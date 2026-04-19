@@ -23,9 +23,19 @@ jobs:
       - name: Run tests
         run: go test ./... -race -count=1
 
+      - name: Generate GitHub App token for palgroup/homebrew-tap
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PALBASE_CI_APP_ID }}
+          private-key: ${{ secrets.PALBASE_CI_APP_PRIVATE_KEY }}
+          owner: palgroup
+          repositories: homebrew-tap
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}

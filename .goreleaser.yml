@@ -32,6 +32,7 @@ brews:
     repository:
       owner: palgroup
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://palbase.studio"
     description: "Palbase CLI — develop, test, and deploy backend projects"
     install: |
