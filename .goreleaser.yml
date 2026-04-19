@@ -29,6 +29,7 @@ checksum:
 
 brews:
   - name: palbase
+    directory: Formula
     repository:
       owner: palgroup
       name: homebrew-tap
