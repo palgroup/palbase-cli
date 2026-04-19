@@ -77,16 +77,16 @@ func TestSaveAndLoadCredentials(t *testing.T) {
 		User:         UserInfo{ID: "usr_123", Email: "test@example.com"},
 	}
 
-	err := SaveCredentials(creds)
+	err := SaveCredentials("prod", creds)
 	require.NoError(t, err)
 
 	// Check file permissions
-	path := filepath.Join(tmpDir, ".palbase", "credentials.json")
+	path := filepath.Join(tmpDir, ".palbase", "credentials-prod.json")
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 
-	loaded, err := LoadCredentials()
+	loaded, err := LoadCredentials("prod")
 	require.NoError(t, err)
 
 	assert.Equal(t, creds.AccessToken, loaded.AccessToken)
@@ -98,7 +98,7 @@ func TestLoadCredentials_NotLoggedIn(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	_, err := LoadCredentials()
+	_, err := LoadCredentials("prod")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not logged in")
 }
@@ -108,15 +108,15 @@ func TestDeleteCredentials(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	// Save first
-	err := SaveCredentials(&Credentials{AccessToken: "x"})
+	err := SaveCredentials("prod", &Credentials{AccessToken: "x"})
 	require.NoError(t, err)
 
 	// Delete
-	err = DeleteCredentials()
+	err = DeleteCredentials("prod")
 	require.NoError(t, err)
 
 	// Load should fail
-	_, err = LoadCredentials()
+	_, err = LoadCredentials("prod")
 	require.Error(t, err)
 }
 
@@ -189,7 +189,7 @@ func TestLogin_FullFlow(t *testing.T) {
 	assert.Contains(t, output.String(), "✓ Logged in as test@example.com")
 
 	// Verify credentials were saved
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentials("prod")
 	require.NoError(t, err)
 	assert.Equal(t, "access_123", creds.AccessToken)
 	assert.Equal(t, "refresh_456", creds.RefreshToken)
@@ -302,7 +302,7 @@ func TestLogout(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	// Save credentials first
-	SaveCredentials(&Credentials{
+	SaveCredentials("prod", &Credentials{
 		AccessToken:  "access",
 		RefreshToken: "refresh",
 		User:         UserInfo{Email: "test@example.com"},
@@ -320,7 +320,7 @@ func TestLogout(t *testing.T) {
 	assert.Contains(t, output.String(), "✓ Logged out")
 
 	// Credentials should be gone
-	_, err = LoadCredentials()
+	_, err = LoadCredentials("prod")
 	require.Error(t, err)
 }
 
@@ -330,7 +330,7 @@ func TestWhoami(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	SaveCredentials(&Credentials{
+	SaveCredentials("prod", &Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_xyz", Email: "salih@example.com"},
@@ -356,7 +356,7 @@ func TestLink_DirectProjectID(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(origDir)
 
-	SaveCredentials(&Credentials{
+	SaveCredentials("prod", &Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_1", Email: "test@example.com"},
@@ -392,7 +392,7 @@ func TestLink_InteractiveSelection(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(origDir)
 
-	SaveCredentials(&Credentials{
+	SaveCredentials("prod", &Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_1", Email: "test@example.com"},
@@ -442,7 +442,7 @@ func TestGetValidToken_Valid(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	SaveCredentials(&Credentials{
+	SaveCredentials("prod", &Credentials{
 		AccessToken: "my_token",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 	})
@@ -468,7 +468,7 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	SaveCredentials(&Credentials{
+	SaveCredentials("prod", &Credentials{
 		AccessToken:  "expired",
 		RefreshToken: "old_refresh",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute),

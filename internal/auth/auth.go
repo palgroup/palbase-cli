@@ -18,6 +18,7 @@ import (
 type Config struct {
 	AuthURL  string
 	ClientID string
+	Mode     string // "prod" or "dev" — determines credentials file
 }
 
 // TokenResponse represents the OAuth token endpoint response.
@@ -147,10 +148,10 @@ func (c *Client) Login(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := SaveCredentials(creds); err != nil {
+		if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
 			return err
 		}
-		fmt.Fprintf(c.Output, "✓ Logged in as %s\n", creds.User.Email)
+		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", creds.User.Email, c.Cfg.Mode)
 		return nil
 
 	case <-time.After(120 * time.Second):
@@ -266,7 +267,7 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 	}
 	creds.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
-	if err := SaveCredentials(creds); err != nil {
+	if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
 		return nil, err
 	}
 	return creds, nil
@@ -274,16 +275,16 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 
 // Logout deletes local credentials and revokes the token server-side.
 func (c *Client) Logout(ctx context.Context) error {
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentials(c.Cfg.Mode)
 	if err == nil && creds.RefreshToken != "" {
 		c.revokeToken(ctx, creds.RefreshToken)
 	}
 
-	if err := DeleteCredentials(); err != nil {
+	if err := DeleteCredentials(c.Cfg.Mode); err != nil {
 		return err
 	}
 
-	fmt.Fprintln(c.Output, "✓ Logged out")
+	fmt.Fprintf(c.Output, "✓ Logged out (mode=%s)\n", c.Cfg.Mode)
 	return nil
 }
 
@@ -303,7 +304,7 @@ func (c *Client) revokeToken(ctx context.Context, token string) {
 
 // Whoami prints the current logged-in user info.
 func (c *Client) Whoami(ctx context.Context) error {
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentials(c.Cfg.Mode)
 	if err != nil {
 		return err
 	}
@@ -315,13 +316,15 @@ func (c *Client) Whoami(ctx context.Context) error {
 		}
 	}
 
-	fmt.Fprintf(c.Output, "Logged in as %s (%s)\n", creds.User.Email, creds.User.ID)
+	fmt.Fprintf(c.Output, "User:    %s (%s)\n", creds.User.Email, creds.User.ID)
+	fmt.Fprintf(c.Output, "Mode:    %s\n", c.Cfg.Mode)
+	fmt.Fprintf(c.Output, "Auth:    %s\n", c.Cfg.AuthURL)
 	return nil
 }
 
 // GetValidToken returns a valid access token, refreshing if needed.
 func (c *Client) GetValidToken(ctx context.Context) (string, error) {
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentials(c.Cfg.Mode)
 	if err != nil {
 		return "", err
 	}

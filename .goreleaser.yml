@@ -30,9 +30,9 @@ checksum:
 brews:
   - name: palbase
     repository:
-      owner: seklabsnet
+      owner: palgroup
       name: homebrew-tap
-    homepage: "https://palbase.io"
+    homepage: "https://palbase.studio"
     description: "Palbase CLI — develop, test, and deploy backend projects"
     install: |
       bin.install "palbase"

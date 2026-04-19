@@ -1,4 +1,4 @@
-module github.com/seklabsnet/palbase-cli
+module github.com/palgroup/palbase-cli
 
 go 1.26.1
 

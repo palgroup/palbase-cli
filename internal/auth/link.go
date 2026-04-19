@@ -84,7 +84,7 @@ func (l *Linker) Link(ctx context.Context, projectID string) error {
 			return err
 		}
 		if len(projects) == 0 {
-			return fmt.Errorf("no projects found — create one at console.palbase.io")
+			return fmt.Errorf("no projects found — create one in the Palbase Studio")
 		}
 		selected, err = l.SelectFn(projects)
 		if err != nil {

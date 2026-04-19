@@ -27,17 +27,20 @@ func (c *Credentials) IsExpired() bool {
 	return time.Now().After(c.ExpiresAt)
 }
 
-func credentialsPath() (string, error) {
+func credentialsPath(mode string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home directory: %w", err)
 	}
-	return filepath.Join(home, ".palbase", "credentials.json"), nil
+	if mode == "" {
+		mode = "prod"
+	}
+	return filepath.Join(home, ".palbase", fmt.Sprintf("credentials-%s.json", mode)), nil
 }
 
-// SaveCredentials writes credentials to ~/.palbase/credentials.json with 0600 permissions.
-func SaveCredentials(creds *Credentials) error {
-	path, err := credentialsPath()
+// SaveCredentials writes credentials to ~/.palbase/credentials-{mode}.json with 0600 permissions.
+func SaveCredentials(mode string, creds *Credentials) error {
+	path, err := credentialsPath(mode)
 	if err != nil {
 		return err
 	}
@@ -54,9 +57,9 @@ func SaveCredentials(creds *Credentials) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// LoadCredentials reads credentials from ~/.palbase/credentials.json.
-func LoadCredentials() (*Credentials, error) {
-	path, err := credentialsPath()
+// LoadCredentials reads credentials from ~/.palbase/credentials-{mode}.json.
+func LoadCredentials(mode string) (*Credentials, error) {
+	path, err := credentialsPath(mode)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +67,7 @@ func LoadCredentials() (*Credentials, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("not logged in — run: palbase login")
+			return nil, fmt.Errorf("not logged in (%s) — run: palbase login", mode)
 		}
 		return nil, fmt.Errorf("read credentials: %w", err)
 	}
@@ -77,9 +80,9 @@ func LoadCredentials() (*Credentials, error) {
 	return &creds, nil
 }
 
-// DeleteCredentials removes the credentials file.
-func DeleteCredentials() error {
-	path, err := credentialsPath()
+// DeleteCredentials removes the credentials file for the given mode.
+func DeleteCredentials(mode string) error {
+	path, err := credentialsPath(mode)
 	if err != nil {
 		return err
 	}

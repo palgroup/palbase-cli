@@ -2,9 +2,9 @@
 set -e
 
 # Palbase CLI installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/seklabsnet/palbase-cli/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/palgroup/palbase-cli/main/install.sh | sh
 
-REPO="seklabsnet/palbase-cli"
+REPO="palgroup/palbase-cli"
 INSTALL_DIR="/usr/local/bin"
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
