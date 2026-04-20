@@ -70,13 +70,17 @@ func (c *Client) Login(ctx context.Context) error {
 		return fmt.Errorf("generate state: %w", err)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// OAuth 2.1 requires exact-match redirect URIs, so the server-side
+	// client must have every loopback port we might bind to pre-registered.
+	// Palauth's palbase-cli client is seeded with 54321..54325; try them
+	// in order and fail the login if all five are in use (which realistically
+	// means five concurrent login flows on one machine — rare).
+	listener, port, err := bindLoopback(LoopbackCallbackPorts)
 	if err != nil {
 		return fmt.Errorf("start callback server: %w", err)
 	}
 	defer listener.Close()
 
-	port := listener.Addr().(*net.TCPAddr).Port
 	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
 
 	authURL := fmt.Sprintf("%s/oauth/authorize?%s",
@@ -349,4 +353,26 @@ func openURL(u string) error {
 	default:
 		return fmt.Errorf("unsupported platform")
 	}
+}
+
+// LoopbackCallbackPorts are the ports the CLI tries, in order, when it
+// needs a loopback HTTP server to receive the OAuth redirect. OAuth 2.1
+// (RFC 8252 §7.3 as implemented here) requires exact-match redirect URIs
+// on the server, so every port listed here must also appear in palauth's
+// palbase-cli client redirect_uris config.
+var LoopbackCallbackPorts = []int{54321, 54322, 54323, 54324, 54325}
+
+// bindLoopback tries each port in turn and returns the first listener it
+// can open. When every port is busy — e.g. five parallel login flows on
+// the same machine — the error surfaces so the user can retry.
+func bindLoopback(ports []int) (net.Listener, int, error) {
+	var lastErr error
+	for _, p := range ports {
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err == nil {
+			return l, p, nil
+		}
+		lastErr = err
+	}
+	return nil, 0, fmt.Errorf("no free loopback port in %v: %w", ports, lastErr)
 }

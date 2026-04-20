@@ -20,15 +20,21 @@ type Endpoints struct {
 	PlatformAPI string
 }
 
+// Auth endpoints target palauth directly via the public API gateway host.
+// Login UI (/login + /oauth-bridge) is served by Studio; palauth's
+// OIDC provider redirects users there via PALAUTH_SERVER_EXTERNAL_LOGIN_URL
+// when a browser session is missing. CLI only talks to palauth for the
+// /oauth/authorize, /oauth/token, /oauth/userinfo, /oauth/revoke endpoints
+// documented by /.well-known/openid-configuration.
 var endpointsByMode = map[Mode]Endpoints{
 	ModeProd: {
 		Studio:      "https://palbase.studio",
-		Auth:        "https://auth.palbase.studio",
+		Auth:        "https://api.palbase.studio",
 		PlatformAPI: "https://api.palbase.studio",
 	},
 	ModeDev: {
 		Studio:      "https://dev.palbase.studio",
-		Auth:        "https://auth.dev.palbase.studio",
+		Auth:        "https://api.dev.palbase.studio",
 		PlatformAPI: "https://api.dev.palbase.studio",
 	},
 }
