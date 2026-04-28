@@ -92,7 +92,7 @@ func (c *Client) Login(ctx context.Context) error {
 			"code_challenge":        {pkce.Challenge},
 			"code_challenge_method": {"S256"},
 			"state":                 {state},
-			"scope":                 {"openid profile email"},
+			"scope":                 {"openid profile email offline_access"},
 		}.Encode(),
 	)
 
@@ -139,8 +139,9 @@ func (c *Client) Login(ctx context.Context) error {
 	defer srv.Close()
 
 	fmt.Fprintln(c.Output, "Opening browser for login...")
+	fmt.Fprintf(c.Output, "If your browser doesn't open, visit:\n  %s\n", authURL)
 	if err := c.OpenBrowser(authURL); err != nil {
-		fmt.Fprintf(c.Output, "Could not open browser. Please visit:\n%s\n", authURL)
+		fmt.Fprintf(c.Output, "(could not auto-open browser: %s)\n", err)
 	}
 
 	select {
