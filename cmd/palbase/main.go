@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
+	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +24,10 @@ var resolved config.Resolved
 
 // authClient is built per invocation from the resolved mode/endpoints.
 var authClient *auth.Client
+
+// studioClient is the tRPC client used by `palbase backend ...` to
+// talk to Studio. Built per invocation against resolved.Endpoints.Studio.
+var studioClient *studio.Client
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -39,6 +46,9 @@ func main() {
 				ClientID: "palbase-cli",
 				Mode:     string(r.Mode),
 			}, os.Stdout)
+			studioClient = studio.New(r.Endpoints.Studio, func(ctx context.Context) (string, error) {
+				return authClient.GetValidToken(ctx)
+			})
 			return nil
 		},
 	}
@@ -52,6 +62,13 @@ func main() {
 		whoamiCmd(),
 		linkCmd(),
 		configCmd(),
+		// Phase 7 — backend opt-in lifecycle. Resolvers close over the
+		// package-level globals so PersistentPreRunE has populated them
+		// by the time a subcommand's RunE actually fires.
+		backend.Cmd(backend.Resolvers{
+			Auth:   func() *auth.Client { return authClient },
+			Studio: func() *studio.Client { return studioClient },
+		}),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

@@ -1,0 +1,5 @@
+node_modules/
+.palbase/
+.env
+.env.local
+*.log

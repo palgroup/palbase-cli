@@ -1,0 +1,6 @@
+{
+  "name": "palbase-backend-project",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Palbase backend project — defineEndpoint handlers run inside backend-runtime."
+}

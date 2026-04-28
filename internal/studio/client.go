@@ -1,0 +1,145 @@
+// Package studio provides a thin tRPC HTTP client used by `palbase
+// backend init/deploy/...`. We talk to Studio's tRPC endpoints directly
+// because the CLI's auth model — user JWT carried as a bearer token —
+// matches Studio's own session reader, and we get every Phase 7
+// authorization check (org membership + backend_enabled gate) for free.
+package studio
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+)
+
+// Client is a tRPC-over-HTTP client.
+type Client struct {
+	BaseURL    string
+	HTTPClient *http.Client
+	// Token resolver runs lazily so the CLI can refresh its access
+	// token without baking the auth.Client import into this package.
+	TokenFn func(ctx context.Context) (string, error)
+}
+
+// New builds a Client with sane defaults.
+func New(baseURL string, token func(ctx context.Context) (string, error)) *Client {
+	return &Client{
+		BaseURL:    baseURL,
+		HTTPClient: &http.Client{Timeout: 120 * time.Second},
+		TokenFn:    token,
+	}
+}
+
+// Query runs a tRPC query (GET) against `<router>.<procedure>`. The
+// `out` pointer receives JSON-decoded `result.data.json` on success.
+func (c *Client) Query(ctx context.Context, path string, input any, out any) error {
+	inputJSON, err := json.Marshal(map[string]any{"json": input})
+	if err != nil {
+		return fmt.Errorf("marshal input: %w", err)
+	}
+	u := fmt.Sprintf("%s/api/trpc/%s?input=%s", c.BaseURL, path, url.QueryEscape(string(inputJSON)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, req, out)
+}
+
+// Mutation runs a tRPC mutation (POST) against `<router>.<procedure>`.
+func (c *Client) Mutation(ctx context.Context, path string, input any, out any) error {
+	body, err := json.Marshal(map[string]any{"json": input})
+	if err != nil {
+		return fmt.Errorf("marshal input: %w", err)
+	}
+	u := fmt.Sprintf("%s/api/trpc/%s", c.BaseURL, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(ctx, req, out)
+}
+
+func (c *Client) do(ctx context.Context, req *http.Request, out any) error {
+	if c.TokenFn != nil {
+		token, err := c.TokenFn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire token: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("trpc request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseTRPCError(body, resp.StatusCode)
+	}
+
+	// tRPC envelope:
+	//   { result: { data: { json: <out> } } }
+	var envelope struct {
+		Result struct {
+			Data struct {
+				JSON json.RawMessage `json:"json"`
+			} `json:"data"`
+		} `json:"result"`
+		Error *trpcErrorBody `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return fmt.Errorf("decode envelope: %w (body=%s)", err, truncate(body, 240))
+	}
+	if envelope.Error != nil {
+		return envelope.Error.toError()
+	}
+	if out == nil || len(envelope.Result.Data.JSON) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(envelope.Result.Data.JSON, out); err != nil {
+		return fmt.Errorf("decode result: %w", err)
+	}
+	return nil
+}
+
+type trpcErrorBody struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+	Data    struct {
+		Code     string `json:"code"`
+		HTTPCode int    `json:"httpStatus"`
+	} `json:"data"`
+}
+
+func (e *trpcErrorBody) toError() error {
+	if e.Data.Code != "" {
+		return fmt.Errorf("studio %s: %s", e.Data.Code, e.Message)
+	}
+	return fmt.Errorf("studio: %s", e.Message)
+}
+
+func parseTRPCError(body []byte, status int) error {
+	// Body may be a raw error envelope OR a plain error string.
+	var envelope struct {
+		Error *trpcErrorBody `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Error != nil {
+		return envelope.Error.toError()
+	}
+	return fmt.Errorf("studio http %d: %s", status, truncate(body, 240))
+}
+
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
+}
