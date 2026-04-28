@@ -36,7 +36,7 @@ func TestResolve_Flag(t *testing.T) {
 	if r.Mode != ModeDev || r.Source != "flag" {
 		t.Fatalf("got %+v", r)
 	}
-	if r.Endpoints.Studio != "https://dev.palbase.studio" {
+	if r.Endpoints.Studio != "https://app.dev.palbase.studio" {
 		t.Fatalf("unexpected studio url: %s", r.Endpoints.Studio)
 	}
 }

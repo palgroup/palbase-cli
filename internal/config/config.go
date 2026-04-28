@@ -33,9 +33,13 @@ var endpointsByMode = map[Mode]Endpoints{
 		PlatformAPI: "https://api.palbase.studio",
 	},
 	ModeDev: {
-		Studio:      "https://dev.palbase.studio",
-		Auth:        "https://dev.palbase.studio",
-		PlatformAPI: "https://api.dev.palbase.studio",
+		// Real Studio dev hostname is `app.dev.palbase.studio`; the
+		// `dev.palbase.studio` apex doesn't resolve. palauth (OAuth +
+		// /.well-known) is fronted by the same host so Auth points
+		// there too.
+		Studio:      "https://app.dev.palbase.studio",
+		Auth:        "https://app.dev.palbase.studio",
+		PlatformAPI: "https://app.dev.palbase.studio",
 	},
 }
 
