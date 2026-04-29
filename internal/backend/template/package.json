@@ -5,9 +5,14 @@
   "description": "Palbase backend project — defineEndpoint handlers run inside backend-runtime.",
   "scripts": {
     "dev": "palbase backend dev",
-    "deploy": "palbase backend deploy"
+    "deploy": "palbase backend deploy",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@palbase/backend": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
   }
 }
