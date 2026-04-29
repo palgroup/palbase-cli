@@ -10,6 +10,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
+	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
@@ -67,6 +68,9 @@ func main() {
 		// by the time a subcommand's RunE actually fires.
 		backend.Cmd(backend.Resolvers{
 			Auth:   func() *auth.Client { return authClient },
+			Studio: func() *studio.Client { return studioClient },
+		}),
+		project.Cmd(project.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
 		}),
 	)
