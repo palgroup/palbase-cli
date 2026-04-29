@@ -79,7 +79,7 @@ function walk(dir, cb) {
 
 // ── ctx — simplified local twin of prod's pipeline ctx ─────────────────
 
-function makeCtx(req, params, body) {
+function makeCtx(req, params, body, user) {
   return {
     input: body ?? {},
     params,
@@ -88,7 +88,7 @@ function makeCtx(req, params, body) {
       url: req.url,
       headers: req.headers,
     },
-    user: null,                       // local dev has no auth; mirrors prod when no JWT
+    user: user ?? null,
     env: { ...process.env, PALBASE_PROJECT_REF: PROJECT_REF },
     logger: {
       info: (...a) => console.log('[handler]', ...a),
@@ -117,7 +117,7 @@ function forbiddenLocal(name) {
 
 // ── reload ──────────────────────────────────────────────────────────────
 
-function loadHandler(modulePath) {
+function loadEndpoint(modulePath) {
   // Bust require cache so saves take effect without restart.
   delete require.cache[require.resolve(modulePath)];
   const mod = require(modulePath);
@@ -125,7 +125,67 @@ function loadHandler(modulePath) {
   if (!exported || typeof exported.handler !== 'function') {
     throw new Error(`endpoint at ${modulePath} must export { default: { method, handler } }`);
   }
-  return exported.handler;
+  return exported;
+}
+
+// ── auth + rate limit gates ────────────────────────────────────────────
+//
+// Local dev intentionally skips full JWT signature verification — we want
+// the loop tight. But we honour the endpoint config's `auth.required`
+// gate so the user can SEE 401 when no Authorization header is present,
+// and decode the bearer (without verify) into ctx.user so handlers that
+// read ctx.user.id behave like prod.
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/').padEnd(parts[1].length + ((4 - parts[1].length % 4) % 4), '=');
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function resolveDevUser(req) {
+  const authHeader = req.headers['authorization'] || '';
+  if (!authHeader.toLowerCase().startsWith('bearer ')) return null;
+  const token = authHeader.slice(7).trim();
+  const claims = decodeJwtPayload(token);
+  if (!claims || !claims.sub) {
+    // Even an opaque/garbled token counts as "authenticated" locally —
+    // the user is signalling intent. Production rejects garbage; dev
+    // gives you a synthetic user so handler logic stays exercised.
+    return { id: 'dev_user', email: 'dev@local', role: 'authenticated', metadata: {} };
+  }
+  return {
+    id: claims.sub,
+    email: typeof claims.email === 'string' ? claims.email : 'dev@local',
+    role: typeof claims.role === 'string' ? claims.role : 'authenticated',
+    metadata: {},
+  };
+}
+
+// Token-bucket-ish rate limiter keyed by (route + remote IP). Lives in
+// memory for the dev server's lifetime — perfect for one-off sanity
+// checks of `rateLimit: { max, window }` configs.
+const rateBuckets = new Map();
+
+function rateLimitCheck(routeKey, ip, cfg) {
+  const now = Date.now();
+  const windowMs = cfg.window * 1000;
+  const key = `${routeKey}|${ip}`;
+  const bucket = rateBuckets.get(key) || [];
+  // Drop entries older than the window.
+  const fresh = bucket.filter((t) => now - t < windowMs);
+  if (fresh.length >= cfg.max) {
+    rateBuckets.set(key, fresh);
+    const retryAfterMs = windowMs - (now - fresh[0]);
+    return { allowed: false, retryAfter: Math.ceil(retryAfterMs / 1000), remaining: 0 };
+  }
+  fresh.push(now);
+  rateBuckets.set(key, fresh);
+  return { allowed: true, retryAfter: 0, remaining: cfg.max - fresh.length };
 }
 
 // ── http ────────────────────────────────────────────────────────────────
@@ -156,11 +216,61 @@ const server = http.createServer(async (req, res) => {
     body = parsed.query;
   }
 
+  let endpoint;
+  try {
+    endpoint = loadEndpoint(route.modulePath);
+  } catch (err) {
+    res.statusCode = 500;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ error: 'load_error', message: err.message }));
+    log(`[${req.method}] ${parsed.pathname}  500  ${Date.now() - start}ms  — ${err.message}`);
+    return;
+  }
+
+  // Auth gate — enforce config.auth.required even though local dev skips
+  // signature verify, so the user can probe both legs of the contract.
+  const authCfg = endpoint.auth || {};
+  const authRequired = authCfg.required !== false && (authCfg.required === true || authCfg.role !== undefined);
+  const user = resolveDevUser(req);
+  if (authRequired && !user) {
+    res.statusCode = 401;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ error: 'unauthorized', message: 'Authorization header required' }));
+    log(`[${req.method}] ${parsed.pathname}  401  ${Date.now() - start}ms  — auth required`);
+    return;
+  }
+  if (authCfg.role && user && user.role !== authCfg.role) {
+    res.statusCode = 403;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ error: 'forbidden', message: `role ${authCfg.role} required, got ${user.role}` }));
+    log(`[${req.method}] ${parsed.pathname}  403  ${Date.now() - start}ms  — role mismatch`);
+    return;
+  }
+
+  // Rate limit gate.
+  if (endpoint.rateLimit) {
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local').toString().split(',')[0].trim();
+    const result = rateLimitCheck(`${route.method} ${route.urlPattern}`, ip, endpoint.rateLimit);
+    res.setHeader('x-ratelimit-limit', String(endpoint.rateLimit.max));
+    res.setHeader('x-ratelimit-remaining', String(Math.max(0, result.remaining)));
+    if (!result.allowed) {
+      res.statusCode = 429;
+      res.setHeader('retry-after', String(result.retryAfter));
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        error: 'rate_limited',
+        message: `max ${endpoint.rateLimit.max} req / ${endpoint.rateLimit.window}s`,
+        retry_after: result.retryAfter,
+      }));
+      log(`[${req.method}] ${parsed.pathname}  429  ${Date.now() - start}ms  — rate limited (retry in ${result.retryAfter}s)`);
+      return;
+    }
+  }
+
   let result;
   try {
-    const handler = loadHandler(route.modulePath);
-    const ctx = makeCtx(req, params, body);
-    result = await handler(ctx);
+    const ctx = makeCtx(req, params, body, user);
+    result = await endpoint.handler(ctx);
   } catch (err) {
     res.statusCode = 500;
     res.setHeader('content-type', 'application/json');
