@@ -80,6 +80,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		newListCmd(r),
 		newRollbackCmd(r),
 		newStatusCmd(r),
+		newDisableCmd(r),
 	)
 	return cmd
 }
@@ -605,6 +606,53 @@ func newListCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	return cmd
+}
+
+func newDisableCmd(r Resolvers) *cobra.Command {
+	var refFlag string
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "disable",
+		Short: "Tear down the backend pod for this project (drops PVC + git history)",
+		Long: `Disable the per-project backend runtime.
+
+This removes the Deployment, Service, Secret, and PVC for br-<ref>.
+The git history of deployed versions is destroyed. Re-running
+` + "`palbase backend init`" + ` starts from a fresh template.
+
+Use this when you no longer want backend resources running for this
+project (e.g. cost reduction, deprecating the project's API surface).
+Auth, DB, Docs, Storage, Realtime — all keep working; only the
+defineEndpoint pod goes away.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			if err != nil {
+				return err
+			}
+			if !yes {
+				fmt.Printf("This will tear down br-%s and discard its git history.\n", ref)
+				fmt.Print("Type the project ref to confirm: ")
+				var typed string
+				if _, err := fmt.Fscanln(os.Stdin, &typed); err != nil || typed != ref {
+					return fmt.Errorf("aborted (typed %q, expected %q)", typed, ref)
+				}
+			}
+			fmt.Printf("→ disabling backend on %s ...\n", ref)
+			var resp struct {
+				WorkflowID string `json:"workflowId"`
+				RunID      string `json:"runId"`
+			}
+			if err := r.Studio().Mutation(cmd.Context(), "backend.disable", map[string]any{"ref": ref}, &resp); err != nil {
+				return fmt.Errorf("backend.disable: %w", err)
+			}
+			fmt.Printf("  workflow: %s\n", resp.WorkflowID)
+			fmt.Println("✓ disable workflow scheduled (poll status with `palbase backend status`)")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the typed-ref confirmation prompt")
 	return cmd
 }
 
