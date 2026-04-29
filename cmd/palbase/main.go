@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
@@ -179,13 +181,23 @@ func configCmd() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "set <key> <value>",
-			Short: "Set a config value (keys: mode=prod|dev)",
-			Args:  cobra.ExactArgs(2),
+			Use:   "set <key> [value]",
+			Short: "Set a config value (keys: mode=prod|dev). Omit value for an interactive picker.",
+			Args:  cobra.RangeArgs(1, 2),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				key, value := args[0], args[1]
+				key := args[0]
 				if key != "mode" {
 					return fmt.Errorf("unknown key: %s (supported: mode)", key)
+				}
+				var value string
+				if len(args) == 2 {
+					value = args[1]
+				} else {
+					v, err := promptMode(resolved.Mode)
+					if err != nil {
+						return err
+					}
+					value = v
 				}
 				m := config.Mode(value)
 				if !m.Valid() {
@@ -221,4 +233,39 @@ func configCmd() *cobra.Command {
 	)
 
 	return cmd
+}
+
+// promptMode shows a numeric picker (1=prod, 2=dev) and returns the
+// chosen value. ENTER without typing keeps the current mode so a quick
+// `palbase config set mode` doubles as "show me the choices, leave it
+// alone if I press enter".
+func promptMode(current config.Mode) (string, error) {
+	options := []config.Mode{config.ModeProd, config.ModeDev}
+	fmt.Fprintln(os.Stdout, "Select environment mode:")
+	for i, m := range options {
+		marker := " "
+		if m == current {
+			marker = "*"
+		}
+		fmt.Fprintf(os.Stdout, "  %s %d) %s\n", marker, i+1, m)
+	}
+	fmt.Fprintf(os.Stdout, "Enter number [%s]: ", current)
+
+	in := bufio.NewReader(os.Stdin)
+	line, err := in.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read selection: %w", err)
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return string(current), nil
+	}
+	switch line {
+	case "1":
+		return string(options[0]), nil
+	case "2":
+		return string(options[1]), nil
+	default:
+		return "", fmt.Errorf("invalid selection %q — enter 1 or 2", line)
+	}
 }
