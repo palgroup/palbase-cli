@@ -67,8 +67,9 @@ func main() {
 		// package-level globals so PersistentPreRunE has populated them
 		// by the time a subcommand's RunE actually fires.
 		backend.Cmd(backend.Resolvers{
-			Auth:   func() *auth.Client { return authClient },
-			Studio: func() *studio.Client { return studioClient },
+			Auth:      func() *auth.Client { return authClient },
+			Studio:    func() *studio.Client { return studioClient },
+			Endpoints: func() config.Endpoints { return resolved.Endpoints },
 		}),
 		project.Cmd(project.Resolvers{
 			Studio: func() *studio.Client { return studioClient },

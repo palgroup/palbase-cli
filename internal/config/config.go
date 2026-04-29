@@ -18,6 +18,13 @@ type Endpoints struct {
 	Studio      string
 	Auth        string
 	PlatformAPI string
+	// PublicHost is the suffix every project endpoint lives under. A
+	// project with ref "mu0028" is reachable at "<ref>.<PublicHost>"
+	// (e.g. "https://mu0028.dev.palbase.studio"). The CLI hands this to
+	// `palbase backend dev` so dev-server.js can build a ServerClient
+	// pointed at the same hosts the deployed pod hits — no URL parsing
+	// or string surgery on Studio's URL.
+	PublicHost string
 }
 
 // All OIDC endpoints live on the Studio apex host. The platform fronts
@@ -31,15 +38,17 @@ var endpointsByMode = map[Mode]Endpoints{
 		Studio:      "https://palbase.studio",
 		Auth:        "https://palbase.studio",
 		PlatformAPI: "https://api.palbase.studio",
+		PublicHost:  "palbase.studio",
 	},
 	ModeDev: {
 		// Real Studio dev hostname is `app.dev.palbase.studio`; the
 		// `dev.palbase.studio` apex doesn't resolve. palauth (OAuth +
 		// /.well-known) is fronted by the same host so Auth points
-		// there too.
+		// there too. Project endpoints are at <ref>.dev.palbase.studio.
 		Studio:      "https://app.dev.palbase.studio",
 		Auth:        "https://app.dev.palbase.studio",
 		PlatformAPI: "https://app.dev.palbase.studio",
+		PublicHost:  "dev.palbase.studio",
 	},
 }
 

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
@@ -53,8 +54,9 @@ var devServerFS embed.FS
 // the auth + studio clients having been initialised yet (cobra's
 // PersistentPreRunE on the root command is what populates them).
 type Resolvers struct {
-	Auth   func() *auth.Client
-	Studio func() *studio.Client
+	Auth      func() *auth.Client
+	Studio    func() *studio.Client
+	Endpoints func() config.Endpoints
 }
 
 // Cmd builds the cobra `backend` group. Subcommands call the resolvers
@@ -73,7 +75,7 @@ func Cmd(r Resolvers) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newInitCmd(r),
-		newDevCmd(),
+		newDevCmd(r),
 		newDeployCmd(r),
 		newListCmd(r),
 		newRollbackCmd(r),
@@ -441,7 +443,7 @@ func newInitCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-func newDevCmd() *cobra.Command {
+func newDevCmd(r Resolvers) *cobra.Command {
 	var port int
 	cmd := &cobra.Command{
 		Use:   "dev",
@@ -469,11 +471,29 @@ func newDevCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			// Reveal the project's anon + service-role keys so dev-server
+			// can build a real ServerClient. If reveal fails (no login,
+			// no project link, network down), we still launch dev-server
+			// without ctx.palbase — the bindings throw on first use, so
+			// the user sees a clear error instead of silent partial behaviour.
+			var revealResp struct {
+				AnonKey        string `json:"anonKey"`
+				ServiceRoleKey string `json:"serviceRoleKey"`
+			}
+			if ref != "" && ref != "local" {
+				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.palbase will be unavailable\n", err)
+				}
+			}
+
 			node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
 			node.Env = append(os.Environ(),
 				fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 				fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
 				fmt.Sprintf("PALBASE_PROJECT_REF=%s", ref),
+				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
+				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.AnonKey),
+				fmt.Sprintf("PALBASE_TENANT_SERVICE_ROLE=%s", revealResp.ServiceRoleKey),
 			)
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr

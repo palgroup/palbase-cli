@@ -21,7 +21,26 @@ const url = require('url');
 const PORT = Number(process.env.PALBASE_DEV_PORT) || 4000;
 const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
+const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 const ENDPOINTS_DIR = path.join(PROJECT_ROOT, 'endpoints');
+
+// Capture pod-bound credentials into module-scope closures, then DELETE
+// them from process.env BEFORE require()ing user code. User endpoints
+// see ctx.env (a curated subset) — they cannot read process.env.PALBASE_*.
+// Same security invariant as the prod runtime's worker.js, but enforced
+// here for dev-server because this is a long-lived process re-loading
+// user modules on file changes.
+const TENANT_APIKEY = process.env.PALBASE_TENANT_APIKEY || '';
+const TENANT_SERVICE_ROLE = process.env.PALBASE_TENANT_SERVICE_ROLE || '';
+delete process.env.PALBASE_TENANT_APIKEY;
+delete process.env.PALBASE_TENANT_SERVICE_ROLE;
+
+// Public host the SDK calls. Same shape as prod: <ref>.<host>.
+// When PROJECT_REF==='local' (no `palbase login`) we run without
+// ctx.palbase live — bindings throw on use.
+const PALBASE_URL = (PROJECT_REF !== 'local' && PUBLIC_HOST)
+  ? `https://${PROJECT_REF}.${PUBLIC_HOST.replace(/\/+$/, '')}`
+  : '';
 
 const METHOD_FILE_RE = /^(get|post|put|patch|delete)\.(c?js|mjs|ts)$/i;
 
@@ -77,9 +96,29 @@ function walk(dir, cb) {
   }
 }
 
-// ── ctx — simplified local twin of prod's pipeline ctx ─────────────────
+// ── ctx — bit-perfect twin of prod's pipeline ctx ──────────────────────
+//
+// ctx.palbase is a real ServerClient hitting the same public hosts the
+// deployed pod hits. Local dev = LIVE data: writes go to production
+// palauth/paldocs/db. The CLI prints a banner before starting the server
+// so this isn't a silent surprise.
+
+let palbaseClientSingleton = null;
+function getPalbaseClient() {
+  if (!PALBASE_URL || !TENANT_APIKEY) return null;
+  if (palbaseClientSingleton) return palbaseClientSingleton;
+  // @palbase/server is a peer the CLI declares; it ships in the global
+  // npm install or in the user's project. require() resolves both.
+  const { createServerClient } = require('@palbase/server');
+  palbaseClientSingleton = createServerClient(TENANT_APIKEY, {
+    url: PALBASE_URL,
+    serviceRole: TENANT_SERVICE_ROLE || undefined,
+  });
+  return palbaseClientSingleton;
+}
 
 function makeCtx(req, params, body, user) {
+  const client = getPalbaseClient();
   return {
     input: body ?? {},
     params,
@@ -89,29 +128,32 @@ function makeCtx(req, params, body, user) {
       headers: req.headers,
     },
     user: user ?? null,
+    // ctx.env exposes a curated subset of process.env. PALBASE_TENANT_*
+    // were deleted at boot; user palbase.toml env vars (whatever they
+    // chose) ARE in process.env and pass through.
     env: { ...process.env, PALBASE_PROJECT_REF: PROJECT_REF },
-    logger: {
+    log: {
       info: (...a) => console.log('[handler]', ...a),
       warn: (...a) => console.warn('[handler]', ...a),
       error: (...a) => console.error('[handler]', ...a),
       debug: (...a) => console.log('[handler:debug]', ...a),
     },
-    palbase: {
-      // `dev` has no live tenant connection; ctx.palbase.* surfaces
-      // throw a clear error so the user knows they must `deploy` to
-      // exercise live data flows. This avoids silent partial behaviour.
-      auth: forbiddenLocal('auth'),
-      documents: forbiddenLocal('documents'),
-      database: forbiddenLocal('database'),
-      storage: forbiddenLocal('storage'),
-    },
+    palbase: client ?? notConfiguredPalbase(),
   };
 }
 
-function forbiddenLocal(name) {
-  const msg = `ctx.palbase.${name} is not available in \`palbase backend dev\` (local). Deploy to test against live services.`;
+function notConfiguredPalbase() {
   return new Proxy({}, {
-    get() { throw new Error(msg); },
+    get(_t, name) {
+      return new Proxy({}, {
+        get() {
+          throw new Error(
+            `ctx.palbase.${String(name)} unavailable: dev-server has no tenant credentials. ` +
+            `Run \`palbase login\` then \`palbase backend dev\` from inside a project directory.`,
+          );
+        },
+      });
+    },
   });
 }
 
@@ -128,13 +170,12 @@ function loadEndpoint(modulePath) {
   return exported;
 }
 
-// ── auth + rate limit gates ────────────────────────────────────────────
+// ── auth: real palauth /auth/user verify ──────────────────────────────
 //
-// Local dev intentionally skips full JWT signature verification — we want
-// the loop tight. But we honour the endpoint config's `auth.required`
-// gate so the user can SEE 401 when no Authorization header is present,
-// and decode the bearer (without verify) into ctx.user so handlers that
-// read ctx.user.id behave like prod.
+// Bit-perfect with prod: pod and dev-server BOTH ask palauth to verify
+// Bearer tokens (signature + DB lookup) — no local crypto, no
+// decode-only fallback. Token cache (30s) keyed by raw token string so
+// hot endpoints aren't dominated by RTT.
 
 function decodeJwtPayload(token) {
   try {
@@ -147,23 +188,52 @@ function decodeJwtPayload(token) {
   }
 }
 
-function resolveDevUser(req) {
-  const authHeader = req.headers['authorization'] || '';
-  if (!authHeader.toLowerCase().startsWith('bearer ')) return null;
-  const token = authHeader.slice(7).trim();
-  const claims = decodeJwtPayload(token);
-  if (!claims || !claims.sub) {
-    // Even an opaque/garbled token counts as "authenticated" locally —
-    // the user is signalling intent. Production rejects garbage; dev
-    // gives you a synthetic user so handler logic stays exercised.
-    return { id: 'dev_user', email: 'dev@local', role: 'authenticated', metadata: {} };
+const tokenCache = new Map();
+const TOKEN_TTL_MS = 30_000;
+
+async function verifyTokenViaPalauth(token) {
+  if (!PALBASE_URL || !TENANT_APIKEY) return { ok: false, reason: 'dev_not_configured' };
+
+  const cached = tokenCache.get(token);
+  if (cached && cached.expires > Date.now()) return cached.value;
+
+  let resp;
+  try {
+    resp = await fetch(`${PALBASE_URL}/auth/user`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: TENANT_APIKEY,
+      },
+    });
+  } catch (err) {
+    return { ok: false, reason: 'palauth_unreachable', detail: err.message };
   }
-  return {
-    id: claims.sub,
-    email: typeof claims.email === 'string' ? claims.email : 'dev@local',
-    role: typeof claims.role === 'string' ? claims.role : 'authenticated',
-    metadata: {},
+  if (resp.status === 401) {
+    const value = { ok: false, reason: 'invalid_token' };
+    tokenCache.set(token, { value, expires: Date.now() + TOKEN_TTL_MS });
+    return value;
+  }
+  if (!resp.ok) return { ok: false, reason: 'palauth_error', status: resp.status };
+  let profile;
+  try {
+    profile = await resp.json();
+  } catch (err) {
+    return { ok: false, reason: 'palauth_bad_response', detail: err.message };
+  }
+  // palauth verified the JWT. Pull role/metadata from the now-trusted
+  // payload — same shortcut the Go pipeline uses.
+  const claims = decodeJwtPayload(token) || {};
+  const value = {
+    ok: true,
+    user: {
+      id: profile.id,
+      email: profile.email || '',
+      role: typeof claims.role === 'string' ? claims.role : 'authenticated',
+      metadata: claims.metadata && typeof claims.metadata === 'object' ? claims.metadata : {},
+    },
   };
+  tokenCache.set(token, { value, expires: Date.now() + TOKEN_TTL_MS });
+  return value;
 }
 
 // Token-bucket-ish rate limiter keyed by (route + remote IP). Lives in
@@ -227,11 +297,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Auth gate — enforce config.auth.required even though local dev skips
-  // signature verify, so the user can probe both legs of the contract.
+  // Auth gate — same contract as prod: optional => no token = pass with
+  // ctx.user=null, present token = palauth verify. Required => must have
+  // a token AND palauth must accept it.
   const authCfg = endpoint.auth || {};
   const authRequired = authCfg.required !== false && (authCfg.required === true || authCfg.role !== undefined);
-  const user = resolveDevUser(req);
+  const authHeader = req.headers['authorization'] || '';
+  let user = null;
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
+    const token = authHeader.slice(7).trim();
+    const verifyResult = await verifyTokenViaPalauth(token);
+    if (verifyResult.ok) {
+      user = verifyResult.user;
+    } else if (authRequired) {
+      const status = verifyResult.reason === 'invalid_token' ? 401 : 502;
+      res.statusCode = status;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        error: verifyResult.reason,
+        message: status === 401 ? 'Token is invalid or expired' : 'Could not reach palauth to verify the token',
+      }));
+      log(`[${req.method}] ${parsed.pathname}  ${status}  ${Date.now() - start}ms  — ${verifyResult.reason}`);
+      return;
+    }
+  }
   if (authRequired && !user) {
     res.statusCode = 401;
     res.setHeader('content-type', 'application/json');
@@ -322,5 +411,14 @@ server.listen(PORT, () => {
   log(`listening on http://127.0.0.1:${PORT}`);
   log(`project ref: ${PROJECT_REF}`);
   log(`watching: ${ENDPOINTS_DIR}`);
+  if (PALBASE_URL) {
+    log('────────────────────────────────────────────────────────────');
+    log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
+    log(`  ctx.palbase.* writes hit ${PALBASE_URL}`);
+    log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);
+    log('────────────────────────────────────────────────────────────');
+  } else {
+    log('ctx.palbase.* disabled (no project credentials). Run `palbase login` then re-run.');
+  }
   log(`press Ctrl+C to quit`);
 });
