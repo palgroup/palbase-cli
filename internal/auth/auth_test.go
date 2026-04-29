@@ -347,7 +347,7 @@ func TestWhoami(t *testing.T) {
 
 // --- Link Tests ---
 
-func TestLink_DirectProjectID(t *testing.T) {
+func TestLink_DirectRef(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
@@ -364,21 +364,24 @@ func TestLink_DirectProjectID(t *testing.T) {
 
 	var output bytes.Buffer
 	authClient := NewClient(Config{ClientID: "palbase-cli"}, &output)
+	mockAPI := &mockPlatformAPI{
+		projects: []Project{
+			{ID: "proj_abc123", Ref: "myapp", Name: "My App"},
+			{ID: "proj_other", Ref: "other", Name: "Other"},
+		},
+	}
+	linker := &Linker{AuthClient: authClient, PlatformAPI: mockAPI, Output: &output}
 
-	linker := &Linker{AuthClient: authClient, Output: &output}
-
-	err := linker.Link(context.Background(), "proj_abc123")
+	err := linker.Link(context.Background(), "myapp")
 	require.NoError(t, err)
 
-	assert.Contains(t, output.String(), "✓ Linked to project proj_abc123")
+	assert.Contains(t, output.String(), "✓ Linked to My App (myapp)")
 
-	// Verify config file
 	cfg, err := LoadProjectConfig()
 	require.NoError(t, err)
-	assert.Equal(t, "proj_abc123", cfg.ProjectID)
+	assert.Equal(t, "myapp", cfg.Ref)
 	assert.Equal(t, "staging", cfg.DefaultEnv)
 
-	// Verify .gitignore
 	gitignore, err := os.ReadFile(".gitignore")
 	require.NoError(t, err)
 	assert.Contains(t, string(gitignore), ".palbase/")
@@ -400,8 +403,8 @@ func TestLink_InteractiveSelection(t *testing.T) {
 
 	mockAPI := &mockPlatformAPI{
 		projects: []Project{
-			{ID: "proj_1", Name: "My App"},
-			{ID: "proj_2", Name: "Other App"},
+			{ID: "proj_1", Ref: "myapp", Name: "My App"},
+			{ID: "proj_2", Ref: "other", Name: "Other App"},
 		},
 	}
 
@@ -419,7 +422,7 @@ func TestLink_InteractiveSelection(t *testing.T) {
 
 	cfg, err := LoadProjectConfig()
 	require.NoError(t, err)
-	assert.Equal(t, "proj_1", cfg.ProjectID)
+	assert.Equal(t, "myapp", cfg.Ref)
 }
 
 func TestLink_NotLoggedIn(t *testing.T) {

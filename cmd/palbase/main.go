@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
@@ -118,24 +116,29 @@ func whoamiCmd() *cobra.Command {
 }
 
 func linkCmd() *cobra.Command {
-	var projectID string
+	var refFlag string
 
 	cmd := &cobra.Command{
-		Use:   "link",
+		Use:   "link [ref]",
 		Short: "Link current directory to a Palbase project",
+		Long: "Link the current directory to a project. Pass the ref as a " +
+			"positional arg (palbase link myproj) or via --ref. With no " +
+			"argument, prompts you to pick from `palbase project list`.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ref := refFlag
+			if ref == "" && len(args) == 1 {
+				ref = args[0]
+			}
 			linker := &auth.Linker{
-				AuthClient: authClient,
-				PlatformAPI: &auth.HTTPPlatformAPI{
-					BaseURL:    resolved.Endpoints.PlatformAPI,
-					HTTPClient: &http.Client{Timeout: 30 * time.Second},
-				},
-				Output: os.Stdout,
+				AuthClient:  authClient,
+				PlatformAPI: studioPlatformAPI{client: studioClient},
+				Output:      os.Stdout,
 				SelectFn: func(projects []auth.Project) (*auth.Project, error) {
 					fmt.Println("Select a project:")
 					fmt.Println()
 					for i, p := range projects {
-						fmt.Printf("  %d. %s (%s)\n", i+1, p.Name, p.ID)
+						fmt.Printf("  %d. %s (%s)\n", i+1, p.Name, p.Ref)
 					}
 					fmt.Println()
 
@@ -150,13 +153,29 @@ func linkCmd() *cobra.Command {
 					return &projects[choice-1], nil
 				},
 			}
-
-			return linker.Link(cmd.Context(), projectID)
+			return linker.Link(cmd.Context(), ref)
 		},
 	}
 
-	cmd.Flags().StringVar(&projectID, "project", "", "Project ID to link directly")
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref to link (overrides positional arg)")
 	return cmd
+}
+
+// studioPlatformAPI adapts studio.Client to auth.PlatformAPI so the
+// linker doesn't need to know about tRPC envelopes.
+type studioPlatformAPI struct {
+	client *studio.Client
+}
+
+func (s studioPlatformAPI) ListProjects(ctx context.Context, _ string) ([]auth.Project, error) {
+	// studio.Client already pulls the token from the auth.Client closure,
+	// so the caller-passed token is ignored. Kept on the interface for
+	// test substitutability.
+	var rows []auth.Project
+	if err := s.client.Query(ctx, "project.list", nil, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func configCmd() *cobra.Command {

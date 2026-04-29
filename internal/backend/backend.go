@@ -15,6 +15,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -95,20 +96,98 @@ func (s *stringFlag) Type() string           { return "string" }
 
 // projectRef resolves the linked project ref. Order:
 //   1. --ref flag override
-//   2. .palbase/config.json's project_id (link writes it as the ref)
-//   3. error
+//   2. .palbase/config.json's ref (link writes it)
+//   3. ErrNotLinked — caller decides whether to prompt or fail.
+//
+// Returning ErrNotLinked instead of bubbling the underlying os.IsNotExist
+// lets the init/dev/deploy commands auto-link via project.list when the
+// user hasn't run `palbase link` first.
 func projectRef(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
 	cfg, err := auth.LoadProjectConfig()
 	if err != nil {
-		return "", fmt.Errorf("project not linked — run `palbase link --project <ref>` first (%w)", err)
+		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "not linked") {
+			return "", ErrNotLinked
+		}
+		return "", err
 	}
-	if cfg.ProjectID == "" {
-		return "", fmt.Errorf("project_id missing from .palbase/config.json")
+	if cfg.Ref == "" {
+		return "", ErrNotLinked
 	}
-	return cfg.ProjectID, nil
+	return cfg.Ref, nil
+}
+
+// ErrNotLinked is returned by projectRef when the cwd doesn't carry a
+// .palbase/config.json. Subcommands catch this and offer to pick a
+// project from the user's project.list before falling through.
+var ErrNotLinked = errors.New("project not linked")
+
+// resolveOrLinkRef wraps projectRef with an interactive picker that
+// reads project.list, prompts the user when there's >1, and writes the
+// chosen ref to .palbase/config.json so subsequent runs are silent.
+//
+// The picker fires only when stdin is a TTY — non-interactive callers
+// (CI, piped scripts) get the original ErrNotLinked back so they can
+// fail loudly instead of hanging waiting for input.
+func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, out io.Writer) (string, error) {
+	ref, err := projectRef(override)
+	if err == nil {
+		return ref, nil
+	}
+	if !errors.Is(err, ErrNotLinked) {
+		return "", err
+	}
+
+	if !isInteractive() {
+		return "", fmt.Errorf("project not linked — pass --ref or run `palbase link <ref>`")
+	}
+
+	var rows []auth.Project
+	if listErr := c.Query(ctx, "project.list", nil, &rows); listErr != nil {
+		return "", fmt.Errorf("auto-link: %w", listErr)
+	}
+	if len(rows) == 0 {
+		return "", fmt.Errorf("no projects in your account — create one at the Palbase Studio dashboard first")
+	}
+
+	var picked auth.Project
+	if len(rows) == 1 {
+		picked = rows[0]
+		fmt.Fprintf(out, "Linking to your only project: %s (%s)\n", picked.Name, picked.Ref)
+	} else {
+		fmt.Fprintln(out, "Select a project:")
+		for i, p := range rows {
+			fmt.Fprintf(out, "  %d) %s (%s)\n", i+1, p.Name, p.Ref)
+		}
+		fmt.Fprint(out, "Enter number: ")
+		var choice int
+		if _, scanErr := fmt.Fscan(os.Stdin, &choice); scanErr != nil {
+			return "", fmt.Errorf("invalid selection: %w", scanErr)
+		}
+		if choice < 1 || choice > len(rows) {
+			return "", fmt.Errorf("invalid selection: %d", choice)
+		}
+		picked = rows[choice-1]
+	}
+
+	if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "staging"}); err != nil {
+		return "", fmt.Errorf("save .palbase/config.json: %w", err)
+	}
+	fmt.Fprintf(out, "✓ Linked to %s (%s)\n", picked.Name, picked.Ref)
+	return picked.Ref, nil
+}
+
+// isInteractive returns true when stdin is a TTY. Used by
+// resolveOrLinkRef to gate the picker — running under CI / piped input
+// shouldn't block waiting for `Enter number:`.
+func isInteractive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // extractFS unpacks an embed.FS subtree into target on disk.
@@ -269,11 +348,11 @@ func newInitCmd(r Resolvers) *cobra.Command {
 		Use:   "init",
 		Short: "Enable backend on this project and download the template into cwd",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ctx := cmd.Context()
+			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
-			ctx := cmd.Context()
 			fmt.Printf("→ enabling backend on %s ...\n", ref)
 			var enableResult struct {
 				WorkflowID string `json:"workflowId"`
@@ -325,7 +404,7 @@ func newInitCmd(r Resolvers) *cobra.Command {
 
 			// Re-use the existing link helper so .palbase/config.json gets
 			// the project ref and .gitignore picks up .palbase/.
-			if err := auth.SaveProjectConfig(&auth.ProjectConfig{ProjectID: ref, DefaultEnv: "main"}); err != nil {
+			if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}); err != nil {
 				return err
 			}
 
@@ -405,7 +484,7 @@ func newDeployCmd(r Resolvers) *cobra.Command {
 		Use:   "deploy",
 		Short: "Bundle current project and deploy a new version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
@@ -447,7 +526,7 @@ func newListCmd(r Resolvers) *cobra.Command {
 		Use:   "list",
 		Short: "Show deploy history (newest first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
@@ -495,7 +574,7 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Roll back to a previous version (creates a new commit)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
@@ -525,7 +604,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 		Use:   "status",
 		Short: "Show backend enable + active-version state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}

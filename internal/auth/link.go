@@ -5,58 +5,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 )
 
 // ProjectConfig holds the linked project configuration (.palbase/config.json).
+//
+// Persists the project's `ref` because every downstream command
+// (`backend init --ref`, `backend deploy --ref`) keys off the ref —
+// the bare project ID isn't part of any URL or runtime context.
 type ProjectConfig struct {
-	ProjectID  string `json:"project_id"`
+	Ref        string `json:"ref"`
 	DefaultEnv string `json:"default_env"`
 }
 
-// Project represents a project from the Platform API.
+// Project represents a project as the Studio tRPC layer returns it.
+// Mirrors the columns project.list selects from control-pg's projects
+// table.
 type Project struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID     string `json:"id"`
+	Ref    string `json:"ref"`
+	Name   string `json:"name"`
+	Tier   string `json:"tier"`
+	Region string `json:"region"`
+	Status string `json:"status"`
 }
 
-// PlatformAPI abstracts Platform API calls for testing.
+// PlatformAPI abstracts project listing for testing. Production
+// implementations call Studio's tRPC project.list endpoint with the
+// CLI's bearer token.
 type PlatformAPI interface {
 	ListProjects(ctx context.Context, token string) ([]Project, error)
-}
-
-// HTTPPlatformAPI implements PlatformAPI using HTTP calls.
-type HTTPPlatformAPI struct {
-	BaseURL    string
-	HTTPClient HTTPClient
-}
-
-// ListProjects fetches projects from the Platform API.
-func (a *HTTPPlatformAPI) ListProjects(ctx context.Context, token string) ([]Project, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.BaseURL+"/api/v1/projects", nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := a.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("list projects failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	var projects []Project
-	if err := json.NewDecoder(resp.Body).Decode(&projects); err != nil {
-		return nil, fmt.Errorf("parse projects: %w", err)
-	}
-	return projects, nil
 }
 
 // Linker handles project linking.
@@ -64,36 +43,51 @@ type Linker struct {
 	AuthClient  *Client
 	PlatformAPI PlatformAPI
 	Output      io.Writer
-	SelectFn    func(projects []Project) (*Project, error)
+	// SelectFn lets the caller pick when multiple projects are visible
+	// and the user didn't pass `--ref`. CLI wires a numeric prompt;
+	// tests inject a deterministic stub.
+	SelectFn func(projects []Project) (*Project, error)
 }
 
-// Link links the current directory to a project.
-func (l *Linker) Link(ctx context.Context, projectID string) error {
+// Link links the current directory to a project. `wantRef` is the
+// project ref the user passed (positional arg or --ref); empty means
+// "ask the user to pick from project.list".
+func (l *Linker) Link(ctx context.Context, wantRef string) error {
 	token, err := l.AuthClient.GetValidToken(ctx)
 	if err != nil {
 		return err
 	}
 
-	var selected *Project
+	projects, err := l.PlatformAPI.ListProjects(ctx, token)
+	if err != nil {
+		return err
+	}
+	if len(projects) == 0 {
+		return fmt.Errorf("no projects found — create one at the Palbase Studio dashboard first")
+	}
 
-	if projectID != "" {
-		selected = &Project{ID: projectID}
+	var selected *Project
+	if wantRef != "" {
+		for i := range projects {
+			if projects[i].Ref == wantRef {
+				selected = &projects[i]
+				break
+			}
+		}
+		if selected == nil {
+			return fmt.Errorf("no project with ref %q found in your account", wantRef)
+		}
+	} else if len(projects) == 1 {
+		// Only one project? skip the picker — the answer is obvious.
+		selected = &projects[0]
 	} else {
-		projects, err := l.PlatformAPI.ListProjects(ctx, token)
-		if err != nil {
-			return err
-		}
-		if len(projects) == 0 {
-			return fmt.Errorf("no projects found — create one in the Palbase Studio")
-		}
 		selected, err = l.SelectFn(projects)
 		if err != nil {
 			return err
 		}
 	}
 
-	cfg := &ProjectConfig{ProjectID: selected.ID, DefaultEnv: "staging"}
-
+	cfg := &ProjectConfig{Ref: selected.Ref, DefaultEnv: "staging"}
 	if err := SaveProjectConfig(cfg); err != nil {
 		return err
 	}
@@ -101,7 +95,7 @@ func (l *Linker) Link(ctx context.Context, projectID string) error {
 		return err
 	}
 
-	fmt.Fprintf(l.Output, "✓ Linked to project %s\n", selected.ID)
+	fmt.Fprintf(l.Output, "✓ Linked to %s (%s)\n", selected.Name, selected.Ref)
 	return nil
 }
 
@@ -124,7 +118,7 @@ func LoadProjectConfig() (*ProjectConfig, error) {
 	data, err := os.ReadFile(filepath.Join(".palbase", "config.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("project not linked — run: palbase link")
+			return nil, fmt.Errorf("project not linked — run: palbase link <ref>")
 		}
 		return nil, fmt.Errorf("read project config: %w", err)
 	}
@@ -132,6 +126,9 @@ func LoadProjectConfig() (*ProjectConfig, error) {
 	var cfg ProjectConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse project config: %w", err)
+	}
+	if cfg.Ref == "" {
+		return nil, fmt.Errorf(".palbase/config.json missing ref — run: palbase link <ref>")
 	}
 	return &cfg, nil
 }
