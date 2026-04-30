@@ -504,6 +504,13 @@ func newDevCmd(r Resolvers) *cobra.Command {
 			}
 
 			node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
+			// dev-server.js runs from a temp dir but needs to require()
+			// the user's local @palbase/server (and any other declared
+			// deps). NODE_PATH adds the project's node_modules to the
+			// resolver path, and setting Dir keeps `process.cwd()` and
+			// any relative paths from user endpoints anchored to the
+			// project root.
+			node.Dir = cwd
 			node.Env = append(os.Environ(),
 				fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 				fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
@@ -511,6 +518,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.AnonKey),
 				fmt.Sprintf("PALBASE_TENANT_SERVICE_ROLE=%s", revealResp.ServiceRoleKey),
+				fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
 			)
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr
