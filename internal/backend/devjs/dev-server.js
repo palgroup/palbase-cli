@@ -51,6 +51,21 @@ const METHOD_FILE_RE = /^(get|post|put|patch|delete)\.(c?js|mjs|ts)$/i;
 // requests with named capture groups.
 const routes = new Map();
 
+// deriveOperationId — same dotted-segment convention the deployed
+// backend-runtime uses (see modules/backend/internal/management/
+// endpoint_router.go). Each endpoint gets a `/rpc/{operationId}` alias
+// so iOS/TS clients can do typed `pb.backend.call("todos.list", ...)`
+// against the local dev-server with the same wire shape as production.
+function deriveOperationId(segments, method) {
+  const parts = segments
+    .map((s) => (s.startsWith(':') ? s.slice(1) : s))
+    .filter((s) => s.length > 0);
+  if (method && method !== 'POST') {
+    parts.push(method.toLowerCase());
+  }
+  return parts.join('.');
+}
+
 function registerEndpoints() {
   routes.clear();
   if (!fs.existsSync(ENDPOINTS_DIR)) {
@@ -81,6 +96,21 @@ function registerEndpoints() {
       paramNames,
       modulePath: file,
     });
+
+    // RPC alias: every endpoint also responds at `POST /rpc/{operationId}`
+    // regardless of its declared HTTP method. Path params are folded into
+    // dotted segments — RPC clients pass them in the body, not the URL.
+    const operationId = deriveOperationId(segments, method);
+    if (operationId) {
+      const rpcPattern = `/rpc/${operationId}`;
+      routes.set('POST ' + rpcPattern, {
+        method: 'POST',
+        urlPattern: rpcPattern,
+        regex: new RegExp('^' + rpcPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/?$'),
+        paramNames: [],
+        modulePath: file,
+      });
+    }
   });
   log(`registered ${routes.size} endpoint(s):`);
   for (const route of routes.values()) {
