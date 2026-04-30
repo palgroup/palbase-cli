@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -32,6 +33,20 @@ import (
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
+
+// defaultHTTPClient is reused by `palbase backend types` (and any
+// future direct HTTP we add). 30s read timeout matches the SDK side
+// so a slow Kong response surfaces consistently.
+var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
 
 // templateFS embeds the default backend project bundle (palbase.toml,
 // endpoints/hello/get.js, package.json, .gitignore). `init` falls back
@@ -81,6 +96,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		newRollbackCmd(r),
 		newStatusCmd(r),
 		newDisableCmd(r),
+		newTypesCmd(r),
 	)
 	return cmd
 }
@@ -522,6 +538,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 func newDeployCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var message string
+	var skipTypes bool
 	cmd := &cobra.Command{
 		Use:   "deploy",
 		Short: "Bundle current project and deploy a new version",
@@ -553,12 +570,25 @@ func newDeployCmd(r Resolvers) *cobra.Command {
 				return fmt.Errorf("backend.deploy: %w", err)
 			}
 			fmt.Printf("✓ deployed version %s (%d files)\n", resp.Version, resp.Files)
-			fmt.Printf("  https://%s.dev.palbase.studio/api/*\n", ref)
+			fmt.Printf("  https://%s.dev.palbase.studio/rpc/*\n", ref)
+
+			// Adım B14 — auto-pull types after every successful deploy.
+			// `--no-types` disables for CI loops where the typed
+			// declarations aren't useful.
+			if !skipTypes {
+				if err := pullTypes(cmd.Context(), r.Studio(), ref, "remote", os.Stdout); err != nil {
+					// Don't fail the deploy on a types-pull glitch — the
+					// deploy itself succeeded; types are an ergonomic
+					// artifact developers can refresh manually.
+					fmt.Fprintf(os.Stderr, "⚠ types pull failed: %v\n", err)
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Optional commit message recorded in git history")
+	cmd.Flags().BoolVar(&skipTypes, "no-types", false, "Skip the post-deploy `palbase backend types` step")
 	return cmd
 }
 
@@ -790,3 +820,212 @@ func renderJSON(v any) string {
 }
 
 var _ = renderJSON // silence "unused" until --json lands
+
+// ─────────────────────────────────────────────────────────────────────
+// Adım B14 — `palbase backend types`
+//
+// Pulls the deployed `/openapi.json` for the project and writes
+// `.palbase/openapi.json` + `.palbase/types.d.ts`. Both files are
+// auto-generated and overwritten on every run; users edit the
+// underlying `defineEndpoint` source instead.
+// ─────────────────────────────────────────────────────────────────────
+
+func newTypesCmd(r Resolvers) *cobra.Command {
+	var refFlag string
+	var envFlag string
+	var outDir string
+	cmd := &cobra.Command{
+		Use:   "types",
+		Short: "Pull the deployed OpenAPI spec + generate TypeScript types",
+		Long: `Fetch the OpenAPI document from the deployed backend and write it
+plus generated TypeScript declarations into .palbase/. Files written:
+
+  .palbase/openapi.json   — raw OpenAPI 3.1 document, used by Studio,
+                            Postman, swift-openapi-generator, etc.
+  .palbase/types.d.ts     — TypeScript interface BackendEndpoints {...}
+                            picked up automatically by tsc when present.
+
+Both files are auto-generated. Re-run this command after every
+deploy to keep them in sync; ` + "`palbase backend deploy`" + ` already does.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			if err != nil {
+				return err
+			}
+			if outDir == "" {
+				outDir = ".palbase"
+			}
+			return pullTypesTo(cmd.Context(), r.Studio(), ref, envFlag, outDir, os.Stdout)
+		},
+	}
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase backend dev on localhost:4003)")
+	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output directory")
+	return cmd
+}
+
+// pullTypes is the post-deploy convenience wrapper that writes into
+// the default `.palbase/` directory.
+func pullTypes(ctx context.Context, sc *studio.Client, ref, env string, w io.Writer) error {
+	return pullTypesTo(ctx, sc, ref, env, ".palbase", w)
+}
+
+// pullTypesTo does the actual work — fetch /openapi.json, write JSON,
+// shell out to `npx openapi-typescript` for the .d.ts. Failures emit a
+// warning but don't block; the JSON file alone is useful (Studio,
+// Postman). Augmentation of `interface BackendEndpoints` is what
+// drives the typed `pb.backend.call(name, input)` API.
+func pullTypesTo(ctx context.Context, sc *studio.Client, ref, env, outDir string, w io.Writer) error {
+	specURL, err := openAPIURL(ctx, sc, ref, env)
+	if err != nil {
+		return err
+	}
+
+	apiKey, err := lookupAnonAPIKey(ctx, sc, ref)
+	if err != nil {
+		return err
+	}
+
+	specBytes, err := fetchOpenAPISpec(ctx, specURL, apiKey)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", outDir, err)
+	}
+	jsonPath := filepath.Join(outDir, "openapi.json")
+	if err := writeAutogenFile(jsonPath, specBytes); err != nil {
+		return fmt.Errorf("write %s: %w", jsonPath, err)
+	}
+	fmt.Fprintf(w, "✓ wrote %s\n", jsonPath)
+
+	// .palbase/types.d.ts via openapi-typescript shell-out. Optional —
+	// users without Node.js still get the JSON contract.
+	tsPath := filepath.Join(outDir, "types.d.ts")
+	if err := generateTypesDecl(ctx, jsonPath, tsPath); err != nil {
+		fmt.Fprintf(w, "  (skipped types.d.ts: %v)\n", err)
+	} else {
+		fmt.Fprintf(w, "✓ wrote %s\n", tsPath)
+	}
+
+	// Ensure .palbase/ is gitignored so generated artifacts don't end
+	// up in customer commits. Idempotent — append a single line if
+	// neither `.palbase/` nor `.palbase` is already listed.
+	if err := ensureGitignored(".gitignore", ".palbase/"); err != nil {
+		fmt.Fprintf(w, "  (gitignore not updated: %v)\n", err)
+	}
+
+	return nil
+}
+
+// openAPIURL resolves the spec URL for the chosen environment.
+func openAPIURL(ctx context.Context, sc *studio.Client, ref, env string) (string, error) {
+	switch env {
+	case "remote", "":
+		// Studio knows the project domain from control-pg; a tRPC
+		// helper would be ideal but for B14.2 we hard-code the dev
+		// domain — `palbase backend deploy` itself uses the same.
+		return fmt.Sprintf("https://%s.dev.palbase.studio/openapi.json", ref), nil
+	case "local":
+		return "http://localhost:4003/openapi.json", nil
+	default:
+		return "", fmt.Errorf("unknown --env %q (expected remote|local)", env)
+	}
+}
+
+// lookupAnonAPIKey calls Studio's apikey.reveal to get the project's
+// anon key. The deployed `/openapi.json` is gated by the same Kong
+// apikey middleware as `/rpc/*` so we need a real key to fetch it.
+func lookupAnonAPIKey(ctx context.Context, sc *studio.Client, ref string) (string, error) {
+	var resp struct {
+		AnonKey string `json:"anonKey"`
+	}
+	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
+		return "", fmt.Errorf("apikey.reveal: %w", err)
+	}
+	if resp.AnonKey == "" {
+		return "", errors.New("apikey.reveal: missing anon key")
+	}
+	return resp.AnonKey, nil
+}
+
+// fetchOpenAPISpec issues a GET against the project's /openapi.json
+// with the apikey header set. Returns raw bytes — we don't parse here
+// because the caller writes the JSON straight to disk.
+func fetchOpenAPISpec(ctx context.Context, specURL, apiKey string) ([]byte, error) {
+	req, err := newJSONRequest(ctx, "GET", specURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := defaultHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", specURL, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+// writeAutogenFile writes data to path with a header comment that
+// surfaces "do not edit" when the file is opened. JSON files take a
+// `// AUTO-GENERATED` line via a key in the JSON itself rather than a
+// comment (JSON has no comments) — so we just write the bytes as-is
+// and rely on the OpenAPI document's `info.description` from the
+// backend SDK.
+func writeAutogenFile(path string, data []byte) error {
+	return os.WriteFile(path, data, 0o644)
+}
+
+// generateTypesDecl runs `npx openapi-typescript <jsonPath> -o <tsPath>`
+// to produce a .d.ts file. Requires Node.js + npx on PATH; if absent
+// the function returns an error and the caller logs a warning.
+func generateTypesDecl(ctx context.Context, jsonPath, tsPath string) error {
+	if _, err := exec.LookPath("npx"); err != nil {
+		return fmt.Errorf("npx not on PATH (Node.js required for types.d.ts generation)")
+	}
+	cmd := exec.CommandContext(ctx, "npx", "--yes", "openapi-typescript@^7", jsonPath, "-o", tsPath)
+	cmd.Stderr = io.Discard
+	cmd.Stdout = io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("openapi-typescript: %w", err)
+	}
+	// Prepend the AUTO-GENERATED header so editors flag it.
+	existing, err := os.ReadFile(tsPath)
+	if err != nil {
+		return err
+	}
+	header := []byte("// AUTO-GENERATED FROM YOUR DEPLOYED BACKEND. DO NOT EDIT — RUN 'palbase backend types' TO REFRESH.\n\n")
+	return os.WriteFile(tsPath, append(header, existing...), 0o644)
+}
+
+// ensureGitignored appends `entry` to the .gitignore at gitignorePath
+// if neither it nor its trailing-slash variant is already listed.
+// Creates the file when missing. Whitespace-trimmed comparisons keep
+// this idempotent across editor quirks.
+func ensureGitignored(gitignorePath, entry string) error {
+	current, err := os.ReadFile(gitignorePath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	want := strings.TrimSuffix(entry, "/")
+	for _, line := range strings.Split(string(current), "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "/"))
+		if trimmed == want {
+			return nil
+		}
+	}
+	suffix := entry + "\n"
+	if len(current) > 0 && !strings.HasSuffix(string(current), "\n") {
+		suffix = "\n" + suffix
+	}
+	return os.WriteFile(gitignorePath, append(current, []byte(suffix)...), 0o644)
+}
