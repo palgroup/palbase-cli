@@ -137,12 +137,19 @@ let palbaseClientSingleton = null;
 function getPalbaseClient() {
   if (!PALBASE_URL || !TENANT_APIKEY) return null;
   if (palbaseClientSingleton) return palbaseClientSingleton;
-  // @palbase/server is a peer the CLI declares; it ships in the global
-  // npm install or in the user's project. require() resolves both.
   const { createServerClient } = require('@palbase/server');
-  palbaseClientSingleton = createServerClient(TENANT_APIKEY, {
+  // Mirror worker.js (the prod backend-runtime path): the apikey
+  // header drives Kong's scope decision (`s` = service-role / RLS
+  // bypass, `c` = anon). ctx.palbase IS the project's privileged
+  // surface, so the service-role key MUST be the primary apikey
+  // when present — passing the anon key here makes Kong stamp
+  // role=anon on the iJWT and downstream services (paldocs)
+  // SET LOCAL ROLE anon, which has read-only grants. Falls back
+  // to anon only when service-role wasn't revealed.
+  const primaryKey = TENANT_SERVICE_ROLE || TENANT_APIKEY;
+  palbaseClientSingleton = createServerClient(primaryKey, {
     url: PALBASE_URL,
-    serviceRole: TENANT_SERVICE_ROLE || undefined,
+    ...(TENANT_SERVICE_ROLE ? { serviceRole: TENANT_SERVICE_ROLE } : {}),
   });
   return palbaseClientSingleton;
 }
@@ -239,11 +246,24 @@ async function verifyTokenViaPalauth(token) {
     return { ok: false, reason: 'palauth_unreachable', detail: err.message };
   }
   if (resp.status === 401) {
+    // Surface what palauth actually said + show a token fingerprint so
+    // the dev can spot stale-keychain-vs-fresh-token mismatches without
+    // dumping the whole JWT to stdout.
+    let body = '';
+    try { body = await resp.text(); } catch {}
+    const claims = decodeJwtPayload(token) || {};
+    const fp = `sub=${claims.sub || '?'} exp=${claims.exp || '?'} iat=${claims.iat || '?'}`;
+    log(`palauth /auth/user → 401 (${fp}): ${body.slice(0, 240)}`);
     const value = { ok: false, reason: 'invalid_token' };
     tokenCache.set(token, { value, expires: Date.now() + TOKEN_TTL_MS });
     return value;
   }
-  if (!resp.ok) return { ok: false, reason: 'palauth_error', status: resp.status };
+  if (!resp.ok) {
+    let body = '';
+    try { body = await resp.text(); } catch {}
+    log(`palauth /auth/user → ${resp.status}: ${body.slice(0, 240)}`);
+    return { ok: false, reason: 'palauth_error', status: resp.status };
+  }
   let profile;
   try {
     profile = await resp.json();
@@ -445,6 +465,12 @@ server.listen(PORT, () => {
     log('────────────────────────────────────────────────────────────');
     log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
     log(`  ctx.palbase.* writes hit ${PALBASE_URL}`);
+    if (TENANT_SERVICE_ROLE) {
+      log(`  scope: service-role (RLS bypass) — key ${TENANT_SERVICE_ROLE.slice(0, 16)}…`);
+    } else {
+      log(`  scope: anon — RLS WILL apply, writes to protected collections will fail`);
+      log(`         (apikey.reveal returned no service-role; likely missing default key)`);
+    }
     log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);
     log('────────────────────────────────────────────────────────────');
   } else {
