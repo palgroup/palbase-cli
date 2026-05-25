@@ -842,33 +842,53 @@ func newTypesCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var envFlag string
 	var outDir string
+	var langFlag string
 	cmd := &cobra.Command{
 		Use:   "types",
-		Short: "Pull the deployed OpenAPI spec + generate TypeScript types",
-		Long: `Fetch the OpenAPI document from the deployed backend and write it
-plus generated TypeScript declarations into .palbase/. Files written:
+		Short: "Pull the deployed OpenAPI spec + generate typed client code",
+		Long: `Fetch the OpenAPI document from the deployed backend and generate
+typed client code.
 
-  .palbase/openapi.json   — raw OpenAPI 3.1 document, used by Studio,
-                            Postman, swift-openapi-generator, etc.
-  .palbase/types.d.ts     — TypeScript interface BackendEndpoints {...}
-                            picked up automatically by tsc when present.
+  --lang ts     (default) writes .palbase/openapi.json + .palbase/types.d.ts
+  --lang swift  writes a Swift file of namespaced typed calls
+                (pb.rooms.create(...)) for the Palbe iOS SDK
 
-Both files are auto-generated. Re-run this command after every
-deploy to keep them in sync; ` + "`palbase backend deploy`" + ` already does.`,
+Swift codegen is self-contained (no Node/npx). The generated file
+'import Palbe' and lowers each call to the SDK's public seam, so it
+compiles in the consumer app target. Use it from an Xcode Run Script
+build phase for automatic regeneration on every build:
+
+  palbase backend types --lang swift \
+    --out "$DERIVED_FILE_DIR/PalbaseEndpoints.swift" \
+    --env "$([ "$CONFIGURATION" = Debug ] && echo local || echo remote)"
+
+Re-run after every deploy to stay in sync; ` + "`palbase backend deploy`" + ` already does (ts).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
-			if outDir == "" {
-				outDir = ".palbase"
+			switch langFlag {
+			case "swift":
+				out := outDir
+				if out == ".palbase" || out == "" {
+					out = "PalbaseEndpoints.swift" // swift default: a file, not a dir
+				}
+				return pullSwiftTypes(cmd.Context(), r.Studio(), ref, envFlag, out, os.Stdout)
+			case "ts", "":
+				if outDir == "" {
+					outDir = ".palbase"
+				}
+				return pullTypesTo(cmd.Context(), r.Studio(), ref, envFlag, outDir, os.Stdout)
+			default:
+				return fmt.Errorf("unknown --lang %q (expected ts|swift)", langFlag)
 			}
-			return pullTypesTo(cmd.Context(), r.Studio(), ref, envFlag, outDir, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase backend dev on localhost:4003)")
-	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output directory")
+	cmd.Flags().StringVar(&langFlag, "lang", "ts", "Output language: ts | swift")
+	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output: dir for ts (.palbase), file for swift (PalbaseEndpoints.swift)")
 	return cmd
 }
 
@@ -883,6 +903,38 @@ func pullTypes(ctx context.Context, sc *studio.Client, ref, env string, w io.Wri
 // warning but don't block; the JSON file alone is useful (Studio,
 // Postman). Augmentation of `interface BackendEndpoints` is what
 // drives the typed `pb.backend.call(name, input)` API.
+// pullSwiftTypes fetches the OpenAPI spec and generates a Swift file of
+// namespaced typed calls for the Palbe iOS SDK. Self-contained — no npx.
+func pullSwiftTypes(ctx context.Context, sc *studio.Client, ref, env, outFile string, w io.Writer) error {
+	specURL, err := openAPIURL(ctx, sc, ref, env)
+	if err != nil {
+		return err
+	}
+	apiKey, err := lookupAnonAPIKey(ctx, sc, ref)
+	if err != nil {
+		return err
+	}
+	specBytes, err := fetchOpenAPISpec(ctx, specURL, apiKey)
+	if err != nil {
+		return err
+	}
+	ops, err := parseOpenAPIForSwift(specBytes)
+	if err != nil {
+		return err
+	}
+	swift := emitSwift(ops)
+	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(outFile, []byte(swift), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outFile, err)
+	}
+	fmt.Fprintf(w, "✓ wrote %s (%d operation(s))\n", outFile, len(ops))
+	return nil
+}
+
 func pullTypesTo(ctx context.Context, sc *studio.Client, ref, env, outDir string, w io.Writer) error {
 	specURL, err := openAPIURL(ctx, sc, ref, env)
 	if err != nil {

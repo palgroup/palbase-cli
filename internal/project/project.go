@@ -1,34 +1,37 @@
-// Package project wires `palbase project ...` subcommands. We talk to
-// Studio's tRPC layer with the same Bearer flow `palbase backend ...`
-// uses, so org-membership + tier checks stay server-side.
+// Package project wires `palbase project ...` subcommands over the
+// Management API REST transport (Authorization: DPoP <pat> + per-request
+// proof). The legacy tRPC path is gone for project — only the REST
+// client is used here (Spec 1, S5.4).
 package project
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
+	"net/http"
 	"os"
 	"text/tabwriter"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
+	"fmt"
+
 	"github.com/spf13/cobra"
 )
 
-// Resolvers lets the cobra wiring read the lazily-built Studio client
-// from main.go's PersistentPreRunE — see backend.Resolvers for the
-// same pattern.
+// Resolvers lets the cobra wiring read the lazily-built REST client from
+// main.go's PersistentPreRunE — mirrors backend.Resolvers' pattern.
 type Resolvers struct {
-	Studio func() *studio.Client
+	REST func() REST
 }
 
 // Cmd returns the `palbase project` parent command.
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
-		Short: "List and inspect Palbase projects",
+		Short: "Create, list, and inspect Palbase projects",
 	}
-	cmd.AddCommand(listCmd(r))
+	cmd.AddCommand(
+		listCmd(r.REST),
+		createCmd(r.REST),
+		statusCmd(r.REST),
+	)
 	return cmd
 }
 
@@ -43,7 +46,7 @@ type projectRow struct {
 	OrgID     string    `json:"org_id"`
 }
 
-func listCmd(r Resolvers) *cobra.Command {
+func listCmd(rest func() REST) *cobra.Command {
 	var jsonOut bool
 
 	cmd := &cobra.Command{
@@ -51,16 +54,14 @@ func listCmd(r Resolvers) *cobra.Command {
 		Short: "List projects you have access to",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var rows []projectRow
-			if err := r.Studio().Query(cmd.Context(), "project.list", nil, &rows); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodGet, "/api/v1/projects", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(rows)
+				return encodeJSON(rows)
 			}
 			if len(rows) == 0 {
-				fmt.Fprintln(os.Stdout, "No projects yet — create one at the dashboard.")
+				fmt.Fprintln(os.Stdout, "No projects yet — create one with `palbase project create`.")
 				return nil
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -74,8 +75,5 @@ func listCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-
-	// satisfy unused-context lint when the command runs without args
-	_ = context.Background
 	return cmd
 }

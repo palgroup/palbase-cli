@@ -155,6 +155,10 @@ func TestLogin_FullFlow(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	// Login provisions a keyring DPoP key — isolate to the 0600 file
+	// fallback so the test never touches the host OS keychain (which
+	// would block on a Keychain UI prompt under -race).
+	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	var output bytes.Buffer
 	client := NewClient(Config{
@@ -194,6 +198,13 @@ func TestLogin_FullFlow(t *testing.T) {
 	assert.Equal(t, "access_123", creds.AccessToken)
 	assert.Equal(t, "refresh_456", creds.RefreshToken)
 	assert.Equal(t, "test@example.com", creds.User.Email)
+
+	// Login must provision a keyring DPoP key (S5.2) so subsequent
+	// Management-API calls can sign a proof.
+	key, err := LoadDPoPKey("prod")
+	require.NoError(t, err)
+	assert.NotEmpty(t, key.Thumbprint())
+	assert.Contains(t, output.String(), "DPoP key ready")
 }
 
 func TestLogin_Timeout(t *testing.T) {
@@ -300,6 +311,9 @@ func TestLogout(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	// Logout purges the keyring DPoP key — isolate to the file fallback
+	// so the test never touches the host OS keychain.
+	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	// Save credentials first
 	SaveCredentials("prod", &Credentials{

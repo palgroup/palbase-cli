@@ -7,11 +7,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -28,7 +30,20 @@ var authClient *auth.Client
 
 // studioClient is the tRPC client used by `palbase backend ...` to
 // talk to Studio. Built per invocation against resolved.Endpoints.Studio.
+// Retained ONLY for backend until backend REST routes exist (S5.4
+// decision — see docs/decisions/2026-05-24-s5-cli-pat-provisioning-...).
 var studioClient *studio.Client
+
+// managementREST lazily builds the Management-API REST client used by
+// `palbase project`/`apikey`. It loads the keyring DPoP key + the
+// PALBASE_ACCESS_TOKEN PAT on first use; missing material surfaces a
+// clear error from transport.Client.Do rather than at wiring time, so
+// `palbase login` / `config` still run without a PAT present.
+func managementREST() *transport.Client {
+	key, _ := auth.LoadDPoPKey(string(resolved.Mode))
+	pat, _ := auth.ManagementToken(string(resolved.Mode))
+	return transport.New(resolved.Endpoints.PlatformAPI, key, pat)
+}
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -72,7 +87,10 @@ func main() {
 			Endpoints: func() config.Endpoints { return resolved.Endpoints },
 		}),
 		project.Cmd(project.Resolvers{
-			Studio: func() *studio.Client { return studioClient },
+			REST: func() project.REST { return managementREST() },
+		}),
+		apikey.Cmd(apikey.Resolvers{
+			REST: func() apikey.REST { return managementREST() },
 		}),
 	)
 

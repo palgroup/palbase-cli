@@ -45,9 +45,14 @@ var endpointsByMode = map[Mode]Endpoints{
 		// `dev.palbase.studio` apex doesn't resolve. palauth (OAuth +
 		// /.well-known) is fronted by the same host so Auth points
 		// there too. Project endpoints are at <ref>.dev.palbase.studio.
+		//
+		// PlatformAPI is the Management API (`/api/v1/*`) origin —
+		// `api.dev.palbase.studio` per the Spec-1 contract, fronted by
+		// the Kong `api.palbase.studio` route (plan S4). Until that route
+		// lands in dev, override with PALBASE_PLATFORM_URL.
 		Studio:      "https://app.dev.palbase.studio",
 		Auth:        "https://app.dev.palbase.studio",
-		PlatformAPI: "https://app.dev.palbase.studio",
+		PlatformAPI: "https://api.dev.palbase.studio",
 		PublicHost:  "dev.palbase.studio",
 	},
 }

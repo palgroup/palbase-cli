@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -157,6 +158,23 @@ func (c *Client) Login(ctx context.Context) error {
 			return err
 		}
 		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", creds.User.Email, c.Cfg.Mode)
+
+		// Provision the keyring DPoP key the Management API (REST) needs.
+		// The CLI's OAuth token cannot mint a PAT (palauth's PAT-create is
+		// session-gated), so we surface the jkt + next step: generate a
+		// DPoP-bound PAT in the Dashboard and export PALBASE_ACCESS_TOKEN.
+		key, keyErr := EnsureDPoPKey(c.Cfg.Mode)
+		if keyErr != nil {
+			fmt.Fprintf(c.Output, "  ! could not provision DPoP key: %v\n", keyErr)
+			fmt.Fprintln(c.Output, "    Management-API commands (project/apikey) will be unavailable until this is resolved.")
+			return nil
+		}
+		if os.Getenv("PALBASE_ACCESS_TOKEN") == "" {
+			fmt.Fprintf(c.Output, "  DPoP key ready (jkt=%s)\n", key.Thumbprint())
+			fmt.Fprintln(c.Output, "  To run `palbase project`/`apikey` commands, generate a")
+			fmt.Fprintln(c.Output, "  DPoP-bound access token in the Dashboard (bound to the jkt above)")
+			fmt.Fprintln(c.Output, "  and export it: export PALBASE_ACCESS_TOKEN=pat_…")
+		}
 		return nil
 
 	case <-time.After(120 * time.Second):
@@ -287,6 +305,12 @@ func (c *Client) Logout(ctx context.Context) error {
 
 	if err := DeleteCredentials(c.Cfg.Mode); err != nil {
 		return err
+	}
+	// Purge the keyring DPoP key too — leaving it behind would orphan a
+	// jkt whose paired Dashboard PAT is now unusable. The next login
+	// mints a fresh key.
+	if err := DeleteDPoPKey(c.Cfg.Mode); err != nil {
+		fmt.Fprintf(c.Output, "  ! could not remove DPoP key: %v\n", err)
 	}
 
 	fmt.Fprintf(c.Output, "✓ Logged out (mode=%s)\n", c.Cfg.Mode)
