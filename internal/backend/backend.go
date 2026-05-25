@@ -460,6 +460,19 @@ func newInitCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
+// resolveDevProjectRef picks the ref the dev server should build its
+// <ref>.<host> URL from. Kong only routes the branch endpoint_ref
+// subdomain, so prefer the endpoint_ref apikey.reveal returns. When
+// reveal was skipped (ref "" / "local") or failed, endpointRef is empty
+// and we fall back to the bare ref — dev still launches and ctx.palbase
+// surfaces a clear downstream error rather than hard-failing here.
+func resolveDevProjectRef(ref, endpointRef string) string {
+	if endpointRef != "" {
+		return endpointRef
+	}
+	return ref
+}
+
 func newDevCmd(r Resolvers) *cobra.Command {
 	var port int
 	cmd := &cobra.Command{
@@ -494,6 +507,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 			// without ctx.palbase — the bindings throw on first use, so
 			// the user sees a clear error instead of silent partial behaviour.
 			var revealResp struct {
+				EndpointRef    string `json:"endpointRef"`
 				AnonKey        string `json:"anonKey"`
 				ServiceRoleKey string `json:"serviceRoleKey"`
 			}
@@ -514,7 +528,13 @@ func newDevCmd(r Resolvers) *cobra.Command {
 			node.Env = append(os.Environ(),
 				fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 				fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
-				fmt.Sprintf("PALBASE_PROJECT_REF=%s", ref),
+				// PROJECT_REF feeds dev-server.js's https://<ref>.<host> URL,
+				// which goes through Kong — and Kong routes the branch
+				// endpoint_ref subdomain (e.g. test0r8q3m), NOT the bare ref.
+				// apikey.reveal returns the resolved endpoint_ref; prefer it,
+				// falling back to the bare ref when reveal was skipped/failed
+				// so dev still launches (ctx.palbase then errors clearly).
+				fmt.Sprintf("PALBASE_PROJECT_REF=%s", resolveDevProjectRef(ref, revealResp.EndpointRef)),
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.AnonKey),
 				fmt.Sprintf("PALBASE_TENANT_SERVICE_ROLE=%s", revealResp.ServiceRoleKey),
