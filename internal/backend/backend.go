@@ -83,6 +83,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		Long: `Commands for the per-project backend (defineEndpoint runtime).
 
   palbase backend init      Enable the backend pod and scaffold the project.
+  palbase backend pull      Pull branch code + env vars to local dev machine.
   palbase backend dev       Run endpoints/ locally with hot reload.
   palbase backend deploy    Push current code as a new version + activate.
   palbase backend list      Show recent versions (newest first).
@@ -90,6 +91,7 @@ func Cmd(r Resolvers) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newInitCmd(r),
+		newPullCmd(r),
 		newDevCmd(r),
 		newDeployCmd(r),
 		newListCmd(r),
@@ -850,6 +852,140 @@ func renderJSON(v any) string {
 }
 
 var _ = renderJSON // silence "unused" until --json lands
+
+// ─────────────────────────────────────────────────────────────────────
+// palbase backend pull
+//
+// Pulls the branch's latest code archive (same as init does) and then
+// fetches the decrypted branch env vars via env.pull, writing them to
+// .env.local so `palbase backend dev` has the real values.
+//
+// .env.local is already in the template .gitignore; we also ensure it
+// is listed in the project's own .gitignore so values never reach git,
+// even in projects initialised before this command existed.
+//
+// If the env.pull step fails (e.g. no vars set, transient network
+// error), a warning is printed and the command returns successfully —
+// the code pull already completed.
+// ─────────────────────────────────────────────────────────────────────
+
+// envVar holds a single key/value pair returned by the env.pull tRPC procedure.
+type envVar struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// needsQuoting returns true when the value contains characters that
+// require double-quoting in a .env file: whitespace, #, or ".
+func needsQuoting(v string) bool {
+	return strings.ContainsAny(v, " \t#\"")
+}
+
+// formatEnvLine serialises one env var as a dotenv line.
+// Values containing whitespace, # or " are wrapped in double-quotes with
+// embedded quotes and backslashes escaped.
+// NOTE: values with literal newlines are not supported in v1.
+func formatEnvLine(key, value string) string {
+	if !needsQuoting(value) {
+		return key + "=" + value
+	}
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
+	return key + `="` + escaped + `"`
+}
+
+// writeEnvLocal writes vars as a .env.local file inside dir and ensures
+// .env.local is listed in dir/.gitignore. When vars is empty the file
+// is not written (but the .gitignore is still not touched).
+func writeEnvLocal(dir string, vars []envVar) error {
+	if len(vars) == 0 {
+		return nil
+	}
+
+	var sb strings.Builder
+	for _, v := range vars {
+		sb.WriteString(formatEnvLine(v.Key, v.Value))
+		sb.WriteByte('\n')
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, ".env.local"), []byte(sb.String()), 0o600); err != nil {
+		return fmt.Errorf("write .env.local: %w", err)
+	}
+
+	// Safety: ensure .env.local is gitignored so the value never reaches git,
+	// even in projects initialised before this command existed.
+	if err := ensureGitignored(filepath.Join(dir, ".gitignore"), ".env.local"); err != nil {
+		// Non-fatal — the file is written; warn rather than roll back.
+		fmt.Fprintf(os.Stderr, "warning: could not update .gitignore: %v\n", err)
+	}
+
+	return nil
+}
+
+func newPullCmd(r Resolvers) *cobra.Command {
+	var refFlag string
+	cmd := &cobra.Command{
+		Use:   "pull",
+		Short: "Pull branch code and env vars to local machine",
+		Long: `Download the branch's current code archive and write decrypted env
+vars to .env.local so local development has the real values.
+
+.env.local is gitignored — values reach the dev machine, never git.
+If env.pull fails (transient error, no vars configured), a warning is
+printed but the command still exits successfully because the code pull
+already succeeded.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
+			if err != nil {
+				return err
+			}
+
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+
+			// ── code pull ─────────────────────────────────────────────
+			fmt.Printf("→ pulling code for %s ...\n", ref)
+			var pull struct {
+				Version string `json:"version"`
+				Archive string `json:"archive"`
+				Size    int    `json:"size"`
+			}
+			if err := r.Studio().Query(ctx, "backend.pull", map[string]any{"ref": ref}, &pull); err != nil {
+				return fmt.Errorf("backend.pull: %w", err)
+			}
+			archive, err := base64.StdEncoding.DecodeString(pull.Archive)
+			if err != nil {
+				return fmt.Errorf("decode pull archive: %w", err)
+			}
+			if err := extractTarGzReplace(archive, cwd); err != nil {
+				return fmt.Errorf("extract pull archive: %w", err)
+			}
+			fmt.Printf("  code version: %s (%d bytes)\n", pull.Version, pull.Size)
+
+			// ── env pull ──────────────────────────────────────────────
+			fmt.Println("→ pulling env vars ...")
+			var envVars []envVar
+			if envErr := r.Studio().Query(ctx, "env.pull", map[string]any{"ref": ref}, &envVars); envErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: env.pull failed (%v) — .env.local not written\n", envErr)
+			} else {
+				if err := writeEnvLocal(cwd, envVars); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: %v — .env.local not written\n", err)
+				} else if len(envVars) > 0 {
+					fmt.Printf("  wrote .env.local (%d var(s))\n", len(envVars))
+				} else {
+					fmt.Println("  no env vars configured — .env.local not written")
+				}
+			}
+
+			fmt.Println("✓ pull complete")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	return cmd
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Adım B14 — `palbase backend types`
