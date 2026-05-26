@@ -35,7 +35,7 @@ func TestResolveDevProjectRef(t *testing.T) {
 			want:        bareRef,
 		},
 		{
-			name:        "local ref with no reveal stays local (dev launches, ctx.palbase errors clearly)",
+			name:        "local ref with no reveal stays local (dev launches, ctx errors clearly)",
 			ref:         "local",
 			endpointRef: "",
 			want:        "local",
