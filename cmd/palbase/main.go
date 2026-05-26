@@ -12,6 +12,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/project"
+	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
@@ -91,6 +92,9 @@ func main() {
 		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST: func() apikey.REST { return managementREST() },
+		}),
+		secret.Cmd(secret.Resolvers{
+			Studio: func() *studio.Client { return studioClient },
 		}),
 	)
 
