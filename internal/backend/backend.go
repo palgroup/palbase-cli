@@ -464,8 +464,9 @@ func newInitCmd(r Resolvers) *cobra.Command {
 // <ref>.<host> URL from. Kong only routes the branch endpoint_ref
 // subdomain, so prefer the endpoint_ref apikey.reveal returns. When
 // reveal was skipped (ref "" / "local") or failed, endpointRef is empty
-// and we fall back to the bare ref — dev still launches and ctx.palbase
-// surfaces a clear downstream error rather than hard-failing here.
+// and we fall back to the bare ref — dev still launches and the module
+// clients (ctx.docs/…) surface a clear downstream error rather than
+// hard-failing here.
 func resolveDevProjectRef(ref, endpointRef string) string {
 	if endpointRef != "" {
 		return endpointRef
@@ -504,8 +505,9 @@ func newDevCmd(r Resolvers) *cobra.Command {
 			// Reveal the project's anon + service-role keys so dev-server
 			// can build a real ServerClient. If reveal fails (no login,
 			// no project link, network down), we still launch dev-server
-			// without ctx.palbase — the bindings throw on first use, so
-			// the user sees a clear error instead of silent partial behaviour.
+			// without the module clients — ctx.docs/ctx.storage/… throw on
+			// first use, so the user sees a clear error instead of silent
+			// partial behaviour.
 			var revealResp struct {
 				EndpointRef    string `json:"endpointRef"`
 				AnonKey        string `json:"anonKey"`
@@ -513,7 +515,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 			}
 			if ref != "" && ref != "local" {
 				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.palbase will be unavailable\n", err)
+					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.docs/ctx.storage/… will be unavailable\n", err)
 				}
 			}
 
@@ -533,7 +535,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 				// endpoint_ref subdomain (e.g. test0r8q3m), NOT the bare ref.
 				// apikey.reveal returns the resolved endpoint_ref; prefer it,
 				// falling back to the bare ref when reveal was skipped/failed
-				// so dev still launches (ctx.palbase then errors clearly).
+				// so dev still launches (ctx.docs/… then errors clearly).
 				fmt.Sprintf("PALBASE_PROJECT_REF=%s", resolveDevProjectRef(ref, revealResp.EndpointRef)),
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.AnonKey),

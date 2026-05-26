@@ -37,7 +37,7 @@ delete process.env.PALBASE_TENANT_SERVICE_ROLE;
 
 // Public host the SDK calls. Same shape as prod: <ref>.<host>.
 // When PROJECT_REF==='local' (no `palbase login`) we run without
-// ctx.palbase live — bindings throw on use.
+// the module clients live — ctx.docs/ctx.storage/… throw on use.
 const PALBASE_URL = (PROJECT_REF !== 'local' && PUBLIC_HOST)
   ? `https://${PROJECT_REF}.${PUBLIC_HOST.replace(/\/+$/, '')}`
   : '';
@@ -128,10 +128,10 @@ function walk(dir, cb) {
 
 // ── ctx — bit-perfect twin of prod's pipeline ctx ──────────────────────
 //
-// ctx.palbase is a real ServerClient hitting the same public hosts the
-// deployed pod hits. Local dev = LIVE data: writes go to production
-// palauth/paldocs/db. The CLI prints a banner before starting the server
-// so this isn't a silent surprise.
+// The module clients (ctx.docs, ctx.storage, …) are a real ServerClient
+// hitting the same public hosts the deployed pod hits. Local dev = LIVE
+// data: writes go to production palauth/paldocs/db. The CLI prints a banner
+// before starting the server so this isn't a silent surprise.
 
 let palbaseClientSingleton = null;
 function getPalbaseClient() {
@@ -140,7 +140,7 @@ function getPalbaseClient() {
   const { createServerClient } = require('@palbase/server');
   // Mirror worker.js (the prod backend-runtime path): the apikey
   // header drives Kong's scope decision (`s` = service-role / RLS
-  // bypass, `c` = anon). ctx.palbase IS the project's privileged
+  // bypass, `c` = anon). The module clients ARE the project's privileged
   // surface, so the service-role key MUST be the primary apikey
   // when present — passing the anon key here makes Kong stamp
   // role=anon on the iJWT and downstream services (paldocs)
@@ -154,9 +154,31 @@ function getPalbaseClient() {
   return palbaseClientSingleton;
 }
 
-function makeCtx(req, params, body, user) {
+// Module clients (docs, storage, realtime, …) hang directly off ctx —
+// ctx.docs, NOT ctx.palbase.docs — mirroring the deployed runtime
+// (modules/backend/internal/runtime/worker.js, the flat-ctx refactor
+// 0331a6d6). Keeping dev = prod here is the whole point: a handler that
+// works under `palbase backend dev` must work once deployed.
+const MODULE_NAMES = ['auth', 'storage', 'docs', 'realtime', 'functions',
+  'flags', 'notifications', 'analytics', 'links', 'cms'];
+
+function moduleClients() {
   const client = getPalbaseClient();
+  if (!client) {
+    // No tenant credentials: each module slot throws on first use so
+    // partial behaviour fails loudly (same shape as worker.js's stub).
+    const out = {};
+    for (const n of MODULE_NAMES) out[n] = notConfiguredModule(n);
+    return out;
+  }
+  const out = {};
+  for (const n of MODULE_NAMES) out[n] = client[n];
+  return out;
+}
+
+function makeCtx(req, params, body, user) {
   return {
+    ...moduleClients(),
     input: body ?? {},
     params,
     req: {
@@ -175,21 +197,16 @@ function makeCtx(req, params, body, user) {
       error: (...a) => console.error('[handler]', ...a),
       debug: (...a) => console.log('[handler:debug]', ...a),
     },
-    palbase: client ?? notConfiguredPalbase(),
   };
 }
 
-function notConfiguredPalbase() {
+function notConfiguredModule(name) {
   return new Proxy({}, {
-    get(_t, name) {
-      return new Proxy({}, {
-        get() {
-          throw new Error(
-            `ctx.palbase.${String(name)} unavailable: dev-server has no tenant credentials. ` +
-            `Run \`palbase login\` then \`palbase backend dev\` from inside a project directory.`,
-          );
-        },
-      });
+    get() {
+      throw new Error(
+        `ctx.${name} unavailable: dev-server has no tenant credentials. ` +
+        `Run \`palbase login\` then \`palbase backend dev\` from inside a project directory.`,
+      );
     },
   });
 }
@@ -464,7 +481,7 @@ server.listen(PORT, () => {
   if (PALBASE_URL) {
     log('────────────────────────────────────────────────────────────');
     log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
-    log(`  ctx.palbase.* writes hit ${PALBASE_URL}`);
+    log(`  ctx.docs/ctx.storage/… writes hit ${PALBASE_URL}`);
     if (TENANT_SERVICE_ROLE) {
       log(`  scope: service-role (RLS bypass) — key ${TENANT_SERVICE_ROLE.slice(0, 16)}…`);
     } else {
@@ -474,7 +491,7 @@ server.listen(PORT, () => {
     log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);
     log('────────────────────────────────────────────────────────────');
   } else {
-    log('ctx.palbase.* disabled (no project credentials). Run `palbase login` then re-run.');
+    log('ctx.docs/ctx.storage/… disabled (no project credentials). Run `palbase login` then re-run.');
   }
   log(`press Ctrl+C to quit`);
 });
