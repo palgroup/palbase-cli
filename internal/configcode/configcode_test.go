@@ -52,6 +52,8 @@ func pathAwareStudio(t *testing.T, flagsRows []systemFlagRow) *studio.Client {
 			trpcOK(w, map[string]any{"buckets": []any{}})
 		case "/api/trpc/documents.rules.list":
 			trpcOK(w, map[string]any{"rules": []any{}})
+		case "/api/trpc/notifications.providers.list":
+			trpcOK(w, []any{})
 		default:
 			// A newly-registered serializer hit an unmocked path — fail
 			// loudly so the mock stays in sync with the registry.
@@ -184,6 +186,8 @@ func TestPull_PartialFailureIsNonFatal(t *testing.T) {
 			trpcOK(w, map[string]any{"configureAvailable": false, "providers": []any{}})
 		case "/api/trpc/documents.rules.list":
 			trpcOK(w, map[string]any{"rules": []any{}})
+		case "/api/trpc/notifications.providers.list":
+			trpcOK(w, []any{})
 		case "/api/trpc/storage.buckets.list":
 			// Simulate the live centauri failure: buckets table absent.
 			http.Error(w, `{"error":{"json":{"message":"relation \"buckets\" does not exist"}}}`, http.StatusInternalServerError)

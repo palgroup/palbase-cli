@@ -353,52 +353,163 @@ func Push(ctx context.Context, projectDir, ref, module string, sc *studio.Client
 		return PushResult{}, err
 	}
 
-	// Conflict check: hash the server's current serialized state and
-	// compare to the last-pull hash. Reusing the pull serializer means the
-	// bytes are produced identically to what `config pull` stored, so the
-	// hashes are directly comparable.
-	serverBytes, err := pusher.Pull(ctx, ref, sc)
-	if err != nil {
-		return PushResult{}, fmt.Errorf("read current server state: %w", err)
-	}
-	serverHash := hashContent(serverBytes)
-	baseline, haveBaseline := state.Modules[module]
-	if !haveBaseline {
-		// No last-pull baseline for this module. We cannot prove the local
-		// file reflects current server state, so refuse rather than risk
-		// overwriting a dashboard change we never saw.
-		return PushResult{}, fmt.Errorf("%w (no baseline in %s for %q — pull first)", ErrStateConflict, StateFile, module)
-	}
-	if baseline.Hash != serverHash {
-		return PushResult{}, ErrStateConflict
+	if err := validateNoConflict(ctx, ref, sc, pusher, state); err != nil {
+		return PushResult{}, err
 	}
 
-	// Apply: read the local TOML and delegate the diff+SET to the module.
-	localPath := filepath.Join(projectDir, ConfigDir, pusher.Filename())
-	localBytes, err := os.ReadFile(localPath)
+	applied, err := applyAndRefresh(ctx, projectDir, ref, sc, pusher, state)
 	if err != nil {
-		return PushResult{}, fmt.Errorf("read %s: %w", localPath, err)
+		return PushResult{}, err
 	}
-	applied, err := pusher.Push(ctx, ref, sc, localBytes)
-	if err != nil {
-		return PushResult{}, fmt.Errorf("push %s: %w", module, err)
-	}
-
-	// Refresh state.json with the post-apply server hash so a subsequent
-	// push sees an up-to-date baseline. Re-pull rather than hashing the
-	// local file: the server is the source of truth and may normalise
-	// values (e.g. number formatting), so the stored hash must reflect
-	// what the server actually holds.
-	newBytes, err := pusher.Pull(ctx, ref, sc)
-	if err != nil {
-		return PushResult{}, fmt.Errorf("refresh server state after push: %w", err)
-	}
-	state.Modules[module] = ModuleState{Hash: hashContent(newBytes)}
 	if err := writeState(statePath, state); err != nil {
 		return PushResult{}, err
 	}
 
-	return PushResult{Module: module, Filename: pusher.Filename(), PushApplied: applied}, nil
+	return PushResult{Module: pusher.Name(), Filename: pusher.Filename(), PushApplied: applied}, nil
+}
+
+// validateNoConflict is the per-module conflict check shared by [Push] and
+// [PushAll]: it re-pulls the module's current server state, hashes the
+// serialized bytes (reusing the pull serializer so the bytes match what
+// `config pull` stored), and compares to the state.json baseline. An
+// absent baseline or a hash mismatch is a conflict — returned WITHOUT any
+// SET so the caller can abort before mutating anything.
+func validateNoConflict(ctx context.Context, ref string, sc *studio.Client, pusher ModulePusher, state *State) error {
+	module := pusher.Name()
+	serverBytes, err := pusher.Pull(ctx, ref, sc)
+	if err != nil {
+		return fmt.Errorf("read current server state for %q: %w", module, err)
+	}
+	serverHash := hashContent(serverBytes)
+	baseline, haveBaseline := state.Modules[module]
+	if !haveBaseline {
+		// No last-pull baseline. We cannot prove the local file reflects
+		// current server state, so refuse rather than risk overwriting a
+		// dashboard change we never saw.
+		return fmt.Errorf("%w (no baseline in %s for %q — pull first)", ErrStateConflict, StateFile, module)
+	}
+	if baseline.Hash != serverHash {
+		return fmt.Errorf("%w (module %q)", ErrStateConflict, module)
+	}
+	return nil
+}
+
+// applyAndRefresh reads the module's local TOML, delegates the diff+SET to
+// the pusher, then refreshes state.Modules[module] with the post-apply
+// server hash (re-pull, not local hash, because the server may normalise
+// values). It MUTATES state in place but does NOT persist it — the caller
+// owns the single writeState so a multi-module push writes state.json once.
+func applyAndRefresh(ctx context.Context, projectDir, ref string, sc *studio.Client, pusher ModulePusher, state *State) (PushApplied, error) {
+	module := pusher.Name()
+	localPath := filepath.Join(projectDir, ConfigDir, pusher.Filename())
+	localBytes, err := os.ReadFile(localPath)
+	if err != nil {
+		return PushApplied{}, fmt.Errorf("read %s: %w", localPath, err)
+	}
+	applied, err := pusher.Push(ctx, ref, sc, localBytes)
+	if err != nil {
+		return PushApplied{}, fmt.Errorf("push %s: %w", module, err)
+	}
+	newBytes, err := pusher.Pull(ctx, ref, sc)
+	if err != nil {
+		return PushApplied{}, fmt.Errorf("refresh server state after push %q: %w", module, err)
+	}
+	state.Modules[module] = ModuleState{Hash: hashContent(newBytes)}
+	return applied, nil
+}
+
+// PushAllResult is the outcome of [PushAll]: per-module results in apply
+// order plus the overall disposition. Applied lists modules that were
+// applied successfully (in order); Skipped lists modules with no local
+// config file (nothing to push). FailedModule/Err are set when a module's
+// apply failed mid-batch — the modules in Applied before it stay applied
+// (no rollback — that's Faz 3b).
+type PushAllResult struct {
+	Applied      []PushResult
+	Skipped      []string
+	FailedModule string
+	Err          error
+}
+
+// PushAll applies EVERY push-capable module's local config/*.toml to the
+// server in a single ordered, all-or-nothing-validated batch — the
+// argument-less `config push`.
+//
+// Two phases (advisor contract):
+//
+//	PHASE 1 — pre-validate (NO SET): for each module with a local file,
+//	re-pull + hash-compare against the state.json baseline. ANY conflict
+//	aborts the whole batch with ErrStateConflict before a single mutation,
+//	so a stale local mirror can never half-apply.
+//
+//	PHASE 2 — apply (only if every module validated): apply modules in
+//	registry (Name-sorted) order — sequential, NOT parallel, because module
+//	ordering can matter. A mid-batch failure leaves prior modules applied
+//	(reported), stops the batch, and returns the partial result with
+//	FailedModule/Err set. state.json is written ONCE at the end reflecting
+//	exactly the modules that applied.
+//
+// Modules with no local config file are skipped (not every project pulls
+// every module). Modules without push support (no [ModulePusher]) are not
+// in the batch at all.
+func PushAll(ctx context.Context, projectDir, ref string, sc *studio.Client) (PushAllResult, error) {
+	statePath := filepath.Join(projectDir, StateFile)
+	state, err := loadState(statePath)
+	if err != nil {
+		return PushAllResult{}, err
+	}
+
+	// Collect the push-capable modules that have a local file, in
+	// registry (Name-sorted) order. Serializers() is already sorted.
+	var pushers []ModulePusher
+	var result PushAllResult
+	for _, s := range Serializers() {
+		pusher, ok := s.(ModulePusher)
+		if !ok {
+			continue // pull-only module — not part of the push batch
+		}
+		localPath := filepath.Join(projectDir, ConfigDir, pusher.Filename())
+		if _, statErr := os.Stat(localPath); os.IsNotExist(statErr) {
+			result.Skipped = append(result.Skipped, pusher.Name())
+			continue
+		}
+		pushers = append(pushers, pusher)
+	}
+
+	// PHASE 1 — pre-validate every module. No SET happens here; the first
+	// conflict aborts the batch so nothing is half-applied.
+	for _, pusher := range pushers {
+		if err := validateNoConflict(ctx, ref, sc, pusher, state); err != nil {
+			result.FailedModule = pusher.Name()
+			result.Err = err
+			return result, err
+		}
+	}
+
+	// PHASE 2 — apply in order. A failure stops the batch; prior modules
+	// stay applied (no rollback — Faz 3b). state is mutated per module and
+	// persisted once at the end.
+	for _, pusher := range pushers {
+		applied, err := applyAndRefresh(ctx, projectDir, ref, sc, pusher, state)
+		if err != nil {
+			result.FailedModule = pusher.Name()
+			result.Err = err
+			// Persist whatever applied so far so the baseline reflects
+			// reality (the prior modules really did change the server).
+			if writeErr := writeState(statePath, state); writeErr != nil {
+				return result, fmt.Errorf("%w (additionally failed to persist state: %v)", err, writeErr)
+			}
+			return result, err
+		}
+		result.Applied = append(result.Applied, PushResult{
+			Module: pusher.Name(), Filename: pusher.Filename(), PushApplied: applied,
+		})
+	}
+
+	if err := writeState(statePath, state); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // writeState marshals state and writes it to path, creating the parent
