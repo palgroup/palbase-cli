@@ -2,6 +2,8 @@ package configcode
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"sort"
 )
 
@@ -37,6 +39,30 @@ type ModuleState struct {
 // newState returns an empty state with an initialised module map.
 func newState() *State {
 	return &State{Modules: map[string]ModuleState{}}
+}
+
+// loadState reads the on-disk state mirror at path. A missing file is NOT
+// an error — it returns a fresh empty state so a project that has never
+// pulled (no .palbase/state.json yet) is handled as "every module is
+// unknown". Push uses this: an absent stored hash means there is no
+// last-pull baseline, so the conflict check can't pass and push must
+// refuse rather than silently overwrite (see [ModulePusher]).
+func loadState(path string) (*State, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return newState(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	st := newState()
+	if err := json.Unmarshal(b, st); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if st.Modules == nil {
+		st.Modules = map[string]ModuleState{}
+	}
+	return st, nil
 }
 
 // marshal renders the state to deterministic, indented JSON. Map keys

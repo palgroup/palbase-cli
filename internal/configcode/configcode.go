@@ -50,6 +50,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -221,4 +222,197 @@ func Pull(ctx context.Context, projectDir, ref string, sc *studio.Client) ([]Pul
 func hashContent(b []byte) string {
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// --- Faz 2: push (single module, idempotent) -------------------------
+//
+// `palbase backend config push` applies a local config/<module>.toml to
+// the server via that module's SET tRPC. Only flags implements it this
+// phase (it has a working userFlags.system.put); auth/storage/documents
+// have no SET path yet, so they don't satisfy [ModulePusher] and report
+// [ErrPushNotImplemented] (Faz 3).
+//
+// Push is UPSERT-only: it sets every entry present in the local TOML. A
+// flag that exists on the server but is ABSENT from the local file is
+// NOT deleted — destructive sync (delete orphans) is deferred to Faz 3
+// (atomic activation + explicit confirmation), because a missing/wrong
+// TOML must never silently drop a live production flag. The orphan keys
+// are surfaced as a warning instead.
+//
+// # state_version conflict (client-side hash-compare)
+//
+// There is NO server-side state_version GET/SET yet (Faz 1 noted this;
+// true server-side versioning is Faz 3 — needs a control-pg migration +
+// Studio change). Faz 2 delivers the conflict CONTRACT without a server
+// change via option 1: before applying, push re-pulls the module's
+// current server state, hashes the serialized bytes, and compares to the
+// hash stored in .palbase/state.json at the last pull. If the server
+// state changed since that pull (someone edited via the dashboard) the
+// stored hash won't match → CONFLICT, push is rejected with
+// [ErrStateConflict] and NO SET call is made. The user re-pulls to
+// reconcile. This is real drift protection with zero server changes.
+
+// ErrStateConflict is returned by [Push] when the module's current server
+// state no longer matches the hash recorded in .palbase/state.json at the
+// last pull — i.e. someone changed config out-of-band (dashboard) since
+// the local mirror was taken. The push is rejected before any SET call.
+var ErrStateConflict = errors.New("remote config changed since last pull; run `palbase backend config pull` to reconcile, then re-apply")
+
+// ErrPushNotImplemented is returned by [Push] for a module that has a
+// pull serializer but no push support yet (auth/storage/documents — Faz
+// 3). It is a sentinel so the command layer can distinguish "not yet
+// supported" from a real failure.
+var ErrPushNotImplemented = errors.New("push not implemented for this module yet (Faz 3)")
+
+// ModulePusher applies a local config/<module>.toml to the server. Only
+// modules with a working SET tRPC implement it (flags this phase). It is
+// SEPARATE from [ModuleSerializer] on purpose: the Faz 1 pull serializers
+// (auth/storage/documents) stay untouched and simply don't satisfy this
+// interface, so [Push] reports [ErrPushNotImplemented] for them rather
+// than forcing every serializer to carry a no-op Push.
+//
+// Implementations MUST be idempotent: pushing a TOML that already matches
+// the server makes ZERO SET calls. They diff the parsed local file against
+// the current server state and only SET what changed.
+type ModulePusher interface {
+	ModuleSerializer
+
+	// Push applies tomlBytes (the on-disk config/<module>.toml) to the
+	// server for ref. It diffs against current server state and issues a
+	// SET only for changed/new entries; unchanged input → no calls. It
+	// returns the number of entries it set and any server-orphan keys
+	// (present server-side, absent locally) it intentionally did NOT
+	// delete (Faz 2 is upsert-only). It does NOT perform the conflict
+	// check — [Push] owns that uniformly across modules.
+	Push(ctx context.Context, ref string, sc *studio.Client, tomlBytes []byte) (PushApplied, error)
+}
+
+// PushApplied reports what a [ModulePusher.Push] changed, for the caller's
+// log output. Set is the count of entries written; Orphans are server-side
+// keys absent from the local file that were left untouched (upsert-only);
+// Ignored lists entries whose local definition carries fields the SET API
+// can't write (e.g. flag variants — see flagsSerializer.Push) so the user
+// knows part of the file did not round-trip.
+type PushApplied struct {
+	Set     int
+	Orphans []string
+	Ignored []string
+}
+
+// PushResult is the command-layer outcome of pushing one module.
+type PushResult struct {
+	Module   string
+	Filename string
+	PushApplied
+}
+
+// pusherFor returns the registered serializer for module name if it also
+// implements [ModulePusher]. ok is false when the module is unknown or has
+// no push support (the latter being the Faz 3 case).
+func pusherFor(name string) (ModulePusher, bool) {
+	for _, s := range Serializers() {
+		if s.Name() != name {
+			continue
+		}
+		p, ok := s.(ModulePusher)
+		return p, ok
+	}
+	return nil, false
+}
+
+// Push applies <projectDir>/config/<module>.toml to the server for ref,
+// gated by client-side state_version conflict detection, and refreshes
+// the module's hash in .palbase/state.json on success.
+//
+// Flow (see the package's Faz 2 comment for the contract):
+//  1. Resolve the module's pusher; unknown/unsupported → ErrPushNotImplemented.
+//  2. Load .palbase/state.json (absent → fresh state).
+//  3. CONFLICT CHECK: re-pull the module's current server state, hash the
+//     serialized bytes, compare to state.Modules[module].Hash. A stored
+//     hash that differs (or, defensively, an absent baseline when the
+//     server is non-empty) → ErrStateConflict, no SET call.
+//  4. APPLY: read the local TOML and delegate to the pusher, which diffs
+//     vs the server and SETs only changes (idempotent: no change → no call).
+//  5. Refresh state.json: re-pull post-apply, hash, store under the module
+//     key (preserving other modules' hashes).
+func Push(ctx context.Context, projectDir, ref, module string, sc *studio.Client) (PushResult, error) {
+	pusher, ok := pusherFor(module)
+	if !ok {
+		// Distinguish "no such module" from "module exists but no push yet".
+		for _, s := range Serializers() {
+			if s.Name() == module {
+				return PushResult{}, fmt.Errorf("%s: %w", module, ErrPushNotImplemented)
+			}
+		}
+		return PushResult{}, fmt.Errorf("unknown module %q", module)
+	}
+
+	statePath := filepath.Join(projectDir, StateFile)
+	state, err := loadState(statePath)
+	if err != nil {
+		return PushResult{}, err
+	}
+
+	// Conflict check: hash the server's current serialized state and
+	// compare to the last-pull hash. Reusing the pull serializer means the
+	// bytes are produced identically to what `config pull` stored, so the
+	// hashes are directly comparable.
+	serverBytes, err := pusher.Pull(ctx, ref, sc)
+	if err != nil {
+		return PushResult{}, fmt.Errorf("read current server state: %w", err)
+	}
+	serverHash := hashContent(serverBytes)
+	baseline, haveBaseline := state.Modules[module]
+	if !haveBaseline {
+		// No last-pull baseline for this module. We cannot prove the local
+		// file reflects current server state, so refuse rather than risk
+		// overwriting a dashboard change we never saw.
+		return PushResult{}, fmt.Errorf("%w (no baseline in %s for %q — pull first)", ErrStateConflict, StateFile, module)
+	}
+	if baseline.Hash != serverHash {
+		return PushResult{}, ErrStateConflict
+	}
+
+	// Apply: read the local TOML and delegate the diff+SET to the module.
+	localPath := filepath.Join(projectDir, ConfigDir, pusher.Filename())
+	localBytes, err := os.ReadFile(localPath)
+	if err != nil {
+		return PushResult{}, fmt.Errorf("read %s: %w", localPath, err)
+	}
+	applied, err := pusher.Push(ctx, ref, sc, localBytes)
+	if err != nil {
+		return PushResult{}, fmt.Errorf("push %s: %w", module, err)
+	}
+
+	// Refresh state.json with the post-apply server hash so a subsequent
+	// push sees an up-to-date baseline. Re-pull rather than hashing the
+	// local file: the server is the source of truth and may normalise
+	// values (e.g. number formatting), so the stored hash must reflect
+	// what the server actually holds.
+	newBytes, err := pusher.Pull(ctx, ref, sc)
+	if err != nil {
+		return PushResult{}, fmt.Errorf("refresh server state after push: %w", err)
+	}
+	state.Modules[module] = ModuleState{Hash: hashContent(newBytes)}
+	if err := writeState(statePath, state); err != nil {
+		return PushResult{}, err
+	}
+
+	return PushResult{Module: module, Filename: pusher.Filename(), PushApplied: applied}, nil
+}
+
+// writeState marshals state and writes it to path, creating the parent
+// directory. Shared by Push (and mirrors the inline write in Pull).
+func writeState(statePath string, state *State) error {
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(statePath), err)
+	}
+	b, err := state.marshal()
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+	if err := os.WriteFile(statePath, b, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", statePath, err)
+	}
+	return nil
 }

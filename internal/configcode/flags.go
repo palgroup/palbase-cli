@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/BurntSushi/toml"
 	"github.com/palgroup/palbase-cli/internal/studio"
@@ -202,4 +203,128 @@ func decodeVariants(raw json.RawMessage) ([]flagVariant, error) {
 		out = append(out, flagVariant{Value: val, Weight: rv.Weight})
 	}
 	return out, nil
+}
+
+// --- Faz 2: push ----------------------------------------------------
+//
+// flagsSerializer also implements [ModulePusher]: it parses config/
+// flags.toml and upserts each flag to the server via userFlags.system.put.
+// It is the only module with push support this phase.
+
+// flagsPutInput mirrors the userFlags.system.put tRPC input shape
+// (user-flags.ts:121 — key/valueType/value/description). NOTE: that SET
+// procedure does NOT accept `variants`, so push can only sync
+// type/value/description. A local flag that declares variants is upserted
+// without them and a warning is surfaced — variant push lands when the
+// SET API grows the field (Faz 3+).
+type flagsPutInput struct {
+	Ref         string `json:"ref"`
+	Key         string `json:"key"`
+	ValueType   string `json:"valueType"`
+	Value       any    `json:"value"`
+	Description string `json:"description,omitempty"`
+}
+
+// Push parses tomlBytes (config/flags.toml) and upserts each flag to the
+// server. It diffs the parsed local entry against the current server row
+// and calls userFlags.system.put ONLY for flags that are new or changed —
+// so an unchanged file makes zero mutations (idempotent). Server flags
+// absent from the local file are reported as orphans and left untouched
+// (upsert-only; delete is Faz 3).
+func (flagsSerializer) Push(ctx context.Context, ref string, sc *studio.Client, tomlBytes []byte) (PushApplied, error) {
+	var doc flagsDoc
+	if err := toml.Unmarshal(tomlBytes, &doc); err != nil {
+		return PushApplied{}, fmt.Errorf("parse flags.toml: %w", err)
+	}
+
+	var rows []systemFlagRow
+	if err := sc.Query(ctx, "userFlags.system.list", map[string]any{"ref": ref}, &rows); err != nil {
+		return PushApplied{}, fmt.Errorf("userFlags.system.list: %w", err)
+	}
+	server := make(map[string]systemFlagRow, len(rows))
+	for _, r := range rows {
+		if r.DeletedAt != nil {
+			continue // tombstone — treat as absent
+		}
+		server[r.Key] = r
+	}
+
+	applied := PushApplied{}
+	for key, entry := range doc.Flags {
+		// userFlags.system.put has no variants field, so a local flag that
+		// declares A/B variants cannot push them. Surface it rather than
+		// silently dropping the intent (variant push is Faz 3+).
+		if len(entry.Variants) > 0 {
+			applied.Ignored = append(applied.Ignored, key)
+		}
+		changed, err := flagDiffersFromServer(entry, server[key])
+		if err != nil {
+			return PushApplied{}, fmt.Errorf("flag %q: %w", key, err)
+		}
+		if !changed {
+			continue
+		}
+		in := flagsPutInput{
+			Ref:         ref,
+			Key:         key,
+			ValueType:   entry.Type,
+			Value:       entry.Default,
+			Description: entry.Description,
+		}
+		if err := sc.Mutation(ctx, "userFlags.system.put", in, nil); err != nil {
+			return PushApplied{}, fmt.Errorf("userFlags.system.put %q: %w", key, err)
+		}
+		applied.Set++
+	}
+
+	for key := range server {
+		if _, inLocal := doc.Flags[key]; !inLocal {
+			applied.Orphans = append(applied.Orphans, key)
+		}
+	}
+	sort.Strings(applied.Orphans)
+	sort.Strings(applied.Ignored)
+	return applied, nil
+}
+
+// flagDiffersFromServer reports whether the local entry needs a SET: true
+// if the flag is absent server-side, or if its type/value/description
+// differ. Comparison is on the fields userFlags.system.put can write
+// (type/value/description); variants are NOT settable via that API so
+// they are excluded from the diff. Value equality is by canonical JSON so
+// 42 == 42.0 and object key order doesn't cause spurious SETs.
+func flagDiffersFromServer(local flagEntry, srv systemFlagRow) (bool, error) {
+	if srv.Key == "" {
+		return true, nil // not present server-side → must create
+	}
+	if local.Type != srv.ValueType {
+		return true, nil
+	}
+	if local.Description != srv.Description {
+		return true, nil
+	}
+	localVal, err := canonicalJSON(local.Default)
+	if err != nil {
+		return false, fmt.Errorf("encode local value: %w", err)
+	}
+	srvDecoded, err := decodeJSONValue(srv.Value)
+	if err != nil {
+		return false, fmt.Errorf("decode server value: %w", err)
+	}
+	srvVal, err := canonicalJSON(srvDecoded)
+	if err != nil {
+		return false, fmt.Errorf("encode server value: %w", err)
+	}
+	return localVal != srvVal, nil
+}
+
+// canonicalJSON marshals v to JSON. encoding/json sorts object keys, so
+// two semantically-equal values produce identical bytes regardless of map
+// ordering — the basis for the value diff.
+func canonicalJSON(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
