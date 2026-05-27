@@ -57,7 +57,51 @@ func Cmd(r Resolvers) *cobra.Command {
 		listCmd(r.REST),
 		switchCmd(),
 		deleteCmd(r.REST),
+		lifecycleCmd(r.REST, "hibernate", "Hibernate a branch (tear down compute; reversible)"),
+		lifecycleCmd(r.REST, "wake", "Wake a hibernated branch (re-provision + restore)"),
 	)
+	return cmd
+}
+
+// lifecycleCmd builds `palbase branch hibernate|wake <name>` — both POST to
+// /api/v1/projects/:ref/branches/:name/<action> and print the workflow handle.
+// hibernate refuses "main" client-side (the server also refuses).
+func lifecycleCmd(rest func() REST, action, short string) *cobra.Command {
+	var (
+		ref     string
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   action + " <name>",
+		Args:  cobra.ExactArgs(1),
+		Short: short,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			if action == "hibernate" && name == "main" {
+				return fmt.Errorf("cannot hibernate the main branch")
+			}
+			projectRef, err := linkedRef(ref)
+			if err != nil {
+				return err
+			}
+			var handle struct {
+				WorkflowID string `json:"workflowId"`
+				RunID      string `json:"runId"`
+			}
+			path := "/api/v1/projects/" + projectRef + "/branches/" + name + "/" + action
+			if err := rest().Do(cmd.Context(), http.MethodPost, path, nil, &handle); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(handle)
+			}
+			fmt.Fprintf(os.Stdout, "✓ branch %q %s started on %s\n", name, action, projectRef)
+			fmt.Fprintf(os.Stdout, "  workflow: %s\n", handle.WorkflowID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&ref, "ref", "", "Project ref (defaults to the linked project)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 
