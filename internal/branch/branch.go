@@ -10,10 +10,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -114,27 +116,61 @@ type branchRow struct {
 	URL         string `json:"url"`
 }
 
-// createCmd wires `palbase branch create <name>`. Branch provisioning is
-// async (Temporal): POST returns 202 with a workflow handle; the branch
-// URL serves once the stack is up. Free tier → 403 (branches need Pro+).
+// branchPollInterval / branchPollTimeout bound the sync-wait loop: how often
+// the CLI polls the branch list and how long it waits before giving up.
+// Provisioning a branch spins up a DB + pod + ingress (30–120s typical), so
+// the interval is tight enough to feel live and the ceiling generous enough
+// not to false-fail. They are vars (not consts) so tests can shrink the
+// interval — production never reassigns them.
+var (
+	branchPollInterval = 2 * time.Second
+	branchPollTimeout  = 5 * time.Minute
+)
+
+// createCmd wires `palbase branch create <name>`. A branch is a full isolated
+// stack (its own DB + pod + URL), so the command (a) confirms before spending
+// those resources and (b) waits for provisioning to finish by default,
+// printing the live URL when it's ready. `--async` returns the 202 workflow
+// handle immediately (CI / scripted use); `--yes` skips the prompt.
+// Free tier → 403 server-side (branches need Pro+).
 func createCmd(rest func() REST) *cobra.Command {
 	var (
 		ref      string
 		kind     string
 		forkFrom string
 		noDeploy bool
+		async    bool
+		yes      bool
 		jsonOut  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Create a branch (async — its URL serves once provisioned)",
+		Short: "Create a branch (waits for provisioning; --async returns immediately)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			out := cmd.OutOrStdout()
 			projectRef, err := linkedRef(ref)
 			if err != nil {
 				return err
 			}
+
+			// Confirm before provisioning — a branch is a real isolated stack
+			// (DB + pod + URL), not a cheap pointer. --yes skips; a
+			// non-interactive caller without --yes must opt in explicitly.
+			if !yes {
+				if !isInteractive() {
+					return fmt.Errorf("creating a branch provisions an isolated stack (DB+pod+URL) — pass --yes to confirm in a non-interactive shell")
+				}
+				fmt.Fprintf(out, "Bu yeni bir izole stack açacak (DB+pod+URL), %s/%s. Devam? [y/N]: ", projectRef, name)
+				reader := bufio.NewReader(cmd.InOrStdin())
+				line, _ := reader.ReadString('\n')
+				if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+					fmt.Fprintln(out, "Aborted.")
+					return nil
+				}
+			}
+
 			body := map[string]any{
 				"branchName": name,
 				"kind":       kind,
@@ -151,12 +187,36 @@ func createCmd(rest func() REST) *cobra.Command {
 			if err := rest().Do(cmd.Context(), http.MethodPost, path, body, &handle); err != nil {
 				return err
 			}
-			if jsonOut {
-				return encodeJSON(handle)
+
+			// --async: don't wait — hand back the workflow handle (the old
+			// default; kept for CI loops and scripts).
+			if async {
+				if jsonOut {
+					return encodeJSONTo(out, handle)
+				}
+				fmt.Fprintf(out, "✓ branch %q provisioning started on %s\n", name, projectRef)
+				fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
+				fmt.Fprintf(out, "  list:     palbase branch list\n")
+				return nil
 			}
-			fmt.Fprintf(os.Stdout, "✓ branch %q provisioning started on %s\n", name, projectRef)
-			fmt.Fprintf(os.Stdout, "  workflow: %s\n", handle.WorkflowID)
-			fmt.Fprintf(os.Stdout, "  list:     palbase branch list\n")
+
+			// Default: wait for the stack to come up, then show its URL.
+			if !jsonOut {
+				fmt.Fprintf(out, "→ provisioning branch %q on %s (DB + pod + URL) ...\n", name, projectRef)
+			}
+			row, err := waitForBranchReady(cmd.Context(), rest(), projectRef, name)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSONTo(out, row)
+			}
+			fmt.Fprintf(out, "✓ branch %q is ready on %s\n", name, projectRef)
+			if row.URL != "" {
+				fmt.Fprintf(out, "  url: %s\n", row.URL)
+			} else {
+				fmt.Fprintf(out, "  run `palbase branch list` for its URL\n")
+			}
 			return nil
 		},
 	}
@@ -164,8 +224,59 @@ func createCmd(rest func() REST) *cobra.Command {
 	cmd.Flags().StringVar(&kind, "kind", "staging", "Branch kind: staging|dev|qa|preview")
 	cmd.Flags().StringVar(&forkFrom, "fork-from", "", "Fork from a parent branch (copies its code; schema-only DB)")
 	cmd.Flags().BoolVar(&noDeploy, "no-deploy", false, "Provision the stack without auto-deploying the backend pod")
+	cmd.Flags().BoolVar(&async, "async", false, "Return the workflow handle immediately instead of waiting for provisioning")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
+}
+
+// waitForBranchReady polls the project's branch list until the named branch
+// reaches status "active" (provisioning done → URL serves), surfacing it.
+//
+// Failure detection: the orchestrator inserts the row as "creating", flips it
+// to "active" on success, and (on compensation) to "deleted" — and listBranches
+// filters "deleted" out. So a branch that DISAPPEARS after we've seen it
+// "creating" provisioned-and-failed. We track seenCreating to avoid mistaking
+// the first-poll race (row not inserted yet) for that failure.
+func waitForBranchReady(ctx context.Context, rest REST, projectRef, name string) (branchRow, error) {
+	deadline := time.Now().Add(branchPollTimeout)
+	ticker := time.NewTicker(branchPollInterval)
+	defer ticker.Stop()
+
+	path := "/api/v1/projects/" + projectRef + "/branches"
+	seenCreating := false
+	for {
+		var rows []branchRow
+		if err := rest.Do(ctx, http.MethodGet, path, nil, &rows); err != nil {
+			return branchRow{}, err
+		}
+		var found *branchRow
+		for i := range rows {
+			if rows[i].Name == name {
+				found = &rows[i]
+				break
+			}
+		}
+		switch {
+		case found != nil && found.Status == "active":
+			return *found, nil
+		case found != nil:
+			// still "creating" (or another transient state) — keep waiting.
+			seenCreating = true
+		case seenCreating:
+			// row vanished after we saw it provisioning → compensation ran.
+			return branchRow{}, fmt.Errorf("branch %q provisioning failed (the stack was rolled back) — check the Studio dashboard", name)
+		}
+
+		if time.Now().After(deadline) {
+			return branchRow{}, fmt.Errorf("branch %q still provisioning after %s — check `palbase branch list` for its status", name, branchPollTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return branchRow{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // listCmd wires `palbase branch list`.
@@ -291,6 +402,19 @@ func deleteCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
+// isInteractive reports whether stdin is a TTY. The create confirmation
+// prompt fires only when interactive; a piped/CI shell must pass --yes.
+// (Duplicated from the backend package's unexported helper — a 4-line stdlib
+// idiom isn't worth exporting across a package boundary.) It's a var so tests
+// can force interactivity to exercise the prompt's decline path.
+var isInteractive = func() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
 // activeBranchName returns the locally-active branch (ProjectConfig.DefaultEnv),
 // or "" if not linked. Used only to mark the active row in `branch list`.
 func activeBranchName() string {
@@ -302,7 +426,13 @@ func activeBranchName() string {
 }
 
 func encodeJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+	return encodeJSONTo(os.Stdout, v)
+}
+
+// encodeJSONTo writes indented JSON to an explicit writer, so commands that
+// thread cmd.OutOrStdout() (create) emit to a test-capturable sink.
+func encodeJSONTo(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
