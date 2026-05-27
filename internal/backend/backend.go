@@ -182,7 +182,9 @@ func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, ou
 		picked = rows[choice-1]
 	}
 
-	if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "staging"}); err != nil {
+	// Default to the project's main branch: a fresh link should pull/dev
+	// against main, not staging. --branch selects another branch per command.
+	if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "main"}); err != nil {
 		return "", fmt.Errorf("save .palbase/config.json: %w", err)
 	}
 	fmt.Fprintf(out, "✓ Linked to %s (%s)\n", picked.Name, picked.Ref)
@@ -386,6 +388,7 @@ func resolveDevProjectRef(ref, endpointRef string) string {
 
 func newDevCmd(r Resolvers) *cobra.Command {
 	var port int
+	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "dev",
 		Short: "Run endpoints/ locally with hot reload",
@@ -396,7 +399,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 			}
 			endpointsDir := filepath.Join(cwd, "endpoints")
 			if _, err := os.Stat(endpointsDir); err != nil {
-				return fmt.Errorf("no endpoints/ directory in cwd — run `palbase backend init` first")
+				return fmt.Errorf("no endpoints/ directory in cwd — run `palbase pull` first")
 			}
 			tmpDir, err := os.MkdirTemp("", "palbase-dev-*")
 			if err != nil {
@@ -450,6 +453,12 @@ func newDevCmd(r Resolvers) *cobra.Command {
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.AnonKey),
 				fmt.Sprintf("PALBASE_TENANT_SERVICE_ROLE=%s", revealResp.ServiceRoleKey),
+				// PALBASE_BRANCH gives dev-server the active branch (--branch
+				// wins, else ProjectConfig.DefaultEnv from `palbase branch
+				// switch`). resolveActiveBranch returns "" for main; we surface
+				// "main" explicitly so the value is always present for the
+				// dev-server to read (local only — no Kong/server round-trip).
+				fmt.Sprintf("PALBASE_BRANCH=%s", devBranchValue(branchFlag)),
 				fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
 			)
 			node.Stdout = os.Stdout
@@ -472,13 +481,26 @@ func newDevCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", 4000, "Local port for the dev server")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to run against (defaults to the active branch; omit for main)")
 	return cmd
+}
+
+// devBranchValue resolves the branch name for the dev-server's PALBASE_BRANCH
+// env. Unlike the server payload (which omits "main" for back-compat),
+// dev-server is local and always wants a concrete value, so resolveActiveBranch's
+// "" (main/unset) is surfaced as "main".
+func devBranchValue(flag string) string {
+	if b := resolveActiveBranch(flag); b != "" {
+		return b
+	}
+	return "main"
 }
 
 func newPushCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var message string
 	var skipTypes bool
+	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Push the project (deploy code + apply config) to the server",
@@ -494,6 +516,17 @@ reported but does NOT roll back the code deploy that already landed.`,
 			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
+			}
+			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
+			// "" = main). NAMED GAP: backend.deploy and the config-as-code
+			// push procedures don't accept a branch field yet. Branch-aware
+			// push lands when Track A adds it server-side; then the
+			// backend.deploy payload below gets
+			//   if branch != "" { payload["branch"] = branch }
+			// and this resolve already feeds it.
+			branch := resolveActiveBranch(branchFlag)
+			if branch != "" {
+				fmt.Printf("note: --branch %q requested, but server-side branch push isn't wired yet; pushing the default branch.\n", branch)
 			}
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -547,6 +580,7 @@ reported but does NOT roll back the code deploy that already landed.`,
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Optional commit message recorded in git history")
 	cmd.Flags().BoolVar(&skipTypes, "no-types", false, "Skip the post-deploy types generation step")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to push (defaults to the active branch; omit for main)")
 	return cmd
 }
 
@@ -795,6 +829,7 @@ func writeEnvLocal(dir string, vars []envVar) error {
 
 func newPullCmd(r Resolvers) *cobra.Command {
 	var refFlag string
+	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "pull",
 		Short: "Pull the project (code + env + config) to your local machine",
@@ -812,6 +847,17 @@ code pull is the load-bearing step.`,
 			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
+			}
+			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
+			// "" = main). NAMED GAP: backend.pull / env.pull / config-as-code
+			// tRPC procedures don't accept a branch field yet (env.pull is
+			// .strict() and would reject one). Branch-aware pull lands when
+			// Track A adds the field server-side; then each payload below gets
+			//   if branch != "" { payload["branch"] = branch }
+			// and this resolve already feeds it.
+			branch := resolveActiveBranch(branchFlag)
+			if branch != "" {
+				fmt.Printf("note: --branch %q requested, but server-side branch pull isn't wired yet; pulling the default branch.\n", branch)
 			}
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -864,6 +910,7 @@ code pull is the load-bearing step.`,
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to pull (defaults to the active branch; omit for main)")
 	return cmd
 }
 
