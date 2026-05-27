@@ -6,11 +6,13 @@
 package branch
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -54,6 +56,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		createCmd(r.REST),
 		listCmd(r.REST),
 		switchCmd(),
+		deleteCmd(r.REST),
 	)
 	return cmd
 }
@@ -183,6 +186,59 @@ func switchCmd() *cobra.Command {
 			return nil
 		},
 	}
+	return cmd
+}
+
+// deleteCmd wires `palbase branch delete <name>`. Teardown is async (Temporal)
+// and IRREVERSIBLE — without --yes it prompts for confirmation. Refuses "main"
+// client-side for fast feedback (the server also refuses the default branch).
+func deleteCmd(rest func() REST) *cobra.Command {
+	var (
+		ref     string
+		yes     bool
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "delete <name>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Delete a branch and its entire stack (irreversible)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			if name == "main" {
+				return fmt.Errorf("cannot delete the main branch")
+			}
+			projectRef, err := linkedRef(ref)
+			if err != nil {
+				return err
+			}
+			if !yes {
+				fmt.Fprintf(os.Stdout, "Delete branch %q on %s and its entire stack (DB, pod, URL)? This is irreversible. [y/N]: ", name, projectRef)
+				reader := bufio.NewReader(cmd.InOrStdin())
+				line, _ := reader.ReadString('\n')
+				if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+					fmt.Fprintln(os.Stdout, "Aborted.")
+					return nil
+				}
+			}
+			var handle struct {
+				WorkflowID string `json:"workflowId"`
+				RunID      string `json:"runId"`
+			}
+			path := "/api/v1/projects/" + projectRef + "/branches/" + name
+			if err := rest().Do(cmd.Context(), http.MethodDelete, path, nil, &handle); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(handle)
+			}
+			fmt.Fprintf(os.Stdout, "✓ branch %q teardown started on %s\n", name, projectRef)
+			fmt.Fprintf(os.Stdout, "  workflow: %s\n", handle.WorkflowID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&ref, "ref", "", "Project ref (defaults to the linked project)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 

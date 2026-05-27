@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
@@ -77,6 +78,59 @@ func TestBranchList_REST(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	require.NoError(t, cmd.Execute())
+}
+
+func TestBranchDelete_WithYes_REST(t *testing.T) {
+	var gotMethod, gotPath string
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-d", "runId": "run-d"})
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"delete", "staging", "--ref", "acme1234", "--yes", "--json"})
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, http.MethodDelete, gotMethod)
+	require.Equal(t, "/api/v1/projects/acme1234/branches/staging", gotPath)
+}
+
+func TestBranchDelete_RefusesMainClientSide(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API to delete main")
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"delete", "main", "--ref", "acme1234", "--yes"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot delete the main branch")
+}
+
+func TestBranchDelete_AbortsWithoutConfirm(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API when the user declines")
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"delete", "staging", "--ref", "acme1234"})
+	cmd.SetIn(strings.NewReader("n\n")) // decline
+	require.NoError(t, cmd.Execute())
+}
+
+func TestBranchDelete_403DefaultBranchSurfacesAPIError(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "forbidden", "error_description": "Cannot delete the default branch.",
+			"status": 403, "request_id": "req_e",
+		})
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"delete", "staging", "--ref", "acme1234", "--yes"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	var apiErr *transport.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, "forbidden", apiErr.Code)
 }
 
 func TestBranchCreate_404SurfacesAPIError(t *testing.T) {
