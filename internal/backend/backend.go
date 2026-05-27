@@ -113,14 +113,14 @@ type stringFlag struct {
 	value string
 }
 
-func (s *stringFlag) String() string         { return s.value }
-func (s *stringFlag) Set(v string) error     { s.value = v; return nil }
-func (s *stringFlag) Type() string           { return "string" }
+func (s *stringFlag) String() string     { return s.value }
+func (s *stringFlag) Set(v string) error { s.value = v; return nil }
+func (s *stringFlag) Type() string       { return "string" }
 
 // projectRef resolves the linked project ref. Order:
-//   1. --ref flag override
-//   2. .palbase/config.json's ref (link writes it)
-//   3. ErrNotLinked — caller decides whether to prompt or fail.
+//  1. --ref flag override
+//  2. .palbase/config.json's ref (link writes it)
+//  3. ErrNotLinked — caller decides whether to prompt or fail.
 //
 // Returning ErrNotLinked instead of bubbling the underlying os.IsNotExist
 // lets the init/dev/deploy commands auto-link via project.list when the
@@ -722,6 +722,7 @@ defineEndpoint pod goes away.`,
 
 func newRollbackCmd(r Resolvers) *cobra.Command {
 	var refFlag string
+	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "rollback <version-sha>",
 		Args:  cobra.ExactArgs(1),
@@ -732,23 +733,52 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 			version := args[0]
+			// Branch context (Track A · Feature 3): --branch wins; otherwise
+			// the locally-active branch from `palbase branch switch`
+			// (ProjectConfig.DefaultEnv). "main"/empty is omitted so the
+			// server resolves the default branch (back-compat).
+			branch := resolveActiveBranch(branchFlag)
+			payload := map[string]any{"ref": ref, "version": version}
+			if branch != "" {
+				payload["branch"] = branch
+			}
 			var resp struct {
 				Status         string `json:"status"`
 				Version        string `json:"version"`
 				RolledBackFrom string `json:"rolled_back_from"`
 			}
-			if err := r.Studio().Mutation(cmd.Context(), "backend.rollback", map[string]any{
-				"ref":     ref,
-				"version": version,
-			}, &resp); err != nil {
+			if err := r.Studio().Mutation(cmd.Context(), "backend.rollback", payload, &resp); err != nil {
 				return fmt.Errorf("backend.rollback: %w", err)
 			}
-			fmt.Printf("✓ rolled back to %s (new HEAD: %s)\n", resp.RolledBackFrom, resp.Version)
+			target := "default branch"
+			if branch != "" {
+				target = "branch " + branch
+			}
+			fmt.Printf("✓ rolled back %s to %s (new HEAD: %s)\n", target, resp.RolledBackFrom, resp.Version)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to roll back (defaults to the active branch; omit for main)")
 	return cmd
+}
+
+// resolveActiveBranch picks the branch the rollback targets: the --branch flag
+// if set, else the locally-active branch (ProjectConfig.DefaultEnv, set by
+// `palbase branch switch`). Returns "" for main / unset so the caller omits the
+// branch field and the server resolves the default branch (back-compat).
+func resolveActiveBranch(flag string) string {
+	if flag != "" {
+		if flag == "main" {
+			return ""
+		}
+		return flag
+	}
+	cfg, err := auth.LoadProjectConfig()
+	if err != nil || cfg == nil || cfg.DefaultEnv == "" || cfg.DefaultEnv == "main" {
+		return ""
+	}
+	return cfg.DefaultEnv
 }
 
 func newStatusCmd(r Resolvers) *cobra.Command {
