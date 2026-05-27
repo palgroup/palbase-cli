@@ -45,8 +45,8 @@ func opSegments(opID string) []string {
 	return out
 }
 
-func typeNameOf(s string) string  { return sanitize(s, true) }
-func identOf(s string) string     { return escapeKeyword(sanitize(s, false)) }
+func typeNameOf(s string) string { return sanitize(s, true) }
+func identOf(s string) string    { return escapeKeyword(sanitize(s, false)) }
 
 func typePrefix(opID string) string {
 	segs := opSegments(opID)

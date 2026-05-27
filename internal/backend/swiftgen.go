@@ -23,9 +23,9 @@ import (
 type swiftSchema struct {
 	kind     string // string|number|integer|boolean|object|array|enum|any
 	nullable bool
-	props    []swiftProp   // object
-	elem     *swiftSchema  // array
-	enumVals []string      // enum
+	props    []swiftProp  // object
+	elem     *swiftSchema // array
+	enumVals []string     // enum
 }
 
 type swiftProp struct {

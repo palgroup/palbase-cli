@@ -38,11 +38,11 @@ func TestEmitSwift(t *testing.T) {
 		"func create(_ input: Rooms.Create.Input) async throws(BackendError) -> Rooms.Create.Output",
 		`_invoke("rooms.create", input, as: Rooms.Create.Output.self)`,
 		"public enum KindValue: String, Codable, Sendable {",
-		"case `public` = \"public\"",         // keyword escaped
-		"public let capacity: Int?",           // optional (not required)
-		"public let score: Double?",           // nullable → optional
-		"public let tags: [String]",           // array
-		"struct PBRoomsIdNamespace",           // nested namespace
+		"case `public` = \"public\"", // keyword escaped
+		"public let capacity: Int?",  // optional (not required)
+		"public let score: Double?",  // nullable → optional
+		"public let tags: [String]",  // array
+		"struct PBRoomsIdNamespace",  // nested namespace
 		"func get(_ input: Rooms.Id.Get.Input)",
 	}
 	for _, m := range must {
