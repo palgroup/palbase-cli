@@ -87,7 +87,8 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase backend dev       Run endpoints/ locally with hot reload.
   palbase backend deploy    Push current code as a new version + activate.
   palbase backend list      Show recent versions (newest first).
-  palbase backend rollback  Roll back to a previous version SHA.`,
+  palbase backend rollback  Roll back to a previous version SHA.
+  palbase backend config    Config-as-code: pull module config into config/*.toml.`,
 	}
 	cmd.AddCommand(
 		newInitCmd(r),
@@ -99,6 +100,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		newStatusCmd(r),
 		newDisableCmd(r),
 		newTypesCmd(r),
+		newConfigCmd(r),
 	)
 	return cmd
 }
