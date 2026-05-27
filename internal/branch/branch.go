@@ -213,7 +213,7 @@ func listCmd(rest func() REST) *cobra.Command {
 }
 
 // switchCmd wires `palbase branch switch <name>`. Local-only: it records the
-// active branch in the project config so subsequent `palbase dev`/`palbase
+// active branch in the project config so subsequent `palbase serve`/`palbase
 // push` target that branch's endpoint_ref. No server call.
 func switchCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -231,7 +231,7 @@ func switchCmd() *cobra.Command {
 				return fmt.Errorf("save project config: %w", err)
 			}
 			fmt.Fprintf(os.Stdout, "✓ switched to branch %q (project %s)\n", name, cfg.Ref)
-			fmt.Fprintln(os.Stdout, "  `palbase dev`/`palbase push` now target this branch.")
+			fmt.Fprintln(os.Stdout, "  `palbase serve`/`palbase push` now target this branch.")
 			return nil
 		},
 	}

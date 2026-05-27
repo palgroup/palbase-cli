@@ -5,7 +5,7 @@
  * Local equivalent of the prod backend-runtime endpoint dispatcher,
  * but tuned for hot reload + interactive output. The shape of every
  * user-facing surface (routes, ctx, defineEndpoint) matches prod so
- * what runs in `palbase dev` runs identically in
+ * what runs in `palbase serve` runs identically in
  * services-shared/br-<ref> after `palbase push`.
  *
  * Invocation (set by the Go CLI):
@@ -51,21 +51,6 @@ const METHOD_FILE_RE = /^(get|post|put|patch|delete)\.(c?js|mjs|ts)$/i;
 // requests with named capture groups.
 const routes = new Map();
 
-// deriveOperationId — same dotted-segment convention the deployed
-// backend-runtime uses (see modules/backend/internal/management/
-// endpoint_router.go). Each endpoint gets a `/rpc/{operationId}` alias
-// so iOS/TS clients can do typed `pb.backend.call("todos.list", ...)`
-// against the local dev-server with the same wire shape as production.
-function deriveOperationId(segments, method) {
-  const parts = segments
-    .map((s) => (s.startsWith(':') ? s.slice(1) : s))
-    .filter((s) => s.length > 0);
-  if (method && method !== 'POST') {
-    parts.push(method.toLowerCase());
-  }
-  return parts.join('.');
-}
-
 function registerEndpoints() {
   routes.clear();
   if (!fs.existsSync(ENDPOINTS_DIR)) {
@@ -96,21 +81,6 @@ function registerEndpoints() {
       paramNames,
       modulePath: file,
     });
-
-    // RPC alias: every endpoint also responds at `POST /rpc/{operationId}`
-    // regardless of its declared HTTP method. Path params are folded into
-    // dotted segments — RPC clients pass them in the body, not the URL.
-    const operationId = deriveOperationId(segments, method);
-    if (operationId) {
-      const rpcPattern = `/rpc/${operationId}`;
-      routes.set('POST ' + rpcPattern, {
-        method: 'POST',
-        urlPattern: rpcPattern,
-        regex: new RegExp('^' + rpcPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/?$'),
-        paramNames: [],
-        modulePath: file,
-      });
-    }
   });
   log(`registered ${routes.size} endpoint(s):`);
   for (const route of routes.values()) {
@@ -158,7 +128,7 @@ function getPalbaseClient() {
 // ctx.docs, NOT ctx.palbase.docs — mirroring the deployed runtime
 // (modules/backend/internal/runtime/worker.js, the flat-ctx refactor
 // 0331a6d6). Keeping dev = prod here is the whole point: a handler that
-// works under `palbase dev` must work once deployed.
+// works under `palbase serve` must work once deployed.
 const MODULE_NAMES = ['auth', 'storage', 'docs', 'realtime', 'functions',
   'flags', 'notifications', 'analytics', 'links', 'cms'];
 
@@ -205,7 +175,7 @@ function notConfiguredModule(name) {
     get() {
       throw new Error(
         `ctx.${name} unavailable: dev-server has no tenant credentials. ` +
-        `Run \`palbase login\` then \`palbase dev\` from inside a project directory.`,
+        `Run \`palbase login\` then \`palbase serve\` from inside a project directory.`,
       );
     },
   });
@@ -466,7 +436,7 @@ function watchEndpoints() {
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19);
-  process.stdout.write(`[palbase dev ${ts}] ${msg}\n`);
+  process.stdout.write(`[palbase serve ${ts}] ${msg}\n`);
 }
 
 // ── boot ────────────────────────────────────────────────────────────────

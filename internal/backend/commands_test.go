@@ -28,14 +28,14 @@ func TestCommands_FlatSurface(t *testing.T) {
 	}
 
 	// Present, top-level, flat.
-	for _, want := range []string{"pull", "push", "dev", "list", "rollback", "status", "types"} {
+	for _, want := range []string{"pull", "push", "serve", "list", "rollback", "status", "types"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
 	// Removed/renamed: no init/enable/disable (backend is the default — the
-	// CLI never enables or tears down), no deploy (→ push), no `backend`
-	// parent, no `config` (config-as-code folded into pull/push).
-	for _, gone := range []string{"init", "deploy", "disable", "enable", "backend", "config"} {
+	// CLI never enables or tears down), no deploy (→ push), no `dev` (→ serve),
+	// no `backend` parent, no `config` (config-as-code folded into pull/push).
+	for _, gone := range []string{"init", "deploy", "dev", "disable", "enable", "backend", "config"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}
 }

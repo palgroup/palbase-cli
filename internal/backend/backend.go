@@ -1,5 +1,5 @@
 // Package backend provides the top-level backend lifecycle commands
-// (pull / push / dev / list / rollback / status / types). palbase IS the
+// (pull / push / serve / list / rollback / status / types). palbase IS the
 // backend CLI — there is no `backend` parent command. These cover the full
 // developer loop for the per-project backend-runtime pod.
 //
@@ -50,7 +50,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 }
 
 // devServerFS embeds the local Node.js dev server. Shipped beside the
-// CLI binary so `palbase dev` works without an internet round
+// CLI binary so `palbase serve` works without an internet round
 // trip; copied to a temp dir at runtime so Node can resolve relative
 // requires the way it would inside a real package.
 //
@@ -111,7 +111,7 @@ func (s *stringFlag) Type() string       { return "string" }
 //  3. ErrNotLinked — caller decides whether to prompt or fail.
 //
 // Returning ErrNotLinked instead of bubbling the underlying os.IsNotExist
-// lets the init/dev/deploy commands auto-link via project.list when the
+// lets the init/serve/deploy commands auto-link via project.list when the
 // user hasn't run `palbase link` first.
 func projectRef(override string) (string, error) {
 	if override != "" {
@@ -391,8 +391,12 @@ func newDevCmd(r Resolvers) *cobra.Command {
 	var port int
 	var branchFlag string
 	cmd := &cobra.Command{
-		Use:   "dev",
+		Use:   "serve",
 		Short: "Run endpoints/ locally with hot reload",
+		Long: `Serve the project's endpoints/ from a local Node.js dev server with
+hot reload — the local equivalent of the deployed backend-runtime pod.
+Routes, ctx, and defineEndpoint behave identically to production, so
+what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push`" + `.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -552,7 +556,10 @@ reported but does NOT roll back the code deploy that already landed.`,
 				return fmt.Errorf("backend.deploy: %w", err)
 			}
 			fmt.Printf("✓ deployed version %s (%d files)\n", resp.Version, resp.Files)
-			fmt.Printf("  https://%s.dev.palbase.studio/rpc/*\n", ref)
+			// Endpoints are served file-based (e.g. POST /hello/get from
+			// endpoints/hello/post.ts) — there is no /rpc/* prefix on the
+			// deployed runtime, so print the project base URL only.
+			fmt.Printf("  https://%s.dev.palbase.studio\n", ref)
 
 			// Adım B14 — auto-pull types after every successful deploy.
 			// `--no-types` disables for CI loops where the typed
@@ -765,7 +772,7 @@ var _ = renderJSON // silence "unused" until --json lands
 //
 // Pulls the branch's latest code archive and then fetches the decrypted
 // branch env vars via env.pull, writing them to
-// .env.local so `palbase dev` has the real values.
+// .env.local so `palbase serve` has the real values.
 //
 // .env.local is already in the template .gitignore; we also ensure it
 // is listed in the project's own .gitignore so values never reach git,
@@ -972,7 +979,7 @@ Re-run after every push to stay in sync; ` + "`palbase push`" + ` already does (
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase dev on localhost:4003)")
+	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase serve on localhost:4003)")
 	cmd.Flags().StringVar(&langFlag, "lang", "ts", "Output language: ts | swift")
 	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output: dir for ts (.palbase), file for swift (PalbaseEndpoints.swift)")
 	return cmd
@@ -1082,7 +1089,7 @@ func openAPIURL(ctx context.Context, sc *studio.Client, ref, env string) (string
 
 // lookupAnonAPIKey calls Studio's apikey.reveal to get the project's
 // anon key. The deployed `/openapi.json` is gated by the same Kong
-// apikey middleware as `/rpc/*` so we need a real key to fetch it.
+// apikey middleware as the endpoint routes so we need a real key to fetch it.
 func lookupAnonAPIKey(ctx context.Context, sc *studio.Client, ref string) (string, error) {
 	var resp struct {
 		AnonKey string `json:"anonKey"`

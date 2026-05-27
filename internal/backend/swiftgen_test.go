@@ -9,17 +9,17 @@ import (
 const fixtureOpenAPI = `{
   "openapi":"3.1.0","info":{"title":"t","version":"1"},
   "paths":{
-    "/rpc/rooms.create":{"post":{"operationId":"rooms.create",
+    "/rooms/create":{"post":{"operationId":"rooms.create",
       "requestBody":{"content":{"application/json":{"schema":{"type":"object",
         "properties":{"name":{"type":"string"},"capacity":{"type":"integer"},"kind":{"type":"string","enum":["public","private"]}},
         "required":["name","kind"]}}}},
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
         "properties":{"id":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"score":{"type":"number","nullable":true}},
         "required":["id","tags","score"]}}}}}}},
-    "/rpc/rooms.id.get":{"post":{"operationId":"rooms.id.get",
+    "/rooms/id/get":{"post":{"operationId":"rooms.id.get",
       "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}},
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}}}}},
-    "/rpc/auth.login":{"post":{"operationId":"auth.login",
+    "/auth/login":{"post":{"operationId":"auth.login",
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}}}}}}
   }
 }`
