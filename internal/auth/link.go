@@ -87,7 +87,10 @@ func (l *Linker) Link(ctx context.Context, wantRef string) error {
 		}
 	}
 
-	cfg := &ProjectConfig{Ref: selected.Ref, DefaultEnv: "staging"}
+	// Default to the project's main branch (CLI-2): a fresh `palbase link`
+	// should pull/dev against main, not staging. `palbase branch switch`
+	// changes the active branch per-project.
+	cfg := &ProjectConfig{Ref: selected.Ref, DefaultEnv: "main"}
 	if err := SaveProjectConfig(cfg); err != nil {
 		return err
 	}

@@ -394,7 +394,8 @@ func TestLink_DirectRef(t *testing.T) {
 	cfg, err := LoadProjectConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "myapp", cfg.Ref)
-	assert.Equal(t, "staging", cfg.DefaultEnv)
+	// CLI-2: a fresh link defaults to main (was "staging").
+	assert.Equal(t, "main", cfg.DefaultEnv)
 
 	gitignore, err := os.ReadFile(".gitignore")
 	require.NoError(t, err)
