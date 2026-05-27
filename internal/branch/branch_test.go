@@ -51,6 +51,32 @@ func TestBranchCreate_REST_202Handle(t *testing.T) {
 	require.Equal(t, true, gotBody["deploy"]) // default ON
 }
 
+func TestBranchCreate_ForkFromFlag(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"create", "qa", "--ref", "acme1234", "--kind", "qa", "--fork-from", "main", "--json"})
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "main", gotBody["forkFrom"])
+	require.Equal(t, "qa", gotBody["kind"])
+}
+
+func TestBranchCreate_NoForkOmitsForkFrom(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"create", "staging", "--ref", "acme1234", "--json"})
+	require.NoError(t, cmd.Execute())
+	_, has := gotBody["forkFrom"]
+	require.False(t, has, "forkFrom omitted when --fork-from not passed")
+}
+
 func TestBranchCreate_NoDeployFlag(t *testing.T) {
 	var gotBody map[string]any
 	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {

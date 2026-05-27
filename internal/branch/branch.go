@@ -77,6 +77,7 @@ func createCmd(rest func() REST) *cobra.Command {
 	var (
 		ref      string
 		kind     string
+		forkFrom string
 		noDeploy bool
 		jsonOut  bool
 	)
@@ -94,6 +95,9 @@ func createCmd(rest func() REST) *cobra.Command {
 				"branchName": name,
 				"kind":       kind,
 				"deploy":     !noDeploy,
+			}
+			if forkFrom != "" {
+				body["forkFrom"] = forkFrom
 			}
 			var handle struct {
 				WorkflowID string `json:"workflowId"`
@@ -114,6 +118,7 @@ func createCmd(rest func() REST) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&ref, "ref", "", "Project ref (defaults to the linked project)")
 	cmd.Flags().StringVar(&kind, "kind", "staging", "Branch kind: staging|dev|qa|preview")
+	cmd.Flags().StringVar(&forkFrom, "fork-from", "", "Fork from a parent branch (copies its code; schema-only DB)")
 	cmd.Flags().BoolVar(&noDeploy, "no-deploy", false, "Provision the stack without auto-deploying the backend pod")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
