@@ -48,14 +48,6 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 	return req, nil
 }
 
-// templateFS embeds the default backend project bundle (palbase.toml,
-// endpoints/hello/get.js, package.json, .gitignore). `init` falls back
-// to this when Studio's pull stream is unavailable, e.g. while the
-// orchestrator workflow is still seeding the remote git repo.
-//
-//go:embed all:template/*
-var templateFS embed.FS
-
 // devServerFS embeds the local Node.js dev server. Shipped beside the
 // CLI binary so `palbase backend dev` works without an internet round
 // trip; copied to a temp dir at runtime so Node can resolve relative
@@ -74,35 +66,30 @@ type Resolvers struct {
 	Endpoints func() config.Endpoints
 }
 
-// Cmd builds the cobra `backend` group. Subcommands call the resolvers
-// at action time, after PersistentPreRunE has finished.
-func Cmd(r Resolvers) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "backend",
-		Short: "Manage the per-project backend runtime",
-		Long: `Commands for the per-project backend (defineEndpoint runtime).
-
-  palbase backend init      Enable the backend pod and scaffold the project.
-  palbase backend pull      Pull branch code + env vars to local dev machine.
-  palbase backend dev       Run endpoints/ locally with hot reload.
-  palbase backend deploy    Push current code as a new version + activate.
-  palbase backend list      Show recent versions (newest first).
-  palbase backend rollback  Roll back to a previous version SHA.
-  palbase backend config    Config-as-code: pull module config into config/*.toml.`,
-	}
-	cmd.AddCommand(
-		newInitCmd(r),
+// Commands returns the flat, top-level command set the root mounts
+// directly — there is no `backend` parent anymore (palbase IS the
+// backend CLI). Subcommands call the resolvers at action time, after
+// PersistentPreRunE has finished.
+//
+// There is no `init`/`enable`/`disable`: a project IS a backend from
+// creation (backend is the default), so the CLI never enables, checks, or
+// tears down the backend — it assumes the linked project is ready. The
+// server-side gating is owned by the platform, not the CLI.
+//
+// `pull` and `push` are unified verbs:
+//   - pull  = code archive + env (.env.local) + config-as-code (config/*.toml)
+//   - push  = deploy (bundle+upload+activate) + config-as-code push
+// so "pull/push the project" is a single action for the developer.
+func Commands(r Resolvers) []*cobra.Command {
+	return []*cobra.Command{
 		newPullCmd(r),
+		newPushCmd(r),
 		newDevCmd(r),
-		newDeployCmd(r),
 		newListCmd(r),
 		newRollbackCmd(r),
 		newStatusCmd(r),
-		newDisableCmd(r),
 		newTypesCmd(r),
-		newConfigCmd(r),
-	)
-	return cmd
+	}
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -383,87 +370,6 @@ func bundleCwd(root, ref string) ([]byte, error) {
 
 // ── subcommands ─────────────────────────────────────────────────────────
 
-func newInitCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Enable backend on this project and download the template into cwd",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("→ enabling backend on %s ...\n", ref)
-			var enableResult struct {
-				WorkflowID string `json:"workflowId"`
-				RunID      string `json:"runId"`
-			}
-			if err := r.Studio().Mutation(ctx, "backend.enable", map[string]any{"ref": ref}, &enableResult); err != nil {
-				return fmt.Errorf("backend.enable: %w", err)
-			}
-			fmt.Printf("  workflow: %s\n", enableResult.WorkflowID)
-			fmt.Println("  waiting for backend to become ready ...")
-			if err := waitForBackendEnabled(ctx, r.Studio(), ref, 4*time.Minute); err != nil {
-				return fmt.Errorf("backend never became ready: %w", err)
-			}
-
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			fmt.Println("  pulling template into cwd ...")
-			var pull struct {
-				Version string `json:"version"`
-				Archive string `json:"archive"`
-				Size    int    `json:"size"`
-			}
-			if err := r.Studio().Query(ctx, "backend.pull", map[string]any{"ref": ref}, &pull); err != nil {
-				// Fall back to the embedded template — this is normal during
-				// the brief window where the workflow has marked enabled but
-				// the seed commit's reflection in HEAD hasn't propagated.
-				fmt.Println("  ! pull failed, falling back to embedded template")
-				if err := extractFS(templateFS, "template", cwd); err != nil {
-					return fmt.Errorf("extract embedded template: %w", err)
-				}
-			} else {
-				archive, decErr := base64.StdEncoding.DecodeString(pull.Archive)
-				if decErr != nil {
-					return fmt.Errorf("decode pull archive: %w", decErr)
-				}
-				if err := extractTarGzReplace(archive, cwd); err != nil {
-					return fmt.Errorf("extract pull archive: %w", err)
-				}
-				fmt.Printf("  template version: %s (%d bytes)\n", pull.Version, pull.Size)
-			}
-
-			// Persist the link so dev/deploy can pick the ref up without
-			// a flag, and make sure the .palbase/ dir lands in .gitignore.
-			if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}); err != nil {
-				return err
-			}
-
-			// Pull the @palbase/backend SDK (and any other declared deps)
-			// so the freshly-scaffolded project is buildable / runnable
-			// the moment init returns. Errors here are surfaced but we
-			// don't fail init — the user can re-run npm install later.
-			if err := installNodeDeps(cwd); err != nil {
-				fmt.Printf("  ! npm install failed: %v\n", err)
-				fmt.Println("    re-run `npm install` once the issue is resolved")
-			}
-
-			fmt.Println("✓ backend ready")
-			fmt.Println()
-			fmt.Println("Next steps:")
-			fmt.Println("  palbase backend dev       # run locally with hot reload")
-			fmt.Println("  palbase backend deploy    # publish to production")
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	return cmd
-}
-
 // resolveDevProjectRef picks the ref the dev server should build its
 // <ref>.<host> URL from. Kong only routes the branch endpoint_ref
 // subdomain, so prefer the endpoint_ref apikey.reveal returns. When
@@ -569,15 +475,23 @@ func newDevCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-func newDeployCmd(r Resolvers) *cobra.Command {
+func newPushCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var message string
 	var skipTypes bool
 	cmd := &cobra.Command{
-		Use:   "deploy",
-		Short: "Bundle current project and deploy a new version",
+		Use:   "push",
+		Short: "Push the project (deploy code + apply config) to the server",
+		Long: `Push everything for the linked project in one step:
+
+  • code → bundled, uploaded as a new version, and activated
+  • config-as-code → config/*.toml applied to the server (ordered, conflict-gated)
+
+The code deploy runs first; config push follows. A config-push failure is
+reported but does NOT roll back the code deploy that already landed.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			ctx := cmd.Context()
+			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
@@ -596,7 +510,7 @@ func newDeployCmd(r Resolvers) *cobra.Command {
 				Version string `json:"version"`
 				Files   int    `json:"files"`
 			}
-			if err := r.Studio().Mutation(cmd.Context(), "backend.deploy", map[string]any{
+			if err := r.Studio().Mutation(ctx, "backend.deploy", map[string]any{
 				"ref":     ref,
 				"archive": base64.StdEncoding.EncodeToString(archive),
 				"message": message,
@@ -610,19 +524,29 @@ func newDeployCmd(r Resolvers) *cobra.Command {
 			// `--no-types` disables for CI loops where the typed
 			// declarations aren't useful.
 			if !skipTypes {
-				if err := pullTypes(cmd.Context(), r.Studio(), ref, "remote", os.Stdout); err != nil {
+				if err := pullTypes(ctx, r.Studio(), ref, "remote", os.Stdout); err != nil {
 					// Don't fail the deploy on a types-pull glitch — the
 					// deploy itself succeeded; types are an ergonomic
 					// artifact developers can refresh manually.
 					fmt.Fprintf(os.Stderr, "⚠ types pull failed: %v\n", err)
 				}
 			}
+
+			// ── config-as-code push ───────────────────────────────────
+			// Runs AFTER the code deploy (advisor ordering: code first).
+			// A config failure is surfaced but the code deploy already
+			// landed and is NOT rolled back (no-rollback — Faz 3b).
+			if cfgErr := runConfigPush(ctx, cwd, ref, r.Studio(), os.Stdout); cfgErr != nil {
+				return fmt.Errorf("code deployed (version %s) but config push failed: %w", resp.Version, cfgErr)
+			}
+
+			fmt.Println("✓ push complete")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Optional commit message recorded in git history")
-	cmd.Flags().BoolVar(&skipTypes, "no-types", false, "Skip the post-deploy `palbase backend types` step")
+	cmd.Flags().BoolVar(&skipTypes, "no-types", false, "Skip the post-deploy types generation step")
 	return cmd
 }
 
@@ -670,53 +594,6 @@ func newListCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	return cmd
-}
-
-func newDisableCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	var yes bool
-	cmd := &cobra.Command{
-		Use:   "disable",
-		Short: "Tear down the backend pod for this project (drops PVC + git history)",
-		Long: `Disable the per-project backend runtime.
-
-This removes the Deployment, Service, Secret, and PVC for br-<ref>.
-The git history of deployed versions is destroyed. Re-running
-` + "`palbase backend init`" + ` starts from a fresh template.
-
-Use this when you no longer want backend resources running for this
-project (e.g. cost reduction, deprecating the project's API surface).
-Auth, DB, Docs, Storage, Realtime — all keep working; only the
-defineEndpoint pod goes away.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
-			if err != nil {
-				return err
-			}
-			if !yes {
-				fmt.Printf("This will tear down br-%s and discard its git history.\n", ref)
-				fmt.Print("Type the project ref to confirm: ")
-				var typed string
-				if _, err := fmt.Fscanln(os.Stdin, &typed); err != nil || typed != ref {
-					return fmt.Errorf("aborted (typed %q, expected %q)", typed, ref)
-				}
-			}
-			fmt.Printf("→ disabling backend on %s ...\n", ref)
-			var resp struct {
-				WorkflowID string `json:"workflowId"`
-				RunID      string `json:"runId"`
-			}
-			if err := r.Studio().Mutation(cmd.Context(), "backend.disable", map[string]any{"ref": ref}, &resp); err != nil {
-				return fmt.Errorf("backend.disable: %w", err)
-			}
-			fmt.Printf("  workflow: %s\n", resp.WorkflowID)
-			fmt.Println("✓ disable workflow scheduled (poll status with `palbase backend status`)")
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the typed-ref confirmation prompt")
 	return cmd
 }
 
@@ -785,73 +662,36 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show backend enable + active-version state",
+		Short: "Show the project's active version + deploy state",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
+			// backend.status still carries backendEnabled server-side, but the
+			// CLI no longer surfaces it: backend is the default (every project
+			// is a backend), so there's no enable state for a user to act on.
+			// We show the version/deploy info, which is what `status` is for.
 			var resp struct {
-				Ref            string  `json:"ref"`
-				BackendEnabled bool    `json:"backendEnabled"`
-				Head           *string `json:"head"`
-				ActiveVersion  *string `json:"activeVersion"`
+				Ref           string  `json:"ref"`
+				Head          *string `json:"head"`
+				ActiveVersion *string `json:"activeVersion"`
 			}
 			if err := r.Studio().Query(cmd.Context(), "backend.status", map[string]any{"ref": ref}, &resp); err != nil {
 				return fmt.Errorf("backend.status: %w", err)
 			}
-			fmt.Printf("ref:             %s\n", resp.Ref)
-			fmt.Printf("backend_enabled: %v\n", resp.BackendEnabled)
+			fmt.Printf("ref:    %s\n", resp.Ref)
 			if resp.Head != nil {
-				fmt.Printf("head:            %s\n", *resp.Head)
+				fmt.Printf("head:   %s\n", *resp.Head)
 			}
 			if resp.ActiveVersion != nil {
-				fmt.Printf("active:          %s\n", *resp.ActiveVersion)
+				fmt.Printf("active: %s\n", *resp.ActiveVersion)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	return cmd
-}
-
-// waitForBackendEnabled polls Studio until backend.status reports
-// backend_enabled = true (or the timeout elapses). The CLI doesn't
-// trust the workflow start response alone — Temporal acks the start
-// well before activities run.
-func waitForBackendEnabled(ctx context.Context, c *studio.Client, ref string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var resp struct {
-			BackendEnabled bool `json:"backendEnabled"`
-		}
-		if err := c.Query(ctx, "backend.status", map[string]any{"ref": ref}, &resp); err == nil && resp.BackendEnabled {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
-	}
-	return fmt.Errorf("timed out after %s", timeout)
-}
-
-// installNodeDeps runs `npm install` in dir so a freshly-scaffolded
-// project ships with @palbase/backend (and any other declared deps)
-// already on disk. Honours an existing package-lock.json, prefers
-// `npm` because that's the only manager the template targets.
-func installNodeDeps(dir string) error {
-	bin, err := exec.LookPath("npm")
-	if err != nil {
-		return fmt.Errorf("npm not found in PATH — install Node.js (https://nodejs.org) and re-run")
-	}
-	fmt.Println("→ installing dependencies (npm install) ...")
-	cmd := exec.Command(bin, "install", "--silent", "--no-audit", "--no-fund")
-	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 // runtimeTOML serializes the per-project palbase.toml the deploy step
@@ -957,21 +797,22 @@ func newPullCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Pull branch code and env vars to local machine",
-		Long: `Download the branch's current code archive and write decrypted env
-vars to .env.local so local development has the real values.
+		Short: "Pull the project (code + env + config) to your local machine",
+		Long: `Pull everything for the linked project in one step:
 
-.env.local is gitignored — values reach the dev machine, never git.
-If env.pull fails (transient error, no vars configured), a warning is
-printed but the command still exits successfully because the code pull
-already succeeded.`,
+  • code archive   → extracted into the cwd
+  • env vars       → decrypted into .env.local (gitignored)
+  • config-as-code → config/*.toml + .palbase/state.json
+
+.env.local is gitignored — values reach the dev machine, never git. A
+transient env or config failure warns but does not abort the pull; the
+code pull is the load-bearing step.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
-
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
@@ -1009,6 +850,13 @@ already succeeded.`,
 				} else {
 					fmt.Println("  no env vars configured — .env.local not written")
 				}
+			}
+
+			// ── config-as-code pull ───────────────────────────────────
+			// Non-fatal: a config glitch must not lose the code/env pull
+			// that already succeeded.
+			if cfgErr := runConfigPull(ctx, cwd, ref, r.Studio(), os.Stdout); cfgErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: config pull failed (%v) — code + env were still pulled\n", cfgErr)
 			}
 
 			fmt.Println("✓ pull complete")

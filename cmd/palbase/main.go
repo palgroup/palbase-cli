@@ -81,14 +81,6 @@ func main() {
 		whoamiCmd(),
 		linkCmd(),
 		configCmd(),
-		// Phase 7 — backend opt-in lifecycle. Resolvers close over the
-		// package-level globals so PersistentPreRunE has populated them
-		// by the time a subcommand's RunE actually fires.
-		backend.Cmd(backend.Resolvers{
-			Auth:      func() *auth.Client { return authClient },
-			Studio:    func() *studio.Client { return studioClient },
-			Endpoints: func() config.Endpoints { return resolved.Endpoints },
-		}),
 		project.Cmd(project.Resolvers{
 			REST: func() project.REST { return managementREST() },
 		}),
@@ -105,6 +97,17 @@ func main() {
 			Studio: func() *studio.Client { return studioClient },
 		}),
 	)
+
+	// CLI-1 flat redesign: the backend lifecycle commands (pull/push/dev/
+	// list/rollback/status/disable/types) live at the TOP LEVEL — palbase
+	// IS the backend CLI, there is no `backend` parent. Resolvers close
+	// over the package-level globals so PersistentPreRunE has populated
+	// them by the time a subcommand's RunE fires.
+	rootCmd.AddCommand(backend.Commands(backend.Resolvers{
+		Auth:      func() *auth.Client { return authClient },
+		Studio:    func() *studio.Client { return studioClient },
+		Endpoints: func() config.Endpoints { return resolved.Endpoints },
+	})...)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
