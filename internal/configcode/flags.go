@@ -85,9 +85,9 @@ type rawVariant struct {
 
 const flagsHeader = `# config/flags.toml — system flag definitions (config-as-code, Faz 1).
 #
-# READ-ONLY MIRROR of server state. ` + "`palbase backend config pull`" + ` overwrites
-# this file; there is no push contract yet (Faz 2). Editing here does not
-# change the server.
+# READ-ONLY MIRROR of server state. ` + "`palbase pull`" + ` overwrites
+# this file; edit it and run ` + "`palbase push`" + ` to apply. Editing here
+# alone does not change the server.
 #
 # Each [flags.<key>] is a project-wide system flag default. User
 # overrides (runtime, per-user) are NOT config — they live in the flags

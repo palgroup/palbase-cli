@@ -5,8 +5,8 @@
  * Local equivalent of the prod backend-runtime endpoint dispatcher,
  * but tuned for hot reload + interactive output. The shape of every
  * user-facing surface (routes, ctx, defineEndpoint) matches prod so
- * what runs in `palbase backend dev` runs identically in
- * services-shared/br-<ref> after `palbase backend deploy`.
+ * what runs in `palbase dev` runs identically in
+ * services-shared/br-<ref> after `palbase push`.
  *
  * Invocation (set by the Go CLI):
  *   PALBASE_DEV_PORT=4000 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
@@ -158,7 +158,7 @@ function getPalbaseClient() {
 // ctx.docs, NOT ctx.palbase.docs — mirroring the deployed runtime
 // (modules/backend/internal/runtime/worker.js, the flat-ctx refactor
 // 0331a6d6). Keeping dev = prod here is the whole point: a handler that
-// works under `palbase backend dev` must work once deployed.
+// works under `palbase dev` must work once deployed.
 const MODULE_NAMES = ['auth', 'storage', 'docs', 'realtime', 'functions',
   'flags', 'notifications', 'analytics', 'links', 'cms'];
 
@@ -205,7 +205,7 @@ function notConfiguredModule(name) {
     get() {
       throw new Error(
         `ctx.${name} unavailable: dev-server has no tenant credentials. ` +
-        `Run \`palbase login\` then \`palbase backend dev\` from inside a project directory.`,
+        `Run \`palbase login\` then \`palbase dev\` from inside a project directory.`,
       );
     },
   });

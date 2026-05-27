@@ -1,5 +1,5 @@
-// Package configcode implements config-as-code Faz 1: the read-only
-// `palbase backend config pull`. It fetches each module's current
+// Package configcode implements config-as-code: the config portion of
+// `palbase pull`. It fetches each module's current
 // configuration from Studio's tRPC GET APIs and serializes it to
 // declarative TOML files under `config/` in the project directory,
 // plus a `.palbase/state.json` mirror.
@@ -226,7 +226,7 @@ func hashContent(b []byte) string {
 
 // --- Faz 2: push (single module, idempotent) -------------------------
 //
-// `palbase backend config push` applies a local config/<module>.toml to
+// the config portion of `palbase push` applies a local config/<module>.toml to
 // the server via that module's SET tRPC. Only flags implements it this
 // phase (it has a working userFlags.system.put); auth/storage/documents
 // have no SET path yet, so they don't satisfy [ModulePusher] and report
@@ -256,7 +256,7 @@ func hashContent(b []byte) string {
 // state no longer matches the hash recorded in .palbase/state.json at the
 // last pull — i.e. someone changed config out-of-band (dashboard) since
 // the local mirror was taken. The push is rejected before any SET call.
-var ErrStateConflict = errors.New("remote config changed since last pull; run `palbase backend config pull` to reconcile, then re-apply")
+var ErrStateConflict = errors.New("remote config changed since last pull; run `palbase pull` to reconcile, then re-apply")
 
 // ErrPushNotImplemented is returned by [Push] for a module that has a
 // pull serializer but no push support yet (auth/storage/documents — Faz

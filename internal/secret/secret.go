@@ -1,6 +1,6 @@
 // Package secret provides the `palbase secret` subcommand group:
 // set / list / remove. These commands manage a branch's remote env vars
-// via Studio tRPC — same authority chain as `palbase backend deploy`
+// via Studio tRPC — same authority chain as `palbase push`
 // (user JWT → Studio env.* → control-pg). NOT dev-server-local.
 package secret
 

@@ -4,8 +4,8 @@
   "private": true,
   "description": "Palbase backend project — defineEndpoint handlers run inside backend-runtime.",
   "scripts": {
-    "dev": "palbase backend dev",
-    "deploy": "palbase backend deploy",
+    "dev": "palbase dev",
+    "deploy": "palbase push",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

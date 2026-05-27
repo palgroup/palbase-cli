@@ -1,6 +1,7 @@
-// Package backend provides the `palbase backend` subcommand group:
-// init / dev / deploy / list / rollback. These commands cover the full
-// developer loop for the per-project backend-runtime pod (Phase 7).
+// Package backend provides the top-level backend lifecycle commands
+// (pull / push / dev / list / rollback / status / types). palbase IS the
+// backend CLI — there is no `backend` parent command. These cover the full
+// developer loop for the per-project backend-runtime pod.
 //
 // All remote calls go through Studio's tRPC layer via the studio
 // package — never directly to br-<ref> — so org-membership + the
@@ -34,7 +35,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// defaultHTTPClient is reused by `palbase backend types` (and any
+// defaultHTTPClient is reused by `palbase types` (and any
 // future direct HTTP we add). 30s read timeout matches the SDK side
 // so a slow Kong response surfaces consistently.
 var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -49,7 +50,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 }
 
 // devServerFS embeds the local Node.js dev server. Shipped beside the
-// CLI binary so `palbase backend dev` works without an internet round
+// CLI binary so `palbase dev` works without an internet round
 // trip; copied to a temp dir at runtime so Node can resolve relative
 // requires the way it would inside a real package.
 //
@@ -760,11 +761,11 @@ func renderJSON(v any) string {
 var _ = renderJSON // silence "unused" until --json lands
 
 // ─────────────────────────────────────────────────────────────────────
-// palbase backend pull
+// palbase pull
 //
-// Pulls the branch's latest code archive (same as init does) and then
-// fetches the decrypted branch env vars via env.pull, writing them to
-// .env.local so `palbase backend dev` has the real values.
+// Pulls the branch's latest code archive and then fetches the decrypted
+// branch env vars via env.pull, writing them to
+// .env.local so `palbase dev` has the real values.
 //
 // .env.local is already in the template .gitignore; we also ensure it
 // is listed in the project's own .gitignore so values never reach git,
@@ -915,7 +916,7 @@ code pull is the load-bearing step.`,
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Adım B14 — `palbase backend types`
+// Adım B14 — `palbase types`
 //
 // Pulls the deployed `/openapi.json` for the project and writes
 // `.palbase/openapi.json` + `.palbase/types.d.ts`. Both files are
@@ -943,7 +944,7 @@ Swift codegen is self-contained (no Node/npx). The generated file
 compiles in the consumer app target. Use it from an Xcode Run Script
 build phase for automatic regeneration on every build:
 
-  palbase backend types --lang swift \
+  palbase types --lang swift \
     --out "$DERIVED_FILE_DIR/PalbaseEndpoints.swift" \
     --env "$([ "$CONFIGURATION" = Debug ] && echo local || echo remote)"
 
@@ -971,7 +972,7 @@ Re-run after every push to stay in sync; ` + "`palbase push`" + ` already does (
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase backend dev on localhost:4003)")
+	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase dev on localhost:4003)")
 	cmd.Flags().StringVar(&langFlag, "lang", "ts", "Output language: ts | swift")
 	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output: dir for ts (.palbase), file for swift (PalbaseEndpoints.swift)")
 	return cmd
@@ -1148,7 +1149,7 @@ func generateTypesDecl(ctx context.Context, jsonPath, tsPath string) error {
 	if err != nil {
 		return err
 	}
-	header := []byte("// AUTO-GENERATED FROM YOUR DEPLOYED BACKEND. DO NOT EDIT — RUN 'palbase backend types' TO REFRESH.\n\n")
+	header := []byte("// AUTO-GENERATED FROM YOUR DEPLOYED BACKEND. DO NOT EDIT — RUN 'palbase types' TO REFRESH.\n\n")
 	return os.WriteFile(tsPath, append(header, existing...), 0o644)
 }
 

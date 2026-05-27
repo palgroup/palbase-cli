@@ -72,8 +72,8 @@ type collectionEntry struct {
 
 const documentsHeader = `# config/documents.toml — collection security rules (config-as-code, Faz 1).
 #
-# READ-ONLY MIRROR of server state. ` + "`palbase backend config pull`" + ` overwrites
-# this file; there is no push contract yet (Faz 2). Editing here does not
+# READ-ONLY MIRROR of server state. ` + "`palbase pull`" + ` overwrites
+# this file; this module has no push contract yet. Editing here does not
 # change the server.
 #
 # Each [collections.<name>] holds the app-level security predicate

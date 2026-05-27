@@ -21,7 +21,7 @@ type Endpoints struct {
 	// PublicHost is the suffix every project endpoint lives under. A
 	// project with ref "mu0028" is reachable at "<ref>.<PublicHost>"
 	// (e.g. "https://mu0028.dev.palbase.studio"). The CLI hands this to
-	// `palbase backend dev` so dev-server.js can build a ServerClient
+	// `palbase dev` so dev-server.js can build a ServerClient
 	// pointed at the same hosts the deployed pod hits — no URL parsing
 	// or string surgery on Studio's URL.
 	PublicHost string

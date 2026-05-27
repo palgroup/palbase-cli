@@ -35,7 +35,7 @@ func linkedRef(override string) (string, error) {
 	}
 	cfg, err := auth.LoadProjectConfig()
 	if err != nil || cfg.Ref == "" {
-		return "", fmt.Errorf("not linked to a project — run `palbase backend init` or pass --ref")
+		return "", fmt.Errorf("not linked to a project — run `palbase pull` or pass --ref")
 	}
 	return cfg.Ref, nil
 }

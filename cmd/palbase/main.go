@@ -31,8 +31,9 @@ var resolved config.Resolved
 // authClient is built per invocation from the resolved mode/endpoints.
 var authClient *auth.Client
 
-// studioClient is the tRPC client used by `palbase backend ...` to
-// talk to Studio. Built per invocation against resolved.Endpoints.Studio.
+// studioClient is the tRPC client the backend lifecycle commands
+// (pull/push/dev/...) use to talk to Studio. Built per invocation against
+// resolved.Endpoints.Studio.
 // Retained ONLY for backend until backend REST routes exist (S5.4
 // decision — see docs/decisions/2026-05-24-s5-cli-pat-provisioning-...).
 var studioClient *studio.Client

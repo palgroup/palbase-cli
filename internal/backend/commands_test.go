@@ -41,8 +41,8 @@ func TestCommands_FlatSurface(t *testing.T) {
 }
 
 // TestCommands_NoBackendParent guards against a regression to the old
-// `palbase backend X` shape: none of the returned commands is a `backend`
-// group with children.
+// nested shape (a `backend` parent group with the lifecycle verbs as its
+// children): none of the returned commands is a `backend` group.
 func TestCommands_NoBackendParent(t *testing.T) {
 	for _, c := range Commands(noopResolvers()) {
 		require.NotEqual(t, "backend", c.Name(), "the `backend` parent command must be gone (palbase IS the backend CLI)")
