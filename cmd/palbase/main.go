@@ -12,6 +12,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/branch"
 	"github.com/palgroup/palbase-cli/internal/config"
+	"github.com/palgroup/palbase-cli/internal/merge"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/studio"
@@ -93,6 +94,9 @@ func main() {
 		}),
 		branch.Cmd(branch.Resolvers{
 			REST: func() branch.REST { return managementREST() },
+		}),
+		merge.Cmd(merge.Resolvers{
+			REST: func() merge.REST { return managementREST() },
 		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST: func() apikey.REST { return managementREST() },
