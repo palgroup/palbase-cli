@@ -10,6 +10,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/branch"
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/secret"
@@ -89,6 +90,9 @@ func main() {
 		}),
 		project.Cmd(project.Resolvers{
 			REST: func() project.REST { return managementREST() },
+		}),
+		branch.Cmd(branch.Resolvers{
+			REST: func() branch.REST { return managementREST() },
 		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST: func() apikey.REST { return managementREST() },
