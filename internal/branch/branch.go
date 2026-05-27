@@ -162,7 +162,7 @@ func createCmd(rest func() REST) *cobra.Command {
 				if !isInteractive() {
 					return fmt.Errorf("creating a branch provisions an isolated stack (DB+pod+URL) — pass --yes to confirm in a non-interactive shell")
 				}
-				fmt.Fprintf(out, "Bu yeni bir izole stack açacak (DB+pod+URL), %s/%s. Devam? [y/N]: ", projectRef, name)
+				fmt.Fprintf(out, "Create branch %q on %s? This provisions a new isolated stack (DB, pod, URL). [y/N]: ", name, projectRef)
 				reader := bufio.NewReader(cmd.InOrStdin())
 				line, _ := reader.ReadString('\n')
 				if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
