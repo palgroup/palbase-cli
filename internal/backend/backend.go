@@ -151,45 +151,70 @@ func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, ou
 		return "", err
 	}
 
-	if !isInteractive() {
-		return "", fmt.Errorf("project not linked — pass --ref or run `palbase link <ref>`")
+	picked, err := pickProject(ctx, override, c, out)
+	if err != nil {
+		return "", err
 	}
 
-	var rows []auth.Project
-	if listErr := c.Query(ctx, "project.list", nil, &rows); listErr != nil {
-		return "", fmt.Errorf("auto-link: %w", listErr)
-	}
-	if len(rows) == 0 {
-		return "", fmt.Errorf("no projects in your account — create one at the Palbase Studio dashboard first")
-	}
-
-	var picked auth.Project
-	if len(rows) == 1 {
-		picked = rows[0]
-		fmt.Fprintf(out, "Linking to your only project: %s (%s)\n", picked.Name, picked.Ref)
-	} else {
-		fmt.Fprintln(out, "Select a project:")
-		for i, p := range rows {
-			fmt.Fprintf(out, "  %d) %s (%s)\n", i+1, p.Name, p.Ref)
-		}
-		fmt.Fprint(out, "Enter number: ")
-		var choice int
-		if _, scanErr := fmt.Fscan(os.Stdin, &choice); scanErr != nil {
-			return "", fmt.Errorf("invalid selection: %w", scanErr)
-		}
-		if choice < 1 || choice > len(rows) {
-			return "", fmt.Errorf("invalid selection: %d", choice)
-		}
-		picked = rows[choice-1]
-	}
-
-	// Default to the project's main branch: a fresh link should pull/dev
+	// Default to the project's main branch: a fresh link should pull/serve
 	// against main, not staging. --branch selects another branch per command.
 	if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "main"}); err != nil {
 		return "", fmt.Errorf("save .palbase/config.json: %w", err)
 	}
 	fmt.Fprintf(out, "✓ Linked to %s (%s)\n", picked.Name, picked.Ref)
 	return picked.Ref, nil
+}
+
+// pickProject resolves which project the caller should act on when the cwd
+// isn't linked: it lists the user's projects and selects one. With a
+// non-empty override it matches by ref (CI/scripted path); otherwise it
+// auto-picks the only project or prompts interactively. It does NOT write
+// any config — the caller persists the link where it wants (cwd for the
+// in-place path, a fresh <projectName>/ dir for `palbase pull` clone-mode).
+func pickProject(ctx context.Context, override string, c *studio.Client, out io.Writer) (*auth.Project, error) {
+	if override == "" && !isInteractive() {
+		return nil, fmt.Errorf("project not linked — pass --ref or run `palbase link <ref>`")
+	}
+
+	var rows []auth.Project
+	if listErr := c.Query(ctx, "project.list", nil, &rows); listErr != nil {
+		return nil, fmt.Errorf("auto-link: %w", listErr)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("no projects in your account — create one at the Palbase Studio dashboard first")
+	}
+
+	// --ref override: match by ref, no prompt (works under CI / piped input).
+	if override != "" {
+		for i := range rows {
+			if rows[i].Ref == override {
+				return &rows[i], nil
+			}
+		}
+		return nil, fmt.Errorf("no project with ref %q found in your account", override)
+	}
+
+	if len(rows) == 1 {
+		// Mode-neutral wording: pickProject feeds both the in-place link
+		// ("✓ Linked to …" follows) and clone-mode ("Cloning … into …/"),
+		// so this line must read sensibly before either.
+		fmt.Fprintf(out, "Using your only project: %s (%s)\n", rows[0].Name, rows[0].Ref)
+		return &rows[0], nil
+	}
+
+	fmt.Fprintln(out, "Select a project:")
+	for i, p := range rows {
+		fmt.Fprintf(out, "  %d) %s (%s)\n", i+1, p.Name, p.Ref)
+	}
+	fmt.Fprint(out, "Enter number: ")
+	var choice int
+	if _, scanErr := fmt.Fscan(os.Stdin, &choice); scanErr != nil {
+		return nil, fmt.Errorf("invalid selection: %w", scanErr)
+	}
+	if choice < 1 || choice > len(rows) {
+		return nil, fmt.Errorf("invalid selection: %d", choice)
+	}
+	return &rows[choice-1], nil
 }
 
 // isInteractive returns true when stdin is a TTY. Used by
@@ -835,6 +860,71 @@ func writeEnvLocal(dir string, vars []envVar) error {
 	return nil
 }
 
+// sanitizeProjectDir turns a project's display name into a safe directory
+// name for `palbase pull` clone-mode: lowercase, spaces/underscores → "-",
+// non [a-z0-9-] stripped, runs of "-" collapsed, leading/trailing "-"
+// trimmed. Names that reduce to "", "." or ".." (which would target the cwd
+// or escape it) yield "" so the caller falls back to the project ref.
+func sanitizeProjectDir(name string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		case r == ' ' || r == '_' || r == '-':
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		default:
+			// drop everything else (slashes, dots, punctuation, unicode)
+		}
+	}
+	out := strings.TrimRight(b.String(), "-")
+	if out == "" || out == "." || out == ".." {
+		return ""
+	}
+	return out
+}
+
+// cloneTarget computes the directory `palbase pull` clone-mode should create
+// for a picked project: the sanitized name, falling back to the ref when the
+// name sanitizes to empty. Returns an error if the target already exists and
+// is non-empty (an empty/just-created dir is fine to clone into).
+func cloneTarget(p *auth.Project) (string, error) {
+	name := sanitizeProjectDir(p.Name)
+	if name == "" {
+		name = p.Ref
+	}
+	entries, err := os.ReadDir(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// target doesn't exist yet — clone into a fresh dir
+	case err != nil:
+		return "", fmt.Errorf("check %s: %w", name, err)
+	case len(entries) > 0:
+		return "", fmt.Errorf("directory %q already exists and is not empty", name)
+	}
+	return name, nil
+}
+
+// isCloneMode reports whether `palbase pull` should run in clone-mode: the
+// cwd has no .palbase/config.json (ErrNotLinked) AND no endpoints/ dir. The
+// endpoints/ guard prevents clobbering an existing project whose .palbase/
+// was merely deleted — that case stays in-place and surfaces the normal
+// not-linked path instead of pulling into a sibling directory.
+func isCloneMode() bool {
+	if _, err := projectRef(""); !errors.Is(err, ErrNotLinked) {
+		return false
+	}
+	if _, err := os.Stat("endpoints"); err == nil {
+		return false
+	}
+	return true
+}
+
 func newPullCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var branchFlag string
@@ -849,13 +939,55 @@ func newPullCmd(r Resolvers) *cobra.Command {
 
 .env.local is gitignored — values reach the dev machine, never git. A
 transient env or config failure warns but does not abort the pull; the
-code pull is the load-bearing step.`,
+code pull is the load-bearing step.
+
+Run from an empty directory (no .palbase/config.json, no endpoints/) and
+pull works like 'git clone': it picks a project, creates a <projectName>/
+directory, and pulls into it. It does NOT change your shell's directory —
+it prints a "cd <projectName>" hint to run afterwards.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
-			if err != nil {
-				return err
+
+			// Clone-mode vs in-place. Clone-mode (empty/unlinked dir) creates a
+			// fresh <projectName>/ tree and pulls into it; in-place updates the
+			// already-linked cwd (the original, unchanged behaviour). The two
+			// differ only in (a) where ref comes from and (b) which dir the
+			// pull targets — the body below is shared.
+			var ref string
+			var cwd string
+			cloneDir := "" // non-empty only in clone-mode; drives the final "cd" hint
+			if isCloneMode() {
+				picked, err := pickProject(ctx, refFlag, r.Studio(), os.Stdout)
+				if err != nil {
+					return err
+				}
+				target, err := cloneTarget(picked)
+				if err != nil {
+					return err
+				}
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					return fmt.Errorf("create %s: %w", target, err)
+				}
+				// main by default — a fresh clone tracks main, not staging.
+				if err := auth.SaveProjectConfigIn(target, &auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "main"}); err != nil {
+					return fmt.Errorf("save %s/.palbase/config.json: %w", target, err)
+				}
+				ref = picked.Ref
+				cwd = target
+				cloneDir = target
+				fmt.Printf("Cloning %s (%s) into %s/ ...\n", picked.Name, picked.Ref, target)
+			} else {
+				var err error
+				ref, err = resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
+				if err != nil {
+					return err
+				}
+				cwd, err = os.Getwd()
+				if err != nil {
+					return err
+				}
 			}
+
 			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
 			// "" = main). NAMED GAP: backend.pull / env.pull / config-as-code
 			// tRPC procedures don't accept a branch field yet (env.pull is
@@ -866,10 +998,6 @@ code pull is the load-bearing step.`,
 			branch := resolveActiveBranch(branchFlag)
 			if branch != "" {
 				fmt.Printf("note: --branch %q requested, but server-side branch pull isn't wired yet; pulling the default branch.\n", branch)
-			}
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
 			}
 
 			// ── code pull ─────────────────────────────────────────────
@@ -914,6 +1042,12 @@ code pull is the load-bearing step.`,
 			}
 
 			fmt.Println("✓ pull complete")
+			// Clone-mode pulled into a sibling directory. A CLI can't change
+			// the parent shell's cwd (neither can `git clone`), so print the
+			// hint instead of cd-ing.
+			if cloneDir != "" {
+				fmt.Printf("✓ cd %s to start\n", cloneDir)
+			}
 			return nil
 		},
 	}

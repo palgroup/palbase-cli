@@ -104,7 +104,17 @@ func (l *Linker) Link(ctx context.Context, wantRef string) error {
 
 // SaveProjectConfig writes .palbase/config.json in the current directory.
 func SaveProjectConfig(cfg *ProjectConfig) error {
-	if err := os.MkdirAll(".palbase", 0755); err != nil {
+	return SaveProjectConfigIn(".", cfg)
+}
+
+// SaveProjectConfigIn writes <dir>/.palbase/config.json. Same as
+// SaveProjectConfig but lets the caller target a directory other than the
+// cwd — needed by `palbase pull` clone-mode, which creates a fresh
+// <projectName>/ tree and writes the link config into it rather than into
+// the directory the command was launched from.
+func SaveProjectConfigIn(dir string, cfg *ProjectConfig) error {
+	palbaseDir := filepath.Join(dir, ".palbase")
+	if err := os.MkdirAll(palbaseDir, 0755); err != nil {
 		return fmt.Errorf("create .palbase directory: %w", err)
 	}
 
@@ -113,7 +123,7 @@ func SaveProjectConfig(cfg *ProjectConfig) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	return os.WriteFile(filepath.Join(".palbase", "config.json"), data, 0644)
+	return os.WriteFile(filepath.Join(palbaseDir, "config.json"), data, 0644)
 }
 
 // LoadProjectConfig reads .palbase/config.json from the current directory.
