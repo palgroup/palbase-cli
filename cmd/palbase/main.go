@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
@@ -39,13 +40,26 @@ var authClient *auth.Client
 var studioClient *studio.Client
 
 // managementREST lazily builds the Management-API REST client used by
-// `palbase project`/`apikey`. It loads the keyring DPoP key + the
-// PALBASE_ACCESS_TOKEN PAT on first use; missing material surfaces a
-// clear error from transport.Client.Do rather than at wiring time, so
-// `palbase login` / `config` still run without a PAT present.
+// `palbase project`/`apikey`. It loads the keyring DPoP key + resolves
+// the management credential (PALBASE_ACCESS_TOKEN PAT or, for
+// interactive use, the DPoP-bound login access token — refreshed in
+// place if expired). Missing material surfaces a clear error from
+// transport.Client.Do rather than at wiring time, so `palbase login` /
+// `config` still run without a credential present.
+//
+// The Resolvers callbacks below are `func() REST` — they don't carry the
+// cobra command context. Wiring that through every command package would
+// be a wide refactor for a single side-effect (refresh-token HTTP call);
+// instead we cap the refresh with a short timeout here. Refresh hits
+// /oauth/token on palauth, no streaming, so 30s is generous.
 func managementREST() *transport.Client {
 	key, _ := auth.LoadDPoPKey(string(resolved.Mode))
-	pat, _ := auth.ManagementToken(string(resolved.Mode))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// ManagementToken auto-refreshes an expired login token via /oauth/token
+	// (CLI-12); on failure we leave the credential empty and let
+	// transport.Client.Do emit the actionable "run palbase login" error.
+	pat, _ := authClient.ManagementToken(ctx)
 	return transport.New(resolved.Endpoints.PlatformAPI, key, pat)
 }
 

@@ -312,7 +312,15 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("session expired — run: palbase login")
+		// Surface the server's OAuth error code (invalid_grant /
+		// invalid_dpop_proof / etc.) so callers like ManagementToken can
+		// tell "refresh token rotated/dead" apart from "DPoP proof was
+		// rejected" — the second masquerading as the first wasted hours of
+		// debugging during CLI-12 smoke. Truncate to keep the line bounded
+		// when the body is HTML from a proxy.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("refresh tokens: %d %s — %s",
+			resp.StatusCode, http.StatusText(resp.StatusCode), strings.TrimSpace(string(body)))
 	}
 
 	var tokenResp TokenResponse

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -56,18 +57,38 @@ func EnsureDPoPKey(mode string) (*DPoPKey, error) {
 //  2. The login access token from credentials-<mode>.json — the DPoP-bound
 //     OAuth token `palbase login` provisions (jkt set in the authorize
 //     request, RFC 9449 §10). Studio /api/v1 accepts it on its own; no PAT
-//     is required for interactive use.
+//     is required for interactive use. Expired tokens are refreshed in
+//     place via /oauth/token (DPoP-bound by CLI-11), so an interactive
+//     user keeps working across the 30-min access-token lifetime without
+//     re-running `palbase login`.
 //
 // Returns an actionable error only when neither path is available: the
 // caller is unauthenticated AND not configured for headless use.
-func ManagementToken(mode string) (string, error) {
+func (c *Client) ManagementToken(ctx context.Context) (string, error) {
 	if v := os.Getenv("PALBASE_ACCESS_TOKEN"); v != "" {
 		return v, nil
 	}
-	creds, err := LoadCredentials(mode)
-	if err == nil && creds.AccessToken != "" && !creds.IsExpired() {
-		return creds.AccessToken, nil
+	creds, err := LoadCredentials(c.Cfg.Mode)
+	if err != nil || creds.AccessToken == "" {
+		return "", errNotAuthenticated()
 	}
-	return "", fmt.Errorf("not authenticated — run `palbase login` (or, for headless use, " +
+	if creds.IsExpired() {
+		// Refresh through the same DPoP-bound /oauth/token path login uses
+		// — palauth carries cnf.jkt forward from the prior binding (storage.go
+		// privateClaims), so the renewed access token stays sender-constrained.
+		// If the refresh token is itself dead (30-day lifetime, family-revoked,
+		// or DPoP key wiped), the caller still needs to re-login — surface
+		// the underlying refresh error verbatim so they see why.
+		refreshed, rerr := c.RefreshTokens(ctx, creds)
+		if rerr != nil {
+			return "", fmt.Errorf("%w (refresh failed: %v)", errNotAuthenticated(), rerr)
+		}
+		return refreshed.AccessToken, nil
+	}
+	return creds.AccessToken, nil
+}
+
+func errNotAuthenticated() error {
+	return fmt.Errorf("not authenticated — run `palbase login` (or, for headless use, " +
 		"export PALBASE_ACCESS_TOKEN with a Dashboard-issued DPoP-bound PAT)")
 }
