@@ -2049,7 +2049,21 @@ func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
 // path. The generated PalbaseGenerated.swift is already covered by
 // outputPaths.
 func palbaseCodegenPhaseBlock(shellPhaseID string) string {
-	script := "cd \"${SRCROOT:-.}\"\nif command -v palbase >/dev/null 2>&1; then\n  palbase mobile codegen ios\nelse\n  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\nfi\n"
+	// Fail-soft: codegen failure (login expired, network down, ref
+	// unlinked) prints a warning and lets the build continue with
+	// whatever generated files are already on disk. Hard-failing the
+	// build every time the CLI hiccups blocks Xcode workflow for
+	// trivial reasons. The previous codegen output stays valid until
+	// the customer re-logs in or fixes the underlying issue.
+	script := "cd \"${SRCROOT:-.}\"\n" +
+		"if ! command -v palbase >/dev/null 2>&1; then\n" +
+		"  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if ! palbase mobile codegen ios; then\n" +
+		"  echo \"warning: palbase mobile codegen ios failed; using last generated files (check your login + project link)\"\n" +
+		"fi\n" +
+		"exit 0\n"
 	return "\t\t" + shellPhaseID + " /* Palbase Codegen iOS */ = {\n" +
 		"\t\t\tisa = PBXShellScriptBuildPhase;\n" +
 		"\t\t\tbuildActionMask = 2147483647;\n" +
