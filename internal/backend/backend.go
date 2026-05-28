@@ -331,7 +331,36 @@ func extractTarGzReplace(archive []byte, dest string) error {
 	return nil
 }
 
-// bundleCwd packs the current project (excluding common dev junk) as
+// backendBundleAllowedRoots lists the only top-level cwd entries that
+// belong in a backend deploy archive. Switched to an allow-list after
+// CLI-18: the old deny-list ("skip .git/node_modules/.palbase/...")
+// happily packed anything else the cwd happened to contain, which on a
+// hybrid project tree (e.g. an iOS app where the backend lives in a
+// subdir, or a monorepo with a webapp next to the backend) meant
+// Xcode projects, Swift sources, *.xcodeproj/ bundles, Info.plist —
+// everything — got uploaded to the backend-runtime pod and then re-
+// pulled by the next `palbase pull`. Allow-list is the only safe
+// default: backend artifacts are a small, well-known set; everything
+// else is opt-in (a future palbase.toml [bundle].include).
+var backendBundleAllowedRoots = map[string]struct{}{
+	// Required runtime: handlers + their colocated meta sidecars.
+	"endpoints": {},
+	// Config-as-code (auth/storage/notifications/flags/documents TOMLs).
+	"config": {},
+	// Node deps + lockfile — pod installs from these.
+	"package.json":      {},
+	"package-lock.json": {},
+	"pnpm-lock.yaml":    {},
+	"yarn.lock":         {},
+	// TypeScript config — pod's typecheck/bundling reads it.
+	"tsconfig.json": {},
+	// User-supplied runtime config — bundled but overwritten by the
+	// injected palbase.toml below (kept here so a customer-provided
+	// override survives the walk-phase filter, then loses to inject).
+	"palbase.toml": {},
+}
+
+// bundleCwd packs the project's backend artifacts (allow-list) as
 // tar.gz for the deploy upload, with a freshly-rendered palbase.toml
 // stitched in at the end. The TOML is regenerated from the project's
 // ref on every deploy so user edits can't desync from control-pg.
@@ -340,14 +369,6 @@ func bundleCwd(root, ref string) ([]byte, error) {
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
 
-	skipDirs := map[string]struct{}{
-		".git":         {},
-		"node_modules": {},
-		".palbase":     {},
-		".next":        {},
-		"dist":         {},
-		"build":        {},
-	}
 	walked := 0
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -360,13 +381,18 @@ func bundleCwd(root, ref string) ([]byte, error) {
 		if rel == "." {
 			return nil
 		}
-		base := filepath.Base(rel)
-		if _, skip := skipDirs[base]; skip && info.IsDir() {
-			return filepath.SkipDir
+		// Allow-list gate: a path is in if its top-level component
+		// (everything up to the first separator) is allowed. Anything
+		// else — Info.plist, *.xcodeproj/, palbase/ (Swift sources),
+		// docs/, fixtures/, … — is dropped silently.
+		top := rel
+		if idx := strings.IndexAny(rel, "/\\"); idx >= 0 {
+			top = rel[:idx]
 		}
-		// Skip dotfiles outside .gitignore — keep .gitignore but drop
-		// stuff like .DS_Store + per-tool caches.
-		if strings.HasPrefix(base, ".") && base != ".gitignore" && !info.IsDir() {
+		if _, ok := backendBundleAllowedRoots[top]; !ok {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		header, err := tar.FileInfoHeader(info, "")
