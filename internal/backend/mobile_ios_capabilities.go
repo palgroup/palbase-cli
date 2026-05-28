@@ -112,6 +112,10 @@ func injectEntitlement(content string) (string, bool) {
 // level ones) so we don't accidentally apply the entitlement to other
 // targets (tests, extensions) that don't want it.
 func ensureCodeSignEntitlementsSetting(pbx, relPath string, appConfigIDs []string) (string, bool) {
+	// Quote the value when it contains pbxproj-unsafe characters (spaces
+	// etc.) — a target named "My App" yields "My App.entitlements" which
+	// must be quoted or the project won't parse.
+	relPath = pbxQuote(relPath)
 	setting := "CODE_SIGN_ENTITLEMENTS = " + relPath + ";"
 	if strings.Contains(pbx, setting) {
 		// Already set somewhere — assume idempotent. (A project that
