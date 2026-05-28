@@ -132,6 +132,11 @@ func TestLogin_FullFlow(t *testing.T) {
 			assert.Equal(t, "palbase-cli", r.FormValue("client_id"))
 			assert.NotEmpty(t, r.FormValue("code_verifier"))
 			assert.Equal(t, "test_code", r.FormValue("code"))
+			// CLI-11: exchange must carry a DPoP proof so palauth mints a
+			// cnf.jkt-bound access token (matches the authorize-time
+			// dpop_jkt). Without this the token would silently come back
+			// unbound and every later DPoP-only API call would 401.
+			assert.NotEmpty(t, r.Header.Get("DPoP"), "exchange must carry DPoP proof")
 
 			json.NewEncoder(w).Encode(TokenResponse{
 				AccessToken:  "access_123",
@@ -290,6 +295,9 @@ func TestRefreshTokens(t *testing.T) {
 		r.ParseForm()
 		assert.Equal(t, "refresh_token", r.FormValue("grant_type"))
 		assert.Equal(t, "old_refresh", r.FormValue("refresh_token"))
+		// CLI-11: refresh must carry a DPoP proof so the new access token
+		// stays bound to the keyring key (palauth rebinds cnf.jkt).
+		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
 
 		json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "new_access",
@@ -301,6 +309,11 @@ func TestRefreshTokens(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("PALBASE_NO_KEYRING", "1") // force file fallback under HOME
+
+	// Refresh needs a keyring key to sign its DPoP proof.
+	_, err := EnsureDPoPKey("prod")
+	require.NoError(t, err)
 
 	var output bytes.Buffer
 	client := NewClient(Config{
@@ -499,6 +512,9 @@ func TestGetValidToken_Valid(t *testing.T) {
 
 func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CLI-11: refresh path must present a DPoP proof so the new token
+		// stays bound to the keyring key.
+		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
 		json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "refreshed_token",
 			RefreshToken: "new_refresh",
@@ -509,6 +525,11 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("PALBASE_NO_KEYRING", "1")
+
+	// Refresh signs a DPoP proof; provision the keyring key first.
+	_, err := EnsureDPoPKey("prod")
+	require.NoError(t, err)
 
 	SaveCredentials("prod", &Credentials{
 		AccessToken:  "expired",

@@ -164,7 +164,7 @@ func (c *Client) Login(ctx context.Context) error {
 		if result.err != nil {
 			return result.err
 		}
-		creds, err := c.exchangeCode(ctx, result.code, redirectURI, pkce.Verifier)
+		creds, err := c.exchangeCode(ctx, result.code, redirectURI, pkce.Verifier, key)
 		if err != nil {
 			return err
 		}
@@ -191,7 +191,7 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 }
 
-func (c *Client) exchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (*Credentials, error) {
+func (c *Client) exchangeCode(ctx context.Context, code, redirectURI, codeVerifier string, key *DPoPKey) (*Credentials, error) {
 	data := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -200,12 +200,25 @@ func (c *Client) exchangeCode(ctx context.Context, code, redirectURI, codeVerifi
 		"code_verifier": {codeVerifier},
 	}
 
+	tokenURL := c.Cfg.AuthURL + "/oauth/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.Cfg.AuthURL+"/oauth/token", strings.NewReader(data.Encode()))
+		tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("create token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	// RFC 9449 §10: the authorize request pre-bound this DPoP key
+	// (dpop_jkt query param); the /oauth/token call MUST present a matching
+	// proof or palauth refuses to mint a bound token (storage.go enforces
+	// VerifyBinding). Without this header the access token would come back
+	// without cnf.jkt and silently fail every later DPoP-only API call.
+	// No ATH yet — the access token is what we're asking for.
+	proof, err := key.NewProof(ProofOptions{HTTPMethod: http.MethodPost, URL: tokenURL})
+	if err != nil {
+		return nil, fmt.Errorf("dpop proof for token exchange: %w", err)
+	}
+	req.Header.Set("DPoP", proof)
 
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
@@ -260,7 +273,10 @@ func (c *Client) fetchUserInfo(ctx context.Context, accessToken string) (*UserIn
 	return &info, nil
 }
 
-// RefreshTokens refreshes an expired access token.
+// RefreshTokens refreshes an expired access token. The refreshed access
+// token must remain DPoP-bound to the keyring key, so we present a DPoP
+// proof on the /oauth/token call just like exchangeCode does — palauth
+// carries cnf.jkt forward from the prior token's binding.
 func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Credentials, error) {
 	data := url.Values{
 		"grant_type":    {"refresh_token"},
@@ -268,12 +284,26 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 		"client_id":     {c.Cfg.ClientID},
 	}
 
+	tokenURL := c.Cfg.AuthURL + "/oauth/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.Cfg.AuthURL+"/oauth/token", strings.NewReader(data.Encode()))
+		tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("create refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	// Load the keyring DPoP key so the proof's jkt matches what the original
+	// token was bound to. If the user wiped the keyring after login, refresh
+	// is the right place to fail loudly rather than mint an unbound token.
+	key, err := LoadDPoPKey(c.Cfg.Mode)
+	if err != nil {
+		return nil, fmt.Errorf("load dpop key for refresh: %w", err)
+	}
+	proof, err := key.NewProof(ProofOptions{HTTPMethod: http.MethodPost, URL: tokenURL})
+	if err != nil {
+		return nil, fmt.Errorf("dpop proof for refresh: %w", err)
+	}
+	req.Header.Set("DPoP", proof)
 
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
