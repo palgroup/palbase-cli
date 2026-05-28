@@ -13,8 +13,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha1"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,9 +82,11 @@ type Resolvers struct {
 // `pull` and `push` are unified verbs:
 //   - pull  = code archive + env (.env.local) + config-as-code (config/*.toml)
 //   - push  = deploy (bundle+upload+activate) + config-as-code push
+//
 // so "pull/push the project" is a single action for the developer.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
+		newMobileCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
 		newDevCmd(r),
@@ -91,6 +95,26 @@ func Commands(r Resolvers) []*cobra.Command {
 		newStatusCmd(r),
 		newTypesCmd(r),
 	}
+}
+
+const defaultIOSGeneratedFile = ".palbase/generated/ios/PalbaseGenerated.swift"
+
+type backendTarget struct {
+	URL    string
+	APIKey string
+}
+
+func newMobileCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mobile",
+		Short: "Generate mobile SDK config and typed endpoint code",
+	}
+	cmd.AddCommand(
+		newMobileCheckoutCmd(r),
+		newMobileCodegenCmd(r),
+		newMobileSetupCmd(r),
+	)
+	return cmd
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -1054,6 +1078,580 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to pull (defaults to the active branch; omit for main)")
 	return cmd
+}
+
+func newMobileCheckoutCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "checkout <branch>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Switch the mobile backend branch and regenerate SDK code",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			branch := strings.TrimSpace(args[0])
+			if branch == "" {
+				return fmt.Errorf("branch is required")
+			}
+			ref, err := resolveOrLinkRef(cmd.Context(), "", r.Studio(), os.Stdout)
+			if err != nil {
+				return err
+			}
+			cfg, err := auth.LoadProjectConfig()
+			if err != nil {
+				return err
+			}
+			cfg.DefaultEnv = branch
+			if err := auth.SaveProjectConfig(cfg); err != nil {
+				return fmt.Errorf("save project config: %w", err)
+			}
+			fmt.Fprintf(os.Stdout, "✓ checked out mobile backend branch %q (project %s)\n", branch, ref)
+			if err := generateIOSRemote(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout); err != nil {
+				return fmt.Errorf("ios codegen: %w", err)
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func newMobileCodegenCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "codegen",
+		Short: "Generate mobile SDK code from the active Palbase contract",
+	}
+	cmd.AddCommand(newCodegenIOSCmd(r))
+	return cmd
+}
+
+func newMobileSetupCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Wire a mobile app to generated Palbase SDK code",
+	}
+	cmd.AddCommand(newMobileSetupIOSCmd(r))
+	return cmd
+}
+
+func newMobileSetupIOSCmd(r Resolvers) *cobra.Command {
+	var projectPath string
+	var targetName string
+	cmd := &cobra.Command{
+		Use:   "ios",
+		Args:  cobra.NoArgs,
+		Short: "Add Palbase iOS generated code + build phase to an Xcode project",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ensureIOSGeneratedStub(defaultIOSGeneratedFile); err != nil {
+				return err
+			}
+			project, target, changed, err := setupIOSXcodeProject(projectPath, targetName)
+			if err != nil {
+				return err
+			}
+			if changed {
+				fmt.Fprintf(os.Stdout, "✓ wired %s target %q for Palbase iOS codegen\n", project, target)
+			} else {
+				fmt.Fprintf(os.Stdout, "✓ %s target %q already wired for Palbase iOS codegen\n", project, target)
+			}
+
+			ref, err := resolveOrLinkRef(cmd.Context(), "", r.Studio(), os.Stdout)
+			if err != nil {
+				return err
+			}
+			cfg, err := auth.LoadProjectConfig()
+			if err != nil {
+				return err
+			}
+			branch := cfg.DefaultEnv
+			if branch == "" {
+				branch = "main"
+			}
+			if err := generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout); err != nil {
+				return fmt.Errorf("initial ios codegen: %w", err)
+			}
+			fmt.Fprintln(os.Stdout, "  app usage: pb.configure(PalbaseGenerated.config)")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&projectPath, "project", "", "Path to .xcodeproj (defaults to the only project in cwd)")
+	cmd.Flags().StringVar(&targetName, "target", "", "Xcode target to wire (defaults to the first app target)")
+	return cmd
+}
+
+func newCodegenIOSCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ios",
+		Args:  cobra.NoArgs,
+		Short: "Generate iOS Palbe config + typed endpoint calls",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := auth.LoadProjectConfig()
+			if err != nil {
+				return err
+			}
+			branch := cfg.DefaultEnv
+			if branch == "" {
+				branch = "main"
+			}
+			return generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), cfg.Ref, branch, defaultIOSGeneratedFile, os.Stdout)
+		},
+	}
+	return cmd
+}
+
+func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
+	localURL := "http://localhost:4003"
+	if specBytes, err := fetchOpenAPISpec(ctx, localURL+"/openapi.json", ""); err == nil {
+		apiKey := ""
+		if target, lookupErr := lookupBackendTarget(ctx, sc, endpoints, ref); lookupErr == nil {
+			apiKey = target.APIKey
+		} else {
+			fmt.Fprintf(w, "  (anon key not embedded for local config: %v)\n", lookupErr)
+		}
+		return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
+			URL:    localURL,
+			APIKey: apiKey,
+			Branch: branch,
+			Source: "local",
+		}, outFile, w)
+	}
+	target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
+	if err != nil {
+		return err
+	}
+	return generateIOSRemoteWithTarget(ctx, target, branch, outFile, w)
+}
+
+func generateIOSRemote(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
+	target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
+	if err != nil {
+		return err
+	}
+	return generateIOSRemoteWithTarget(ctx, target, branch, outFile, w)
+}
+
+func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, branch, outFile string, w io.Writer) error {
+	specBytes, err := fetchOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey)
+	if err != nil {
+		return err
+	}
+	return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
+		URL:    target.URL,
+		APIKey: target.APIKey,
+		Branch: branch,
+		Source: "remote",
+	}, outFile, w)
+}
+
+func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string) (backendTarget, error) {
+	var resp struct {
+		EndpointRef string `json:"endpointRef"`
+		AnonKey     string `json:"anonKey"`
+	}
+	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
+		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)
+	}
+	if resp.AnonKey == "" {
+		return backendTarget{}, errors.New("apikey.reveal: missing anon key")
+	}
+	endpointRef := resp.EndpointRef
+	if endpointRef == "" {
+		endpointRef = ref
+	}
+	return backendTarget{
+		URL:    fmt.Sprintf("https://%s.%s", endpointRef, endpoints.PublicHost),
+		APIKey: resp.AnonKey,
+	}, nil
+}
+
+func writeSwiftGenerated(specBytes []byte, cfg swiftGeneratedConfig, outFile string, w io.Writer) error {
+	ops, err := parseOpenAPIForSwift(specBytes)
+	if err != nil {
+		return err
+	}
+	swift := emitSwiftWithConfig(ops, cfg)
+	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(outFile, []byte(swift), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outFile, err)
+	}
+	if err := ensureGitignored(".gitignore", ".palbase/"); err != nil {
+		fmt.Fprintf(w, "  (gitignore not updated: %v)\n", err)
+	}
+	fmt.Fprintf(w, "✓ wrote %s (%d operation(s), %s)\n", outFile, len(ops), cfg.Source)
+	return nil
+}
+
+func ensureIOSGeneratedStub(outFile string) error {
+	if _, err := os.Stat(outFile); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check %s: %w", outFile, err)
+	}
+	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	stub := `// Generated by palbase mobile setup ios. Re-run palbase mobile codegen ios.
+import Foundation
+import Palbe
+
+public enum PalbaseGenerated {
+    public static let config = PalBackendGeneratedConfig(url: "", apiKey: "", branch: "main", source: "setup")
+}
+`
+	if err := os.WriteFile(outFile, []byte(stub), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outFile, err)
+	}
+	return ensureGitignored(".gitignore", ".palbase/")
+}
+
+func setupIOSXcodeProject(projectFlag, targetFlag string) (projectPath, targetName string, changed bool, err error) {
+	projectPath, err = resolveXcodeProject(projectFlag)
+	if err != nil {
+		return "", "", false, err
+	}
+	pbxPath := filepath.Join(projectPath, "project.pbxproj")
+	data, err := os.ReadFile(pbxPath)
+	if err != nil {
+		return "", "", false, fmt.Errorf("read %s: %w", pbxPath, err)
+	}
+	next, targetName, changed, err := patchXcodeProject(string(data), targetFlag)
+	if err != nil {
+		return "", "", false, err
+	}
+	if changed {
+		if err := os.WriteFile(pbxPath, []byte(next), 0o644); err != nil {
+			return "", "", false, fmt.Errorf("write %s: %w", pbxPath, err)
+		}
+	}
+	return projectPath, targetName, changed, nil
+}
+
+func resolveXcodeProject(projectFlag string) (string, error) {
+	if projectFlag != "" {
+		if filepath.Ext(projectFlag) != ".xcodeproj" {
+			return "", fmt.Errorf("--project must point to a .xcodeproj")
+		}
+		if _, err := os.Stat(filepath.Join(projectFlag, "project.pbxproj")); err != nil {
+			return "", fmt.Errorf("check %s/project.pbxproj: %w", projectFlag, err)
+		}
+		return projectFlag, nil
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return "", fmt.Errorf("read cwd: %w", err)
+	}
+	var projects []string
+	for _, e := range entries {
+		if e.IsDir() && filepath.Ext(e.Name()) == ".xcodeproj" {
+			projects = append(projects, e.Name())
+		}
+	}
+	switch len(projects) {
+	case 0:
+		return "", fmt.Errorf("no .xcodeproj found in cwd; pass --project")
+	case 1:
+		return projects[0], nil
+	default:
+		return "", fmt.Errorf("multiple .xcodeproj files found; pass --project")
+	}
+}
+
+type xcodeTarget struct {
+	id          string
+	name        string
+	productType string
+	phases      []string
+}
+
+func patchXcodeProject(pbx, requestedTarget string) (string, string, bool, error) {
+	targets := parseXcodeTargets(pbx)
+	if len(targets) == 0 {
+		return "", "", false, fmt.Errorf("no PBXNativeTarget found in Xcode project")
+	}
+	target, err := chooseXcodeTarget(targets, requestedTarget)
+	if err != nil {
+		return "", "", false, err
+	}
+	sourcesID := ""
+	for _, phaseID := range target.phases {
+		if objectContains(pbx, phaseID, "isa = PBXSourcesBuildPhase;") {
+			sourcesID = phaseID
+			break
+		}
+	}
+	if sourcesID == "" {
+		return "", "", false, fmt.Errorf("target %q has no Swift sources build phase", target.name)
+	}
+
+	const generatedPath = ".palbase/generated/ios/PalbaseGenerated.swift"
+	fileRefID := findObjectIDContaining(pbx, "path = "+generatedPath+";")
+	if fileRefID == "" {
+		fileRefID = xcodeObjectID("palbase-ios-file-ref")
+	}
+	buildFileID := findObjectIDContaining(pbx, "PalbaseGenerated.swift in Sources")
+	if buildFileID == "" {
+		buildFileID = xcodeObjectID("palbase-ios-build-file")
+	}
+	shellPhaseID := findObjectIDContaining(pbx, "name = \"Palbase Codegen iOS\";")
+	if shellPhaseID == "" {
+		shellPhaseID = xcodeObjectID("palbase-ios-shell-phase")
+	}
+
+	next := pbx
+	changed := false
+	var did bool
+	next, did = ensurePBXBuildFile(next, buildFileID, fileRefID)
+	changed = changed || did
+	next, did = ensurePBXFileReference(next, fileRefID)
+	changed = changed || did
+	next, did = ensurePBXShellScriptPhase(next, shellPhaseID)
+	changed = changed || did
+	next, did = ensureBuildFileInSources(next, sourcesID, buildFileID)
+	changed = changed || did
+	next, did = ensureBuildPhaseInTarget(next, target.id, shellPhaseID)
+	changed = changed || did
+	return next, target.name, changed, nil
+}
+
+func parseXcodeTargets(pbx string) []xcodeTarget {
+	lines := strings.Split(pbx, "\n")
+	var targets []xcodeTarget
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if !strings.Contains(line, "= {") || !strings.Contains(line, "/*") {
+			continue
+		}
+		id := strings.Fields(line)[0]
+		j := i + 1
+		for ; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) == "};" {
+				break
+			}
+		}
+		if j >= len(lines) {
+			continue
+		}
+		block := strings.Join(lines[i:j+1], "\n")
+		if !strings.Contains(block, "isa = PBXNativeTarget;") {
+			i = j
+			continue
+		}
+		t := xcodeTarget{id: id, name: xcodeCommentName(line), productType: xcodeValue(block, "productType")}
+		if name := xcodeValue(block, "name"); name != "" {
+			t.name = strings.Trim(name, `"`)
+		}
+		t.phases = xcodeListValue(block, "buildPhases")
+		targets = append(targets, t)
+		i = j
+	}
+	return targets
+}
+
+func chooseXcodeTarget(targets []xcodeTarget, requested string) (xcodeTarget, error) {
+	if requested != "" {
+		for _, t := range targets {
+			if t.name == requested {
+				return t, nil
+			}
+		}
+		return xcodeTarget{}, fmt.Errorf("target %q not found", requested)
+	}
+	for _, t := range targets {
+		if strings.Contains(t.productType, "com.apple.product-type.application") {
+			return t, nil
+		}
+	}
+	return targets[0], nil
+}
+
+func xcodeCommentName(line string) string {
+	start := strings.Index(line, "/*")
+	end := strings.Index(line, "*/")
+	if start == -1 || end == -1 || end <= start+2 {
+		return ""
+	}
+	return strings.TrimSpace(line[start+2 : end])
+}
+
+func xcodeValue(block, key string) string {
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimSpace(line)
+		prefix := key + " = "
+		if strings.HasPrefix(line, prefix) && strings.HasSuffix(line, ";") {
+			return strings.TrimSuffix(strings.TrimPrefix(line, prefix), ";")
+		}
+	}
+	return ""
+}
+
+func xcodeListValue(block, key string) []string {
+	lines := strings.Split(block, "\n")
+	var out []string
+	inList := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == key+" = (" {
+			inList = true
+			continue
+		}
+		if inList && trimmed == ");" {
+			break
+		}
+		if !inList || trimmed == "" {
+			continue
+		}
+		out = append(out, strings.Fields(trimmed)[0])
+	}
+	return out
+}
+
+func objectContains(pbx, objectID, needle string) bool {
+	block := objectBlock(pbx, objectID)
+	return strings.Contains(block, needle)
+}
+
+func objectBlock(pbx, objectID string) string {
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), objectID+" ") && strings.Contains(line, "= {") {
+			j := i + 1
+			for ; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "};" {
+					break
+				}
+			}
+			if j < len(lines) {
+				return strings.Join(lines[i:j+1], "\n")
+			}
+		}
+	}
+	return ""
+}
+
+func findObjectIDContaining(pbx, needle string) string {
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		for j := i; j >= 0 && j >= i-20; j-- {
+			trimmed := strings.TrimSpace(lines[j])
+			if strings.Contains(trimmed, "= {") {
+				fields := strings.Fields(trimmed)
+				if len(fields) > 0 {
+					return fields[0]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func xcodeObjectID(seed string) string {
+	sum := sha1.Sum([]byte("palbase:" + seed))
+	return strings.ToUpper(hex.EncodeToString(sum[:]))[:24]
+}
+
+func ensurePBXBuildFile(pbx, buildFileID, fileRefID string) (string, bool) {
+	if objectBlock(pbx, buildFileID) != "" || strings.Contains(pbx, "PalbaseGenerated.swift in Sources") {
+		return pbx, false
+	}
+	line := "\t\t" + buildFileID + " /* PalbaseGenerated.swift in Sources */ = {isa = PBXBuildFile; fileRef = " + fileRefID + " /* PalbaseGenerated.swift */; };\n"
+	return insertBeforeMarker(pbx, "/* End PBXBuildFile section */", line)
+}
+
+func ensurePBXFileReference(pbx, fileRefID string) (string, bool) {
+	if objectBlock(pbx, fileRefID) != "" || strings.Contains(pbx, "path = .palbase/generated/ios/PalbaseGenerated.swift;") {
+		return pbx, false
+	}
+	line := "\t\t" + fileRefID + " /* PalbaseGenerated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = .palbase/generated/ios/PalbaseGenerated.swift; sourceTree = \"<group>\"; };\n"
+	return insertBeforeMarker(pbx, "/* End PBXFileReference section */", line)
+}
+
+func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
+	if objectBlock(pbx, shellPhaseID) != "" || strings.Contains(pbx, "Palbase Codegen iOS") {
+		return pbx, false
+	}
+	script := "cd \"${SRCROOT:-.}\"\nif command -v palbase >/dev/null 2>&1; then\n  palbase mobile codegen ios\nelse\n  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\nfi\n"
+	block := "\t\t" + shellPhaseID + " /* Palbase Codegen iOS */ = {\n" +
+		"\t\t\tisa = PBXShellScriptBuildPhase;\n" +
+		"\t\t\tbuildActionMask = 2147483647;\n" +
+		"\t\t\tfiles = (\n\t\t\t);\n" +
+		"\t\t\tinputFileListPaths = (\n\t\t\t);\n" +
+		"\t\t\tinputPaths = (\n\t\t\t);\n" +
+		"\t\t\tname = \"Palbase Codegen iOS\";\n" +
+		"\t\t\toutputFileListPaths = (\n\t\t\t);\n" +
+		"\t\t\toutputPaths = (\n" +
+		"\t\t\t\t\"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.swift\",\n" +
+		"\t\t\t);\n" +
+		"\t\t\trunOnlyForDeploymentPostprocessing = 0;\n" +
+		"\t\t\tshellPath = /bin/sh;\n" +
+		"\t\t\tshellScript = " + fmt.Sprintf("%q", script) + ";\n" +
+		"\t\t};\n"
+	if strings.Contains(pbx, "/* End PBXShellScriptBuildPhase section */") {
+		return insertBeforeMarker(pbx, "/* End PBXShellScriptBuildPhase section */", block)
+	}
+	section := "/* Begin PBXShellScriptBuildPhase section */\n" + block + "/* End PBXShellScriptBuildPhase section */\n\n"
+	return insertBeforeMarker(pbx, "/* Begin PBXSourcesBuildPhase section */", section)
+}
+
+func ensureBuildFileInSources(pbx, sourcesID, buildFileID string) (string, bool) {
+	block := objectBlock(pbx, sourcesID)
+	if block == "" {
+		return pbx, false
+	}
+	if strings.Contains(block, buildFileID) || strings.Contains(block, "PalbaseGenerated.swift in Sources") {
+		return pbx, false
+	}
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), sourcesID+" ") && strings.Contains(line, "= {") {
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "files = (" {
+					insert := "\t\t\t\t" + buildFileID + " /* PalbaseGenerated.swift in Sources */,"
+					lines = append(lines[:j+1], append([]string{insert}, lines[j+1:]...)...)
+					return strings.Join(lines, "\n"), true
+				}
+				if strings.TrimSpace(lines[j]) == "};" {
+					break
+				}
+			}
+		}
+	}
+	return pbx, false
+}
+
+func ensureBuildPhaseInTarget(pbx, targetID, shellPhaseID string) (string, bool) {
+	block := objectBlock(pbx, targetID)
+	if block == "" || strings.Contains(block, shellPhaseID) || strings.Contains(block, "Palbase Codegen iOS") {
+		return pbx, false
+	}
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), targetID+" ") && strings.Contains(line, "= {") {
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "buildPhases = (" {
+					insert := "\t\t\t\t" + shellPhaseID + " /* Palbase Codegen iOS */,"
+					lines = append(lines[:j+1], append([]string{insert}, lines[j+1:]...)...)
+					return strings.Join(lines, "\n"), true
+				}
+				if strings.TrimSpace(lines[j]) == "};" {
+					break
+				}
+			}
+		}
+	}
+	return pbx, false
+}
+
+func insertBeforeMarker(s, marker, insertion string) (string, bool) {
+	idx := strings.Index(s, marker)
+	if idx == -1 {
+		return s, false
+	}
+	return s[:idx] + insertion + s[idx:], true
 }
 
 // ─────────────────────────────────────────────────────────────────────

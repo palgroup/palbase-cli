@@ -36,6 +36,8 @@ type swiftProp struct {
 
 type swiftOp struct {
 	operationID string
+	method      string
+	path        string
 	input       *swiftSchema
 	output      *swiftSchema
 }
@@ -53,12 +55,12 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 	}
 
 	var ops []swiftOp
-	for _, item := range paths {
+	for path, item := range paths {
 		methods, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		for _, raw := range methods {
+		for method, raw := range methods {
 			op, ok := raw.(map[string]any)
 			if !ok {
 				continue
@@ -69,6 +71,8 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 			}
 			ops = append(ops, swiftOp{
 				operationID: opID,
+				method:      strings.ToUpper(method),
+				path:        path,
 				input:       requestSchema(op),
 				output:      responseSchema(op),
 			})

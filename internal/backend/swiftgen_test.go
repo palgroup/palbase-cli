@@ -36,7 +36,7 @@ func TestEmitSwift(t *testing.T) {
 		"public extension PalBackendClient {",
 		"var rooms: PBRoomsNamespace",
 		"func create(_ input: Rooms.Create.Input) async throws(BackendError) -> Rooms.Create.Output",
-		`_invoke("rooms.create", input, as: Rooms.Create.Output.self)`,
+		`_invoke(method: "POST", path: "/rooms/create", input, as: Rooms.Create.Output.self)`,
 		"public enum KindValue: String, Codable, Sendable {",
 		"case `public` = \"public\"", // keyword escaped
 		"public let capacity: Int?",  // optional (not required)
