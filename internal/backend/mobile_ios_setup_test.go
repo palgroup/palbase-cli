@@ -19,12 +19,22 @@ func TestPatchXcodeProjectAddsPalbaseGeneratedFileAndPhase(t *testing.T) {
 			buildConfigurationList = 222222222222222222222222 /* Build configuration list for PBXNativeTarget "App" */;
 			buildPhases = (
 				333333333333333333333333 /* Sources */,
+				555555555555555555555555 /* Resources */,
 			);
 			name = App;
 			productName = App;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
+/* Begin PBXResourcesBuildPhase section */
+		555555555555555555555555 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 /* Begin PBXSourcesBuildPhase section */
 		333333333333333333333333 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -55,6 +65,11 @@ func TestPatchXcodeProjectAddsPalbaseGeneratedFileAndPhase(t *testing.T) {
 		"name = \"Palbase Codegen iOS\";",
 		"palbase mobile codegen ios",
 		"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.swift",
+		// JSON bundle resource — copied into the app at build time so
+		// the Palbe SDK can load it from Bundle.main at pb.configure().
+		"PalbaseGenerated.json in Resources",
+		"path = .palbase/generated/ios/PalbaseGenerated.json;",
+		"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.json",
 	} {
 		if !strings.Contains(out, must) {
 			t.Fatalf("patched project missing %q:\n%s", must, out)

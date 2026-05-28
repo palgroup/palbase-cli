@@ -13,12 +13,15 @@ type swiftGeneratedConfig struct {
 	Source string
 }
 
-// emitSwift turns parsed operations into one PalbaseEndpoints.swift.
+// emitSwift turns parsed operations into one PalbaseGenerated.swift.
+//
+// The Swift file is types + endpoint methods only; the runtime
+// config (url / apiKey / branch / source) ships separately as
+// PalbaseGenerated.json — a Bundle resource the Palbe SDK reads at
+// `pb.configure()` time. The split keeps customer apps off any
+// cross-module reflection: typed methods compile against the SDK,
+// the SDK loads its config from the bundle at startup.
 func emitSwift(ops []swiftOp) string {
-	return emitSwiftWithConfig(ops, swiftGeneratedConfig{})
-}
-
-func emitSwiftWithConfig(ops []swiftOp, cfg swiftGeneratedConfig) string {
 	// `auth` is reserved on `pb`; skip endpoints whose top segment is `auth`.
 	var usable []swiftOp
 	for _, op := range ops {
@@ -40,11 +43,11 @@ func emitSwiftWithConfig(ops []swiftOp, cfg swiftGeneratedConfig) string {
 	// generated file. Requires palbackend-ios ≥ v0.2.5.
 	b.WriteString("@_spi(Generated) import Palbe\n\n")
 
-	if cfg.URL != "" {
-		b.WriteString("// MARK: - Generated backend config\n\n")
-		b.WriteString(emitGeneratedConfig(cfg))
-		b.WriteString("\n")
-	}
+	// Backend config (url/apiKey/branch/source) is written separately as
+	// PalbaseGenerated.json next to this file and loaded by the Palbe SDK
+	// from Bundle.main at `pb.configure()` time. Keeps this Swift file
+	// pure types + endpoint methods; no static-let config literal that
+	// the SDK would otherwise need cross-module reflection to find.
 
 	b.WriteString("// MARK: - Request / response types\n\n")
 	b.WriteString(emitTypeTree(usable))
@@ -52,35 +55,6 @@ func emitSwiftWithConfig(ops []swiftOp, cfg swiftGeneratedConfig) string {
 	b.WriteString("\n// MARK: - Namespaced calls (pb.*)\n\n")
 	b.WriteString(emitNamespaceTree(usable))
 
-	return b.String()
-}
-
-func emitGeneratedConfig(cfg swiftGeneratedConfig) string {
-	branch := cfg.Branch
-	if branch == "" {
-		branch = "main"
-	}
-	source := cfg.Source
-	if source == "" {
-		source = "remote"
-	}
-	var b strings.Builder
-	b.WriteString("public enum PalbaseGenerated {\n")
-	b.WriteString("    public static let config = PalBackendGeneratedConfig(\n")
-	b.WriteString("        url: " + swiftStringLiteral(cfg.URL) + ",\n")
-	b.WriteString("        apiKey: " + swiftStringLiteral(cfg.APIKey) + ",\n")
-	b.WriteString("        branch: " + swiftStringLiteral(branch) + ",\n")
-	b.WriteString("        source: " + swiftStringLiteral(source) + "\n")
-	b.WriteString("    )\n")
-	b.WriteString("}\n\n")
-	// Zero-arg pb.configure() shortcut: the customer's call site stays
-	// `pb.configure()` forever. Lives in the consumer target alongside
-	// PalbaseGenerated so it can reach the config struct (cross-module
-	// — the Palbe module can't see it). Rewritten on every codegen run
-	// so it stays in lock-step with `source` (local vs remote).
-	b.WriteString("public extension PalBackendClient {\n")
-	b.WriteString("    func configure() { configure(PalbaseGenerated.config) }\n")
-	b.WriteString("}\n")
 	return b.String()
 }
 
