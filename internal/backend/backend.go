@@ -56,7 +56,12 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // trip; copied to a temp dir at runtime so Node can resolve relative
 // requires the way it would inside a real package.
 //
-//go:embed devjs/dev-server.js
+// module-clients.js is dev-server.js's sibling require — it carries
+// the ctx.<module> fetch wrappers (lockstep mirror of the backend-
+// runtime image's internal/runtime/module-clients.js). Both files must
+// land in the temp dir so the relative resolve works.
+//
+//go:embed devjs/dev-server.js devjs/module-clients.js
 var devServerFS embed.FS
 
 // Resolvers returns lazy accessors for the shared CLI globals, so the
@@ -496,11 +501,11 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 			defer cancel()
 
 			// Reveal the project's anon + service-role keys so dev-server
-			// can build a real ServerClient. If reveal fails (no login,
-			// no project link, network down), we still launch dev-server
-			// without the module clients — ctx.docs/ctx.storage/… throw on
-			// first use, so the user sees a clear error instead of silent
-			// partial behaviour.
+			// can wire its inline module clients (module-clients.js). If
+			// reveal fails (no login, no project link, network down), we
+			// still launch dev-server without the module clients —
+			// ctx.docs/ctx.storage/… throw on first use, so the user sees
+			// a clear error instead of silent partial behaviour.
 			var revealResp struct {
 				EndpointRef    string `json:"endpointRef"`
 				AnonKey        string `json:"anonKey"`
@@ -514,7 +519,7 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 
 			node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
 			// dev-server.js runs from a temp dir but needs to require()
-			// the user's local @palbase/server (and any other declared
+			// the user's local @palbase/backend (and any other declared
 			// deps). NODE_PATH adds the project's node_modules to the
 			// resolver path, and setting Dir keeps `process.cwd()` and
 			// any relative paths from user endpoints anchored to the

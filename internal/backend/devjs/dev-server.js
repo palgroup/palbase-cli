@@ -98,43 +98,33 @@ function walk(dir, cb) {
 
 // ── ctx — bit-perfect twin of prod's pipeline ctx ──────────────────────
 //
-// The module clients (ctx.docs, ctx.storage, …) are a real ServerClient
+// The module clients (ctx.docs, ctx.storage, …) are inline fetch wrappers
 // hitting the same public hosts the deployed pod hits. Local dev = LIVE
 // data: writes go to production palauth/paldocs/db. The CLI prints a banner
 // before starting the server so this isn't a silent surprise.
+//
+// module-clients.js is a verbatim mirror of the backend-runtime's
+// internal/runtime/module-clients.js. Keep them in lockstep — edit both
+// when changing any client surface. There is no @palbase/server dep
+// anymore; customers only add @palbase/backend.
+const { buildModuleClients } = require('./module-clients.js');
 
 let palbaseClientSingleton = null;
-let palbaseClientLoadError = null;
-function getPalbaseClient() {
+function getPalbaseClients() {
   if (!PALBASE_URL || !TENANT_APIKEY) return null;
   if (palbaseClientSingleton) return palbaseClientSingleton;
-  if (palbaseClientLoadError) return null;
-  // @palbase/server is what backend-runtime's worker.js imports too — but
-  // older project templates (pre-CLI-20) only listed @palbase/backend in
-  // dependencies, so the package is missing from node_modules. Treat the
-  // require failure as a soft signal: stash the error, return null so
-  // each module client throws its own "ctx.X unavailable" with a clear
-  // hint, and don't keep retrying every request.
-  let createServerClient;
-  try {
-    ({ createServerClient } = require('@palbase/server'));
-  } catch (e) {
-    palbaseClientLoadError = e;
-    process.stderr.write(`[palbase serve] @palbase/server is not installed in this project — run \`npm install @palbase/server\` so ctx.docs / ctx.storage / ctx.notify / ctx.analytics / ctx.flags work locally. (underlying error: ${e && e.message ? e.message : e})\n`);
-    return null;
-  }
   // Mirror worker.js (the prod backend-runtime path): the apikey
   // header drives Kong's scope decision (`s` = service-role / RLS
-  // bypass, `c` = anon). The module clients ARE the project's privileged
-  // surface, so the service-role key MUST be the primary apikey
-  // when present — passing the anon key here makes Kong stamp
-  // role=anon on the iJWT and downstream services (paldocs)
-  // SET LOCAL ROLE anon, which has read-only grants. Falls back
-  // to anon only when service-role wasn't revealed.
-  const primaryKey = TENANT_SERVICE_ROLE || TENANT_APIKEY;
-  palbaseClientSingleton = createServerClient(primaryKey, {
+  // bypass, `c` = anon). The module clients ARE the project's
+  // privileged surface, so the service-role key wins when present —
+  // passing the anon key here makes Kong stamp role=anon on the iJWT
+  // and downstream services (paldocs) SET LOCAL ROLE anon, which has
+  // read-only grants. Falls back to anon only when service-role
+  // wasn't revealed.
+  palbaseClientSingleton = buildModuleClients({
     url: PALBASE_URL,
-    ...(TENANT_SERVICE_ROLE ? { serviceRole: TENANT_SERVICE_ROLE } : {}),
+    apikey: TENANT_APIKEY,
+    ...(TENANT_SERVICE_ROLE ? { service_role: TENANT_SERVICE_ROLE } : {}),
   });
   return palbaseClientSingleton;
 }
@@ -155,8 +145,8 @@ const MODULE_ALIASES = {
 };
 
 function moduleClients() {
-  const client = getPalbaseClient();
-  if (!client) {
+  const clients = getPalbaseClients();
+  if (!clients) {
     // No tenant credentials: each module slot throws on first use so
     // partial behaviour fails loudly (same shape as worker.js's stub).
     const out = {};
@@ -167,7 +157,7 @@ function moduleClients() {
     return out;
   }
   const out = {};
-  for (const n of MODULE_NAMES) out[n] = client[n];
+  for (const n of MODULE_NAMES) out[n] = clients[n];
   // Identity-equal alias (out.notify === out.notifications) so handlers
   // can use either name and worker.js / dev-server stay consistent.
   for (const [alias, canonical] of Object.entries(MODULE_ALIASES)) {

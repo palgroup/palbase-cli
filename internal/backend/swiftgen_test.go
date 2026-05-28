@@ -32,7 +32,7 @@ func TestEmitSwift(t *testing.T) {
 	out := emitSwift(ops)
 
 	must := []string{
-		"import Palbe",
+		"@_spi(Generated) import Palbe",
 		"public extension PalBackendClient {",
 		"var rooms: PBRoomsNamespace",
 		"func create(_ input: Rooms.Create.Input) async throws(BackendError) -> Rooms.Create.Output",
