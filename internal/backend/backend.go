@@ -1227,7 +1227,17 @@ func newMobileSetupIOSCmd(r Resolvers) *cobra.Command {
 			if err := generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout); err != nil {
 				return fmt.Errorf("initial ios codegen: %w", err)
 			}
-			fmt.Fprintln(os.Stdout, "  app usage: pb.configure(PalbaseGenerated.config)")
+
+			// Google URL scheme — runs AFTER codegen because the
+			// reversed-DNS redirect scheme is derived from the Google
+			// client_id, which codegen just fetched from palauth and
+			// wrote into PalbaseGenerated.json. No-op when the project
+			// has no Google provider configured.
+			if err := wireGoogleURLSchemeFromGenerated(project, target, defaultIOSGeneratedFile, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stdout, "  (Google URL scheme not wired: %v)\n", err)
+			}
+
+			fmt.Fprintln(os.Stdout, "✓ done — the SDK auto-configures from PalbaseGenerated.json; just `import Palbe` and call pb.*")
 			return nil
 		},
 	}
@@ -1279,8 +1289,19 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 	localURL := "http://localhost:4003"
 	if specBytes, err := fetchOpenAPISpec(ctx, localURL+"/openapi.json", ""); err == nil {
 		apiKey := ""
+		var oauth *swiftOAuthConfig
 		if target, lookupErr := lookupBackendTarget(ctx, sc, endpoints, ref); lookupErr == nil {
 			apiKey = target.APIKey
+			// OAuth providers live in remote palauth — the local
+			// backend dev server doesn't proxy /auth/*. Hit the remote
+			// (the same URL the SDK would when configure()'d for the
+			// remote project) so codegen output is identical no matter
+			// which spec source we use.
+			if oauthCfg, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey); oauthErr != nil {
+				fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
+			} else {
+				oauth = oauthCfg
+			}
 		} else {
 			fmt.Fprintf(w, "  (anon key not embedded for local config: %v)\n", lookupErr)
 		}
@@ -1289,6 +1310,7 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 			APIKey: apiKey,
 			Branch: branch,
 			Source: "local",
+			OAuth:  oauth,
 		}, outFile, w)
 	}
 	target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
@@ -1311,11 +1333,22 @@ func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, bran
 	if err != nil {
 		return err
 	}
+	// Best-effort OAuth providers fetch — palauth's public endpoint
+	// returns just the secret-free bits the SDK needs (Apple enabled
+	// flag, Google client_id). A network blip or an older palauth
+	// without the route lands as nil; the codegen continues without
+	// an `oauth` block and the SDK falls back to the explicit-
+	// parameter signInWithGoogle overload.
+	oauth, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey)
+	if oauthErr != nil {
+		fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
+	}
 	return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
 		URL:    target.URL,
 		APIKey: target.APIKey,
 		Branch: branch,
 		Source: "remote",
+		OAuth:  oauth,
 	}, outFile, w)
 }
 
@@ -1393,6 +1426,16 @@ func writeGeneratedConfigJSON(path string, cfg swiftGeneratedConfig) error {
 		"branch":  branch,
 		"source":  source,
 	}
+	// Surface OAuth provider availability so the SDK can run
+	// `pb.auth.signInWithGoogle()` zero-arg (Bundle.main reads this
+	// JSON at startup, hands the values to GoogleSignIn at call
+	// time). Apple's block is just `enabled: true` because the iOS
+	// flow doesn't need client_id on the device. Omitted entirely
+	// when the project has no enabled+configured providers — keeps
+	// the JSON minimal for projects that don't use OAuth.
+	if cfg.OAuth != nil {
+		body["oauth"] = cfg.OAuth
+	}
 	bytes, err := json.MarshalIndent(body, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal generated config: %w", err)
@@ -1462,12 +1505,60 @@ func setupIOSXcodeProject(projectFlag, targetFlag string) (projectPath, targetNa
 	if err != nil {
 		return "", "", false, err
 	}
+
+	// Sign in with Apple capability. Always wired — the SDK's
+	// `pb.auth.signInWithApple()` is zero-config (server-side id_token
+	// exchange), so any project that enables the Apple provider in
+	// Studio can use it with no per-app code. Two parts: an
+	// entitlements file on disk + CODE_SIGN_ENTITLEMENTS pointing at
+	// it in EVERY build config (Debug AND Release — setting it in one
+	// silently fails the other build path).
+	patched, appleChanged, appleErr := wireAppleSignIn(next, projectPath, targetFlag)
+	if appleErr != nil {
+		// Non-fatal: the codegen + Run Script wiring already
+		// succeeded. Surface the capability failure but don't abort
+		// the whole setup — the customer can add the capability in
+		// Xcode if our splice didn't fit their project shape.
+		fmt.Fprintf(os.Stdout, "  (Sign in with Apple capability not wired: %v)\n", appleErr)
+	} else {
+		next = patched
+		changed = changed || appleChanged
+	}
+
 	if changed {
 		if err := os.WriteFile(pbxPath, []byte(next), 0o644); err != nil {
 			return "", "", false, fmt.Errorf("write %s: %w", pbxPath, err)
 		}
 	}
 	return projectPath, targetName, changed, nil
+}
+
+// wireAppleSignIn writes the entitlements file and sets
+// CODE_SIGN_ENTITLEMENTS on the app target's build configs. Returns
+// the patched pbxproj + whether the pbxproj changed (the entitlements
+// file write is tracked separately but folded into the changed flag).
+func wireAppleSignIn(pbx, projectPath, targetFlag string) (string, bool, error) {
+	targets := parseXcodeTargets(pbx)
+	target, err := chooseXcodeTarget(targets, targetFlag)
+	if err != nil {
+		return pbx, false, err
+	}
+	// Entitlements file lives at SRCROOT (the dir containing the
+	// .xcodeproj), named after the target. Matches the demo's
+	// INFOPLIST_FILE = Info.plist convention (SRCROOT-relative).
+	srcroot := filepath.Dir(projectPath)
+	entFileName := target.name + ".entitlements"
+	entPath := filepath.Join(srcroot, entFileName)
+	fileChanged, err := ensureAppleSignInEntitlement(entPath)
+	if err != nil {
+		return pbx, false, err
+	}
+	configIDs := appTargetConfigIDs(pbx, target)
+	if len(configIDs) == 0 {
+		return pbx, fileChanged, fmt.Errorf("no build configurations found for target %q", target.name)
+	}
+	next, settingChanged := ensureCodeSignEntitlementsSetting(pbx, entFileName, configIDs)
+	return next, fileChanged || settingChanged, nil
 }
 
 func resolveXcodeProject(projectFlag string) (string, error) {
@@ -2328,6 +2419,96 @@ func openAPIURL(ctx context.Context, sc *studio.Client, endpoints config.Endpoin
 	default:
 		return "", "", fmt.Errorf("unknown --env %q (expected remote|local)", env)
 	}
+}
+
+// fetchOAuthProviders calls palauth's public `/auth/oauth/providers`
+// endpoint (anon-key authed, secret-free) and lowers the response
+// into the swiftOAuthConfig we serialise into PalbaseGenerated.json.
+//
+// Best-effort: a 404 (older palauth without the endpoint), a
+// non-OAuth-providers response, or a network failure all return
+// (nil, nil) — the codegen continues without an `oauth` block, and
+// the SDK's zero-arg `signInWithGoogle()` overload short-circuits at
+// runtime. We only return an error for things callers genuinely need
+// to act on (malformed JSON from a 2xx response).
+//
+// Apple's response carries only `enabled` because the iOS SDK doesn't
+// need credentials to drive AuthenticationServices — the id_token
+// exchange happens server-side. Google's response carries
+// `client_id`, and we derive the standard reversed-DNS redirectURI
+// (`com.googleusercontent.apps.<numeric-id>:/oauthredirect`) from
+// it so customer apps don't have to hand-author the value too.
+func fetchOAuthProviders(ctx context.Context, baseURL, apiKey string) (*swiftOAuthConfig, error) {
+	if baseURL == "" || apiKey == "" {
+		return nil, nil
+	}
+	url := strings.TrimRight(baseURL, "/") + "/auth/oauth/providers"
+	req, err := newJSONRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, nil // best-effort: caller continues without oauth
+	}
+	req.Header.Set("apikey", apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := defaultHTTPClient.Do(req)
+	if err != nil {
+		return nil, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil
+	}
+	var raw struct {
+		Providers map[string]struct {
+			Enabled  bool   `json:"enabled"`
+			ClientID string `json:"client_id,omitempty"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("decode /auth/oauth/providers: %w", err)
+	}
+	if len(raw.Providers) == 0 {
+		return nil, nil
+	}
+	out := &swiftOAuthConfig{}
+	if apple, ok := raw.Providers["apple"]; ok && apple.Enabled {
+		out.Apple = &swiftOAuthApple{Enabled: true}
+	}
+	if google, ok := raw.Providers["google"]; ok && google.Enabled && google.ClientID != "" {
+		out.Google = &swiftOAuthGoogle{
+			Enabled:     true,
+			ClientID:    google.ClientID,
+			RedirectURI: googleRedirectURIFromClientID(google.ClientID),
+		}
+	}
+	// All providers came back disabled / unconfigured — collapse to nil
+	// so the JSON omits the empty `oauth: {}` block.
+	if out.Apple == nil && out.Google == nil {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// googleRedirectURIFromClientID builds the standard reversed-DNS
+// callback URL Google issues for iOS OAuth clients:
+//
+//	1234567890-abc.apps.googleusercontent.com
+//	→ com.googleusercontent.apps.1234567890-abc:/oauthredirect
+//
+// Customers can override per-call with the explicit
+// `pb.auth.signInWithGoogle(clientID:redirectURI:)` overload if their
+// Google OAuth client uses a non-standard scheme.
+func googleRedirectURIFromClientID(clientID string) string {
+	// Strip the .apps.googleusercontent.com suffix and prepend the
+	// reversed domain. If the suffix is missing (unusual), fall back
+	// to the raw client_id — the SDK error message will surface the
+	// mismatch clearly.
+	const suffix = ".apps.googleusercontent.com"
+	id := strings.TrimSuffix(clientID, suffix)
+	return "com.googleusercontent.apps." + id + ":/oauthredirect"
 }
 
 // fetchOpenAPISpec issues a GET against the project's /openapi.json

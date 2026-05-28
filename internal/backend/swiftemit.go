@@ -11,6 +11,32 @@ type swiftGeneratedConfig struct {
 	APIKey string
 	Branch string
 	Source string
+	// OAuth captures the provider availability map fetched from
+	// palauth's public `/auth/oauth/providers` endpoint. Nil means
+	// "fetch failed or the project has no providers configured" —
+	// the iOS SDK's zero-arg `pb.auth.signInWithGoogle()` will throw
+	// AuthError.invalidCredentials("Google not configured") in that
+	// case (and `signInWithApple()` will still work because Apple's
+	// flow doesn't need a client_id from the Bundle).
+	OAuth *swiftOAuthConfig
+}
+
+// swiftOAuthConfig is what we serialise under `oauth` in
+// PalbaseGenerated.json. Strictly secret-free — palauth's public
+// endpoint never returns secrets so we have nothing to filter here.
+type swiftOAuthConfig struct {
+	Apple  *swiftOAuthApple  `json:"apple,omitempty"`
+	Google *swiftOAuthGoogle `json:"google,omitempty"`
+}
+
+type swiftOAuthApple struct {
+	Enabled bool `json:"enabled"`
+}
+
+type swiftOAuthGoogle struct {
+	Enabled     bool   `json:"enabled"`
+	ClientID    string `json:"client_id"`
+	RedirectURI string `json:"redirect_uri"`
 }
 
 // emitSwift turns parsed operations into one PalbaseGenerated.swift.
