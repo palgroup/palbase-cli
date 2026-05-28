@@ -147,6 +147,13 @@ function getPalbaseClient() {
 const MODULE_NAMES = ['auth', 'storage', 'docs', 'realtime', 'functions',
   'flags', 'notifications', 'analytics', 'links', 'cms'];
 
+// Customer-facing short names that alias to a canonical SDK surface.
+// Kept identical to worker.js's MODULE_CLIENT_ALIASES so dev = prod (e.g.
+// ctx.notify === ctx.notifications). Edit both in lock-step.
+const MODULE_ALIASES = {
+  notify: 'notifications',
+};
+
 function moduleClients() {
   const client = getPalbaseClient();
   if (!client) {
@@ -154,16 +161,48 @@ function moduleClients() {
     // partial behaviour fails loudly (same shape as worker.js's stub).
     const out = {};
     for (const n of MODULE_NAMES) out[n] = notConfiguredModule(n);
+    for (const [alias, canonical] of Object.entries(MODULE_ALIASES)) {
+      out[alias] = out[canonical] || notConfiguredModule(canonical);
+    }
     return out;
   }
   const out = {};
   for (const n of MODULE_NAMES) out[n] = client[n];
+  // Identity-equal alias (out.notify === out.notifications) so handlers
+  // can use either name and worker.js / dev-server stay consistent.
+  for (const [alias, canonical] of Object.entries(MODULE_ALIASES)) {
+    out[alias] = out[canonical];
+  }
   return out;
+}
+
+// ctx.db = the project's own Postgres surface in deployed mode. In
+// `palbase serve` we don't have access to the per-tenant pgx pool
+// (that's tied to the backend-runtime pod's internal-API on
+// 127.0.0.1, not externally reachable). Rather than half-fake it and
+// have handlers silently behave differently in dev vs prod, ctx.db
+// throws a clear "use ctx.docs in serve, or palbase push to test"
+// hint on first call. This keeps dev = prod for everything we CAN
+// honestly mirror (docs, storage, notify, analytics, flags, …) and
+// names the one surface that needs a deploy to exercise.
+function dbClient() {
+  const hint =
+    'ctx.db is not available under `palbase serve` (no local Postgres ' +
+    'tunnel to the tenant pool). For local dev, use ctx.docs.collection() ' +
+    'which proxies through the deployed module. For ctx.db tests, run ' +
+    '`palbase push` and exercise the deployed endpoint.';
+  return new Proxy({}, {
+    get(_t, method) {
+      if (typeof method !== 'string') return undefined;
+      return () => { throw new Error(hint); };
+    },
+  });
 }
 
 function makeCtx(req, params, body, user) {
   return {
     ...moduleClients(),
+    db: dbClient(),
     input: body ?? {},
     params,
     req: {
