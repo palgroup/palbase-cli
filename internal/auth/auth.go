@@ -71,6 +71,19 @@ func (c *Client) Login(ctx context.Context) error {
 		return fmt.Errorf("generate state: %w", err)
 	}
 
+	// Provision the DPoP key BEFORE the authorize request: palauth's
+	// AuthorizeDPoPJKTMiddleware (RFC 9449 §10) reads the `dpop_jkt` query
+	// param and pre-binds the issued access token to that thumbprint via
+	// cnf.jkt. The key MUST exist now — minting it after the token exchange
+	// (the old order) left the token unbound, so the Management-API REST
+	// client's DPoP proofs never matched and every call was rejected.
+	// EnsureDPoPKey is load-or-create (idempotent), so a returning user
+	// keeps the same stable jkt their Dashboard PAT is bound to.
+	key, err := EnsureDPoPKey(c.Cfg.Mode)
+	if err != nil {
+		return fmt.Errorf("provision DPoP key: %w", err)
+	}
+
 	// OAuth 2.1 requires exact-match redirect URIs, so the server-side
 	// client must have every loopback port we might bind to pre-registered.
 	// Palauth's palbase-cli client is seeded with 54321..54325; try them
@@ -94,6 +107,8 @@ func (c *Client) Login(ctx context.Context) error {
 			"code_challenge_method": {"S256"},
 			"state":                 {state},
 			"scope":                 {"openid profile email offline_access"},
+			// Sender-constrain the access token to our DPoP key at issue time.
+			"dpop_jkt": {key.Thumbprint()},
 		}.Encode(),
 	)
 
@@ -159,16 +174,11 @@ func (c *Client) Login(ctx context.Context) error {
 		}
 		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", creds.User.Email, c.Cfg.Mode)
 
-		// Provision the keyring DPoP key the Management API (REST) needs.
-		// The CLI's OAuth token cannot mint a PAT (palauth's PAT-create is
-		// session-gated), so we surface the jkt + next step: generate a
-		// DPoP-bound PAT in the Dashboard and export PALBASE_ACCESS_TOKEN.
-		key, keyErr := EnsureDPoPKey(c.Cfg.Mode)
-		if keyErr != nil {
-			fmt.Fprintf(c.Output, "  ! could not provision DPoP key: %v\n", keyErr)
-			fmt.Fprintln(c.Output, "    Management-API commands (project/apikey) will be unavailable until this is resolved.")
-			return nil
-		}
+		// The access token is now DPoP-bound to `key` (its jkt went into
+		// the authorize request above). The CLI's OAuth token still can't
+		// mint a PAT (palauth's PAT-create is session-gated), so surface
+		// the jkt + next step: generate a DPoP-bound PAT in the Dashboard
+		// (bound to this jkt) and export PALBASE_ACCESS_TOKEN.
 		if os.Getenv("PALBASE_ACCESS_TOKEN") == "" {
 			fmt.Fprintf(c.Output, "  DPoP key ready (jkt=%s)\n", key.Thumbprint())
 			fmt.Fprintln(c.Output, "  To run `palbase project`/`apikey` commands, generate a")

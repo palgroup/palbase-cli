@@ -166,8 +166,11 @@ func TestLogin_FullFlow(t *testing.T) {
 		ClientID: "palbase-cli",
 	}, &output)
 
-	// Override openBrowser to simulate browser callback
+	// Override openBrowser to simulate browser callback. Capture the authorize
+	// URL so we can assert the DPoP jkt binding param was attached.
+	var capturedAuthURL string
 	client.OpenBrowser = func(authURL string) error {
+		capturedAuthURL = authURL
 		// Parse the auth URL to extract state and redirect_uri
 		u, err := parseAuthURL(authURL)
 		if err != nil {
@@ -205,11 +208,29 @@ func TestLogin_FullFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, key.Thumbprint())
 	assert.Contains(t, output.String(), "DPoP key ready")
+
+	// CLI-8: the authorize request must carry dpop_jkt = the key's
+	// thumbprint (RFC 9449 §10) so palauth binds the issued token to it.
+	// Without this the token is unbound and the Management API rejects the
+	// DPoP-proofed requests the REST client makes.
+	au, err := parseAuthURL(capturedAuthURL)
+	require.NoError(t, err)
+	gotJKT := au.Query().Get("dpop_jkt")
+	assert.NotEmpty(t, gotJKT, "authorize URL must carry dpop_jkt")
+	assert.Equal(t, key.Thumbprint(), gotJKT, "dpop_jkt must equal the provisioned key's thumbprint")
+	// base64url SHA-256: 43 chars, no padding, no +/ chars.
+	assert.Len(t, gotJKT, 43, "jkt should be a 43-char base64url SHA-256 thumbprint")
+	assert.NotContains(t, gotJKT, "=", "base64url thumbprint must be unpadded")
+	assert.NotContains(t, gotJKT, "+", "base64url uses - not +")
+	assert.NotContains(t, gotJKT, "/", "base64url uses _ not /")
 }
 
 func TestLogin_Timeout(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	// Login now provisions the DPoP key up front (before authorize); pin the
+	// file fallback so the test never blocks on a real keychain prompt.
+	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	var output bytes.Buffer
 	client := NewClient(Config{
@@ -233,6 +254,9 @@ func TestLogin_StateMismatch(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	// Login now provisions the DPoP key up front (before authorize); pin the
+	// file fallback so the test never blocks on a real keychain prompt.
+	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	var output bytes.Buffer
 	client := NewClient(Config{
