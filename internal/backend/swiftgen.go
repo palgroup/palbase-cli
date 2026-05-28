@@ -284,7 +284,24 @@ func parseSwiftSchema(s map[string]any) swiftSchema {
 		}
 	}
 
+	// Draft 7 / OpenAPI 3.1 allow `type` as an array — `["string","null"]`
+	// is what `zod-to-json-schema` emits for `z.string().nullable()`. Lower
+	// it to the single non-null type + nullable=true so the Swift side
+	// gets `String?` instead of falling through to AnyCodableValue.
 	typ, _ := s["type"].(string)
+	if typ == "" {
+		if arr, ok := s["type"].([]any); ok {
+			for _, v := range arr {
+				if str, ok := v.(string); ok {
+					if str == "null" {
+						nullable = true
+					} else if typ == "" {
+						typ = str
+					}
+				}
+			}
+		}
+	}
 	switch typ {
 	case "string":
 		return swiftSchema{kind: "string", nullable: nullable}

@@ -28,6 +28,10 @@ const fixtureOpenAPI = `{
         },
         "required":["title","meta"]}}}},
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}}}}},
+    "/has-nullable":{"post":{"operationId":"has.nullable",
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"error":{"type":["string","null"]},"ok":{"type":"boolean"}},
+        "required":["error","ok"]}}}}}}},
     "/auth/login":{"post":{"operationId":"auth.login",
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}}}}}}
   }
@@ -71,6 +75,14 @@ func TestEmitSwift(t *testing.T) {
 		"public let body: String?",                       // parent optional
 		"public let meta: Meta",                          // parent → short ref
 		"public let title: String",                       // parent required
+		// `type: ["string","null"]` (zod-to-json-schema for
+		// z.string().nullable()) lowers to String? — NOT
+		// AnyCodableValue. Without the type-array lowering the
+		// generated code would expose AnyCodableValue in public
+		// position and the SDK's SPI gate would reject it.
+		"public struct HasNullableResponse: Codable, Sendable {",
+		"public let error: String?",
+		"public let ok: Bool",
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
