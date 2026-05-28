@@ -50,15 +50,15 @@ func TestEmitSwift(t *testing.T) {
 		"var rooms: PBRoomsNamespace",
 		// Top-level Request / Response structs per operation — no
 		// nested `enum Rooms { typealias Input = ... }` walk.
-		"public struct RoomsCreateRequest: Codable, Sendable {",
-		"public struct RoomsCreateResponse: Codable, Sendable {",
-		"public struct RoomsIdGetRequest: Codable, Sendable {",
-		"public struct RoomsIdGetResponse: Codable, Sendable {",
+		"public nonisolated struct RoomsCreateRequest: Codable, Sendable {",
+		"public nonisolated struct RoomsCreateResponse: Codable, Sendable {",
+		"public nonisolated struct RoomsIdGetRequest: Codable, Sendable {",
+		"public nonisolated struct RoomsIdGetResponse: Codable, Sendable {",
 		// Call signature references the flat top-level names.
 		"func create(_ input: RoomsCreateRequest) async throws(BackendError) -> RoomsCreateResponse",
 		`_invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self)`,
 		// Nested enum (string union) declared inside the parent struct.
-		"public enum KindValue: String, Codable, Sendable {",
+		"public nonisolated enum KindValue: String, Codable, Sendable {",
 		"case `public` = \"public\"", // keyword escaped
 		"public let capacity: Int?",  // optional (not in `required`)
 		"public let score: Double?",  // nullable → optional
@@ -68,8 +68,8 @@ func TestEmitSwift(t *testing.T) {
 		// Nested object property → struct declared INSIDE the parent
 		// struct body (Swift type-nesting); field references the short
 		// name. `body` is optional (not in required); `meta` is required.
-		"public struct PostsCreateRequest: Codable, Sendable {",
-		"public struct Meta: Codable, Sendable {",        // nested struct
+		"public nonisolated struct PostsCreateRequest: Codable, Sendable {",
+		"public nonisolated struct Meta: Codable, Sendable {",        // nested struct
 		"public let pinned: Bool?",                       // nested optional
 		"public let tags: [String]",                      // nested required
 		"public let body: String?",                       // parent optional
@@ -80,7 +80,7 @@ func TestEmitSwift(t *testing.T) {
 		// AnyCodableValue. Without the type-array lowering the
 		// generated code would expose AnyCodableValue in public
 		// position and the SDK's SPI gate would reject it.
-		"public struct HasNullableResponse: Codable, Sendable {",
+		"public nonisolated struct HasNullableResponse: Codable, Sendable {",
 		"public let error: String?",
 		"public let ok: Bool",
 	}
