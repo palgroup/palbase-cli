@@ -200,7 +200,8 @@ func emitTypeTree(ops []swiftOp) string {
 		hasChildren := len(node.children) > 0
 		hasInput := node.op != nil && node.op.input != nil
 		hasOutput := node.op != nil && node.op.output != nil
-		if !hasChildren && !hasInput && !hasOutput {
+		hasErrors := node.op != nil && len(node.op.errors) > 0
+		if !hasChildren && !hasInput && !hasOutput && !hasErrors {
 			// Nothing to emit at this leaf — the namespace method renders
 			// directly against the type prefix.
 			return
@@ -211,6 +212,9 @@ func emitTypeTree(ops []swiftOp) string {
 		}
 		if hasOutput {
 			lines = append(lines, declLines("Output", *node.op.output, depth+1)...)
+		}
+		if hasErrors {
+			lines = append(lines, errorEnumLines(node.op.errors, depth+1)...)
 		}
 		var keys []string
 		for k := range node.children {
@@ -238,6 +242,71 @@ func declLines(name string, s swiftSchema, depth int) []string {
 		return structLines(name, s.props, depth)
 	}
 	return []string{indent(depth) + "public typealias " + name + " = " + bareType(s)}
+}
+
+// errorEnumLines renders a `public enum Error: TypedBackendError` block
+// keyed on the declared TS-side names. Cases with a `data` payload carry
+// the parsed Swift type as an associated value; cases without are bare.
+// init(envelope:) matches the wire `code` and decodes the optional data
+// payload via JSON re-encoding (BackendErrorEnvelope.data is an
+// AnyCodableValue; we serialise + Decode against the case's typed
+// payload). Returning `nil` for an unknown code is what the SDK seam
+// uses to fall through to BackendError.server.
+func errorEnumLines(errs []swiftErrorDef, depth int) []string {
+	var lines []string
+	lines = append(lines, indent(depth)+"public enum Error: TypedBackendError {")
+	fd := depth + 1
+
+	// Per-case data payload structs / typealiases first so the case
+	// declarations below can reference them by name (Swift requires
+	// the type to be in scope at the case site).
+	for _, e := range errs {
+		if e.data == nil {
+			continue
+		}
+		typeName := typeNameOf(e.name) + "Data"
+		lines = append(lines, declLines(typeName, *e.data, fd)...)
+	}
+
+	// case declarations
+	for _, e := range errs {
+		caseName := identOf(e.name)
+		if e.data != nil {
+			typeName := typeNameOf(e.name) + "Data"
+			lines = append(lines, indent(fd)+"case "+caseName+"("+typeName+")")
+		} else {
+			lines = append(lines, indent(fd)+"case "+caseName)
+		}
+	}
+
+	// init(envelope:) — match envelope.error against the declared wire code
+	lines = append(lines, indent(fd)+"public init?(envelope: BackendErrorEnvelope) {")
+	lines = append(lines, indent(fd+1)+"switch envelope.error {")
+	for _, e := range errs {
+		lines = append(lines, indent(fd+1)+"case "+swiftStringLiteral(e.code)+":")
+		caseName := identOf(e.name)
+		if e.data != nil {
+			typeName := typeNameOf(e.name) + "Data"
+			// Re-encode the AnyCodableValue payload to bytes, then decode it
+			// into the typed case shape. A missing/malformed payload
+			// degrades to .<case>(nil-like) ONLY when the case has no
+			// required fields; otherwise nil → caller falls through to
+			// BackendError.server.
+			lines = append(lines, indent(fd+2)+"guard let raw = envelope.data,")
+			lines = append(lines, indent(fd+2)+"      let bytes = try? JSONEncoder().encode(raw),")
+			lines = append(lines, indent(fd+2)+"      let data = try? JSONDecoder.palbaseDefault.decode("+typeName+".self, from: bytes)")
+			lines = append(lines, indent(fd+2)+"else { return nil }")
+			lines = append(lines, indent(fd+2)+"self = ."+caseName+"(data)")
+		} else {
+			lines = append(lines, indent(fd+2)+"self = ."+caseName)
+		}
+	}
+	lines = append(lines, indent(fd+1)+"default: return nil")
+	lines = append(lines, indent(fd+1)+"}")
+	lines = append(lines, indent(fd)+"}")
+
+	lines = append(lines, indent(depth)+"}")
+	return lines
 }
 
 func structLines(name string, props []swiftProp, depth int) []string {
@@ -454,21 +523,37 @@ func renderNSNode(node *nsNode) string {
 		// onto every customer even when the route is fire-and-forget. The
 		// new shapes match the spec literally: no body → no Input param,
 		// no response → -> Void with no @discardableResult.
+		//
+		// When the endpoint declared errors (defineEndpoint({errors:…}))
+		// the method drops to `_invokeTyped(…, errors: <tp>.Error.self)`
+		// and removes the typed-throws constraint — the customer's `catch
+		// <Endpoint>.Error.<case>` clause matches first, and a trailing
+		// `catch let e as BackendError` covers everything else.
+		typedErrors := op.errors != nil && len(op.errors) > 0
+		invoke := "_invoke"
+		errorsArg := ""
+		throwsKw := "throws(BackendError)"
+		if typedErrors {
+			invoke = "_invokeTyped"
+			errorsArg = ", errors: " + tp + ".Error.self"
+			throwsKw = "throws" // mixed: typed enum OR BackendError, so no constraint
+		}
+
 		switch {
 		case op.input != nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async throws(BackendError) -> "+tp+".Output {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+tp+".Output.self)")
+			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async "+throwsKw+" -> "+tp+".Output {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+tp+".Output.self"+errorsArg+")")
 		case op.input != nil && op.output == nil:
-			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async throws(BackendError) {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input)")
+			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async "+throwsKw+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input"+errorsArg+")")
 		case op.input == nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"() async throws(BackendError) -> "+tp+".Output {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+tp+".Output.self)")
+			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" -> "+tp+".Output {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+tp+".Output.self"+errorsArg+")")
 		default: // no input, no output
-			lines = append(lines, indent(1)+vis+"func "+method+"() async throws(BackendError) {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+errorsArg+")")
 		}
 		lines = append(lines, indent(1)+"}")
 	}

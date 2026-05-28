@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -40,6 +41,21 @@ type swiftOp struct {
 	path        string
 	input       *swiftSchema
 	output      *swiftSchema
+	errors      []swiftErrorDef // declared errors via defineEndpoint({ errors: { … } })
+}
+
+// swiftErrorDef describes one declared error from an endpoint's
+// `x-palbase-errors` OpenAPI extension. The friendly TS-side `name` is
+// the iOS enum case identifier; the wire `code` is what the envelope
+// carries and what `TypedBackendError.init(envelope:)` matches on.
+// `data`, when present, is the JSON schema for the structured payload
+// the typed enum case lifts as an associated value.
+type swiftErrorDef struct {
+	name        string       // TS-side key (e.g. "todoLocked") — becomes the Swift case identifier
+	code        string       // wire `error` value (e.g. "todo_locked") — matched at decode time
+	status      int          // HTTP status — kept for doc-comments and quick-help
+	description string       // optional human description
+	data        *swiftSchema // nil when the error carries no payload
 }
 
 // --- Parse ------------------------------------------------------------------
@@ -75,11 +91,122 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 				path:        path,
 				input:       requestSchema(op),
 				output:      responseSchema(op),
+				errors:      declaredErrors(op),
 			})
 		}
 	}
 	sort.Slice(ops, func(i, j int) bool { return ops[i].operationID < ops[j].operationID })
 	return ops, nil
+}
+
+// declaredErrors reads the `x-palbase-errors` OpenAPI extension the
+// backend SDK stashes on each operation when `defineEndpoint({errors:…})`
+// is set. Returns nil when the endpoint has no declared errors — that
+// flips the emit path back to plain `_invoke` (no `<Endpoint>.Error` enum,
+// the wire envelope surfaces as `BackendError.server` on iOS).
+//
+// The extension shape mirrors palbase-ts/backend/src/openapi/convert.ts:
+//
+//	"x-palbase-errors": {
+//	  "todoNotFound": { "status": 404, "code": "todo_not_found", "hasData": false, "description": "..." },
+//	  "todoLocked":   { "status": 409, "code": "todo_locked",    "hasData": true,  "description": "..." }
+//	}
+//
+// The matching response under responses["409"].content."application/json".schema
+// holds the data payload's JSON schema (parsed here for the typed enum's
+// associated value).
+func declaredErrors(op map[string]any) []swiftErrorDef {
+	extRaw, ok := op["x-palbase-errors"].(map[string]any)
+	if !ok || len(extRaw) == 0 {
+		return nil
+	}
+	responses, _ := op["responses"].(map[string]any)
+	out := make([]swiftErrorDef, 0, len(extRaw))
+	for name, raw := range extRaw {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		statusF, _ := entry["status"].(float64)
+		code, _ := entry["code"].(string)
+		description, _ := entry["description"].(string)
+		hasData, _ := entry["hasData"].(bool)
+		if code == "" || statusF == 0 {
+			continue
+		}
+		def := swiftErrorDef{
+			name:        name,
+			code:        code,
+			status:      int(statusF),
+			description: description,
+		}
+		if hasData {
+			def.data = errorDataSchema(responses, int(statusF), code)
+		}
+		out = append(out, def)
+	}
+	// Deterministic order: by case name.
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+// errorDataSchema pulls the data-payload schema out of a declared error's
+// response shape. The TS emitter writes the response as either the
+// declared error's standalone schema (single error on a status) or as
+// `oneOf` (multiple errors sharing a status). In the oneOf case we pick
+// the variant whose `error: { const: <code> }` discriminator matches.
+// Returns nil if the response is missing or no `data` property is set.
+func errorDataSchema(responses map[string]any, status int, code string) *swiftSchema {
+	if responses == nil {
+		return nil
+	}
+	resp, _ := responses[strconv.Itoa(status)].(map[string]any)
+	if resp == nil {
+		return nil
+	}
+	content, _ := resp["content"].(map[string]any)
+	if content == nil {
+		return nil
+	}
+	jsonCT, _ := content["application/json"].(map[string]any)
+	if jsonCT == nil {
+		return nil
+	}
+	schema, _ := jsonCT["schema"].(map[string]any)
+	if schema == nil {
+		return nil
+	}
+
+	// oneOf: pick the variant whose `error.const` matches our code.
+	if variants, ok := schema["oneOf"].([]any); ok {
+		for _, v := range variants {
+			vm, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			props, _ := vm["properties"].(map[string]any)
+			if errProp, ok := props["error"].(map[string]any); ok {
+				if c, _ := errProp["const"].(string); c == code {
+					return extractDataProperty(vm)
+				}
+			}
+		}
+		return nil
+	}
+	return extractDataProperty(schema)
+}
+
+func extractDataProperty(schema map[string]any) *swiftSchema {
+	props, _ := schema["properties"].(map[string]any)
+	if props == nil {
+		return nil
+	}
+	dm, ok := props["data"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	s := parseSwiftSchema(dm)
+	return &s
 }
 
 func requestSchema(op map[string]any) *swiftSchema {
