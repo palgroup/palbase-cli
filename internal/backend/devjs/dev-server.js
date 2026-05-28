@@ -104,10 +104,25 @@ function walk(dir, cb) {
 // before starting the server so this isn't a silent surprise.
 
 let palbaseClientSingleton = null;
+let palbaseClientLoadError = null;
 function getPalbaseClient() {
   if (!PALBASE_URL || !TENANT_APIKEY) return null;
   if (palbaseClientSingleton) return palbaseClientSingleton;
-  const { createServerClient } = require('@palbase/server');
+  if (palbaseClientLoadError) return null;
+  // @palbase/server is what backend-runtime's worker.js imports too — but
+  // older project templates (pre-CLI-20) only listed @palbase/backend in
+  // dependencies, so the package is missing from node_modules. Treat the
+  // require failure as a soft signal: stash the error, return null so
+  // each module client throws its own "ctx.X unavailable" with a clear
+  // hint, and don't keep retrying every request.
+  let createServerClient;
+  try {
+    ({ createServerClient } = require('@palbase/server'));
+  } catch (e) {
+    palbaseClientLoadError = e;
+    process.stderr.write(`[palbase serve] @palbase/server is not installed in this project — run \`npm install @palbase/server\` so ctx.docs / ctx.storage / ctx.notify / ctx.analytics / ctx.flags work locally. (underlying error: ${e && e.message ? e.message : e})\n`);
+    return null;
+  }
   // Mirror worker.js (the prod backend-runtime path): the apikey
   // header drives Kong's scope decision (`s` = service-role / RLS
   // bypass, `c` = anon). The module clients ARE the project's privileged
