@@ -78,14 +78,27 @@ func opSegments(opID string) []string {
 func typeNameOf(s string) string { return sanitize(s, true) }
 func identOf(s string) string    { return escapeKeyword(sanitize(s, false)) }
 
+// typePrefix builds the PascalCase concatenation of all op-id segments,
+// used as the BASE for top-level <Prefix>Request / <Prefix>Response /
+// <Prefix>Error type names. Example: "rooms.create" → "RoomsCreate".
+// Dots between segments are dropped — the user wants flat top-level
+// struct names ("RoomsCreateRequest"), not nested
+// "Rooms.Create.Input"-style enum trees.
 func typePrefix(opID string) string {
 	segs := opSegments(opID)
 	parts := make([]string, len(segs))
 	for i, s := range segs {
 		parts[i] = typeNameOf(s)
 	}
-	return strings.Join(parts, ".")
+	return strings.Join(parts, "")
 }
+
+// requestTypeName / responseTypeName / errorEnumName are the three
+// public top-level names per operation. Kept as small helpers so the
+// emit + call sites agree without duplicating the suffix.
+func requestTypeName(opID string) string  { return typePrefix(opID) + "Request" }
+func responseTypeName(opID string) string { return typePrefix(opID) + "Response" }
+func errorEnumName(opID string) string    { return typePrefix(opID) + "Error" }
 
 func sanitize(s string, firstUpper bool) string {
 	var parts []string
@@ -144,110 +157,96 @@ func unbacktick(s string) string { return strings.ReplaceAll(s, "`", "") }
 
 func indent(d int) string { return strings.Repeat("    ", d) }
 
-// --- Type tree (merged namespaces with Input/Output at leaves) --------------
-
-type typeNode struct {
-	children map[string]*typeNode
-	op       *swiftOp
-}
+// --- Top-level Request / Response / Error types ----------------------------
+//
+// Each operation emits its own flat trio:
+//   public struct RoomsCreateRequest:  Codable, Sendable { … }
+//   public struct RoomsCreateResponse: Codable, Sendable { … }
+//   public enum   RoomsCreateError:    TypedBackendError    { … }
+//
+// Any nested object inside a request/response property is rendered as a
+// `public struct <FieldName> { … }` **inside** the parent struct body
+// (Swift's natural type-nesting), so the field references the short
+// name directly. The struct emitter recurses depth-first, declaring
+// the inner type at the same indent level as the field that uses it.
+//
+// Operations with no input emit no Request type; with no output emit
+// no Response type; with no declared errors emit no Error enum. The
+// namespace methods below match those four shapes.
 
 func emitTypeTree(ops []swiftOp) string {
-	root := &typeNode{children: map[string]*typeNode{}}
+	var lines []string
 	for i := range ops {
 		op := ops[i]
-		segs := opSegments(op.operationID)
-		node := root
-		for _, seg := range segs {
-			tn := typeNameOf(seg)
-			if node.children[tn] == nil {
-				node.children[tn] = &typeNode{children: map[string]*typeNode{}}
+		emitted := false
+		if op.input != nil {
+			lines = append(lines, topLevelDeclLines(requestTypeName(op.operationID), *op.input)...)
+			emitted = true
+		}
+		if op.output != nil {
+			if emitted {
+				lines = append(lines, "")
 			}
-			node = node.children[tn]
+			lines = append(lines, topLevelDeclLines(responseTypeName(op.operationID), *op.output)...)
+			emitted = true
 		}
-		node.op = &op
+		if len(op.errors) > 0 {
+			if emitted {
+				lines = append(lines, "")
+			}
+			lines = append(lines, topLevelErrorEnumLines(errorEnumName(op.operationID), op.errors)...)
+			emitted = true
+		}
+		if emitted {
+			lines = append(lines, "")
+		}
 	}
-
-	var lines []string
-	var walk func(name string, node *typeNode, depth int)
-	walk = func(name string, node *typeNode, depth int) {
-		// Only emit a wrapper enum at all if the leaf actually has child
-		// namespaces OR at least one of Input/Output. An endpoint with no
-		// body and no response (e.g. fire-and-forget POST /healthchecks)
-		// gets a zero-arg, Void-returning method on the namespace — no
-		// dead `enum GetHello { }` shell hanging around. The old emit
-		// stamped Input/Output = EmptyPayload to keep the call signature
-		// uniform, but that forced every customer to pass an empty payload
-		// literal and to bind a no-op return value; the new generator
-		// drops both when the OpenAPI op declares neither.
-		hasChildren := len(node.children) > 0
-		hasInput := node.op != nil && node.op.input != nil
-		hasOutput := node.op != nil && node.op.output != nil
-		hasErrors := node.op != nil && len(node.op.errors) > 0
-		if !hasChildren && !hasInput && !hasOutput && !hasErrors {
-			// Nothing to emit at this leaf — the namespace method renders
-			// directly against the type prefix.
-			return
-		}
-		lines = append(lines, indent(depth)+"public enum "+name+" {")
-		if hasInput {
-			lines = append(lines, declLines("Input", *node.op.input, depth+1)...)
-		}
-		if hasOutput {
-			lines = append(lines, declLines("Output", *node.op.output, depth+1)...)
-		}
-		if hasErrors {
-			lines = append(lines, errorEnumLines(node.op.errors, depth+1)...)
-		}
-		var keys []string
-		for k := range node.children {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			walk(k, node.children[k], depth+1)
-		}
-		lines = append(lines, indent(depth)+"}")
-	}
-	var top []string
-	for k := range root.children {
-		top = append(top, k)
-	}
-	sort.Strings(top)
-	for _, k := range top {
-		walk(k, root.children[k], 0)
-	}
-	return strings.Join(lines, "\n") + "\n"
+	return strings.Join(lines, "\n")
 }
 
-func declLines(name string, s swiftSchema, depth int) []string {
+// topLevelDeclLines renders one top-level type for an operation side
+// (request or response). Objects become `public struct <Name>`; scalars
+// or arrays (no `properties`) fall back to a `public typealias <Name> =
+// <BareType>` so the call signature still reads typed.
+func topLevelDeclLines(name string, s swiftSchema) []string {
 	if s.kind == "object" {
-		return structLines(name, s.props, depth)
+		return structLines(name, s.props, 0)
 	}
-	return []string{indent(depth) + "public typealias " + name + " = " + bareType(s)}
+	return []string{"public typealias " + name + " = " + bareType(s)}
 }
 
-// errorEnumLines renders a `public enum Error: TypedBackendError` block
-// keyed on the declared TS-side names. Cases with a `data` payload carry
-// the parsed Swift type as an associated value; cases without are bare.
-// init(envelope:) matches the wire `code` and decodes the optional data
-// payload via JSON re-encoding (BackendErrorEnvelope.data is an
+// topLevelErrorEnumLines renders one `public enum <Prefix>Error:
+// TypedBackendError` block per operation. `enumName` is the full
+// top-level name (e.g. "RoomsCreateError") so customers reference it
+// directly — no nested `Rooms.Create.Error` walk.
+//
+// Cases with a `data` payload carry the parsed Swift type as an
+// associated value (declared inside the enum body so the case
+// signature can reference it by short name). Cases without are bare.
+// init(envelope:) matches the wire `code` and decodes the optional
+// data payload via JSON re-encoding (BackendErrorEnvelope.data is an
 // AnyCodableValue; we serialise + Decode against the case's typed
 // payload). Returning `nil` for an unknown code is what the SDK seam
 // uses to fall through to BackendError.server.
-func errorEnumLines(errs []swiftErrorDef, depth int) []string {
+func topLevelErrorEnumLines(enumName string, errs []swiftErrorDef) []string {
 	var lines []string
-	lines = append(lines, indent(depth)+"public enum Error: TypedBackendError {")
-	fd := depth + 1
+	lines = append(lines, "public enum "+enumName+": TypedBackendError {")
+	fd := 1
 
 	// Per-case data payload structs / typealiases first so the case
 	// declarations below can reference them by name (Swift requires
-	// the type to be in scope at the case site).
+	// the type to be in scope at the case site). Nested inside the
+	// enum body so customers reference them as `<Enum>.<Name>Data`.
 	for _, e := range errs {
 		if e.data == nil {
 			continue
 		}
 		typeName := typeNameOf(e.name) + "Data"
-		lines = append(lines, declLines(typeName, *e.data, fd)...)
+		if e.data.kind == "object" {
+			lines = append(lines, structLines(typeName, e.data.props, fd)...)
+		} else {
+			lines = append(lines, indent(fd)+"public typealias "+typeName+" = "+bareType(*e.data))
+		}
 	}
 
 	// case declarations
@@ -287,7 +286,7 @@ func errorEnumLines(errs []swiftErrorDef, depth int) []string {
 	lines = append(lines, indent(fd+1)+"}")
 	lines = append(lines, indent(fd)+"}")
 
-	lines = append(lines, indent(depth)+"}")
+	lines = append(lines, "}")
 	return lines
 }
 
@@ -488,7 +487,8 @@ func renderNSNode(node *nsNode) string {
 
 	for _, op := range node.methods {
 		method := identOf(opSegments(op.operationID)[len(opSegments(op.operationID))-1])
-		tp := typePrefix(op.operationID)
+		reqType := requestTypeName(op.operationID)
+		resType := responseTypeName(op.operationID)
 		httpMethod := op.method
 		if httpMethod == "" {
 			httpMethod = "POST"
@@ -507,9 +507,9 @@ func renderNSNode(node *nsNode) string {
 		// no response → -> Void with no @discardableResult.
 		//
 		// When the endpoint declared errors (defineEndpoint({errors:…}))
-		// the method drops to `_invokeTyped(…, errors: <tp>.Error.self)`
+		// the method drops to `_invokeTyped(…, errors: <Prefix>Error.self)`
 		// and removes the typed-throws constraint — the customer's `catch
-		// <Endpoint>.Error.<case>` clause matches first, and a trailing
+		// <Prefix>Error.<case>` clause matches first, and a trailing
 		// `catch let e as BackendError` covers everything else.
 		typedErrors := op.errors != nil && len(op.errors) > 0
 		invoke := "_invoke"
@@ -517,22 +517,22 @@ func renderNSNode(node *nsNode) string {
 		throwsKw := "throws(BackendError)"
 		if typedErrors {
 			invoke = "_invokeTyped"
-			errorsArg = ", errors: " + tp + ".Error.self"
+			errorsArg = ", errors: " + errorEnumName(op.operationID) + ".self"
 			throwsKw = "throws" // mixed: typed enum OR BackendError, so no constraint
 		}
 
 		switch {
 		case op.input != nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async "+throwsKw+" -> "+tp+".Output {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+tp+".Output.self"+errorsArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+reqType+") async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+resType+".self"+errorsArg+")")
 		case op.input != nil && op.output == nil:
-			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async "+throwsKw+" {")
+			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+reqType+") async "+throwsKw+" {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input"+errorsArg+")")
 		case op.input == nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" -> "+tp+".Output {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+tp+".Output.self"+errorsArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+resType+".self"+errorsArg+")")
 		default: // no input, no output
 			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+errorsArg+")")
