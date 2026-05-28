@@ -606,21 +606,43 @@ func renderNSNode(node *nsNode) string {
 			throwsKw = "throws" // mixed: typed enum OR BackendError, so no constraint
 		}
 
+		// Declared headers add a `headers: <Op>Headers` parameter to the
+		// signature (after `input` when present) and a
+		// `, headers: headers.asHeaderDict()` argument to the seam call.
+		// Both empty when no headers declared.
+		headerParam := ""
+		headerArg := ""
+		if op.headers != nil {
+			headerParam = "headers: " + headersTypeName(op.operationID)
+			headerArg = ", headers: headers.asHeaderDict()"
+		}
+		// joinParams comma-joins the leading params so we never emit a
+		// dangling comma like `(, headers:)`.
+		joinParams := func(parts ...string) string {
+			var nonEmpty []string
+			for _, p := range parts {
+				if p != "" {
+					nonEmpty = append(nonEmpty, p)
+				}
+			}
+			return strings.Join(nonEmpty, ", ")
+		}
+
 		switch {
 		case op.input != nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+reqType+") async "+throwsKw+" -> "+resType+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+resType+".self"+errorsArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, headerParam)+") async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+resType+".self"+errorsArg+headerArg+")")
 		case op.input != nil && op.output == nil:
-			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+reqType+") async "+throwsKw+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input"+errorsArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, headerParam)+") async "+throwsKw+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input"+errorsArg+headerArg+")")
 		case op.input == nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" -> "+resType+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+resType+".self"+errorsArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+headerParam+") async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+resType+".self"+errorsArg+headerArg+")")
 		default: // no input, no output
-			lines = append(lines, indent(1)+vis+"func "+method+"() async "+throwsKw+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+errorsArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+headerParam+") async "+throwsKw+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+errorsArg+headerArg+")")
 		}
 		lines = append(lines, indent(1)+"}")
 	}
