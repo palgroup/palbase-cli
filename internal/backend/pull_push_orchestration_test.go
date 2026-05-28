@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
 )
@@ -97,7 +98,14 @@ func (rs *recordingStudio) client(t *testing.T) *studio.Client {
 
 func (rs *recordingStudio) resolvers(t *testing.T) Resolvers {
 	c := rs.client(t)
-	return Resolvers{Studio: func() *studio.Client { return c }}
+	return Resolvers{
+		Studio: func() *studio.Client { return c },
+		// PublicHost is consumed by the lookupBackendTarget call the
+		// post-push URL print uses. The mock studio reveal returns
+		// endpoint_ref + anonKey, so the only piece the test wiring has
+		// to supply is the public-host suffix.
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
+	}
 }
 
 // chdirLinked makes a temp dir the cwd, seeds .palbase/config.json so
@@ -254,6 +262,11 @@ func (rs *recordingStudioPush) resolvers(t *testing.T) Resolvers {
 			ok(map[string]any{"buckets": []any{}})
 		case "/api/trpc/documents.rules.list":
 			ok(map[string]any{"rules": []any{}})
+		case "/api/trpc/apikey.reveal":
+			// post-deploy URL print calls lookupBackendTarget which
+			// needs endpoint_ref + anonKey. Stub returns the same shape
+			// production Studio returns.
+			ok(map[string]any{"endpointRef": "abc123m", "anonKey": "pb_abc123m_canon"})
 		default:
 			t.Errorf("unexpected push tRPC path: %s", path)
 			http.Error(w, "unexpected", http.StatusNotFound)
@@ -261,5 +274,8 @@ func (rs *recordingStudioPush) resolvers(t *testing.T) Resolvers {
 	}))
 	t.Cleanup(srv.Close)
 	c := studio.New(srv.URL, func(_ context.Context) (string, error) { return "tok", nil })
-	return Resolvers{Studio: func() *studio.Client { return c }}
+	return Resolvers{
+		Studio:    func() *studio.Client { return c },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
+	}
 }

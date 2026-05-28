@@ -608,13 +608,22 @@ reported but does NOT roll back the code deploy that already landed.`,
 			// Endpoints are served file-based (e.g. POST /hello/get from
 			// endpoints/hello/post.ts) — there is no /rpc/* prefix on the
 			// deployed runtime, so print the project base URL only.
-			fmt.Printf("  https://%s.dev.palbase.studio\n", ref)
+			//
+			// The URL MUST use the branch endpoint_ref (Kong routes only
+			// that subdomain) and the mode-aware public host. Best-effort:
+			// look it up via apikey.reveal; on failure fall back to a
+			// generic note instead of printing a bare-ref URL that 404s.
+			if target, lerr := lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref); lerr == nil {
+				fmt.Printf("  %s\n", target.URL)
+			} else {
+				fmt.Printf("  (project base URL unavailable: %v)\n", lerr)
+			}
 
 			// Adım B14 — auto-pull types after every successful deploy.
 			// `--no-types` disables for CI loops where the typed
 			// declarations aren't useful.
 			if !skipTypes {
-				if err := pullTypes(ctx, r.Studio(), ref, "remote", os.Stdout); err != nil {
+				if err := pullTypes(ctx, r.Studio(), r.Endpoints(), ref, "remote", os.Stdout); err != nil {
 					// Don't fail the deploy on a types-pull glitch — the
 					// deploy itself succeeded; types are an ergonomic
 					// artifact developers can refresh manually.
@@ -1699,12 +1708,12 @@ Re-run after every push to stay in sync; ` + "`palbase push`" + ` already does (
 				if out == ".palbase" || out == "" {
 					out = "PalbaseEndpoints.swift" // swift default: a file, not a dir
 				}
-				return pullSwiftTypes(cmd.Context(), r.Studio(), ref, envFlag, out, os.Stdout)
+				return pullSwiftTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, envFlag, out, os.Stdout)
 			case "ts", "":
 				if outDir == "" {
 					outDir = ".palbase"
 				}
-				return pullTypesTo(cmd.Context(), r.Studio(), ref, envFlag, outDir, os.Stdout)
+				return pullTypesTo(cmd.Context(), r.Studio(), r.Endpoints(), ref, envFlag, outDir, os.Stdout)
 			default:
 				return fmt.Errorf("unknown --lang %q (expected ts|swift)", langFlag)
 			}
@@ -1719,8 +1728,8 @@ Re-run after every push to stay in sync; ` + "`palbase push`" + ` already does (
 
 // pullTypes is the post-deploy convenience wrapper that writes into
 // the default `.palbase/` directory.
-func pullTypes(ctx context.Context, sc *studio.Client, ref, env string, w io.Writer) error {
-	return pullTypesTo(ctx, sc, ref, env, ".palbase", w)
+func pullTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env string, w io.Writer) error {
+	return pullTypesTo(ctx, sc, endpoints, ref, env, ".palbase", w)
 }
 
 // pullTypesTo does the actual work — fetch /openapi.json, write JSON,
@@ -1730,12 +1739,8 @@ func pullTypes(ctx context.Context, sc *studio.Client, ref, env string, w io.Wri
 // drives the typed `pb.backend.call(name, input)` API.
 // pullSwiftTypes fetches the OpenAPI spec and generates a Swift file of
 // namespaced typed calls for the Palbe iOS SDK. Self-contained — no npx.
-func pullSwiftTypes(ctx context.Context, sc *studio.Client, ref, env, outFile string, w io.Writer) error {
-	specURL, err := openAPIURL(ctx, sc, ref, env)
-	if err != nil {
-		return err
-	}
-	apiKey, err := lookupAnonAPIKey(ctx, sc, ref)
+func pullSwiftTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env, outFile string, w io.Writer) error {
+	specURL, apiKey, err := openAPIURL(ctx, sc, endpoints, ref, env)
 	if err != nil {
 		return err
 	}
@@ -1760,13 +1765,8 @@ func pullSwiftTypes(ctx context.Context, sc *studio.Client, ref, env, outFile st
 	return nil
 }
 
-func pullTypesTo(ctx context.Context, sc *studio.Client, ref, env, outDir string, w io.Writer) error {
-	specURL, err := openAPIURL(ctx, sc, ref, env)
-	if err != nil {
-		return err
-	}
-
-	apiKey, err := lookupAnonAPIKey(ctx, sc, ref)
+func pullTypesTo(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env, outDir string, w io.Writer) error {
+	specURL, apiKey, err := openAPIURL(ctx, sc, endpoints, ref, env)
 	if err != nil {
 		return err
 	}
@@ -1804,35 +1804,34 @@ func pullTypesTo(ctx context.Context, sc *studio.Client, ref, env, outDir string
 	return nil
 }
 
-// openAPIURL resolves the spec URL for the chosen environment.
-func openAPIURL(ctx context.Context, sc *studio.Client, ref, env string) (string, error) {
+// openAPIURL resolves the spec URL for the chosen environment AND the
+// anon key needed to fetch it.
+//
+// remote: routes through Kong, so the URL MUST use the branch
+// endpoint_ref subdomain (apikey.reveal returns it) and the mode-aware
+// public host (endpoints.PublicHost — `dev.palbase.studio` or
+// `palbase.studio`). The old hard-coded `<bareRef>.dev.palbase.studio`
+// 404-ed two ways: bare ref had no Kong route (tenant_not_found), and
+// the host was wrong in prod. `palbase mobile codegen ios` already
+// resolves this correctly via lookupBackendTarget; we route here too so
+// both codegen paths agree on a single source of truth (and the typed
+// path drops to a single tRPC roundtrip).
+//
+// Returns (specURL, apiKey, err) — for the local env the apiKey is "" by
+// design (no auth on `palbase serve`'s localhost spec).
+func openAPIURL(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env string) (string, string, error) {
 	switch env {
 	case "remote", "":
-		// Studio knows the project domain from control-pg; a tRPC
-		// helper would be ideal but for B14.2 we hard-code the dev
-		// domain — `palbase push` itself uses the same.
-		return fmt.Sprintf("https://%s.dev.palbase.studio/openapi.json", ref), nil
+		target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
+		if err != nil {
+			return "", "", err
+		}
+		return target.URL + "/openapi.json", target.APIKey, nil
 	case "local":
-		return "http://localhost:4003/openapi.json", nil
+		return "http://localhost:4003/openapi.json", "", nil
 	default:
-		return "", fmt.Errorf("unknown --env %q (expected remote|local)", env)
+		return "", "", fmt.Errorf("unknown --env %q (expected remote|local)", env)
 	}
-}
-
-// lookupAnonAPIKey calls Studio's apikey.reveal to get the project's
-// anon key. The deployed `/openapi.json` is gated by the same Kong
-// apikey middleware as the endpoint routes so we need a real key to fetch it.
-func lookupAnonAPIKey(ctx context.Context, sc *studio.Client, ref string) (string, error) {
-	var resp struct {
-		AnonKey string `json:"anonKey"`
-	}
-	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
-		return "", fmt.Errorf("apikey.reveal: %w", err)
-	}
-	if resp.AnonKey == "" {
-		return "", errors.New("apikey.reveal: missing anon key")
-	}
-	return resp.AnonKey, nil
 }
 
 // fetchOpenAPISpec issues a GET against the project's /openapi.json

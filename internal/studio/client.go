@@ -116,23 +116,58 @@ type trpcErrorBody struct {
 	Data    struct {
 		Code     string `json:"code"`
 		HTTPCode int    `json:"httpStatus"`
+		// Some Studio errors stash the readable reason here (Zod
+		// validation surfaces, tRPC errorFormatter additions) — when
+		// Message is empty we want this so the user doesn't see a bare
+		// "studio: " line.
+		Cause string `json:"cause,omitempty"`
+		Path  string `json:"path,omitempty"`
 	} `json:"data"`
 }
 
 func (e *trpcErrorBody) toError() error {
-	if e.Data.Code != "" {
-		return fmt.Errorf("studio %s: %s", e.Data.Code, e.Message)
+	// CLI-14 fix: build a descriptive line even when Message is empty,
+	// which Studio routinely returns for module-not-provisioned errors
+	// (the path then sees the empty message wrapped as "auth.providers.list:
+	// studio: " and the user can't tell whether it's a 404, a 500, or a
+	// network drop). Layer the available signals — message → cause →
+	// http status → tRPC code — so something always lands in the output.
+	msg := e.Message
+	if msg == "" && e.Data.Cause != "" {
+		msg = e.Data.Cause
 	}
-	return fmt.Errorf("studio: %s", e.Message)
+	if msg == "" {
+		switch {
+		case e.Data.HTTPCode > 0:
+			msg = fmt.Sprintf("HTTP %d (no error message)", e.Data.HTTPCode)
+		case e.Code != 0:
+			msg = fmt.Sprintf("tRPC code %d (no error message)", e.Code)
+		default:
+			msg = "empty error envelope"
+		}
+	}
+	if e.Data.Code != "" {
+		return fmt.Errorf("studio %s: %s", e.Data.Code, msg)
+	}
+	return fmt.Errorf("studio: %s", msg)
 }
 
 func parseTRPCError(body []byte, status int) error {
 	// Body may be a raw error envelope OR a plain error string.
-	var envelope struct {
+	// The envelope can also be an ARRAY (tRPC batch responses) — handle
+	// that shape too so a batch error isn't silently swallowed as
+	// "studio http <status>: [..." with the real reason hidden inside.
+	var single struct {
 		Error *trpcErrorBody `json:"error"`
 	}
-	if json.Unmarshal(body, &envelope) == nil && envelope.Error != nil {
-		return envelope.Error.toError()
+	if json.Unmarshal(body, &single) == nil && single.Error != nil {
+		return single.Error.toError()
+	}
+	var batch []struct {
+		Error *trpcErrorBody `json:"error"`
+	}
+	if json.Unmarshal(body, &batch) == nil && len(batch) > 0 && batch[0].Error != nil {
+		return batch[0].Error.toError()
 	}
 	return fmt.Errorf("studio http %d: %s", status, truncate(body, 240))
 }
