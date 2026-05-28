@@ -1476,6 +1476,17 @@ func patchXcodeProject(pbx, requestedTarget string) (string, string, bool, error
 	changed = changed || did
 	next, did = ensurePBXFileReference(next, fileRefID)
 	changed = changed || did
+	// Slot the generated file into a "Generated" group so Xcode shows it
+	// under the project navigator (and not "Recovered References", which
+	// is where Xcode parks PBXFileReferences that no group claims). The
+	// helper is idempotent: if a Generated group already exists we just
+	// append the fileRef when missing.
+	groupID := findObjectIDContaining(next, "name = Generated;")
+	if groupID == "" {
+		groupID = xcodeObjectID("palbase-ios-generated-group")
+	}
+	next, did = ensurePalbaseGeneratedGroup(next, groupID, fileRefID)
+	changed = changed || did
 	next, did = ensurePBXShellScriptPhase(next, shellPhaseID)
 	changed = changed || did
 	next, did = ensureBuildFileInSources(next, sourcesID, buildFileID)
@@ -1483,6 +1494,156 @@ func patchXcodeProject(pbx, requestedTarget string) (string, string, bool, error
 	next, did = ensureBuildPhaseInTarget(next, target.id, shellPhaseID)
 	changed = changed || did
 	return next, target.name, changed, nil
+}
+
+// ensurePalbaseGeneratedGroup makes sure the PalbaseGenerated.swift file
+// reference is parented to a named "Generated" PBXGroup, attached to the
+// project's root group. Without a parent, Xcode displays the file under
+// "Recovered References" — technically buildable but visually broken.
+//
+// Cases:
+//   - Generated group exists: append fileRefID to its children if missing.
+//   - Generated group doesn't exist + the project has a PBXGroup section:
+//     emit the new group and attach it under the root group.
+//   - No PBXGroup section at all (rare: minimal hand-rolled pbxproj /
+//     test fixture): bail without mutating — the project shape is
+//     non-standard and we can't safely splice. Keeps idempotency in those
+//     cases too (the second patch is a no-op).
+func ensurePalbaseGeneratedGroup(pbx, groupID, fileRefID string) (string, bool) {
+	groupBlock := objectBlock(pbx, groupID)
+	if groupBlock != "" {
+		changed := false
+		// Ensure fileRefID listed inside Generated's children.
+		if !strings.Contains(groupBlock, fileRefID) {
+			needle := groupID + " /* Generated */ = {"
+			lines := strings.Split(pbx, "\n")
+			for i, line := range lines {
+				if !strings.Contains(line, needle) {
+					continue
+				}
+				for j := i; j < len(lines) && j < i+20; j++ {
+					if strings.Contains(lines[j], "children = (") {
+						insert := "\t\t\t\t" + fileRefID + " /* PalbaseGenerated.swift */,"
+						newLines := append([]string{}, lines[:j+1]...)
+						newLines = append(newLines, insert)
+						newLines = append(newLines, lines[j+1:]...)
+						pbx = strings.Join(newLines, "\n")
+						changed = true
+						break
+					}
+				}
+				break
+			}
+		}
+		// Self-heal: ensure the Generated group is also attached to the
+		// root PBXGroup. An earlier CLI version (pre this fix) created
+		// the group but never wired it into the navigator, so it
+		// floated and Xcode parked the file under Recovered References.
+		// Re-running `palbase mobile setup ios` picks up the attachment
+		// without needing to recreate the group.
+		if rootGroupID := findRootPBXGroup(pbx); rootGroupID != "" {
+			rootBlock := objectBlock(pbx, rootGroupID)
+			if !strings.Contains(rootBlock, groupID+" /* Generated */") {
+				pbx = appendChildToGroup(pbx, rootGroupID, groupID, "Generated")
+				changed = true
+			}
+		}
+		return pbx, changed
+	}
+
+	// No Generated group yet. We need a PBXGroup section to slot a new
+	// group into; if the project doesn't have one, skip silently (the
+	// file ref still lives in the project — Xcode will park it under
+	// Recovered References, same as before this fix; but at least the
+	// patch stays idempotent, which the test guards).
+	if !strings.Contains(pbx, "/* End PBXGroup section */") {
+		return pbx, false
+	}
+
+	groupDef := "\t\t" + groupID + " /* Generated */ = {\n" +
+		"\t\t\tisa = PBXGroup;\n" +
+		"\t\t\tchildren = (\n" +
+		"\t\t\t\t" + fileRefID + " /* PalbaseGenerated.swift */,\n" +
+		"\t\t\t);\n" +
+		"\t\t\tname = Generated;\n" +
+		"\t\t\tsourceTree = \"<group>\";\n" +
+		"\t\t};\n"
+	next, inserted := insertBeforeMarker(pbx, "/* End PBXGroup section */", groupDef)
+	if !inserted {
+		return pbx, false
+	}
+
+	// Attach to the root group so it shows up in the navigator.
+	if rootGroupID := findRootPBXGroup(next); rootGroupID != "" {
+		next = appendChildToGroup(next, rootGroupID, groupID, "Generated")
+	}
+	return next, true
+}
+
+// findRootPBXGroup returns the id of the first PBXGroup that has no
+// `path` attribute and a `sourceTree = "<group>";` — i.e. the project's
+// root group. Returns "" if it can't tell.
+//
+// Xcode templates spell the root group as `<id> = {` with no `/* … */`
+// comment (every other PBX object carries the comment). That single
+// shape tells us the line opens the root; the 15-line lookahead just
+// confirms it's actually a PBXGroup whose sourceTree is "<group>" and
+// has no `path` (a child group like /* palbase */ has both `path` and
+// the comment).
+func findRootPBXGroup(pbx string) string {
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasSuffix(trimmed, "= {") {
+			continue
+		}
+		if strings.Contains(trimmed, "/*") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 || fields[1] != "=" {
+			continue
+		}
+		blob := strings.Join(lines[i:min(i+15, len(lines))], "\n")
+		if strings.Contains(blob, "isa = PBXGroup;") &&
+			strings.Contains(blob, `sourceTree = "<group>";`) &&
+			!strings.Contains(blob, "\tpath = ") {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+// appendChildToGroup adds a child reference (e.g. `<id> /* Generated */,`)
+// to the named PBXGroup's children list, idempotently.
+func appendChildToGroup(pbx, groupID, childID, childName string) string {
+	needle := childID + " /* " + childName + " */,"
+	if block := objectBlock(pbx, groupID); strings.Contains(block, needle) {
+		return pbx
+	}
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, groupID+" = {") && !strings.Contains(line, groupID+" /*") {
+			continue
+		}
+		for j := i; j < len(lines) && j < i+20; j++ {
+			if strings.Contains(lines[j], "children = (") {
+				insert := "\t\t\t\t" + needle
+				newLines := append([]string{}, lines[:j+1]...)
+				newLines = append(newLines, insert)
+				newLines = append(newLines, lines[j+1:]...)
+				return strings.Join(newLines, "\n")
+			}
+		}
+	}
+	return pbx
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func parseXcodeTargets(pbx string) []xcodeTarget {

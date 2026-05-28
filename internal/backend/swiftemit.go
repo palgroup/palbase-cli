@@ -183,18 +183,29 @@ func emitTypeTree(ops []swiftOp) string {
 	var lines []string
 	var walk func(name string, node *typeNode, depth int)
 	walk = func(name string, node *typeNode, depth int) {
+		// Only emit a wrapper enum at all if the leaf actually has child
+		// namespaces OR at least one of Input/Output. An endpoint with no
+		// body and no response (e.g. fire-and-forget POST /healthchecks)
+		// gets a zero-arg, Void-returning method on the namespace — no
+		// dead `enum GetHello { }` shell hanging around. The old emit
+		// stamped Input/Output = EmptyPayload to keep the call signature
+		// uniform, but that forced every customer to pass an empty payload
+		// literal and to bind a no-op return value; the new generator
+		// drops both when the OpenAPI op declares neither.
+		hasChildren := len(node.children) > 0
+		hasInput := node.op != nil && node.op.input != nil
+		hasOutput := node.op != nil && node.op.output != nil
+		if !hasChildren && !hasInput && !hasOutput {
+			// Nothing to emit at this leaf — the namespace method renders
+			// directly against the type prefix.
+			return
+		}
 		lines = append(lines, indent(depth)+"public enum "+name+" {")
-		if node.op != nil {
-			if node.op.input != nil {
-				lines = append(lines, declLines("Input", *node.op.input, depth+1)...)
-			} else {
-				lines = append(lines, indent(depth+1)+"public typealias Input = EmptyPayload")
-			}
-			if node.op.output != nil {
-				lines = append(lines, declLines("Output", *node.op.output, depth+1)...)
-			} else {
-				lines = append(lines, indent(depth+1)+"public typealias Output = EmptyPayload")
-			}
+		if hasInput {
+			lines = append(lines, declLines("Input", *node.op.input, depth+1)...)
+		}
+		if hasOutput {
+			lines = append(lines, declLines("Output", *node.op.output, depth+1)...)
 		}
 		var keys []string
 		for k := range node.children {
@@ -430,13 +441,29 @@ func renderNSNode(node *nsNode) string {
 		if httpPath == "" {
 			httpPath = "/" + strings.ReplaceAll(op.operationID, ".", "/")
 		}
-		lines = append(lines, indent(1)+"@discardableResult")
-		if op.input != nil {
+
+		// Four shapes depending on which sides the OpenAPI op declares.
+		// Old generator forced Input=EmptyPayload / Output=EmptyPayload so
+		// every call looked uniform; that pushed an awkward
+		//   _ = try await pb.foo.bar(EmptyPayload())
+		// onto every customer even when the route is fire-and-forget. The
+		// new shapes match the spec literally: no body → no Input param,
+		// no response → -> Void with no @discardableResult.
+		switch {
+		case op.input != nil && op.output != nil:
+			lines = append(lines, indent(1)+"@discardableResult")
 			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async throws(BackendError) -> "+tp+".Output {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+tp+".Output.self)")
-		} else {
+		case op.input != nil && op.output == nil:
+			lines = append(lines, indent(1)+vis+"func "+method+"(_ input: "+tp+".Input) async throws(BackendError) {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input)")
+		case op.input == nil && op.output != nil:
+			lines = append(lines, indent(1)+"@discardableResult")
 			lines = append(lines, indent(1)+vis+"func "+method+"() async throws(BackendError) -> "+tp+".Output {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+tp+".Output.self)")
+		default: // no input, no output
+			lines = append(lines, indent(1)+vis+"func "+method+"() async throws(BackendError) {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+")")
 		}
 		lines = append(lines, indent(1)+"}")
 	}

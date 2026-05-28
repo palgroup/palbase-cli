@@ -9,8 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@palbase/backend": "latest",
-    "@palbase/server": "latest"
+    "@palbase/backend": "latest"
   },
   "devDependencies": {
     "@types/node": "^22",
