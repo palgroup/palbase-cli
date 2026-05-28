@@ -98,8 +98,9 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("management API: no dpop key — run `palbase login` to provision one")
 	}
 	if c.PAT == "" {
-		return fmt.Errorf("management API: no management PAT — set PALBASE_ACCESS_TOKEN " +
-			"(generate a DPoP-bound access token in the Dashboard; see `palbase login` output)")
+		return fmt.Errorf("management API: not authenticated — run `palbase login` " +
+			"(or, for headless use, export PALBASE_ACCESS_TOKEN with a Dashboard-issued " +
+			"DPoP-bound PAT)")
 	}
 
 	fullURL := c.BaseURL + path

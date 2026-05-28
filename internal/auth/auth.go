@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -175,16 +174,13 @@ func (c *Client) Login(ctx context.Context) error {
 		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", creds.User.Email, c.Cfg.Mode)
 
 		// The access token is now DPoP-bound to `key` (its jkt went into
-		// the authorize request above). The CLI's OAuth token still can't
-		// mint a PAT (palauth's PAT-create is session-gated), so surface
-		// the jkt + next step: generate a DPoP-bound PAT in the Dashboard
-		// (bound to this jkt) and export PALBASE_ACCESS_TOKEN.
-		if os.Getenv("PALBASE_ACCESS_TOKEN") == "" {
-			fmt.Fprintf(c.Output, "  DPoP key ready (jkt=%s)\n", key.Thumbprint())
-			fmt.Fprintln(c.Output, "  To run `palbase project`/`apikey` commands, generate a")
-			fmt.Fprintln(c.Output, "  DPoP-bound access token in the Dashboard (bound to the jkt above)")
-			fmt.Fprintln(c.Output, "  and export it: export PALBASE_ACCESS_TOKEN=pat_…")
-		}
+		// Surface the DPoP key thumbprint so the user can see what's been
+		// provisioned. The login token is itself DPoP-bound (the jkt went
+		// into the authorize request above), so it doubles as the
+		// management credential — no PAT is needed for interactive use.
+		// A Dashboard-issued PAT bound to this jkt is still useful for
+		// headless contexts (CI, AI agents, no browser).
+		fmt.Fprintf(c.Output, "  DPoP key ready (jkt=%s)\n", key.Thumbprint())
 		return nil
 
 	case <-time.After(120 * time.Second):

@@ -45,17 +45,29 @@ func EnsureDPoPKey(mode string) (*DPoPKey, error) {
 	return key, nil
 }
 
-// ManagementToken resolves the DPoP-bound management PAT for mode.
+// ManagementToken resolves the DPoP-bound credential the management API
+// (Studio /api/v1) expects on the Authorization header.
 //
-// Source: PALBASE_ACCESS_TOKEN — a Dashboard-issued, DPoP-bound PAT. This
-// is the supported management credential (headless + interactive) until
-// palauth grows an OAuth-token-authed PAT-mint path. A missing env var
-// yields an actionable error rather than a silent failure.
-func ManagementToken(_ string) (string, error) {
+// Priority:
+//  1. PALBASE_ACCESS_TOKEN — a Dashboard-issued, DPoP-bound PAT. Headless
+//     callers (CI, AI agents, no browser) need this; an env-supplied PAT
+//     also wins for interactive callers that want a narrowly-scoped
+//     credential.
+//  2. The login access token from credentials-<mode>.json — the DPoP-bound
+//     OAuth token `palbase login` provisions (jkt set in the authorize
+//     request, RFC 9449 §10). Studio /api/v1 accepts it on its own; no PAT
+//     is required for interactive use.
+//
+// Returns an actionable error only when neither path is available: the
+// caller is unauthenticated AND not configured for headless use.
+func ManagementToken(mode string) (string, error) {
 	if v := os.Getenv("PALBASE_ACCESS_TOKEN"); v != "" {
 		return v, nil
 	}
-	return "", fmt.Errorf("no management access token — set PALBASE_ACCESS_TOKEN to a " +
-		"DPoP-bound Personal Access Token (generate one in the Palbase Dashboard, bound to " +
-		"the jkt printed by `palbase login`)")
+	creds, err := LoadCredentials(mode)
+	if err == nil && creds.AccessToken != "" && !creds.IsExpired() {
+		return creds.AccessToken, nil
+	}
+	return "", fmt.Errorf("not authenticated — run `palbase login` (or, for headless use, " +
+		"export PALBASE_ACCESS_TOKEN with a Dashboard-issued DPoP-bound PAT)")
 }

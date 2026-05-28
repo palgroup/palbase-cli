@@ -2,6 +2,7 @@ package auth
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -30,9 +31,31 @@ func TestManagementToken_FromEnv(t *testing.T) {
 	require.Equal(t, "pat_headless_123", tok)
 }
 
-func TestManagementToken_MissingIsActionable(t *testing.T) {
+func TestManagementToken_LoginFallback(t *testing.T) {
+	// Isolate HOME so the test sees only credentials we write here.
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PALBASE_ACCESS_TOKEN", "")
+
+	// A logged-in user without a PAT must still authenticate to the
+	// management API — their DPoP-bound login access token is the
+	// credential.
+	creds := &Credentials{
+		AccessToken: "login_at_xyz",
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}
+	require.NoError(t, SaveCredentials("dev", creds))
+
+	tok, err := ManagementToken("dev")
+	require.NoError(t, err)
+	require.Equal(t, "login_at_xyz", tok)
+}
+
+func TestManagementToken_UnauthenticatedIsActionable(t *testing.T) {
+	// Neither env nor stored credentials → actionable error.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PALBASE_ACCESS_TOKEN", "")
+
 	_, err := ManagementToken("dev")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "PALBASE_ACCESS_TOKEN")
+	require.Contains(t, err.Error(), "palbase login")
 }
