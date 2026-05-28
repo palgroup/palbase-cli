@@ -1195,9 +1195,20 @@ func newMobileSetupIOSCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// mobile setup ios is special: it BOTH consumes the ref AND
+			// asks LoadProjectConfig immediately for the branch default.
+			// resolveOrLinkRef only writes .palbase/config.json when it
+			// went through the picker path (override == ""), so a --ref
+			// invocation in a fresh cwd would error at LoadProjectConfig
+			// below. Materialise the link here when missing so the second
+			// LoadProjectConfig always succeeds.
 			cfg, err := auth.LoadProjectConfig()
 			if err != nil {
-				return err
+				cfg = &auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}
+				if saveErr := auth.SaveProjectConfig(cfg); saveErr != nil {
+					return fmt.Errorf("save .palbase/config.json: %w", saveErr)
+				}
+				fmt.Fprintf(os.Stdout, "✓ Linked to %s (branch: main)\n", ref)
 			}
 			branch := cfg.DefaultEnv
 			if branch == "" {
@@ -1231,9 +1242,17 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Same defensive materialise as mobile setup ios: --ref makes
+			// resolveOrLinkRef return early without writing the config, so
+			// LoadProjectConfig in a fresh cwd would 404. Default branch to
+			// main when the link is being created now.
 			cfg, err := auth.LoadProjectConfig()
 			if err != nil {
-				return err
+				cfg = &auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}
+				if saveErr := auth.SaveProjectConfig(cfg); saveErr != nil {
+					return fmt.Errorf("save .palbase/config.json: %w", saveErr)
+				}
+				fmt.Fprintf(os.Stdout, "✓ Linked to %s (branch: main)\n", ref)
 			}
 			branch := cfg.DefaultEnv
 			if branch == "" {
@@ -1581,6 +1600,60 @@ func objectBlock(pbx, objectID string) string {
 	return ""
 }
 
+// findPhaseIDByName returns the object id of the PBXShellScriptBuildPhase
+// whose `name = "<n>";` matches the given name. Returns "" when no such
+// phase exists. Used by ensurePBXShellScriptPhase to find a stale phase
+// emitted by an earlier CLI version so we can re-write it with the
+// current canonical block (inputs/outputs/script kept in lock-step).
+func findPhaseIDByName(pbx, name string) string {
+	needle := "name = \"" + name + "\";"
+	return findObjectIDContaining(pbx, needle)
+}
+
+// removeObjectBlock strips the full `<id> /* … */ = { … };` definition
+// for the given object id from the pbxproj body. Returns the body
+// unchanged if the id isn't present. Pair with removePhaseReference to
+// fully detach a build phase before re-emitting it.
+func removeObjectBlock(pbx, objectID string) string {
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, objectID+" ") || !strings.Contains(line, "= {") {
+			continue
+		}
+		// Scan forward to the matching closing "};".
+		j := i + 1
+		for ; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) == "};" {
+				break
+			}
+		}
+		if j >= len(lines) {
+			return pbx
+		}
+		// Drop lines [i, j] inclusive. Preserve surrounding blank lines.
+		return strings.Join(append(append([]string{}, lines[:i]...), lines[j+1:]...), "\n")
+	}
+	return pbx
+}
+
+// removePhaseReference removes the build-phases entry that references
+// the given shell-phase id (lines like `<id> /* <name> */,` inside
+// `buildPhases = ( … );` blocks). Without this, the phase is gone from
+// the section but the target still tries to dispatch it and Xcode errors
+// with "Reference to unknown object".
+func removePhaseReference(pbx, objectID, name string) string {
+	needle := objectID + " /* " + name + " */,"
+	lines := strings.Split(pbx, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(line, needle) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
 func findObjectIDContaining(pbx, needle string) string {
 	lines := strings.Split(pbx, "\n")
 	for i, line := range lines {
@@ -1622,16 +1695,53 @@ func ensurePBXFileReference(pbx, fileRefID string) (string, bool) {
 }
 
 func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
-	if objectBlock(pbx, shellPhaseID) != "" || strings.Contains(pbx, "Palbase Codegen iOS") {
-		return pbx, false
+	// Self-healing semantics: if a phase with our name already exists,
+	// compare against the canonical block we'd emit today. If they match
+	// (idempotent), bail out — nothing to do. If they differ (older CLI
+	// shipped a different block, e.g. before CLI-19 added .palbase/config.json
+	// to inputPaths so Xcode's USER_SCRIPT_SANDBOXING permits the read),
+	// strip the stale block + reference and fall through to re-emit the
+	// current canonical one with the SAME id so any references stay valid.
+	if existingID := findPhaseIDByName(pbx, "Palbase Codegen iOS"); existingID != "" {
+		existing := objectBlock(pbx, existingID)
+		canonical := palbaseCodegenPhaseBlock(existingID)
+		if normalizePBXBlock(existing) == normalizePBXBlock(canonical) {
+			return pbx, false
+		}
+		pbx = removeObjectBlock(pbx, existingID)
+		pbx = removePhaseReference(pbx, existingID, "Palbase Codegen iOS")
+		shellPhaseID = existingID // re-use the id so existing buildPhases refs stay valid
 	}
+	block := palbaseCodegenPhaseBlock(shellPhaseID)
+	if strings.Contains(pbx, "/* End PBXShellScriptBuildPhase section */") {
+		return insertBeforeMarker(pbx, "/* End PBXShellScriptBuildPhase section */", block)
+	}
+	section := "/* Begin PBXShellScriptBuildPhase section */\n" + block + "/* End PBXShellScriptBuildPhase section */\n\n"
+	return insertBeforeMarker(pbx, "/* Begin PBXSourcesBuildPhase section */", section)
+}
+
+// palbaseCodegenPhaseBlock renders the canonical Palbase Codegen iOS
+// PBXShellScriptBuildPhase definition. Kept here so both the initial
+// emit (ensurePBXShellScriptPhase) and the "is it stale?" comparison
+// (same function, idempotency check) read the same source of truth.
+//
+// inputPaths carries .palbase/config.json so Xcode's
+// USER_SCRIPT_SANDBOXING grants the script read access — without it
+// `palbase mobile codegen ios` errors "open .palbase/config.json:
+// operation not permitted" inside sandbox-exec, since the sandbox
+// profile only opens up explicitly-declared inputs plus the output
+// path. The generated PalbaseGenerated.swift is already covered by
+// outputPaths.
+func palbaseCodegenPhaseBlock(shellPhaseID string) string {
 	script := "cd \"${SRCROOT:-.}\"\nif command -v palbase >/dev/null 2>&1; then\n  palbase mobile codegen ios\nelse\n  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\nfi\n"
-	block := "\t\t" + shellPhaseID + " /* Palbase Codegen iOS */ = {\n" +
+	return "\t\t" + shellPhaseID + " /* Palbase Codegen iOS */ = {\n" +
 		"\t\t\tisa = PBXShellScriptBuildPhase;\n" +
 		"\t\t\tbuildActionMask = 2147483647;\n" +
 		"\t\t\tfiles = (\n\t\t\t);\n" +
 		"\t\t\tinputFileListPaths = (\n\t\t\t);\n" +
-		"\t\t\tinputPaths = (\n\t\t\t);\n" +
+		"\t\t\tinputPaths = (\n" +
+		"\t\t\t\t\"$(SRCROOT)/.palbase/config.json\",\n" +
+		"\t\t\t);\n" +
 		"\t\t\tname = \"Palbase Codegen iOS\";\n" +
 		"\t\t\toutputFileListPaths = (\n\t\t\t);\n" +
 		"\t\t\toutputPaths = (\n" +
@@ -1641,11 +1751,24 @@ func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
 		"\t\t\tshellPath = /bin/sh;\n" +
 		"\t\t\tshellScript = " + fmt.Sprintf("%q", script) + ";\n" +
 		"\t\t};\n"
-	if strings.Contains(pbx, "/* End PBXShellScriptBuildPhase section */") {
-		return insertBeforeMarker(pbx, "/* End PBXShellScriptBuildPhase section */", block)
+}
+
+// normalizePBXBlock canonicalises whitespace so two textually-different
+// blocks that are semantically identical compare equal. Trim every
+// line + drop blank lines is enough for the idempotency check (every
+// emit-site uses tabs the same way; this absorbs the rare diff from
+// users hand-editing the project).
+func normalizePBXBlock(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		b.WriteString(t)
+		b.WriteByte('\n')
 	}
-	section := "/* Begin PBXShellScriptBuildPhase section */\n" + block + "/* End PBXShellScriptBuildPhase section */\n\n"
-	return insertBeforeMarker(pbx, "/* Begin PBXSourcesBuildPhase section */", section)
+	return b.String()
 }
 
 func ensureBuildFileInSources(pbx, sourcesID, buildFileID string) (string, bool) {
