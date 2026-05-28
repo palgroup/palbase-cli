@@ -1374,6 +1374,10 @@ import Palbe
 public enum PalbaseGenerated {
     public static let config = PalBackendGeneratedConfig(url: "", apiKey: "", branch: "main", source: "setup")
 }
+
+public extension PalBackendClient {
+    func configure() { configure(PalbaseGenerated.config) }
+}
 `
 	if err := os.WriteFile(outFile, []byte(stub), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", outFile, err)

@@ -72,6 +72,14 @@ func emitGeneratedConfig(cfg swiftGeneratedConfig) string {
 	b.WriteString("        branch: " + swiftStringLiteral(branch) + ",\n")
 	b.WriteString("        source: " + swiftStringLiteral(source) + "\n")
 	b.WriteString("    )\n")
+	b.WriteString("}\n\n")
+	// Zero-arg pb.configure() shortcut: the customer's call site stays
+	// `pb.configure()` forever. Lives in the consumer target alongside
+	// PalbaseGenerated so it can reach the config struct (cross-module
+	// — the Palbe module can't see it). Rewritten on every codegen run
+	// so it stays in lock-step with `source` (local vs remote).
+	b.WriteString("public extension PalBackendClient {\n")
+	b.WriteString("    func configure() { configure(PalbaseGenerated.config) }\n")
 	b.WriteString("}\n")
 	return b.String()
 }
