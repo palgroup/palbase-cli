@@ -136,7 +136,7 @@ func (s *stringFlag) Type() string       { return "string" }
 //
 // Returning ErrNotLinked instead of bubbling the underlying os.IsNotExist
 // lets the init/serve/deploy commands auto-link via project.list when the
-// user hasn't run `palbase link` first.
+// user hasn't run `palbase pull` first (pull writes .palbase/config.json).
 func projectRef(override string) (string, error) {
 	if override != "" {
 		return override, nil
@@ -197,7 +197,7 @@ func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, ou
 // in-place path, a fresh <projectName>/ dir for `palbase pull` clone-mode).
 func pickProject(ctx context.Context, override string, c *studio.Client, out io.Writer) (*auth.Project, error) {
 	if override == "" && !isInteractive() {
-		return nil, fmt.Errorf("project not linked — pass --ref or run `palbase link <ref>`")
+		return nil, fmt.Errorf("project not linked — pass --ref or run `palbase pull` in a fresh directory to pick a project")
 	}
 
 	var rows []auth.Project

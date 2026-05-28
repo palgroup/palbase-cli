@@ -47,7 +47,7 @@ All changes are applied to the branch's remote configuration via Studio tRPC.`,
 
 // projectRef resolves the linked project ref. Order:
 //  1. --ref flag override
-//  2. .palbase/config.json (written by `palbase link`)
+//  2. .palbase/config.json (written by `palbase pull` on first use)
 //  3. error if neither is available
 func projectRef(override string) (string, error) {
 	if override != "" {
@@ -56,12 +56,12 @@ func projectRef(override string) (string, error) {
 	cfg, err := auth.LoadProjectConfig()
 	if err != nil {
 		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "not linked") {
-			return "", fmt.Errorf("project not linked — pass --ref or run `palbase link <ref>`")
+			return "", fmt.Errorf("project not linked — pass --ref or run `palbase pull` in this directory")
 		}
 		return "", err
 	}
 	if cfg.Ref == "" {
-		return "", fmt.Errorf("project not linked — pass --ref or run `palbase link <ref>`")
+		return "", fmt.Errorf("project not linked — pass --ref or run `palbase pull` in this directory")
 	}
 	return cfg.Ref, nil
 }

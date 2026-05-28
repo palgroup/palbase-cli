@@ -87,7 +87,7 @@ func (l *Linker) Link(ctx context.Context, wantRef string) error {
 		}
 	}
 
-	// Default to the project's main branch (CLI-2): a fresh `palbase link`
+	// Default to the project's main branch (CLI-2): a fresh `palbase pull`
 	// should pull/dev against main, not staging. `palbase branch switch`
 	// changes the active branch per-project.
 	cfg := &ProjectConfig{Ref: selected.Ref, DefaultEnv: "main"}
@@ -131,7 +131,7 @@ func LoadProjectConfig() (*ProjectConfig, error) {
 	data, err := os.ReadFile(filepath.Join(".palbase", "config.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("project not linked — run: palbase link <ref>")
+			return nil, fmt.Errorf("project not linked — run `palbase pull` in this directory to pick a project")
 		}
 		return nil, fmt.Errorf("read project config: %w", err)
 	}

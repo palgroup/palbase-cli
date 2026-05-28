@@ -36,7 +36,7 @@ type Resolvers struct {
 
 // linkedRef resolves the project ref the branch commands act on: an
 // explicit --ref override wins, otherwise the locally-linked project
-// (`palbase pull` / `palbase link`). Branch is always scoped to a project.
+// (`palbase pull` writes .palbase/config.json on first use). Branch is always scoped to a project.
 func linkedRef(override string) (string, error) {
 	if override != "" {
 		return override, nil
