@@ -276,25 +276,74 @@ func resolveInfoPlistPath(pbx, projectPath string, configIDs []string) string {
 	return ""
 }
 
-// resolveInfoPlistPath finds the Info.plist for the app target by
-// reading INFOPLIST_FILE from one of its build configs. Returns the
-// path relative to the project dir's parent (SRCROOT). Empty string
-// when the project uses GENERATE_INFOPLIST_FILE (no file on disk).
-func resolveInfoPlistPath(pbx, projectDir string, configIDs []string) string {
-	for _, id := range configIDs {
-		block := objectBlock(pbx, id)
-		if block == "" {
+// indentOf returns the leading whitespace of a line.
+func indentOf(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+}
+
+// pbxQuote wraps a pbxproj value in double quotes when it contains
+// characters outside the unquoted-string grammar (letters, digits,
+// _ . / - are safe; spaces and most punctuation are not). Mirrors how
+// Xcode serialises such values.
+func pbxQuote(s string) string {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '.' || r == '/' || r == '-' {
 			continue
 		}
-		v := xcodeValue(block, "INFOPLIST_FILE")
-		v = strings.Trim(strings.TrimSpace(v), `"`)
-		if v == "" {
-			continue
-		}
-		// INFOPLIST_FILE is SRCROOT-relative; SRCROOT is the directory
-		// that contains the .xcodeproj.
-		srcroot := filepath.Dir(projectDir)
-		return filepath.Join(srcroot, v)
+		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
 	}
-	return ""
+	return s
+}
+
+// wireGoogleURLSchemeFromGenerated reads the Google redirect URI baked
+// into PalbaseGenerated.json by codegen and injects the matching
+// CFBundleURLTypes entry into the app target's Info.plist. No-op (nil)
+// when the project has no Google provider, or uses a generated
+// Info.plist (nothing on disk to patch — surfaced to the caller).
+func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPath string, w io.Writer) error {
+	// The JSON sits next to the .swift codegen output.
+	jsonPath := filepath.Join(filepath.Dir(generatedSwiftPath), "PalbaseGenerated.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return nil // codegen didn't write one (e.g. local-only) — skip
+	}
+	var gen struct {
+		OAuth *struct {
+			Google *struct {
+				RedirectURI string `json:"redirect_uri"`
+			} `json:"google"`
+		} `json:"oauth"`
+	}
+	if err := json.Unmarshal(data, &gen); err != nil {
+		return fmt.Errorf("parse %s: %w", jsonPath, err)
+	}
+	if gen.OAuth == nil || gen.OAuth.Google == nil || gen.OAuth.Google.RedirectURI == "" {
+		return nil // no Google provider configured — nothing to wire
+	}
+
+	pbxPath := filepath.Join(projectPath, "project.pbxproj")
+	pbxData, err := os.ReadFile(pbxPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", pbxPath, err)
+	}
+	pbx := string(pbxData)
+	targets := parseXcodeTargets(pbx)
+	target, err := chooseXcodeTarget(targets, targetName)
+	if err != nil {
+		return err
+	}
+	configIDs := appTargetConfigIDs(pbx, target)
+	plistPath := resolveInfoPlistPath(pbx, projectPath, configIDs)
+	if plistPath == "" {
+		return fmt.Errorf("target %q uses a generated Info.plist — add the Google URL scheme (%s) manually", target.name, gen.OAuth.Google.RedirectURI)
+	}
+	changed, err := ensureGoogleURLScheme(plistPath, gen.OAuth.Google.RedirectURI)
+	if err != nil {
+		return err
+	}
+	if changed {
+		fmt.Fprintf(w, "✓ wired Google URL scheme into %s\n", filepath.Base(plistPath))
+	}
+	return nil
 }
