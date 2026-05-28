@@ -41,6 +41,7 @@ type swiftOp struct {
 	path        string
 	input       *swiftSchema
 	output      *swiftSchema
+	headers     *swiftSchema    // declared request headers (parameters[in:header]) → <Op>Headers struct
 	errors      []swiftErrorDef // declared errors via defineEndpoint({ errors: { … } })
 }
 
@@ -91,6 +92,7 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 				path:        path,
 				input:       requestSchema(op),
 				output:      responseSchema(op),
+				headers:     headerSchema(op),
 				errors:      declaredErrors(op),
 			})
 		}
@@ -215,6 +217,48 @@ func requestSchema(op map[string]any) *swiftSchema {
 		return nil
 	}
 	return schemaFromContent(body["content"])
+}
+
+// headerSchema collects the operation's `parameters[in:header]` entries
+// into a synthetic object swiftSchema (one property per header), so the
+// emitter can render an <Op>Headers struct exactly like a request body.
+// Returns nil when the op declares no header parameters. Header param
+// schemas are always string-typed (the backend extractor enforces it),
+// so each property parses to a string/enum field.
+func headerSchema(op map[string]any) *swiftSchema {
+	paramsRaw, ok := op["parameters"].([]any)
+	if !ok || len(paramsRaw) == 0 {
+		return nil
+	}
+	var props []swiftProp
+	for _, p := range paramsRaw {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if in, _ := pm["in"].(string); in != "header" {
+			continue
+		}
+		name, _ := pm["name"].(string)
+		if name == "" {
+			continue
+		}
+		required, _ := pm["required"].(bool)
+		var ps swiftSchema
+		if sm, ok := pm["schema"].(map[string]any); ok {
+			ps = parseSwiftSchema(sm)
+		} else {
+			ps = swiftSchema{kind: "string"}
+		}
+		props = append(props, swiftProp{name: name, schema: ps, required: required})
+	}
+	if len(props) == 0 {
+		return nil
+	}
+	// Deterministic field order (parameters arrive sorted from the
+	// generator, but don't rely on map iteration upstream).
+	sort.Slice(props, func(i, j int) bool { return props[i].name < props[j].name })
+	return &swiftSchema{kind: "object", props: props}
 }
 
 func responseSchema(op map[string]any) *swiftSchema {

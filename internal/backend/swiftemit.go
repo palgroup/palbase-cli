@@ -126,6 +126,7 @@ func typePrefix(opID string) string {
 func requestTypeName(opID string) string  { return typePrefix(opID) + "Request" }
 func responseTypeName(opID string) string { return typePrefix(opID) + "Response" }
 func errorEnumName(opID string) string    { return typePrefix(opID) + "Error" }
+func headersTypeName(opID string) string  { return typePrefix(opID) + "Headers" }
 
 func sanitize(s string, firstUpper bool) string {
 	var parts []string
@@ -217,6 +218,13 @@ func emitTypeTree(ops []swiftOp) string {
 			lines = append(lines, topLevelDeclLines(responseTypeName(op.operationID), *op.output)...)
 			emitted = true
 		}
+		if op.headers != nil {
+			if emitted {
+				lines = append(lines, "")
+			}
+			lines = append(lines, headerStructLines(headersTypeName(op.operationID), *op.headers)...)
+			emitted = true
+		}
 		if len(op.errors) > 0 {
 			if emitted {
 				lines = append(lines, "")
@@ -240,6 +248,46 @@ func topLevelDeclLines(name string, s swiftSchema) []string {
 		return structLines(name, s.props, 0)
 	}
 	return []string{"public typealias " + name + " = " + bareType(s)}
+}
+
+// headerStructLines emits the <Op>Headers struct (string-typed fields,
+// like any request struct) PLUS an `asHeaderDict()` method that
+// flattens it to the `[String: String]` the SDK seam sends on the wire.
+// Header names keep their declared casing as dict keys (HTTP headers are
+// case-insensitive; the server lowercases when matching). Optional
+// fields are omitted from the dict when nil. Enum fields use rawValue.
+func headerStructLines(name string, s swiftSchema) []string {
+	lines := structLines(name, s.props, 0)
+	// Drop the struct's closing brace so we can append the method inside.
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "}" {
+		lines = lines[:len(lines)-1]
+	}
+	lines = append(lines, indent(1)+"public func asHeaderDict() -> [String: String] {")
+	lines = append(lines, indent(2)+"var out: [String: String] = [:]")
+	for _, p := range s.props {
+		ident := identOf(p.name)
+		key := swiftStringLiteral(p.name)
+		optional := !p.required || p.schema.nullable
+		// Value expression: enum → .rawValue, string → itself.
+		valueExpr := ident
+		if p.schema.kind == "enum" {
+			valueExpr = ident + ".rawValue"
+		}
+		if optional {
+			// `if let v = field { out[key] = <v|v.rawValue> }`
+			if p.schema.kind == "enum" {
+				lines = append(lines, indent(2)+"if let v = "+ident+" { out["+key+"] = v.rawValue }")
+			} else {
+				lines = append(lines, indent(2)+"if let v = "+ident+" { out["+key+"] = v }")
+			}
+		} else {
+			lines = append(lines, indent(2)+"out["+key+"] = "+valueExpr)
+		}
+	}
+	lines = append(lines, indent(2)+"return out")
+	lines = append(lines, indent(1)+"}")
+	lines = append(lines, "}")
+	return lines
 }
 
 // topLevelErrorEnumLines renders one `public enum <Prefix>Error:

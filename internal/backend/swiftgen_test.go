@@ -10,6 +10,10 @@ const fixtureOpenAPI = `{
   "openapi":"3.1.0","info":{"title":"t","version":"1"},
   "paths":{
     "/rooms/create":{"post":{"operationId":"rooms.create",
+      "parameters":[
+        {"name":"if-match","in":"header","required":true,"schema":{"type":"string"}},
+        {"name":"x-trace-id","in":"header","required":false,"schema":{"type":"string"}}
+      ],
       "requestBody":{"content":{"application/json":{"schema":{"type":"object",
         "properties":{"name":{"type":"string"},"capacity":{"type":"integer"},"kind":{"type":"string","enum":["public","private"]}},
         "required":["name","kind"]}}}},
@@ -54,9 +58,20 @@ func TestEmitSwift(t *testing.T) {
 		"public nonisolated struct RoomsCreateResponse: Codable, Sendable {",
 		"public nonisolated struct RoomsIdGetRequest: Codable, Sendable {",
 		"public nonisolated struct RoomsIdGetResponse: Codable, Sendable {",
-		// Call signature references the flat top-level names.
-		"func create(_ input: RoomsCreateRequest) async throws(BackendError) -> RoomsCreateResponse",
-		`_invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self)`,
+		// Call signature references the flat top-level names. rooms.create
+		// declares headers, so the method gains a `headers:` parameter and
+		// the seam call forwards `headers.asHeaderDict()`.
+		"func create(_ input: RoomsCreateRequest, headers: RoomsCreateHeaders) async throws(BackendError) -> RoomsCreateResponse",
+		`_invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, headers: headers.asHeaderDict())`,
+		// <Op>Headers struct: required header non-optional, optional one
+		// String?, wire names preserved via CodingKeys, asHeaderDict()
+		// flattens to [String:String] (required direct, optional if-let).
+		"public nonisolated struct RoomsCreateHeaders: Codable, Sendable {",
+		"public let ifMatch: String",
+		"public let xTraceId: String?",
+		"public func asHeaderDict() -> [String: String] {",
+		`out["if-match"] = ifMatch`,
+		`if let v = xTraceId { out["x-trace-id"] = v }`,
 		// Nested enum (string union) declared inside the parent struct.
 		"public nonisolated enum KindValue: String, Codable, Sendable {",
 		"case `public` = \"public\"", // keyword escaped
