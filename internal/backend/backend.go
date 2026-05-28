@@ -1168,6 +1168,7 @@ func newMobileSetupCmd(r Resolvers) *cobra.Command {
 func newMobileSetupIOSCmd(r Resolvers) *cobra.Command {
 	var projectPath string
 	var targetName string
+	var refFlag string
 	cmd := &cobra.Command{
 		Use:   "ios",
 		Args:  cobra.NoArgs,
@@ -1186,7 +1187,11 @@ func newMobileSetupIOSCmd(r Resolvers) *cobra.Command {
 				fmt.Fprintf(os.Stdout, "✓ %s target %q already wired for Palbase iOS codegen\n", project, target)
 			}
 
-			ref, err := resolveOrLinkRef(cmd.Context(), "", r.Studio(), os.Stdout)
+			// resolveOrLinkRef honours --ref the same way pull/branch/apikey
+			// do (CLI-19): in non-interactive shells where the picker would
+			// hang, the user supplies --ref to wire link explicitly. Picker
+			// runs only when ref is empty AND stdin is a TTY.
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
@@ -1207,15 +1212,25 @@ func newMobileSetupIOSCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&projectPath, "project", "", "Path to .xcodeproj (defaults to the only project in cwd)")
 	cmd.Flags().StringVar(&targetName, "target", "", "Xcode target to wire (defaults to the first app target)")
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref to link (skips the interactive picker; required in non-interactive shells)")
 	return cmd
 }
 
 func newCodegenIOSCmd(r Resolvers) *cobra.Command {
+	var refFlag string
 	cmd := &cobra.Command{
 		Use:   "ios",
 		Args:  cobra.NoArgs,
 		Short: "Generate iOS Palbe config + typed endpoint calls",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Auto-link when the cwd isn't linked yet (mirrors what every
+			// other cwd-scoped command does — see resolveOrLinkRef). With
+			// --ref the picker is skipped; without it, an interactive shell
+			// prompts. CI-only shells must pass --ref.
+			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			if err != nil {
+				return err
+			}
 			cfg, err := auth.LoadProjectConfig()
 			if err != nil {
 				return err
@@ -1224,9 +1239,10 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 			if branch == "" {
 				branch = "main"
 			}
-			return generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), cfg.Ref, branch, defaultIOSGeneratedFile, os.Stdout)
+			return generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout)
 		},
 	}
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref to link (skips the interactive picker; required in non-interactive shells)")
 	return cmd
 }
 
