@@ -6,7 +6,8 @@ import { defineEndpoint, z } from "@palbase/backend";
 //   endpoints/items/post.ts         → POST /items
 //
 // `defineEndpoint` is fully type-safe: the Zod input schema flows into
-// `ctx.input`, the output schema validates the return value.
+// `req.input`, the output schema validates the return value. Services are
+// imported as singletons, e.g. `import { Database } from "@palbase/backend"`.
 
 export default defineEndpoint({
   method: "GET",
@@ -17,10 +18,10 @@ export default defineEndpoint({
     message: z.string(),
     user: z.string().nullable(),
   }),
-  handler: async (ctx) => {
+  handler: async (req) => {
     return {
-      message: `hello, ${ctx.input.name ?? "world"}!`,
-      user: ctx.user?.id ?? null,
+      message: `hello, ${req.input.name ?? "world"}!`,
+      user: req.user?.id ?? null,
     };
   },
 });

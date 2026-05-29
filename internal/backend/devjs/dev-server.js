@@ -166,20 +166,19 @@ function moduleClients() {
   return out;
 }
 
-// ctx.db = the project's own Postgres surface in deployed mode. In
-// `palbase serve` we don't have access to the per-tenant pgx pool
-// (that's tied to the backend-runtime pod's internal-API on
-// 127.0.0.1, not externally reachable). Rather than half-fake it and
-// have handlers silently behave differently in dev vs prod, ctx.db
-// throws a clear "use ctx.docs in serve, or palbase push to test"
-// hint on first call. This keeps dev = prod for everything we CAN
-// honestly mirror (docs, storage, notify, analytics, flags, …) and
-// names the one surface that needs a deploy to exercise.
+// The Database singleton = the project's own Postgres surface in deployed
+// mode. In `palbase serve` we don't have access to the per-tenant pgx pool
+// (that's tied to the backend-runtime pod's internal-API on 127.0.0.1, not
+// externally reachable). Rather than half-fake it and have handlers silently
+// behave differently in dev vs prod, every Database op throws a clear
+// "use Documents in serve, or palbase push to test" hint on first call. This
+// keeps dev = prod for everything we CAN honestly mirror (Documents, Storage,
+// Notifications, Flags, …) and names the one surface that needs a deploy.
 function dbClient() {
   const hint =
-    'ctx.db is not available under `palbase serve` (no local Postgres ' +
-    'tunnel to the tenant pool). For local dev, use ctx.docs.collection() ' +
-    'which proxies through the deployed module. For ctx.db tests, run ' +
+    'Database is not available under `palbase serve` (no local Postgres ' +
+    'tunnel to the tenant pool). For local dev, use Documents.collection() ' +
+    'which proxies through the deployed module. For Database tests, run ' +
     '`palbase push` and exercise the deployed endpoint.';
   return new Proxy({}, {
     get(_t, method) {
@@ -189,28 +188,73 @@ function dbClient() {
   });
 }
 
-function makeCtx(req, params, body, user) {
+// dev log surface (the Log singleton in serve mode).
+function makeLog() {
   return {
-    ...moduleClients(),
-    db: dbClient(),
+    info: (...a) => console.log('[handler]', ...a),
+    warn: (...a) => console.warn('[handler]', ...a),
+    error: (...a) => console.error('[handler]', ...a),
+    debug: (...a) => console.log('[handler:debug]', ...a),
+  };
+}
+
+// clientInfoFromHeaders mirrors worker.js — derive req.client from the
+// X-Palbase-*-Version headers (Faz 1: nullable raw fields only).
+function clientInfoFromHeaders(headers) {
+  const lower = {};
+  for (const k of Object.keys(headers || {})) {
+    lower[k.toLowerCase()] = headers[k];
+  }
+  const pick = (name) => {
+    const v = lower[name];
+    return v === undefined || v === null || v === '' ? null : String(v);
+  };
+  return {
+    sdkVersion: pick('x-palbase-sdk-version'),
+    appVersion: pick('x-palbase-client-version'),
+    platform: pick('x-palbase-platform'),
+    osVersion: pick('x-palbase-os-version'),
+  };
+}
+
+// installRuntime injects the dev service clients into the shared
+// @palbase/backend instance, mirroring worker.js's __setRuntime seam. Both
+// dev-server.js (temp dir) and the user's endpoints resolve @palbase/backend
+// from the same project node_modules (NODE_PATH), so they share ONE module
+// instance and the bundle's `import { Database }` sees what we set here.
+//
+// EXCLUDED on purpose: Realtime, Functions, CMS, Links, Analytics, Auth.
+function installRuntime() {
+  const clients = moduleClients();
+  require('@palbase/backend').__setRuntime({
+    Database: dbClient(),
+    Documents: clients.docs,
+    Storage: clients.storage,
+    Cache: notConfiguredModule('Cache'),
+    Queue: notConfiguredModule('Queue'),
+    Log: makeLog(),
+    Notifications: clients.notifications,
+    Flags: clients.flags,
+  });
+}
+
+// makeRequest builds the request-scoped object passed to the handler. Services
+// are NOT on it — they are the imported singletons (installed by
+// installRuntime). `req` here is the Node http request.
+function makeRequest(req, params, body, user) {
+  return {
     input: body ?? {},
     params,
-    req: {
-      method: req.method,
-      url: req.url,
-      headers: req.headers,
-    },
+    query: {},
+    headers: req.headers || {},
     user: user ?? null,
-    // ctx.env exposes a curated subset of process.env. PALBASE_TENANT_*
-    // were deleted at boot; user palbase.toml env vars (whatever they
-    // chose) ARE in process.env and pass through.
-    env: { ...process.env, PALBASE_PROJECT_REF: PROJECT_REF },
-    log: {
-      info: (...a) => console.log('[handler]', ...a),
-      warn: (...a) => console.warn('[handler]', ...a),
-      error: (...a) => console.error('[handler]', ...a),
-      debug: (...a) => console.log('[handler:debug]', ...a),
-    },
+    client: clientInfoFromHeaders(req.headers || {}),
+    file: null,
+    method: req.method,
+    requestId: `req_dev_${Date.now().toString(36)}`,
+    traceId: '0'.repeat(32),
+    spanId: '0'.repeat(16),
+    errors: {},
   };
 }
 
@@ -218,7 +262,7 @@ function notConfiguredModule(name) {
   return new Proxy({}, {
     get() {
       throw new Error(
-        `ctx.${name} unavailable: dev-server has no tenant credentials. ` +
+        `${name} unavailable: dev-server has no tenant credentials. ` +
         `Run \`palbase login\` then \`palbase serve\` from inside a project directory.`,
       );
     },
@@ -439,8 +483,9 @@ const server = http.createServer(async (req, res) => {
 
   let result;
   try {
-    const ctx = makeCtx(req, params, body, user);
-    result = await endpoint.handler(ctx);
+    installRuntime();
+    const pbReq = makeRequest(req, params, body, user);
+    result = await endpoint.handler(pbReq);
   } catch (err) {
     res.statusCode = 500;
     res.setHeader('content-type', 'application/json');
