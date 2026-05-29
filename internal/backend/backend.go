@@ -380,6 +380,12 @@ var backendBundleAllowedRoots = map[string]struct{}{
 	"shared": {},
 	"src":    {},
 	"utils":  {},
+	// SQL migrations live under db/migrations/*.up.sql — the deploy-time
+	// migration runner reads them from db/migrations on the pod. Without
+	// db/ in the archive the migrations never reach the server, so the
+	// schema-drift gate trips ("table X not present") on the very tables
+	// the migrations would have created. (Also covers a db/schema.ts form.)
+	"db": {},
 }
 
 // bundleCwd packs the project's backend artifacts (allow-list) as
