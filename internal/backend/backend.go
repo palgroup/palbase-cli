@@ -10,6 +10,7 @@ package backend
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -609,6 +610,8 @@ func newPushCmd(r Resolvers) *cobra.Command {
 	var message string
 	var skipTypes bool
 	var branchFlag string
+	var acceptDataLoss bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Push the project (deploy code + apply config) to the server",
@@ -618,9 +621,19 @@ func newPushCmd(r Resolvers) *cobra.Command {
   • config-as-code → config/*.toml applied to the server (ordered, conflict-gated)
 
 The code deploy runs first; config push follows. A config-push failure is
-reported but does NOT roll back the code deploy that already landed.`,
+reported but does NOT roll back the code deploy that already landed.
+
+Schema changes are auto-migrated (Prisma "db push" style). A destructive change
+that would LOSE data (DROP TABLE on a non-empty table, DROP COLUMN with non-null
+values) requires confirmation: an interactive y/N prompt on a TTY, or the
+--accept-data-loss flag (alias: --force) in CI. Dropping empty tables/columns
+applies without prompting.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			// --force is an alias for --accept-data-loss.
+			if force {
+				acceptDataLoss = true
+			}
 			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
@@ -645,6 +658,41 @@ reported but does NOT roll back the code deploy that already landed.`,
 				return fmt.Errorf("bundle: %w", err)
 			}
 			fmt.Printf("  bundle: %d bytes\n", len(archive))
+
+			// ── destructive-migration plan/consent round-trip ──────────
+			// Before the deploy mutation, ask the server what schema changes
+			// the auto-migrate engine would make (PLAN mode: computes the diff
+			// + per-drop row counts, applies NOTHING). If the project has no
+			// schema file we skip the plan entirely (additive one-shot deploy —
+			// backward compatible with code-only projects).
+			schemaPath := locateSchemaFile(cwd)
+			if schemaPath != "" {
+				schemaSrc, readErr := os.ReadFile(schemaPath)
+				if readErr != nil {
+					return fmt.Errorf("read schema %s: %w", schemaPath, readErr)
+				}
+				planPayload := map[string]any{"ref": ref, "schema": string(schemaSrc)}
+				if branch != "" {
+					planPayload["branch"] = branch
+				}
+				var plan migrationPlan
+				if planErr := r.Studio().Mutation(ctx, "backend.migrationPlan", planPayload, &plan); planErr != nil {
+					return fmt.Errorf("backend.migrationPlan: %w", planErr)
+				}
+				proceed, decErr := decideDestructive(plan, acceptDataLoss, os.Stdin, isInteractive(), os.Stdout)
+				if decErr != nil {
+					return decErr
+				}
+				if !proceed {
+					return fmt.Errorf("aborted: destructive schema change not confirmed")
+				}
+				// Carry consent into the deploy only when the plan actually
+				// loses data — empty drops apply server-side without a flag.
+				if plan.HasDataLoss {
+					acceptDataLoss = true
+				}
+			}
+
 			fmt.Println("→ uploading via Studio ...")
 			var resp struct {
 				Version string `json:"version"`
@@ -657,6 +705,9 @@ reported but does NOT roll back the code deploy that already landed.`,
 			}
 			if branch != "" {
 				deployPayload["branch"] = branch
+			}
+			if acceptDataLoss {
+				deployPayload["acceptDataLoss"] = true
 			}
 			if err := r.Studio().Mutation(ctx, "backend.deploy", deployPayload, &resp); err != nil {
 				return fmt.Errorf("backend.deploy: %w", err)
@@ -704,7 +755,118 @@ reported but does NOT roll back the code deploy that already landed.`,
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Optional commit message recorded in git history")
 	cmd.Flags().BoolVar(&skipTypes, "no-types", false, "Skip the post-deploy types generation step")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to push (defaults to the active branch; omit for main)")
+	cmd.Flags().BoolVar(&acceptDataLoss, "accept-data-loss", false, "Approve destructive schema changes (DROP TABLE/COLUMN that lose data) without an interactive prompt")
+	cmd.Flags().BoolVar(&force, "force", false, "Alias for --accept-data-loss")
 	return cmd
+}
+
+// migrationPlan mirrors the Studio backend.migrationPlan result (which in turn
+// mirrors modules/backend internal/schema.DestructivePlan). Decoded from the
+// tRPC JSON envelope by studio.Client.
+type migrationPlan struct {
+	Drops       []destructiveOp     `json:"drops"`
+	Unsupported []unsupportedChange `json:"unsupported"`
+	HasDataLoss bool                `json:"hasDataLoss"`
+}
+
+type destructiveOp struct {
+	Kind     string `json:"kind"` // "table" | "column"
+	Table    string `json:"table"`
+	Column   string `json:"column,omitempty"`
+	RowCount int64  `json:"rowCount"`
+	NonNull  int64  `json:"nonNull,omitempty"`
+}
+
+type unsupportedChange struct {
+	Table  string `json:"table"`
+	Column string `json:"column,omitempty"`
+	Reason string `json:"reason"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+// schemaFileCandidates mirrors the server's resolveSchemaPath precedence so the
+// CLI uploads the SAME file the deploy-time auto-migrate engine evaluates.
+var schemaFileCandidates = []string{
+	"schema.ts",
+	filepath.Join("db", "schema.ts"),
+	filepath.Join("schema", "index.ts"),
+	filepath.Join("db", "schema", "index.ts"),
+}
+
+// locateSchemaFile returns the first existing schema definition under root, or
+// "" when the project declares no schema (a code-only project — push then does
+// an additive one-shot deploy with no plan round-trip).
+func locateSchemaFile(root string) string {
+	for _, rel := range schemaFileCandidates {
+		p := filepath.Join(root, rel)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// decideDestructive implements the consent decision for a migration plan:
+//
+//   - no drops at all          → proceed silently
+//   - drops but no data loss   → print a one-line note, proceed (no prompt)
+//   - data loss + flag/force   → proceed
+//   - data loss + TTY          → print the warning block, read y/N
+//   - data loss + non-TTY      → abort with a hint to pass --accept-data-loss
+//
+// It writes user-facing output to out and reads the y/N answer from in.
+func decideDestructive(plan migrationPlan, acceptFlag bool, in io.Reader, isTTY bool, out io.Writer) (bool, error) {
+	if len(plan.Drops) == 0 {
+		return true, nil
+	}
+	if !plan.HasDataLoss {
+		// Destructive but empty — apply without friction (Prisma db push).
+		for _, op := range plan.Drops {
+			if op.Kind == "table" {
+				fmt.Fprintf(out, "  (dropping empty table %s — no data loss)\n", op.Table)
+			} else {
+				fmt.Fprintf(out, "  (dropping empty column %s.%s — no data loss)\n", op.Table, op.Column)
+			}
+		}
+		return true, nil
+	}
+
+	// Real data loss — print the warning block.
+	fmt.Fprintln(out, "⚠ This push will DESTROY data:")
+	for _, op := range plan.Drops {
+		switch op.Kind {
+		case "table":
+			if op.RowCount > 0 {
+				fmt.Fprintf(out, "  ⚠ DROP TABLE %s (%d row(s) will be lost)\n", op.Table, op.RowCount)
+			}
+		case "column":
+			if op.NonNull > 0 {
+				fmt.Fprintf(out, "  ⚠ DROP COLUMN %s.%s (%d non-null value(s) will be lost)\n", op.Table, op.Column, op.NonNull)
+			}
+		}
+	}
+	return confirmDestructive(in, isTTY, acceptFlag)
+}
+
+// confirmDestructive resolves the proceed/abort decision for a data-losing
+// change. The flag (--accept-data-loss / --force) short-circuits to proceed.
+// On a TTY it reads a y/N answer from in. Without the flag and without a TTY
+// (CI), it aborts so a destructive change never lands unattended.
+func confirmDestructive(in io.Reader, isTTY bool, flag bool) (bool, error) {
+	if flag {
+		return true, nil
+	}
+	if !isTTY {
+		return false, fmt.Errorf("destructive schema change would lose data; re-run with --accept-data-loss (or --force) to proceed in a non-interactive shell")
+	}
+	fmt.Print("Proceed and lose this data? [y/N]: ")
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 func newListCmd(r Resolvers) *cobra.Command {
