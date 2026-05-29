@@ -115,6 +115,20 @@ func TestParseTRPCError_BatchAndSingle(t *testing.T) {
 			body: `not json`,
 			want: "studio http 500",
 		},
+		{
+			// Regression: Studio uses superjson, which nests the real
+			// fields under `error.json`. The decoder MUST reach through
+			// it and surface "UNAUTHORIZED" instead of "empty error
+			// envelope". This is the exact body that 401'd `palbase push`.
+			name: "superjson-wrapped single error surfaces real message",
+			body: `{"error":{"json":{"message":"UNAUTHORIZED","code":-32001,"data":{"code":"UNAUTHORIZED","httpStatus":401,"path":"backend.deploy"}}}}`,
+			want: "UNAUTHORIZED: UNAUTHORIZED",
+		},
+		{
+			name: "superjson-wrapped batch error surfaces real message",
+			body: `[{"error":{"json":{"message":"row not found","data":{"code":"NOT_FOUND"}}}}]`,
+			want: "NOT_FOUND: row not found",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

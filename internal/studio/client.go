@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
@@ -81,6 +82,9 @@ func (c *Client) do(ctx context.Context, req *http.Request, out any) error {
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
+	if os.Getenv("PALBASE_DEBUG_TRPC") != "" {
+		fmt.Fprintf(os.Stderr, "studio trpc debug: status=%d body=%s\n", resp.StatusCode, truncate(body, 1024))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return parseTRPCError(body, resp.StatusCode)
 	}
@@ -110,19 +114,59 @@ func (c *Client) do(ctx context.Context, req *http.Request, out any) error {
 	return nil
 }
 
+type trpcErrorData struct {
+	Code     string `json:"code"`
+	HTTPCode int    `json:"httpStatus"`
+	// Some Studio errors stash the readable reason here (Zod
+	// validation surfaces, tRPC errorFormatter additions) — when
+	// Message is empty we want this so the user doesn't see a bare
+	// "studio: " line.
+	Cause string `json:"cause,omitempty"`
+	Path  string `json:"path,omitempty"`
+}
+
 type trpcErrorBody struct {
-	Message string `json:"message"`
-	Code    int    `json:"code"`
-	Data    struct {
-		Code     string `json:"code"`
-		HTTPCode int    `json:"httpStatus"`
-		// Some Studio errors stash the readable reason here (Zod
-		// validation surfaces, tRPC errorFormatter additions) — when
-		// Message is empty we want this so the user doesn't see a bare
-		// "studio: " line.
-		Cause string `json:"cause,omitempty"`
-		Path  string `json:"path,omitempty"`
-	} `json:"data"`
+	Message string        `json:"message"`
+	Code    int           `json:"code"`
+	Data    trpcErrorData `json:"data"`
+}
+
+// UnmarshalJSON handles BOTH tRPC error wire shapes:
+//
+//	flat:      {"message":"...","code":-32001,"data":{...}}
+//	superjson: {"json":{"message":"...","code":-32001,"data":{...}}}
+//
+// Studio configures `transformer: superjson`, so its HTTP error responses
+// nest the real fields under a `json` key. The previous decoder only knew
+// the flat shape, so every Studio error unmarshalled to an all-zero struct
+// and toError() fell back to the useless "empty error envelope" — hiding
+// the actual message (e.g. "UNAUTHORIZED") that was right there under
+// error.json.message. We try the superjson envelope first and fall back to
+// the flat shape so this client works against transformer'd and plain tRPC
+// servers alike.
+func (e *trpcErrorBody) UnmarshalJSON(b []byte) error {
+	type rawBody struct {
+		Message string        `json:"message"`
+		Code    int           `json:"code"`
+		Data    trpcErrorData `json:"data"`
+	}
+	var wrapped struct {
+		JSON *rawBody `json:"json"`
+	}
+	if err := json.Unmarshal(b, &wrapped); err == nil && wrapped.JSON != nil {
+		e.Message = wrapped.JSON.Message
+		e.Code = wrapped.JSON.Code
+		e.Data = wrapped.JSON.Data
+		return nil
+	}
+	var flat rawBody
+	if err := json.Unmarshal(b, &flat); err != nil {
+		return err
+	}
+	e.Message = flat.Message
+	e.Code = flat.Code
+	e.Data = flat.Data
+	return nil
 }
 
 func (e *trpcErrorBody) toError() error {
