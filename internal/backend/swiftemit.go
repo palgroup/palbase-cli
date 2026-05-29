@@ -48,12 +48,16 @@ type swiftOAuthGoogle struct {
 // cross-module reflection: typed methods compile against the SDK,
 // the SDK loads its config from the bundle at startup.
 func emitSwift(ops []swiftOp) string {
-	// `auth` is reserved on `pb`; skip endpoints whose top segment is `auth`.
+	// `auth` and `analytics` are reserved on `pb` (pb.auth.*, pb.analytics.*);
+	// skip endpoints whose top segment collides with either.
 	var usable []swiftOp
 	for _, op := range ops {
 		segs := opSegments(op.operationID)
-		if len(segs) > 0 && strings.ToLower(segs[0]) == "auth" {
-			continue
+		if len(segs) > 0 {
+			top := strings.ToLower(segs[0])
+			if top == "auth" || top == "analytics" {
+				continue
+			}
 		}
 		usable = append(usable, op)
 	}
