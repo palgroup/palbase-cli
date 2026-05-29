@@ -105,9 +105,9 @@ func secretEnvName(channel, provider string) string {
 
 // Pull fetches the project's provider configs and serializes them. An
 // empty project still yields a valid header-only document.
-func (notificationsSerializer) Pull(ctx context.Context, ref string, sc *studio.Client) ([]byte, error) {
+func (notificationsSerializer) Pull(ctx context.Context, ref, branch string, sc *studio.Client) ([]byte, error) {
 	var rows []notifProviderRow
-	if err := sc.Query(ctx, "notifications.providers.list", map[string]any{"ref": ref}, &rows); err != nil {
+	if err := sc.Query(ctx, "notifications.providers.list", refPayload(ref, branch), &rows); err != nil {
 		return nil, fmt.Errorf("notifications.providers.list: %w", err)
 	}
 	return serializeProviders(rows)
@@ -184,6 +184,7 @@ func decodeMetadata(raw json.RawMessage) (map[string]any, error) {
 // @secret/<NAME> reference points at.
 type createProviderInput struct {
 	Ref         string          `json:"ref"`
+	Branch      string          `json:"branch,omitempty"`
 	Channel     string          `json:"channel"`
 	Provider    string          `json:"provider"`
 	Credentials json.RawMessage `json:"credentials"`
@@ -192,18 +193,19 @@ type createProviderInput struct {
 }
 
 type deleteProviderInput struct {
-	Ref string `json:"ref"`
-	ID  string `json:"id"`
+	Ref    string `json:"ref"`
+	Branch string `json:"branch,omitempty"`
+	ID     string `json:"id"`
 }
 
-func (notificationsSerializer) Push(ctx context.Context, ref string, sc *studio.Client, tomlBytes []byte) (PushApplied, error) {
+func (notificationsSerializer) Push(ctx context.Context, ref, branch string, sc *studio.Client, tomlBytes []byte) (PushApplied, error) {
 	var doc notificationsDoc
 	if err := toml.Unmarshal(tomlBytes, &doc); err != nil {
 		return PushApplied{}, fmt.Errorf("parse notifications.toml: %w", err)
 	}
 
 	var rows []notifProviderRow
-	if err := sc.Query(ctx, "notifications.providers.list", map[string]any{"ref": ref}, &rows); err != nil {
+	if err := sc.Query(ctx, "notifications.providers.list", refPayload(ref, branch), &rows); err != nil {
 		return PushApplied{}, fmt.Errorf("notifications.providers.list: %w", err)
 	}
 	// Server providers keyed by (channel, provider). id is needed for delete.
@@ -243,6 +245,7 @@ func (notificationsSerializer) Push(ctx context.Context, ref string, sc *studio.
 		}
 		in := createProviderInput{
 			Ref:         ref,
+			Branch:      branch,
 			Channel:     entry.Channel,
 			Provider:    entry.Provider,
 			Credentials: creds,
@@ -273,7 +276,7 @@ func (notificationsSerializer) Push(ctx context.Context, ref string, sc *studio.
 		row := server[key]
 		label := key.channel + "/" + key.provider
 		if err := sc.Mutation(ctx, "notifications.providers.delete",
-			deleteProviderInput{Ref: ref, ID: row.ID}, nil); err != nil {
+			deleteProviderInput{Ref: ref, Branch: branch, ID: row.ID}, nil); err != nil {
 			return PushApplied{}, fmt.Errorf("notifications.providers.delete %s: %w", label, err)
 		}
 		applied.Orphans = append(applied.Orphans, label)

@@ -78,6 +78,20 @@ const SecretRefPrefix = "@secret/"
 // SecretRef returns the reference form for a named secret.
 func SecretRef(name string) string { return SecretRefPrefix + name }
 
+// refPayload builds the tRPC input map every serializer's GET shares:
+// always {"ref": ref}, plus {"branch": branch} when a non-empty branch is
+// requested. An empty branch omits the field entirely so the Studio router
+// resolves the default branch (main) exactly as before — backward
+// compatible with the pre-branch wire shape and the .strict() procedures
+// that would reject an unknown key (branch is now a known optional field).
+func refPayload(ref, branch string) map[string]any {
+	p := map[string]any{"ref": ref}
+	if branch != "" {
+		p["branch"] = branch
+	}
+	return p
+}
+
 // ModuleSerializer turns one module's live server config into a TOML
 // file on disk. Each module (flags, auth, storage, documents,
 // notifications) implements this in its own file and registers itself
@@ -102,7 +116,12 @@ type ModuleSerializer interface {
 	// returns its serialized TOML bytes. It does NOT write to disk — the
 	// caller ([Pull]) owns file I/O so it can hash + mirror state
 	// uniformly across modules.
-	Pull(ctx context.Context, ref string, sc *studio.Client) ([]byte, error)
+	//
+	// branch selects which branch's tenant to read (branch=project model:
+	// each branch is its own tenant, endpoint_ref = <ref><branchSlug>).
+	// An empty branch ("") means the default branch (main) — backward
+	// compatible with every existing caller and test.
+	Pull(ctx context.Context, ref, branch string, sc *studio.Client) ([]byte, error)
 }
 
 // registry holds every registered serializer. Populated by each module
@@ -157,7 +176,7 @@ type PullResult struct {
 // placeholder state_version (the server exposes no state_version GET yet
 // — see [State]). The function returns per-module results for the caller
 // to print.
-func Pull(ctx context.Context, projectDir, ref string, sc *studio.Client) ([]PullResult, error) {
+func Pull(ctx context.Context, projectDir, ref, branch string, sc *studio.Client) ([]PullResult, error) {
 	sers := Serializers()
 	if len(sers) == 0 {
 		return nil, fmt.Errorf("no module serializers registered")
@@ -173,7 +192,7 @@ func Pull(ctx context.Context, projectDir, ref string, sc *studio.Client) ([]Pul
 	failed := 0
 
 	for _, s := range sers {
-		body, err := s.Pull(ctx, ref, sc)
+		body, err := s.Pull(ctx, ref, branch, sc)
 		if err != nil {
 			// Per-module failure (e.g. tenant hasn't provisioned this
 			// module's tables) is non-fatal: record it, skip the file,
@@ -278,13 +297,17 @@ type ModulePusher interface {
 	ModuleSerializer
 
 	// Push applies tomlBytes (the on-disk config/<module>.toml) to the
-	// server for ref. It diffs against current server state and issues a
-	// SET only for changed/new entries; unchanged input → no calls. It
-	// returns the number of entries it set and any server-orphan keys
-	// (present server-side, absent locally) it intentionally did NOT
-	// delete (Faz 2 is upsert-only). It does NOT perform the conflict
-	// check — [Push] owns that uniformly across modules.
-	Push(ctx context.Context, ref string, sc *studio.Client, tomlBytes []byte) (PushApplied, error)
+	// server for ref on the given branch. It diffs against current server
+	// state and issues a SET only for changed/new entries; unchanged input
+	// → no calls. It returns the number of entries it set and any
+	// server-orphan keys (present server-side, absent locally) it
+	// intentionally did NOT delete (Faz 2 is upsert-only). It does NOT
+	// perform the conflict check — [Push] owns that uniformly across
+	// modules.
+	//
+	// branch selects which branch's tenant to write (branch=project: each
+	// branch is its own tenant). Empty ("") = default branch (main).
+	Push(ctx context.Context, ref, branch string, sc *studio.Client, tomlBytes []byte) (PushApplied, error)
 }
 
 // PushApplied reports what a [ModulePusher.Push] changed, for the caller's
@@ -335,7 +358,7 @@ func pusherFor(name string) (ModulePusher, bool) {
 //     vs the server and SETs only changes (idempotent: no change → no call).
 //  5. Refresh state.json: re-pull post-apply, hash, store under the module
 //     key (preserving other modules' hashes).
-func Push(ctx context.Context, projectDir, ref, module string, sc *studio.Client) (PushResult, error) {
+func Push(ctx context.Context, projectDir, ref, branch, module string, sc *studio.Client) (PushResult, error) {
 	pusher, ok := pusherFor(module)
 	if !ok {
 		// Distinguish "no such module" from "module exists but no push yet".
@@ -353,11 +376,11 @@ func Push(ctx context.Context, projectDir, ref, module string, sc *studio.Client
 		return PushResult{}, err
 	}
 
-	if err := validateNoConflict(ctx, ref, sc, pusher, state); err != nil {
+	if err := validateNoConflict(ctx, ref, branch, sc, pusher, state); err != nil {
 		return PushResult{}, err
 	}
 
-	applied, err := applyAndRefresh(ctx, projectDir, ref, sc, pusher, state)
+	applied, err := applyAndRefresh(ctx, projectDir, ref, branch, sc, pusher, state)
 	if err != nil {
 		return PushResult{}, err
 	}
@@ -374,9 +397,9 @@ func Push(ctx context.Context, projectDir, ref, module string, sc *studio.Client
 // `config pull` stored), and compares to the state.json baseline. An
 // absent baseline or a hash mismatch is a conflict — returned WITHOUT any
 // SET so the caller can abort before mutating anything.
-func validateNoConflict(ctx context.Context, ref string, sc *studio.Client, pusher ModulePusher, state *State) error {
+func validateNoConflict(ctx context.Context, ref, branch string, sc *studio.Client, pusher ModulePusher, state *State) error {
 	module := pusher.Name()
-	serverBytes, err := pusher.Pull(ctx, ref, sc)
+	serverBytes, err := pusher.Pull(ctx, ref, branch, sc)
 	if err != nil {
 		return fmt.Errorf("read current server state for %q: %w", module, err)
 	}
@@ -399,18 +422,18 @@ func validateNoConflict(ctx context.Context, ref string, sc *studio.Client, push
 // server hash (re-pull, not local hash, because the server may normalise
 // values). It MUTATES state in place but does NOT persist it — the caller
 // owns the single writeState so a multi-module push writes state.json once.
-func applyAndRefresh(ctx context.Context, projectDir, ref string, sc *studio.Client, pusher ModulePusher, state *State) (PushApplied, error) {
+func applyAndRefresh(ctx context.Context, projectDir, ref, branch string, sc *studio.Client, pusher ModulePusher, state *State) (PushApplied, error) {
 	module := pusher.Name()
 	localPath := filepath.Join(projectDir, ConfigDir, pusher.Filename())
 	localBytes, err := os.ReadFile(localPath)
 	if err != nil {
 		return PushApplied{}, fmt.Errorf("read %s: %w", localPath, err)
 	}
-	applied, err := pusher.Push(ctx, ref, sc, localBytes)
+	applied, err := pusher.Push(ctx, ref, branch, sc, localBytes)
 	if err != nil {
 		return PushApplied{}, fmt.Errorf("push %s: %w", module, err)
 	}
-	newBytes, err := pusher.Pull(ctx, ref, sc)
+	newBytes, err := pusher.Pull(ctx, ref, branch, sc)
 	if err != nil {
 		return PushApplied{}, fmt.Errorf("refresh server state after push %q: %w", module, err)
 	}
@@ -452,7 +475,7 @@ type PushAllResult struct {
 // Modules with no local config file are skipped (not every project pulls
 // every module). Modules without push support (no [ModulePusher]) are not
 // in the batch at all.
-func PushAll(ctx context.Context, projectDir, ref string, sc *studio.Client) (PushAllResult, error) {
+func PushAll(ctx context.Context, projectDir, ref, branch string, sc *studio.Client) (PushAllResult, error) {
 	statePath := filepath.Join(projectDir, StateFile)
 	state, err := loadState(statePath)
 	if err != nil {
@@ -479,7 +502,7 @@ func PushAll(ctx context.Context, projectDir, ref string, sc *studio.Client) (Pu
 	// PHASE 1 — pre-validate every module. No SET happens here; the first
 	// conflict aborts the batch so nothing is half-applied.
 	for _, pusher := range pushers {
-		if err := validateNoConflict(ctx, ref, sc, pusher, state); err != nil {
+		if err := validateNoConflict(ctx, ref, branch, sc, pusher, state); err != nil {
 			result.FailedModule = pusher.Name()
 			result.Err = err
 			return result, err
@@ -490,7 +513,7 @@ func PushAll(ctx context.Context, projectDir, ref string, sc *studio.Client) (Pu
 	// stay applied (no rollback — Faz 3b). state is mutated per module and
 	// persisted once at the end.
 	for _, pusher := range pushers {
-		applied, err := applyAndRefresh(ctx, projectDir, ref, sc, pusher, state)
+		applied, err := applyAndRefresh(ctx, projectDir, ref, branch, sc, pusher, state)
 		if err != nil {
 			result.FailedModule = pusher.Name()
 			result.Err = err

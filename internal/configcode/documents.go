@@ -93,9 +93,9 @@ const documentsHeader = `# config/documents.toml — collection security rules (
 // `documents: documentsRouter`), followed by the nested `rules.list`
 // procedure. tRPC paths are the JS object keys, so this must match the
 // mount key exactly or the pull 404s.
-func (documentsSerializer) Pull(ctx context.Context, ref string, sc *studio.Client) ([]byte, error) {
+func (documentsSerializer) Pull(ctx context.Context, ref, branch string, sc *studio.Client) ([]byte, error) {
 	var resp documentsRulesResponse
-	if err := sc.Query(ctx, "documents.rules.list", map[string]any{"ref": ref}, &resp); err != nil {
+	if err := sc.Query(ctx, "documents.rules.list", refPayload(ref, branch), &resp); err != nil {
 		return nil, fmt.Errorf("documents.rules.list: %w", err)
 	}
 	return serializeDocuments(resp.Rules)

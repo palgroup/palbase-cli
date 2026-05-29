@@ -22,9 +22,9 @@ import (
 // tenant) is non-fatal — it warns and keeps the rest, so a project that
 // hasn't enabled a given module still pulls cleanly. Returns an error only
 // for a hard failure of the whole pull.
-func runConfigPull(ctx context.Context, cwd, ref string, sc *studio.Client, out io.Writer) error {
+func runConfigPull(ctx context.Context, cwd, ref, branch string, sc *studio.Client, out io.Writer) error {
 	fmt.Fprintln(out, "→ pulling config (config/*.toml) ...")
-	results, err := configcode.Pull(ctx, cwd, ref, sc)
+	results, err := configcode.Pull(ctx, cwd, ref, branch, sc)
 	if err != nil {
 		return fmt.Errorf("config pull: %w", err)
 	}
@@ -44,9 +44,9 @@ func runConfigPull(ctx context.Context, cwd, ref string, sc *studio.Client, out 
 // the server in one ordered, pre-validated batch (configcode.PushAll). On
 // a mid-batch failure the already-applied modules are reported before the
 // error is surfaced (they really changed the server — no rollback).
-func runConfigPush(ctx context.Context, cwd, ref string, sc *studio.Client, out io.Writer) error {
+func runConfigPush(ctx context.Context, cwd, ref, branch string, sc *studio.Client, out io.Writer) error {
 	fmt.Fprintln(out, "→ pushing config (config/*.toml) ...")
-	result, err := configcode.PushAll(ctx, cwd, ref, sc)
+	result, err := configcode.PushAll(ctx, cwd, ref, branch, sc)
 
 	for _, res := range result.Applied {
 		printPushResult(res, out)

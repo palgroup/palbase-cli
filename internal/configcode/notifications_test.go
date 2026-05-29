@@ -201,7 +201,7 @@ func TestNotificationsPush_CreatesMissing(t *testing.T) {
 		Priority:    0,
 	})
 
-	applied, err := notificationsSerializer{}.Push(context.Background(), "abc123", sc, file)
+	applied, err := notificationsSerializer{}.Push(context.Background(), "abc123", "", sc, file)
 	require.NoError(t, err)
 	require.Equal(t, 1, applied.Set)
 	require.Empty(t, applied.Orphans)
@@ -217,7 +217,7 @@ func TestNotificationsPush_DeletesOrphan(t *testing.T) {
 	sc := srv.client(t)
 
 	// Empty local file → the server's twilio provider is an orphan.
-	applied, err := notificationsSerializer{}.Push(context.Background(), "abc123", sc, notifPushFile(t))
+	applied, err := notificationsSerializer{}.Push(context.Background(), "abc123", "", sc, notifPushFile(t))
 	require.NoError(t, err)
 	require.Equal(t, 0, applied.Set)
 	require.Equal(t, []string{"sms/twilio"}, applied.Orphans)
@@ -239,7 +239,7 @@ func TestNotificationsPush_IgnoresExisting(t *testing.T) {
 		Priority:    5, // changed priority — still can't update in place
 	})
 
-	applied, err := notificationsSerializer{}.Push(context.Background(), "abc123", sc, file)
+	applied, err := notificationsSerializer{}.Push(context.Background(), "abc123", "", sc, file)
 	require.NoError(t, err)
 	require.Equal(t, 0, applied.Set)
 	require.Equal(t, []string{"email/sendgrid"}, applied.Ignored)
@@ -261,7 +261,7 @@ func TestNotificationsPush_MissingSecretFails(t *testing.T) {
 		Priority:    0,
 	})
 
-	_, err := notificationsSerializer{}.Push(context.Background(), "abc123", sc, file)
+	_, err := notificationsSerializer{}.Push(context.Background(), "abc123", "", sc, file)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not set")
 	require.Equal(t, 0, srv.createCalls)
@@ -280,7 +280,7 @@ func TestNotificationsPush_RejectsLiteralCredential(t *testing.T) {
 		Priority:    0,
 	})
 
-	_, err := notificationsSerializer{}.Push(context.Background(), "abc123", sc, file)
+	_, err := notificationsSerializer{}.Push(context.Background(), "abc123", "", sc, file)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "@secret/")
 	require.Equal(t, 0, srv.createCalls)

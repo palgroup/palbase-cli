@@ -128,7 +128,7 @@ func loadStateForTest(t *testing.T, dir string) *State {
 // would have stored — used to seed a matching (non-conflicting) baseline.
 func serverHashFor(t *testing.T, fs *flagsServer) string {
 	t.Helper()
-	body, err := flagsSerializer{}.Pull(context.Background(), "myproj", fs.client(t))
+	body, err := flagsSerializer{}.Pull(context.Background(), "myproj", "", fs.client(t))
 	require.NoError(t, err)
 	return hashContent(body)
 }
@@ -148,7 +148,7 @@ func TestFlagsPush_RoundTripsChange(t *testing.T) {
 	// Local file flips feature_x to true.
 	writeFlagsConfig(t, dir, []systemFlagRow{row("feature_x", "bool", "true", "", "")})
 
-	res, err := Push(context.Background(), dir, "myproj", "flags", c)
+	res, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.Set, "one flag changed → one SET")
 	require.Equal(t, 1, fs.puts(), "exactly one userFlags.system.put")
@@ -175,7 +175,7 @@ func TestFlagsPush_CreatesNewFlag(t *testing.T) {
 	seedState(t, dir, serverHashFor(t, fs)) // baseline = empty server
 	writeFlagsConfig(t, dir, []systemFlagRow{row("brand_new", "string", `"hi"`, "", "")})
 
-	res, err := Push(context.Background(), dir, "myproj", "flags", c)
+	res, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.Set)
 	require.Equal(t, 1, fs.puts())
@@ -196,7 +196,7 @@ func TestFlagsPush_ConflictRejected(t *testing.T) {
 	seedState(t, dir, "sha256:stale-from-an-older-pull")
 	writeFlagsConfig(t, dir, []systemFlagRow{row("feature_x", "bool", "true", "", "")})
 
-	_, err := Push(context.Background(), dir, "myproj", "flags", c)
+	_, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.ErrorIs(t, err, ErrStateConflict)
 	require.Equal(t, 0, fs.puts(), "conflict must abort before any SET")
 }
@@ -214,7 +214,7 @@ func TestFlagsPush_NoBaselineRejected(t *testing.T) {
 	require.NoError(t, writeState(filepath.Join(dir, StateFile), st))
 	writeFlagsConfig(t, dir, []systemFlagRow{row("feature_x", "bool", "true", "", "")})
 
-	_, err := Push(context.Background(), dir, "myproj", "flags", c)
+	_, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.ErrorIs(t, err, ErrStateConflict)
 	require.Equal(t, 0, fs.puts())
 }
@@ -238,7 +238,7 @@ func TestFlagsPush_Idempotent(t *testing.T) {
 		row("max_items", "number", "42", "", ""),
 	})
 
-	res, err := Push(context.Background(), dir, "myproj", "flags", c)
+	res, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.Set, "no changes → no SET")
 	require.Equal(t, 0, fs.puts(), "idempotent push must issue zero mutations")
@@ -255,12 +255,12 @@ func TestFlagsPush_IdempotentAfterRoundTrip(t *testing.T) {
 	seedState(t, dir, serverHashFor(t, fs))
 	writeFlagsConfig(t, dir, []systemFlagRow{row("feature_x", "bool", "true", "", "")})
 
-	_, err := Push(context.Background(), dir, "myproj", "flags", c)
+	_, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 1, fs.puts())
 
 	// Second push, unchanged file.
-	res, err := Push(context.Background(), dir, "myproj", "flags", c)
+	res, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.Set)
 	require.Equal(t, 1, fs.puts(), "second push must add no mutations")
@@ -283,7 +283,7 @@ func TestFlagsPush_OrphansLeftUntouched(t *testing.T) {
 	// Local file omits server_only; keep_me unchanged.
 	writeFlagsConfig(t, dir, []systemFlagRow{row("keep_me", "bool", "true", "", "")})
 
-	res, err := Push(context.Background(), dir, "myproj", "flags", c)
+	res, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.Set, "keep_me unchanged → no SET")
 	require.Equal(t, []string{"server_only"}, res.Orphans)
@@ -309,7 +309,7 @@ func TestFlagsPush_VariantsIgnored(t *testing.T) {
 		row("ab_flag", "bool", "false", `[{"value":false,"weight":50},{"value":true,"weight":50}]`, ""),
 	})
 
-	res, err := Push(context.Background(), dir, "myproj", "flags", c)
+	res, err := Push(context.Background(), dir, "myproj", "", "flags", c)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.Set, "the flag itself is still created")
 	require.Equal(t, []string{"ab_flag"}, res.Ignored, "variants must be flagged as not pushed")
@@ -323,7 +323,7 @@ func TestPush_UnsupportedModule(t *testing.T) {
 	fs := newFlagsServer()
 	c := fs.client(t)
 	dir := t.TempDir()
-	_, err := Push(context.Background(), dir, "myproj", "auth", c)
+	_, err := Push(context.Background(), dir, "myproj", "", "auth", c)
 	require.ErrorIs(t, err, ErrPushNotImplemented)
 }
 
@@ -333,7 +333,7 @@ func TestPush_UnknownModule(t *testing.T) {
 	fs := newFlagsServer()
 	c := fs.client(t)
 	dir := t.TempDir()
-	_, err := Push(context.Background(), dir, "myproj", "does-not-exist", c)
+	_, err := Push(context.Background(), dir, "myproj", "", "does-not-exist", c)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrPushNotImplemented)
 }

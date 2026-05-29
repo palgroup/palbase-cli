@@ -32,9 +32,69 @@ type comboServer struct {
 	providerCreates int
 	providerDeletes int
 
+	// branches records every distinct branch field observed across ALL
+	// incoming requests (list/put/create/delete). Empty string is recorded
+	// when a request omits the branch (default-branch / main). Used to
+	// assert PushAll threads the branch through to every module's tRPC call.
+	branches map[string]bool
+
 	// failNotifyCreate makes notifications.providers.create return 500,
 	// driving the PushAll partial-fail branch (apply phase, not validate).
 	failNotifyCreate bool
+}
+
+// branchOfRequest extracts the branch field a request carried. Query (GET)
+// passes the input as `?input={"json":{...}}`; Mutation (POST) as a body
+// `{"json":{...}}`. Either way the branch lives at json.branch (omitted →
+// "" via omitempty), so this decodes whichever transport the path uses.
+func branchOfRequest(t *testing.T, r *http.Request) string {
+	t.Helper()
+	type envelope struct {
+		JSON struct {
+			Branch string `json:"branch"`
+		} `json:"json"`
+	}
+	var env envelope
+	if raw := r.URL.Query().Get("input"); raw != "" {
+		require.NoError(t, json.Unmarshal([]byte(raw), &env))
+		return env.JSON.Branch
+	}
+	body, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	r.Body = io.NopCloser(bytes.NewReader(body)) // allow re-read by handler
+	require.NoError(t, json.Unmarshal(body, &env))
+	return env.JSON.Branch
+}
+
+func (cs *comboServer) recordBranch(t *testing.T, r *http.Request) {
+	cs.mu.Lock()
+	if cs.branches == nil {
+		cs.branches = map[string]bool{}
+	}
+	cs.branches[branchOfRequest(t, r)] = true
+	cs.mu.Unlock()
+}
+
+// resetBranches clears the recorded branches. comboProject pre-pulls each
+// module (to seed the state.json baseline) against the same server, which
+// records "" before the action under test runs; tests call this after setup
+// so observedBranches reflects only the PushAll/Pull they actually assert.
+func (cs *comboServer) resetBranches() {
+	cs.mu.Lock()
+	cs.branches = nil
+	cs.mu.Unlock()
+}
+
+// observedBranches returns the distinct branch values the server saw, for
+// assertions. {""} means every request used the default branch.
+func (cs *comboServer) observedBranches() map[string]bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	out := make(map[string]bool, len(cs.branches))
+	for k := range cs.branches {
+		out[k] = true
+	}
+	return out
 }
 
 func newComboServer() *comboServer {
@@ -50,6 +110,7 @@ func (cs *comboServer) client(t *testing.T) *studio.Client {
 
 func (cs *comboServer) handle(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		cs.recordBranch(t, r)
 		switch r.URL.Path {
 		case "/api/trpc/userFlags.system.list":
 			cs.mu.Lock()
@@ -167,7 +228,7 @@ func comboProject(t *testing.T, cs *comboServer, c *studio.Client, flagRows []sy
 
 func serverHashOf(t *testing.T, s ModuleSerializer, c *studio.Client) string {
 	t.Helper()
-	body, err := s.Pull(context.Background(), "myproj", c)
+	body, err := s.Pull(context.Background(), "myproj", "", c)
 	require.NoError(t, err)
 	return hashContent(body)
 }
@@ -188,7 +249,7 @@ func TestPushAll_HappyPath(t *testing.T) {
 		}},
 	)
 
-	result, err := PushAll(context.Background(), dir, "myproj", c)
+	result, err := PushAll(context.Background(), dir, "myproj", "", c)
 	require.NoError(t, err)
 	require.Empty(t, result.FailedModule)
 	require.Empty(t, result.Skipped)
@@ -219,7 +280,7 @@ func TestPushAll_Idempotent(t *testing.T) {
 		}},
 	)
 
-	result, err := PushAll(context.Background(), dir, "myproj", c)
+	result, err := PushAll(context.Background(), dir, "myproj", "", c)
 	require.NoError(t, err)
 	require.Equal(t, 0, cs.flagPuts, "unchanged flags → no put")
 	require.Equal(t, 0, cs.providerCreates, "existing provider → no create")
@@ -250,7 +311,7 @@ func TestPushAll_PreValidateConflictAbortsBatch(t *testing.T) {
 	cs.flags["sneaky"] = systemFlagRow{Key: "sneaky", ValueType: "bool", Value: json.RawMessage("true")}
 	cs.mu.Unlock()
 
-	result, err := PushAll(context.Background(), dir, "myproj", c)
+	result, err := PushAll(context.Background(), dir, "myproj", "", c)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrStateConflict))
 	require.Equal(t, "flags", result.FailedModule)
@@ -277,7 +338,7 @@ func TestPushAll_PartialFailLeavesPriorApplied(t *testing.T) {
 		}},
 	)
 
-	result, err := PushAll(context.Background(), dir, "myproj", c)
+	result, err := PushAll(context.Background(), dir, "myproj", "", c)
 	require.Error(t, err)
 	require.Equal(t, "notifications", result.FailedModule)
 	// flags (ordered first) applied; notifications failed.
@@ -307,7 +368,60 @@ func TestPushAll_SkipsModuleWithoutLocalFile(t *testing.T) {
 	st.Modules["flags"] = ModuleState{Hash: serverHashOf(t, flagsSerializer{}, c)}
 	require.NoError(t, writeState(filepath.Join(dir, StateFile), st))
 
-	result, err := PushAll(context.Background(), dir, "myproj", c)
+	result, err := PushAll(context.Background(), dir, "myproj", "", c)
 	require.NoError(t, err)
 	require.Contains(t, result.Skipped, "notifications")
+}
+
+// TestPushAll_NoBranchOmitsBranchField: with branch="" (default/main), NO
+// request carries a branch field — the wire shape is byte-identical to the
+// pre-branch contract (backward compatible). Asserts via the server's
+// observed branches that every call (flags list/put + notifications
+// list/create) used "" only.
+func TestPushAll_NoBranchOmitsBranchField(t *testing.T) {
+	t.Setenv("NOTIFY_EMAIL_SENDGRID_CREDENTIALS", `{"api_key":"SG"}`)
+	cs := newComboServer()
+	c := cs.client(t)
+
+	dir := comboProject(t, cs, c,
+		[]systemFlagRow{row("brand_new", "string", `"hi"`, "", "")},
+		[]notifProviderEntry{{
+			Channel: "email", Provider: "sendgrid",
+			Credentials: SecretRef("NOTIFY_EMAIL_SENDGRID_CREDENTIALS"), Priority: 0,
+		}},
+	)
+
+	cs.resetBranches() // drop the baseline-seed pulls; assert only the PushAll
+	_, err := PushAll(context.Background(), dir, "myproj", "", c)
+	require.NoError(t, err)
+	// Only the default-branch (empty) value was ever seen on the wire.
+	require.Equal(t, map[string]bool{"": true}, cs.observedBranches())
+}
+
+// TestPushAll_BranchThreadedToEveryModule: with branch="qa", EVERY tRPC call
+// PushAll makes (flags list+put, notifications list+create) carries
+// branch="qa" — the branch=project model lands config on that branch's
+// tenant, not main. Asserts the server saw "qa" and nothing else.
+func TestPushAll_BranchThreadedToEveryModule(t *testing.T) {
+	t.Setenv("NOTIFY_EMAIL_SENDGRID_CREDENTIALS", `{"api_key":"SG"}`)
+	cs := newComboServer()
+	c := cs.client(t)
+
+	dir := comboProject(t, cs, c,
+		[]systemFlagRow{row("brand_new", "string", `"hi"`, "", "")},
+		[]notifProviderEntry{{
+			Channel: "email", Provider: "sendgrid",
+			Credentials: SecretRef("NOTIFY_EMAIL_SENDGRID_CREDENTIALS"), Priority: 0,
+		}},
+	)
+
+	cs.resetBranches() // drop the baseline-seed pulls; assert only the PushAll
+	result, err := PushAll(context.Background(), dir, "myproj", "qa", c)
+	require.NoError(t, err)
+	require.Empty(t, result.FailedModule)
+	require.Len(t, result.Applied, 2)
+	require.Equal(t, 1, cs.flagPuts)
+	require.Equal(t, 1, cs.providerCreates)
+	// Every request on every module carried branch="qa" — none defaulted.
+	require.Equal(t, map[string]bool{"qa": true}, cs.observedBranches())
 }

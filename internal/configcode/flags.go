@@ -104,9 +104,9 @@ const flagsHeader = `# config/flags.toml — system flag definitions (config-as-
 // `userFlags: userFlagsRouter`), NOT the hyphenated module name. tRPC
 // paths are the JS object keys, so this must match the mount key exactly
 // or every pull 404s.
-func (flagsSerializer) Pull(ctx context.Context, ref string, sc *studio.Client) ([]byte, error) {
+func (flagsSerializer) Pull(ctx context.Context, ref, branch string, sc *studio.Client) ([]byte, error) {
 	var rows []systemFlagRow
-	if err := sc.Query(ctx, "userFlags.system.list", map[string]any{"ref": ref}, &rows); err != nil {
+	if err := sc.Query(ctx, "userFlags.system.list", refPayload(ref, branch), &rows); err != nil {
 		return nil, fmt.Errorf("userFlags.system.list: %w", err)
 	}
 	return serializeFlags(rows)
@@ -219,6 +219,7 @@ func decodeVariants(raw json.RawMessage) ([]flagVariant, error) {
 // SET API grows the field (Faz 3+).
 type flagsPutInput struct {
 	Ref         string `json:"ref"`
+	Branch      string `json:"branch,omitempty"`
 	Key         string `json:"key"`
 	ValueType   string `json:"valueType"`
 	Value       any    `json:"value"`
@@ -231,14 +232,14 @@ type flagsPutInput struct {
 // so an unchanged file makes zero mutations (idempotent). Server flags
 // absent from the local file are reported as orphans and left untouched
 // (upsert-only; delete is Faz 3).
-func (flagsSerializer) Push(ctx context.Context, ref string, sc *studio.Client, tomlBytes []byte) (PushApplied, error) {
+func (flagsSerializer) Push(ctx context.Context, ref, branch string, sc *studio.Client, tomlBytes []byte) (PushApplied, error) {
 	var doc flagsDoc
 	if err := toml.Unmarshal(tomlBytes, &doc); err != nil {
 		return PushApplied{}, fmt.Errorf("parse flags.toml: %w", err)
 	}
 
 	var rows []systemFlagRow
-	if err := sc.Query(ctx, "userFlags.system.list", map[string]any{"ref": ref}, &rows); err != nil {
+	if err := sc.Query(ctx, "userFlags.system.list", refPayload(ref, branch), &rows); err != nil {
 		return PushApplied{}, fmt.Errorf("userFlags.system.list: %w", err)
 	}
 	server := make(map[string]systemFlagRow, len(rows))
@@ -266,6 +267,7 @@ func (flagsSerializer) Push(ctx context.Context, ref string, sc *studio.Client, 
 		}
 		in := flagsPutInput{
 			Ref:         ref,
+			Branch:      branch,
 			Key:         key,
 			ValueType:   entry.Type,
 			Value:       entry.Default,

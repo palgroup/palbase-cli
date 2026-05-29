@@ -85,9 +85,9 @@ const storageHeader = `# config/storage.toml — storage bucket metadata (config
 // `storage: storageRouter`), followed by the nested `buckets.list`
 // procedure. tRPC paths are the JS object keys, so this must match the
 // mount key exactly or the pull 404s.
-func (storageSerializer) Pull(ctx context.Context, ref string, sc *studio.Client) ([]byte, error) {
+func (storageSerializer) Pull(ctx context.Context, ref, branch string, sc *studio.Client) ([]byte, error) {
 	var resp storageListResponse
-	if err := sc.Query(ctx, "storage.buckets.list", map[string]any{"ref": ref}, &resp); err != nil {
+	if err := sc.Query(ctx, "storage.buckets.list", refPayload(ref, branch), &resp); err != nil {
 		return nil, fmt.Errorf("storage.buckets.list: %w", err)
 	}
 	return serializeStorage(resp.Buckets)

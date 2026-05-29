@@ -100,7 +100,7 @@ func TestFlagsSerializer_Pull(t *testing.T) {
 		trpcOK(w, rows)
 	})
 
-	body, err := flagsSerializer{}.Pull(context.Background(), "myproj", c)
+	body, err := flagsSerializer{}.Pull(context.Background(), "myproj", "", c)
 	require.NoError(t, err)
 	// Must match the root router's mount key (router.ts:27 `userFlags:`),
 	// which is camelCase — NOT the hyphenated module name.
@@ -118,7 +118,7 @@ func TestPull_WritesConfigAndState(t *testing.T) {
 	c := pathAwareStudio(t, rows)
 
 	dir := t.TempDir()
-	results, err := Pull(context.Background(), dir, "myproj", c)
+	results, err := Pull(context.Background(), dir, "myproj", "", c)
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
 
@@ -161,10 +161,10 @@ func TestPull_Deterministic(t *testing.T) {
 	}
 
 	d1 := t.TempDir()
-	_, err := Pull(context.Background(), d1, "myproj", c)
+	_, err := Pull(context.Background(), d1, "myproj", "", c)
 	require.NoError(t, err)
 	d2 := t.TempDir()
-	_, err = Pull(context.Background(), d2, "myproj", c)
+	_, err = Pull(context.Background(), d2, "myproj", "", c)
 	require.NoError(t, err)
 
 	f1, s1 := read(d1)
@@ -197,7 +197,7 @@ func TestPull_PartialFailureIsNonFatal(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	results, err := Pull(context.Background(), dir, "myproj", c)
+	results, err := Pull(context.Background(), dir, "myproj", "", c)
 	require.NoError(t, err, "partial failure must not abort the whole pull")
 
 	// flags/auth/documents wrote files; storage is an Err result, no file.

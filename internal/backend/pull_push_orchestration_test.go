@@ -188,7 +188,7 @@ func TestPush_Orchestration_DeployThenConfig(t *testing.T) {
 	// Seed config/*.toml + a matching .palbase/state.json baseline by
 	// running the config pull against the same mock first — a realistic
 	// pull→push, so PushAll's pre-validate sees no drift.
-	require.NoError(t, runConfigPull(context.Background(), mustGetwd(t), "abc123", r.Studio(), &bytes.Buffer{}))
+	require.NoError(t, runConfigPull(context.Background(), mustGetwd(t), "abc123", "", r.Studio(), &bytes.Buffer{}))
 	rs.reset() // drop the pull's recorded calls; we only assert the push order
 
 	cmd := newPushCmd(r)

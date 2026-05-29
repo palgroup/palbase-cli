@@ -124,9 +124,9 @@ const authHeader = `# config/auth.toml — auth provider configuration (config-a
 // object keys, so this must be `auth.providers.list` exactly or the pull
 // 404s. (It happens to match the module folder name, unlike flags whose
 // path is the camelCase `userFlags.system.list`.)
-func (authSerializer) Pull(ctx context.Context, ref string, sc *studio.Client) ([]byte, error) {
+func (authSerializer) Pull(ctx context.Context, ref, branch string, sc *studio.Client) ([]byte, error) {
 	var resp authProviderListResponse
-	if err := sc.Query(ctx, "auth.providers.list", map[string]any{"ref": ref}, &resp); err != nil {
+	if err := sc.Query(ctx, "auth.providers.list", refPayload(ref, branch), &resp); err != nil {
 		return nil, fmt.Errorf("auth.providers.list: %w", err)
 	}
 	return serializeAuth(resp.Providers)

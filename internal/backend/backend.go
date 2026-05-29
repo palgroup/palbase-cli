@@ -692,7 +692,7 @@ reported but does NOT roll back the code deploy that already landed.`,
 			// Runs AFTER the code deploy (advisor ordering: code first).
 			// A config failure is surfaced but the code deploy already
 			// landed and is NOT rolled back (no-rollback — Faz 3b).
-			if cfgErr := runConfigPush(ctx, cwd, ref, r.Studio(), os.Stdout); cfgErr != nil {
+			if cfgErr := runConfigPush(ctx, cwd, ref, branch, r.Studio(), os.Stdout); cfgErr != nil {
 				return fmt.Errorf("code deployed (version %s) but config push failed: %w", resp.Version, cfgErr)
 			}
 
@@ -1079,15 +1079,18 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 			}
 
 			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
-			// "" = main). NAMED GAP: backend.pull / env.pull / config-as-code
-			// tRPC procedures don't accept a branch field yet (env.pull is
-			// .strict() and would reject one). Branch-aware pull lands when
-			// Track A adds the field server-side; then each payload below gets
-			//   if branch != "" { payload["branch"] = branch }
-			// and this resolve already feeds it.
+			// "" = main). Config-as-code pull IS branch-aware now — its
+			// serializers accept a branch and the Studio config routers
+			// resolve ref+branch → endpoint_ref (branch=project model), so
+			// `palbase pull --branch qa` snapshots THAT branch's module
+			// config. NAMED GAP (still): backend.pull / env.pull don't accept
+			// a branch field yet (env.pull is .strict() and would reject one),
+			// so the code archive + .env.local below still come from the
+			// default branch. Those land when their tRPC inputs grow a branch
+			// field server-side; this resolve already feeds them.
 			branch := resolveActiveBranch(branchFlag)
 			if branch != "" {
-				fmt.Printf("note: --branch %q requested, but server-side branch pull isn't wired yet; pulling the default branch.\n", branch)
+				fmt.Printf("note: --branch %q — config pulled from that branch; code + env still pull the default branch (not branch-wired yet).\n", branch)
 			}
 
 			// ── code pull ─────────────────────────────────────────────
@@ -1127,7 +1130,7 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 			// ── config-as-code pull ───────────────────────────────────
 			// Non-fatal: a config glitch must not lose the code/env pull
 			// that already succeeded.
-			if cfgErr := runConfigPull(ctx, cwd, ref, r.Studio(), os.Stdout); cfgErr != nil {
+			if cfgErr := runConfigPull(ctx, cwd, ref, branch, r.Studio(), os.Stdout); cfgErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: config pull failed (%v) — code + env were still pulled\n", cfgErr)
 			}
 
