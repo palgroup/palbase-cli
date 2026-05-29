@@ -368,6 +368,18 @@ var backendBundleAllowedRoots = map[string]struct{}{
 	// injected palbase.toml below (kept here so a customer-provided
 	// override survives the walk-phase filter, then loses to inject).
 	"palbase.toml": {},
+	// Shared source dirs an endpoint may import (e.g. the schema passed to
+	// defineEndpoint({ schema }), use-case/service classes, helpers). The
+	// server bundler runs `esbuild --bundle` from endpoints/ and follows
+	// relative imports like `../../../schema/index.js`, so these dirs MUST
+	// reach the pod or the deploy fails "Could not resolve". Bug caught on
+	// a real SQL todo app whose endpoints imported `schema/`. node_modules
+	// is intentionally NOT here — the pod installs deps from package.json.
+	"schema": {},
+	"lib":    {},
+	"shared": {},
+	"src":    {},
+	"utils":  {},
 }
 
 // bundleCwd packs the project's backend artifacts (allow-list) as
