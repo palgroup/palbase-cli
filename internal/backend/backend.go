@@ -670,7 +670,7 @@ reported but does NOT roll back the code deploy that already landed.`,
 			// that subdomain) and the mode-aware public host. Best-effort:
 			// look it up via apikey.reveal; on failure fall back to a
 			// generic note instead of printing a bare-ref URL that 404s.
-			if target, lerr := lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref); lerr == nil {
+			if target, lerr := lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref, branch); lerr == nil {
 				fmt.Printf("  %s\n", target.URL)
 			} else {
 				fmt.Printf("  (project base URL unavailable: %v)\n", lerr)
@@ -1314,7 +1314,7 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 	if specBytes, err := fetchOpenAPISpec(ctx, localURL+"/openapi.json", ""); err == nil {
 		apiKey := ""
 		var oauth *swiftOAuthConfig
-		if target, lookupErr := lookupBackendTarget(ctx, sc, endpoints, ref); lookupErr == nil {
+		if target, lookupErr := lookupBackendTarget(ctx, sc, endpoints, ref, branch); lookupErr == nil {
 			apiKey = target.APIKey
 			// OAuth providers live in remote palauth — the local
 			// backend dev server doesn't proxy /auth/*. Hit the remote
@@ -1337,7 +1337,7 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 			OAuth:  oauth,
 		}, outFile, w)
 	}
-	target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
+	target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
 	if err != nil {
 		return err
 	}
@@ -1345,7 +1345,7 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 }
 
 func generateIOSRemote(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
-	target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
+	target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
 	if err != nil {
 		return err
 	}
@@ -1376,12 +1376,16 @@ func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, bran
 	}, outFile, w)
 }
 
-func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string) (backendTarget, error) {
+func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string, branch string) (backendTarget, error) {
 	var resp struct {
 		EndpointRef string `json:"endpointRef"`
 		AnonKey     string `json:"anonKey"`
 	}
-	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
+	payload := map[string]any{"ref": ref}
+	if branch != "" {
+		payload["branch"] = branch
+	}
+	if err := sc.Query(ctx, "apikey.reveal", payload, &resp); err != nil {
 		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)
 	}
 	if resp.AnonKey == "" {
@@ -2433,7 +2437,7 @@ func pullTypesTo(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 func openAPIURL(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env string) (string, string, error) {
 	switch env {
 	case "remote", "":
-		target, err := lookupBackendTarget(ctx, sc, endpoints, ref)
+		target, err := lookupBackendTarget(ctx, sc, endpoints, ref, "")
 		if err != nil {
 			return "", "", err
 		}
