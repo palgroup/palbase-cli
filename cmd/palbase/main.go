@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/palgroup/palbase-cli/internal/admin"
 	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
@@ -109,6 +110,9 @@ func main() {
 		}),
 		secret.Cmd(secret.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
+		}),
+		admin.NewCommand(admin.Resolvers{
+			REST: func() admin.REST { return managementREST() },
 		}),
 	)
 
