@@ -626,15 +626,14 @@ reported but does NOT roll back the code deploy that already landed.`,
 				return err
 			}
 			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
-			// "" = main). NAMED GAP: backend.deploy and the config-as-code
-			// push procedures don't accept a branch field yet. Branch-aware
-			// push lands when Track A adds it server-side; then the
-			// backend.deploy payload below gets
-			//   if branch != "" { payload["branch"] = branch }
-			// and this resolve already feeds it.
+			// "" = main). In the branch=project model each branch is its own
+			// tenant pod (endpoint_ref = <ref><branchSlug>), so push must land
+			// on the branch you're on. backend.deploy now accepts a `branch`
+			// field (server resolves ref+branch → endpoint_ref); we thread it
+			// below. Empty = default branch (main).
 			branch := resolveActiveBranch(branchFlag)
 			if branch != "" {
-				fmt.Printf("note: --branch %q requested, but server-side branch push isn't wired yet; pushing the default branch.\n", branch)
+				fmt.Printf("→ branch: %s\n", branch)
 			}
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -651,11 +650,15 @@ reported but does NOT roll back the code deploy that already landed.`,
 				Version string `json:"version"`
 				Files   int    `json:"files"`
 			}
-			if err := r.Studio().Mutation(ctx, "backend.deploy", map[string]any{
+			deployPayload := map[string]any{
 				"ref":     ref,
 				"archive": base64.StdEncoding.EncodeToString(archive),
 				"message": message,
-			}, &resp); err != nil {
+			}
+			if branch != "" {
+				deployPayload["branch"] = branch
+			}
+			if err := r.Studio().Mutation(ctx, "backend.deploy", deployPayload, &resp); err != nil {
 				return fmt.Errorf("backend.deploy: %w", err)
 			}
 			fmt.Printf("✓ deployed version %s (%d files)\n", resp.Version, resp.Files)
