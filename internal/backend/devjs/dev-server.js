@@ -109,6 +109,20 @@ function walk(dir, cb) {
 // anymore; customers only add @palbase/backend.
 const { buildModuleClients } = require('./module-clients.js');
 
+// Request-scoped user id for auto-binding flags resolution to the current
+// request's user — mirrors worker.js's `currentRequestUserId`. The dev-server
+// builds the module clients ONCE (singleton, below) rather than per-request, so
+// instead of a per-call closure we keep a module-scoped variable that the http
+// handler sets before each invocation and clears after. The getter passed into
+// buildModuleClients reads it lazily at flags-call time, so `flags.get('key')`
+// resolves user-override → project-default for the signed-in user (project
+// defaults when anonymous). Concurrency note: the dev-server handles requests
+// effectively serially for this purpose (a handler awaits its flags call within
+// the same turn before the next request mutates the variable); this is a local
+// one-developer dev tool, not the multi-tenant pod. Prod's per-subprocess model
+// gives the same guarantee structurally.
+let currentRequestUserId = null;
+
 let palbaseClientSingleton = null;
 function getPalbaseClients() {
   if (!PALBASE_URL || !TENANT_APIKEY) return null;
@@ -125,6 +139,10 @@ function getPalbaseClients() {
     url: PALBASE_URL,
     apikey: TENANT_APIKEY,
     ...(TENANT_SERVICE_ROLE ? { service_role: TENANT_SERVICE_ROLE } : {}),
+  }, {
+    // Lazy getter — read at flags-call time so it sees whatever the http
+    // handler set for the in-flight request. Matches worker.js.
+    getCurrentUserId: () => currentRequestUserId,
   });
   return palbaseClientSingleton;
 }
@@ -485,6 +503,11 @@ const server = http.createServer(async (req, res) => {
   try {
     installRuntime();
     const pbReq = makeRequest(req, params, body, user);
+    // Make this request's user visible to the flags client's auto-bind getter
+    // (mirrors worker.js): `flags.get('key')` resolves user-override → default
+    // without the handler passing { userId } manually. Anonymous → null →
+    // project defaults. Reset in finally so a later request never inherits it.
+    currentRequestUserId = (pbReq.user && pbReq.user.id) || null;
     result = await endpoint.handler(pbReq);
   } catch (err) {
     res.statusCode = 500;
@@ -492,6 +515,8 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ error: 'handler_error', message: err.message, stack: err.stack }));
     log(`[${req.method}] ${parsed.pathname}  500  ${Date.now() - start}ms  — ${err.message}`);
     return;
+  } finally {
+    currentRequestUserId = null;
   }
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');

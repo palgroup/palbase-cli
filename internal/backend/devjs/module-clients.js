@@ -621,14 +621,44 @@ function buildFunctionsClient(http) {
 }
 
 // ─── Flags client (PalbaseFlagsClient) ──────────────────────────────────
+// Resolution endpoint: GET /v1/flags/<name>/enabled|variant + GET /v1/flags
+// (getAll). These are the per-call resolution routes palflags exposes; they
+// take `userId` so the server resolves user-override → project-default.
+//
+// Auto user-bind: a handler running inside a request has a current user
+// (pbReq.user). `getCurrentUserId` is a getter the dev-server installs so that
+// `flags.get('key')` resolves against that user automatically — override →
+// default when signed-in, project defaults when anonymous. An explicit
+// `{ userId }` in the context always wins (admin / cross-user reads); auto-
+// bind only fills when the caller did not specify a userId.
+//
+// `getCurrentUserId` may be undefined (tests that build the client directly) —
+// in that case behaviour is exactly the old contract (no auto-injection).
+//
+// Mirrors backend-runtime internal/runtime/module-clients.js (lockstep).
 
-function buildFlagsClient(http) {
+function buildFlagsClient(http, getCurrentUserId) {
+  // Resolve the effective userId for a call: explicit context.userId wins;
+  // otherwise fall back to the current request's user (when present). An
+  // explicit `userId: null` is treated as a deliberate anonymous read and
+  // suppresses auto-bind.
+  function resolveUserId(context) {
+    if (context && 'userId' in context) return context.userId; // explicit (incl. null) wins
+    if (typeof getCurrentUserId === 'function') {
+      const id = getCurrentUserId();
+      if (id) return id;
+    }
+    return undefined;
+  }
+
   function ctxParams(context) {
     const params = new URLSearchParams();
-    if (context && context.userId) params.set('userId', context.userId);
+    const userId = resolveUserId(context);
+    if (userId) params.set('userId', userId);
     if (context && context.properties) params.set('properties', JSON.stringify(context.properties));
     return params;
   }
+
   return {
     async isEnabled(flagName, context) {
       if (!FLAG_NAME_RE.test(flagName)) {
@@ -648,11 +678,82 @@ function buildFlagsClient(http) {
       const query = ctxParams(context).toString();
       return http.request('GET', `/v1/flags/${flagName}/variant${query ? `?${query}` : ''}`);
     },
+    // get(key)                      → resolve flag value for current user
+    // get(key, defaultValue)        → fall back to defaultValue when the flag
+    //                                 is absent OR palflags is unreachable
+    // get(key, defaultValue, ctx)   → + explicit context (e.g. { userId })
+    // get(key, ctx)                 → context only, no default
+    //
+    // Returns the same {data, error, status} envelope the rest of the surface
+    // uses; `data` is the resolved value (defaultValue substituted when the
+    // flag is missing/unreachable and a default was given).
+    async get(flagName, defaultOrContext, maybeContext) {
+      if (!FLAG_NAME_RE.test(flagName)) {
+        throw new Error(
+          `Invalid flag name: "${flagName}". Flag names must match ${FLAG_NAME_RE.source}`,
+        );
+      }
+      // Disambiguate the overload: a plain object with no value-y meaning is a
+      // context; anything else (boolean/string/number/etc.) is a default.
+      let defaultValue;
+      let context;
+      let hasDefault = false;
+      if (maybeContext !== undefined) {
+        defaultValue = defaultOrContext;
+        hasDefault = true;
+        context = maybeContext;
+      } else if (isContextObject(defaultOrContext)) {
+        context = defaultOrContext;
+      } else if (defaultOrContext !== undefined) {
+        defaultValue = defaultOrContext;
+        hasDefault = true;
+      }
+
+      const query = ctxParams(context).toString();
+      const resp = await http.request('GET', `/v1/flags/${flagName}${query ? `?${query}` : ''}`);
+      // Missing flag (404) or unreachable palflags (network_error) → default,
+      // when one was supplied. Otherwise the envelope (incl. error) passes
+      // through unchanged so the handler can decide.
+      if (resp.error !== null) {
+        if (hasDefault) return { data: defaultValue, error: null, status: resp.status };
+        return resp;
+      }
+      // Unwrap a value envelope if palflags wraps the resolved flag in
+      // `{ value }`/`{ enabled }`; otherwise hand back data verbatim.
+      const value = unwrapFlagValue(resp.data);
+      if (value === undefined && hasDefault) {
+        return { data: defaultValue, error: null, status: resp.status };
+      }
+      return { data: value, error: null, status: resp.status };
+    },
     async getAll(context) {
       const query = ctxParams(context).toString();
       return http.request('GET', `/v1/flags${query ? `?${query}` : ''}`);
     },
   };
+}
+
+// A "context object" is a plain object carrying userId/properties — used to
+// tell `flags.get(key, ctx)` apart from `flags.get(key, defaultObject)`.
+function isContextObject(v) {
+  return (
+    v !== null &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    ('userId' in v || 'properties' in v)
+  );
+}
+
+// palflags' resolution route may return the value directly or wrapped in a
+// small envelope. Accept both so the convenience `get()` returns the bare
+// value regardless of which shape the server uses.
+function unwrapFlagValue(data) {
+  if (data !== null && typeof data === 'object' && !Array.isArray(data)) {
+    if ('value' in data) return data.value;
+    if ('enabled' in data) return data.enabled;
+    if ('variant' in data) return data.variant;
+  }
+  return data;
 }
 
 // ─── Notifications client (PalbaseNotificationsClient) ──────────────────
@@ -1012,7 +1113,7 @@ function buildCmsClient(http) {
 // pair. The caller picks which apikey is "primary" (service-role wins
 // when present — see worker.js comment).
 
-function buildModuleClients(palbase) {
+function buildModuleClients(palbase, options) {
   if (!palbase || !palbase.url) {
     // Not configured: every module slot throws on first use so partial
     // behaviour fails loudly. Spread onto ctx so ctx.docs.collection(...)
@@ -1026,13 +1127,18 @@ function buildModuleClients(palbase) {
   // (it's a manual fetch); stash apiKey on the http object so buildAuthClient
   // can read it without taking it as a separate parameter.
   http.apiKey = apiKey;
+  // getCurrentUserId: a getter the dev-server passes so flags auto-binds the
+  // current request's user (flags.get('key') resolves override → default).
+  // Undefined when built standalone (unit tests) — then flags behaves exactly
+  // as before (no auto-injection).
+  const getCurrentUserId = options && options.getCurrentUserId;
   return {
     auth: buildAuthClient(http),
     storage: buildStorageClient(http),
     docs: buildDocsClient(http),
     realtime: buildRealtimeClient(http),
     functions: buildFunctionsClient(http),
-    flags: buildFlagsClient(http),
+    flags: buildFlagsClient(http, getCurrentUserId),
     notifications: buildNotificationsClient(http),
     analytics: buildAnalyticsClient(http),
     links: buildLinksClient(http),
