@@ -96,11 +96,11 @@ func TestE2E_CreatePollReveal_DPoPBound(t *testing.T) {
 
 	// 3. reveal — DPoP-bound write-scoped call returns plaintext.
 	var revealed struct {
-		AnonKey *string `json:"anonKey"`
+		PublishableKey *string `json:"publishableKey"`
 	}
 	require.NoError(t, c.Do(ctx, http.MethodGet, "/api/v1/projects/"+ref+"/api-keys?reveal=true", nil, &revealed))
-	require.NotNil(t, revealed.AnonKey, "reveal must surface the anon key plaintext")
-	require.True(t, strings.HasPrefix(*revealed.AnonKey, "pb_"), "anon key has pb_ prefix")
+	require.NotNil(t, revealed.PublishableKey, "reveal must surface the publishable key plaintext")
+	require.True(t, strings.HasPrefix(*revealed.PublishableKey, "pb_"), "publishable key has pb_ prefix")
 }
 
 // TestE2E_BearerPresentedPAT_Rejected pins the no-downgrade rule: the

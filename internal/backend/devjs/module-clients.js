@@ -36,9 +36,8 @@
  * @palbase/server clients used. The base URL comes from `palbase.url`
  * which the Go runtime sets to `https://<endpointRef>.<publicHost>`.
  *
- * Auth headers: `apikey` carries the project key (service-role if
- * available; falls back to anon). Kong's pre-function plugin reads
- * scope from byte offset 12 and stamps the iJWT — the runtime must NOT
+ * Auth headers: `apikey` carries the project publishable key in local
+ * dev. Kong's pre-function plugin reads scope from byte offset 12 and stamps the iJWT — the runtime must NOT
  * put the key in `Authorization`, which PostgREST would try to decode
  * as a JWT and 500 on.
  *
@@ -1109,9 +1108,8 @@ function buildCmsClient(http) {
 }
 
 // ─── Factory ────────────────────────────────────────────────────────────
-// Builds the full ctx.* module surface from a single (apikey, baseUrl)
-// pair. The caller picks which apikey is "primary" (service-role wins
-// when present — see worker.js comment).
+// Builds the full ctx.* module surface from a single publishable-key/baseUrl
+// pair.
 
 function buildModuleClients(palbase, options) {
   if (!palbase || !palbase.url) {
@@ -1120,7 +1118,7 @@ function buildModuleClients(palbase, options) {
     // surfaces the clear error rather than "Cannot read of undefined".
     return null;
   }
-  const apiKey = palbase.service_role || palbase.apikey || '';
+  const apiKey = palbase.apikey || '';
   const baseUrl = palbase.url.replace(/\/+$/, '');
   const http = makeHttpClient(apiKey, baseUrl);
   // verifyUserToken needs the apikey but doesn't go through http.request

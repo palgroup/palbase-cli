@@ -524,16 +524,12 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			// Reveal the project's anon + service-role keys so dev-server
-			// can wire its inline module clients (module-clients.js). If
-			// reveal fails (no login, no project link, network down), we
-			// still launch dev-server without the module clients —
-			// ctx.docs/ctx.storage/… throw on first use, so the user sees
-			// a clear error instead of silent partial behaviour.
+			// Reveal the project's publishable key so dev-server can wire its
+			// inline module clients (module-clients.js). Service-role keys are
+			// platform-internal and are never pulled into local dev.
 			var revealResp struct {
 				EndpointRef    string `json:"endpointRef"`
-				AnonKey        string `json:"anonKey"`
-				ServiceRoleKey string `json:"serviceRoleKey"`
+				PublishableKey string `json:"publishableKey"`
 			}
 			if ref != "" && ref != "local" {
 				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
@@ -560,8 +556,7 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 				// so dev still launches (ctx.docs/… then errors clearly).
 				fmt.Sprintf("PALBASE_PROJECT_REF=%s", resolveDevProjectRef(ref, revealResp.EndpointRef)),
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
-				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.AnonKey),
-				fmt.Sprintf("PALBASE_TENANT_SERVICE_ROLE=%s", revealResp.ServiceRoleKey),
+				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.PublishableKey),
 				// PALBASE_BRANCH gives dev-server the active branch (--branch
 				// wins, else ProjectConfig.DefaultEnv from `palbase branch
 				// switch`). resolveActiveBranch returns "" for main; we surface
@@ -1489,7 +1484,7 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 				oauth = oauthCfg
 			}
 		} else {
-			fmt.Fprintf(w, "  (anon key not embedded for local config: %v)\n", lookupErr)
+			fmt.Fprintf(w, "  (publishable key not embedded for local config: %v)\n", lookupErr)
 		}
 		return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
 			URL:    localURL,
@@ -1540,8 +1535,8 @@ func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, bran
 
 func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string, branch string) (backendTarget, error) {
 	var resp struct {
-		EndpointRef string `json:"endpointRef"`
-		AnonKey     string `json:"anonKey"`
+		EndpointRef    string `json:"endpointRef"`
+		PublishableKey string `json:"publishableKey"`
 	}
 	payload := map[string]any{"ref": ref}
 	if branch != "" {
@@ -1550,8 +1545,8 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 	if err := sc.Query(ctx, "apikey.reveal", payload, &resp); err != nil {
 		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)
 	}
-	if resp.AnonKey == "" {
-		return backendTarget{}, errors.New("apikey.reveal: missing anon key")
+	if resp.PublishableKey == "" {
+		return backendTarget{}, errors.New("apikey.reveal: missing publishable key")
 	}
 	endpointRef := resp.EndpointRef
 	if endpointRef == "" {
@@ -1559,7 +1554,7 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 	}
 	return backendTarget{
 		URL:    fmt.Sprintf("https://%s.%s", endpointRef, endpoints.PublicHost),
-		APIKey: resp.AnonKey,
+		APIKey: resp.PublishableKey,
 	}, nil
 }
 
@@ -2582,7 +2577,7 @@ func pullTypesTo(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 }
 
 // openAPIURL resolves the spec URL for the chosen environment AND the
-// anon key needed to fetch it.
+// publishable key needed to fetch it.
 //
 // remote: routes through Kong, so the URL MUST use the branch
 // endpoint_ref subdomain (apikey.reveal returns it) and the mode-aware

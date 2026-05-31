@@ -31,9 +31,7 @@ const ENDPOINTS_DIR = path.join(PROJECT_ROOT, 'endpoints');
 // here for dev-server because this is a long-lived process re-loading
 // user modules on file changes.
 const TENANT_APIKEY = process.env.PALBASE_TENANT_APIKEY || '';
-const TENANT_SERVICE_ROLE = process.env.PALBASE_TENANT_SERVICE_ROLE || '';
 delete process.env.PALBASE_TENANT_APIKEY;
-delete process.env.PALBASE_TENANT_SERVICE_ROLE;
 
 // Public host the SDK calls. Same shape as prod: <ref>.<host>.
 // When PROJECT_REF==='local' (no `palbase login`) we run without
@@ -127,18 +125,13 @@ let palbaseClientSingleton = null;
 function getPalbaseClients() {
   if (!PALBASE_URL || !TENANT_APIKEY) return null;
   if (palbaseClientSingleton) return palbaseClientSingleton;
-  // Mirror worker.js (the prod backend-runtime path): the apikey
-  // header drives Kong's scope decision (`s` = service-role / RLS
-  // bypass, `c` = anon). The module clients ARE the project's
-  // privileged surface, so the service-role key wins when present —
-  // passing the anon key here makes Kong stamp role=anon on the iJWT
-  // and downstream services (paldocs) SET LOCAL ROLE anon, which has
-  // read-only grants. Falls back to anon only when service-role
-  // wasn't revealed.
+  // Local dev receives only the publishable key. Privileged Palbase
+  // module operations must run in the managed backend runtime; local
+  // ctx.* calls use normal publishable-key permissions and fail clearly
+  // when a service requires internal authority.
   palbaseClientSingleton = buildModuleClients({
     url: PALBASE_URL,
     apikey: TENANT_APIKEY,
-    ...(TENANT_SERVICE_ROLE ? { service_role: TENANT_SERVICE_ROLE } : {}),
   }, {
     // Lazy getter — read at flags-call time so it sees whatever the http
     // handler set for the in-flight request. Matches worker.js.
@@ -566,12 +559,7 @@ server.listen(PORT, () => {
     log('────────────────────────────────────────────────────────────');
     log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
     log(`  ctx.docs/ctx.storage/… writes hit ${PALBASE_URL}`);
-    if (TENANT_SERVICE_ROLE) {
-      log(`  scope: service-role (RLS bypass) — key ${TENANT_SERVICE_ROLE.slice(0, 16)}…`);
-    } else {
-      log(`  scope: anon — RLS WILL apply, writes to protected collections will fail`);
-      log(`         (apikey.reveal returned no service-role; likely missing default key)`);
-    }
+    log(`  key: publishable — protected module writes require managed runtime authority`);
     log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);
     log('────────────────────────────────────────────────────────────');
   } else {

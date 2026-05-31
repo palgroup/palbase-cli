@@ -48,27 +48,27 @@ func TestApikeyCreate_REST_201Plaintext(t *testing.T) {
 		require.Equal(t, "/api/v1/projects/abcd1234/api-keys", r.URL.Path)
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		okData(w, http.StatusCreated, map[string]any{
-			"id": "k2", "endpoint_ref": "abcd1234", "name": "ci", "scope": "s",
-			"is_default": false, "plaintext": "pb_abcd1234m_s_secret", "lookup_prefix": "pb_abcd",
+			"id": "k2", "endpoint_ref": "abcd1234", "name": "ci", "scope": "c",
+			"is_default": false, "plaintext": "pb_abcd1234m_c_publishable", "lookup_prefix": "pb_abcd",
 		})
 	})
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--name", "ci", "--scope", "s", "--json"})
+	cmd.SetArgs([]string{"create", "abcd1234", "--name", "ci", "--json"})
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, "ci", body["name"])
-	require.Equal(t, "s", body["scope"])
+	require.NotContains(t, body, "scope")
 }
 
-func TestApikeyCreate_RejectsBadScope(t *testing.T) {
+func TestApikeyCreate_HasNoScopeFlag(t *testing.T) {
 	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call API with an invalid scope")
+		t.Fatal("must not call API when cobra rejects an unknown flag")
 	})
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--name", "x", "--scope", "service_role"})
+	cmd.SetArgs([]string{"create", "abcd1234", "--name", "x", "--scope", "s"})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--scope")
+	require.Contains(t, err.Error(), "unknown flag")
 }
 
 func TestApikeyCreate_RequiresName(t *testing.T) {
@@ -88,9 +88,8 @@ func TestApikeyReveal_REST_GatedQuery(t *testing.T) {
 		require.Equal(t, http.MethodGet, r.Method)
 		require.Equal(t, "/api/v1/projects/abcd1234/api-keys", r.URL.Path)
 		require.Equal(t, "true", r.URL.Query().Get("reveal"), "reveal must set ?reveal=true")
-		anon, svc := "pb_anon", "pb_svc"
 		okData(w, 200, map[string]any{
-			"anonKey": anon, "serviceRoleKey": svc, "keys": []any{},
+			"publishableKey": "pb_publishable", "keys": []any{},
 		})
 	})
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})

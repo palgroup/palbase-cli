@@ -163,7 +163,7 @@ func (rs *pushPlanStudio) resolvers(t *testing.T) Resolvers {
 		case "/api/trpc/documents.rules.list":
 			ok(map[string]any{"rules": []any{}})
 		case "/api/trpc/apikey.reveal":
-			ok(map[string]any{"endpointRef": "abc123m", "anonKey": "pb_abc123m_canon"})
+			ok(map[string]any{"endpointRef": "abc123m", "publishableKey": "pb_abc123m_cpublishable"})
 		default:
 			t.Errorf("unexpected tRPC path: %s", path)
 			http.Error(w, "unexpected", http.StatusNotFound)

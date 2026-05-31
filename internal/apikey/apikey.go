@@ -76,7 +76,7 @@ func listCmd(rest func() REST) *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tNAME\tSCOPE\tPREFIX\tDEFAULT\tREVOKED")
+			fmt.Fprintln(tw, "ID\tNAME\tTYPE\tPREFIX\tDEFAULT\tREVOKED")
 			for _, k := range rows {
 				name := ""
 				if k.Name != nil {
@@ -87,7 +87,7 @@ func listCmd(rest func() REST) *cobra.Command {
 					revoked = "yes"
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\t%s\n",
-					k.ID, name, k.Scope, k.LookupPrefix, k.IsDefault, revoked)
+					k.ID, name, keyType(k.Scope), k.LookupPrefix, k.IsDefault, revoked)
 			}
 			return tw.Flush()
 		},
@@ -99,7 +99,6 @@ func listCmd(rest func() REST) *cobra.Command {
 func createCmd(rest func() REST) *cobra.Command {
 	var (
 		name    string
-		scope   string
 		jsonOut bool
 	)
 	cmd := &cobra.Command{
@@ -110,10 +109,6 @@ func createCmd(rest func() REST) *cobra.Command {
 			ref := args[0]
 			if name == "" {
 				return fmt.Errorf("--name is required")
-			}
-			// Contract: scope is "c" (anon/publishable) or "s" (service_role).
-			if scope != "c" && scope != "s" {
-				return fmt.Errorf(`--scope must be "c" (anon) or "s" (service_role)`)
 			}
 			var created struct {
 				ID           string `json:"id"`
@@ -126,20 +121,19 @@ func createCmd(rest func() REST) *cobra.Command {
 			}
 			if err := rest().Do(cmd.Context(), http.MethodPost,
 				"/api/v1/projects/"+ref+"/api-keys",
-				map[string]any{"name": name, "scope": scope}, &created); err != nil {
+				map[string]any{"name": name}, &created); err != nil {
 				return err
 			}
 			if jsonOut {
 				return encodeJSON(created)
 			}
-			fmt.Fprintf(os.Stdout, "✓ created key %s (%s)\n", created.ID, created.Scope)
+			fmt.Fprintf(os.Stdout, "✓ created publishable key %s\n", created.ID)
 			fmt.Fprintf(os.Stdout, "  %s\n", created.Plaintext)
 			fmt.Fprintln(os.Stdout, "  (shown once — store it now)")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Key name (required)")
-	cmd.Flags().StringVar(&scope, "scope", "c", `Key scope: "c" (anon) or "s" (service_role)`)
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
@@ -149,12 +143,11 @@ func revealCmd(rest func() REST) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "reveal <ref>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Reveal the project's default key plaintexts (needs api-keys:write)",
+		Short: "Reveal the project's default publishable key plaintext (needs api-keys:write)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := args[0]
 			var revealed struct {
-				AnonKey        *string `json:"anonKey"`
-				ServiceRoleKey *string `json:"serviceRoleKey"`
+				PublishableKey *string `json:"publishableKey"`
 				Keys           []struct {
 					ID    string `json:"id"`
 					Scope string `json:"scope"`
@@ -167,11 +160,8 @@ func revealCmd(rest func() REST) *cobra.Command {
 			if jsonOut {
 				return encodeJSON(revealed)
 			}
-			if revealed.AnonKey != nil {
-				fmt.Fprintf(os.Stdout, "anon:          %s\n", *revealed.AnonKey)
-			}
-			if revealed.ServiceRoleKey != nil {
-				fmt.Fprintf(os.Stdout, "service_role:  %s\n", *revealed.ServiceRoleKey)
+			if revealed.PublishableKey != nil {
+				fmt.Fprintf(os.Stdout, "publishable:  %s\n", *revealed.PublishableKey)
 			}
 			return nil
 		},
@@ -201,6 +191,13 @@ func revokeCmd(rest func() REST) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
+}
+
+func keyType(scope string) string {
+	if scope == "c" {
+		return "publishable"
+	}
+	return scope
 }
 
 func encodeJSON(v any) error {
