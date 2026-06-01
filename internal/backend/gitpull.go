@@ -79,15 +79,28 @@ func mergePulledCode(dir string, serverTar []byte, version string) (*MergeResult
 	}
 
 	if fresh {
-		// First pull: just check the server tree out as the working tree and
-		// set it as both HEAD and base. Nothing to merge.
+		// First pull: check the server tree out as the working tree and set it
+		// as both HEAD and base. Then add .gitignore as a follow-up commit so
+		// derived/local-only paths (.palbase/, .env.local, node_modules/) are
+		// never tracked. (Written AFTER the reset, which would otherwise wipe it.)
 		if err := g.run("reset", "-q", "--hard", serverCommit); err != nil {
 			return nil, fmt.Errorf("seed working tree: %w", err)
 		}
 		if err := g.run("update-ref", baseRef, serverCommit); err != nil {
 			return nil, fmt.Errorf("set base ref: %w", err)
 		}
+		if err := ensurePalbaseGitignore(dir); err != nil {
+			return nil, err
+		}
+		if err := g.commitWorkingTree("palbase: add .gitignore"); err != nil {
+			return nil, err
+		}
 		return &MergeResult{}, nil
+	}
+
+	// Existing clone: keep .gitignore current (idempotent) before merging.
+	if err := ensurePalbaseGitignore(dir); err != nil {
+		return nil, err
 	}
 
 	// 3. Merge the server commit into main. --no-edit/--no-ff keeps it scriptable.
@@ -237,6 +250,19 @@ func (g *gitRunner) conflictedFiles() ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// ensurePalbaseGitignore makes sure the local clone ignores derived/local-only
+// paths: the .palbase/ cache (compiled endpoints, deploy-state), .env.local
+// (secrets), and node_modules/. Idempotent.
+func ensurePalbaseGitignore(dir string) error {
+	gi := filepath.Join(dir, ".gitignore")
+	for _, entry := range []string{".palbase/", ".env.local", "node_modules/"} {
+		if err := ensureGitignored(gi, entry); err != nil {
+			return fmt.Errorf("write .gitignore: %w", err)
+		}
+	}
+	return nil
 }
 
 func dirHasGit(dir string) bool {

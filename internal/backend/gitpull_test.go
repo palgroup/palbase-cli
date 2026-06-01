@@ -187,3 +187,31 @@ func TestMergePulledCode_FreshClone(t *testing.T) {
 		t.Fatalf(".git must exist at project root: %v", err)
 	}
 }
+
+// TestMergePulledCode_IgnoresGeneratedAndState: the local clone must NOT track
+// derived/local-only files (.palbase/ cache, .env.local, node_modules). They'd
+// otherwise show up in git status, get committed, and pollute conflicts.
+func TestMergePulledCode_IgnoresGeneratedAndState(t *testing.T) {
+	gitAvailable(t)
+	dir := t.TempDir()
+	tar := makeServerTar(t, map[string]string{"endpoints/x/post.ts": "// x\n"})
+	if _, err := mergePulledCode(dir, tar, "v1"); err != nil {
+		t.Fatalf("fresh clone: %v", err)
+	}
+	// Simulate derived/local files appearing after a pull.
+	writeFile(t, dir, ".palbase/endpoints/x/post.js", "// compiled\n")
+	writeFile(t, dir, ".palbase/deploy-state.json", `{"branch_heads":{}}`)
+	writeFile(t, dir, ".env.local", "SECRET=1\n")
+	writeFile(t, dir, "node_modules/dep/index.js", "// dep\n")
+
+	g := &gitRunner{dir: dir}
+	out, err := g.output("status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{".palbase/", ".env.local", "node_modules/"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("%s must be gitignored, but git status shows it:\n%s", bad, out)
+		}
+	}
+}
