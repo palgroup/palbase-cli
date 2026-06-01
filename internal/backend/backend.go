@@ -607,6 +607,7 @@ func newPushCmd(r Resolvers) *cobra.Command {
 	var branchFlag string
 	var acceptDataLoss bool
 	var force bool
+	var forcePush bool
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Push the project (deploy code + apply config) to the server",
@@ -711,8 +712,26 @@ applies without prompting.`,
 			if acceptDataLoss {
 				deployPayload["acceptDataLoss"] = true
 			}
+			// Git-like stale-base guard: send the SHA we last pulled so the
+			// server rejects (409) if someone else pushed since. --force-push
+			// skips it (intentional overwrite of concurrent changes).
+			if !forcePush {
+				if base := baseSHAFor(cwd, branch); base != "" {
+					deployPayload["baseSHA"] = base
+				}
+			}
 			if err := r.Studio().Mutation(ctx, "backend.deploy", deployPayload, &resp); err != nil {
+				if isStaleBaseErr(err) {
+					return fmt.Errorf("push rejected: the remote has moved since your last pull " +
+						"(someone else pushed).\n  Run `palbase pull` to sync, then push again " +
+						"(or `palbase push --force-push` to overwrite remote changes).")
+				}
 				return fmt.Errorf("backend.deploy: %w", err)
+			}
+			// Record the just-deployed version as the new base so an immediate
+			// follow-up push doesn't false-trip the stale check.
+			if err := recordPulledVersion(cwd, branch, resp.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not update deploy base after push: %v\n", err)
 			}
 			fmt.Printf("✓ deployed version %s (%d files)\n", resp.Version, resp.Files)
 			// Endpoints are served file-based (e.g. POST /hello/get from
@@ -759,7 +778,18 @@ applies without prompting.`,
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to push (defaults to the active branch; omit for main)")
 	cmd.Flags().BoolVar(&acceptDataLoss, "accept-data-loss", false, "Approve destructive schema changes (DROP TABLE/COLUMN that lose data) without an interactive prompt")
 	cmd.Flags().BoolVar(&force, "force", false, "Alias for --accept-data-loss")
+	cmd.Flags().BoolVar(&forcePush, "force-push", false, "Push even if the remote has moved since your last pull (overwrites concurrent changes — use with care)")
 	return cmd
+}
+
+// isStaleBaseErr reports whether a backend.deploy error is the server's
+// 409 stale_base rejection (the remote HEAD moved past the client's base).
+func isStaleBaseErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "stale_base") || strings.Contains(msg, "conflict")
 }
 
 // migrationPlan mirrors the Studio backend.migrationPlan result (which in turn
@@ -1275,6 +1305,11 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 				return fmt.Errorf("extract pull archive: %w", err)
 			}
 			fmt.Printf("  code version: %s (%d bytes)\n", pull.Version, pull.Size)
+			// Record the pulled version as the base for the next push's
+			// optimistic-concurrency (stale_base) check. Non-fatal.
+			if err := recordPulledVersion(cwd, branch, pull.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not record pulled version (push stale-check disabled): %v\n", err)
+			}
 
 			// ── env pull ──────────────────────────────────────────────
 			fmt.Println("→ pulling env vars ...")
