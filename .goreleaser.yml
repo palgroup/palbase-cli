@@ -36,6 +36,10 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://palbase.studio"
     description: "Palbase CLI — develop, test, and deploy backend projects"
+    # `palbase pull` shells out to the system git for its 3-way merge / conflict
+    # markers, so guarantee git is present.
+    dependencies:
+      - name: git
     install: |
       bin.install "palbase"
     test: |
