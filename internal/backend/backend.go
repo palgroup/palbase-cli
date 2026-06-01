@@ -1212,6 +1212,7 @@ func isCloneMode() bool {
 func newPullCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var branchFlag string
+	var rawPull bool
 	cmd := &cobra.Command{
 		Use:   "pull",
 		Short: "Pull the project (code + env + config) to your local machine",
@@ -1301,10 +1302,31 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 			if err != nil {
 				return fmt.Errorf("decode pull archive: %w", err)
 			}
-			if err := extractTarGzReplace(archive, cwd); err != nil {
-				return fmt.Errorf("extract pull archive: %w", err)
+			// Git-like pull: merge the server tree into the local working tree
+			// via the system git so the project is a real git repo (.git at the
+			// root) and conflicts surface as standard <<<<<<< markers any git
+			// tool (Fork, VS Code, mergetool) can resolve. --raw falls back to
+			// the legacy blind overwrite (no git, server wins) for CI/throwaway.
+			if rawPull {
+				if err := extractTarGzReplace(archive, cwd); err != nil {
+					return fmt.Errorf("extract pull archive: %w", err)
+				}
+				fmt.Printf("  code version: %s (%d bytes, raw overwrite)\n", pull.Version, pull.Size)
+			} else {
+				merge, mErr := mergePulledCode(cwd, archive, pull.Version)
+				if mErr != nil {
+					return fmt.Errorf("merge pull: %w", mErr)
+				}
+				fmt.Printf("  code version: %s (%d bytes)\n", pull.Version, pull.Size)
+				if merge.Conflicted {
+					fmt.Printf("⚠ merge conflict in %d file(s):\n", len(merge.ConflictedFiles))
+					for _, f := range merge.ConflictedFiles {
+						fmt.Printf("    %s\n", f)
+					}
+					fmt.Println("  Resolve them in your git tool (e.g. open this folder in Fork/VS Code,")
+					fmt.Println("  or run `git mergetool`), commit the merge, then `palbase push`.")
+				}
 			}
-			fmt.Printf("  code version: %s (%d bytes)\n", pull.Version, pull.Size)
 			// Record the pulled version as the base for the next push's
 			// optimistic-concurrency (stale_base) check. Non-fatal.
 			if err := recordPulledVersion(cwd, branch, pull.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -1345,6 +1367,7 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to pull (defaults to the active branch; omit for main)")
+	cmd.Flags().BoolVar(&rawPull, "raw", false, "Overwrite local files instead of a git merge (no conflict markers; for CI/throwaway clones)")
 	return cmd
 }
 
