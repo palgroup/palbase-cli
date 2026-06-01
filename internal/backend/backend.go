@@ -648,6 +648,13 @@ applies without prompting.`,
 				return err
 			}
 			fmt.Printf("→ bundling %s ...\n", cwd)
+			// Fail fast on imports that won't reach the pod (e.g. an endpoint
+			// importing ../../../schema/index.js while schema/ is missing or
+			// outside the allow-list). Catches client-side what would otherwise
+			// be a server esbuild "Could not resolve" after upload.
+			if err := preflightImports(cwd); err != nil {
+				return err
+			}
 			archive, err := bundleCwd(cwd, ref)
 			if err != nil {
 				return fmt.Errorf("bundle: %w", err)
