@@ -191,6 +191,12 @@ func TestMergePulledCode_FreshClone(t *testing.T) {
 // TestMergePulledCode_IgnoresGeneratedAndState: the local clone must NOT track
 // derived/local-only files (.palbase/ cache, .env.local, node_modules). They'd
 // otherwise show up in git status, get committed, and pollute conflicts.
+//
+// By contrast the iOS codegen output now lives in a VISIBLE, committed folder
+// (Palbase/Generated/) — it is referenced as a synchronized Xcode folder and
+// committed like SwiftGen/R.swift output, so it must NOT be ignored. This test
+// pins both halves: the hidden cache stays out of git, the visible generated
+// folder is tracked.
 func TestMergePulledCode_IgnoresGeneratedAndState(t *testing.T) {
 	gitAvailable(t)
 	dir := t.TempDir()
@@ -203,6 +209,9 @@ func TestMergePulledCode_IgnoresGeneratedAndState(t *testing.T) {
 	writeFile(t, dir, ".palbase/deploy-state.json", `{"branch_heads":{}}`)
 	writeFile(t, dir, ".env.local", "SECRET=1\n")
 	writeFile(t, dir, "node_modules/dep/index.js", "// dep\n")
+	// The visible iOS codegen folder — committed, NOT ignored.
+	writeFile(t, dir, "Palbase/Generated/PalbaseGenerated.swift", "import Foundation\n")
+	writeFile(t, dir, "Palbase/Generated/PalbaseGenerated.json", "{\"url\":\"\"}\n")
 
 	g := &gitRunner{dir: dir}
 	out, err := g.output("status", "--porcelain")
@@ -213,5 +222,12 @@ func TestMergePulledCode_IgnoresGeneratedAndState(t *testing.T) {
 		if strings.Contains(out, bad) {
 			t.Fatalf("%s must be gitignored, but git status shows it:\n%s", bad, out)
 		}
+	}
+	// The visible generated folder must be trackable: it shows up in git
+	// status as untracked (git collapses a fully-untracked tree to the top
+	// dir, so we expect "Palbase/" — proof it is NOT swallowed by a
+	// gitignore rule the way .palbase/ is).
+	if !strings.Contains(out, "Palbase/") {
+		t.Fatalf("Palbase/Generated/ must be tracked (visible, committed), but git status doesn't show it:\n%s", out)
 	}
 }

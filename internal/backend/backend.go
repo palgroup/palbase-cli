@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -110,7 +111,18 @@ func Commands(r Resolvers) []*cobra.Command {
 // carries the runtime config the Palbe SDK loads from Bundle.main at
 // `pb.configure()` time — kept implicit so callers that pass a custom
 // --out only need to think about the Swift path.
-const defaultIOSGeneratedFile = ".palbase/generated/ios/PalbaseGenerated.swift"
+//
+// It lives in a VISIBLE, committed folder (Palbase/Generated/, the
+// SwiftGen/R.swift convention) rather than the hidden .palbase/ cache:
+// the folder is wired into Xcode as a single synchronized FOLDER
+// reference (the blue folder), so every file under it auto-joins the
+// target by type (.swift → Compile Sources, .json → Copy Bundle
+// Resources) with zero per-file pbxproj plumbing. defaultIOSGeneratedDir
+// is the single source of truth for that path.
+const (
+	defaultIOSGeneratedDir  = "Palbase/Generated"
+	defaultIOSGeneratedFile = defaultIOSGeneratedDir + "/PalbaseGenerated.swift"
+)
 
 type backendTarget struct {
 	URL    string
@@ -1782,7 +1794,12 @@ func writeSwiftGenerated(specBytes []byte, cfg swiftGeneratedConfig, outFile str
 	if err := writeGeneratedConfigJSON(jsonPath, cfg); err != nil {
 		return fmt.Errorf("write %s: %w", jsonPath, err)
 	}
-	if err := ensureGitignored(".gitignore", ".palbase/"); err != nil {
+	// The generated Swift + JSON now live in a VISIBLE, committed folder
+	// (Palbase/Generated/) referenced as a synchronized Xcode folder, so
+	// we no longer gitignore them — committing generated code is standard
+	// for SwiftGen/R.swift teams. Only the hidden .palbase/config.json
+	// (project ref + URL cache) stays out of git.
+	if err := ensureGitignored(".gitignore", ".palbase/config.json"); err != nil {
 		fmt.Fprintf(w, "  (gitignore not updated: %v)\n", err)
 	}
 	fmt.Fprintf(w, "✓ wrote %s (%d operation(s))\n", outFile, len(ops))
@@ -1875,7 +1892,10 @@ import Foundation
 			return fmt.Errorf("write %s: %w", jsonPath, err)
 		}
 	}
-	return ensureGitignored(".gitignore", ".palbase/")
+	// The stub lives in the visible, committed Palbase/Generated/ folder
+	// (synchronized Xcode folder ref) — not gitignored. Only the hidden
+	// .palbase/config.json cache stays out of git.
+	return ensureGitignored(".gitignore", ".palbase/config.json")
 }
 
 func setupIOSXcodeProject(projectFlag, targetFlag string) (projectPath, targetName string, changed bool, err error) {
@@ -1994,174 +2014,177 @@ func patchXcodeProject(pbx, requestedTarget string) (string, string, bool, error
 	if err != nil {
 		return "", "", false, err
 	}
-	sourcesID := ""
-	resourcesID := ""
+	// Sanity-check the target is a real compile target. The synchronized
+	// folder auto-enrols its .swift into Compile Sources, so we no longer
+	// splice into this phase — but a target with no Sources phase isn't an
+	// app we can wire codegen into.
+	hasSources := false
 	for _, phaseID := range target.phases {
 		if objectContains(pbx, phaseID, "isa = PBXSourcesBuildPhase;") {
-			sourcesID = phaseID
-		}
-		if objectContains(pbx, phaseID, "isa = PBXResourcesBuildPhase;") {
-			resourcesID = phaseID
+			hasSources = true
 		}
 	}
-	if sourcesID == "" {
+	if !hasSources {
 		return "", "", false, fmt.Errorf("target %q has no Swift sources build phase", target.name)
 	}
-	if resourcesID == "" {
-		return "", "", false, fmt.Errorf("target %q has no PBXResourcesBuildPhase — needed to bundle PalbaseGenerated.json", target.name)
-	}
 
-	const (
-		generatedSwiftPath = ".palbase/generated/ios/PalbaseGenerated.swift"
-		generatedJSONPath  = ".palbase/generated/ios/PalbaseGenerated.json"
-	)
-	fileRefID := findObjectIDContaining(pbx, "path = "+generatedSwiftPath+";")
-	if fileRefID == "" {
-		fileRefID = xcodeObjectID("palbase-ios-file-ref")
-	}
-	buildFileID := findObjectIDContaining(pbx, "PalbaseGenerated.swift in Sources")
-	if buildFileID == "" {
-		buildFileID = xcodeObjectID("palbase-ios-build-file")
-	}
-	jsonRefID := findObjectIDContaining(pbx, "path = "+generatedJSONPath+";")
-	if jsonRefID == "" {
-		jsonRefID = xcodeObjectID("palbase-ios-json-file-ref")
-	}
-	jsonBuildFileID := findObjectIDContaining(pbx, "PalbaseGenerated.json in Resources")
-	if jsonBuildFileID == "" {
-		jsonBuildFileID = xcodeObjectID("palbase-ios-json-build-file")
-	}
 	shellPhaseID := findObjectIDContaining(pbx, "name = \"Palbase Codegen iOS\";")
 	if shellPhaseID == "" {
 		shellPhaseID = xcodeObjectID("palbase-ios-shell-phase")
 	}
+	syncGroupID := xcodeObjectID("palbase-ios-sync-folder")
 
 	next := pbx
 	changed := false
 	var did bool
-	next, did = ensurePBXBuildFile(next, buildFileID, fileRefID)
+
+	// Synchronized FOLDER reference (Xcode 16). One blue-folder object
+	// covers Palbase/Generated/ wholesale: every file under it auto-joins
+	// the target by type (.swift → Compile Sources, .json → Copy Bundle
+	// Resources) with ZERO per-file PBXBuildFile/PBXFileReference entries.
+	// That replaces the old, fragile 4-object splice (swift ref+buildFile,
+	// json ref+buildFile) with a single robust reference.
+	//
+	// Synchronized folders require objectVersion >= 70 (Xcode 16.0). We
+	// always bump to 77 (what current Xcode round-trips) when lower — no
+	// backward-compat fallback.
+	next, did = ensureObjectVersion(next, 77)
 	changed = changed || did
-	next, did = ensurePBXFileReference(next, fileRefID)
+	next, did = ensureSyncedFolderGroup(next, syncGroupID, defaultIOSGeneratedDir)
 	changed = changed || did
-	// JSON config — Bundle resource the Palbe SDK loads at pb.configure()
-	// time. Lives next to the .swift in the same Generated group so it
-	// shows up in the navigator alongside the typed methods.
-	next, did = ensurePBXBuildFileForJSON(next, jsonBuildFileID, jsonRefID)
+	next, did = ensureFileSystemSynchronizedGroupInTarget(next, target.id, syncGroupID)
 	changed = changed || did
-	next, did = ensurePBXFileReferenceForJSON(next, jsonRefID)
-	changed = changed || did
-	// Slot both file refs into a "Generated" group so Xcode shows them
-	// under the project navigator (and not "Recovered References", which
-	// is where Xcode parks PBXFileReferences that no group claims). The
-	// helper is idempotent: if a Generated group already exists we just
-	// append the fileRef when missing.
-	groupID := findObjectIDContaining(next, "name = Generated;")
-	if groupID == "" {
-		groupID = xcodeObjectID("palbase-ios-generated-group")
+	// Show the synced folder in the navigator by parenting it under the
+	// project's root (main) group, just like a regular group.
+	if rootGroupID := findRootPBXGroup(next); rootGroupID != "" {
+		beforeAttach := next
+		next = appendChildToGroup(next, rootGroupID, syncGroupID, "Generated")
+		if next != beforeAttach {
+			changed = true
+		}
 	}
-	next, did = ensurePalbaseGeneratedGroup(next, groupID, fileRefID)
-	changed = changed || did
-	// Also add the JSON ref to the Generated group. appendChildToGroup
-	// is itself idempotent — early-returns the same `pbx` when the ref
-	// is already a child — so compare-by-identity to gate `changed`.
-	beforeJSON := next
-	next = appendChildToGroup(next, groupID, jsonRefID, "PalbaseGenerated.json")
-	if next != beforeJSON {
-		changed = true
-	}
+
 	next, did = ensurePBXShellScriptPhase(next, shellPhaseID)
-	changed = changed || did
-	next, did = ensureBuildFileInSources(next, sourcesID, buildFileID)
-	changed = changed || did
-	next, did = ensureBuildFileInResources(next, resourcesID, jsonBuildFileID)
 	changed = changed || did
 	next, did = ensureBuildPhaseInTarget(next, target.id, shellPhaseID)
 	changed = changed || did
 	return next, target.name, changed, nil
 }
 
-// ensurePalbaseGeneratedGroup makes sure the PalbaseGenerated.swift file
-// reference is parented to a named "Generated" PBXGroup, attached to the
-// project's root group. Without a parent, Xcode displays the file under
-// "Recovered References" — technically buildable but visually broken.
+// ensureObjectVersion bumps the project's `objectVersion = N;` line up to
+// `want` when N < want. Synchronized FOLDER references need
+// objectVersion >= 70; we always emit 77 (Xcode 16.1+, what current Xcode
+// round-trips) — emitting the synced-folder ISA while leaving an older
+// objectVersion produces an artifact Xcode rejects. archiveVersion is
+// left untouched. Idempotent: when N >= want the body is returned
+// unchanged.
+func ensureObjectVersion(pbx string, want int) (string, bool) {
+	re := regexp.MustCompile(`(?m)^(\s*)objectVersion = (\d+);`)
+	m := re.FindStringSubmatchIndex(pbx)
+	if m == nil {
+		return pbx, false
+	}
+	current, err := strconv.Atoi(pbx[m[4]:m[5]])
+	if err != nil || current >= want {
+		return pbx, false
+	}
+	indent := pbx[m[2]:m[3]]
+	replacement := indent + "objectVersion = " + strconv.Itoa(want) + ";"
+	return pbx[:m[0]] + replacement + pbx[m[1]:], true
+}
+
+// ensureSyncedFolderGroup emits a PBXFileSystemSynchronizedRootGroup
+// object pointing at `path` (e.g. Palbase/Generated), inside its own
+// `/* Begin/End PBXFileSystemSynchronizedRootGroup section */`, creating
+// the section if absent. Real Xcode drops the exceptions/
+// explicitFileTypes/explicitFolders keys when empty, so we omit them.
 //
-// Cases:
-//   - Generated group exists: append fileRefID to its children if missing.
-//   - Generated group doesn't exist + the project has a PBXGroup section:
-//     emit the new group and attach it under the root group.
-//   - No PBXGroup section at all (rare: minimal hand-rolled pbxproj /
-//     test fixture): bail without mutating — the project shape is
-//     non-standard and we can't safely splice. Keeps idempotency in those
-//     cases too (the second patch is a no-op).
-func ensurePalbaseGeneratedGroup(pbx, groupID, fileRefID string) (string, bool) {
-	groupBlock := objectBlock(pbx, groupID)
-	if groupBlock != "" {
-		changed := false
-		// Ensure fileRefID listed inside Generated's children.
-		if !strings.Contains(groupBlock, fileRefID) {
-			needle := groupID + " /* Generated */ = {"
-			lines := strings.Split(pbx, "\n")
-			for i, line := range lines {
-				if !strings.Contains(line, needle) {
-					continue
-				}
-				for j := i; j < len(lines) && j < i+20; j++ {
-					if strings.Contains(lines[j], "children = (") {
-						insert := "\t\t\t\t" + fileRefID + " /* PalbaseGenerated.swift */,"
-						newLines := append([]string{}, lines[:j+1]...)
-						newLines = append(newLines, insert)
-						newLines = append(newLines, lines[j+1:]...)
-						pbx = strings.Join(newLines, "\n")
-						changed = true
-						break
-					}
-				}
+// Idempotent: if a synchronized root group with this path already exists,
+// returns the body unchanged.
+func ensureSyncedFolderGroup(pbx, groupID, path string) (string, bool) {
+	if strings.Contains(pbx, "isa = PBXFileSystemSynchronizedRootGroup;") &&
+		strings.Contains(pbx, "path = "+path+";") {
+		return pbx, false
+	}
+	block := "\t\t" + groupID + " /* Generated */ = {\n" +
+		"\t\t\tisa = PBXFileSystemSynchronizedRootGroup;\n" +
+		"\t\t\tpath = " + path + ";\n" +
+		"\t\t\tsourceTree = \"<group>\";\n" +
+		"\t\t};\n"
+	if strings.Contains(pbx, "/* End PBXFileSystemSynchronizedRootGroup section */") {
+		return insertBeforeMarker(pbx, "/* End PBXFileSystemSynchronizedRootGroup section */", block)
+	}
+	// No section yet — create one. Anchor it before the PBXFrameworksBuildPhase
+	// section (alphabetical neighbour in Xcode's canonical ordering); fall
+	// back to the PBXGroup section, then the objects close, so we always
+	// land somewhere valid regardless of which sections the project has.
+	section := "/* Begin PBXFileSystemSynchronizedRootGroup section */\n" +
+		block +
+		"/* End PBXFileSystemSynchronizedRootGroup section */\n\n"
+	for _, anchor := range []string{
+		"/* Begin PBXFrameworksBuildPhase section */",
+		"/* Begin PBXGroup section */",
+		"/* Begin PBXNativeTarget section */",
+	} {
+		if next, ok := insertBeforeMarker(pbx, anchor, section); ok {
+			return next, true
+		}
+	}
+	return pbx, false
+}
+
+// ensureFileSystemSynchronizedGroupInTarget adds the synchronized folder
+// id to the target's PBXNativeTarget object under
+// `fileSystemSynchronizedGroups = ( … );` (a sibling of buildPhases /
+// dependencies). Creates the key if absent; appends idempotently if
+// present.
+func ensureFileSystemSynchronizedGroupInTarget(pbx, targetID, syncGroupID string) (string, bool) {
+	block := objectBlock(pbx, targetID)
+	if block == "" {
+		return pbx, false
+	}
+	entry := syncGroupID + " /* Generated */,"
+	if strings.Contains(block, syncGroupID) {
+		return pbx, false // already attached
+	}
+
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), targetID+" ") || !strings.Contains(line, "= {") {
+			continue
+		}
+		// Find the bounds of this target object.
+		end := i + 1
+		for ; end < len(lines); end++ {
+			if strings.TrimSpace(lines[end]) == "};" {
 				break
 			}
 		}
-		// Self-heal: ensure the Generated group is also attached to the
-		// root PBXGroup. An earlier CLI version (pre this fix) created
-		// the group but never wired it into the navigator, so it
-		// floated and Xcode parked the file under Recovered References.
-		// Re-running `palbase mobile link ios` picks up the attachment
-		// without needing to recreate the group.
-		if rootGroupID := findRootPBXGroup(pbx); rootGroupID != "" {
-			rootBlock := objectBlock(pbx, rootGroupID)
-			if !strings.Contains(rootBlock, groupID+" /* Generated */") {
-				pbx = appendChildToGroup(pbx, rootGroupID, groupID, "Generated")
-				changed = true
+		// If the array already exists, append into it.
+		for j := i + 1; j < end; j++ {
+			if strings.TrimSpace(lines[j]) == "fileSystemSynchronizedGroups = (" {
+				insert := "\t\t\t\t" + entry
+				newLines := append([]string{}, lines[:j+1]...)
+				newLines = append(newLines, insert)
+				newLines = append(newLines, lines[j+1:]...)
+				return strings.Join(newLines, "\n"), true
 			}
 		}
-		return pbx, changed
+		// No array yet — create it right after the target's isa line so it
+		// sits as a sibling of buildPhases/dependencies.
+		for j := i + 1; j < end; j++ {
+			if strings.TrimSpace(lines[j]) == "isa = PBXNativeTarget;" {
+				insert := "\t\t\tfileSystemSynchronizedGroups = (\n" +
+					"\t\t\t\t" + entry + "\n" +
+					"\t\t\t);"
+				newLines := append([]string{}, lines[:j+1]...)
+				newLines = append(newLines, insert)
+				newLines = append(newLines, lines[j+1:]...)
+				return strings.Join(newLines, "\n"), true
+			}
+		}
 	}
-
-	// No Generated group yet. We need a PBXGroup section to slot a new
-	// group into; if the project doesn't have one, skip silently (the
-	// file ref still lives in the project — Xcode will park it under
-	// Recovered References, same as before this fix; but at least the
-	// patch stays idempotent, which the test guards).
-	if !strings.Contains(pbx, "/* End PBXGroup section */") {
-		return pbx, false
-	}
-
-	groupDef := "\t\t" + groupID + " /* Generated */ = {\n" +
-		"\t\t\tisa = PBXGroup;\n" +
-		"\t\t\tchildren = (\n" +
-		"\t\t\t\t" + fileRefID + " /* PalbaseGenerated.swift */,\n" +
-		"\t\t\t);\n" +
-		"\t\t\tname = Generated;\n" +
-		"\t\t\tsourceTree = \"<group>\";\n" +
-		"\t\t};\n"
-	next, inserted := insertBeforeMarker(pbx, "/* End PBXGroup section */", groupDef)
-	if !inserted {
-		return pbx, false
-	}
-
-	// Attach to the root group so it shows up in the navigator.
-	if rootGroupID := findRootPBXGroup(next); rootGroupID != "" {
-		next = appendChildToGroup(next, rootGroupID, groupID, "Generated")
-	}
-	return next, true
+	return pbx, false
 }
 
 // findRootPBXGroup returns the id of the first PBXGroup that has no
@@ -2423,71 +2446,6 @@ func xcodeObjectID(seed string) string {
 	return strings.ToUpper(hex.EncodeToString(sum[:]))[:24]
 }
 
-func ensurePBXBuildFile(pbx, buildFileID, fileRefID string) (string, bool) {
-	if objectBlock(pbx, buildFileID) != "" || strings.Contains(pbx, "PalbaseGenerated.swift in Sources") {
-		return pbx, false
-	}
-	line := "\t\t" + buildFileID + " /* PalbaseGenerated.swift in Sources */ = {isa = PBXBuildFile; fileRef = " + fileRefID + " /* PalbaseGenerated.swift */; };\n"
-	return insertBeforeMarker(pbx, "/* End PBXBuildFile section */", line)
-}
-
-func ensurePBXFileReference(pbx, fileRefID string) (string, bool) {
-	if objectBlock(pbx, fileRefID) != "" || strings.Contains(pbx, "path = .palbase/generated/ios/PalbaseGenerated.swift;") {
-		return pbx, false
-	}
-	line := "\t\t" + fileRefID + " /* PalbaseGenerated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = .palbase/generated/ios/PalbaseGenerated.swift; sourceTree = \"<group>\"; };\n"
-	return insertBeforeMarker(pbx, "/* End PBXFileReference section */", line)
-}
-
-// JSON resource counterparts: PalbaseGenerated.json is added to the
-// Resources build phase (not Sources) so Xcode copies it verbatim into
-// the app bundle. The Palbe SDK loads it from Bundle.main at
-// pb.configure() time. Same idempotency contract as the Swift pair.
-func ensurePBXBuildFileForJSON(pbx, buildFileID, fileRefID string) (string, bool) {
-	if objectBlock(pbx, buildFileID) != "" || strings.Contains(pbx, "PalbaseGenerated.json in Resources") {
-		return pbx, false
-	}
-	line := "\t\t" + buildFileID + " /* PalbaseGenerated.json in Resources */ = {isa = PBXBuildFile; fileRef = " + fileRefID + " /* PalbaseGenerated.json */; };\n"
-	return insertBeforeMarker(pbx, "/* End PBXBuildFile section */", line)
-}
-
-func ensurePBXFileReferenceForJSON(pbx, fileRefID string) (string, bool) {
-	if objectBlock(pbx, fileRefID) != "" || strings.Contains(pbx, "path = .palbase/generated/ios/PalbaseGenerated.json;") {
-		return pbx, false
-	}
-	line := "\t\t" + fileRefID + " /* PalbaseGenerated.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = .palbase/generated/ios/PalbaseGenerated.json; sourceTree = \"<group>\"; };\n"
-	return insertBeforeMarker(pbx, "/* End PBXFileReference section */", line)
-}
-
-// ensureBuildFileInResources appends the JSON buildFile id to the
-// target's PBXResourcesBuildPhase children list (mirror of
-// ensureBuildFileInSources but for the Resources phase). Idempotent.
-func ensureBuildFileInResources(pbx, resourcesID, buildFileID string) (string, bool) {
-	block := objectBlock(pbx, resourcesID)
-	if block == "" {
-		return pbx, false
-	}
-	if strings.Contains(block, buildFileID) || strings.Contains(block, "PalbaseGenerated.json in Resources") {
-		return pbx, false
-	}
-	lines := strings.Split(pbx, "\n")
-	for i, line := range lines {
-		if !strings.HasPrefix(strings.TrimSpace(line), resourcesID+" ") || !strings.Contains(line, "= {") {
-			continue
-		}
-		for j := i; j < len(lines) && j < i+25; j++ {
-			if strings.Contains(lines[j], "files = (") {
-				insert := "\t\t\t\t" + buildFileID + " /* PalbaseGenerated.json in Resources */,"
-				newLines := append([]string{}, lines[:j+1]...)
-				newLines = append(newLines, insert)
-				newLines = append(newLines, lines[j+1:]...)
-				return strings.Join(newLines, "\n"), true
-			}
-		}
-	}
-	return pbx, false
-}
-
 func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
 	// Self-healing semantics: if a phase with our name already exists,
 	// compare against the canonical block we'd emit today. If they match
@@ -2562,8 +2520,8 @@ func palbaseCodegenPhaseBlock(shellPhaseID string) string {
 		"\t\t\tname = \"Palbase Codegen iOS\";\n" +
 		"\t\t\toutputFileListPaths = (\n\t\t\t);\n" +
 		"\t\t\toutputPaths = (\n" +
-		"\t\t\t\t\"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.swift\",\n" +
-		"\t\t\t\t\"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.json\",\n" +
+		"\t\t\t\t\"$(SRCROOT)/" + defaultIOSGeneratedDir + "/PalbaseGenerated.swift\",\n" +
+		"\t\t\t\t\"$(SRCROOT)/" + defaultIOSGeneratedDir + "/PalbaseGenerated.json\",\n" +
 		"\t\t\t);\n" +
 		"\t\t\trunOnlyForDeploymentPostprocessing = 0;\n" +
 		"\t\t\tshellPath = /bin/sh;\n" +
@@ -2587,32 +2545,6 @@ func normalizePBXBlock(s string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
-}
-
-func ensureBuildFileInSources(pbx, sourcesID, buildFileID string) (string, bool) {
-	block := objectBlock(pbx, sourcesID)
-	if block == "" {
-		return pbx, false
-	}
-	if strings.Contains(block, buildFileID) || strings.Contains(block, "PalbaseGenerated.swift in Sources") {
-		return pbx, false
-	}
-	lines := strings.Split(pbx, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), sourcesID+" ") && strings.Contains(line, "= {") {
-			for j := i + 1; j < len(lines); j++ {
-				if strings.TrimSpace(lines[j]) == "files = (" {
-					insert := "\t\t\t\t" + buildFileID + " /* PalbaseGenerated.swift in Sources */,"
-					lines = append(lines[:j+1], append([]string{insert}, lines[j+1:]...)...)
-					return strings.Join(lines, "\n"), true
-				}
-				if strings.TrimSpace(lines[j]) == "};" {
-					break
-				}
-			}
-		}
-	}
-	return pbx, false
 }
 
 func ensureBuildPhaseInTarget(pbx, targetID, shellPhaseID string) (string, bool) {

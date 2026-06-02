@@ -80,10 +80,10 @@ func (cs *codegenURLStudio) resolvers(t *testing.T) Resolvers {
 // This test runs without a local serve listening on 4003, so codegen takes
 // the deployed-spec fallback; either way the embedded URL must be remote.
 func TestGenerateIOSAuto_EmbedsRemoteURL_NotLocalhost(t *testing.T) {
-	// writeSwiftGenerated appends ".palbase/" to ./.gitignore (relative to
-	// cwd). Run in a temp cwd so that stray file lands in the sandbox, not
-	// in the repo (a leftover internal/backend/.gitignore trips goreleaser's
-	// dirty-tree check at release time).
+	// writeSwiftGenerated appends ".palbase/config.json" to ./.gitignore
+	// (relative to cwd). Run in a temp cwd so that stray file lands in the
+	// sandbox, not in the repo (a leftover internal/backend/.gitignore trips
+	// goreleaser's dirty-tree check at release time).
 	t.Chdir(t.TempDir())
 
 	localSpecServer(t) // local `palbase serve` is up → local-spec path
