@@ -535,7 +535,7 @@ func freeDevPort(port int, w io.Writer) {
 				port, pid, comm)
 			continue
 		}
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err := terminatePID(pid); err != nil {
 			fmt.Fprintf(w, "warning: could not free port %d (pid %d): %v\n", port, pid, err)
 			continue
 		}
