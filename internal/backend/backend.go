@@ -1390,14 +1390,25 @@ func newMobileCheckoutCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Commit-on-success, like `git checkout`: write the new branch,
+			// then regenerate. If codegen fails (e.g. the branch doesn't
+			// exist → apikey.reveal 404), roll the link back to the previous
+			// branch so the cwd isn't stranded on a broken branch where every
+			// later command fails. The config write only "sticks" once
+			// codegen succeeds.
+			prevBranch := cfg.DefaultEnv
 			cfg.DefaultEnv = branch
 			if err := auth.SaveProjectConfig(cfg); err != nil {
 				return fmt.Errorf("save project config: %w", err)
 			}
-			fmt.Fprintf(os.Stdout, "✓ checked out mobile backend branch %q (project %s)\n", branch, ref)
 			if err := generateIOSRemote(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout); err != nil {
-				return fmt.Errorf("ios codegen: %w", err)
+				cfg.DefaultEnv = prevBranch
+				if saveErr := auth.SaveProjectConfig(cfg); saveErr != nil {
+					return fmt.Errorf("ios codegen failed (%w); ALSO failed to roll back branch to %q: %v", err, prevBranch, saveErr)
+				}
+				return fmt.Errorf("could not check out branch %q: %w (staying on %q)", branch, err, prevBranch)
 			}
+			fmt.Fprintf(os.Stdout, "✓ checked out mobile backend branch %q (project %s)\n", branch, ref)
 			return nil
 		},
 	}
