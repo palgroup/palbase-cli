@@ -533,7 +533,14 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 				PublishableKey string `json:"publishableKey"`
 			}
 			if ref != "" && ref != "local" {
-				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
+				// Thread the active branch so reveal returns THIS branch's
+				// endpoint_ref (e.g. test0r8q3p1) — otherwise serve's module
+				// clients (ctx.docs/storage/…) route to the default branch.
+				revealPayload := map[string]any{"ref": ref}
+				if b := resolveActiveBranch(branchFlag); b != "" {
+					revealPayload["branch"] = b
+				}
+				if err := r.Studio().Query(ctx, "apikey.reveal", revealPayload, &revealResp); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.docs/ctx.storage/… will be unavailable\n", err)
 				}
 			}
@@ -1278,15 +1285,20 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 			// "" = main). Config-as-code pull IS branch-aware now — its
 			// serializers accept a branch and the Studio config routers
 			// resolve ref+branch → endpoint_ref (branch=project model), so
-			// `palbase pull --branch qa` snapshots THAT branch's module
-			// config. NAMED GAP (still): backend.pull / env.pull don't accept
-			// a branch field yet (env.pull is .strict() and would reject one),
-			// so the code archive + .env.local below still come from the
-			// default branch. Those land when their tRPC inputs grow a branch
-			// field server-side; this resolve already feeds them.
+			// `palbase pull --branch qa` snapshots THAT branch. backend.pull and
+			// env.pull now ALSO accept a branch field server-side, so code, env
+			// AND config all pull from the same branch's endpoint_ref.
 			branch := resolveActiveBranch(branchFlag)
 			if branch != "" {
-				fmt.Printf("note: --branch %q — config pulled from that branch; code + env still pull the default branch (not branch-wired yet).\n", branch)
+				fmt.Printf("→ branch: %s\n", branch)
+			}
+			// withBranch adds the branch field to a tRPC payload when non-empty
+			// (main is "" and the server omits it for back-compat).
+			withBranch := func(p map[string]any) map[string]any {
+				if branch != "" {
+					p["branch"] = branch
+				}
+				return p
 			}
 
 			// ── code pull ─────────────────────────────────────────────
@@ -1296,7 +1308,7 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 				Archive string `json:"archive"`
 				Size    int    `json:"size"`
 			}
-			if err := r.Studio().Query(ctx, "backend.pull", map[string]any{"ref": ref}, &pull); err != nil {
+			if err := r.Studio().Query(ctx, "backend.pull", withBranch(map[string]any{"ref": ref}), &pull); err != nil {
 				return fmt.Errorf("backend.pull: %w", err)
 			}
 			archive, err := base64.StdEncoding.DecodeString(pull.Archive)
@@ -1337,7 +1349,7 @@ it prints a "cd <projectName>" hint to run afterwards.`,
 			// ── env pull ──────────────────────────────────────────────
 			fmt.Println("→ pulling env vars ...")
 			var envVars []envVar
-			if envErr := r.Studio().Query(ctx, "env.pull", map[string]any{"ref": ref}, &envVars); envErr != nil {
+			if envErr := r.Studio().Query(ctx, "env.pull", withBranch(map[string]any{"ref": ref}), &envVars); envErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: env.pull failed (%v) — .env.local not written\n", envErr)
 			} else {
 				if err := writeEnvLocal(cwd, envVars); err != nil {
