@@ -1659,45 +1659,48 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 }
 
 func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
-	localURL := "http://localhost:4003"
-	specBytes, localErr := fetchOpenAPISpec(ctx, localURL+"/openapi.json", "")
-	if localErr != nil {
-		// Don't silently fall back — tell the developer the local spec wasn't
-		// reachable and how to get one, so a stale `palbase serve` (or none at
-		// all) doesn't quietly generate against the deployed project instead of
-		// their local edits.
-		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using remote — run `palbase serve` for local codegen\n", localURL, localErr)
-	} else {
-		apiKey := ""
-		var oauth *swiftOAuthConfig
-		if target, lookupErr := lookupBackendTarget(ctx, sc, endpoints, ref, branch); lookupErr == nil {
-			apiKey = target.APIKey
-			// OAuth providers live in remote palauth — the local
-			// backend dev server doesn't proxy /auth/*. Hit the remote
-			// (the same URL the SDK would when configure()'d for the
-			// remote project) so codegen output is identical no matter
-			// which spec source we use.
-			if oauthCfg, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey); oauthErr != nil {
-				fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
-			} else {
-				oauth = oauthCfg
-			}
-		} else {
-			fmt.Fprintf(w, "  (publishable key not embedded for local config: %v)\n", lookupErr)
-		}
-		return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
-			URL:    localURL,
-			APIKey: apiKey,
-			Branch: branch,
-			Source: "local",
-			OAuth:  oauth,
-		}, outFile, w)
-	}
+	// The remote backend target (URL + publishable key + OAuth) is what the
+	// generated app config is ALWAYS wired to — the app runs on a device /
+	// simulator that cannot reach the developer's localhost:4003. A local
+	// `palbase serve` only ever provides a fresher SPEC (endpoint shapes for
+	// typed methods); it must NEVER become the app's runtime base URL.
+	//
+	// So: resolve the remote target first. If it fails (not logged in, no
+	// network, sandboxed build phase without credentials), there's nothing
+	// valid to embed — surface the error rather than writing a broken
+	// localhost config that silently makes the app dial the dev's machine.
 	target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
 	if err != nil {
 		return err
 	}
-	return generateIOSRemoteWithTarget(ctx, target, branch, outFile, w)
+
+	oauth, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey)
+	if oauthErr != nil {
+		fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
+	}
+
+	// Prefer a local spec when `palbase serve` is up (fast, hot-reloaded
+	// endpoint shapes), else fall back to the deployed project's spec. Either
+	// way the embedded URL/key below stay the REMOTE target.
+	localURL := "http://localhost:4003"
+	specBytes, localErr := fetchOpenAPISpec(ctx, localURL+"/openapi.json", "")
+	source := "local"
+	if localErr != nil {
+		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using deployed spec — run `palbase serve` for local endpoint shapes\n", localURL, localErr)
+		specBytes, err = fetchOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey)
+		if err != nil {
+			return err
+		}
+		source = "remote"
+	}
+
+	return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
+		URL:    target.URL, // ALWAYS the remote tenant host, never localhost
+		APIKey: target.APIKey,
+		Branch: branch,
+		Source: source,
+		OAuth:  oauth,
+	}, outFile, w)
 }
 
 func generateIOSRemote(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
