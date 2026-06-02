@@ -9,7 +9,7 @@
  * services-shared/br-<ref> after `palbase push`.
  *
  * Invocation (set by the Go CLI):
- *   PALBASE_DEV_PORT=4000 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
+ *   PALBASE_DEV_PORT=4003 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
  */
 'use strict';
 
@@ -18,7 +18,11 @@ const path = require('path');
 const http = require('http');
 const url = require('url');
 
-const PORT = Number(process.env.PALBASE_DEV_PORT) || 4000;
+// 4003 is the single canonical local port — the codegen consumers (`palbase
+// mobile codegen`, `palbase types|pull --env local`) probe localhost:4003, and
+// the Go `serve --port` default matches it, so a plain `palbase serve` lands
+// where codegen looks.
+const PORT = Number(process.env.PALBASE_DEV_PORT) || 4003;
 const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
@@ -293,6 +297,385 @@ function loadEndpoint(modulePath) {
   return exported;
 }
 
+// isAuthRequired is the SINGLE source of truth for "does this endpoint need a
+// verified user?" — read by BOTH the request-time auth gate (below) AND the
+// /openapi.json builder, so the served `security` block always matches what the
+// dev-server actually enforces. Secure-by-default, mirroring the prod runtime
+// (project memory: endpoint-auth-default — `auth` OMITTED is treated as
+// REQUIRED, an explicit `auth: false` / `{ required: false }` is the only way
+// to opt out). The `role` shorthand (`auth: { role: 'admin' }`) implies
+// required too.
+//
+//   undefined            → required (secure-by-default)
+//   true                 → required
+//   false                → optional
+//   { required: false }  → optional
+//   { required: true }   → required
+//   { role: 'x' }        → required (role without explicit required:false)
+//   { required: false, role: 'x' } → optional
+function isAuthRequired(auth) {
+  if (auth === undefined || auth === null) return true; // omitted → secure-by-default
+  if (typeof auth === 'boolean') return auth;
+  if (typeof auth === 'object') {
+    if (auth.required === false) return false;
+    return auth.required === true || auth.role !== undefined || auth.required === undefined;
+  }
+  return true;
+}
+
+// ── /openapi.json — byte-identical to the prod backend-runtime spec ─────
+//
+// The deployed pod generates the spec in Go
+// (modules/backend/internal/openapi/generator.go) from the same
+// defineEndpoint() configs. `palbase mobile codegen` / `palbase types|pull
+// --env local` fetch /openapi.json to drive local codegen, so the LOCAL spec
+// must match the REMOTE one the deployed pod serves — otherwise codegen output
+// silently differs between `palbase serve` and `palbase push`.
+//
+// We rebuild the document fresh on every GET (not on the fs.watch reload):
+// it's the simpler correct option — endpoints already reload per request via
+// loadEndpoint()'s cache-bust, so building here picks up edits with zero extra
+// bookkeeping, and a spec fetch is far rarer + cheaper than a hot request path.
+//
+// Byte-shape rules (matched to Go's json.MarshalIndent, which sorts map keys
+// lexicographically but emits struct fields in declaration order):
+//   - 2-space indent.
+//   - Struct-shaped objects (spec, info, operation-without-extensions,
+//     requestBody, response, parameter, securityScheme) keep Go's field order,
+//     reproduced here by INSERTING keys in that order (JSON.stringify preserves
+//     insertion order for string keys).
+//   - Map-shaped objects (paths, path-item methods, responses, securitySchemes,
+//     security requirements, x-rate-limit, x-palbase-errors, and the opaque
+//     zod-to-json-schema bodies) sort keys — reproduced by inserting in sorted
+//     order (and sortDeep() for the opaque schema sub-trees).
+//   - An operation WITH x- extensions re-marshals as a flat map in Go, so ALL
+//     its top-level keys sort alphabetically.
+
+// zod-to-json-schema is resolved lazily from the project node_modules via the
+// same NODE_PATH the dev-server already uses for @palbase/backend. Older
+// projects may not have it; we cache the (possibly null) result so we only warn
+// once and never crash the route.
+let zodToJsonSchemaFn; // undefined = not tried, null = absent, fn = loaded
+function getZodToJsonSchema() {
+  if (zodToJsonSchemaFn !== undefined) return zodToJsonSchemaFn;
+  try {
+    // eslint-disable-next-line global-require
+    const mod = require('zod-to-json-schema');
+    zodToJsonSchemaFn = mod.zodToJsonSchema || mod.default || null;
+  } catch {
+    zodToJsonSchemaFn = null;
+  }
+  if (!zodToJsonSchemaFn) {
+    log('hint: zod-to-json-schema not found in node_modules — /openapi.json ' +
+      'will omit request/response/header schemas. `npm i zod-to-json-schema` ' +
+      'for full local codegen parity.');
+  }
+  return zodToJsonSchemaFn;
+}
+
+// zodToJSON converts a Zod schema to the same Draft-7 JSON Schema body the prod
+// extractor emits (target 'jsonSchema7', outer $schema stripped). Returns null
+// when the dep is absent or the value isn't a Zod schema — callers then omit
+// the body, matching the prod "no schema declared" path. sortDeep() makes the
+// opaque body's object keys match Go's sorted map marshaling.
+function zodToJSON(z) {
+  const conv = getZodToJsonSchema();
+  if (!conv) return null;
+  if (!z || typeof z._def !== 'object') return null;
+  try {
+    const schema = conv(z, { target: 'jsonSchema7' });
+    if (schema && typeof schema === 'object') {
+      const { $schema, ...rest } = schema;
+      return sortDeep(rest);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// sortDeep recursively sorts object keys (arrays preserved positionally) so an
+// opaque sub-tree byte-matches Go's lexicographic map key ordering.
+function sortDeep(value) {
+  if (Array.isArray(value)) return value.map(sortDeep);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = sortDeep(value[key]);
+    return out;
+  }
+  return value;
+}
+
+// capitalize upcases the FIRST byte only — identical to the Go generator's
+// capitalize (which slices s[:1]); a no-op for empty strings.
+function capitalize(s) {
+  if (!s) return s;
+  return s[0].toUpperCase() + s.slice(1);
+}
+
+// openApiPath converts a dev-server urlPattern (`:id` colon params, from `[id]`
+// dirs) to the OpenAPI/Chi `{id}` form the prod path keys use.
+function openApiPath(urlPattern) {
+  return urlPattern.replace(/:([^/]+)/g, '{$1}');
+}
+
+// operationId mirrors generator.go's operationID: toLower(method) + per
+// non-empty path segment, `By`+Capitalize(param) for `{param}` else
+// Capitalize(segment). e.g. POST /todos/create → postTodosCreate;
+// GET /rooms/{id} → getRoomsById.
+function operationId(method, openPath) {
+  let out = method.toLowerCase();
+  for (const seg of openPath.split('/')) {
+    if (!seg) continue;
+    if (seg.startsWith('{') && seg.endsWith('}')) {
+      out += 'By' + capitalize(seg.slice(1, -1));
+    } else {
+      out += capitalize(seg);
+    }
+  }
+  return out;
+}
+
+// headerParameters lowers a headers JSON Schema (object, string-typed props)
+// into a name-sorted array of `in: header` parameters — matching
+// generator.go's headerParameters (struct order: name, in, required,
+// description?, schema).
+function headerParameters(schema) {
+  if (!schema || typeof schema !== 'object') return [];
+  const props = schema.properties;
+  if (!props || typeof props !== 'object') return [];
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const out = [];
+  for (const name of Object.keys(props).sort()) {
+    const prop = props[name] && typeof props[name] === 'object' ? props[name] : {};
+    const param = { name, in: 'header', required: required.has(name) };
+    if (typeof prop.description === 'string' && prop.description !== '') {
+      param.description = prop.description;
+    }
+    param.schema = sortDeep(props[name]);
+    out.push(param);
+  }
+  return out;
+}
+
+// buildEndpointMeta reads the spec-relevant fields off a loaded endpoint
+// module. method comes from the route (filename-derived) — NOT config.method —
+// matching the dev-server's own dispatch. auth uses the shared isAuthRequired()
+// so spec == enforcement.
+function buildEndpointMeta(route, endpoint) {
+  return {
+    method: route.method,
+    openPath: openApiPath(route.urlPattern),
+    authRequired: isAuthRequired(endpoint.auth),
+    authRole: (endpoint.auth && typeof endpoint.auth === 'object' && typeof endpoint.auth.role === 'string')
+      ? endpoint.auth.role : '',
+    rateLimit: (endpoint.rateLimit && typeof endpoint.rateLimit === 'object'
+      && typeof endpoint.rateLimit.max === 'number'
+      && typeof endpoint.rateLimit.window === 'number')
+      ? { max: endpoint.rateLimit.max, window: endpoint.rateLimit.window } : null,
+    inputSchema: endpoint.input ? zodToJSON(endpoint.input) : null,
+    outputSchema: endpoint.output ? zodToJSON(endpoint.output) : null,
+    headersSchema: endpoint.headers ? zodToJSON(endpoint.headers) : null,
+    errors: extractErrors(endpoint.errors),
+  };
+}
+
+// extractErrors lowers a defineEndpoint({ errors }) table into the shape the
+// generator consumes: { name: { status, code, description, data } }.
+// description defaults to '' (the generator always emits the key);
+// data is the zod-to-json-schema body or null.
+function extractErrors(errors) {
+  if (!errors || typeof errors !== 'object') return null;
+  const out = {};
+  for (const [name, def] of Object.entries(errors)) {
+    if (!def || typeof def !== 'object') continue;
+    out[name] = {
+      status: def.status,
+      code: def.code,
+      description: typeof def.description === 'string' ? def.description : '',
+      data: def.data ? zodToJSON(def.data) : null,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+// buildOperation assembles one OpenAPI operation object with keys inserted in
+// Go's exact emission order. When x- extensions are present Go re-marshals the
+// whole operation as a flat map (all keys sorted alpha), so we sort the
+// top-level keys in that case — see sortOperationKeys.
+function buildOperation(meta) {
+  const op = {};
+  // struct field order: summary, operationId, tags, security, parameters,
+  // requestBody, responses (summary/tags omitted — dev-server has no
+  // description/tags on the route; they'd be empty).
+  op.operationId = operationId(meta.method, meta.openPath);
+
+  if (meta.authRequired) {
+    // bearerAuth then apiKey — generator.go emits them in that array order.
+    op.security = [{ bearerAuth: [] }, { apiKey: [] }];
+  } else {
+    // explicit opt-out → empty requirement (auth optional).
+    op.security = [{}];
+  }
+
+  if (meta.headersSchema) {
+    const params = headerParameters(meta.headersSchema);
+    if (params.length > 0) op.parameters = params;
+  }
+
+  if (meta.inputSchema) {
+    op.requestBody = {
+      required: true,
+      content: { 'application/json': { schema: meta.inputSchema } },
+    };
+  }
+
+  // responses — status keys inserted in sorted order ("200" < "400" < "401" <
+  // declared). 200 always; 400 always; 401 only when auth required.
+  const responses = {};
+  const responseEntries = [];
+  if (meta.outputSchema) {
+    responseEntries.push(['200', {
+      description: 'Successful response',
+      content: { 'application/json': { schema: meta.outputSchema } },
+    }]);
+  } else {
+    responseEntries.push(['200', { description: 'Successful response' }]);
+  }
+  responseEntries.push(['400', { description: 'Bad request' }]);
+  if (meta.authRequired) {
+    responseEntries.push(['401', { description: 'Unauthorized' }]);
+  }
+
+  // Declared typed errors → per-status response envelope + x-palbase-errors.
+  const extensions = {};
+  if (meta.rateLimit) {
+    extensions['x-rate-limit'] = { max: meta.rateLimit.max, window: meta.rateLimit.window };
+  }
+  if (meta.errors) {
+    const ext = {};
+    const byStatus = new Map();
+    for (const [name, e] of Object.entries(meta.errors)) {
+      if (!byStatus.has(e.status)) byStatus.set(e.status, []);
+      byStatus.get(e.status).push(name);
+    }
+    for (const status of byStatus.keys()) {
+      const names = byStatus.get(status).slice().sort();
+      const variants = [];
+      for (const name of names) {
+        const e = meta.errors[name];
+        const envelopeProps = {
+          error: { const: e.code, type: 'string' },
+          message: { type: 'string' },
+        };
+        const required = ['error'];
+        if (e.data) {
+          envelopeProps.data = e.data;
+          required.push('data');
+        }
+        // properties object: insert keys sorted (error < message[ < data]) —
+        // Go marshals envelopeProps as a map. error/message always; data when
+        // present. After sort: data, error, message.
+        const sortedProps = {};
+        for (const k of Object.keys(envelopeProps).sort()) sortedProps[k] = envelopeProps[k];
+        // variant struct is a map in Go → keys sorted: properties, required, type.
+        variants.push({ properties: sortedProps, required, type: 'object' });
+        ext[name] = {
+          code: e.code,
+          description: e.description,
+          hasData: e.data != null,
+          status: e.status,
+        };
+      }
+      const schema = variants.length === 1 ? variants[0] : { oneOf: variants };
+      responseEntries.push([String(status), {
+        description: 'Declared error response',
+        content: { 'application/json': { schema } },
+      }]);
+    }
+    extensions['x-palbase-errors'] = ext;
+  }
+
+  // Insert response status keys in sorted order ("200" < "400" < "401" < …).
+  const byCode = new Map(responseEntries);
+  for (const code of [...byCode.keys()].sort(compareStatus)) {
+    responses[code] = byCode.get(code);
+  }
+  op.responses = responses;
+
+  if (Object.keys(extensions).length > 0) {
+    for (const [k, v] of Object.entries(extensions)) op[k] = v;
+    return sortOperationKeys(op);
+  }
+  return op;
+}
+
+// compareStatus sorts status-code strings the way Go sorts its responses map
+// keys: lexicographically as strings ("200" < "400" < "401" < "404" < "409").
+function compareStatus(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// sortOperationKeys re-emits an operation's TOP-LEVEL keys alphabetically,
+// matching Go's behaviour when x- extensions force the whole operation to
+// marshal as a flat map. Values keep their own (already-correct) ordering.
+function sortOperationKeys(op) {
+  const out = {};
+  for (const key of Object.keys(op).sort()) out[key] = op[key];
+  return out;
+}
+
+// buildOpenApiSpec walks the route table and produces the full document with
+// keys ordered to byte-match the prod Go generator. A module that throws on
+// require is skipped (logged) — one bad endpoint must not break the whole spec,
+// mirroring the dispatcher's load-error tolerance.
+function buildOpenApiSpec() {
+  // paths: { <path>: { <method>: <operation> } }. Build into a plain map first,
+  // then re-emit with sorted path keys and sorted method keys.
+  const rawPaths = new Map();
+  for (const route of routes.values()) {
+    let endpoint;
+    try {
+      endpoint = loadEndpoint(route.modulePath);
+    } catch (err) {
+      log(`openapi: skipping ${route.method} ${route.urlPattern} — ${err.message}`);
+      continue;
+    }
+    const meta = buildEndpointMeta(route, endpoint);
+    const operation = buildOperation(meta);
+    if (!rawPaths.has(meta.openPath)) rawPaths.set(meta.openPath, {});
+    rawPaths.get(meta.openPath)[route.method.toLowerCase()] = operation;
+  }
+
+  const paths = {};
+  for (const pathKey of [...rawPaths.keys()].sort()) {
+    const item = rawPaths.get(pathKey);
+    const sortedItem = {};
+    for (const method of Object.keys(item).sort()) sortedItem[method] = item[method];
+    paths[pathKey] = sortedItem;
+  }
+
+  // Top-level + info + components in Go struct field order; the dynamic map
+  // bodies (paths, securitySchemes) are inserted in sorted order.
+  return {
+    openapi: '3.1.0',
+    info: {
+      title: 'Palbase Backend',
+      version: '1.0.0',
+      description: 'Auto-generated from defineEndpoint() configs.',
+    },
+    // servers OMITTED — prod's ServerURL is empty for the deployed spec.
+    paths,
+    components: {
+      securitySchemes: {
+        // sorted map keys: apiKey < bearerAuth.
+        apiKey: { type: 'apiKey', name: 'apikey', in: 'header' },
+        bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+      },
+    },
+  };
+}
+
 // ── auth: real palauth /auth/user verify ──────────────────────────────
 //
 // Bit-perfect with prod: pod and dev-server BOTH ask palauth to verify
@@ -399,6 +782,28 @@ function rateLimitCheck(routeKey, ip, cfg) {
 const server = http.createServer(async (req, res) => {
   const start = Date.now();
   const parsed = url.parse(req.url, true);
+
+  // /openapi.json — served before route matching so it never falls through to
+  // the 404 path. Built fresh per request (see buildOpenApiSpec comment) and
+  // serialized with 2-space indent. Never crashes the route: any failure logs
+  // and returns 500 with a json envelope, same as the other error paths.
+  if (req.method === 'GET' && parsed.pathname === '/openapi.json') {
+    try {
+      const spec = buildOpenApiSpec();
+      const bodyJson = JSON.stringify(spec, null, 2);
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(bodyJson);
+      log(`[GET] /openapi.json  200  ${Date.now() - start}ms  (${routes.size} route(s))`);
+    } catch (err) {
+      res.statusCode = 500;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ error: 'openapi_error', message: err.message }));
+      log(`[GET] /openapi.json  500  ${Date.now() - start}ms  — ${err.message}`);
+    }
+    return;
+  }
+
   let route = null;
   let match = null;
   for (const r of routes.values()) {
@@ -435,9 +840,14 @@ const server = http.createServer(async (req, res) => {
 
   // Auth gate — same contract as prod: optional => no token = pass with
   // ctx.user=null, present token = palauth verify. Required => must have
-  // a token AND palauth must accept it.
-  const authCfg = endpoint.auth || {};
-  const authRequired = authCfg.required !== false && (authCfg.required === true || authCfg.role !== undefined);
+  // a token AND palauth must accept it. `authRequired` comes from the shared
+  // isAuthRequired() so the enforcement here and the served /openapi.json
+  // `security` block never drift (omitted auth → required, secure-by-default).
+  // Note: pass endpoint.auth RAW — `endpoint.auth || {}` would silently turn an
+  // explicit `auth: false` into `{}`, re-securing an endpoint the developer
+  // opted out of.
+  const authCfg = (endpoint.auth && typeof endpoint.auth === 'object') ? endpoint.auth : {};
+  const authRequired = isAuthRequired(endpoint.auth);
   const authHeader = req.headers['authorization'] || '';
   let user = null;
   if (authHeader.toLowerCase().startsWith('bearer ')) {

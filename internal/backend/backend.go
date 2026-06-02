@@ -28,6 +28,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -492,6 +494,68 @@ func resolveDevProjectRef(ref, endpointRef string) string {
 	return ref
 }
 
+// freeDevPort best-effort frees `port` before starting the dev server, so a
+// re-run after a crashed/orphaned `palbase serve` doesn't bounce off
+// EADDRINUSE. The chosen design is the single fixed port (4003) + this
+// free-on-start — no marker file.
+//
+// Safety guards (we'd rather let the bind fail than kill the wrong process):
+//   - Only darwin/linux (lsof). Other OSes: skip silently, let node surface
+//     EADDRINUSE.
+//   - If lsof is absent: skip silently.
+//   - Only SIGTERM (never SIGKILL) PIDs whose `ps -o comm=` is exactly "node"
+//     — i.e. a previous dev-server, not an unrelated listener. For anything
+//     else, print a clear warning and DON'T kill it.
+//   - Never signal PID <= 0 and never our own PID.
+//
+// `w` receives the human-readable log lines (what was freed / what was left).
+func freeDevPort(port int, w io.Writer) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return
+	}
+	lsof, err := exec.LookPath("lsof")
+	if err != nil {
+		return // no lsof → let node's EADDRINUSE surface
+	}
+	out, err := exec.Command(lsof, "-ti", fmt.Sprintf("tcp:%d", port), "-sTCP:LISTEN").Output()
+	if err != nil {
+		// Non-zero exit just means "no listener on this port" — nothing to free.
+		return
+	}
+	self := os.Getpid()
+	for _, line := range strings.Fields(string(out)) {
+		pid, perr := strconv.Atoi(strings.TrimSpace(line))
+		if perr != nil || pid <= 0 || pid == self {
+			continue
+		}
+		comm := strings.TrimSpace(processComm(pid))
+		if comm != "node" {
+			fmt.Fprintf(w, "warning: port %d is held by pid %d (%s) — not a dev-server; "+
+				"not killing it (use --port to pick another port)\n",
+				port, pid, comm)
+			continue
+		}
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+			fmt.Fprintf(w, "warning: could not free port %d (pid %d): %v\n", port, pid, err)
+			continue
+		}
+		fmt.Fprintf(w, "freed port %d (stopped stale dev-server pid %d)\n", port, pid)
+	}
+}
+
+// processComm returns the executable name of a pid via `ps -p <pid> -o comm=`.
+// Empty string when the process is gone or ps fails — callers treat a
+// non-"node" comm (including "") as "don't touch it".
+func processComm(pid int) string {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return ""
+	}
+	// `comm` may be a full path (Linux ps prints the basename, macOS the path);
+	// take the basename so "/usr/local/bin/node" → "node".
+	return filepath.Base(strings.TrimSpace(string(out)))
+}
+
 func newDevCmd(r Resolvers) *cobra.Command {
 	var port int
 	var branchFlag string
@@ -575,6 +639,12 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 			)
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr
+			// Best-effort: free the port if a stale dev-server is still holding
+			// it, so a re-run doesn't bounce off EADDRINUSE. Only ever stops a
+			// process whose comm is "node" (a previous dev-server); anything
+			// else is left alone with a warning. Safe to call even when nothing
+			// is listening.
+			freeDevPort(port, os.Stderr)
 			if err := node.Start(); err != nil {
 				return fmt.Errorf("start node: %w (is Node.js installed?)", err)
 			}
@@ -592,7 +662,11 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&port, "port", 4000, "Local port for the dev server")
+	// 4003 is the single canonical local port: the codegen consumers
+	// (generateIOSAuto, openAPIURL "local", `--env` help) all probe
+	// localhost:4003 for the local /openapi.json, so a plain `palbase serve`
+	// must land there. --port still overrides for the rare conflict.
+	cmd.Flags().IntVar(&port, "port", 4003, "Local port for the dev server")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to run against (defaults to the active branch; omit for main)")
 	return cmd
 }
@@ -1586,7 +1660,14 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 
 func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
 	localURL := "http://localhost:4003"
-	if specBytes, err := fetchOpenAPISpec(ctx, localURL+"/openapi.json", ""); err == nil {
+	specBytes, localErr := fetchOpenAPISpec(ctx, localURL+"/openapi.json", "")
+	if localErr != nil {
+		// Don't silently fall back — tell the developer the local spec wasn't
+		// reachable and how to get one, so a stale `palbase serve` (or none at
+		// all) doesn't quietly generate against the deployed project instead of
+		// their local edits.
+		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using remote — run `palbase serve` for local codegen\n", localURL, localErr)
+	} else {
 		apiKey := ""
 		var oauth *swiftOAuthConfig
 		if target, lookupErr := lookupBackendTarget(ctx, sc, endpoints, ref, branch); lookupErr == nil {
