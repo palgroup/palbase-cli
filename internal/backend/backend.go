@@ -2099,11 +2099,19 @@ func ensureObjectVersion(pbx string, want int) (string, bool) {
 // the section if absent. Real Xcode drops the exceptions/
 // explicitFileTypes/explicitFolders keys when empty, so we omit them.
 //
-// Idempotent: if a synchronized root group with this path already exists,
-// returns the body unchanged.
+// Idempotent: if OUR synchronized root group (the one with this exact
+// deterministic groupID) already exists, returns the body unchanged. We key
+// the guard on groupID — and confirm that object is actually our synced
+// folder at `path` — rather than two independent global substring checks:
+// a project may legitimately carry an UNRELATED PBXFileSystemSynchronizedRootGroup
+// plus some other object whose path is Palbase/Generated, which would make a
+// split "isa present" && "path present" guard falsely skip emission while the
+// caller still wires the target's fileSystemSynchronizedGroups → a dangling
+// "reference to unknown object". Scoping to groupID's own block avoids that.
 func ensureSyncedFolderGroup(pbx, groupID, path string) (string, bool) {
-	if strings.Contains(pbx, "isa = PBXFileSystemSynchronizedRootGroup;") &&
-		strings.Contains(pbx, "path = "+path+";") {
+	if existing := objectBlock(pbx, groupID); existing != "" &&
+		strings.Contains(existing, "isa = PBXFileSystemSynchronizedRootGroup;") &&
+		strings.Contains(existing, "path = "+path+";") {
 		return pbx, false
 	}
 	block := "\t\t" + groupID + " /* Generated */ = {\n" +

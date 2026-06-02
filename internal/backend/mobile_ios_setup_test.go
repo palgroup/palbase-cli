@@ -234,3 +234,44 @@ func TestEnsureObjectVersionBumpsOnlyWhenLower(t *testing.T) {
 		}
 	})
 }
+
+// TestEnsureSyncedFolderGroup_UnrelatedSyncFolderDoesNotFalseSkip guards the
+// idempotency check against a split-condition false positive: a project that
+// already has an UNRELATED PBXFileSystemSynchronizedRootGroup (e.g. its own
+// source folder) AND some other object whose path is Palbase/Generated must
+// still get OUR sync group emitted. A guard that just checks "isa present" &&
+// "path present" globally would falsely skip, leaving the target's
+// fileSystemSynchronizedGroups pointing at an object that was never created
+// (a dangling "reference to unknown object" that breaks the project).
+func TestEnsureSyncedFolderGroup_UnrelatedSyncFolderDoesNotFalseSkip(t *testing.T) {
+	syncID := xcodeObjectID("palbase-ios-sync-folder")
+	// A pbxproj that already contains an unrelated sync folder AND a stray
+	// object at path = Palbase/Generated, but NOT our deterministic groupID.
+	pbx := "/* Begin PBXFileSystemSynchronizedRootGroup section */\n" +
+		"\t\tDEADBEEFDEADBEEFDEADBEEF /* Sources */ = {\n" +
+		"\t\t\tisa = PBXFileSystemSynchronizedRootGroup;\n" +
+		"\t\t\tpath = Sources;\n" +
+		"\t\t\tsourceTree = \"<group>\";\n" +
+		"\t\t};\n" +
+		"\t\tCAFEBABECAFEBABECAFEBABE /* something */ = {isa = PBXFileReference; path = Palbase/Generated; sourceTree = \"<group>\"; };\n" +
+		"/* End PBXFileSystemSynchronizedRootGroup section */\n"
+
+	out, did := ensureSyncedFolderGroup(pbx, syncID, "Palbase/Generated")
+	if !did {
+		t.Fatal("expected our sync group to be emitted despite unrelated sync folder + stray path")
+	}
+	block := objectBlock(out, syncID)
+	if block == "" {
+		t.Fatalf("our sync group %s was not emitted:\n%s", syncID, out)
+	}
+	if !strings.Contains(block, "isa = PBXFileSystemSynchronizedRootGroup;") ||
+		!strings.Contains(block, "path = Palbase/Generated;") {
+		t.Fatalf("our sync group %s is malformed:\n%s", syncID, block)
+	}
+
+	// And it IS idempotent once ours exists: a second call is a no-op.
+	out2, did2 := ensureSyncedFolderGroup(out, syncID, "Palbase/Generated")
+	if did2 {
+		t.Fatalf("second call must be a no-op once our group exists:\n%s", out2)
+	}
+}
