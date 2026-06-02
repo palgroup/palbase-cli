@@ -106,3 +106,106 @@ func TestMigrateAllTenants_403SurfacesAPIError(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, "forbidden", apiErr.Code)
 }
+
+func TestSetModuleImage_POSTsModuleAndImage(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "set-module-image-palnotify-1"})
+	})
+
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify", "--image", "registry.example/palnotify:abc123"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/api/v1/admin/set-module-image", gotPath)
+	require.Equal(t, "palnotify", gotBody["module"])
+	require.Equal(t, "registry.example/palnotify:abc123", gotBody["image"])
+	require.Contains(t, out.String(), "set-module-image-palnotify-1")
+}
+
+func TestSetModuleImage_JSONOutput(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "set-module-image-paldocs-2"})
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "paldocs", "--image", "registry.example/paldocs:def456", "--json"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, out.String(), `"workflowId": "set-module-image-paldocs-2"`)
+}
+
+func TestSetModuleImage_InvalidModuleRejectedClientSide(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API for an invalid module")
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "bogus", "--image", "registry.example/bogus:1"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid --module")
+	// the error lists the valid modules so the user can self-correct
+	require.Contains(t, err.Error(), "palnotify")
+	require.Contains(t, err.Error(), "palauth")
+}
+
+func TestSetModuleImage_EmptyImageRejectedClientSide(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API when --image is empty")
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify", "--image", ""})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "image is required")
+}
+
+func TestSetModuleImage_ModuleRequired(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API when --module is missing")
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--image", "registry.example/x:1"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "module")
+}
+
+func TestSetModuleImage_ImageRequired(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API when --image is missing")
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "image")
+}
+
+func TestSetModuleImage_403SurfacesAPIError(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "forbidden", "error_description": "Platform-admin access required.",
+			"status": 403, "request_id": "req_e",
+		})
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify", "--image", "registry.example/palnotify:1"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	var apiErr *transport.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, "forbidden", apiErr.Code)
+}
