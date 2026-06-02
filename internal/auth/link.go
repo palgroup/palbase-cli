@@ -126,6 +126,19 @@ func SaveProjectConfigIn(dir string, cfg *ProjectConfig) error {
 	return os.WriteFile(filepath.Join(palbaseDir, "config.json"), data, 0644)
 }
 
+// UnlinkProjectConfig removes the .palbase/config.json link in the current
+// directory, detaching the cwd from its project. Idempotent: a missing
+// link is a no-op (not an error), so `palbase mobile unlink ios` can be
+// re-run safely. Only the link file is removed — generated code, the
+// Xcode build phase, and .gitignore entries are left untouched.
+func UnlinkProjectConfig() error {
+	path := filepath.Join(".palbase", "config.json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove project config: %w", err)
+	}
+	return nil
+}
+
 // LoadProjectConfig reads .palbase/config.json from the current directory.
 func LoadProjectConfig() (*ProjectConfig, error) {
 	data, err := os.ReadFile(filepath.Join(".palbase", "config.json"))

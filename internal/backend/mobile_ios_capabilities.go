@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Xcode capability wiring for `palbase mobile setup ios`:
+// Xcode capability wiring for `palbase mobile link ios`:
 //
 //   - Sign in with Apple: always wired (Apple sign-in is zero-config
 //     on the SDK side — the id_token exchange is server-side, so any
