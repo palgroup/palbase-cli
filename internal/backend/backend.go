@@ -2449,7 +2449,16 @@ func palbaseCodegenPhaseBlock(shellPhaseID string) string {
 	// build every time the CLI hiccups blocks Xcode workflow for
 	// trivial reasons. The previous codegen output stays valid until
 	// the customer re-logs in or fixes the underlying issue.
+	// Xcode runs build phases with a minimal PATH that does NOT include
+	// the user's login-shell PATH (~/.zshrc etc.), so a `palbase` installed
+	// in Homebrew (/opt/homebrew/bin on Apple Silicon, /usr/local/bin on
+	// Intel) or a Go/local bin is invisible to `command -v` and codegen
+	// silently skips on a machine where `palbase` clearly works in the
+	// terminal. Prepend the standard install locations so the lookup
+	// succeeds; this keeps the fail-soft `command -v` guard meaningful (it
+	// now only trips when the CLI is genuinely absent, not merely off-PATH).
 	script := "cd \"${SRCROOT:-.}\"\n" +
+		"export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/go/bin:$HOME/.local/bin:$PATH\"\n" +
 		"if ! command -v palbase >/dev/null 2>&1; then\n" +
 		"  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\n" +
 		"  exit 0\n" +

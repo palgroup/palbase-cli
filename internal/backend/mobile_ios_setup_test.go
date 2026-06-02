@@ -63,6 +63,10 @@ func TestPatchXcodeProjectAddsPalbaseGeneratedFileAndPhase(t *testing.T) {
 		"PalbaseGenerated.swift in Sources",
 		"path = .palbase/generated/ios/PalbaseGenerated.swift;",
 		"name = \"Palbase Codegen iOS\";",
+		// Xcode build phases run with a minimal PATH; the script must
+		// prepend Homebrew/Go bins or `command -v palbase` skips codegen
+		// on machines where palbase is installed but off the build PATH.
+		"export PATH=\\\"/opt/homebrew/bin:/usr/local/bin:$HOME/go/bin:$HOME/.local/bin:$PATH\\\"",
 		"palbase mobile codegen ios",
 		"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.swift",
 		// JSON bundle resource — copied into the app at build time so
