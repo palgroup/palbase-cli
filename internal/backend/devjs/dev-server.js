@@ -593,7 +593,16 @@ function buildOperation(meta) {
         content: { 'application/json': { schema } },
       }]);
     }
-    extensions['x-palbase-errors'] = ext;
+    // x-palbase-errors is a Go map[string]any (generator.go:324,378) re-marshaled
+    // through Operation.MarshalJSON's flat map (generator.go:60-83), so its
+    // error-NAME keys come out GLOBALLY lexicographically sorted — NOT in the
+    // status-grouped insertion order ext was built in above. Re-emit the names
+    // globally sorted so the bytes match Go for endpoints whose error names
+    // don't happen to sort the same as their status grouping (e.g. zeta@409,
+    // alpha@422, mid@409 → alpha, mid, zeta).
+    const sortedExt = {};
+    for (const name of Object.keys(ext).sort()) sortedExt[name] = ext[name];
+    extensions['x-palbase-errors'] = sortedExt;
   }
 
   // Insert response status keys in sorted order ("200" < "400" < "401" < …).

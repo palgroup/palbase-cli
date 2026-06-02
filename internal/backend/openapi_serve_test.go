@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -282,4 +283,192 @@ func freeTCPPort(t *testing.T) int {
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 	return port
+}
+
+// TestServeOpenAPIErrorOrdering is a regression test for the dev-server's
+// x-palbase-errors key ordering. The Go OpenAPI generator stores declared
+// errors in a Go map[string]any and re-marshals it through a flat map, so the
+// served error-NAME keys come out GLOBALLY lexicographically sorted. The
+// dev-server originally built that object grouped by status, so its insertion
+// order was status-grouped (NOT global-sorted), and for an endpoint whose error
+// names don't happen to sort the same as their status grouping the served bytes
+// diverged from prod — breaking byte-identical local codegen.
+//
+// Fixture: things/post declares three errors whose names are NOT in
+// status-grouping order — zeta@409, alpha@422, mid@409. Built grouped by status
+// (409 seen first → mid,zeta; then 422 → alpha) the insertion order would be
+// [mid, zeta, alpha]. The fix re-emits globally sorted, so the SERIALIZED keys
+// must be [alpha, mid, zeta]. We read the order from the RAW response bytes
+// (JSON.stringify preserves object insertion order) because a parsed Go map
+// loses key order.
+func TestServeOpenAPIErrorOrdering(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+
+	root := t.TempDir()
+
+	// Three errors deliberately NOT in status-grouping order. Also an object-form
+	// rateLimit { max, window } (prod emits object-only x-rate-limit too).
+	mustWrite(t, root, "endpoints/things/post.js", `
+module.exports.default = {
+  auth: { required: true },
+  rateLimit: { max: 10, window: 45 },
+  errors: {
+    zeta: { status: 409, code: 'zeta_conflict', description: 'Zeta' },
+    alpha: { status: 422, code: 'alpha_invalid', description: 'Alpha' },
+    mid: { status: 409, code: 'mid_conflict', description: 'Mid' },
+  },
+  handler: async () => ({ ok: true }),
+};
+`)
+
+	writeZodToJSONStub(t, root)
+
+	// Boot the embedded dev-server exactly like TestServeOpenAPISpec.
+	devDir := t.TempDir()
+	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
+		t.Fatalf("extract dev server: %v", err)
+	}
+
+	port := freeTCPPort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, nodeBin, filepath.Join(devDir, "dev-server.js"))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
+		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
+		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
+		"PALBASE_PROJECT_REF=local",
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dev-server: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	// Wait until ready (parsed), then re-fetch the RAW bytes to read key order.
+	spec := fetchSpecUntilReady(t, ctx, port)
+	raw := fetchSpecRaw(t, ctx, port)
+
+	paths, _ := spec["paths"].(map[string]any)
+	postOp := operationAt(t, paths, "/things", "post")
+
+	// Sanity: the extension object exists and has exactly the three names.
+	xerr, _ := postOp["x-palbase-errors"].(map[string]any)
+	if len(xerr) != 3 || xerr["alpha"] == nil || xerr["mid"] == nil || xerr["zeta"] == nil {
+		t.Fatalf("x-palbase-errors = %v, want keys {alpha,mid,zeta}", postOp["x-palbase-errors"])
+	}
+
+	// Object-form rateLimit → x-rate-limit { max:10, window:45 }.
+	rl, _ := postOp["x-rate-limit"].(map[string]any)
+	if rl == nil || rl["max"] != float64(10) || rl["window"] != float64(45) {
+		t.Fatalf("x-rate-limit = %v, want {max:10,window:45}", postOp["x-rate-limit"])
+	}
+
+	// SERIALIZED key order of x-palbase-errors on POST /things — read from raw.
+	got := orderedKeysOf(t, raw, "paths", "/things", "post", "x-palbase-errors")
+	want := []string{"alpha", "mid", "zeta"}
+	if !equalStrings(got, want) {
+		t.Fatalf("x-palbase-errors serialized key order = %v, want %v "+
+			"(status-grouped insertion order would be [mid zeta alpha])", got, want)
+	}
+}
+
+// fetchSpecRaw GETs /openapi.json once (the server is already known-ready) and
+// returns the raw response body so callers can inspect SERIALIZED key order,
+// which a parsed Go map would lose.
+func fetchSpecRaw(t *testing.T, ctx context.Context, port int) []byte {
+	t.Helper()
+	specURL := fmt.Sprintf("http://127.0.0.1:%d/openapi.json", port)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("fetch raw /openapi.json: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read raw /openapi.json body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("raw /openapi.json status = %d, want 200\nbody: %s", resp.StatusCode, body)
+	}
+	return body
+}
+
+// orderedKeysOf navigates raw JSON object bytes down the given key path and
+// returns the target object's keys IN SERIALIZED ORDER. Each level is decoded
+// into map[string]json.RawMessage (which preserves the child bytes), then the
+// final object's keys are read in textual order with a json.Decoder token scan.
+func orderedKeysOf(t *testing.T, raw []byte, path ...string) []string {
+	t.Helper()
+	cur := json.RawMessage(raw)
+	for _, key := range path {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(cur, &obj); err != nil {
+			t.Fatalf("decode object at %q: %v", key, err)
+		}
+		next, ok := obj[key]
+		if !ok {
+			t.Fatalf("key %q missing while navigating %v", key, path)
+		}
+		cur = next
+	}
+	keys, err := topLevelKeysInOrder(cur)
+	if err != nil {
+		t.Fatalf("read ordered keys at %v: %v", path, err)
+	}
+	return keys
+}
+
+// topLevelKeysInOrder returns the keys of a JSON object in serialized order by
+// scanning tokens (json.Decoder hands object keys back in document order).
+func topLevelKeysInOrder(raw []byte) ([]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("expected object, got %v", tok)
+	}
+	var keys []string
+	for dec.More() {
+		ktok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := ktok.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string key, got %v", ktok)
+		}
+		keys = append(keys, key)
+		// Consume the value (object/array/scalar) so the next token is a key.
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil, err
+		}
+	}
+	return keys, nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
