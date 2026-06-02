@@ -187,6 +187,48 @@ func escapeKeyword(id string) string {
 
 func unbacktick(s string) string { return strings.ReplaceAll(s, "`", "") }
 
+// snakeCaseRoundTrips reports whether the SDK's `.convertFromSnakeCase` decoder
+// would map the wire key back to exactly `ident` (and `.convertToSnakeCase`
+// would produce `key` from `ident`) — i.e. the coder strategy already bridges
+// the two, so NO explicit CodingKey is needed (and emitting one would break
+// decoding). It returns true when `key` is the plain snake_case form the
+// strategy reconstructs `ident` from. Mirrors Foundation's documented
+// `convertFromSnakeCase` (split on `_`, lowercase the first component, upper-
+// case the first letter of each following component) including the leading/
+// trailing-underscore passthrough, then checks the result equals `ident`.
+func snakeCaseRoundTrips(ident, key string) bool {
+	if ident == key {
+		return true // already identical (e.g. `platform`, an escaped keyword)
+	}
+	if !strings.Contains(key, "_") {
+		return false // no underscores → strategy leaves it as-is ≠ ident
+	}
+	// Preserve leading/trailing underscores exactly as Foundation does.
+	lead := len(key) - len(strings.TrimLeft(key, "_"))
+	trail := len(key) - len(strings.TrimRight(key, "_"))
+	core := key[lead : len(key)-trail]
+	if core == "" {
+		return false
+	}
+	parts := strings.Split(core, "_")
+	var b strings.Builder
+	b.WriteString(key[:lead])
+	for i, p := range parts {
+		if p == "" {
+			// Consecutive underscores: Foundation keeps an empty component,
+			// which can't round-trip cleanly → force a mismatch (emit a key).
+			return false
+		}
+		if i == 0 {
+			b.WriteString(strings.ToLower(p))
+		} else {
+			b.WriteString(strings.ToUpper(p[:1]) + strings.ToLower(p[1:]))
+		}
+	}
+	b.WriteString(key[len(key)-trail:])
+	return b.String() == ident
+}
+
 func indent(d int) string { return strings.Repeat("    ", d) }
 
 // --- Top-level Request / Response / Error types ----------------------------
@@ -389,11 +431,29 @@ func structLines(name string, props []swiftProp, depth int) []string {
 		optional        bool
 	}
 	var fields []field
+	// Guard against identifier collision: two distinct wire keys can sanitize
+	// to the SAME Swift ident (e.g. "device_id" and "deviceId" both → deviceId).
+	// Emitting both would produce "Invalid redeclaration" for the property, the
+	// init param, AND the CodingKeys case — uncompilable Swift. Keep the FIRST
+	// key for each ident and skip later collisions, recording a visible comment
+	// so the dropped wire key isn't silent. (A schema with both conventions for
+	// one field is the usual cause — the generator can't know they're the same
+	// field, so first-wins is the safe, deterministic choice; the nested types
+	// of a skipped prop are also not emitted, avoiding duplicate type decls.)
+	seenIdent := make(map[string]string, len(props))
 	for _, p := range props {
+		ident := identOf(p.name)
+		if firstKey, clash := seenIdent[ident]; clash {
+			lines = append(lines, indent(fd)+"// codegen: skipped duplicate key "+
+				swiftStringLiteral(p.name)+" — collides with "+swiftStringLiteral(firstKey)+
+				" (both map to Swift `"+unbacktick(ident)+"`)")
+			continue
+		}
+		seenIdent[ident] = p.name
 		optional := !p.required || p.schema.nullable
 		typ, nested := fieldType(p.schema, p.name, fd)
 		lines = append(lines, nested...)
-		fields = append(fields, field{ident: identOf(p.name), key: p.name, typ: typ, optional: optional})
+		fields = append(fields, field{ident: ident, key: p.name, typ: typ, optional: optional})
 	}
 	for _, f := range fields {
 		t := f.typ
@@ -416,10 +476,21 @@ func structLines(name string, props []swiftProp, depth int) []string {
 		lines = append(lines, indent(fd+1)+"self."+f.ident+" = "+f.ident)
 	}
 	lines = append(lines, indent(fd)+"}")
-	// CodingKeys when any ident was sanitized away from the wire key.
+	// CodingKeys ONLY for the keys the SDK's coder strategy can't reconstruct.
+	//
+	// The SDK decodes responses with `.convertFromSnakeCase` and encodes
+	// requests with `.convertToSnakeCase` (see palbackend-ios-src Codec.swift),
+	// so a wire key that is the plain snake_case form of the camelCase ident
+	// round-trips AUTOMATICALLY — emitting a `case x = "snake_key"` there is not
+	// just redundant, it BREAKS decoding: `.convertFromSnakeCase` rewrites the
+	// incoming key to camelCase BEFORE CodingKeys is consulted, so a literal
+	// "snake_key" rawValue no longer matches and the field silently decodes nil.
+	// We therefore emit a CodingKey only when the strategy can NOT recover the
+	// ident from the wire key (e.g. a key with digits/uppercase the snake↔camel
+	// round-trip doesn't reproduce). Most fields need no CodingKeys at all.
 	needKeys := false
 	for _, f := range fields {
-		if unbacktick(f.ident) != f.key {
+		if !snakeCaseRoundTrips(unbacktick(f.ident), f.key) {
 			needKeys = true
 			break
 		}
@@ -427,10 +498,10 @@ func structLines(name string, props []swiftProp, depth int) []string {
 	if needKeys {
 		lines = append(lines, indent(fd)+"enum CodingKeys: String, CodingKey {")
 		for _, f := range fields {
-			if unbacktick(f.ident) != f.key {
-				lines = append(lines, indent(fd+1)+"case "+f.ident+" = \""+f.key+"\"")
-			} else {
+			if snakeCaseRoundTrips(unbacktick(f.ident), f.key) {
 				lines = append(lines, indent(fd+1)+"case "+f.ident)
+			} else {
+				lines = append(lines, indent(fd+1)+"case "+f.ident+" = \""+f.key+"\"")
 			}
 		}
 		lines = append(lines, indent(fd)+"}")

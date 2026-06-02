@@ -123,3 +123,88 @@ func TestEmitSwift(t *testing.T) {
 		}
 	}
 }
+
+// TestStructLines_IdentifierCollisionDeduped guards the codegen against
+// schemas that declare the same field in two conventions (e.g. an AI-written
+// Zod object with both `deviceId` and `device_id`). Both wire keys sanitize to
+// the Swift ident `deviceId`; without a guard the emitter produced duplicate
+// `public let`, init params, and CodingKeys cases → "Invalid redeclaration"
+// (uncompilable). The first key wins; the collision is dropped with a visible
+// comment, so the output compiles.
+func TestStructLines_IdentifierCollisionDeduped(t *testing.T) {
+	props := []swiftProp{
+		{name: "deviceId", schema: swiftSchema{kind: "string"}},
+		{name: "device_id", schema: swiftSchema{kind: "string"}}, // collides → deviceId
+		{name: "appVersion", schema: swiftSchema{kind: "string"}},
+		{name: "app_version", schema: swiftSchema{kind: "string"}}, // collides → appVersion
+		{name: "platform", schema: swiftSchema{kind: "string"}},
+	}
+	out := strings.Join(structLines("PostAppV1InitRequest", props, 0), "\n")
+
+	// Exactly ONE stored property per colliding ident.
+	if n := strings.Count(out, "public let deviceId:"); n != 1 {
+		t.Errorf("expected exactly 1 `public let deviceId`, got %d\n---\n%s", n, out)
+	}
+	if n := strings.Count(out, "public let appVersion:"); n != 1 {
+		t.Errorf("expected exactly 1 `public let appVersion`, got %d\n---\n%s", n, out)
+	}
+	// Exactly ONE init-body assignment per ident (no duplicate self.x = x).
+	if n := strings.Count(out, "self.deviceId = deviceId"); n != 1 {
+		t.Errorf("expected exactly 1 `self.deviceId = deviceId`, got %d\n---\n%s", n, out)
+	}
+	// All surviving idents equal their wire key (deviceId/appVersion/platform),
+	// so NO CodingKeys enum is emitted — and crucially the dropped snake_case
+	// keys must NOT have smuggled in a `case ... = "device_id"`.
+	if strings.Contains(out, "enum CodingKeys") {
+		t.Errorf("no CodingKeys expected (all idents match wire keys)\n---\n%s", out)
+	}
+	if strings.Contains(out, `case deviceId = "device_id"`) || strings.Contains(out, `case appVersion = "app_version"`) {
+		t.Errorf("dropped snake_case wire key leaked into a CodingKeys case\n---\n%s", out)
+	}
+	// The collision is visible, not silent.
+	if !strings.Contains(out, "skipped duplicate key") {
+		t.Errorf("expected a `skipped duplicate key` comment for the dropped key\n---\n%s", out)
+	}
+	// The non-colliding field survives.
+	if !strings.Contains(out, "public let platform:") {
+		t.Errorf("non-colliding field `platform` should survive\n---\n%s", out)
+	}
+}
+
+// TestStructLines_MixedCaseVariants is the pathological edge case: the same
+// concept declared four ways. identOf collapses device_id+deviceId → deviceId
+// (one collision, deduped), while DeviceID → deviceID and deviceid → deviceid
+// are DISTINCT idents that survive. The CodingKeys must be strategy-aware:
+// the snake_case winner (device_id → deviceId) needs NO rawValue (the SDK's
+// .convertFromSnakeCase recovers it), but DeviceID can't be reconstructed so it
+// keeps an explicit rawValue. This proves first-wins dedup + round-trip-aware
+// CodingKeys compose correctly.
+func TestStructLines_MixedCaseVariants(t *testing.T) {
+	props := []swiftProp{
+		{name: "device_id", schema: swiftSchema{kind: "string"}},
+		{name: "deviceId", schema: swiftSchema{kind: "string"}}, // collides → deviceId
+		{name: "DeviceID", schema: swiftSchema{kind: "string"}}, // → deviceID (distinct)
+		{name: "deviceid", schema: swiftSchema{kind: "string"}}, // → deviceid (distinct)
+	}
+	out := strings.Join(structLines("EdgeReq", props, 0), "\n")
+
+	for _, want := range []string{
+		"public let deviceId: String?",
+		"public let deviceID: String?",
+		"public let deviceid: String?",
+		`case deviceID = "DeviceID"`, // not snake-recoverable → explicit rawValue
+		"skipped duplicate key",      // device_id/deviceId collision dropped
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n---\n%s", want, out)
+		}
+	}
+	// The snake_case winner must NOT carry a rawValue (the strategy handles it).
+	if strings.Contains(out, `case deviceId = "device_id"`) {
+		t.Errorf("deviceId must have no rawValue (.convertFromSnakeCase recovers it)\n---\n%s", out)
+	}
+	// Exactly three surviving stored properties (one collision removed).
+	if n := strings.Count(out, "public let "); n != 3 {
+		t.Errorf("expected 3 stored properties, got %d\n---\n%s", n, out)
+	}
+}
