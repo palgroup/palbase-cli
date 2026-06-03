@@ -107,7 +107,208 @@ const richPBX = `// !$*UTF8*$!
 }
 `
 
-func TestPatchXcodeProjectWiresSynchronizedFolder(t *testing.T) {
+// modernPBX models a real Xcode 16 project: the app target's source folder
+// "palbase" is ITSELF a PBXFileSystemSynchronizedRootGroup (path = palbase),
+// listed in the target's fileSystemSynchronizedGroups, and parented under the
+// main group. objectVersion is already 77. This is the shape that produces
+// the double-folder bug with the old code (a stray root "Palbase/Generated"
+// reference on top of the app folder auto-surfacing "palbase/Generated").
+const modernPBX = `// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+/* Begin PBXFileReference section */
+		AAAAAAAAAAAAAAAAAAAAAAAA /* palbase.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = palbase.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		CCCCCCCCCCCCCCCCCCCCCCCC /* palbase */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = palbase;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+/* Begin PBXGroup section */
+		888888888888888888888888 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AAAAAAAAAAAAAAAAAAAAAAAA /* palbase.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		999999999999999999999999 = {
+			isa = PBXGroup;
+			children = (
+				CCCCCCCCCCCCCCCCCCCCCCCC /* palbase */,
+				888888888888888888888888 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+		111111111111111111111111 /* palbase */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 222222222222222222222222 /* Build configuration list for PBXNativeTarget "palbase" */;
+			buildPhases = (
+				333333333333333333333333 /* Sources */,
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CCCCCCCCCCCCCCCCCCCCCCCC /* palbase */,
+			);
+			name = palbase;
+			productName = palbase;
+			productReference = AAAAAAAAAAAAAAAAAAAAAAAA /* palbase.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+		444444444444444444444444 /* Project object */ = {
+			isa = PBXProject;
+			mainGroup = 999999999999999999999999;
+			productRefGroup = 888888888888888888888888 /* Products */;
+			targets = (
+				111111111111111111111111 /* palbase */,
+			);
+		};
+/* End PBXProject section */
+/* Begin PBXSourcesBuildPhase section */
+		333333333333333333333333 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+	};
+	rootObject = 444444444444444444444444 /* Project object */;
+}
+`
+
+// TestPatchXcodeProjectModernSyncedTarget: on a modern Xcode 16 project whose
+// app target folder is itself a synchronized folder, codegen output lives at
+// <appFolder>/Generated and the app's own synced folder surfaces it — so we
+// add NO stray root-level synchronized folder, NO root child ref, and only
+// wire the build phase. This is the fix for the double-appearance bug.
+func TestPatchXcodeProjectModernSyncedTarget(t *testing.T) {
+	out, target, changed, err := patchXcodeProject(modernPBX, "")
+	if err != nil {
+		t.Fatalf("patchXcodeProject: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected project to change (build phase added)")
+	}
+	if target != "palbase" {
+		t.Fatalf("target = %q, want palbase", target)
+	}
+
+	syncID := xcodeObjectID("palbase-ios-sync-folder")
+
+	// PRESENT: the build phase, with outputPaths INSIDE the app folder
+	// (lowercase "palbase/Generated", matching the app folder's casing — not
+	// a case-colliding capital "Palbase/Generated").
+	for _, must := range []string{
+		"name = \"Palbase Codegen iOS\";",
+		"$(SRCROOT)/palbase/Generated/PalbaseGenerated.swift",
+		"$(SRCROOT)/palbase/Generated/PalbaseGenerated.json",
+		"alwaysOutOfDate = 1;",
+		"palbase mobile codegen ios",
+	} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("patched project missing %q:\n%s", must, out)
+		}
+	}
+
+	// ABSENT: we must NOT add our own synchronized folder — the app target's
+	// existing synced folder already covers palbase/Generated. No stray root
+	// reference, no capital "Palbase/Generated", no extra synced group.
+	for _, gone := range []string{
+		syncID,                      // our deterministic sync-folder id never appears
+		"path = Palbase/Generated;", // the case-colliding capital path
+		"path = palbase/Generated;", // we don't add OUR OWN synced folder either
+	} {
+		if strings.Contains(out, gone) {
+			t.Fatalf("patched project must NOT add %q (app folder already covers it):\n%s", gone, out)
+		}
+	}
+
+	// The target's fileSystemSynchronizedGroups must still hold ONLY the app
+	// folder (CCC...), never our Generated id.
+	targetBlock := objectBlock(out, "111111111111111111111111")
+	if strings.Contains(targetBlock, syncID) {
+		t.Fatalf("our sync id leaked into the target's fileSystemSynchronizedGroups:\n%s", targetBlock)
+	}
+
+	// Idempotency.
+	out2, _, changed2, err := patchXcodeProject(out, "palbase")
+	if err != nil {
+		t.Fatalf("second patch: %v", err)
+	}
+	if changed2 {
+		t.Fatalf("second patch should be idempotent:\n%s", out2)
+	}
+}
+
+// TestPatchXcodeProjectHealsV036DoubleFolder: a project linked by v0.3.35/36
+// carries a STRAY root-level synchronized folder (our deterministic id, path
+// Palbase/Generated, in the main group + the target's fileSystemSynchronizedGroups).
+// Re-linking must STRIP it (object + main-group child ref + target entry) so
+// the double appearance heals to the single natural copy.
+func TestPatchXcodeProjectHealsV036DoubleFolder(t *testing.T) {
+	syncID := xcodeObjectID("palbase-ios-sync-folder")
+
+	// Inject the v0.3.36 stray into the modern fixture: the synced-folder
+	// object, its main-group child ref, and its target entry.
+	strayObject := "/* Begin PBXFileSystemSynchronizedRootGroup section */\n" +
+		"\t\t" + syncID + " /* Generated */ = {\n" +
+		"\t\t\tisa = PBXFileSystemSynchronizedRootGroup;\n" +
+		"\t\t\tpath = Palbase/Generated;\n" +
+		"\t\t\tsourceTree = \"<group>\";\n" +
+		"\t\t};\n" +
+		"/* Begin PBXFileSystemSynchronizedRootGroup section */"
+	seeded := strings.Replace(modernPBX,
+		"/* Begin PBXFileSystemSynchronizedRootGroup section */", strayObject, 1)
+	// add the stray to the main group children
+	seeded = strings.Replace(seeded,
+		"\t\t\t\tCCCCCCCCCCCCCCCCCCCCCCCC /* palbase */,",
+		"\t\t\t\tCCCCCCCCCCCCCCCCCCCCCCCC /* palbase */,\n\t\t\t\t"+syncID+" /* Generated */,", 1)
+	// add the stray to the target's fileSystemSynchronizedGroups
+	seeded = strings.Replace(seeded,
+		"\t\t\t\tCCCCCCCCCCCCCCCCCCCCCCCC /* palbase */,\n\t\t\t);\n\t\t\tname = palbase;",
+		"\t\t\t\tCCCCCCCCCCCCCCCCCCCCCCCC /* palbase */,\n\t\t\t\t"+syncID+" /* Generated */,\n\t\t\t);\n\t\t\tname = palbase;", 1)
+
+	if !strings.Contains(seeded, syncID) {
+		t.Fatalf("test setup failed: stray not seeded:\n%s", seeded)
+	}
+
+	out, _, _, err := patchXcodeProject(seeded, "")
+	if err != nil {
+		t.Fatalf("patchXcodeProject: %v", err)
+	}
+
+	// The stray sync-folder object must be gone.
+	if objectBlock(out, syncID) != "" {
+		t.Fatalf("stray sync-folder object %s was not removed:\n%s", syncID, out)
+	}
+	// Its id must not remain anywhere (no dangling child ref / target entry).
+	if strings.Contains(out, syncID) {
+		t.Fatalf("stray sync-folder id %s still referenced after heal:\n%s", syncID, out)
+	}
+	if strings.Contains(out, "path = Palbase/Generated;") {
+		t.Fatalf("stray capital Palbase/Generated path survived:\n%s", out)
+	}
+}
+
+// TestPatchXcodeProjectClassicTarget: a classic (non-synced) project has no
+// app synced folder, so we wire our OWN synchronized folder at
+// <appFolder>/Generated, parent it UNDER the target's group (not the project
+// root), bump objectVersion to 77, and register it on the target.
+func TestPatchXcodeProjectClassicTarget(t *testing.T) {
 	out, target, changed, err := patchXcodeProject(richPBX, "")
 	if err != nil {
 		t.Fatalf("patchXcodeProject: %v", err)
@@ -118,81 +319,78 @@ func TestPatchXcodeProjectWiresSynchronizedFolder(t *testing.T) {
 	if target != "App" {
 		t.Fatalf("target = %q, want App", target)
 	}
-
-	// The deterministic sync-folder id (xcodeObjectID seed) the wiring uses.
 	syncID := xcodeObjectID("palbase-ios-sync-folder")
 
 	for _, must := range []string{
-		// objectVersion bumped 60 → 77 (synced folders need >= 70; we emit 77).
-		"objectVersion = 77;",
-		// The synchronized FOLDER reference object + its section.
-		"/* Begin PBXFileSystemSynchronizedRootGroup section */",
+		"objectVersion = 77;", // bumped 60 → 77 for synced folder support
 		"isa = PBXFileSystemSynchronizedRootGroup;",
-		"path = Palbase/Generated;",
-		// Attached to the target as a synchronized group.
+		"path = App/Generated;", // inside the app folder, not root "Palbase/Generated"
 		"fileSystemSynchronizedGroups = (",
 		syncID + " /* Generated */,",
-		// Shows in the navigator: parented under the project's main group.
-		"777777777777777777777777 /* App */,", // root group children intact
-		// The codegen build phase survives, with the NEW visible output path.
-		"name = \"Palbase Codegen iOS\";",
-		"$(SRCROOT)/Palbase/Generated/PalbaseGenerated.swift",
-		"$(SRCROOT)/Palbase/Generated/PalbaseGenerated.json",
-		// alwaysOutOfDate = 1 makes the phase run EVERY build (unchecks "Based
-		// on dependency analysis"); without it Xcode skips codegen when the
-		// outputPaths look up-to-date.
+		"$(SRCROOT)/App/Generated/PalbaseGenerated.swift",
 		"alwaysOutOfDate = 1;",
-		"buildActionMask = 2147483647;",
-		// Build phase prepended to the target so it runs BEFORE compile.
 		"palbase mobile codegen ios",
 	} {
 		if !strings.Contains(out, must) {
-			t.Fatalf("patched project missing %q:\n%s", must, out)
+			t.Fatalf("classic patch missing %q:\n%s", must, out)
 		}
 	}
 
-	// The sync-folder id must appear in the main (root) group's children so
-	// Xcode shows the folder in the navigator.
-	rootBlock := objectBlock(out, "999999999999999999999999")
-	if !strings.Contains(rootBlock, syncID) {
-		t.Fatalf("sync folder id %s not parented under main group:\n%s", syncID, rootBlock)
+	// The Generated folder is parented under the TARGET's group (App, id 777),
+	// NOT the project root group (999). That keeps it nested in the app.
+	appGroup := objectBlock(out, "777777777777777777777777")
+	if !strings.Contains(appGroup, syncID) {
+		t.Fatalf("Generated not parented under the App group:\n%s", appGroup)
+	}
+	rootGroup := objectBlock(out, "999999999999999999999999")
+	if strings.Contains(rootGroup, syncID) {
+		t.Fatalf("Generated must NOT be parented under the project root group:\n%s", rootGroup)
 	}
 
-	// The fileSystemSynchronizedGroups array must live on the native target
-	// object (sibling of buildPhases), not somewhere stray.
-	targetBlock := objectBlock(out, "111111111111111111111111")
-	if !strings.Contains(targetBlock, "fileSystemSynchronizedGroups = (") {
-		t.Fatalf("fileSystemSynchronizedGroups not on native target:\n%s", targetBlock)
-	}
-	if !strings.Contains(targetBlock, syncID) {
-		t.Fatalf("sync folder id %s not in target's fileSystemSynchronizedGroups:\n%s", syncID, targetBlock)
-	}
-
-	// ABSENCE: the old per-file plumbing must NOT be emitted — a .swift
-	// referenced both via a PBXBuildFile AND auto-synced would double-compile.
-	for _, gone := range []string{
-		"PalbaseGenerated.swift in Sources",
-		"PalbaseGenerated.json in Resources",
-		"path = .palbase/generated/ios/PalbaseGenerated.swift;",
-		"path = .palbase/generated/ios/PalbaseGenerated.json;",
-		"$(SRCROOT)/.palbase/generated/ios/PalbaseGenerated.swift",
-	} {
-		if strings.Contains(out, gone) {
-			t.Fatalf("patched project still contains old per-file artifact %q:\n%s", gone, out)
-		}
-	}
-
-	// Idempotency: re-patching the already-wired project is a no-op.
-	out2, target2, changed2, err := patchXcodeProject(out, "App")
+	// Idempotency.
+	out2, _, changed2, err := patchXcodeProject(out, "App")
 	if err != nil {
-		t.Fatalf("second patchXcodeProject: %v", err)
+		t.Fatalf("second patch: %v", err)
 	}
 	if changed2 {
 		t.Fatalf("second patch should be idempotent:\n%s", out2)
 	}
-	if target2 != "App" {
-		t.Fatalf("second target = %q, want App", target2)
-	}
+}
+
+// TestDetectAppSourceFolder covers the synced vs classic detection + casing.
+func TestDetectAppSourceFolder(t *testing.T) {
+	t.Run("synced target returns folder path + synced=true", func(t *testing.T) {
+		targets := parseXcodeTargets(modernPBX)
+		tgt, err := chooseXcodeTarget(targets, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		folder, synced := detectAppSourceFolder(modernPBX, tgt)
+		if !synced {
+			t.Fatal("expected synced=true for the modern fixture")
+		}
+		if folder != "palbase" {
+			t.Fatalf("folder = %q, want palbase (exact casing)", folder)
+		}
+		if got := iosGeneratedDirFor(folder); got != "palbase/Generated" {
+			t.Fatalf("genDir = %q, want palbase/Generated", got)
+		}
+	})
+
+	t.Run("classic target falls back to target name + synced=false", func(t *testing.T) {
+		targets := parseXcodeTargets(richPBX)
+		tgt, err := chooseXcodeTarget(targets, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		folder, synced := detectAppSourceFolder(richPBX, tgt)
+		if synced {
+			t.Fatal("expected synced=false for the classic fixture")
+		}
+		if folder != "App" {
+			t.Fatalf("folder = %q, want App", folder)
+		}
+	})
 }
 
 // TestEnsureObjectVersionBumpsOnlyWhenLower locks the bump policy: a project

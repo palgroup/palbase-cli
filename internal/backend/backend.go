@@ -106,23 +106,32 @@ func Commands(r Resolvers) []*cobra.Command {
 	}
 }
 
-// defaultIOSGeneratedFile is the Swift codegen output (typed methods +
-// types). PalbaseGenerated.json sits next to it (same directory) and
-// carries the runtime config the Palbe SDK loads from Bundle.main at
-// `pb.configure()` time — kept implicit so callers that pass a custom
-// --out only need to think about the Swift path.
+// The Swift codegen output (typed methods + types) lands in a "Generated"
+// subfolder INSIDE the app target's own source folder (e.g.
+// palbase/Generated/PalbaseGenerated.swift), with the matching JSON next to
+// it (the runtime config the Palbe SDK loads from Bundle.main at
+// pb.configure()). Living inside the target folder is what makes it appear
+// ONCE, naturally, in the navigator: a modern Xcode 16 app folder is itself
+// a synchronized folder, so a nested Generated/ auto-joins the target with
+// ZERO pbxproj plumbing. Writing to a top-level "Palbase/Generated" instead
+// would (a) collide case-insensitively with a "palbase/" app folder on macOS
+// and (b) need a stray root-level synchronized-folder reference — the exact
+// double-appearance bug this avoids.
 //
-// It lives in a VISIBLE, committed folder (Palbase/Generated/, the
-// SwiftGen/R.swift convention) rather than the hidden .palbase/ cache:
-// the folder is wired into Xcode as a single synchronized FOLDER
-// reference (the blue folder), so every file under it auto-joins the
-// target by type (.swift → Compile Sources, .json → Copy Bundle
-// Resources) with zero per-file pbxproj plumbing. defaultIOSGeneratedDir
-// is the single source of truth for that path.
+// The concrete directory is resolved at runtime from the project's target
+// (resolveIOSGeneratedDir). fallbackIOSGeneratedDir is used only when no
+// project/target can be detected — a bare "Generated" at cwd, never the
+// case-colliding capital "Palbase/...".
 const (
-	defaultIOSGeneratedDir  = "Palbase/Generated"
-	defaultIOSGeneratedFile = defaultIOSGeneratedDir + "/PalbaseGenerated.swift"
+	fallbackIOSGeneratedDir = "Generated"
+	iosGeneratedSwiftName   = "PalbaseGenerated.swift"
+	iosGeneratedJSONName    = "PalbaseGenerated.json"
 )
+
+// iosGeneratedSwiftFile returns the Swift output path for a generated dir.
+func iosGeneratedSwiftFile(dir string) string {
+	return dir + "/" + iosGeneratedSwiftName
+}
 
 type backendTarget struct {
 	URL    string
@@ -1499,7 +1508,7 @@ func newMobileCheckoutCmd(r Resolvers) *cobra.Command {
 			if err := auth.SaveProjectConfig(cfg); err != nil {
 				return fmt.Errorf("save project config: %w", err)
 			}
-			if err := generateIOSRemote(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout); err != nil {
+			if err := generateIOSRemote(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, iosGeneratedSwiftFile(resolveIOSGeneratedDir()), os.Stdout); err != nil {
 				cfg.DefaultEnv = prevBranch
 				if saveErr := auth.SaveProjectConfig(cfg); saveErr != nil {
 					return fmt.Errorf("ios codegen failed (%w); ALSO failed to roll back branch to %q: %v", err, prevBranch, saveErr)
@@ -1569,7 +1578,7 @@ func newMobileLinkIOSCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Add Palbase iOS generated code + build phase to an Xcode project",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := ensureIOSGeneratedStub(defaultIOSGeneratedFile); err != nil {
+			if err := ensureIOSGeneratedStub(iosGeneratedSwiftFile(resolveIOSGeneratedDir())); err != nil {
 				return err
 			}
 			project, target, changed, err := setupIOSXcodeProject(projectPath, targetName)
@@ -1609,7 +1618,7 @@ func newMobileLinkIOSCmd(r Resolvers) *cobra.Command {
 			if branch == "" {
 				branch = "main"
 			}
-			if err := generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout); err != nil {
+			if err := generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, iosGeneratedSwiftFile(resolveIOSGeneratedDir()), os.Stdout); err != nil {
 				return fmt.Errorf("initial ios codegen: %w", err)
 			}
 
@@ -1618,7 +1627,7 @@ func newMobileLinkIOSCmd(r Resolvers) *cobra.Command {
 			// client_id, which codegen just fetched from palauth and
 			// wrote into PalbaseGenerated.json. No-op when the project
 			// has no Google provider configured.
-			if err := wireGoogleURLSchemeFromGenerated(project, target, defaultIOSGeneratedFile, os.Stdout); err != nil {
+			if err := wireGoogleURLSchemeFromGenerated(project, target, iosGeneratedSwiftFile(resolveIOSGeneratedDir()), os.Stdout); err != nil {
 				fmt.Fprintf(os.Stdout, "  (Google URL scheme not wired: %v)\n", err)
 			}
 
@@ -1663,7 +1672,7 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 			if branch == "" {
 				branch = "main"
 			}
-			return generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, defaultIOSGeneratedFile, os.Stdout)
+			return generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, iosGeneratedSwiftFile(resolveIOSGeneratedDir()), os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref to link (skips the interactive picker; required in non-interactive shells)")
@@ -2003,6 +2012,10 @@ type xcodeTarget struct {
 	name        string
 	productType string
 	phases      []string
+	// syncedGroups are the ids in this target's fileSystemSynchronizedGroups
+	// array (Xcode 16 PBXFileSystemSynchronizedRootGroup references). Empty
+	// for a classic project that wires sources via per-file PBXBuildFile.
+	syncedGroups []string
 }
 
 func patchXcodeProject(pbx, requestedTarget string) (string, string, bool, error) {
@@ -2038,37 +2051,122 @@ func patchXcodeProject(pbx, requestedTarget string) (string, string, bool, error
 	changed := false
 	var did bool
 
-	// Synchronized FOLDER reference (Xcode 16). One blue-folder object
-	// covers Palbase/Generated/ wholesale: every file under it auto-joins
-	// the target by type (.swift → Compile Sources, .json → Copy Bundle
-	// Resources) with ZERO per-file PBXBuildFile/PBXFileReference entries.
-	// That replaces the old, fragile 4-object splice (swift ref+buildFile,
-	// json ref+buildFile) with a single robust reference.
-	//
-	// Synchronized folders require objectVersion >= 70 (Xcode 16.0). We
-	// always bump to 77 (what current Xcode round-trips) when lower — no
-	// backward-compat fallback.
-	next, did = ensureObjectVersion(next, 77)
-	changed = changed || did
-	next, did = ensureSyncedFolderGroup(next, syncGroupID, defaultIOSGeneratedDir)
-	changed = changed || did
-	next, did = ensureFileSystemSynchronizedGroupInTarget(next, target.id, syncGroupID)
-	changed = changed || did
-	// Show the synced folder in the navigator by parenting it under the
-	// project's root (main) group, just like a regular group.
-	if rootGroupID := findRootPBXGroup(next); rootGroupID != "" {
-		beforeAttach := next
-		next = appendChildToGroup(next, rootGroupID, syncGroupID, "Generated")
-		if next != beforeAttach {
-			changed = true
+	// The generated code lives INSIDE the app target's own source folder
+	// (e.g. palbase/Generated), using the project's exact casing. Where to
+	// wire it depends on the target shape.
+	appFolder, appSynced := detectAppSourceFolder(next, target)
+	genDir := iosGeneratedDirFor(appFolder)
+
+	// MIGRATION: strip a STALE synchronized folder we emitted in a prior CLI
+	// version — but ONLY when it's at the wrong path. v0.3.35/0.3.36 emitted
+	// our syncGroupID at path "Palbase/Generated" parented to the main group;
+	// on case-insensitive macOS that aliased the app's own "palbase/" folder,
+	// so files surfaced TWICE. We remove that stray (object + child ref +
+	// target entry) so it heals on re-link. We must NOT strip our own folder
+	// when it's already at the correct genDir (the classic case) — that would
+	// churn (remove+re-add) and break idempotency. So: strip only when an
+	// existing syncGroupID object's path differs from genDir.
+	if existing := objectBlock(next, syncGroupID); existing != "" &&
+		strings.Trim(xcodeValue(existing, "path"), `"`) != genDir {
+		next, did = stripGeneratedSyncFolder(next, target.id, syncGroupID)
+		changed = changed || did
+	}
+
+	if appSynced {
+		// Modern Xcode 16: the app target's source folder is ITSELF a
+		// synchronized folder, so a nested <appFolder>/Generated/ is picked
+		// up automatically from disk — we add NOTHING to the pbxproj for the
+		// files. One natural appearance, inside the app folder, zero stray
+		// references. (Codegen writes the files there; see resolveIOSGeneratedDir.)
+	} else {
+		// Classic project (no synced source folder): wire our own synchronized
+		// FOLDER reference at <appFolder>/Generated and attach it to the
+		// target. Bump objectVersion to 77 (synced folders need >= 70). Parent
+		// it under the target's own group when we can find it (so it nests in
+		// the app, not at project root); fall back to the root group otherwise.
+		next, did = ensureObjectVersion(next, 77)
+		changed = changed || did
+		next, did = ensureSyncedFolderGroup(next, syncGroupID, genDir)
+		changed = changed || did
+		next, did = ensureFileSystemSynchronizedGroupInTarget(next, target.id, syncGroupID)
+		changed = changed || did
+		parentID := findClassicTargetGroup(next, appFolder)
+		if parentID == "" {
+			parentID = findRootPBXGroup(next)
+		}
+		if parentID != "" {
+			beforeAttach := next
+			next = appendChildToGroup(next, parentID, syncGroupID, "Generated")
+			if next != beforeAttach {
+				changed = true
+			}
 		}
 	}
 
-	next, did = ensurePBXShellScriptPhase(next, shellPhaseID)
+	next, did = ensurePBXShellScriptPhase(next, shellPhaseID, genDir)
 	changed = changed || did
 	next, did = ensureBuildPhaseInTarget(next, target.id, shellPhaseID)
 	changed = changed || did
 	return next, target.name, changed, nil
+}
+
+// findClassicTargetGroup returns the id of the PBXGroup whose `path` equals
+// `folder` (the app target's source dir) — used to parent the generated
+// folder inside the app group on a classic (non-synced) project. Returns ""
+// when no such group exists.
+func findClassicTargetGroup(pbx, folder string) string {
+	if folder == "" {
+		return ""
+	}
+	lines := strings.Split(pbx, "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if !strings.Contains(t, "= {") || !strings.HasSuffix(t, "= {") {
+			continue
+		}
+		id := strings.Fields(t)[0]
+		block := objectBlock(pbx, id)
+		if block == "" || !strings.Contains(block, "isa = PBXGroup;") {
+			continue
+		}
+		p := strings.Trim(xcodeValue(block, "path"), `"`)
+		if p == folder {
+			return id
+		}
+		_ = i
+	}
+	return ""
+}
+
+// stripGeneratedSyncFolder removes a synchronized FOLDER reference we emitted
+// in a prior CLI version: the object block, its child ref under any group,
+// and its entry in the target's fileSystemSynchronizedGroups. Idempotent /
+// no-op when absent. Heals a v0.3.36-linked project (double appearance) on
+// re-link rather than leaving the stray root reference in place.
+func stripGeneratedSyncFolder(pbx, targetID, syncID string) (string, bool) {
+	_ = targetID // kept for call-site symmetry; the line shape below is global
+	before := pbx
+	pbx = removeObjectBlock(pbx, syncID)
+	// removeChildReference drops every `<syncID> /* Generated */,` line —
+	// which covers BOTH the root-group child ref AND the target's
+	// fileSystemSynchronizedGroups entry (identical line shape).
+	pbx = removeChildReference(pbx, syncID, "Generated")
+	return pbx, pbx != before
+}
+
+// removeChildReference drops a `<id> /* <name> */,` child line from any
+// group's children list or fileSystemSynchronizedGroups array (mirror of
+// removePhaseReference for group children).
+func removeChildReference(pbx, objectID, name string) string {
+	needle := objectID + " /* " + name + " */,"
+	var out []string
+	for _, line := range strings.Split(pbx, "\n") {
+		if strings.TrimSpace(line) == needle {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 // ensureObjectVersion bumps the project's `objectVersion = N;` line up to
@@ -2289,10 +2387,92 @@ func parseXcodeTargets(pbx string) []xcodeTarget {
 			t.name = strings.Trim(name, `"`)
 		}
 		t.phases = xcodeListValue(block, "buildPhases")
+		t.syncedGroups = xcodeListValue(block, "fileSystemSynchronizedGroups")
 		targets = append(targets, t)
 		i = j
 	}
 	return targets
+}
+
+// detectAppSourceFolder finds the on-disk source folder for a target and
+// whether that folder is an Xcode 16 synchronized folder.
+//
+//   - Synced (Xcode 16): the target lists its source folder(s) in
+//     fileSystemSynchronizedGroups; each is a PBXFileSystemSynchronizedRootGroup
+//     whose `path` is the folder (e.g. "palbase"). We pick the group whose path
+//     equals the target name (case-insensitively) when present, else the first
+//     — that's the app's primary source folder. Returns (path, true).
+//   - Classic (no synced groups): we can't reliably read a folder from the
+//     pbxproj group graph here, so we fall back to the target name (Xcode
+//     conventionally names the app's source folder after the target). Returns
+//     (targetName, false).
+//
+// The returned path preserves the project's exact casing — critical on
+// case-insensitive macOS, where writing "Palbase/" into an existing "palbase/"
+// would alias and double-surface.
+func detectAppSourceFolder(pbx string, target xcodeTarget) (folder string, synced bool) {
+	// Our OWN generated synced folder (classic-project case) is registered in
+	// the target's fileSystemSynchronizedGroups too — skip it so re-linking
+	// doesn't mistake "App/Generated" for the app source folder and nest into
+	// "App/Generated/Generated".
+	ownSyncID := xcodeObjectID("palbase-ios-sync-folder")
+	var firstPath string
+	for _, gid := range target.syncedGroups {
+		if gid == ownSyncID {
+			continue
+		}
+		block := objectBlock(pbx, gid)
+		if block == "" || !strings.Contains(block, "isa = PBXFileSystemSynchronizedRootGroup;") {
+			continue
+		}
+		p := strings.Trim(xcodeValue(block, "path"), `"`)
+		if p == "" {
+			continue
+		}
+		if firstPath == "" {
+			firstPath = p
+		}
+		if strings.EqualFold(p, target.name) {
+			return p, true
+		}
+	}
+	if firstPath != "" {
+		return firstPath, true
+	}
+	// Classic project: no synced folder. Use the target name as the source dir.
+	return target.name, false
+}
+
+// iosGeneratedDirFor returns the generated-output dir for a detected app
+// source folder: "<folder>/Generated". Empty folder → the bare fallback.
+func iosGeneratedDirFor(folder string) string {
+	if folder == "" {
+		return fallbackIOSGeneratedDir
+	}
+	return folder + "/Generated"
+}
+
+// resolveIOSGeneratedDir resolves where codegen should write, by reading the
+// project in cwd and detecting the (first/app) target's source folder. Used
+// by `mobile codegen ios` (standalone) and as the default for `mobile link
+// ios`. Falls back to a bare "Generated" (never the case-colliding capital
+// "Palbase/Generated") when no project/target is resolvable.
+func resolveIOSGeneratedDir() string {
+	projectPath, err := resolveXcodeProject("")
+	if err != nil {
+		return fallbackIOSGeneratedDir
+	}
+	pbx, err := os.ReadFile(filepath.Join(projectPath, "project.pbxproj"))
+	if err != nil {
+		return fallbackIOSGeneratedDir
+	}
+	targets := parseXcodeTargets(string(pbx))
+	target, err := chooseXcodeTarget(targets, "")
+	if err != nil {
+		return fallbackIOSGeneratedDir
+	}
+	folder, _ := detectAppSourceFolder(string(pbx), target)
+	return iosGeneratedDirFor(folder)
 }
 
 func chooseXcodeTarget(targets []xcodeTarget, requested string) (xcodeTarget, error) {
@@ -2454,7 +2634,7 @@ func xcodeObjectID(seed string) string {
 	return strings.ToUpper(hex.EncodeToString(sum[:]))[:24]
 }
 
-func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
+func ensurePBXShellScriptPhase(pbx, shellPhaseID, genDir string) (string, bool) {
 	// Self-healing semantics: if a phase with our name already exists,
 	// compare against the canonical block we'd emit today. If they match
 	// (idempotent), bail out — nothing to do. If they differ (older CLI
@@ -2464,7 +2644,7 @@ func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
 	// current canonical one with the SAME id so any references stay valid.
 	if existingID := findPhaseIDByName(pbx, "Palbase Codegen iOS"); existingID != "" {
 		existing := objectBlock(pbx, existingID)
-		canonical := palbaseCodegenPhaseBlock(existingID)
+		canonical := palbaseCodegenPhaseBlock(existingID, genDir)
 		if normalizePBXBlock(existing) == normalizePBXBlock(canonical) {
 			return pbx, false
 		}
@@ -2472,7 +2652,7 @@ func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
 		pbx = removePhaseReference(pbx, existingID, "Palbase Codegen iOS")
 		shellPhaseID = existingID // re-use the id so existing buildPhases refs stay valid
 	}
-	block := palbaseCodegenPhaseBlock(shellPhaseID)
+	block := palbaseCodegenPhaseBlock(shellPhaseID, genDir)
 	if strings.Contains(pbx, "/* End PBXShellScriptBuildPhase section */") {
 		return insertBeforeMarker(pbx, "/* End PBXShellScriptBuildPhase section */", block)
 	}
@@ -2492,7 +2672,7 @@ func ensurePBXShellScriptPhase(pbx, shellPhaseID string) (string, bool) {
 // profile only opens up explicitly-declared inputs plus the output
 // path. The generated PalbaseGenerated.swift is already covered by
 // outputPaths.
-func palbaseCodegenPhaseBlock(shellPhaseID string) string {
+func palbaseCodegenPhaseBlock(shellPhaseID, genDir string) string {
 	// Fail-soft: codegen failure (login expired, network down, ref
 	// unlinked) prints a warning and lets the build continue with
 	// whatever generated files are already on disk. Hard-failing the
@@ -2543,8 +2723,8 @@ func palbaseCodegenPhaseBlock(shellPhaseID string) string {
 		"\t\t\tname = \"Palbase Codegen iOS\";\n" +
 		"\t\t\toutputFileListPaths = (\n\t\t\t);\n" +
 		"\t\t\toutputPaths = (\n" +
-		"\t\t\t\t\"$(SRCROOT)/" + defaultIOSGeneratedDir + "/PalbaseGenerated.swift\",\n" +
-		"\t\t\t\t\"$(SRCROOT)/" + defaultIOSGeneratedDir + "/PalbaseGenerated.json\",\n" +
+		"\t\t\t\t\"$(SRCROOT)/" + genDir + "/" + iosGeneratedSwiftName + "\",\n" +
+		"\t\t\t\t\"$(SRCROOT)/" + genDir + "/" + iosGeneratedJSONName + "\",\n" +
 		"\t\t\t);\n" +
 		"\t\t\trunOnlyForDeploymentPostprocessing = 0;\n" +
 		"\t\t\tshellPath = /bin/sh;\n" +
