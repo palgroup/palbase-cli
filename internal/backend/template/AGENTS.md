@@ -17,7 +17,9 @@ TypeScript files; Palbase discovers and serves them.
 ## Commands
 
 - `palbase serve` — run locally with hot reload.
-- `palbase push` — deploy. `palbase push --branch <name>` deploys to a branch.
+- Deploy is GitHub-native: commit and `git push` to the project's GitHub repo.
+  A webhook tells Palbase to build + deploy the pushed code (and apply the
+  config-as-code committed in the repo). Push to a branch to deploy that branch.
 
 ## Full SDK documentation
 

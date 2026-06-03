@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"os"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/auth"
 )
 
 // noopResolvers builds a Resolvers whose accessors return nil — enough to
@@ -27,15 +29,17 @@ func TestCommands_FlatSurface(t *testing.T) {
 		got[name] = true
 	}
 
-	// Present, top-level, flat.
-	for _, want := range []string{"pull", "push", "serve", "list", "rollback", "status", "types"} {
+	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
+	// CLI keeps local dev + observation/control verbs only.
+	for _, want := range []string{"serve", "list", "rollback", "status", "types"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
-	// Removed/renamed: no init/enable/disable (backend is the default — the
-	// CLI never enables or tears down), no deploy (→ push), no `dev` (→ serve),
-	// no `backend` parent, no `config` (config-as-code folded into pull/push).
-	for _, gone := range []string{"init", "deploy", "dev", "disable", "enable", "backend", "config"} {
+	// Removed: no init/enable/disable (backend is the default — the CLI never
+	// enables or tears down), no `dev` (→ serve), no `backend` parent, and no
+	// push/pull/merge — deploy moved to the GitHub-native `git push` flow, so
+	// the tar + go-git deploy verbs are retired.
+	for _, gone := range []string{"init", "deploy", "dev", "disable", "enable", "backend", "config", "push", "pull", "merge"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}
 }
@@ -49,26 +53,23 @@ func TestCommands_NoBackendParent(t *testing.T) {
 	}
 }
 
-// TestCommands_PushReplacesDeploy: the write verb is `push` and it carries
-// the deploy flags (-m / --no-types) so the deploy→push rename preserved
-// the flag surface.
-func TestCommands_PushReplacesDeploy(t *testing.T) {
-	var push *cobra.Command
-	for _, c := range Commands(noopResolvers()) {
-		if c.Name() == "push" {
-			push = c
-			break
-		}
-	}
-	require.NotNil(t, push, "push command must exist")
-	require.NotNil(t, push.Flags().Lookup("message"), "push must keep deploy's --message flag")
-	require.NotNil(t, push.Flags().Lookup("no-types"), "push must keep deploy's --no-types flag")
-}
-
 func keys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
 	return out
+}
+
+// chdirLinked makes a temp dir the cwd, seeds .palbase/config.json so
+// resolveOrLinkRef finds the ref without prompting, and restores cwd.
+func chdirLinked(t *testing.T, ref string) {
+	t.Helper()
+	dir := t.TempDir()
+	prev, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	require.NoError(t, os.MkdirAll(".palbase", 0o755))
+	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}))
 }

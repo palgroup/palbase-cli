@@ -1,7 +1,12 @@
 // Package backend provides the top-level backend lifecycle commands
-// (pull / push / serve / list / rollback / status / types). palbase IS the
-// backend CLI — there is no `backend` parent command. These cover the full
-// developer loop for the per-project backend-runtime pod.
+// (serve / list / rollback / status / types / mobile). palbase IS the
+// backend CLI — there is no `backend` parent command. These cover the
+// local dev + observation loop for the per-project backend-runtime pod.
+//
+// Deploy is GitHub-native: code flows via `git push` to the project's
+// GitHub repo → webhook → orchestrator deploys (and applies the
+// config-as-code committed in the repo). The CLI no longer pushes/pulls
+// a tar bundle.
 //
 // All remote calls go through Studio's tRPC layer via the studio
 // package — never directly to br-<ref> — so org-membership + the
@@ -9,14 +14,9 @@
 package backend
 
 import (
-	"archive/tar"
-	"bufio"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha1"
 	"embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -88,16 +88,13 @@ type Resolvers struct {
 // tears down the backend — it assumes the linked project is ready. The
 // server-side gating is owned by the platform, not the CLI.
 //
-// `pull` and `push` are unified verbs:
-//   - pull  = code archive + env (.env.local) + config-as-code (config/*.toml)
-//   - push  = deploy (bundle+upload+activate) + config-as-code push
-//
-// so "pull/push the project" is a single action for the developer.
+// There is no `push`/`pull`/`merge`: deploy is GitHub-native (`git push`
+// to the project's GitHub repo → webhook → orchestrator deploys + applies
+// the repo's config-as-code). The CLI keeps local dev (`serve`) and the
+// observation/control verbs (list, rollback, status, types, mobile).
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newMobileCmd(r),
-		newPullCmd(r),
-		newPushCmd(r),
 		newDevCmd(r),
 		newListCmd(r),
 		newRollbackCmd(r),
@@ -170,8 +167,8 @@ func (s *stringFlag) Type() string       { return "string" }
 //  3. ErrNotLinked — caller decides whether to prompt or fail.
 //
 // Returning ErrNotLinked instead of bubbling the underlying os.IsNotExist
-// lets the init/serve/deploy commands auto-link via project.list when the
-// user hasn't run `palbase pull` first (pull writes .palbase/config.json).
+// lets the serve/observation commands auto-link via project.list when the
+// cwd has no .palbase/config.json yet (the interactive picker writes it).
 func projectRef(override string) (string, error) {
 	if override != "" {
 		return override, nil
@@ -228,11 +225,10 @@ func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, ou
 // isn't linked: it lists the user's projects and selects one. With a
 // non-empty override it matches by ref (CI/scripted path); otherwise it
 // auto-picks the only project or prompts interactively. It does NOT write
-// any config — the caller persists the link where it wants (cwd for the
-// in-place path, a fresh <projectName>/ dir for `palbase pull` clone-mode).
+// any config — the caller persists the link in the cwd.
 func pickProject(ctx context.Context, override string, c *studio.Client, out io.Writer) (*auth.Project, error) {
 	if override == "" && !isInteractive() {
-		return nil, fmt.Errorf("project not linked — pass --ref or run `palbase pull` in a fresh directory to pick a project")
+		return nil, fmt.Errorf("project not linked — pass --ref to select a project in a non-interactive shell")
 	}
 
 	var rows []auth.Project
@@ -313,190 +309,6 @@ func extractFS(src embed.FS, root, target string) error {
 		}
 		return os.WriteFile(out, body, 0o644)
 	})
-}
-
-// extractTarGzReplace replaces the contents of dest with the contents
-// of the tar.gz archive. Existing files are overwritten; existing
-// directories that don't appear in the archive are left in place
-// (so e.g. node_modules survives an init-on-existing-dir).
-func extractTarGzReplace(archive []byte, dest string) error {
-	gz, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		return fmt.Errorf("open gzip: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read tar entry: %w", err)
-		}
-		clean := filepath.Clean(header.Name)
-		if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
-			return fmt.Errorf("invalid archive path: %s", header.Name)
-		}
-		out := filepath.Join(dest, clean)
-		if !strings.HasPrefix(filepath.Clean(out), filepath.Clean(dest)+string(os.PathSeparator)) &&
-			filepath.Clean(out) != filepath.Clean(dest) {
-			return fmt.Errorf("path traversal in archive: %s", header.Name)
-		}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(out, 0o755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-				return err
-			}
-			f, err := os.Create(out)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return err
-			}
-			f.Close()
-		}
-	}
-	return nil
-}
-
-// backendBundleAllowedRoots lists the only top-level cwd entries that
-// belong in a backend deploy archive. Switched to an allow-list after
-// CLI-18: the old deny-list ("skip .git/node_modules/.palbase/...")
-// happily packed anything else the cwd happened to contain, which on a
-// hybrid project tree (e.g. an iOS app where the backend lives in a
-// subdir, or a monorepo with a webapp next to the backend) meant
-// Xcode projects, Swift sources, *.xcodeproj/ bundles, Info.plist —
-// everything — got uploaded to the backend-runtime pod and then re-
-// pulled by the next `palbase pull`. Allow-list is the only safe
-// default: backend artifacts are a small, well-known set; everything
-// else is opt-in (a future palbase.toml [bundle].include).
-var backendBundleAllowedRoots = map[string]struct{}{
-	// Required runtime: handlers + their colocated meta sidecars.
-	"endpoints": {},
-	// Config-as-code (auth/storage/notifications/flags/documents TOMLs).
-	"config": {},
-	// Node deps + lockfile — pod installs from these.
-	"package.json":      {},
-	"package-lock.json": {},
-	"pnpm-lock.yaml":    {},
-	"yarn.lock":         {},
-	// TypeScript config — pod's typecheck/bundling reads it.
-	"tsconfig.json": {},
-	// User-supplied runtime config — bundled but overwritten by the
-	// injected palbase.toml below (kept here so a customer-provided
-	// override survives the walk-phase filter, then loses to inject).
-	"palbase.toml": {},
-	// Shared source dirs an endpoint may import (e.g. the schema passed to
-	// defineEndpoint({ schema }), use-case/service classes, helpers). The
-	// server bundler runs `esbuild --bundle` from endpoints/ and follows
-	// relative imports like `../../../schema/index.js`, so these dirs MUST
-	// reach the pod or the deploy fails "Could not resolve". Bug caught on
-	// a real SQL todo app whose endpoints imported `schema/`. node_modules
-	// is intentionally NOT here — the pod installs deps from package.json.
-	"schema": {},
-	"lib":    {},
-	"shared": {},
-	"src":    {},
-	"utils":  {},
-	// SQL migrations live under db/migrations/*.up.sql — the deploy-time
-	// migration runner reads them from db/migrations on the pod. Without
-	// db/ in the archive the migrations never reach the server, so the
-	// schema-drift gate trips ("table X not present") on the very tables
-	// the migrations would have created. (Also covers a db/schema.ts form.)
-	"db": {},
-}
-
-// bundleCwd packs the project's backend artifacts (allow-list) as
-// tar.gz for the deploy upload, with a freshly-rendered palbase.toml
-// stitched in at the end. The TOML is regenerated from the project's
-// ref on every deploy so user edits can't desync from control-pg.
-func bundleCwd(root, ref string) ([]byte, error) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-
-	walked := 0
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		// Allow-list gate: a path is in if its top-level component
-		// (everything up to the first separator) is allowed. Anything
-		// else — Info.plist, *.xcodeproj/, palbase/ (Swift sources),
-		// docs/, fixtures/, … — is dropped silently.
-		top := rel
-		if idx := strings.IndexAny(rel, "/\\"); idx >= 0 {
-			top = rel[:idx]
-		}
-		if _, ok := backendBundleAllowedRoots[top]; !ok {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		header.Name = filepath.ToSlash(rel)
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(tw, f)
-		walked++
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Inject the runtime config (overrides any user-side palbase.toml the
-	// archive may have picked up — the walk above doesn't filter it
-	// because exclusion + injection are the same operation).
-	tomlBody := runtimeTOML(ref)
-	if err := tw.WriteHeader(&tar.Header{
-		Name:    "palbase.toml",
-		Mode:    0o644,
-		Size:    int64(len(tomlBody)),
-		ModTime: time.Now(),
-	}); err != nil {
-		return nil, err
-	}
-	if _, err := tw.Write(tomlBody); err != nil {
-		return nil, err
-	}
-
-	if err := tw.Close(); err != nil {
-		return nil, err
-	}
-	if err := gw.Close(); err != nil {
-		return nil, err
-	}
-	if walked == 0 {
-		return nil, fmt.Errorf("nothing to bundle from %s", root)
-	}
-	return buf.Bytes(), nil
 }
 
 // ── subcommands ─────────────────────────────────────────────────────────
@@ -586,7 +398,7 @@ func newDevCmd(r Resolvers) *cobra.Command {
 		Long: `Serve the project's endpoints/ from a local Node.js dev server with
 hot reload — the local equivalent of the deployed backend-runtime pod.
 Routes, ctx, and defineEndpoint behave identically to production, so
-what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push`" + `.`,
+what runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + ` it to deploy.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -594,7 +406,7 @@ what runs under ` + "`palbase serve`" + ` runs the same after ` + "`palbase push
 			}
 			endpointsDir := filepath.Join(cwd, "endpoints")
 			if _, err := os.Stat(endpointsDir); err != nil {
-				return fmt.Errorf("no endpoints/ directory in cwd — run `palbase pull` first")
+				return fmt.Errorf("no endpoints/ directory in cwd — run from your project root (clone it with `git clone`)")
 			}
 			tmpDir, err := os.MkdirTemp("", "palbase-dev-*")
 			if err != nil {
@@ -701,307 +513,6 @@ func devBranchValue(flag string) string {
 		return b
 	}
 	return "main"
-}
-
-func newPushCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	var message string
-	var skipTypes bool
-	var branchFlag string
-	var acceptDataLoss bool
-	var force bool
-	var forcePush bool
-	cmd := &cobra.Command{
-		Use:   "push",
-		Short: "Push the project (deploy code + apply config) to the server",
-		Long: `Push everything for the linked project in one step:
-
-  • code → bundled, uploaded as a new version, and activated
-  • config-as-code → config/*.toml applied to the server (ordered, conflict-gated)
-
-The code deploy runs first; config push follows. A config-push failure is
-reported but does NOT roll back the code deploy that already landed.
-
-Schema changes are auto-migrated (Prisma "db push" style). A destructive change
-that would LOSE data (DROP TABLE on a non-empty table, DROP COLUMN with non-null
-values) requires confirmation: an interactive y/N prompt on a TTY, or the
---accept-data-loss flag (alias: --force) in CI. Dropping empty tables/columns
-applies without prompting.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			// --force is an alias for --accept-data-loss.
-			if force {
-				acceptDataLoss = true
-			}
-			ref, err := resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
-			if err != nil {
-				return err
-			}
-			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
-			// "" = main). In the branch=project model each branch is its own
-			// tenant pod (endpoint_ref = <ref><branchSlug>), so push must land
-			// on the branch you're on. backend.deploy now accepts a `branch`
-			// field (server resolves ref+branch → endpoint_ref); we thread it
-			// below. Empty = default branch (main).
-			branch := resolveActiveBranch(branchFlag)
-			if branch != "" {
-				fmt.Printf("→ branch: %s\n", branch)
-			}
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			fmt.Printf("→ bundling %s ...\n", cwd)
-			// Fail fast on imports that won't reach the pod (e.g. an endpoint
-			// importing ../../../schema/index.js while schema/ is missing or
-			// outside the allow-list). Catches client-side what would otherwise
-			// be a server esbuild "Could not resolve" after upload.
-			if err := preflightImports(cwd); err != nil {
-				return err
-			}
-			archive, err := bundleCwd(cwd, ref)
-			if err != nil {
-				return fmt.Errorf("bundle: %w", err)
-			}
-			fmt.Printf("  bundle: %d bytes\n", len(archive))
-
-			// ── destructive-migration plan/consent round-trip ──────────
-			// Before the deploy mutation, ask the server what schema changes
-			// the auto-migrate engine would make (PLAN mode: computes the diff
-			// + per-drop row counts, applies NOTHING). If the project has no
-			// schema file we skip the plan entirely (additive one-shot deploy —
-			// backward compatible with code-only projects).
-			schemaPath := locateSchemaFile(cwd)
-			if schemaPath != "" {
-				schemaSrc, readErr := os.ReadFile(schemaPath)
-				if readErr != nil {
-					return fmt.Errorf("read schema %s: %w", schemaPath, readErr)
-				}
-				planPayload := map[string]any{"ref": ref, "schema": string(schemaSrc)}
-				if branch != "" {
-					planPayload["branch"] = branch
-				}
-				var plan migrationPlan
-				if planErr := r.Studio().Mutation(ctx, "backend.migrationPlan", planPayload, &plan); planErr != nil {
-					return fmt.Errorf("backend.migrationPlan: %w", planErr)
-				}
-				proceed, decErr := decideDestructive(plan, acceptDataLoss, os.Stdin, isInteractive(), os.Stdout)
-				if decErr != nil {
-					return decErr
-				}
-				if !proceed {
-					return fmt.Errorf("aborted: destructive schema change not confirmed")
-				}
-				// Carry consent into the deploy only when the plan actually
-				// loses data — empty drops apply server-side without a flag.
-				if plan.HasDataLoss {
-					acceptDataLoss = true
-				}
-			}
-
-			fmt.Println("→ uploading via Studio ...")
-			var resp struct {
-				Version string `json:"version"`
-				Files   int    `json:"files"`
-			}
-			deployPayload := map[string]any{
-				"ref":     ref,
-				"archive": base64.StdEncoding.EncodeToString(archive),
-				"message": message,
-			}
-			if branch != "" {
-				deployPayload["branch"] = branch
-			}
-			if acceptDataLoss {
-				deployPayload["acceptDataLoss"] = true
-			}
-			// Git-like stale-base guard: send the SHA we last pulled so the
-			// server rejects (409) if someone else pushed since. --force-push
-			// skips it (intentional overwrite of concurrent changes).
-			if !forcePush {
-				if base := baseSHAFor(cwd, branch); base != "" {
-					deployPayload["baseSHA"] = base
-				}
-			}
-			if err := r.Studio().Mutation(ctx, "backend.deploy", deployPayload, &resp); err != nil {
-				if isStaleBaseErr(err) {
-					return fmt.Errorf("push rejected: the remote has moved since your last pull " +
-						"(someone else pushed).\n  Run `palbase pull` to sync, then push again " +
-						"(or `palbase push --force-push` to overwrite remote changes).")
-				}
-				return fmt.Errorf("backend.deploy: %w", err)
-			}
-			// Record the just-deployed version as the new base so an immediate
-			// follow-up push doesn't false-trip the stale check.
-			if err := recordPulledVersion(cwd, branch, resp.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not update deploy base after push: %v\n", err)
-			}
-			fmt.Printf("✓ deployed version %s (%d files)\n", resp.Version, resp.Files)
-			// Endpoints are served file-based (e.g. POST /hello/get from
-			// endpoints/hello/post.ts) — there is no /rpc/* prefix on the
-			// deployed runtime, so print the project base URL only.
-			//
-			// The URL MUST use the branch endpoint_ref (Kong routes only
-			// that subdomain) and the mode-aware public host. Best-effort:
-			// look it up via apikey.reveal; on failure fall back to a
-			// generic note instead of printing a bare-ref URL that 404s.
-			if target, lerr := lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref, branch); lerr == nil {
-				fmt.Printf("  %s\n", target.URL)
-			} else {
-				fmt.Printf("  (project base URL unavailable: %v)\n", lerr)
-			}
-
-			// Adım B14 — auto-pull types after every successful deploy.
-			// `--no-types` disables for CI loops where the typed
-			// declarations aren't useful.
-			if !skipTypes {
-				if err := pullTypes(ctx, r.Studio(), r.Endpoints(), ref, "remote", os.Stdout); err != nil {
-					// Don't fail the deploy on a types-pull glitch — the
-					// deploy itself succeeded; types are an ergonomic
-					// artifact developers can refresh manually.
-					fmt.Fprintf(os.Stderr, "⚠ types pull failed: %v\n", err)
-				}
-			}
-
-			// ── config-as-code push ───────────────────────────────────
-			// Runs AFTER the code deploy (advisor ordering: code first).
-			// A config failure is surfaced but the code deploy already
-			// landed and is NOT rolled back (no-rollback — Faz 3b).
-			if cfgErr := runConfigPush(ctx, cwd, ref, branch, r.Studio(), os.Stdout); cfgErr != nil {
-				return fmt.Errorf("code deployed (version %s) but config push failed: %w", resp.Version, cfgErr)
-			}
-
-			fmt.Println("✓ push complete")
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVarP(&message, "message", "m", "", "Optional commit message recorded in git history")
-	cmd.Flags().BoolVar(&skipTypes, "no-types", false, "Skip the post-deploy types generation step")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to push (defaults to the active branch; omit for main)")
-	cmd.Flags().BoolVar(&acceptDataLoss, "accept-data-loss", false, "Approve destructive schema changes (DROP TABLE/COLUMN that lose data) without an interactive prompt")
-	cmd.Flags().BoolVar(&force, "force", false, "Alias for --accept-data-loss")
-	cmd.Flags().BoolVar(&forcePush, "force-push", false, "Push even if the remote has moved since your last pull (overwrites concurrent changes — use with care)")
-	return cmd
-}
-
-// isStaleBaseErr reports whether a backend.deploy error is the server's
-// 409 stale_base rejection (the remote HEAD moved past the client's base).
-func isStaleBaseErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "stale_base") || strings.Contains(msg, "conflict")
-}
-
-// migrationPlan mirrors the Studio backend.migrationPlan result (which in turn
-// mirrors modules/backend internal/schema.DestructivePlan). Decoded from the
-// tRPC JSON envelope by studio.Client.
-type migrationPlan struct {
-	Drops       []destructiveOp     `json:"drops"`
-	Unsupported []unsupportedChange `json:"unsupported"`
-	HasDataLoss bool                `json:"hasDataLoss"`
-}
-
-type destructiveOp struct {
-	Kind     string `json:"kind"` // "table" | "column"
-	Table    string `json:"table"`
-	Column   string `json:"column,omitempty"`
-	RowCount int64  `json:"rowCount"`
-	NonNull  int64  `json:"nonNull,omitempty"`
-}
-
-type unsupportedChange struct {
-	Table  string `json:"table"`
-	Column string `json:"column,omitempty"`
-	Reason string `json:"reason"`
-	Hint   string `json:"hint,omitempty"`
-}
-
-// schemaFileCandidates mirrors the server's resolveSchemaPath precedence so the
-// CLI uploads the SAME file the deploy-time auto-migrate engine evaluates.
-var schemaFileCandidates = []string{
-	"schema.ts",
-	filepath.Join("db", "schema.ts"),
-	filepath.Join("schema", "index.ts"),
-	filepath.Join("db", "schema", "index.ts"),
-}
-
-// locateSchemaFile returns the first existing schema definition under root, or
-// "" when the project declares no schema (a code-only project — push then does
-// an additive one-shot deploy with no plan round-trip).
-func locateSchemaFile(root string) string {
-	for _, rel := range schemaFileCandidates {
-		p := filepath.Join(root, rel)
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-// decideDestructive implements the consent decision for a migration plan:
-//
-//   - no drops at all          → proceed silently
-//   - drops but no data loss   → print a one-line note, proceed (no prompt)
-//   - data loss + flag/force   → proceed
-//   - data loss + TTY          → print the warning block, read y/N
-//   - data loss + non-TTY      → abort with a hint to pass --accept-data-loss
-//
-// It writes user-facing output to out and reads the y/N answer from in.
-func decideDestructive(plan migrationPlan, acceptFlag bool, in io.Reader, isTTY bool, out io.Writer) (bool, error) {
-	if len(plan.Drops) == 0 {
-		return true, nil
-	}
-	if !plan.HasDataLoss {
-		// Destructive but empty — apply without friction (Prisma db push).
-		for _, op := range plan.Drops {
-			if op.Kind == "table" {
-				fmt.Fprintf(out, "  (dropping empty table %s — no data loss)\n", op.Table)
-			} else {
-				fmt.Fprintf(out, "  (dropping empty column %s.%s — no data loss)\n", op.Table, op.Column)
-			}
-		}
-		return true, nil
-	}
-
-	// Real data loss — print the warning block.
-	fmt.Fprintln(out, "⚠ This push will DESTROY data:")
-	for _, op := range plan.Drops {
-		switch op.Kind {
-		case "table":
-			if op.RowCount > 0 {
-				fmt.Fprintf(out, "  ⚠ DROP TABLE %s (%d row(s) will be lost)\n", op.Table, op.RowCount)
-			}
-		case "column":
-			if op.NonNull > 0 {
-				fmt.Fprintf(out, "  ⚠ DROP COLUMN %s.%s (%d non-null value(s) will be lost)\n", op.Table, op.Column, op.NonNull)
-			}
-		}
-	}
-	return confirmDestructive(in, isTTY, acceptFlag)
-}
-
-// confirmDestructive resolves the proceed/abort decision for a data-losing
-// change. The flag (--accept-data-loss / --force) short-circuits to proceed.
-// On a TTY it reads a y/N answer from in. Without the flag and without a TTY
-// (CI), it aborts so a destructive change never lands unattended.
-func confirmDestructive(in io.Reader, isTTY bool, flag bool) (bool, error) {
-	if flag {
-		return true, nil
-	}
-	if !isTTY {
-		return false, fmt.Errorf("destructive schema change would lose data; re-run with --accept-data-loss (or --force) to proceed in a non-interactive shell")
-	}
-	fmt.Print("Proceed and lose this data? [y/N]: ")
-	reader := bufio.NewReader(in)
-	line, err := reader.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return false, fmt.Errorf("read confirmation: %w", err)
-	}
-	answer := strings.ToLower(strings.TrimSpace(line))
-	return answer == "y" || answer == "yes", nil
 }
 
 func newListCmd(r Resolvers) *cobra.Command {
@@ -1148,25 +659,6 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-// runtimeTOML serializes the per-project palbase.toml the deploy step
-// injects into every uploaded archive. Kept in one place so dev / deploy
-// see the same shape, and so changing a default doesn't drift across
-// CLI versions in the field.
-func runtimeTOML(ref string) []byte {
-	return []byte(fmt.Sprintf(`# Generated by `+"`palbase push`"+`. Do not edit by hand —
-# Palbase regenerates this file on every push from the project metadata
-# in control-pg.
-
-[project]
-ref = %q
-
-[backend]
-runtime = "node"
-timeout_seconds = 30
-memory_mb = 256
-`, ref))
-}
-
 // renderJSON pretty-prints a value for `--json` output paths if a
 // future flag wires that on. Kept here so command files stay terse.
 func renderJSON(v any) string {
@@ -1178,306 +670,6 @@ func renderJSON(v any) string {
 }
 
 var _ = renderJSON // silence "unused" until --json lands
-
-// ─────────────────────────────────────────────────────────────────────
-// palbase pull
-//
-// Pulls the branch's latest code archive and then fetches the decrypted
-// branch env vars via env.pull, writing them to
-// .env.local so `palbase serve` has the real values.
-//
-// .env.local is already in the template .gitignore; we also ensure it
-// is listed in the project's own .gitignore so values never reach git,
-// even in projects initialised before this command existed.
-//
-// If the env.pull step fails (e.g. no vars set, transient network
-// error), a warning is printed and the command returns successfully —
-// the code pull already completed.
-// ─────────────────────────────────────────────────────────────────────
-
-// envVar holds a single key/value pair returned by the env.pull tRPC procedure.
-type envVar struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-// needsQuoting returns true when the value contains characters that
-// require double-quoting in a .env file: whitespace, #, or ".
-func needsQuoting(v string) bool {
-	return strings.ContainsAny(v, " \t#\"")
-}
-
-// formatEnvLine serialises one env var as a dotenv line.
-// Values containing whitespace, # or " are wrapped in double-quotes with
-// embedded quotes and backslashes escaped.
-// NOTE: values with literal newlines are not supported in v1.
-func formatEnvLine(key, value string) string {
-	if !needsQuoting(value) {
-		return key + "=" + value
-	}
-	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
-	return key + `="` + escaped + `"`
-}
-
-// writeEnvLocal writes vars as a .env.local file inside dir and ensures
-// .env.local is listed in dir/.gitignore. When vars is empty the file
-// is not written (but the .gitignore is still not touched).
-func writeEnvLocal(dir string, vars []envVar) error {
-	if len(vars) == 0 {
-		return nil
-	}
-
-	var sb strings.Builder
-	for _, v := range vars {
-		sb.WriteString(formatEnvLine(v.Key, v.Value))
-		sb.WriteByte('\n')
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, ".env.local"), []byte(sb.String()), 0o600); err != nil {
-		return fmt.Errorf("write .env.local: %w", err)
-	}
-
-	// Safety: ensure .env.local is gitignored so the value never reaches git,
-	// even in projects initialised before this command existed.
-	if err := ensureGitignored(filepath.Join(dir, ".gitignore"), ".env.local"); err != nil {
-		// Non-fatal — the file is written; warn rather than roll back.
-		fmt.Fprintf(os.Stderr, "warning: could not update .gitignore: %v\n", err)
-	}
-
-	return nil
-}
-
-// sanitizeProjectDir turns a project's display name into a safe directory
-// name for `palbase pull` clone-mode: lowercase, spaces/underscores → "-",
-// non [a-z0-9-] stripped, runs of "-" collapsed, leading/trailing "-"
-// trimmed. Names that reduce to "", "." or ".." (which would target the cwd
-// or escape it) yield "" so the caller falls back to the project ref.
-func sanitizeProjectDir(name string) string {
-	var b strings.Builder
-	prevDash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			prevDash = false
-		case r == ' ' || r == '_' || r == '-':
-			if !prevDash && b.Len() > 0 {
-				b.WriteByte('-')
-				prevDash = true
-			}
-		default:
-			// drop everything else (slashes, dots, punctuation, unicode)
-		}
-	}
-	out := strings.TrimRight(b.String(), "-")
-	if out == "" || out == "." || out == ".." {
-		return ""
-	}
-	return out
-}
-
-// cloneTarget computes the directory `palbase pull` clone-mode should create
-// for a picked project: the sanitized name, falling back to the ref when the
-// name sanitizes to empty. Returns an error if the target already exists and
-// is non-empty (an empty/just-created dir is fine to clone into).
-func cloneTarget(p *auth.Project) (string, error) {
-	name := sanitizeProjectDir(p.Name)
-	if name == "" {
-		name = p.Ref
-	}
-	entries, err := os.ReadDir(name)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// target doesn't exist yet — clone into a fresh dir
-	case err != nil:
-		return "", fmt.Errorf("check %s: %w", name, err)
-	case len(entries) > 0:
-		return "", fmt.Errorf("directory %q already exists and is not empty", name)
-	}
-	return name, nil
-}
-
-// isCloneMode reports whether `palbase pull` should run in clone-mode: the
-// cwd has no .palbase/config.json (ErrNotLinked) AND no endpoints/ dir. The
-// endpoints/ guard prevents clobbering an existing project whose .palbase/
-// was merely deleted — that case stays in-place and surfaces the normal
-// not-linked path instead of pulling into a sibling directory.
-func isCloneMode() bool {
-	if _, err := projectRef(""); !errors.Is(err, ErrNotLinked) {
-		return false
-	}
-	if _, err := os.Stat("endpoints"); err == nil {
-		return false
-	}
-	return true
-}
-
-func newPullCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	var branchFlag string
-	var rawPull bool
-	cmd := &cobra.Command{
-		Use:   "pull",
-		Short: "Pull the project (code + env + config) to your local machine",
-		Long: `Pull everything for the linked project in one step:
-
-  • code archive   → extracted into the cwd
-  • env vars       → decrypted into .env.local (gitignored)
-  • config-as-code → config/*.toml + .palbase/state.json
-
-.env.local is gitignored — values reach the dev machine, never git. A
-transient env or config failure warns but does not abort the pull; the
-code pull is the load-bearing step.
-
-Run from an empty directory (no .palbase/config.json, no endpoints/) and
-pull works like 'git clone': it picks a project, creates a <projectName>/
-directory, and pulls into it. It does NOT change your shell's directory —
-it prints a "cd <projectName>" hint to run afterwards.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
-			// Clone-mode vs in-place. Clone-mode (empty/unlinked dir) creates a
-			// fresh <projectName>/ tree and pulls into it; in-place updates the
-			// already-linked cwd (the original, unchanged behaviour). The two
-			// differ only in (a) where ref comes from and (b) which dir the
-			// pull targets — the body below is shared.
-			var ref string
-			var cwd string
-			cloneDir := "" // non-empty only in clone-mode; drives the final "cd" hint
-			if isCloneMode() {
-				picked, err := pickProject(ctx, refFlag, r.Studio(), os.Stdout)
-				if err != nil {
-					return err
-				}
-				target, err := cloneTarget(picked)
-				if err != nil {
-					return err
-				}
-				if err := os.MkdirAll(target, 0o755); err != nil {
-					return fmt.Errorf("create %s: %w", target, err)
-				}
-				// main by default — a fresh clone tracks main, not staging.
-				if err := auth.SaveProjectConfigIn(target, &auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "main"}); err != nil {
-					return fmt.Errorf("save %s/.palbase/config.json: %w", target, err)
-				}
-				ref = picked.Ref
-				cwd = target
-				cloneDir = target
-				fmt.Printf("Cloning %s (%s) into %s/ ...\n", picked.Name, picked.Ref, target)
-			} else {
-				var err error
-				ref, err = resolveOrLinkRef(ctx, refFlag, r.Studio(), os.Stdout)
-				if err != nil {
-					return err
-				}
-				cwd, err = os.Getwd()
-				if err != nil {
-					return err
-				}
-			}
-
-			// Active branch (--branch wins, else ProjectConfig.DefaultEnv;
-			// "" = main). Config-as-code pull IS branch-aware now — its
-			// serializers accept a branch and the Studio config routers
-			// resolve ref+branch → endpoint_ref (branch=project model), so
-			// `palbase pull --branch qa` snapshots THAT branch. backend.pull and
-			// env.pull now ALSO accept a branch field server-side, so code, env
-			// AND config all pull from the same branch's endpoint_ref.
-			branch := resolveActiveBranch(branchFlag)
-			if branch != "" {
-				fmt.Printf("→ branch: %s\n", branch)
-			}
-			// withBranch adds the branch field to a tRPC payload when non-empty
-			// (main is "" and the server omits it for back-compat).
-			withBranch := func(p map[string]any) map[string]any {
-				if branch != "" {
-					p["branch"] = branch
-				}
-				return p
-			}
-
-			// ── code pull ─────────────────────────────────────────────
-			fmt.Printf("→ pulling code for %s ...\n", ref)
-			var pull struct {
-				Version string `json:"version"`
-				Archive string `json:"archive"`
-				Size    int    `json:"size"`
-			}
-			if err := r.Studio().Query(ctx, "backend.pull", withBranch(map[string]any{"ref": ref}), &pull); err != nil {
-				return fmt.Errorf("backend.pull: %w", err)
-			}
-			archive, err := base64.StdEncoding.DecodeString(pull.Archive)
-			if err != nil {
-				return fmt.Errorf("decode pull archive: %w", err)
-			}
-			// Git-like pull: merge the server tree into the local working tree
-			// via the system git so the project is a real git repo (.git at the
-			// root) and conflicts surface as standard <<<<<<< markers any git
-			// tool (Fork, VS Code, mergetool) can resolve. --raw falls back to
-			// the legacy blind overwrite (no git, server wins) for CI/throwaway.
-			if rawPull {
-				if err := extractTarGzReplace(archive, cwd); err != nil {
-					return fmt.Errorf("extract pull archive: %w", err)
-				}
-				fmt.Printf("  code version: %s (%d bytes, raw overwrite)\n", pull.Version, pull.Size)
-			} else {
-				merge, mErr := mergePulledCode(cwd, archive, pull.Version)
-				if mErr != nil {
-					return fmt.Errorf("merge pull: %w", mErr)
-				}
-				fmt.Printf("  code version: %s (%d bytes)\n", pull.Version, pull.Size)
-				if merge.Conflicted {
-					fmt.Printf("⚠ merge conflict in %d file(s):\n", len(merge.ConflictedFiles))
-					for _, f := range merge.ConflictedFiles {
-						fmt.Printf("    %s\n", f)
-					}
-					fmt.Println("  Resolve them in your git tool (e.g. open this folder in Fork/VS Code,")
-					fmt.Println("  or run `git mergetool`), commit the merge, then `palbase push`.")
-				}
-			}
-			// Record the pulled version as the base for the next push's
-			// optimistic-concurrency (stale_base) check. Non-fatal.
-			if err := recordPulledVersion(cwd, branch, pull.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not record pulled version (push stale-check disabled): %v\n", err)
-			}
-
-			// ── env pull ──────────────────────────────────────────────
-			fmt.Println("→ pulling env vars ...")
-			var envVars []envVar
-			if envErr := r.Studio().Query(ctx, "env.pull", withBranch(map[string]any{"ref": ref}), &envVars); envErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: env.pull failed (%v) — .env.local not written\n", envErr)
-			} else {
-				if err := writeEnvLocal(cwd, envVars); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: %v — .env.local not written\n", err)
-				} else if len(envVars) > 0 {
-					fmt.Printf("  wrote .env.local (%d var(s))\n", len(envVars))
-				} else {
-					fmt.Println("  no env vars configured — .env.local not written")
-				}
-			}
-
-			// ── config-as-code pull ───────────────────────────────────
-			// Non-fatal: a config glitch must not lose the code/env pull
-			// that already succeeded.
-			if cfgErr := runConfigPull(ctx, cwd, ref, branch, r.Studio(), os.Stdout); cfgErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: config pull failed (%v) — code + env were still pulled\n", cfgErr)
-			}
-
-			fmt.Println("✓ pull complete")
-			// Clone-mode pulled into a sibling directory. A CLI can't change
-			// the parent shell's cwd (neither can `git clone`), so print the
-			// hint instead of cd-ing.
-			if cloneDir != "" {
-				fmt.Printf("✓ cd %s to start\n", cloneDir)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to pull (defaults to the active branch; omit for main)")
-	cmd.Flags().BoolVar(&rawPull, "raw", false, "Overwrite local files instead of a git merge (no conflict markers; for CI/throwaway clones)")
-	return cmd
-}
 
 func newMobileCheckoutCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
@@ -2814,7 +2006,7 @@ build phase for automatic regeneration on every build:
     --out "$DERIVED_FILE_DIR/PalbaseEndpoints.swift" \
     --env "$([ "$CONFIGURATION" = Debug ] && echo local || echo remote)"
 
-Re-run after every push to stay in sync; ` + "`palbase push`" + ` already does (ts).`,
+Re-run after every deploy to stay in sync with the live spec.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
@@ -2842,12 +2034,6 @@ Re-run after every push to stay in sync; ` + "`palbase push`" + ` already does (
 	cmd.Flags().StringVar(&langFlag, "lang", "ts", "Output language: ts | swift")
 	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output: dir for ts (.palbase), file for swift (PalbaseEndpoints.swift)")
 	return cmd
-}
-
-// pullTypes is the post-deploy convenience wrapper that writes into
-// the default `.palbase/` directory.
-func pullTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env string, w io.Writer) error {
-	return pullTypesTo(ctx, sc, endpoints, ref, env, ".palbase", w)
 }
 
 // pullTypesTo does the actual work — fetch /openapi.json, write JSON,

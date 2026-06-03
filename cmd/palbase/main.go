@@ -14,7 +14,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/branch"
 	"github.com/palgroup/palbase-cli/internal/config"
-	"github.com/palgroup/palbase-cli/internal/merge"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/studio"
@@ -34,8 +33,8 @@ var resolved config.Resolved
 var authClient *auth.Client
 
 // studioClient is the tRPC client the backend lifecycle commands
-// (pull/push/dev/...) use to talk to Studio. Built per invocation against
-// resolved.Endpoints.Studio.
+// (serve/list/status/types/...) use to talk to Studio. Built per
+// invocation against resolved.Endpoints.Studio.
 // Retained ONLY for backend until backend REST routes exist (S5.4
 // decision — see docs/decisions/2026-05-24-s5-cli-pat-provisioning-...).
 var studioClient *studio.Client
@@ -101,9 +100,6 @@ func main() {
 		}),
 		branch.Cmd(branch.Resolvers{
 			REST: func() branch.REST { return managementREST() },
-		}),
-		merge.Cmd(merge.Resolvers{
-			REST: func() merge.REST { return managementREST() },
 		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST: func() apikey.REST { return managementREST() },

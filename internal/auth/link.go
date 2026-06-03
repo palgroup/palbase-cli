@@ -87,9 +87,9 @@ func (l *Linker) Link(ctx context.Context, wantRef string) error {
 		}
 	}
 
-	// Default to the project's main branch (CLI-2): a fresh `palbase pull`
-	// should pull/dev against main, not staging. `palbase branch switch`
-	// changes the active branch per-project.
+	// Default to the project's main branch (CLI-2): a fresh link should
+	// serve against main, not staging. `palbase branch switch` changes the
+	// active branch per-project.
 	cfg := &ProjectConfig{Ref: selected.Ref, DefaultEnv: "main"}
 	if err := SaveProjectConfig(cfg); err != nil {
 		return err
@@ -109,9 +109,7 @@ func SaveProjectConfig(cfg *ProjectConfig) error {
 
 // SaveProjectConfigIn writes <dir>/.palbase/config.json. Same as
 // SaveProjectConfig but lets the caller target a directory other than the
-// cwd — needed by `palbase pull` clone-mode, which creates a fresh
-// <projectName>/ tree and writes the link config into it rather than into
-// the directory the command was launched from.
+// cwd.
 func SaveProjectConfigIn(dir string, cfg *ProjectConfig) error {
 	palbaseDir := filepath.Join(dir, ".palbase")
 	if err := os.MkdirAll(palbaseDir, 0755); err != nil {
@@ -144,7 +142,7 @@ func LoadProjectConfig() (*ProjectConfig, error) {
 	data, err := os.ReadFile(filepath.Join(".palbase", "config.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("project not linked — run `palbase pull` in this directory to pick a project")
+			return nil, fmt.Errorf("project not linked — run from a project directory or pass --ref to pick a project")
 		}
 		return nil, fmt.Errorf("read project config: %w", err)
 	}

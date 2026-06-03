@@ -6,7 +6,7 @@
  * but tuned for hot reload + interactive output. The shape of every
  * user-facing surface (routes, ctx, defineEndpoint) matches prod so
  * what runs in `palbase serve` runs identically in
- * services-shared/br-<ref> after `palbase push`.
+ * services-shared/br-<ref> after a `git push` deploy.
  *
  * Invocation (set by the Go CLI):
  *   PALBASE_DEV_PORT=4003 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
@@ -186,15 +186,15 @@ function moduleClients() {
 // (that's tied to the backend-runtime pod's internal-API on 127.0.0.1, not
 // externally reachable). Rather than half-fake it and have handlers silently
 // behave differently in dev vs prod, every Database op throws a clear
-// "use Documents in serve, or palbase push to test" hint on first call. This
+// "use Documents in serve, or deploy to test" hint on first call. This
 // keeps dev = prod for everything we CAN honestly mirror (Documents, Storage,
 // Notifications, Flags, …) and names the one surface that needs a deploy.
 function dbClient() {
   const hint =
     'Database is not available under `palbase serve` (no local Postgres ' +
     'tunnel to the tenant pool). For local dev, use Documents.collection() ' +
-    'which proxies through the deployed module. For Database tests, run ' +
-    '`palbase push` and exercise the deployed endpoint.';
+    'which proxies through the deployed module. For Database tests, ' +
+    '`git push` to deploy and exercise the deployed endpoint.';
   return new Proxy({}, {
     get(_t, method) {
       if (typeof method !== 'string') return undefined;
@@ -327,10 +327,10 @@ function isAuthRequired(auth) {
 //
 // The deployed pod generates the spec in Go
 // (modules/backend/internal/openapi/generator.go) from the same
-// defineEndpoint() configs. `palbase mobile codegen` / `palbase types|pull
+// defineEndpoint() configs. `palbase mobile codegen` / `palbase types
 // --env local` fetch /openapi.json to drive local codegen, so the LOCAL spec
 // must match the REMOTE one the deployed pod serves — otherwise codegen output
-// silently differs between `palbase serve` and `palbase push`.
+// silently differs between local serve and the deployed pod.
 //
 // We rebuild the document fresh on every GET (not on the fs.watch reload):
 // it's the simpler correct option — endpoints already reload per request via

@@ -36,14 +36,14 @@ type Resolvers struct {
 
 // linkedRef resolves the project ref the branch commands act on: an
 // explicit --ref override wins, otherwise the locally-linked project
-// (`palbase pull` writes .palbase/config.json on first use). Branch is always scoped to a project.
+// (.palbase/config.json in the project dir). Branch is always scoped to a project.
 func linkedRef(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
 	cfg, err := auth.LoadProjectConfig()
 	if err != nil || cfg.Ref == "" {
-		return "", fmt.Errorf("not linked to a project — run `palbase pull` or pass --ref")
+		return "", fmt.Errorf("not linked to a project — run from a project directory or pass --ref")
 	}
 	return cfg.Ref, nil
 }
@@ -330,19 +330,19 @@ func switchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "switch <name>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Set the locally-active branch for dev/push (no server call)",
+		Short: "Set the locally-active branch for serve (no server call)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			cfg, err := auth.LoadProjectConfig()
 			if err != nil || cfg.Ref == "" {
-				return fmt.Errorf("not linked to a project — run `palbase pull` first")
+				return fmt.Errorf("not linked to a project — run from a project directory or pass --ref")
 			}
 			cfg.DefaultEnv = name
 			if err := auth.SaveProjectConfig(cfg); err != nil {
 				return fmt.Errorf("save project config: %w", err)
 			}
 			fmt.Fprintf(os.Stdout, "✓ switched to branch %q (project %s)\n", name, cfg.Ref)
-			fmt.Fprintln(os.Stdout, "  `palbase serve`/`palbase push` now target this branch.")
+			fmt.Fprintln(os.Stdout, "  `palbase serve` now targets this branch.")
 			return nil
 		},
 	}

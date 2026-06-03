@@ -472,3 +472,16 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// mustWrite writes body to root/rel, creating parent dirs. Shared by the
+// serve fixtures that materialise a temp endpoints/ tree.
+func mustWrite(t *testing.T, root, rel, body string) {
+	t.Helper()
+	p := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
