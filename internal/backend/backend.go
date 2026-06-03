@@ -62,9 +62,10 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // requires the way it would inside a real package.
 //
 // module-clients.js is dev-server.js's sibling require — it carries
-// the ctx.<module> fetch wrappers (lockstep mirror of the backend-
-// runtime image's internal/runtime/module-clients.js). Both files must
-// land in the temp dir so the relative resolve works.
+// the module-client fetch wrappers (Documents/Storage/… singletons; a
+// lockstep mirror of the backend-runtime image's
+// internal/runtime/module-clients.js). Both files must land in the temp
+// dir so the relative resolve works.
 //
 //go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js
 var devServerFS embed.FS
@@ -396,19 +397,20 @@ func newDevCmd(r Resolvers) *cobra.Command {
 	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run endpoints/ locally with hot reload",
-		Long: `Serve the project's endpoints/ from a local Node.js dev server with
+		Short: "Run controllers/ locally with hot reload",
+		Long: `Serve the project's controllers/ from a local Node.js dev server with
 hot reload — the local equivalent of the deployed backend-runtime pod.
-Routes, ctx, and defineEndpoint behave identically to production, so
-what runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + ` it to deploy.`,
+Routes (controller basePath + route.path), the per-request req, the imported
+singleton services, and resources behave identically to production, so what
+runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + ` it to deploy.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
 			}
-			endpointsDir := filepath.Join(cwd, "endpoints")
-			if _, err := os.Stat(endpointsDir); err != nil {
-				return fmt.Errorf("no endpoints/ directory in cwd — run from your project root (clone it with `git clone`)")
+			controllersDir := filepath.Join(cwd, "controllers")
+			if _, err := os.Stat(controllersDir); err != nil {
+				return fmt.Errorf("no controllers/ directory in cwd — run from your project root (clone it with `git clone`)")
 			}
 
 			// Regenerate palbase-env.d.ts from db/schema.ts so the project's

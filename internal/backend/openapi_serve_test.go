@@ -15,17 +15,37 @@ import (
 	"time"
 )
 
+// controllerFixture renders a controllers/*.js CJS module that default-exports
+// a ControllerDef ({ __palbase:'controller', basePath, routes }). The routes
+// arg is a literal JS object body of `mapKey: <RouteDef literal>` entries. These
+// are plain CJS objects with the right __palbase discriminants — they do NOT
+// require @palbase/backend, because the /openapi.json builder only reads the
+// def SHAPE off the default export (it never invokes the handler). The handler
+// is a real function so `hasHandler`/dispatch checks pass.
+func controllerFixture(basePath, routesBody string) string {
+	return fmt.Sprintf(`
+module.exports.default = {
+  __palbase: 'controller',
+  basePath: %q,
+  routes: {
+%s
+  },
+};
+`, basePath, routesBody)
+}
+
 // TestServeOpenAPISpec boots the embedded dev-server against a tiny temp
-// endpoints/ fixture, fetches GET /openapi.json, and asserts the served spec
+// controllers/ fixture, fetches GET /openapi.json, and asserts the served spec
 // matches the prod byte-shape contract (modules/backend/internal/openapi):
 //   - openapi == "3.1.0"
 //   - components.securitySchemes has bearerAuth + apiKey
-//   - an auth-required endpoint has security [bearerAuth, apiKey] + a 401
-//   - an explicit auth:false endpoint has security [{}] and NO 401
-//   - a rateLimit endpoint has x-rate-limit
-//   - an input-schema endpoint has requestBody.content.application/json.schema
+//   - an auth-required route has security [bearerAuth, apiKey] + a 401
+//   - an explicit auth:false route has security [{}] and NO 401
+//   - a rateLimit route has x-rate-limit
+//   - an input-schema route has requestBody.content.application/json.schema
+//   - the full route path is basePath + route.path (controller composition)
 //
-// The fixture endpoints are plain CJS modules that do NOT require
+// The fixture controllers are plain CJS modules that do NOT require
 // @palbase/backend (the dev-server only needs that per-request inside the
 // handler, which /openapi.json never hits). zod-to-json-schema is supplied as a
 // local stub via NODE_PATH so the input-schema body is deterministic and the
@@ -38,39 +58,44 @@ func TestServeOpenAPISpec(t *testing.T) {
 
 	root := t.TempDir()
 
-	// auth omitted → secure-by-default (required). Has input + output schemas
-	// (fake zod objects: zodToJSON only checks for a _def object, our stub
-	// converter returns a fixed schema) and a rateLimit.
-	mustWrite(t, root, "endpoints/todos/create/post.js", `
-module.exports.default = {
-  auth: { required: true },
-  rateLimit: { max: 5, window: 60 },
-  input: { _def: { kind: 'input' } },
-  output: { _def: { kind: 'output' } },
-  errors: {
-    AlreadyExists: { status: 409, code: 'already_exists', description: 'Duplicate' },
-  },
-  handler: async () => ({ ok: true }),
-};
-`)
+	// todos controller: basePath "/todos".
+	//  - create: POST "/create" → full path /todos/create. auth required,
+	//    rateLimit, input/output schemas (fake zod: zodToJSON only checks for a
+	//    _def object, our stub converter returns a fixed schema), declared error.
+	//  - byId: GET "/:id" → full path /todos/:id (→ {id}), auth omitted →
+	//    secure-by-default (required), ByParam operationId.
+	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture("/todos", `
+    create: {
+      __palbase: 'route', method: 'POST', path: '/create',
+      handler: {
+        __palbase: 'handler',
+        auth: { required: true },
+        rateLimit: { max: 5, window: 60 },
+        input: { _def: { kind: 'input' }, safeParse: (v) => ({ success: true, data: v }) },
+        output: { _def: { kind: 'output' } },
+        errors: { AlreadyExists: { status: 409, code: 'already_exists', description: 'Duplicate' } },
+        handler: async () => ({ ok: true }),
+      },
+    },
+    byId: {
+      __palbase: 'route', method: 'GET', path: '/:id',
+      handler: { __palbase: 'handler', handler: async () => ({ id: 1 }) },
+    },`))
 
-	// explicit opt-out → optional auth, no 401.
-	mustWrite(t, root, "endpoints/public/get.js", `
-module.exports.default = {
-  auth: false,
-  handler: async () => ({ public: true }),
-};
-`)
+	// public controller: basePath "" → full path "/public". Explicit opt-out →
+	// optional auth, no 401.
+	mustWrite(t, root, "controllers/public.controller.js", controllerFixture("", `
+    list: {
+      __palbase: 'route', method: 'GET', path: '/public',
+      handler: { __palbase: 'handler', auth: false, handler: async () => ({ public: true }) },
+    },`))
 
-	// path param [id] → {id}; auth omitted → secure-by-default (required).
-	mustWrite(t, root, "endpoints/rooms/[id]/get.js", `
-module.exports.default = {
-  handler: async () => ({ id: 1 }),
-};
-`)
+	// A controller that throws on require must be SKIPPED, not break the spec.
+	mustWrite(t, root, "controllers/broken.controller.js", `throw new Error('boom on require');`)
 
-	// A module that throws on require must be SKIPPED, not break the whole spec.
-	mustWrite(t, root, "endpoints/broken/get.js", `throw new Error('boom on require');`)
+	// A file whose default export is NOT a controller must be SKIPPED (no v1
+	// fallback) and must not leak any route into the spec.
+	mustWrite(t, root, "controllers/notacontroller.js", `module.exports.default = { handler: async () => ({}) };`)
 
 	writeZodToJSONStub(t, root)
 
@@ -129,12 +154,16 @@ module.exports.default = {
 		t.Fatalf("paths missing: %v", spec)
 	}
 
-	// The broken endpoint must have been skipped, not present.
-	if _, ok := paths["/broken"]; ok {
-		t.Fatalf("broken endpoint leaked into spec: %v", paths)
+	// The broken controller (throws on require) + the non-controller file must
+	// both have been skipped — no v1 fallback leaks a route.
+	for _, p := range []string{"/broken", "/notacontroller"} {
+		if _, ok := paths[p]; ok {
+			t.Fatalf("non-controller surface %q leaked into spec: %v", p, paths)
+		}
 	}
 
-	// auth-required endpoint: POST /todos/create → security [bearerAuth, apiKey] + 401.
+	// auth-required route: POST /todos/create (basePath /todos + path /create) →
+	// security [bearerAuth, apiKey] + 401.
 	createOp := operationAt(t, paths, "/todos/create", "post")
 	assertAuthRequiredSecurity(t, createOp)
 	resps, _ := createOp["responses"].(map[string]any)
@@ -184,12 +213,13 @@ module.exports.default = {
 		t.Fatalf("auth:false op must NOT have 401: %v", pubResps)
 	}
 
-	// [id] → {id} path key + ByParam operationId; secure-by-default (auth omitted).
-	roomsOp := operationAt(t, paths, "/rooms/{id}", "get")
-	if roomsOp["operationId"] != "getRoomsById" {
-		t.Fatalf("operationId = %v, want getRoomsById", roomsOp["operationId"])
+	// :id → {id} path key + ByParam operationId; secure-by-default (auth
+	// omitted). Full path = basePath /todos + route path /:id → /todos/{id}.
+	byIdOp := operationAt(t, paths, "/todos/{id}", "get")
+	if byIdOp["operationId"] != "getTodosById" {
+		t.Fatalf("operationId = %v, want getTodosById", byIdOp["operationId"])
 	}
-	assertAuthRequiredSecurity(t, roomsOp)
+	assertAuthRequiredSecurity(t, byIdOp)
 }
 
 // assertAuthRequiredSecurity checks security == [{bearerAuth:[]},{apiKey:[]}].
@@ -311,18 +341,22 @@ func TestServeOpenAPIErrorOrdering(t *testing.T) {
 
 	// Three errors deliberately NOT in status-grouping order. Also an object-form
 	// rateLimit { max, window } (prod emits object-only x-rate-limit too).
-	mustWrite(t, root, "endpoints/things/post.js", `
-module.exports.default = {
-  auth: { required: true },
-  rateLimit: { max: 10, window: 45 },
-  errors: {
-    zeta: { status: 409, code: 'zeta_conflict', description: 'Zeta' },
-    alpha: { status: 422, code: 'alpha_invalid', description: 'Alpha' },
-    mid: { status: 409, code: 'mid_conflict', description: 'Mid' },
-  },
-  handler: async () => ({ ok: true }),
-};
-`)
+	// Controller basePath "/things", route POST "/" → full path /things.
+	mustWrite(t, root, "controllers/things.controller.js", controllerFixture("/things", `
+    create: {
+      __palbase: 'route', method: 'POST', path: '/',
+      handler: {
+        __palbase: 'handler',
+        auth: { required: true },
+        rateLimit: { max: 10, window: 45 },
+        errors: {
+          zeta: { status: 409, code: 'zeta_conflict', description: 'Zeta' },
+          alpha: { status: 422, code: 'alpha_invalid', description: 'Alpha' },
+          mid: { status: 409, code: 'mid_conflict', description: 'Mid' },
+        },
+        handler: async () => ({ ok: true }),
+      },
+    },`))
 
 	writeZodToJSONStub(t, root)
 
@@ -381,6 +415,162 @@ module.exports.default = {
 		t.Fatalf("x-palbase-errors serialized key order = %v, want %v "+
 			"(status-grouped insertion order would be [mid zeta alpha])", got, want)
 	}
+}
+
+// TestServeControllerDispatch boots the embedded dev-server against a v2
+// controller fixture (db/schema.ts + controllers/todos.controller.ts +
+// handlers/todos/*.ts shape, lowered to CJS) and asserts the dev-server
+// actually DISPATCHES a request to the route's handler:
+//
+//	GET /todos → 200 with the handler's output {items:[...]}
+//
+// This is the controller→route-table→handler path (not just the openapi
+// shape): basePath "/todos" + route.path "/" composes to /todos, the GET verb
+// matches, and the handler at routes.list.handler.handler runs. The route is
+// auth:false so no palauth round-trip is needed. A minimal @palbase/backend
+// stub on NODE_PATH satisfies installRuntime()'s `require('@palbase/backend')
+// .__setRuntime(...)` (the handler imports nothing — it returns a literal).
+func TestServeControllerDispatch(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+
+	root := t.TempDir()
+
+	// A handler colocated under handlers/, imported by the controller — the v2
+	// authoring layout. Lowered to CJS: the handler is a plain function and the
+	// def carries the __palbase:"handler" discriminant.
+	mustWrite(t, root, "handlers/todos/list.js", `
+module.exports.default = {
+  __palbase: 'handler',
+  auth: false,
+  handler: async (req) => ({ items: [{ id: 't1', title: 'first' }], gotMethod: req.method }),
+};
+`)
+	// The controller wires the handler at route map key "list": GET "/" under
+	// basePath "/todos" → full path /todos.
+	mustWrite(t, root, "controllers/todos.controller.js", `
+const list = require('../handlers/todos/list.js').default;
+module.exports.default = {
+  __palbase: 'controller',
+  basePath: '/todos',
+  routes: {
+    list: { __palbase: 'route', method: 'GET', path: '/', handler: list },
+  },
+};
+`)
+
+	writeBackendStub(t, root)
+
+	port := startDevServer(t, root)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Poll GET /todos until the server is up, then assert the dispatched body.
+	body := getJSONUntilReady(t, ctx, port, "/todos")
+	items, _ := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("GET /todos body items = %v, want one item", body["items"])
+	}
+	first, _ := items[0].(map[string]any)
+	if first["id"] != "t1" || first["title"] != "first" {
+		t.Fatalf("dispatched handler output = %v, want {id:t1,title:first}", first)
+	}
+	// The dev-server threaded the real PBRequest (req.method) into the handler.
+	if body["gotMethod"] != "GET" {
+		t.Fatalf("handler saw req.method = %v, want GET", body["gotMethod"])
+	}
+}
+
+// startDevServer extracts the embedded dev-server into a temp dir and launches
+// it against `root` on a free port, registering a t.Cleanup to kill it. Returns
+// the port. Shared by the dispatch test (and any future serve test that needs a
+// running server rather than just /openapi.json).
+func startDevServer(t *testing.T, root string) int {
+	t.Helper()
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	devDir := t.TempDir()
+	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
+		t.Fatalf("extract dev server: %v", err)
+	}
+	port := freeTCPPort(t)
+	cmd := exec.Command(nodeBin, filepath.Join(devDir, "dev-server.js"))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
+		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
+		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
+		"PALBASE_PROJECT_REF=local",
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dev-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	return port
+}
+
+// getJSONUntilReady polls GET <path> until the dev-server returns 200 (or the
+// deadline hits), then decodes the JSON body. Used by the dispatch test to wait
+// for boot AND assert the handler's output in one shot.
+func getJSONUntilReady(t *testing.T, ctx context.Context, port int, path string) map[string]any {
+	t.Helper()
+	u := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	deadline := time.Now().Add(12 * time.Second)
+	var lastErr error
+	var lastStatus int
+	for {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			data, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastStatus = resp.StatusCode
+			if resp.StatusCode == http.StatusOK {
+				var out map[string]any
+				if jerr := json.Unmarshal(data, &out); jerr != nil {
+					t.Fatalf("decode GET %s: %v\nbody: %s", path, jerr, data)
+				}
+				return out
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dev-server did not serve 200 on GET %s in time (last status %d, err %v)", path, lastStatus, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// writeBackendStub installs a minimal @palbase/backend on the fixture's
+// node_modules so the dev-server's installRuntime() can
+// `require('@palbase/backend').__setRuntime(...)` without a real install. The
+// stub also no-ops the Resource API (so a resources/ dir, if present, is a clean
+// no-op). The fixture handlers import nothing from it.
+func writeBackendStub(t *testing.T, root string) {
+	t.Helper()
+	mustWrite(t, root, "node_modules/@palbase/backend/package.json",
+		`{"name":"@palbase/backend","version":"0.0.0-test","main":"index.js"}`)
+	mustWrite(t, root, "node_modules/@palbase/backend/index.js", `
+'use strict';
+class Resource {}
+module.exports = {
+  __setRuntime() {},
+  Resource,
+  __registerResource() {},
+  async __runResourceBoot() {},
+  async __shutdownResources() {},
+};
+`)
 }
 
 // fetchSpecRaw GETs /openapi.json once (the server is already known-ready) and

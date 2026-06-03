@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 /**
- * Palbase backend dev server.
+ * Palbase backend dev server (v2 — controllers/).
  *
- * Local equivalent of the prod backend-runtime endpoint dispatcher,
- * but tuned for hot reload + interactive output. The shape of every
- * user-facing surface (routes, ctx, defineEndpoint) matches prod so
- * what runs in `palbase serve` runs identically in
+ * Local equivalent of the prod backend-runtime app-server
+ * (modules/backend/internal/runtime/worker.js), tuned for hot reload +
+ * interactive output. The shape of every user-facing surface (controllers,
+ * handlers, the per-request `req`, the imported singleton services, resources)
+ * matches prod so what runs under `palbase serve` runs identically in
  * services-shared/br-<ref> after a `git push` deploy.
+ *
+ * Routing surface: controllers/ ONLY. A controllers/*.ts file default-exports a
+ * ControllerDef (`__palbase === 'controller'`); each route in `routes[mapKey]`
+ * carries a HandlerDef at `.handler`. The full route path is `basePath +
+ * route.path` and the verb is `route.method` — identical to the runtime's
+ * dispatch + extract_meta.js + generator.go. There is NO v1 `endpoints/`
+ * filename→method path (clean break).
  *
  * Invocation (set by the Go CLI):
  *   PALBASE_DEV_PORT=4003 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
@@ -26,7 +34,8 @@ const PORT = Number(process.env.PALBASE_DEV_PORT) || 4003;
 const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
-const ENDPOINTS_DIR = path.join(PROJECT_ROOT, 'endpoints');
+const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
+const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
 
 // Capture pod-bound credentials into module-scope closures, then DELETE
 // them from process.env BEFORE require()ing user code. User endpoints
@@ -44,66 +53,144 @@ const PALBASE_URL = (PROJECT_REF !== 'local' && PUBLIC_HOST)
   ? `https://${PROJECT_REF}.${PUBLIC_HOST.replace(/\/+$/, '')}`
   : '';
 
-const METHOD_FILE_RE = /^(get|post|put|patch|delete)\.(c?js|mjs|ts)$/i;
+const CONTROLLER_FILE_RE = /\.(c?js|mjs|ts)$/i;
 
 // ── route table ────────────────────────────────────────────────────────
 //
-// Each entry: { method, urlPattern, regex, paramNames, modulePath }.
-// urlPattern keeps original colons for printing; regex matches incoming
-// requests with named capture groups.
+// controllers/ is the ONLY routing surface (v2 — clean break from v1
+// `endpoints/`). Each controllers/*.ts file default-exports a ControllerDef:
+//   { __palbase: 'controller', basePath, routes: { [mapKey]: RouteDef } }
+//   RouteDef = { __palbase: 'route', method, path, handler: HandlerDef }
+// The full route path is `basePath + route.path` and the verb is route.method —
+// identical to extract_meta.js / generator.go / worker.js's dispatch.
+//
+// Each route-table entry: { method, urlPattern, regex, paramNames,
+// controllerPath, routeKey }. `controllerPath` is the file to require();
+// `routeKey` (the map key) selects the route within the controller (mirroring
+// worker.js's `context.route_key`). urlPattern keeps `:param` colons for
+// printing + matching; the regex matches incoming requests with capture groups.
 const routes = new Map();
 
-function registerEndpoints() {
+// loadControllerDef require()s a controller file (cache-busted so saves take
+// effect without a restart) and returns its default-export ControllerDef.
+// Throws a clear error when the default export is not a controller — there is
+// no v1 fallback, matching extract_meta.js + worker.js.
+function loadControllerDef(controllerPath) {
+  delete require.cache[require.resolve(controllerPath)];
+  const mod = require(controllerPath);
+  const controller = mod.default ?? mod;
+  if (!controller || controller.__palbase !== 'controller') {
+    throw new Error(
+      `${path.relative(PROJECT_ROOT, controllerPath)} must default-export a ControllerDef ` +
+      `(use defineController / a controllers/* file); got ` +
+      (controller && controller.__palbase ? `__palbase=${JSON.stringify(controller.__palbase)}` : 'a non-controller export'),
+    );
+  }
+  return controller;
+}
+
+// urlToRegex compiles a `/places/:id`-style pattern into { regex, paramNames }.
+// The full path produced by `basePath + route.path` uses `:param` for path
+// params (the SDK's own convention); we keep that here for matching.
+function urlToRegex(urlPattern) {
+  const segments = urlPattern.split('/').filter((s) => s !== '');
+  const paramNames = [];
+  const body = segments.map((s) => {
+    if (s.startsWith(':')) {
+      paramNames.push(s.slice(1));
+      return '([^/]+)';
+    }
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }).join('/');
+  const regexSrc = '^/' + body + '/?$';
+  return { regex: new RegExp(regexSrc), paramNames };
+}
+
+// joinPath composes basePath + subPath exactly as the SDK does (a plain string
+// concat), then normalises duplicate / leading slashes so "/places" + "/" →
+// "/places", "/places" + "/import" → "/places/import", "" + "/x" → "/x".
+function joinPath(basePath, subPath) {
+  const raw = `${basePath || ''}${subPath || ''}`;
+  if (raw === '') return '/';
+  const collapsed = ('/' + raw).replace(/\/{2,}/g, '/');
+  // Drop a trailing slash (but keep the root "/").
+  return collapsed.length > 1 ? collapsed.replace(/\/$/, '') : collapsed;
+}
+
+function registerControllers() {
   routes.clear();
-  if (!fs.existsSync(ENDPOINTS_DIR)) {
-    log(`endpoints/ not found at ${ENDPOINTS_DIR}`);
+  if (!fs.existsSync(CONTROLLERS_DIR)) {
+    log(`controllers/ not found at ${CONTROLLERS_DIR}`);
     return;
   }
-  walk(ENDPOINTS_DIR, (file) => {
-    const rel = path.relative(ENDPOINTS_DIR, file).replace(/\\/g, '/');
-    const m = METHOD_FILE_RE.exec(path.basename(rel));
-    if (!m) return;
-    const method = m[1].toUpperCase();
-    const segments = rel.split('/').slice(0, -1).map((seg) =>
-      seg.startsWith('[') && seg.endsWith(']') ? `:${seg.slice(1, -1)}` : seg,
-    );
-    const urlPattern = '/' + segments.join('/');
-    const paramNames = [];
-    const regexSrc = '^' + segments.map((s) => {
-      if (s.startsWith(':')) {
-        paramNames.push(s.slice(1));
-        return '([^/]+)';
-      }
-      return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }).join('/').replace(/^/, '/') + '/?$';
-    routes.set(method + ' ' + urlPattern, {
-      method,
-      urlPattern,
-      regex: new RegExp(regexSrc),
-      paramNames,
-      modulePath: file,
-    });
-  });
-  log(`registered ${routes.size} endpoint(s):`);
+  for (const file of walk(CONTROLLERS_DIR)) {
+    if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    let controller;
+    try {
+      controller = loadControllerDef(file);
+    } catch (err) {
+      log(`skipping ${path.relative(PROJECT_ROOT, file)} — ${err.message}`);
+      continue;
+    }
+    const routeMap = (controller.routes && typeof controller.routes === 'object') ? controller.routes : {};
+    for (const [routeKey, routeDef] of Object.entries(routeMap)) {
+      if (!routeDef || typeof routeDef !== 'object') continue;
+      const method = typeof routeDef.method === 'string' ? routeDef.method.toUpperCase() : '';
+      if (!method) continue;
+      const urlPattern = joinPath(controller.basePath, routeDef.path);
+      const { regex, paramNames } = urlToRegex(urlPattern);
+      routes.set(method + ' ' + urlPattern, {
+        method,
+        urlPattern,
+        regex,
+        paramNames,
+        controllerPath: file,
+        routeKey,
+      });
+    }
+  }
+  log(`registered ${routes.size} route(s):`);
   for (const route of routes.values()) {
-    log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${path.relative(PROJECT_ROOT, route.modulePath)}`);
+    log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${path.relative(PROJECT_ROOT, route.controllerPath)} [${route.routeKey}]`);
   }
 }
 
-function walk(dir, cb) {
+// walk yields every file under dir (recursive). Returns an array so callers can
+// iterate without a callback (used by registerControllers).
+function walk(dir) {
+  const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, cb);
-    else cb(full);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else out.push(full);
   }
+  return out;
 }
 
-// ── ctx — bit-perfect twin of prod's pipeline ctx ──────────────────────
+// resolveHandlerDef re-loads the route's controller (cache-busted) and returns
+// the live HandlerDef for the route's mapKey — mirroring worker.js resolving
+// `controller.routes[route_key].handler`. Throws when the controller no longer
+// has the route (e.g. the file changed since registration).
+function resolveHandlerDef(route) {
+  const controller = loadControllerDef(route.controllerPath);
+  const routeDef = controller.routes && controller.routes[route.routeKey];
+  if (!routeDef || typeof routeDef !== 'object') {
+    throw new Error(`route "${route.routeKey}" not found in ${path.relative(PROJECT_ROOT, route.controllerPath)}`);
+  }
+  const handlerDef = routeDef.handler;
+  if (!handlerDef || typeof handlerDef !== 'object' || typeof handlerDef.handler !== 'function') {
+    throw new Error(`route "${route.routeKey}" has no handler function`);
+  }
+  return handlerDef;
+}
+
+// ── module clients — bit-perfect twin of the prod runtime's services ────
 //
-// The module clients (ctx.docs, ctx.storage, …) are inline fetch wrappers
-// hitting the same public hosts the deployed pod hits. Local dev = LIVE
-// data: writes go to production palauth/paldocs/db. The CLI prints a banner
-// before starting the server so this isn't a silent surprise.
+// The module clients (the Documents/Storage/… singletons installed via
+// __setRuntime, below) are inline fetch wrappers hitting the same public hosts
+// the deployed pod hits. Local dev = LIVE data: writes go to production
+// palauth/paldocs/db. The CLI prints a banner before starting the server so
+// this isn't a silent surprise.
 //
 // module-clients.js is a verbatim mirror of the backend-runtime's
 // internal/runtime/module-clients.js. Keep them in lockstep — edit both
@@ -233,10 +320,11 @@ function clientInfoFromHeaders(headers) {
 }
 
 // installRuntime injects the dev service clients into the shared
-// @palbase/backend instance, mirroring worker.js's __setRuntime seam. Both
-// dev-server.js (temp dir) and the user's endpoints resolve @palbase/backend
-// from the same project node_modules (NODE_PATH), so they share ONE module
-// instance and the bundle's `import { Database }` sees what we set here.
+// @palbase/backend instance, mirroring worker.js's runtime seam. Both
+// dev-server.js (temp dir) and the user's controllers/handlers resolve
+// @palbase/backend from the same project node_modules (NODE_PATH), so they
+// share ONE module instance and a handler's `import { Database }` sees what we
+// set here.
 //
 // EXCLUDED on purpose: Realtime, Functions, CMS, Links, Analytics, Auth.
 function installRuntime() {
@@ -284,18 +372,7 @@ function notConfiguredModule(name) {
   });
 }
 
-// ── reload ──────────────────────────────────────────────────────────────
-
-function loadEndpoint(modulePath) {
-  // Bust require cache so saves take effect without restart.
-  delete require.cache[require.resolve(modulePath)];
-  const mod = require(modulePath);
-  const exported = mod.default ?? mod;
-  if (!exported || typeof exported.handler !== 'function') {
-    throw new Error(`endpoint at ${modulePath} must export { default: { method, handler } }`);
-  }
-  return exported;
-}
+// ── auth-required policy ──────────────────────────────────────────────────
 
 // isAuthRequired is the SINGLE source of truth for "does this endpoint need a
 // verified user?" — read by BOTH the request-time auth gate (below) AND the
@@ -333,9 +410,9 @@ function isAuthRequired(auth) {
 // silently differs between local serve and the deployed pod.
 //
 // We rebuild the document fresh on every GET (not on the fs.watch reload):
-// it's the simpler correct option — endpoints already reload per request via
-// loadEndpoint()'s cache-bust, so building here picks up edits with zero extra
-// bookkeeping, and a spec fetch is far rarer + cheaper than a hot request path.
+// it's the simpler correct option — controllers already reload per request via
+// resolveHandlerDef()'s cache-bust, so building here picks up edits with zero
+// extra bookkeeping, and a spec fetch is far rarer + cheaper than a hot path.
 //
 // Byte-shape rules (matched to Go's json.MarshalIndent, which sorts map keys
 // lexicographically but emits struct fields in declaration order):
@@ -458,25 +535,25 @@ function headerParameters(schema) {
   return out;
 }
 
-// buildEndpointMeta reads the spec-relevant fields off a loaded endpoint
-// module. method comes from the route (filename-derived) — NOT config.method —
-// matching the dev-server's own dispatch. auth uses the shared isAuthRequired()
-// so spec == enforcement.
-function buildEndpointMeta(route, endpoint) {
+// buildHandlerMeta reads the spec-relevant fields off a route's HandlerDef.
+// method + path come from the route (controller basePath + route.path) — NOT
+// from the handler, which carries no routing — matching the dev-server's own
+// dispatch. auth uses the shared isAuthRequired() so spec == enforcement.
+function buildHandlerMeta(route, handlerDef) {
   return {
     method: route.method,
     openPath: openApiPath(route.urlPattern),
-    authRequired: isAuthRequired(endpoint.auth),
-    authRole: (endpoint.auth && typeof endpoint.auth === 'object' && typeof endpoint.auth.role === 'string')
-      ? endpoint.auth.role : '',
-    rateLimit: (endpoint.rateLimit && typeof endpoint.rateLimit === 'object'
-      && typeof endpoint.rateLimit.max === 'number'
-      && typeof endpoint.rateLimit.window === 'number')
-      ? { max: endpoint.rateLimit.max, window: endpoint.rateLimit.window } : null,
-    inputSchema: endpoint.input ? zodToJSON(endpoint.input) : null,
-    outputSchema: endpoint.output ? zodToJSON(endpoint.output) : null,
-    headersSchema: endpoint.headers ? zodToJSON(endpoint.headers) : null,
-    errors: extractErrors(endpoint.errors),
+    authRequired: isAuthRequired(handlerDef.auth),
+    authRole: (handlerDef.auth && typeof handlerDef.auth === 'object' && typeof handlerDef.auth.role === 'string')
+      ? handlerDef.auth.role : '',
+    rateLimit: (handlerDef.rateLimit && typeof handlerDef.rateLimit === 'object'
+      && typeof handlerDef.rateLimit.max === 'number'
+      && typeof handlerDef.rateLimit.window === 'number')
+      ? { max: handlerDef.rateLimit.max, window: handlerDef.rateLimit.window } : null,
+    inputSchema: handlerDef.input ? zodToJSON(handlerDef.input) : null,
+    outputSchema: handlerDef.output ? zodToJSON(handlerDef.output) : null,
+    headersSchema: handlerDef.headers ? zodToJSON(handlerDef.headers) : null,
+    errors: extractErrors(handlerDef.errors),
   };
 }
 
@@ -643,14 +720,14 @@ function buildOpenApiSpec() {
   // then re-emit with sorted path keys and sorted method keys.
   const rawPaths = new Map();
   for (const route of routes.values()) {
-    let endpoint;
+    let handlerDef;
     try {
-      endpoint = loadEndpoint(route.modulePath);
+      handlerDef = resolveHandlerDef(route);
     } catch (err) {
       log(`openapi: skipping ${route.method} ${route.urlPattern} — ${err.message}`);
       continue;
     }
-    const meta = buildEndpointMeta(route, endpoint);
+    const meta = buildHandlerMeta(route, handlerDef);
     const operation = buildOperation(meta);
     if (!rawPaths.has(meta.openPath)) rawPaths.set(meta.openPath, {});
     rawPaths.get(meta.openPath)[route.method.toLowerCase()] = operation;
@@ -836,9 +913,9 @@ const server = http.createServer(async (req, res) => {
     body = parsed.query;
   }
 
-  let endpoint;
+  let handlerDef;
   try {
-    endpoint = loadEndpoint(route.modulePath);
+    handlerDef = resolveHandlerDef(route);
   } catch (err) {
     res.statusCode = 500;
     res.setHeader('content-type', 'application/json');
@@ -848,15 +925,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Auth gate — same contract as prod: optional => no token = pass with
-  // ctx.user=null, present token = palauth verify. Required => must have
+  // req.user=null, present token = palauth verify. Required => must have
   // a token AND palauth must accept it. `authRequired` comes from the shared
   // isAuthRequired() so the enforcement here and the served /openapi.json
   // `security` block never drift (omitted auth → required, secure-by-default).
-  // Note: pass endpoint.auth RAW — `endpoint.auth || {}` would silently turn an
-  // explicit `auth: false` into `{}`, re-securing an endpoint the developer
+  // Note: pass handlerDef.auth RAW — `handlerDef.auth || {}` would silently turn
+  // an explicit `auth: false` into `{}`, re-securing a route the developer
   // opted out of.
-  const authCfg = (endpoint.auth && typeof endpoint.auth === 'object') ? endpoint.auth : {};
-  const authRequired = isAuthRequired(endpoint.auth);
+  const authCfg = (handlerDef.auth && typeof handlerDef.auth === 'object') ? handlerDef.auth : {};
+  const authRequired = isAuthRequired(handlerDef.auth);
   const authHeader = req.headers['authorization'] || '';
   let user = null;
   if (authHeader.toLowerCase().startsWith('bearer ')) {
@@ -892,10 +969,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Rate limit gate.
-  if (endpoint.rateLimit) {
+  if (handlerDef.rateLimit) {
     const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local').toString().split(',')[0].trim();
-    const result = rateLimitCheck(`${route.method} ${route.urlPattern}`, ip, endpoint.rateLimit);
-    res.setHeader('x-ratelimit-limit', String(endpoint.rateLimit.max));
+    const result = rateLimitCheck(`${route.method} ${route.urlPattern}`, ip, handlerDef.rateLimit);
+    res.setHeader('x-ratelimit-limit', String(handlerDef.rateLimit.max));
     res.setHeader('x-ratelimit-remaining', String(Math.max(0, result.remaining)));
     if (!result.allowed) {
       res.statusCode = 429;
@@ -903,7 +980,7 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({
         error: 'rate_limited',
-        message: `max ${endpoint.rateLimit.max} req / ${endpoint.rateLimit.window}s`,
+        message: `max ${handlerDef.rateLimit.max} req / ${handlerDef.rateLimit.window}s`,
         retry_after: result.retryAfter,
       }));
       log(`[${req.method}] ${parsed.pathname}  429  ${Date.now() - start}ms  — rate limited (retry in ${result.retryAfter}s)`);
@@ -911,17 +988,65 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  installRuntime();
+  const pbReq = makeRequest(req, params, body, user);
+
+  // Input validation — mirror worker.js: a Zod-compatible `input` schema parses
+  // pbReq.input; failure returns a 400 validation_error envelope (the parsed,
+  // stripped data replaces the raw input). This keeps `palbase serve` honest
+  // about the same 400s the deployed pod returns.
+  if (handlerDef.input && typeof handlerDef.input.safeParse === 'function') {
+    const parsedInput = handlerDef.input.safeParse(pbReq.input);
+    if (!parsedInput.success) {
+      const details = (parsedInput.error?.issues || []).map((issue) => ({
+        field: (issue.path || []).join('.') || 'input',
+        message: issue.message || 'Validation failed',
+      }));
+      res.statusCode = 400;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        error: 'validation_error',
+        error_description: 'Input validation failed',
+        details,
+      }));
+      log(`[${req.method}] ${parsed.pathname}  400  ${Date.now() - start}ms  — input validation`);
+      return;
+    }
+    pbReq.input = parsedInput.data;
+  }
+
+  // Declared typed errors — re-project each `errors` entry as a thrower on
+  // pbReq.errors so the handler can `throw req.errors.todoLocked({...})`. Mirrors
+  // worker.js's HttpError minting (status/code/description + optional data).
+  if (handlerDef.errors && typeof handlerDef.errors === 'object') {
+    pbReq.errors = buildErrorThrowers(handlerDef.errors);
+  }
+
   let result;
   try {
-    installRuntime();
-    const pbReq = makeRequest(req, params, body, user);
     // Make this request's user visible to the flags client's auto-bind getter
-    // (mirrors worker.js): `flags.get('key')` resolves user-override → default
+    // (mirrors worker.js): `Flags.get('key')` resolves user-override → default
     // without the handler passing { userId } manually. Anonymous → null →
     // project defaults. Reset in finally so a later request never inherits it.
     currentRequestUserId = (pbReq.user && pbReq.user.id) || null;
-    result = await endpoint.handler(pbReq);
+    result = await handlerDef.handler(pbReq);
   } catch (err) {
+    // HttpError (a declared-error throw or a hand-built one) is a HANDLER
+    // OUTCOME, not infra failure: surface its status + envelope verbatim,
+    // mirroring worker.js's catch path.
+    if (err && typeof err === 'object' && err.name === 'HttpError' && typeof err.status === 'number') {
+      const envelope = {
+        error: err.error || 'http_error',
+        error_description: err.errorDescription || err.message || 'request failed',
+        status: err.status,
+      };
+      if (err.data !== undefined) envelope.data = err.data;
+      res.statusCode = err.status;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(envelope));
+      log(`[${req.method}] ${parsed.pathname}  ${err.status}  ${Date.now() - start}ms  — ${envelope.error}`);
+      return;
+    }
     res.statusCode = 500;
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ error: 'handler_error', message: err.message, stack: err.stack }));
@@ -930,11 +1055,53 @@ const server = http.createServer(async (req, res) => {
   } finally {
     currentRequestUserId = null;
   }
+
+  // Output validation — mirror worker.js: a Zod `output` schema validates the
+  // result; a failure is a 500 internal_error (detail logged, never leaked).
+  if (handlerDef.output && typeof handlerDef.output.safeParse === 'function') {
+    const out = handlerDef.output.safeParse(result);
+    if (!out.success) {
+      log(`output validation failed: ${JSON.stringify(out.error && out.error.issues)}`);
+      res.statusCode = 500;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ error: 'internal_error', error_description: 'output validation failed' }));
+      log(`[${req.method}] ${parsed.pathname}  500  ${Date.now() - start}ms  — output validation`);
+      return;
+    }
+  }
+
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(result ?? null));
   log(`[${req.method}] ${parsed.pathname}  200  ${Date.now() - start}ms`);
 });
+
+// buildErrorThrowers re-projects a HandlerDef.errors map into thrower functions
+// the handler calls (`throw req.errors.todoLocked({...})`). Each returns an
+// Error tagged name='HttpError' carrying status/code/description (+ optional
+// data validated against the declared zod schema) — the exact wire-shape the
+// dispatch catch path serialises, identical to worker.js.
+function buildErrorThrowers(declaredErrors) {
+  const throwers = {};
+  for (const [name, def] of Object.entries(declaredErrors)) {
+    if (!def || typeof def !== 'object') continue;
+    const { status, code, description, data: dataSchema } = def;
+    throwers[name] = (payload) => {
+      let validated = payload;
+      if (dataSchema && typeof dataSchema.parse === 'function') {
+        validated = dataSchema.parse(payload);
+      }
+      const err = new Error(description || `${code} (${status})`);
+      err.name = 'HttpError';
+      err.status = status;
+      err.error = code;
+      err.errorDescription = description || `${code} (${status})`;
+      if (validated !== undefined) err.data = validated;
+      return err;
+    };
+  }
+  return throwers;
+}
 
 function readJsonBody(req) {
   return new Promise((resolve) => {
@@ -951,12 +1118,12 @@ function readJsonBody(req) {
 
 // ── watch ───────────────────────────────────────────────────────────────
 
-function watchEndpoints() {
-  if (!fs.existsSync(ENDPOINTS_DIR)) return;
-  fs.watch(ENDPOINTS_DIR, { recursive: true }, (event, filename) => {
+function watchControllers() {
+  if (!fs.existsSync(CONTROLLERS_DIR)) return;
+  fs.watch(CONTROLLERS_DIR, { recursive: true }, (event, filename) => {
     if (!filename) return;
     log(`reload: ${event} ${filename}`);
-    registerEndpoints();
+    registerControllers();
   });
 }
 
@@ -965,24 +1132,144 @@ function log(msg) {
   process.stdout.write(`[palbase serve ${ts}] ${msg}\n`);
 }
 
+// ── resources (v2) ─────────────────────────────────────────────────────────
+//
+// Mirrors worker.js's bootResources/shutdownResources: require() each
+// resources/* file, register every `instanceof Resource` export via the SDK's
+// __registerResource, then run __runResourceBoot ONCE with a curated env subset
+// BEFORE serving. On shutdown (SIGINT/SIGTERM) run __shutdownResources.
+//
+// Best-effort for local dev: the SDK must expose the Resource API (older
+// @palbase/backend without it → skip silently), and a declared secret that is
+// absent from the local env is WARNED about rather than aborting boot — local
+// dev often runs without the full secret set, and crashing would block the
+// developer from exercising the controllers that don't need the resource.
+// (The deployed pod is strict; it fails boot on a missing secret.)
+
+// resourceEnvMap is the env handed to Resource boot. Local dev has no per-branch
+// secret injection like the pod, so we expose the developer's own process.env
+// (a copy, so a Resource cannot mutate the live env). PALBASE_* pod credentials
+// were already deleted/closed-over above, so a Resource cannot read them.
+function resourceEnvMap() {
+  return Object.assign({}, process.env);
+}
+
+// missingDeclaredSecrets returns the declared `static secrets` names that are
+// absent from envMap, so we can warn before boot (instead of letting
+// __runResourceBoot throw and abort local dev).
+function missingDeclaredSecrets(resource, envMap) {
+  const ctor = resource && resource.constructor;
+  const declared = ctor && Array.isArray(ctor.secrets) ? ctor.secrets : [];
+  return declared.filter((name) => envMap[name] === undefined);
+}
+
+let resourcesBooted = false;
+
+async function bootResources() {
+  if (!fs.existsSync(RESOURCES_DIR)) return 0;
+  const runtime = require('@palbase/backend');
+  if (typeof runtime.__registerResource !== 'function' ||
+      typeof runtime.__runResourceBoot !== 'function' ||
+      typeof runtime.Resource !== 'function') {
+    log('hint: installed @palbase/backend has no Resource API — resources/ skipped. ' +
+      'Upgrade @palbase/backend for local resource support.');
+    return 0;
+  }
+
+  const envMap = resourceEnvMap();
+  let registered = 0;
+  for (const file of walk(RESOURCES_DIR)) {
+    if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    let mod;
+    try {
+      mod = require(file);
+    } catch (err) {
+      log(`resources: skipping ${path.relative(PROJECT_ROOT, file)} — ${err.message}`);
+      continue;
+    }
+    const candidates = [];
+    if (mod && mod.default !== undefined) candidates.push(mod.default);
+    for (const k of Object.keys(mod || {})) {
+      if (k === 'default') continue;
+      candidates.push(mod[k]);
+    }
+    for (const v of candidates) {
+      if (v instanceof runtime.Resource) {
+        const missing = missingDeclaredSecrets(v, envMap);
+        if (missing.length > 0) {
+          log(`⚠ resource ${v.constructor.name} declares secret(s) ${missing.join(', ')} ` +
+            `not set in your environment — its init() may fail. Set them (e.g. export ${missing[0]}=…) before serving.`);
+        }
+        runtime.__registerResource(v);
+        registered += 1;
+      }
+    }
+  }
+
+  if (registered > 0) {
+    try {
+      await runtime.__runResourceBoot(envMap);
+      resourcesBooted = true;
+      log(`booted ${registered} resource(s)`);
+    } catch (err) {
+      // A missing declared secret (or a failing init) throws here. In local dev
+      // we warn and continue serving rather than aborting — the controllers that
+      // don't touch this resource still work; one that does will surface the
+      // error on first use.
+      log(`⚠ resource boot failed: ${err.message} — serving without booted resources`);
+    }
+  }
+  return registered;
+}
+
+async function shutdownResources() {
+  if (!resourcesBooted) return;
+  try {
+    const runtime = require('@palbase/backend');
+    if (typeof runtime.__shutdownResources === 'function') {
+      await runtime.__shutdownResources();
+    }
+  } catch (err) {
+    log(`resource shutdown failed: ${err.message}`);
+  }
+}
+
 // ── boot ────────────────────────────────────────────────────────────────
 
-registerEndpoints();
-watchEndpoints();
+async function main() {
+  registerControllers();
+  watchControllers();
+  await bootResources();
 
-server.listen(PORT, () => {
-  log(`listening on http://127.0.0.1:${PORT}`);
-  log(`project ref: ${PROJECT_REF}`);
-  log(`watching: ${ENDPOINTS_DIR}`);
-  if (PALBASE_URL) {
-    log('────────────────────────────────────────────────────────────');
-    log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
-    log(`  ctx.docs/ctx.storage/… writes hit ${PALBASE_URL}`);
-    log(`  key: publishable — protected module writes require managed runtime authority`);
-    log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);
-    log('────────────────────────────────────────────────────────────');
-  } else {
-    log('ctx.docs/ctx.storage/… disabled (no project credentials). Run `palbase login` then re-run.');
-  }
-  log(`press Ctrl+C to quit`);
+  server.listen(PORT, () => {
+    log(`listening on http://127.0.0.1:${PORT}`);
+    log(`project ref: ${PROJECT_REF}`);
+    log(`watching: ${CONTROLLERS_DIR}`);
+    if (PALBASE_URL) {
+      log('────────────────────────────────────────────────────────────');
+      log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
+      log(`  Documents/Storage/… writes hit ${PALBASE_URL}`);
+      log(`  key: publishable — protected module writes require managed runtime authority`);
+      log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);
+      log('────────────────────────────────────────────────────────────');
+    } else {
+      log('Documents/Storage/… disabled (no project credentials). Run `palbase login` then re-run.');
+    }
+    log(`press Ctrl+C to quit`);
+  });
+
+  // Graceful shutdown: drain booted resources (close pools, flush buffers) on
+  // SIGINT/SIGTERM before exiting, mirroring worker.js's SIGTERM hook.
+  const onSignal = async () => {
+    await shutdownResources();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+}
+
+main().catch((err) => {
+  log(`FATAL: dev-server boot failed: ${err && err.stack ? err.stack : String(err)}`);
+  process.exit(1);
 });
