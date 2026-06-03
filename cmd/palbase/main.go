@@ -69,7 +69,14 @@ func main() {
 		Short:   "Palbase CLI — Backend-as-a-Service platform",
 		Long:    "Develop, test, and deploy backend projects on Palbase.",
 		Version: Version,
+		// main() prints the returned error once (os.Stderr) — let it own that so
+		// cobra doesn't ALSO print it (double-print).
+		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Flags/args parsed fine to reach here, so a later RunE failure is a
+			// runtime error, not misuse — don't dump the usage block after it.
+			// (Genuine flag/arg parse errors fail before this and still show usage.)
+			cmd.SilenceUsage = true
 			r, err := config.Resolve(modeFlag)
 			if err != nil {
 				return err

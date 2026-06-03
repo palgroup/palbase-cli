@@ -436,6 +436,22 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			// Preflight: serve runs your controllers LOCALLY but proxies
+			// Database and ctx.* (docs/storage/…) to the DEPLOYED branch. So a
+			// branch that isn't a live, active deployment can't back local dev
+			// — fail fast with an actionable message ("push first" / "wake it")
+			// instead of an opaque reveal warning + a half-working server.
+			branchName := devBranchValue(branchFlag) // "main" or the active/flag branch
+			if ref != "" && ref != "local" {
+				if err := preflightServeBranch(ctx, r.Studio(), ref, branchName); err != nil {
+					return err
+				}
+			}
+			// Migration awareness: because serve uses the deployed branch DB,
+			// local db/schema.ts or db/migrations/ changes that aren't pushed
+			// won't be reflected. Warn (never block) so the gap is obvious.
+			warnUndeployedSchema(cwd, branchName, os.Stderr)
+
 			// Reveal the project's publishable key so dev-server can wire its
 			// inline module clients (module-clients.js). Service-role keys are
 			// platform-internal and are never pulled into local dev.
@@ -527,6 +543,101 @@ func devBranchValue(flag string) string {
 		return b
 	}
 	return "main"
+}
+
+// servedBranch is the subset of a `project.listBranches` row the serve
+// preflight needs.
+type servedBranch struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	URL    string `json:"url"`
+}
+
+// preflightServeBranch fails fast with an actionable message when the branch
+// the dev server targets isn't a live, active deployment. serve proxies
+// Database/ctx.* to the deployed branch, so an undeployed/provisioning/
+// hibernated branch can't back local dev. A listing failure (offline/auth) is
+// non-fatal: it warns and lets the reveal step surface any real problem.
+func preflightServeBranch(ctx context.Context, sc *studio.Client, ref, branch string) error {
+	var rows []servedBranch
+	if err := sc.Query(ctx, "project.listBranches", map[string]any{"ref": ref}, &rows); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: couldn't verify branch %q is deployed (%v) — continuing\n", branch, err)
+		return nil
+	}
+	var found *servedBranch
+	for i := range rows {
+		if rows[i].Name == branch {
+			found = &rows[i]
+			break
+		}
+	}
+	return branchPreflightError(branch, found)
+}
+
+// branchPreflightError maps a branch's deployment state to an actionable error
+// (nil = good to serve). Pure, so the status→guidance mapping is unit-tested.
+func branchPreflightError(branch string, found *servedBranch) error {
+	if found == nil {
+		return fmt.Errorf(`branch %q isn't deployed yet.
+
+`+"`palbase serve`"+` runs your controllers locally but proxies Database and ctx.*
+to the deployed branch — which doesn't exist until you create and push it:
+
+  • new branch:                palbase branch create %s
+  • or deploy the current one: git push origin %s
+
+then re-run `+"`palbase serve --branch %s`"+`.`, branch, branch, branch, branch)
+	}
+	switch found.Status {
+	case "active", "":
+		return nil
+	case "creating":
+		return fmt.Errorf("branch %q is still provisioning — check `palbase branch list` and re-run once it's active", branch)
+	case "hibernated", "paused", "stopped", "idle":
+		return fmt.Errorf("branch %q is hibernated — wake it first:\n\n  palbase branch wake %s", branch, branch)
+	case "deleted":
+		return fmt.Errorf("branch %q was deleted — recreate it:\n\n  palbase branch create %s", branch, branch)
+	default:
+		// Unknown/transient state: don't block local dev, but make it visible.
+		fmt.Fprintf(os.Stderr, "warning: branch %q reports status %q — serving anyway\n", branch, found.Status)
+		return nil
+	}
+}
+
+// warnUndeployedSchema prints a best-effort note when the project's local
+// db/schema.ts or db/migrations/ differ from what's deployed to `branch`.
+// serve runs against the deployed branch DB, so unpushed schema changes won't
+// be reflected. Never blocks; silent when git is unavailable or db/ is clean.
+func warnUndeployedSchema(cwd, branch string, w io.Writer) {
+	if _, err := os.Stat(filepath.Join(cwd, "db", "schema.ts")); err != nil {
+		return // no schema → nothing to migrate
+	}
+	paths := []string{"db/schema.ts", "db/migrations"}
+
+	dirty := false
+	statusArgs := append([]string{"-C", cwd, "status", "--porcelain", "--"}, paths...)
+	if out, err := exec.Command("git", statusArgs...).Output(); err == nil {
+		dirty = len(strings.TrimSpace(string(out))) > 0
+	}
+
+	unpushed := false
+	if !dirty {
+		logArgs := append([]string{"-C", cwd, "log", "--oneline", "@{upstream}..HEAD", "--"}, paths...)
+		if out, err := exec.Command("git", logArgs...).Output(); err == nil {
+			unpushed = len(strings.TrimSpace(string(out))) > 0
+		}
+	}
+
+	if !dirty && !unpushed {
+		return
+	}
+	fmt.Fprintf(w, `note: local db/schema.ts or db/migrations/ has changes not deployed to branch %q.
+serve runs against the DEPLOYED branch database — new tables/columns won't exist
+until you push. Additive changes auto-migrate on deploy; type changes need an
+explicit migration in db/migrations/ (the deploy drift-gate blocks unmigrated
+type changes).
+
+`, branch)
 }
 
 func newListCmd(r Resolvers) *cobra.Command {
