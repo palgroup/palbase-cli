@@ -14,6 +14,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"embed"
@@ -65,7 +66,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // runtime image's internal/runtime/module-clients.js). Both files must
 // land in the temp dir so the relative resolve works.
 //
-//go:embed devjs/dev-server.js devjs/module-clients.js
+//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js
 var devServerFS embed.FS
 
 // Resolvers returns lazy accessors for the shared CLI globals, so the
@@ -100,6 +101,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		newRollbackCmd(r),
 		newStatusCmd(r),
 		newTypesCmd(r),
+		newGenTypesCmd(r),
 	}
 }
 
@@ -408,6 +410,16 @@ what runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`
 			if _, err := os.Stat(endpointsDir); err != nil {
 				return fmt.Errorf("no endpoints/ directory in cwd — run from your project root (clone it with `git clone`)")
 			}
+
+			// Regenerate palbase-env.d.ts from db/schema.ts so the project's
+			// handlers get a typed `Database.tables.*`. No-op when the project
+			// has no db/schema.ts. Best-effort: a generation failure must not
+			// block local dev, so we warn and continue (the dev-server runs the
+			// handlers regardless; only authoring-time types are affected).
+			if err := generateEnvTypes(cmd.Context(), cwd); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not regenerate palbase-env.d.ts (%v)\n", err)
+			}
+
 			tmpDir, err := os.MkdirTemp("", "palbase-dev-*")
 			if err != nil {
 				return err
@@ -2036,6 +2048,50 @@ Re-run after every deploy to stay in sync with the live spec.`,
 	return cmd
 }
 
+// newGenTypesCmd is the standalone regeneration of palbase-env.d.ts from the
+// project's db/schema.ts — the same step `palbase serve` runs on startup,
+// exposed on its own so it can run from a build/CI step or after editing the
+// schema without booting the dev server.
+//
+// Distinct from `palbase types`: that pulls the DEPLOYED OpenAPI spec to type
+// the client SDK's `pb.backend.call(...)`; this types the project's OWN handlers
+// (`Database.tables.*`) from the local schema source. No project link, no
+// network — purely local.
+func newGenTypesCmd(_ Resolvers) *cobra.Command {
+	return &cobra.Command{
+		Use:   "gen-types",
+		Short: "Generate palbase-env.d.ts from db/schema.ts (typed Database.tables.*)",
+		Long: `Generate the project's palbase-env.d.ts from its db/schema.ts so handlers
+get a typed Database.tables.* with no import and no generic.
+
+esbuild-bundles db/schema.ts (with @palbase/* external), evaluates the
+defineSchema() result, and writes palbase-env.d.ts to the project root.
+Requires Node.js + npx. ` + "`palbase serve`" + ` runs this automatically on startup;
+run it standalone after editing db/schema.ts or from a build step.
+
+No-op when the project has no db/schema.ts.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			schemaPath := filepath.Join(cwd, "db", "schema.ts")
+			if _, err := os.Stat(schemaPath); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					fmt.Fprintln(os.Stdout, "no db/schema.ts — nothing to generate")
+					return nil
+				}
+				return err
+			}
+			if err := generateEnvTypes(cmd.Context(), cwd); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "✓ wrote %s\n", filepath.Join(cwd, "palbase-env.d.ts"))
+			return nil
+		},
+	}
+}
+
 // pullTypesTo does the actual work — fetch /openapi.json, write JSON,
 // shell out to `npx openapi-typescript` for the .d.ts. Failures emit a
 // warning but don't block; the JSON file alone is useful (Studio,
@@ -2283,6 +2339,144 @@ func generateTypesDecl(ctx context.Context, jsonPath, tsPath string) error {
 	}
 	header := []byte("// AUTO-GENERATED FROM YOUR DEPLOYED BACKEND. DO NOT EDIT — RUN 'palbase types' TO REFRESH.\n\n")
 	return os.WriteFile(tsPath, append(header, existing...), 0o644)
+}
+
+// envGenExternals are kept external when bundling db/schema.ts so the bundle
+// resolves @palbase/* to the project's installed package on NODE_PATH at eval
+// time — exactly like the backend-runtime's schema extractor does. Bundling
+// them in would duplicate the DSL and break the `defineSchema(...)` identity.
+var envGenExternals = []string{"@palbase/backend", "@palbase/core"}
+
+// generateEnvTypes regenerates the project's palbase-env.d.ts from its
+// db/schema.ts. This is the typed-Database wiring: the generated file augments
+// @palbase/backend/env's `Tables` interface so a project's handlers get a typed
+// `Database.tables.*` with no import and no generic.
+//
+// Mechanism mirrors the backend-runtime's schema extractor
+// (modules/backend internal/runtime/schema_extract.js): db/schema.ts imports
+// @palbase/backend via ESM (which bare Node can't resolve from a tenant dir), so
+// we esbuild-bundle it to a temp CJS file with @palbase/* external, then run the
+// embedded env-gen.js bridge over that bundle. The bridge require()s the
+// project's @palbase/backend for makeEnvDts(), calls it with the schema, and
+// writes palbase-env.d.ts to projectDir.
+//
+// It is a clean no-op when the project has no db/schema.ts (a v1 project, or a
+// v2 project that doesn't declare a schema): there is no typed Database to
+// generate, so we return nil without touching the filesystem.
+func generateEnvTypes(ctx context.Context, projectDir string) error {
+	schemaPath := filepath.Join(projectDir, "db", "schema.ts")
+	if _, err := os.Stat(schemaPath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // no schema → nothing to type, skip cleanly
+		}
+		return fmt.Errorf("stat db/schema.ts: %w", err)
+	}
+
+	if _, err := exec.LookPath("node"); err != nil {
+		return fmt.Errorf("node not on PATH (Node.js required to generate palbase-env.d.ts)")
+	}
+	if _, err := exec.LookPath("npx"); err != nil {
+		return fmt.Errorf("npx not on PATH (Node.js required to generate palbase-env.d.ts)")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "palbase-envgen-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Bundle db/schema.ts → temp CJS, keeping @palbase/* external.
+	bundlePath := filepath.Join(tmpDir, "schema.js")
+	if err := bundleSchemaTS(ctx, projectDir, schemaPath, bundlePath); err != nil {
+		return fmt.Errorf("bundle db/schema.ts: %w", err)
+	}
+
+	// Extract the embedded env-gen.js bridge next to the bundle.
+	scriptPath := filepath.Join(tmpDir, "env-gen.js")
+	body, err := devServerFS.ReadFile("devjs/env-gen.js")
+	if err != nil {
+		return fmt.Errorf("read embedded env-gen.js: %w", err)
+	}
+	if err := os.WriteFile(scriptPath, body, 0o644); err != nil {
+		return err
+	}
+
+	outPath := filepath.Join(projectDir, "palbase-env.d.ts")
+	if err := runEnvGenBridge(ctx, projectDir, scriptPath, bundlePath, outPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// bundleSchemaTS runs `npx esbuild` over db/schema.ts, emitting a CJS bundle at
+// outPath with @palbase/* kept external. Runs from projectDir so node_modules
+// resolution and any relative imports inside schema.ts anchor to the project.
+func bundleSchemaTS(ctx context.Context, projectDir, schemaPath, outPath string) error {
+	bundleCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	args := []string{
+		"--yes", "esbuild",
+		schemaPath,
+		"--bundle",
+		"--platform=node",
+		"--format=cjs",
+		"--target=es2022",
+		"--outfile=" + outPath,
+	}
+	for _, ext := range envGenExternals {
+		args = append(args, "--external:"+ext)
+	}
+
+	cmd := exec.CommandContext(bundleCtx, "npx", args...)
+	cmd.Dir = projectDir
+	cmd.Env = append(os.Environ(), "NODE_PATH="+filepath.Join(projectDir, "node_modules"))
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("esbuild: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// runEnvGenBridge runs the env-gen.js bridge over the bundled schema, writing
+// palbase-env.d.ts to outPath. NODE_PATH points at the project's node_modules so
+// the bridge's `require('@palbase/backend')` (for makeEnvDts) resolves to the
+// project's installed SDK.
+func runEnvGenBridge(ctx context.Context, projectDir, scriptPath, bundlePath, outPath string) error {
+	evalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	reqData, err := json.Marshal(struct {
+		BundlePath string `json:"bundle_path"`
+		OutPath    string `json:"out_path"`
+	}{BundlePath: bundlePath, OutPath: outPath})
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(evalCtx, "node", scriptPath)
+	cmd.Dir = projectDir
+	cmd.Env = append(os.Environ(), "NODE_PATH="+filepath.Join(projectDir, "node_modules"))
+	cmd.Stdin = bytes.NewReader(reqData)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("env-gen: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		return fmt.Errorf("parse env-gen output: %w (output: %s)", err, strings.TrimSpace(stdout.String()))
+	}
+	if env.Error != "" {
+		return fmt.Errorf("env-gen: %s", env.Error)
+	}
+	return nil
 }
 
 // ensureGitignored appends `entry` to the .gitignore at gitignorePath
