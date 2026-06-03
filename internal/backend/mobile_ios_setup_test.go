@@ -138,6 +138,11 @@ func TestPatchXcodeProjectWiresSynchronizedFolder(t *testing.T) {
 		"name = \"Palbase Codegen iOS\";",
 		"$(SRCROOT)/Palbase/Generated/PalbaseGenerated.swift",
 		"$(SRCROOT)/Palbase/Generated/PalbaseGenerated.json",
+		// alwaysOutOfDate = 1 makes the phase run EVERY build (unchecks "Based
+		// on dependency analysis"); without it Xcode skips codegen when the
+		// outputPaths look up-to-date.
+		"alwaysOutOfDate = 1;",
+		"buildActionMask = 2147483647;",
 		// Build phase prepended to the target so it runs BEFORE compile.
 		"palbase mobile codegen ios",
 	} {

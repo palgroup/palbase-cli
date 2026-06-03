@@ -2507,19 +2507,34 @@ func palbaseCodegenPhaseBlock(shellPhaseID string) string {
 	// terminal. Prepend the standard install locations so the lookup
 	// succeeds; this keeps the fail-soft `command -v` guard meaningful (it
 	// now only trips when the CLI is genuinely absent, not merely off-PATH).
-	script := "cd \"${SRCROOT:-.}\"\n" +
+	script := "echo \"Palbase Codegen iOS: running\"\n" +
+		"cd \"${SRCROOT:-.}\"\n" +
 		"export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/go/bin:$HOME/.local/bin:$PATH\"\n" +
 		"if ! command -v palbase >/dev/null 2>&1; then\n" +
 		"  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\n" +
 		"  exit 0\n" +
 		"fi\n" +
+		"palbase --version\n" +
 		"if ! palbase mobile codegen ios; then\n" +
 		"  echo \"warning: palbase mobile codegen ios failed; using last generated files (check your login + project link)\"\n" +
 		"fi\n" +
 		"exit 0\n"
 	return "\t\t" + shellPhaseID + " /* Palbase Codegen iOS */ = {\n" +
 		"\t\t\tisa = PBXShellScriptBuildPhase;\n" +
+		// 0x7FFFFFFF — the canonical "all build actions" mask Xcode writes for
+		// shell-script phases. Some older CLI builds (and hand-edits) left this
+		// at 12, which is not a reliable value for a normal build.
 		"\t\t\tbuildActionMask = 2147483647;\n" +
+		// alwaysOutOfDate = 1 is the load-bearing line: it's the pbxproj form of
+		// unchecking "Based on dependency analysis". Without it, Xcode compares
+		// the declared outputPaths' mtimes and SKIPS the phase when they look
+		// up-to-date — so codegen would silently NOT run on most builds. We want
+		// it to run every build (the CLI is cheap and idempotent: it re-reads the
+		// spec and only rewrites the generated files, picking up local-serve vs
+		// remote automatically each time). With this set, outputPaths are kept
+		// only so Xcode grants the sandbox write permission and downstream phases
+		// know these files are produced — they no longer gate execution.
+		"\t\t\talwaysOutOfDate = 1;\n" +
 		"\t\t\tfiles = (\n\t\t\t);\n" +
 		"\t\t\tinputFileListPaths = (\n\t\t\t);\n" +
 		"\t\t\tinputPaths = (\n" +
