@@ -55,6 +55,7 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if err != nil {
 		t.Skip("node not on PATH")
 	}
+	requireEsbuild(t)
 
 	root := t.TempDir()
 
@@ -108,7 +109,7 @@ func TestServeOpenAPISpec(t *testing.T) {
 
 	port := freeTCPPort(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, nodeBin, filepath.Join(devDir, "dev-server.js"))
@@ -257,7 +258,10 @@ func operationAt(t *testing.T, paths map[string]any, path, method string) map[st
 func fetchSpecUntilReady(t *testing.T, ctx context.Context, port int) map[string]any {
 	t.Helper()
 	specURL := fmt.Sprintf("http://127.0.0.1:%d/openapi.json", port)
-	deadline := time.Now().Add(15 * time.Second)
+	// Generous deadline: the dev-server esbuild-bundles controllers/ at boot
+	// before serving (a cold `npx esbuild` under concurrent test load can take
+	// several seconds). The success path returns the moment it's listening.
+	deadline := time.Now().Add(45 * time.Second)
 	for {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
 		resp, err := http.DefaultClient.Do(req)
@@ -336,6 +340,7 @@ func TestServeOpenAPIErrorOrdering(t *testing.T) {
 	if err != nil {
 		t.Skip("node not on PATH")
 	}
+	requireEsbuild(t)
 
 	root := t.TempDir()
 
@@ -368,7 +373,7 @@ func TestServeOpenAPIErrorOrdering(t *testing.T) {
 
 	port := freeTCPPort(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, nodeBin, filepath.Join(devDir, "dev-server.js"))
@@ -464,7 +469,7 @@ module.exports.default = {
 
 	port := startDevServer(t, root)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Poll GET /todos until the server is up, then assert the dispatched body.
@@ -483,6 +488,105 @@ module.exports.default = {
 	}
 }
 
+// TestServeExtensionlessImports is the regression test for the real-project
+// bug: `palbase serve` loaded controllers by require()ing the raw .ts, which
+// Node's loader cannot resolve when controllers use the v2 canonical
+// EXTENSIONLESS relative imports (`import x from "../handlers/foo"`,
+// `"../../services/bar.service"`). Result: every controller failed to load and
+// 0 routes registered.
+//
+// The fixture is the REAL v2 shape — .ts files with extensionless imports
+// across controllers → handlers → services:
+//
+//	controllers/todos.ts   import "../handlers/todos/list"   (extensionless)
+//	handlers/todos/list.ts import "../../services/todo.service" (extensionless)
+//	services/todo.service.ts
+//	controllers/health.ts  import "../handlers/health"        (extensionless)
+//	handlers/health.ts
+//
+// The dev-server must esbuild-bundle these (resolving the extensionless .ts
+// imports + the @palbase/backend external) exactly as deploy does, then
+// register + dispatch. We assert BOTH routes register and return 200 with the
+// handler output that flows through the imported service.
+func TestServeExtensionlessImports(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+
+	root := t.TempDir()
+
+	// A service two levels up from the handler — extensionless import.
+	mustWrite(t, root, "services/todo.service.ts", `
+export function listTodos() {
+  return [{ id: "t1", title: "first" }];
+}
+`)
+	// Handler imports the service WITHOUT a .ts/.js extension (canonical v2).
+	mustWrite(t, root, "handlers/todos/list.ts", `
+import { defineHandler } from "@palbase/backend";
+import { listTodos } from "../../services/todo.service";
+
+export default defineHandler({
+  auth: false,
+  handler: async (req) => ({ items: listTodos(), gotMethod: req.method }),
+});
+`)
+	// Controller imports the handler WITHOUT an extension.
+	mustWrite(t, root, "controllers/todos.ts", `
+import { defineController, route } from "@palbase/backend";
+import list from "../handlers/todos/list";
+
+export default defineController("/todos", {
+  list: route.get("/", list),
+});
+`)
+
+	// A second controller → handler chain (no service), also extensionless.
+	mustWrite(t, root, "handlers/health.ts", `
+import { defineHandler } from "@palbase/backend";
+
+export default defineHandler({
+  auth: false,
+  handler: async () => ({ status: "ok" }),
+});
+`)
+	mustWrite(t, root, "controllers/health.ts", `
+import { defineController, route } from "@palbase/backend";
+import health from "../handlers/health";
+
+export default defineController("/health", {
+  check: route.get("", health),
+});
+`)
+
+	writeBackendStub(t, root)
+
+	port := startDevServer(t, root)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// GET /todos → 200, output flows through the imported service.
+	todos := getJSONUntilReady(t, ctx, port, "/todos")
+	items, _ := todos["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("GET /todos items = %v, want one (extensionless service import failed?)", todos["items"])
+	}
+	first, _ := items[0].(map[string]any)
+	if first["id"] != "t1" || first["title"] != "first" {
+		t.Fatalf("GET /todos output = %v, want {id:t1,title:first}", first)
+	}
+	if todos["gotMethod"] != "GET" {
+		t.Fatalf("handler saw req.method = %v, want GET", todos["gotMethod"])
+	}
+
+	// GET /health → 200 (basePath "/health" + route path "" → /health).
+	health := getJSONUntilReady(t, ctx, port, "/health")
+	if health["status"] != "ok" {
+		t.Fatalf("GET /health = %v, want {status:ok}", health)
+	}
+}
+
 // startDevServer extracts the embedded dev-server into a temp dir and launches
 // it against `root` on a free port, registering a t.Cleanup to kill it. Returns
 // the port. Shared by the dispatch test (and any future serve test that needs a
@@ -493,6 +597,7 @@ func startDevServer(t *testing.T, root string) int {
 	if err != nil {
 		t.Skip("node not on PATH")
 	}
+	requireEsbuild(t)
 	devDir := t.TempDir()
 	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
 		t.Fatalf("extract dev server: %v", err)
@@ -518,13 +623,32 @@ func startDevServer(t *testing.T, root string) int {
 	return port
 }
 
+// requireEsbuild skips the test when esbuild is not reachable via `npx --yes
+// esbuild` — the dev-server now bundles controllers/ + resources/ through it
+// (mirroring the deploy bundler), so a serve test cannot run without it. Kept
+// cheap: a single `--version` probe with a short timeout.
+func requireEsbuild(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Skip("npx not on PATH (esbuild bundling unavailable)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "npx", "--yes", "esbuild", "--version").Run(); err != nil {
+		t.Skipf("esbuild not reachable via npx (%v)", err)
+	}
+}
+
 // getJSONUntilReady polls GET <path> until the dev-server returns 200 (or the
 // deadline hits), then decodes the JSON body. Used by the dispatch test to wait
 // for boot AND assert the handler's output in one shot.
 func getJSONUntilReady(t *testing.T, ctx context.Context, port int, path string) map[string]any {
 	t.Helper()
 	u := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	deadline := time.Now().Add(12 * time.Second)
+	// Generous deadline: the dev-server now esbuild-bundles controllers/ at boot
+	// (a cold `npx esbuild` under concurrent test load can take several seconds),
+	// so a tight bound would flake. The success path returns as soon as it's up.
+	deadline := time.Now().Add(45 * time.Second)
 	var lastErr error
 	var lastStatus int
 	for {
@@ -551,24 +675,41 @@ func getJSONUntilReady(t *testing.T, ctx context.Context, port int, path string)
 	}
 }
 
-// writeBackendStub installs a minimal @palbase/backend on the fixture's
-// node_modules so the dev-server's installRuntime() can
-// `require('@palbase/backend').__setRuntime(...)` without a real install. The
-// stub also no-ops the Resource API (so a resources/ dir, if present, is a clean
-// no-op). The fixture handlers import nothing from it.
+// writeBackendStub installs a minimal but FAITHFUL @palbase/backend on the
+// fixture's node_modules. It is kept external by the dev-server's esbuild
+// bundling (just like the real package), so a fixture controller/handler/
+// resource can `import { defineController, route, defineHandler, Resource }
+// from "@palbase/backend"` exactly as real v2 code does. The factories return
+// the same __palbase-tagged shapes as the real SDK (controller.ts / handler.ts /
+// resource.ts), and the runtime/Resource hooks satisfy installRuntime() +
+// bootResources() without a real install.
 func writeBackendStub(t *testing.T, root string) {
 	t.Helper()
 	mustWrite(t, root, "node_modules/@palbase/backend/package.json",
 		`{"name":"@palbase/backend","version":"0.0.0-test","main":"index.js"}`)
 	mustWrite(t, root, "node_modules/@palbase/backend/index.js", `
 'use strict';
+// defineHandler/defineController/route mirror the real SDK shapes so fixtures
+// author exactly as v2 code does (handler.ts / controller.ts).
+function defineHandler(config) { return Object.assign({ __palbase: 'handler' }, config); }
+function defineController(basePath, routes) { return { __palbase: 'controller', basePath, routes }; }
+function makeRoute(method) {
+  return function (path, handler) { return { __palbase: 'route', method, path, handler }; };
+}
+const route = {
+  get: makeRoute('GET'), post: makeRoute('POST'), put: makeRoute('PUT'),
+  patch: makeRoute('PATCH'), delete: makeRoute('DELETE'),
+};
 class Resource {}
+const registry = [];
 module.exports = {
-  __setRuntime() {},
-  Resource,
-  __registerResource() {},
+  defineHandler, defineController, route, Resource,
+  // Runtime seam: record the installed services so a handler could read them
+  // (fixtures here return literals, so a no-op store is enough).
+  __setRuntime(services) { module.exports.__runtime = services; },
+  __registerResource(r) { registry.push(r); },
   async __runResourceBoot() {},
-  async __shutdownResources() {},
+  async __shutdownResources() { registry.length = 0; },
 };
 `)
 }

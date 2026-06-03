@@ -22,9 +22,11 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const url = require('url');
+const { execFileSync } = require('child_process');
 
 // 4003 is the single canonical local port — the codegen consumers (`palbase
 // mobile codegen`, `palbase types|pull --env local`) probe localhost:4003, and
@@ -36,6 +38,83 @@ const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
 const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
+
+// ── esbuild bundling — IDENTICAL to the deploy path ────────────────────────
+//
+// We do NOT require() the raw controllers/*.ts. Node's loader can't resolve the
+// v2 canonical EXTENSIONLESS relative imports (`import x from "../handlers/foo"`,
+// `"../../services/bar.service"`) — those need a bundler. The deployed pod
+// esbuild-bundles each controllers/* (and resources/*) file as its own entry
+// point with the import graph (handlers/, services/, …) inlined and
+// @palbase/backend kept external (modules/backend internal/deploy/bundler.go +
+// bundler_config.go). We mirror that EXACTLY here so what `palbase serve` loads
+// is what the pod loads.
+//
+// Each src dir is bundled into BUNDLE_ROOT/<name>/ preserving the source tree
+// (esbuild --outbase), so controllers/todos.controller.ts →
+// BUNDLE_ROOT/controllers/todos.controller.js. The dev-server then discovers +
+// require()s the BUNDLED .js (CJS), never the raw .ts.
+const BUNDLE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-serve-bundle-'));
+const BUNDLED_CONTROLLERS_DIR = path.join(BUNDLE_ROOT, 'controllers');
+const BUNDLED_RESOURCES_DIR = path.join(BUNDLE_ROOT, 'resources');
+
+// A {"type":"commonjs"} marker in BUNDLE_ROOT pins our --format=cjs `.js`
+// bundles to CommonJS regardless of the project's package.json "type" — the
+// same marker the deploy bundler drops in .palbase/ so require() of a bundle
+// never throws ERR_REQUIRE_ESM (bundler.go's CommonJS-marker note).
+fs.writeFileSync(path.join(BUNDLE_ROOT, 'package.json'), '{"type":"commonjs"}\n');
+
+// The esbuild externals + resolve-extensions match the deploy bundler
+// (bundler_config.go DefaultBundleConfig + buildArgs): @palbase/backend stays
+// external so the bundle's `import { Database }` resolves to the project's ONE
+// installed instance (the same one the dev-server installs via __setRuntime),
+// and .ts is added to the resolve set so a `.js`-spelled import of a `.ts`
+// source (the TS-idiomatic ESM form) still resolves.
+const ESBUILD_EXTERNAL = '@palbase/backend';
+const ESBUILD_RESOLVE_EXTENSIONS = '.ts,.tsx,.js,.jsx,.json';
+
+// bundleSrcDir esbuild-bundles every entry file under srcDir into outDir,
+// preserving the relative tree (--outbase=srcDir). One esbuild invocation for
+// the whole dir, exactly like the deploy bundler's per-entry-dir Bundle().
+// Returns true when at least one entry file was bundled; false when srcDir is
+// absent or empty (a clean no-op). Throws on an esbuild error so a syntax error
+// surfaces loudly rather than silently registering 0 routes.
+function bundleSrcDir(srcDir, outDir) {
+  if (!fs.existsSync(srcDir)) return false;
+  const entries = walk(srcDir).filter((f) => /\.(c?js|mjs|tsx?|jsx)$/i.test(path.basename(f)));
+  if (entries.length === 0) return false;
+
+  fs.mkdirSync(outDir, { recursive: true });
+  const args = [
+    '--yes', 'esbuild',
+    '--bundle',
+    '--platform=node',
+    '--format=cjs',
+    '--target=es2022',
+    `--outdir=${outDir}`,
+    `--outbase=${srcDir}`,
+    `--resolve-extensions=${ESBUILD_RESOLVE_EXTENSIONS}`,
+    `--external:${ESBUILD_EXTERNAL}`,
+    ...entries,
+  ];
+  // Run from PROJECT_ROOT so node_modules resolution (for any non-external dep
+  // a handler/service imports) + relative imports anchor to the project. esbuild
+  // is resolved via `npx --yes` — the same way the CLI's env-gen bundling shells
+  // out (bundleSchemaTS), so no separate install is required.
+  execFileSync('npx', args, {
+    cwd: PROJECT_ROOT,
+    env: Object.assign({}, process.env, { NODE_PATH: path.join(PROJECT_ROOT, 'node_modules') }),
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  return true;
+}
+
+// rmBundledTree removes a previously-emitted bundle dir so a rename/delete in
+// the source tree doesn't leave a stale bundled `.js` behind (which would keep
+// serving a deleted controller). Best-effort.
+function rmBundledTree(outDir) {
+  try { fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
 
 // Capture pod-bound credentials into module-scope closures, then DELETE
 // them from process.env BEFORE require()ing user code. User endpoints
@@ -80,8 +159,11 @@ function loadControllerDef(controllerPath) {
   const mod = require(controllerPath);
   const controller = mod.default ?? mod;
   if (!controller || controller.__palbase !== 'controller') {
+    const shown = controllerPath.startsWith(BUNDLED_CONTROLLERS_DIR)
+      ? bundledToSrcRel(controllerPath)
+      : path.relative(PROJECT_ROOT, controllerPath);
     throw new Error(
-      `${path.relative(PROJECT_ROOT, controllerPath)} must default-export a ControllerDef ` +
+      `${shown} must default-export a ControllerDef ` +
       `(use defineController / a controllers/* file); got ` +
       (controller && controller.__palbase ? `__palbase=${JSON.stringify(controller.__palbase)}` : 'a non-controller export'),
     );
@@ -123,13 +205,33 @@ function registerControllers() {
     log(`controllers/ not found at ${CONTROLLERS_DIR}`);
     return;
   }
-  for (const file of walk(CONTROLLERS_DIR)) {
+
+  // esbuild-bundle controllers/*.ts (+ their transitively-imported handlers/
+  // and services/) into BUNDLED_CONTROLLERS_DIR. We discover/require the BUNDLED
+  // CJS, so extensionless relative imports resolve exactly as they do on deploy.
+  rmBundledTree(BUNDLED_CONTROLLERS_DIR);
+  try {
+    bundleSrcDir(CONTROLLERS_DIR, BUNDLED_CONTROLLERS_DIR);
+  } catch (err) {
+    // A bundle error (syntax error, unresolved import) must be LOUD — otherwise
+    // the dir scan below finds nothing and silently registers 0 routes.
+    log(`esbuild failed for controllers/ — ${esbuildErr(err)}`);
+    log('registered 0 route(s) (fix the build error above and save to retry)');
+    return;
+  }
+
+  if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) {
+    log('registered 0 route(s) (no controllers/*.ts found)');
+    return;
+  }
+
+  for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
     if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
     let controller;
     try {
       controller = loadControllerDef(file);
     } catch (err) {
-      log(`skipping ${path.relative(PROJECT_ROOT, file)} — ${err.message}`);
+      log(`skipping ${bundledToSrcRel(file)} — ${err.message}`);
       continue;
     }
     const routeMap = (controller.routes && typeof controller.routes === 'object') ? controller.routes : {};
@@ -151,8 +253,26 @@ function registerControllers() {
   }
   log(`registered ${routes.size} route(s):`);
   for (const route of routes.values()) {
-    log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${path.relative(PROJECT_ROOT, route.controllerPath)} [${route.routeKey}]`);
+    log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${bundledToSrcRel(route.controllerPath)} [${route.routeKey}]`);
   }
+}
+
+// bundledToSrcRel maps a bundled controller path back to the project-relative
+// SOURCE path for friendly logging (BUNDLE_ROOT/controllers/x.controller.js →
+// controllers/x.controller.ts-ish). The bundled `.js` mirrors the source tree
+// (esbuild --outbase), so we just swap the bundle root for "controllers" and
+// keep the relative tail (extension shown as the emitted .js).
+function bundledToSrcRel(bundledPath) {
+  const rel = path.relative(BUNDLED_CONTROLLERS_DIR, bundledPath);
+  return path.join('controllers', rel);
+}
+
+// esbuildErr renders a child_process.execFileSync error: prefer the captured
+// stderr (the esbuild diagnostic with file:line:col), fall back to the message.
+function esbuildErr(err) {
+  const stderr = err && err.stderr ? String(err.stderr).trim() : '';
+  if (stderr) return stderr;
+  return err && err.message ? err.message : String(err);
 }
 
 // walk yields every file under dir (recursive). Returns an array so callers can
@@ -175,7 +295,7 @@ function resolveHandlerDef(route) {
   const controller = loadControllerDef(route.controllerPath);
   const routeDef = controller.routes && controller.routes[route.routeKey];
   if (!routeDef || typeof routeDef !== 'object') {
-    throw new Error(`route "${route.routeKey}" not found in ${path.relative(PROJECT_ROOT, route.controllerPath)}`);
+    throw new Error(`route "${route.routeKey}" not found in ${bundledToSrcRel(route.controllerPath)}`);
   }
   const handlerDef = routeDef.handler;
   if (!handlerDef || typeof handlerDef !== 'object' || typeof handlerDef.handler !== 'function') {
@@ -1176,15 +1296,26 @@ async function bootResources() {
     return 0;
   }
 
+  // esbuild-bundle resources/*.ts the same way controllers/ are bundled (CJS,
+  // @palbase/backend external, extensionless-import resolution) so a resource
+  // that imports `../services/foo` loads under serve exactly as on deploy.
+  rmBundledTree(BUNDLED_RESOURCES_DIR);
+  try {
+    if (!bundleSrcDir(RESOURCES_DIR, BUNDLED_RESOURCES_DIR)) return 0;
+  } catch (err) {
+    log(`⚠ esbuild failed for resources/ — ${esbuildErr(err)} — serving without resources`);
+    return 0;
+  }
+
   const envMap = resourceEnvMap();
   let registered = 0;
-  for (const file of walk(RESOURCES_DIR)) {
+  for (const file of walk(BUNDLED_RESOURCES_DIR)) {
     if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
     let mod;
     try {
       mod = require(file);
     } catch (err) {
-      log(`resources: skipping ${path.relative(PROJECT_ROOT, file)} — ${err.message}`);
+      log(`resources: skipping ${path.join('resources', path.relative(BUNDLED_RESOURCES_DIR, file))} — ${err.message}`);
       continue;
     }
     const candidates = [];
@@ -1259,9 +1390,11 @@ async function main() {
   });
 
   // Graceful shutdown: drain booted resources (close pools, flush buffers) on
-  // SIGINT/SIGTERM before exiting, mirroring worker.js's SIGTERM hook.
+  // SIGINT/SIGTERM before exiting, mirroring worker.js's SIGTERM hook, then
+  // remove the temp esbuild bundle tree so it doesn't linger in tmp.
   const onSignal = async () => {
     await shutdownResources();
+    rmBundledTree(BUNDLE_ROOT);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   };
