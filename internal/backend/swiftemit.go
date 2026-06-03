@@ -329,12 +329,25 @@ func emitTypeTree(ops []swiftOp) string {
 }
 
 // topLevelDeclLines renders one top-level type for an operation side
-// (request or response). Objects become `public struct <Name>`; scalars
-// or arrays (no `properties`) fall back to a `public typealias <Name> =
-// <BareType>` so the call signature still reads typed.
+// (request or response). Objects become `public struct <Name>`; an array of
+// objects emits a named item struct `<Name>Item` (same field-emission as any
+// response struct — snake_case→camelCase + CodingKeys) plus
+// `public typealias <Name> = [<Name>Item]`, so a list endpoint surfaces a
+// typed element instead of an opaque `[AnyCodableValue]`. Scalars and arrays
+// of primitives (or unknown/empty items) fall back to
+// `public typealias <Name> = <BareType>` so the call signature still reads
+// typed (`[String]`, `[AnyCodableValue]`, …) and stays byte-identical to the
+// pre-item-struct emitter.
 func topLevelDeclLines(name string, s swiftSchema) []string {
 	if s.kind == "object" {
 		return structLines(name, s.props, 0)
+	}
+	if s.kind == "array" && s.elem != nil && s.elem.kind == "object" && len(s.elem.props) > 0 {
+		itemName := name + "Item"
+		lines := structLines(itemName, s.elem.props, 0)
+		lines = append(lines, "")
+		lines = append(lines, "public typealias "+name+" = ["+itemName+"]")
+		return lines
 	}
 	return []string{"public typealias " + name + " = " + bareType(s)}
 }

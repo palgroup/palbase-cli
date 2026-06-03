@@ -128,6 +128,13 @@ func TestEmitSwift(t *testing.T) {
 		// Multiple path params → both as args in path order, both interpolated.
 		"func get(orgId: String, userId: String) async throws(BackendError) -> OrgsMembersGetResponse",
 		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userId)"`,
+		// Gap 2 — ARRAY-OF-OBJECT RESPONSE. `GET /todos` emits a NAMED item
+		// struct (Codable+Sendable, snake_case→camelCase) and the response is
+		// a typed `[Item]`, not an opaque `[AnyCodableValue]`.
+		"public nonisolated struct TodosListResponseItem: Codable, Sendable {",
+		"public let completed: Bool",
+		"public let createdAt: String", // created_at → camelCase
+		"public typealias TodosListResponse = [TodosListResponseItem]",
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
@@ -144,6 +151,13 @@ func TestEmitSwift(t *testing.T) {
 	// top-level structs now, not nested under an operation-id enum.
 	if strings.Contains(out, "public enum Rooms {") || strings.Contains(out, "public enum Create {") {
 		t.Errorf("legacy nested enum shell should be gone:\n%s", out)
+	}
+
+	// Gap 2 — the array-of-object list response must NOT collapse to the
+	// opaque `[AnyCodableValue]` it used to (a named item struct now carries
+	// the element shape).
+	if strings.Contains(out, "public typealias TodosListResponse = [AnyCodableValue]") {
+		t.Errorf("array-of-object response should be typed, not [AnyCodableValue]:\n%s", out)
 	}
 
 	// Dump for the external compile check (PALBE_GEN_OUT set by the harness).
