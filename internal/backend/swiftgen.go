@@ -39,6 +39,7 @@ type swiftOp struct {
 	operationID string
 	method      string
 	path        string
+	pathParams  []string        // `{name}` path segments in path order → leading String method args
 	input       *swiftSchema
 	output      *swiftSchema
 	headers     *swiftSchema    // declared request headers (parameters[in:header]) → <Op>Headers struct
@@ -90,6 +91,7 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 				operationID: opID,
 				method:      strings.ToUpper(method),
 				path:        path,
+				pathParams:  pathParamNames(path),
 				input:       requestSchema(op),
 				output:      responseSchema(op),
 				headers:     headerSchema(op),
@@ -259,6 +261,34 @@ func headerSchema(op map[string]any) *swiftSchema {
 	// generator, but don't rely on map iteration upstream).
 	sort.Slice(props, func(i, j int) bool { return props[i].name < props[j].name })
 	return &swiftSchema{kind: "object", props: props}
+}
+
+// pathParamNames extracts the `{name}` template segments from an OpenAPI
+// path, in left-to-right path order (the order they must appear as leading
+// method arguments). The path string is the authoritative source: the
+// emitter substitutes each `{name}` back into the wire path, so the names
+// must match the literal template exactly. Returns nil when the path has no
+// templated segments (the common case) — that keeps the emit path byte-
+// identical for non-parameterised operations. Empty `{}` is ignored.
+func pathParamNames(path string) []string {
+	var out []string
+	for {
+		open := strings.IndexByte(path, '{')
+		if open < 0 {
+			break
+		}
+		close := strings.IndexByte(path[open:], '}')
+		if close < 0 {
+			break
+		}
+		close += open
+		name := path[open+1 : close]
+		if name != "" {
+			out = append(out, name)
+		}
+		path = path[close+1:]
+	}
+	return out
 }
 
 func responseSchema(op map[string]any) *swiftSchema {

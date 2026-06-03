@@ -231,6 +231,49 @@ func snakeCaseRoundTrips(ident, key string) bool {
 
 func indent(d int) string { return strings.Repeat("    ", d) }
 
+// interpolatedPathLiteral turns a templated wire path (e.g.
+// "/todos/{id}/notes/{noteId}") into a Swift string literal where each
+// `{name}` is replaced by a percent-encoding interpolation of the matching
+// `name: String` method arg:
+//
+//	"/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)/notes/\(...)"
+//
+// `.urlPathAllowed` keeps a path segment from being broken by a slash/space
+// in the id; the `?? name` fallback can't fail in practice but keeps the
+// expression non-optional. `params` is the path-ordered name list parsed by
+// pathParamNames, so the literal substitutes the exact `{name}` tokens. Each
+// arg is referenced by its sanitized Swift ident (matching the method
+// parameter name), so a param like `note-id` interpolates as `noteId`.
+func interpolatedPathLiteral(path string, params []string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, name := range params {
+		token := "{" + name + "}"
+		idx := strings.Index(path, token)
+		if idx < 0 {
+			continue
+		}
+		b.WriteString(escapeForSwiftLiteral(path[:idx]))
+		ident := identOf(name)
+		b.WriteString("\\(" + ident + ".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? " + ident + ")")
+		path = path[idx+len(token):]
+	}
+	b.WriteString(escapeForSwiftLiteral(path))
+	b.WriteByte('"')
+	return b.String()
+}
+
+// escapeForSwiftLiteral escapes the literal (non-interpolated) chunks of a
+// path so backslashes/quotes can't break the surrounding Swift string
+// literal. Wire paths are plain ASCII URL paths, so this is mostly a guard;
+// it deliberately does NOT touch `\(` since callers only pass already-split
+// literal fragments (no interpolation markers).
+func escapeForSwiftLiteral(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
+}
+
 // --- Top-level Request / Response / Error types ----------------------------
 //
 // Each operation emits its own flat trio:
@@ -658,6 +701,23 @@ func renderNSNode(node *nsNode) string {
 			httpPath = "/" + strings.ReplaceAll(op.operationID, ".", "/")
 		}
 
+		// Path parameters (the `{name}` segments) become LEADING method
+		// args, typed `String` (path params are strings on the wire), in
+		// path order. The seam `path:` literal is rewritten from a plain
+		// string into a Swift interpolation that percent-encodes each arg
+		// with `.urlPathAllowed` so slashes/spaces in an id can't break out
+		// of the path segment. `pathExpr` is `httpPath` as a Swift string
+		// literal when there are no params (byte-identical to before), or
+		// the interpolated form when there are.
+		var pathParamArgs []string
+		for _, name := range op.pathParams {
+			pathParamArgs = append(pathParamArgs, identOf(name)+": String")
+		}
+		pathExpr := swiftStringLiteral(httpPath)
+		if len(op.pathParams) > 0 {
+			pathExpr = interpolatedPathLiteral(httpPath, op.pathParams)
+		}
+
 		// Four shapes depending on which sides the OpenAPI op declares.
 		// Old generator forced Input=EmptyPayload / Output=EmptyPayload so
 		// every call looked uniform; that pushed an awkward
@@ -691,10 +751,17 @@ func renderNSNode(node *nsNode) string {
 			headerParam = "headers: " + headersTypeName(op.operationID)
 			headerArg = ", headers: headers.asHeaderDict()"
 		}
-		// joinParams comma-joins the leading params so we never emit a
-		// dangling comma like `(, headers:)`.
+		// joinParams comma-joins the method parameters so we never emit a
+		// dangling comma like `(, headers:)`. Path-param args always come
+		// FIRST (in path order), then the request body, then headers —
+		// matching the four call shapes below. When the op has no path
+		// params and no headers, the leading-args prefix is empty and the
+		// signature is byte-identical to the pre-path-param emitter.
 		joinParams := func(parts ...string) string {
 			var nonEmpty []string
+			for _, p := range pathParamArgs {
+				nonEmpty = append(nonEmpty, p)
+			}
 			for _, p := range parts {
 				if p != "" {
 					nonEmpty = append(nonEmpty, p)
@@ -707,17 +774,17 @@ func renderNSNode(node *nsNode) string {
 		case op.input != nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
 			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, headerParam)+") async "+throwsKw+" -> "+resType+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input, as: "+resType+".self"+errorsArg+headerArg+")")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input, as: "+resType+".self"+errorsArg+headerArg+")")
 		case op.input != nil && op.output == nil:
 			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, headerParam)+") async "+throwsKw+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", input"+errorsArg+headerArg+")")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input"+errorsArg+headerArg+")")
 		case op.input == nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"("+headerParam+") async "+throwsKw+" -> "+resType+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+", as: "+resType+".self"+errorsArg+headerArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(headerParam)+") async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", as: "+resType+".self"+errorsArg+headerArg+")")
 		default: // no input, no output
-			lines = append(lines, indent(1)+vis+"func "+method+"("+headerParam+") async "+throwsKw+" {")
-			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+swiftStringLiteral(httpPath)+errorsArg+headerArg+")")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(headerParam)+") async "+throwsKw+" {")
+			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+errorsArg+headerArg+")")
 		}
 		lines = append(lines, indent(1)+"}")
 	}

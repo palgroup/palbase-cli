@@ -37,7 +37,23 @@ const fixtureOpenAPI = `{
         "properties":{"error":{"type":["string","null"]},"ok":{"type":"boolean"}},
         "required":["error","ok"]}}}}}}},
     "/auth/login":{"post":{"operationId":"auth.login",
-      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}}}}}}
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}}}}}},
+    "/todos":{"get":{"operationId":"todos.list",
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"array","items":{"type":"object",
+        "properties":{"id":{"type":"string"},"title":{"type":"string"},"completed":{"type":"boolean"},"created_at":{"type":"string"}},
+        "required":["id","title","completed","created_at"]}}}}}}}},
+    "/todos/{id}":{
+      "get":{"operationId":"todos.get",
+        "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],
+        "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"},"title":{"type":"string"}},"required":["id","title"]}}}}}},
+      "patch":{"operationId":"todos.update",
+        "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],
+        "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"}}}}}},
+        "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}}}},
+      "delete":{"operationId":"todos.delete",
+        "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]}},
+    "/orgs/{orgId}/members/{userId}":{"get":{"operationId":"orgs.members.get",
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"role":{"type":"string"}},"required":["role"]}}}}}}}
   }
 }`
 
@@ -98,6 +114,20 @@ func TestEmitSwift(t *testing.T) {
 		"public nonisolated struct HasNullableResponse: Codable, Sendable {",
 		"public let error: String?",
 		"public let ok: Bool",
+		// Gap 1 — PATH PARAMETERS. A `{id}` path segment threads an `id:
+		// String` LEADING method arg, and the seam `path:` literal becomes a
+		// percent-encoding interpolation of that arg (the `{id}` is no longer
+		// emitted literally). Body-bearing ops put path params FIRST, then
+		// the input. No-body ops (get/delete) take just the path param.
+		"func get(id: String) async throws(BackendError) -> TodosGetResponse",
+		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)", as: TodosGetResponse.self)`,
+		"func delete(id: String) async throws(BackendError) {",
+		`_invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)")`,
+		"func update(id: String, _ input: TodosUpdateRequest) async throws(BackendError) -> TodosUpdateResponse",
+		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)", input, as: TodosUpdateResponse.self)`,
+		// Multiple path params → both as args in path order, both interpolated.
+		"func get(orgId: String, userId: String) async throws(BackendError) -> OrgsMembersGetResponse",
+		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userId)"`,
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
