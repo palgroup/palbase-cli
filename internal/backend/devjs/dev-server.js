@@ -42,6 +42,19 @@ const { execFileSync } = require('child_process');
 // the Go `serve --port` default matches it, so a plain `palbase serve` lands
 // where codegen looks.
 const PORT = Number(process.env.PALBASE_DEV_PORT) || 4003;
+
+// lanIP returns the primary non-internal IPv4 address, so we can print a
+// device-reachable URL (a physical device on the same Wi-Fi can't use
+// localhost). Returns null when only loopback exists. (`os` is required at top.)
+function lanIP() {
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) return a.address;
+    }
+  }
+  return null;
+}
+
 const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
@@ -294,7 +307,7 @@ function registerControllers() {
   routes.clear();
   if (!fs.existsSync(CONTROLLERS_DIR)) {
     log(`controllers/ not found at ${CONTROLLERS_DIR}`);
-    return;
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
   }
 
   // esbuild-bundle controllers/*.ts (+ their transitively-imported handlers/
@@ -308,20 +321,27 @@ function registerControllers() {
     // the dir scan below finds nothing and silently registers 0 routes.
     log(`esbuild failed for controllers/ — ${esbuildErr(err)}`);
     log('registered 0 route(s) (fix the build error above and save to retry)');
-    return;
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
   }
 
   if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) {
     log('registered 0 route(s) (no controllers/*.ts found)');
-    return;
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
   }
 
+  let sawControllerFiles = false;
+  let staleSDKSignature = false;
   for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
     if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    sawControllerFiles = true;
     let Ctrl;
     try {
       Ctrl = loadControllerClass(file);
     } catch (err) {
+      // A decorator that resolved to `undefined` (stale/missing @palbase/backend)
+      // throws "... is not a function" at module-eval time. Flag it so the boot
+      // guard can give an actionable message instead of a silent 0-route start.
+      if (/is not a function/.test(err.message)) staleSDKSignature = true;
       log(`skipping ${bundledToSrcRel(file)} — ${err.message}`);
       continue;
     }
@@ -352,6 +372,7 @@ function registerControllers() {
   for (const route of routes.values()) {
     log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${bundledToSrcRel(route.controllerPath)} [${route.routeKey}]`);
   }
+  return { sawControllerFiles, staleSDKSignature, routeCount: routes.size };
 }
 
 // bundledToSrcRel maps a bundled controller path back to the project-relative
@@ -1537,12 +1558,25 @@ async function shutdownResources() {
 // ── boot ────────────────────────────────────────────────────────────────
 
 async function main() {
-  registerControllers();
+  const reg = registerControllers();
+  if (reg.sawControllerFiles && reg.routeCount === 0) {
+    if (reg.staleSDKSignature) {
+      log('FATAL: @palbase/backend is stale or missing — your controllers use');
+      log('@Controller/@Get decorators (added in @palbase/backend 4.0.0) but the');
+      log('installed package does not export them. Run:');
+      log('    npm install @palbase/backend@latest');
+      log('then re-run `palbase serve`.');
+    } else {
+      log('FATAL: controllers/ has files but 0 routes registered (see skip reasons above).');
+    }
+    process.exit(1);
+  }
   watchControllers();
   await bootResources();
 
-  server.listen(PORT, () => {
-    log(`listening on http://127.0.0.1:${PORT}`);
+  server.listen(PORT, '0.0.0.0', () => {
+    const ip = lanIP();
+    log(`listening on http://localhost:${PORT}` + (ip ? ` and http://${ip}:${PORT} (device)` : ''));
     log(`project ref: ${PROJECT_REF}`);
     log(`watching: ${CONTROLLERS_DIR}`);
     if (PALBASE_URL) {
