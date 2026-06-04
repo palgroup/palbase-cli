@@ -212,10 +212,13 @@ The file is gitignored by the scaffold — secrets never enter git.`,
 
 func pushCmd(studioFn func() *studio.Client) *cobra.Command {
 	var (
-		refFlag    string
-		inFlag     string
-		secretKeys []string
-		dryRun     bool
+		refFlag      string
+		inFlag       string
+		secretKeys   []string
+		plainKeys    []string
+		includeNew   bool
+		forceSecrets bool
+		dryRun       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "push",
@@ -242,9 +245,8 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 			}
 
 			// Current remote state: which keys exist + their plain values +
-			// secret-ness. Secrets come back masked (value nil), so a secret's
-			// value always counts as "changed" and is re-pushed (we can't compare
-			// a masked value) — acceptable, the upsert is idempotent.
+			// secret-ness. Secret values come back MASKED (value nil), so we
+			// can't diff them — they are NOT re-pushed unless --force-secrets.
 			var remote []envVar
 			if err := studioFn().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &remote); err != nil {
 				return fmt.Errorf("env.list: %w", err)
@@ -257,31 +259,103 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 					remotePlain[r.Key] = *r.Value
 				}
 			}
-			markSecret := map[string]bool{}
-			for _, k := range secretKeys {
-				markSecret[strings.TrimSpace(k)] = true
+			// Explicit per-key classification for NEW keys. Empty tokens are
+			// dropped so a stray `--secret ""` can't create a phantom slot.
+			markSecret := toSet(secretKeys)
+			markPlain := toSet(plainKeys)
+			for k := range markSecret {
+				if markPlain[k] {
+					return fmt.Errorf("key %q passed to both --secret and --plain", k)
+				}
 			}
 
-			pushed := 0
+			// Classify every local key into a push plan. SECURITY (review
+			// findings 1+2+3):
+			//   • New keys (not on remote) NEVER auto-upload. They are
+			//     credentials by default: secret unless the user says --plain,
+			//     and they only push when the user opts in (--include-new /
+			//     explicit --secret/--plain classification). This stops a
+			//     local-only var from silently leaking to remote, and stops a
+			//     new credential from being stored in plaintext.
+			//   • Remote SECRET keys are skipped (masked, can't diff) unless
+			//     --force-secrets — so a stale local pull can't clobber a secret
+			//     someone rotated since.
+			//   • Remote PLAIN keys push only when the value actually changed.
+			type plan struct {
+				key      string
+				isSecret bool
+				reason   string // shown in dry-run / confirmation
+			}
+			var toPush []plan
+			var newUnclassified []string
+			var skippedSecrets []string
 			for _, key := range sortedKeys(local) {
 				val := local[key]
 				_, existsRemote := remoteSecret[key]
-				isSecret := remoteSecret[key] || markSecret[key]
-				// Skip plain keys whose remote value already matches (no-op push).
-				if existsRemote && !isSecret {
-					if cur, ok := remotePlain[key]; ok && cur == val {
+
+				if !existsRemote {
+					// New key. Default secret unless explicitly --plain.
+					classifiedPlain := markPlain[key]
+					classifiedSecret := markSecret[key]
+					if !includeNew && !classifiedPlain && !classifiedSecret {
+						newUnclassified = append(newUnclassified, key)
 						continue
 					}
+					isSecret := !classifiedPlain // default secret; --plain opts out
+					if classifiedSecret {
+						isSecret = true
+					}
+					toPush = append(toPush, plan{key, isSecret, "new"})
+					continue
 				}
+
+				if remoteSecret[key] {
+					// Existing secret — masked, can't diff. Skip unless forced.
+					if !forceSecrets {
+						skippedSecrets = append(skippedSecrets, key)
+						continue
+					}
+					toPush = append(toPush, plan{key, true, "secret (forced)"})
+					continue
+				}
+
+				// Existing plain key — push only if the value changed.
+				if cur, ok := remotePlain[key]; ok && cur == val {
+					continue
+				}
+				toPush = append(toPush, plan{key, false, "changed"})
+			}
+
+			// New keys that weren't classified are a hard stop, not a silent
+			// plaintext upload — surface them and tell the user how to proceed.
+			if len(newUnclassified) > 0 {
+				out := cmd.ErrOrStderr()
+				fmt.Fprintf(out, "Refusing to push %d new key(s) not yet on remote (would be credentials):\n", len(newUnclassified))
+				for _, k := range newUnclassified {
+					fmt.Fprintf(out, "  %s\n", k)
+				}
+				fmt.Fprintln(out, "Classify each, then re-run:")
+				fmt.Fprintln(out, "  --secret KEY[,KEY]   encrypt these new keys")
+				fmt.Fprintln(out, "  --plain  KEY[,KEY]   store these new keys in plaintext")
+				fmt.Fprintln(out, "  --include-new        include all new keys (defaults to SECRET; --plain to opt out per key)")
+				return fmt.Errorf("%d new key(s) need classification", len(newUnclassified))
+			}
+
+			for _, k := range skippedSecrets {
+				fmt.Fprintf(cmd.OutOrStdout(), "· skipped %s (existing secret — masked; pass --force-secrets to overwrite)\n", k)
+			}
+
+			pushed := 0
+			for _, p := range toPush {
 				if dryRun {
-					fmt.Fprintf(cmd.OutOrStdout(), "would push %s%s\n", key, secretTag(isSecret))
+					fmt.Fprintf(cmd.OutOrStdout(), "would push %s%s [%s]\n", p.key, secretTag(p.isSecret), p.reason)
 					pushed++
 					continue
 				}
 				if err := studioFn().Mutation(cmd.Context(), "env.set", map[string]any{
-					"ref": ref, "key": key, "value": val, "isSecret": isSecret,
+					"ref": ref, "key": p.key, "value": local[p.key], "isSecret": p.isSecret,
 				}, nil); err != nil {
-					return fmt.Errorf("env.set %s: %w", key, err)
+					return fmt.Errorf("env.set %s: %w", p.key, err)
 				}
 				pushed++
 			}
@@ -289,15 +363,31 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 			if dryRun {
 				verb = "would push"
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s %d changed var(s) from %s\n", verb, pushed, inPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s %d var(s) from %s\n", verb, pushed, inPath)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVarP(&inFlag, "in", "i", "", "Input dotenv file (default .env.local)")
-	cmd.Flags().StringSliceVar(&secretKeys, "secret", nil, "Mark these NEW keys as encrypted secrets (comma-separated)")
+	cmd.Flags().StringSliceVar(&secretKeys, "secret", nil, "NEW keys to encrypt (comma-separated)")
+	cmd.Flags().StringSliceVar(&plainKeys, "plain", nil, "NEW keys to store in plaintext (comma-separated)")
+	cmd.Flags().BoolVar(&includeNew, "include-new", false, "Include all new (not-on-remote) keys; each defaults to SECRET unless --plain")
+	cmd.Flags().BoolVar(&forceSecrets, "force-secrets", false, "Re-upload existing secret keys (overwrites remote; use after rotating locally)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would change without writing")
 	return cmd
+}
+
+// toSet builds a set from a flag slice, dropping empty/whitespace tokens so a
+// stray `--secret ""` can't create a phantom classification.
+func toSet(items []string) map[string]bool {
+	s := map[string]bool{}
+	for _, it := range items {
+		it = strings.TrimSpace(it)
+		if it != "" {
+			s[it] = true
+		}
+	}
+	return s
 }
 
 func secretTag(isSecret bool) string {
