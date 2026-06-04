@@ -131,6 +131,7 @@ func requestTypeName(opID string) string  { return typePrefix(opID) + "Request" 
 func responseTypeName(opID string) string { return typePrefix(opID) + "Response" }
 func errorEnumName(opID string) string    { return typePrefix(opID) + "Error" }
 func headersTypeName(opID string) string  { return typePrefix(opID) + "Headers" }
+func queryTypeName(opID string) string     { return typePrefix(opID) + "Query" }
 
 func sanitize(s string, firstUpper bool) string {
 	var parts []string
@@ -314,6 +315,13 @@ func emitTypeTree(ops []swiftOp) string {
 			lines = append(lines, headerStructLines(headersTypeName(op.operationID), *op.headers)...)
 			emitted = true
 		}
+		if op.query != nil {
+			if emitted {
+				lines = append(lines, "")
+			}
+			lines = append(lines, queryStructLines(queryTypeName(op.operationID), *op.query)...)
+			emitted = true
+		}
 		if len(op.errors) > 0 {
 			if emitted {
 				lines = append(lines, "")
@@ -387,6 +395,57 @@ func headerStructLines(name string, s swiftSchema) []string {
 		}
 	}
 	lines = append(lines, indent(2)+"return out")
+	lines = append(lines, indent(1)+"}")
+	lines = append(lines, "}")
+	return lines
+}
+
+// queryStructLines emits the <Op>Query struct (typed fields, like any request
+// struct) PLUS an `asQueryString()` method that flattens it to a wire query
+// string ("?a=1&b=2", or "" when nothing is set). Field VALUES are
+// percent-encoded with `.urlQueryAllowed`; field NAMES keep their declared
+// casing. Optional fields are omitted when nil. Enum fields use rawValue,
+// non-string scalars use String(describing:). The method is appended to the
+// method's `path:` argument by the caller so no SDK seam change is needed —
+// query params fold into the path the existing _invoke already sends.
+func queryStructLines(name string, s swiftSchema) []string {
+	lines := structLines(name, s.props, 0)
+	// Drop the struct's closing brace so we can append the method inside.
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "}" {
+		lines = lines[:len(lines)-1]
+	}
+	lines = append(lines, indent(1)+"public func asQueryString() -> String {")
+	lines = append(lines, indent(2)+"var pairs: [String] = []")
+	for _, p := range s.props {
+		ident := identOf(p.name)
+		key := swiftStringLiteral(p.name)
+		optional := !p.required || p.schema.nullable
+		// rawExpr renders the field as a String to encode: enum → rawValue,
+		// string → itself, other scalars → String(describing:).
+		rawExpr := func(v string) string {
+			switch p.schema.kind {
+			case "enum":
+				return v + ".rawValue"
+			case "string":
+				return v
+			default:
+				return "String(describing: " + v + ")"
+			}
+		}
+		// encExpr percent-encodes the rendered String for a query value.
+		encExpr := func(v string) string {
+			return "(" + v + ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? " + v + ")"
+		}
+		if optional {
+			rendered := rawExpr("v")
+			lines = append(lines, indent(2)+"if let v = "+ident+" { pairs.append("+key+" + \"=\" + "+encExpr(rendered)+") }")
+		} else {
+			rendered := rawExpr(ident)
+			// Bind to a local so the String(describing:)/rawValue isn't computed twice.
+			lines = append(lines, indent(2)+"do { let v = "+rendered+"; pairs.append("+key+" + \"=\" + "+encExpr("v")+") }")
+		}
+	}
+	lines = append(lines, indent(2)+`return pairs.isEmpty ? "" : "?" + pairs.joined(separator: "&")`)
 	lines = append(lines, indent(1)+"}")
 	lines = append(lines, "}")
 	return lines
@@ -730,6 +789,16 @@ func renderNSNode(node *nsNode) string {
 		if len(op.pathParams) > 0 {
 			pathExpr = interpolatedPathLiteral(httpPath, op.pathParams)
 		}
+		// Declared @Query params add a `query: <Op>Query` parameter to the
+		// signature and fold their wire form onto the seam `path:` argument as
+		// `+ query.asQueryString()` ("?a=1&b=2", or "" when nothing is set). This
+		// keeps the SDK seam (_invoke) unchanged — query rides in the path the
+		// _invoke already sends. Empty when the op declares no @Query.
+		queryParam := ""
+		if op.query != nil {
+			queryParam = "query: " + queryTypeName(op.operationID)
+			pathExpr = pathExpr + " + query.asQueryString()"
+		}
 
 		// Four shapes depending on which sides the OpenAPI op declares.
 		// Old generator forced Input=EmptyPayload / Output=EmptyPayload so
@@ -766,10 +835,10 @@ func renderNSNode(node *nsNode) string {
 		}
 		// joinParams comma-joins the method parameters so we never emit a
 		// dangling comma like `(, headers:)`. Path-param args always come
-		// FIRST (in path order), then the request body, then headers —
-		// matching the four call shapes below. When the op has no path
-		// params and no headers, the leading-args prefix is empty and the
-		// signature is byte-identical to the pre-path-param emitter.
+		// FIRST (in path order), then the request body, then query, then
+		// headers — matching the four call shapes below. When the op has no
+		// path params, query or headers, the leading-args prefix is empty and
+		// the signature is byte-identical to the pre-path-param emitter.
 		joinParams := func(parts ...string) string {
 			var nonEmpty []string
 			for _, p := range pathParamArgs {
@@ -786,17 +855,17 @@ func renderNSNode(node *nsNode) string {
 		switch {
 		case op.input != nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, headerParam)+") async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, queryParam, headerParam)+") async "+throwsKw+" -> "+resType+" {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input, as: "+resType+".self"+errorsArg+headerArg+")")
 		case op.input != nil && op.output == nil:
-			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, headerParam)+") async "+throwsKw+" {")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, queryParam, headerParam)+") async "+throwsKw+" {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input"+errorsArg+headerArg+")")
 		case op.input == nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
-			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(headerParam)+") async "+throwsKw+" -> "+resType+" {")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(queryParam, headerParam)+") async "+throwsKw+" -> "+resType+" {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", as: "+resType+".self"+errorsArg+headerArg+")")
 		default: // no input, no output
-			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(headerParam)+") async "+throwsKw+" {")
+			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(queryParam, headerParam)+") async "+throwsKw+" {")
 			lines = append(lines, indent(1)+"    try await "+pbRef+"."+invoke+"(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+errorsArg+headerArg+")")
 		}
 		lines = append(lines, indent(1)+"}")

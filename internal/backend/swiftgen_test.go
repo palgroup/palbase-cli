@@ -53,7 +53,13 @@ const fixtureOpenAPI = `{
       "delete":{"operationId":"todos.delete",
         "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]}},
     "/orgs/{orgId}/members/{userId}":{"get":{"operationId":"orgs.members.get",
-      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"role":{"type":"string"}},"required":["role"]}}}}}}}
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"role":{"type":"string"}},"required":["role"]}}}}}}},
+    "/search":{"get":{"operationId":"search.run",
+      "parameters":[
+        {"name":"q","in":"query","required":true,"schema":{"type":"string"}},
+        {"name":"limit","in":"query","required":false,"schema":{"type":"integer"}}
+      ],
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}}}}}}}
   }
 }`
 
@@ -135,6 +141,15 @@ func TestEmitSwift(t *testing.T) {
 		"public let completed: Bool",
 		"public let createdAt: String", // created_at → camelCase
 		"public typealias TodosListResponse = [TodosListResponseItem]",
+		// QUERY PARAMETERS. A `parameters[in:query]` op gains a `query:
+		// <Op>Query` method arg and the seam `path:` literal is suffixed with
+		// `+ query.asQueryString()` so the params ride the existing _invoke.
+		"public nonisolated struct SearchRunQuery: Codable, Sendable {",
+		"public let q: String",     // required query param
+		"public let limit: Int?",   // optional query param
+		"public func asQueryString() -> String {",
+		"func run(query: SearchRunQuery) async throws(BackendError) -> SearchRunResponse",
+		`_invoke(method: "GET", path: "/search" + query.asQueryString(), as: SearchRunResponse.self)`,
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {

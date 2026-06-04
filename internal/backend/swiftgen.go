@@ -43,6 +43,7 @@ type swiftOp struct {
 	input       *swiftSchema
 	output      *swiftSchema
 	headers     *swiftSchema    // declared request headers (parameters[in:header]) → <Op>Headers struct
+	query       *swiftSchema    // declared query params (parameters[in:query]) → <Op>Query struct
 	errors      []swiftErrorDef // declared errors via defineEndpoint({ errors: { … } })
 }
 
@@ -95,6 +96,7 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 				input:       requestSchema(op),
 				output:      responseSchema(op),
 				headers:     headerSchema(op),
+				query:       querySchema(op),
 				errors:      declaredErrors(op),
 			})
 		}
@@ -224,10 +226,26 @@ func requestSchema(op map[string]any) *swiftSchema {
 // headerSchema collects the operation's `parameters[in:header]` entries
 // into a synthetic object swiftSchema (one property per header), so the
 // emitter can render an <Op>Headers struct exactly like a request body.
-// Returns nil when the op declares no header parameters. Header param
-// schemas are always string-typed (the backend extractor enforces it),
-// so each property parses to a string/enum field.
+// Returns nil when the op declares no header parameters.
 func headerSchema(op map[string]any) *swiftSchema {
+	return parametersSchemaIn(op, "header")
+}
+
+// querySchema collects the operation's `parameters[in:query]` entries into a
+// synthetic object swiftSchema (one property per query param), so the emitter
+// can render an <Op>Query struct + asQueryString(). Returns nil when the op
+// declares no query parameters. Mirrors headerSchema (the generator emits
+// query/header parameters the same way — name-sorted, schema-typed props).
+func querySchema(op map[string]any) *swiftSchema {
+	return parametersSchemaIn(op, "query")
+}
+
+// parametersSchemaIn collects the operation's `parameters[in:<where>]` entries
+// into a synthetic object swiftSchema (one property per parameter), name-sorted
+// for deterministic output. Returns nil when the op declares no parameter in
+// that location. Shared by headerSchema (in:header) + querySchema (in:query);
+// path params are threaded separately (pathParamNames → leading method args).
+func parametersSchemaIn(op map[string]any, where string) *swiftSchema {
 	paramsRaw, ok := op["parameters"].([]any)
 	if !ok || len(paramsRaw) == 0 {
 		return nil
@@ -238,7 +256,7 @@ func headerSchema(op map[string]any) *swiftSchema {
 		if !ok {
 			continue
 		}
-		if in, _ := pm["in"].(string); in != "header" {
+		if in, _ := pm["in"].(string); in != where {
 			continue
 		}
 		name, _ := pm["name"].(string)
