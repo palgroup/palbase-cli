@@ -10,7 +10,6 @@ type swiftGeneratedConfig struct {
 	URL    string
 	APIKey string
 	Branch string
-	Source string
 	// OAuth captures the provider availability map fetched from
 	// palauth's public `/auth/oauth/providers` endpoint. Nil means
 	// "fetch failed or the project has no providers configured" —

@@ -19,7 +19,6 @@ func TestWriteGeneratedConfigJSON_NoOAuth(t *testing.T) {
 		URL:    "https://abc.dev.palbase.studio",
 		APIKey: "pb_abc_cXXXX",
 		Branch: "main",
-		Source: "remote",
 	}
 	if err := writeGeneratedConfigJSON(path, cfg); err != nil {
 		t.Fatalf("write: %v", err)
@@ -35,6 +34,9 @@ func TestWriteGeneratedConfigJSON_NoOAuth(t *testing.T) {
 	if _, ok := out["oauth"]; ok {
 		t.Errorf("expected no `oauth` key when cfg.OAuth is nil, got: %v", out["oauth"])
 	}
+	if _, ok := out["source"]; ok {
+		t.Errorf("PalbaseGenerated.json must not carry a 'source' key — runtime routes by url alone")
+	}
 }
 
 // TestWriteGeneratedConfigJSON_OAuth pins the JSON shape projects
@@ -48,7 +50,6 @@ func TestWriteGeneratedConfigJSON_OAuth(t *testing.T) {
 		URL:    "https://abc.dev.palbase.studio",
 		APIKey: "pb_abc_cXXXX",
 		Branch: "main",
-		Source: "remote",
 		OAuth: &swiftOAuthConfig{
 			Apple: &swiftOAuthApple{Enabled: true},
 			Google: &swiftOAuthGoogle{
