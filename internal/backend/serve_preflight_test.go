@@ -1,9 +1,45 @@
 package backend
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// backendDepMissing decides whether `palbase serve` must run `npm install`
+// before bundling controllers/. Regression guard: the old flat-redesign dropped
+// the auto-install with `init`, so a `git clone` + `palbase serve` left
+// @palbase/backend absent and every controller silently skipped. serve must
+// detect the absence (install) and trust a present dir (skip the slow install).
+func TestBackendDepMissing(t *testing.T) {
+	tests := []struct {
+		name      string
+		installed bool // node_modules/@palbase/backend present on disk
+		want      bool // backendDepMissing == true → serve should install
+	}{
+		{name: "fresh clone, no node_modules → missing", installed: false, want: true},
+		{name: "installed → present", installed: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.installed {
+				pkgDir := filepath.Join(dir, "node_modules", "@palbase", "backend")
+				if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(pkgDir, "package.json"),
+					[]byte(`{"name":"@palbase/backend"}`), 0o644); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+			if got := backendDepMissing(dir); got != tt.want {
+				t.Fatalf("backendDepMissing(%q) = %v, want %v", dir, got, tt.want)
+			}
+		})
+	}
+}
 
 // branchPreflightError is the pure status→guidance mapping that decides whether
 // `palbase serve` can back local dev with a branch's deployed stack.

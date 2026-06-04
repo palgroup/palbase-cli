@@ -316,6 +316,33 @@ func extractFS(src embed.FS, root, target string) error {
 
 // ── subcommands ─────────────────────────────────────────────────────────
 
+// backendDepMissing reports whether the project's @palbase/backend is absent
+// from node_modules. serve bundles controllers/ with @palbase/backend external,
+// resolving it from node_modules at require() time, so when it's missing every
+// controller fails to load and serve must install deps first. A present dir is
+// trusted — a present-but-broken install surfaces via the bundler's own error.
+func backendDepMissing(projectDir string) bool {
+	_, err := os.Stat(filepath.Join(projectDir, "node_modules", "@palbase", "backend"))
+	return os.IsNotExist(err)
+}
+
+// installNodeDeps runs `npm install` in dir so a freshly-cloned project ships
+// with @palbase/backend (and any other declared deps) on disk before serve
+// bundles controllers/. Honours an existing package-lock.json, prefers `npm`
+// because that's the only manager the template targets.
+func installNodeDeps(dir string) error {
+	bin, err := exec.LookPath("npm")
+	if err != nil {
+		return fmt.Errorf("npm not found in PATH — install Node.js (https://nodejs.org) and re-run")
+	}
+	fmt.Println("→ installing dependencies (npm install) ...")
+	cmd := exec.Command(bin, "install", "--silent", "--no-audit", "--no-fund")
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // resolveDevProjectRef picks the ref the dev server should build its
 // <ref>.<host> URL from. Kong only routes the branch endpoint_ref
 // subdomain, so prefer the endpoint_ref apikey.reveal returns. When
@@ -411,6 +438,19 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			controllersDir := filepath.Join(cwd, "controllers")
 			if _, err := os.Stat(controllersDir); err != nil {
 				return fmt.Errorf("no controllers/ directory in cwd — run from your project root (clone it with `git clone`)")
+			}
+
+			// Controllers import @palbase/backend (Controller/Get/Body decorators)
+			// and the bundler keeps it external, require()ing it from the project's
+			// node_modules at load time. The new flow is `git clone` + `palbase
+			// serve` — no scaffold step installs deps anymore — so a fresh clone has
+			// no node_modules and every controller would fail to load (silently
+			// skipped → "registered 0 route(s)"). Install once when @palbase/backend
+			// is absent so a clean clone serves in one step.
+			if backendDepMissing(cwd) {
+				if err := installNodeDeps(cwd); err != nil {
+					return fmt.Errorf("@palbase/backend is not installed and `npm install` failed: %w\nfix the error above (or run `npm install` manually) and re-run `palbase serve`", err)
+				}
 			}
 
 			// Regenerate palbase-env.d.ts from db/schema.ts so the project's
