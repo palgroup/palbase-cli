@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -35,6 +36,7 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase secret list                   List all env vars (secrets shown masked).
   palbase secret remove KEY             Delete an env var.
   palbase secret pull                   Write the branch's env vars (decrypted) to .env.local.
+  palbase secret push                   Push local .env.local changes back to the branch.
 
 All changes are applied to the branch's remote configuration via Studio tRPC.`,
 	}
@@ -43,6 +45,7 @@ All changes are applied to the branch's remote configuration via Studio tRPC.`,
 		listCmd(r.Studio),
 		removeCmd(r.Studio),
 		pullCmd(r.Studio),
+		pushCmd(r.Studio),
 	)
 	return cmd
 }
@@ -205,6 +208,112 @@ The file is gitignored by the scaffold — secrets never enter git.`,
 	cmd.Flags().StringVarP(&outFlag, "out", "o", "", "Output dotenv file (default .env.local)")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite the file with exactly the remote set (no merge)")
 	return cmd
+}
+
+func pushCmd(studioFn func() *studio.Client) *cobra.Command {
+	var (
+		refFlag    string
+		inFlag     string
+		secretKeys []string
+		dryRun     bool
+	)
+	cmd := &cobra.Command{
+		Use:   "push",
+		Short: "Push local .env.local changes back to the branch",
+		Long: `Read a local dotenv file (default .env.local) and upsert every var to the
+branch's remote config — the inverse of ` + "`secret pull`" + `.
+
+Only keys whose value DIFFERS from remote (or are new) are written, so a push
+after a pull is a no-op. A key's secret-ness is preserved from remote; mark NEW
+keys as secret with --secret KEY1,KEY2. Push never DELETES remote keys that are
+absent locally (use ` + "`secret remove`" + ` for that).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := projectRef(refFlag)
+			if err != nil {
+				return err
+			}
+			inPath := inFlag
+			if inPath == "" {
+				inPath = ".env.local"
+			}
+			local, _ := loadDotenv(inPath, false)
+			if len(local) == 0 {
+				return fmt.Errorf("%s has no env vars to push", inPath)
+			}
+
+			// Current remote state: which keys exist + their plain values +
+			// secret-ness. Secrets come back masked (value nil), so a secret's
+			// value always counts as "changed" and is re-pushed (we can't compare
+			// a masked value) — acceptable, the upsert is idempotent.
+			var remote []envVar
+			if err := studioFn().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &remote); err != nil {
+				return fmt.Errorf("env.list: %w", err)
+			}
+			remotePlain := map[string]string{}
+			remoteSecret := map[string]bool{}
+			for _, r := range remote {
+				remoteSecret[r.Key] = r.IsSecret
+				if r.Value != nil {
+					remotePlain[r.Key] = *r.Value
+				}
+			}
+			markSecret := map[string]bool{}
+			for _, k := range secretKeys {
+				markSecret[strings.TrimSpace(k)] = true
+			}
+
+			pushed := 0
+			for _, key := range sortedKeys(local) {
+				val := local[key]
+				_, existsRemote := remoteSecret[key]
+				isSecret := remoteSecret[key] || markSecret[key]
+				// Skip plain keys whose remote value already matches (no-op push).
+				if existsRemote && !isSecret {
+					if cur, ok := remotePlain[key]; ok && cur == val {
+						continue
+					}
+				}
+				if dryRun {
+					fmt.Fprintf(cmd.OutOrStdout(), "would push %s%s\n", key, secretTag(isSecret))
+					pushed++
+					continue
+				}
+				if err := studioFn().Mutation(cmd.Context(), "env.set", map[string]any{
+					"ref": ref, "key": key, "value": val, "isSecret": isSecret,
+				}, nil); err != nil {
+					return fmt.Errorf("env.set %s: %w", key, err)
+				}
+				pushed++
+			}
+			verb := "pushed"
+			if dryRun {
+				verb = "would push"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s %d changed var(s) from %s\n", verb, pushed, inPath)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().StringVarP(&inFlag, "in", "i", "", "Input dotenv file (default .env.local)")
+	cmd.Flags().StringSliceVar(&secretKeys, "secret", nil, "Mark these NEW keys as encrypted secrets (comma-separated)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would change without writing")
+	return cmd
+}
+
+func secretTag(isSecret bool) string {
+	if isSecret {
+		return " (secret)"
+	}
+	return ""
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // loadDotenv reads an existing dotenv file into a map + key order. When force is
