@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,23 +15,40 @@ import (
 )
 
 // controllerFixture renders a controllers/*.js CJS module that default-exports
-// a ControllerDef ({ __palbase:'controller', basePath, routes }). The routes
-// arg is a literal JS object body of `mapKey: <RouteDef literal>` entries. These
-// are plain CJS objects with the right __palbase discriminants — they do NOT
-// require @palbase/backend, because the /openapi.json builder only reads the
-// def SHAPE off the default export (it never invokes the handler). The handler
-// is a real function so `hasHandler`/dispatch checks pass.
-func controllerFixture(basePath, routesBody string) string {
+// a @Controller CLASS, stamped with the exact runtime registry symbols the real
+// @palbase/backend decorators produce: `__palbase:'controller'` on the class,
+// the controller meta on Symbol.for("palbase.backend.controllerMeta"), the route
+// ARRAY on Symbol.for("palbase.backend.routes"), and the @Returns buffer on
+// Symbol.for("palbase.backend.returnBuffer"). This is a faithful CJS twin of the
+// compiled SDK output — the dev-server reads the registry the SAME way worker.js
+// does, so a fixture that stamps these symbols exercises the real load path
+// without needing decorator transpilation. `metaBody` is the controllerMeta
+// object literal ({ __palbase:'controller', basePath, defaultAuth? }); `routes`
+// is a JS array literal of RouteMeta; `methods` is a class-body of methods;
+// `returnBuf` is the returnBuffer object literal (fnName → zod-ish). The methods
+// are real functions so dispatch runs.
+func controllerFixture(metaBody, routes, methods, returnBuf string) string {
 	return fmt.Sprintf(`
-module.exports.default = {
-  __palbase: 'controller',
-  basePath: %q,
-  routes: {
+'use strict';
+const ROUTES = Symbol.for('palbase.backend.routes');
+const RETBUF = Symbol.for('palbase.backend.returnBuffer');
+const CTRLMETA = Symbol.for('palbase.backend.controllerMeta');
+class Ctrl {
 %s
-  },
-};
-`, basePath, routesBody)
 }
+Ctrl.__palbase = 'controller';
+Ctrl[CTRLMETA] = %s;
+Ctrl[ROUTES] = %s;
+Ctrl[RETBUF] = %s;
+module.exports.default = Ctrl;
+`, methods, metaBody, routes, returnBuf)
+}
+
+// fakeZod returns a JS expression for a fake zod schema: a `_def` object (so
+// zodToJSON's `typeof z._def === 'object'` guard passes → the stub converter
+// runs) plus a permissive safeParse (so request validation always passes through
+// in the dispatch tests).
+const fakeZod = `{ _def: { typeName: 'ZodObject' }, safeParse: (v) => ({ success: true, data: v }) }`
 
 // TestServeOpenAPISpec boots the embedded dev-server against a tiny temp
 // controllers/ fixture, fetches GET /openapi.json, and asserts the served spec
@@ -40,16 +56,18 @@ module.exports.default = {
 //   - openapi == "3.1.0"
 //   - components.securitySchemes has bearerAuth + apiKey
 //   - an auth-required route has security [bearerAuth, apiKey] + a 401
-//   - an explicit auth:false route has security [{}] and NO 401
+//   - an explicit auth:false route (via @Controller defaultAuth:false) has
+//     security [{}] and NO 401
 //   - a rateLimit route has x-rate-limit
-//   - an input-schema route has requestBody.content.application/json.schema
-//   - the full route path is basePath + route.path (controller composition)
+//   - a @Body route has requestBody.content.application/json.schema
+//   - a @Query route emits in:query parameters; a @Param route emits in:path
+//   - the full route path is basePath + subpath (controller composition)
+//   - errors are global throw classes → NO x-palbase-errors / declared statuses
 //
-// The fixture controllers are plain CJS modules that do NOT require
-// @palbase/backend (the dev-server only needs that per-request inside the
-// handler, which /openapi.json never hits). zod-to-json-schema is supplied as a
-// local stub via NODE_PATH so the input-schema body is deterministic and the
-// test is fully self-contained — no global npm install required.
+// The fixture controllers stamp the real runtime registry symbols on a class
+// (controllerFixture), so the dev-server's getRoutes/symbol-fallback load path
+// is exercised. zod-to-json-schema is supplied as a local stub via NODE_PATH so
+// the schema bodies are deterministic and the test is self-contained.
 func TestServeOpenAPISpec(t *testing.T) {
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
@@ -61,41 +79,46 @@ func TestServeOpenAPISpec(t *testing.T) {
 
 	// todos controller: basePath "/todos".
 	//  - create: POST "/create" → full path /todos/create. auth required,
-	//    rateLimit, input/output schemas (fake zod: zodToJSON only checks for a
-	//    _def object, our stub converter returns a fixed schema), declared error.
+	//    rateLimit, @Body + @Returns (fake zod: zodToJSON only checks for a _def
+	//    object; the stub converter returns a fixed schema).
 	//  - byId: GET "/:id" → full path /todos/:id (→ {id}), auth omitted →
-	//    secure-by-default (required), ByParam operationId.
-	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture("/todos", `
-    create: {
-      __palbase: 'route', method: 'POST', path: '/create',
-      handler: {
-        __palbase: 'handler',
-        auth: { required: true },
-        rateLimit: { max: 5, window: 60 },
-        input: { _def: { kind: 'input' }, safeParse: (v) => ({ success: true, data: v }) },
-        output: { _def: { kind: 'output' } },
-        errors: { AlreadyExists: { status: 409, code: 'already_exists', description: 'Duplicate' } },
-        handler: async () => ({ ok: true }),
-      },
-    },
-    byId: {
-      __palbase: 'route', method: 'GET', path: '/:id',
-      handler: { __palbase: 'handler', handler: async () => ({ id: 1 }) },
-    },`))
+	//    secure-by-default (required), ByParam operationId, @Param("id").
+	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture(
+		`{ __palbase: 'controller', basePath: '/todos' }`,
+		`[
+      { method: 'POST', subpath: '/create', fnName: 'create',
+        options: { auth: { required: true }, rateLimit: { max: 5, window: 60 } },
+        params: [ { index: 0, kind: 'body', schema: `+fakeZod+` } ] },
+      { method: 'GET', subpath: '/:id', fnName: 'byId',
+        options: {},
+        params: [ { index: 0, kind: 'param', name: 'id' } ] },
+    ]`,
+		`
+  async create() { return { ok: true }; }
+  async byId() { return { id: 1 }; }`,
+		`{ create: { _def: { typeName: 'ZodObject' } } }`,
+	))
 
-	// public controller: basePath "" → full path "/public". Explicit opt-out →
-	// optional auth, no 401.
-	mustWrite(t, root, "controllers/public.controller.js", controllerFixture("", `
-    list: {
-      __palbase: 'route', method: 'GET', path: '/public',
-      handler: { __palbase: 'handler', auth: false, handler: async () => ({ public: true }) },
-    },`))
+	// public controller: basePath "" + @Controller defaultAuth:false → full path
+	// "/public". Explicit opt-out cascades to the route → optional auth, no 401.
+	// The route also declares a @Query so the spec carries in:query parameters.
+	mustWrite(t, root, "controllers/public.controller.js", controllerFixture(
+		`{ __palbase: 'controller', basePath: '', defaultAuth: false }`,
+		`[
+      { method: 'GET', subpath: '/public', fnName: 'list',
+        options: {},
+        params: [ { index: 0, kind: 'query', schema: `+fakeZod+` } ] },
+    ]`,
+		`
+  async list() { return { public: true }; }`,
+		`{}`,
+	))
 
 	// A controller that throws on require must be SKIPPED, not break the spec.
 	mustWrite(t, root, "controllers/broken.controller.js", `throw new Error('boom on require');`)
 
-	// A file whose default export is NOT a controller must be SKIPPED (no v1
-	// fallback) and must not leak any route into the spec.
+	// A file whose default export is NOT a controller class must be SKIPPED and
+	// must not leak any route into the spec.
 	mustWrite(t, root, "controllers/notacontroller.js", `module.exports.default = { handler: async () => ({}) };`)
 
 	writeZodToJSONStub(t, root)
@@ -192,15 +215,16 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if rbJSON == nil || rbJSON["schema"] == nil {
 		t.Fatalf("requestBody.content.application/json.schema missing: %v", reqBody)
 	}
-	// declared error 409 present.
-	if resps["409"] == nil {
-		t.Fatalf("declared error 409 missing: %v", resps)
+	// Errors are global throw classes now: NO declared 409 + NO x-palbase-errors.
+	if resps["409"] != nil {
+		t.Fatalf("unexpected declared error 409 (errors are global throw classes): %v", resps)
 	}
-	if createOp["x-palbase-errors"] == nil {
-		t.Fatalf("x-palbase-errors missing on op with declared errors")
+	if createOp["x-palbase-errors"] != nil {
+		t.Fatalf("x-palbase-errors must NOT be emitted (errors are global throw classes)")
 	}
 
-	// explicit auth:false endpoint: GET /public → security [{}], NO 401.
+	// explicit auth:false (via @Controller defaultAuth:false cascading to the
+	// route): GET /public → security [{}], NO 401, and an in:query parameter.
 	publicOp := operationAt(t, paths, "/public", "get")
 	sec, _ := publicOp["security"].([]any)
 	if len(sec) != 1 {
@@ -213,14 +237,48 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if pubResps["401"] != nil {
 		t.Fatalf("auth:false op must NOT have 401: %v", pubResps)
 	}
+	// @Query → an in:query parameter (the stub schema exposes a `title` prop).
+	if !hasParameterIn(publicOp, "query") {
+		t.Fatalf("@Query route missing in:query parameters: %v", publicOp["parameters"])
+	}
 
 	// :id → {id} path key + ByParam operationId; secure-by-default (auth
-	// omitted). Full path = basePath /todos + route path /:id → /todos/{id}.
+	// omitted). Full path = basePath /todos + subpath /:id → /todos/{id}. The
+	// @Param("id") synthesizes an in:path parameter named "id".
 	byIdOp := operationAt(t, paths, "/todos/{id}", "get")
 	if byIdOp["operationId"] != "getTodosById" {
 		t.Fatalf("operationId = %v, want getTodosById", byIdOp["operationId"])
 	}
 	assertAuthRequiredSecurity(t, byIdOp)
+	if !hasParameterNamedIn(byIdOp, "id", "path") {
+		t.Fatalf("@Param('id') route missing in:path parameter 'id': %v", byIdOp["parameters"])
+	}
+}
+
+// hasParameterIn reports whether the operation declares at least one parameter
+// with the given `in` location.
+func hasParameterIn(op map[string]any, where string) bool {
+	params, _ := op["parameters"].([]any)
+	for _, p := range params {
+		pm, _ := p.(map[string]any)
+		if pm != nil && pm["in"] == where {
+			return true
+		}
+	}
+	return false
+}
+
+// hasParameterNamedIn reports whether the operation declares a parameter with
+// the given name AND `in` location.
+func hasParameterNamedIn(op map[string]any, name, where string) bool {
+	params, _ := op["parameters"].([]any)
+	for _, p := range params {
+		pm, _ := p.(map[string]any)
+		if pm != nil && pm["name"] == name && pm["in"] == where {
+			return true
+		}
+	}
+	return false
 }
 
 // assertAuthRequiredSecurity checks security == [{bearerAuth:[]},{apiKey:[]}].
@@ -319,122 +377,67 @@ func freeTCPPort(t *testing.T) int {
 	return port
 }
 
-// TestServeOpenAPIErrorOrdering is a regression test for the dev-server's
-// x-palbase-errors key ordering. The Go OpenAPI generator stores declared
-// errors in a Go map[string]any and re-marshals it through a flat map, so the
-// served error-NAME keys come out GLOBALLY lexicographically sorted. The
-// dev-server originally built that object grouped by status, so its insertion
-// order was status-grouped (NOT global-sorted), and for an endpoint whose error
-// names don't happen to sort the same as their status grouping the served bytes
-// diverged from prod — breaking byte-identical local codegen.
+// TestServeQueryAndParamDispatch verifies the class-controller positional param
+// injection end-to-end: a @Query param receives the parsed URL query and a
+// @Param param receives the matched path segment, both injected by index. The
+// fixture stamps the registry symbols on a class (the real load path) and the
+// methods echo back what they received so the test asserts the injected values.
 //
-// Fixture: things/post declares three errors whose names are NOT in
-// status-grouping order — zeta@409, alpha@422, mid@409. Built grouped by status
-// (409 seen first → mid,zeta; then 422 → alpha) the insertion order would be
-// [mid, zeta, alpha]. The fix re-emits globally sorted, so the SERIALIZED keys
-// must be [alpha, mid, zeta]. We read the order from the RAW response bytes
-// (JSON.stringify preserves object insertion order) because a parsed Go map
-// loses key order.
-func TestServeOpenAPIErrorOrdering(t *testing.T) {
-	nodeBin, err := exec.LookPath("node")
-	if err != nil {
+//	GET /echo/abc?name=joe → method(query, id) → { name:'joe', id:'abc' }
+func TestServeQueryAndParamDispatch(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not on PATH")
 	}
-	requireEsbuild(t)
 
 	root := t.TempDir()
 
-	// Three errors deliberately NOT in status-grouping order. Also an object-form
-	// rateLimit { max, window } (prod emits object-only x-rate-limit too).
-	// Controller basePath "/things", route POST "/" → full path /things.
-	mustWrite(t, root, "controllers/things.controller.js", controllerFixture("/things", `
-    create: {
-      __palbase: 'route', method: 'POST', path: '/',
-      handler: {
-        __palbase: 'handler',
-        auth: { required: true },
-        rateLimit: { max: 10, window: 45 },
-        errors: {
-          zeta: { status: 409, code: 'zeta_conflict', description: 'Zeta' },
-          alpha: { status: 422, code: 'alpha_invalid', description: 'Alpha' },
-          mid: { status: 409, code: 'mid_conflict', description: 'Mid' },
-        },
-        handler: async () => ({ ok: true }),
-      },
-    },`))
+	// A controller whose method declares @Query (index 0) + @Param("id") (index
+	// 1). The fakeZod query schema passes the raw query through. basePath "/echo",
+	// subpath "/:id" → full path /echo/{id}; auth:false via defaultAuth.
+	mustWrite(t, root, "controllers/echo.controller.js", controllerFixture(
+		`{ __palbase: 'controller', basePath: '/echo', defaultAuth: false }`,
+		`[
+      { method: 'GET', subpath: '/:id', fnName: 'echo',
+        options: {},
+        params: [
+          { index: 0, kind: 'query', schema: `+fakeZod+` },
+          { index: 1, kind: 'param', name: 'id' },
+        ] },
+    ]`,
+		`
+  async echo(query, id) { return { name: query.name, id: id }; }`,
+		`{}`,
+	))
 
-	writeZodToJSONStub(t, root)
+	writeBackendStub(t, root)
 
-	// Boot the embedded dev-server exactly like TestServeOpenAPISpec.
-	devDir := t.TempDir()
-	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
-		t.Fatalf("extract dev server: %v", err)
-	}
-
-	port := freeTCPPort(t)
+	port := startDevServer(t, root)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, nodeBin, filepath.Join(devDir, "dev-server.js"))
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
-		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
-		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
-		"PALBASE_PROJECT_REF=local",
-	)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start dev-server: %v", err)
+	body := getJSONUntilReady(t, ctx, port, "/echo/abc?name=joe")
+	if body["name"] != "joe" {
+		t.Fatalf("@Query injection: name = %v, want joe (body %v)", body["name"], body)
 	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
-
-	// Wait until ready (parsed), then re-fetch the RAW bytes to read key order.
-	spec := fetchSpecUntilReady(t, ctx, port)
-	raw := fetchSpecRaw(t, ctx, port)
-
-	paths, _ := spec["paths"].(map[string]any)
-	postOp := operationAt(t, paths, "/things", "post")
-
-	// Sanity: the extension object exists and has exactly the three names.
-	xerr, _ := postOp["x-palbase-errors"].(map[string]any)
-	if len(xerr) != 3 || xerr["alpha"] == nil || xerr["mid"] == nil || xerr["zeta"] == nil {
-		t.Fatalf("x-palbase-errors = %v, want keys {alpha,mid,zeta}", postOp["x-palbase-errors"])
-	}
-
-	// Object-form rateLimit → x-rate-limit { max:10, window:45 }.
-	rl, _ := postOp["x-rate-limit"].(map[string]any)
-	if rl == nil || rl["max"] != float64(10) || rl["window"] != float64(45) {
-		t.Fatalf("x-rate-limit = %v, want {max:10,window:45}", postOp["x-rate-limit"])
-	}
-
-	// SERIALIZED key order of x-palbase-errors on POST /things — read from raw.
-	got := orderedKeysOf(t, raw, "paths", "/things", "post", "x-palbase-errors")
-	want := []string{"alpha", "mid", "zeta"}
-	if !equalStrings(got, want) {
-		t.Fatalf("x-palbase-errors serialized key order = %v, want %v "+
-			"(status-grouped insertion order would be [mid zeta alpha])", got, want)
+	if body["id"] != "abc" {
+		t.Fatalf("@Param injection: id = %v, want abc (body %v)", body["id"], body)
 	}
 }
 
-// TestServeControllerDispatch boots the embedded dev-server against a v2
-// controller fixture (db/schema.ts + controllers/todos.controller.ts +
-// handlers/todos/*.ts shape, lowered to CJS) and asserts the dev-server
-// actually DISPATCHES a request to the route's handler:
+// TestServeControllerDispatch boots the embedded dev-server against a
+// class-controller fixture (the registry symbols stamped on a class) and asserts
+// the dev-server actually DISPATCHES a request by calling the class method:
 //
-//	GET /todos → 200 with the handler's output {items:[...]}
+//	GET /todos → 200 with the method's output {items:[...]}
 //
-// This is the controller→route-table→handler path (not just the openapi
-// shape): basePath "/todos" + route.path "/" composes to /todos, the GET verb
-// matches, and the handler at routes.list.handler.handler runs. The route is
-// auth:false so no palauth round-trip is needed. A minimal @palbase/backend
-// stub on NODE_PATH satisfies installRuntime()'s `require('@palbase/backend')
-// .__setRuntime(...)` (the handler imports nothing — it returns a literal).
+// This is the controller→registry→method-call path (not just the openapi
+// shape): basePath "/todos" + subpath "/" composes to /todos, the GET verb
+// matches, the route is found by fnName, the class is instantiated once, and the
+// method runs with `this` bound (the @Req param hands the whole request through
+// so the test can read req.method). The route is auth:false (defaultAuth) so no
+// palauth round-trip is needed. A minimal @palbase/backend stub on NODE_PATH
+// satisfies installRuntime()'s __setRuntime call.
 func TestServeControllerDispatch(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not on PATH")
@@ -442,28 +445,22 @@ func TestServeControllerDispatch(t *testing.T) {
 
 	root := t.TempDir()
 
-	// A handler colocated under handlers/, imported by the controller — the v2
-	// authoring layout. Lowered to CJS: the handler is a plain function and the
-	// def carries the __palbase:"handler" discriminant.
-	mustWrite(t, root, "handlers/todos/list.js", `
-module.exports.default = {
-  __palbase: 'handler',
-  auth: false,
-  handler: async (req) => ({ items: [{ id: 't1', title: 'first' }], gotMethod: req.method }),
-};
-`)
-	// The controller wires the handler at route map key "list": GET "/" under
-	// basePath "/todos" → full path /todos.
-	mustWrite(t, root, "controllers/todos.controller.js", `
-const list = require('../handlers/todos/list.js').default;
-module.exports.default = {
-  __palbase: 'controller',
-  basePath: '/todos',
-  routes: {
-    list: { __palbase: 'route', method: 'GET', path: '/', handler: list },
-  },
-};
-`)
+	// A class controller stamped with the registry symbols. The method declares a
+	// @Req param (index 0) so the dev-server injects the whole request and the
+	// test can assert req.method threaded through. `this.first` exercises the
+	// cached-instance `this` binding.
+	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture(
+		`{ __palbase: 'controller', basePath: '/todos', defaultAuth: false }`,
+		`[
+      { method: 'GET', subpath: '/', fnName: 'list',
+        options: {},
+        params: [ { index: 0, kind: 'req' } ] },
+    ]`,
+		`
+  constructor() { this.title = 'first'; }
+  async list(req) { return { items: [{ id: 't1', title: this.title }], gotMethod: req.method }; }`,
+		`{}`,
+	))
 
 	writeBackendStub(t, root)
 
@@ -480,34 +477,33 @@ module.exports.default = {
 	}
 	first, _ := items[0].(map[string]any)
 	if first["id"] != "t1" || first["title"] != "first" {
-		t.Fatalf("dispatched handler output = %v, want {id:t1,title:first}", first)
+		t.Fatalf("dispatched method output = %v, want {id:t1,title:first} (this-binding broken?)", first)
 	}
-	// The dev-server threaded the real PBRequest (req.method) into the handler.
+	// The dev-server threaded the real PBRequest (req.method) into the method.
 	if body["gotMethod"] != "GET" {
-		t.Fatalf("handler saw req.method = %v, want GET", body["gotMethod"])
+		t.Fatalf("method saw req.method = %v, want GET", body["gotMethod"])
 	}
 }
 
 // TestServeExtensionlessImports is the regression test for the real-project
 // bug: `palbase serve` loaded controllers by require()ing the raw .ts, which
-// Node's loader cannot resolve when controllers use the v2 canonical
-// EXTENSIONLESS relative imports (`import x from "../handlers/foo"`,
-// `"../../services/bar.service"`). Result: every controller failed to load and
-// 0 routes registered.
+// Node's loader cannot resolve when controllers use the canonical EXTENSIONLESS
+// relative imports (`import x from "../services/foo"`). Result: every controller
+// failed to load and 0 routes registered.
 //
-// The fixture is the REAL v2 shape — .ts files with extensionless imports
-// across controllers → handlers → services:
+// The fixture is the REAL class-controller shape — .ts files with @Controller/
+// @Get/@Req decorators and extensionless imports across controllers → services:
 //
-//	controllers/todos.ts   import "../handlers/todos/list"   (extensionless)
-//	handlers/todos/list.ts import "../../services/todo.service" (extensionless)
+//	controllers/todos.controller.ts import "../services/todo.service" (extensionless)
 //	services/todo.service.ts
-//	controllers/health.ts  import "../handlers/health"        (extensionless)
-//	handlers/health.ts
+//	controllers/health.controller.ts (no import)
 //
 // The dev-server must esbuild-bundle these (resolving the extensionless .ts
-// imports + the @palbase/backend external) exactly as deploy does, then
-// register + dispatch. We assert BOTH routes register and return 200 with the
-// handler output that flows through the imported service.
+// imports + applying experimentalDecorators from the fixture tsconfig.json +
+// keeping @palbase/backend external) exactly as deploy does, then register +
+// dispatch by calling the class method. We assert BOTH routes register and
+// return 200 with the method output that flows through the imported service. The
+// backend stub implements the real decorators (stamping the registry symbols).
 func TestServeExtensionlessImports(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not on PATH")
@@ -515,48 +511,43 @@ func TestServeExtensionlessImports(t *testing.T) {
 
 	root := t.TempDir()
 
-	// A service two levels up from the handler — extensionless import.
+	// experimentalDecorators tsconfig — esbuild auto-discovers it from the entry
+	// file's directory and lowers the @Controller/@Get decorators.
+	mustWrite(t, root, "tsconfig.json", `{ "compilerOptions": { "experimentalDecorators": true, "target": "es2022", "module": "esnext" } }`)
+
+	// A service imported by the controller — extensionless import.
 	mustWrite(t, root, "services/todo.service.ts", `
 export function listTodos() {
   return [{ id: "t1", title: "first" }];
 }
 `)
-	// Handler imports the service WITHOUT a .ts/.js extension (canonical v2).
-	mustWrite(t, root, "handlers/todos/list.ts", `
-import { defineHandler } from "@palbase/backend";
-import { listTodos } from "../../services/todo.service";
+	// Controller imports the service WITHOUT a .ts/.js extension (canonical). The
+	// method declares @Req so the dev-server injects the whole request (req.method
+	// echoes back). auth:false via @Controller defaultAuth.
+	mustWrite(t, root, "controllers/todos.controller.ts", `
+import { Controller, Get, Req } from "@palbase/backend";
+import { listTodos } from "../services/todo.service";
 
-export default defineHandler({
-  auth: false,
-  handler: async (req) => ({ items: listTodos(), gotMethod: req.method }),
-});
-`)
-	// Controller imports the handler WITHOUT an extension.
-	mustWrite(t, root, "controllers/todos.ts", `
-import { defineController, route } from "@palbase/backend";
-import list from "../handlers/todos/list";
-
-export default defineController("/todos", {
-  list: route.get("/", list),
-});
+@Controller("/todos", { auth: false })
+export default class TodosController {
+  @Get("")
+  list(@Req() req: any) {
+    return { items: listTodos(), gotMethod: req.method };
+  }
+}
 `)
 
-	// A second controller → handler chain (no service), also extensionless.
-	mustWrite(t, root, "handlers/health.ts", `
-import { defineHandler } from "@palbase/backend";
+	// A second controller (no service), also class-shaped.
+	mustWrite(t, root, "controllers/health.controller.ts", `
+import { Controller, Get } from "@palbase/backend";
 
-export default defineHandler({
-  auth: false,
-  handler: async () => ({ status: "ok" }),
-});
-`)
-	mustWrite(t, root, "controllers/health.ts", `
-import { defineController, route } from "@palbase/backend";
-import health from "../handlers/health";
-
-export default defineController("/health", {
-  check: route.get("", health),
-});
+@Controller("/health", { auth: false })
+export default class HealthController {
+  @Get("")
+  check() {
+    return { status: "ok" };
+  }
+}
 `)
 
 	writeBackendStub(t, root)
@@ -577,10 +568,10 @@ export default defineController("/health", {
 		t.Fatalf("GET /todos output = %v, want {id:t1,title:first}", first)
 	}
 	if todos["gotMethod"] != "GET" {
-		t.Fatalf("handler saw req.method = %v, want GET", todos["gotMethod"])
+		t.Fatalf("method saw req.method = %v, want GET", todos["gotMethod"])
 	}
 
-	// GET /health → 200 (basePath "/health" + route path "" → /health).
+	// GET /health → 200 (basePath "/health" + subpath "" → /health).
 	health := getJSONUntilReady(t, ctx, port, "/health")
 	if health["status"] != "ok" {
 		t.Fatalf("GET /health = %v, want {status:ok}", health)
@@ -677,35 +668,103 @@ func getJSONUntilReady(t *testing.T, ctx context.Context, port int, path string)
 
 // writeBackendStub installs a minimal but FAITHFUL @palbase/backend on the
 // fixture's node_modules. It is kept external by the dev-server's esbuild
-// bundling (just like the real package), so a fixture controller/handler/
-// resource can `import { defineController, route, defineHandler, Resource }
-// from "@palbase/backend"` exactly as real v2 code does. The factories return
-// the same __palbase-tagged shapes as the real SDK (controller.ts / handler.ts /
-// resource.ts), and the runtime/Resource hooks satisfy installRuntime() +
-// bootResources() without a real install.
+// bundling (just like the real package), so a fixture controller can `import
+// { Controller, Get, Post, Body, Query, Param, User, Req, Returns } from
+// "@palbase/backend"` exactly as real class-controller code does. The decorators
+// stamp the SAME runtime registry symbols the compiled SDK produces
+// (Symbol.for("palbase.backend.routes") array, controllerMeta, returnBuffer),
+// so the dev-server's symbol-fallback load path is exercised end-to-end. The
+// runtime/Resource hooks satisfy installRuntime() + bootResources() without a
+// real install.
 func writeBackendStub(t *testing.T, root string) {
 	t.Helper()
 	mustWrite(t, root, "node_modules/@palbase/backend/package.json",
 		`{"name":"@palbase/backend","version":"0.0.0-test","main":"index.js"}`)
 	mustWrite(t, root, "node_modules/@palbase/backend/index.js", `
 'use strict';
-// defineHandler/defineController/route mirror the real SDK shapes so fixtures
-// author exactly as v2 code does (handler.ts / controller.ts).
-function defineHandler(config) { return Object.assign({ __palbase: 'handler' }, config); }
-function defineController(basePath, routes) { return { __palbase: 'controller', basePath, routes }; }
-function makeRoute(method) {
-  return function (path, handler) { return { __palbase: 'route', method, path, handler }; };
+// Faithful mini-SDK: the decorators accumulate route + param + return metadata
+// per class then stamp the registry symbols the dev-server (and worker.js) read.
+const ROUTES = Symbol.for('palbase.backend.routes');
+const RETBUF = Symbol.for('palbase.backend.returnBuffer');
+const CTRLMETA = Symbol.for('palbase.backend.controllerMeta');
+const PARAMBUF = Symbol.for('palbase.backend.paramBuffer');
+
+// Per-method param buffers live on the prototype during decoration (parameter
+// decorators run before the method decorator), keyed by fnName.
+function paramBufOf(proto) {
+  if (!proto[PARAMBUF]) proto[PARAMBUF] = {};
+  return proto[PARAMBUF];
 }
-const route = {
-  get: makeRoute('GET'), post: makeRoute('POST'), put: makeRoute('PUT'),
-  patch: makeRoute('PATCH'), delete: makeRoute('DELETE'),
+function paramDecorator(kind) {
+  return (schema) => (proto, propertyKey, index) => {
+    const buf = paramBufOf(proto);
+    if (!buf[propertyKey]) buf[propertyKey] = [];
+    const entry = { index, kind };
+    if (schema && typeof schema === 'object') entry.schema = schema;
+    buf[propertyKey].push(entry);
+  };
+}
+// @Param("name") takes a string name, not a schema.
+const Param = (name) => (proto, propertyKey, index) => {
+  const buf = paramBufOf(proto);
+  if (!buf[propertyKey]) buf[propertyKey] = [];
+  buf[propertyKey].push({ index, kind: 'param', name });
 };
+const Body = paramDecorator('body');
+const Query = paramDecorator('query');
+const Headers = paramDecorator('headers');
+const User = () => paramDecorator('user')();
+const OptionalUser = () => paramDecorator('optionalUser')();
+const Client = () => paramDecorator('client')();
+const RequestId = () => paramDecorator('requestId')();
+const TraceId = () => paramDecorator('traceId')();
+const Req = () => paramDecorator('req')();
+
+function methodDecorator(method) {
+  return (subpath, options) => (proto, propertyKey) => {
+    const Ctrl = proto.constructor;
+    if (!Ctrl[ROUTES]) Object.defineProperty(Ctrl, ROUTES, { value: [], enumerable: false, writable: true, configurable: true });
+    const params = (proto[PARAMBUF] && proto[PARAMBUF][propertyKey]) || [];
+    Ctrl[ROUTES].push({
+      method, subpath: subpath || '', fnName: propertyKey,
+      options: options || {},
+      params: params.slice().sort((a, b) => a.index - b.index),
+    });
+  };
+}
+const Get = methodDecorator('GET');
+const Post = methodDecorator('POST');
+const Put = methodDecorator('PUT');
+const Patch = methodDecorator('PATCH');
+const Delete = methodDecorator('DELETE');
+
+// @Returns(schema) buffers the return schema by fnName.
+const Returns = (schema) => (proto, propertyKey) => {
+  const Ctrl = proto.constructor;
+  if (!Ctrl[RETBUF]) Object.defineProperty(Ctrl, RETBUF, { value: {}, enumerable: false, writable: true, configurable: true });
+  Ctrl[RETBUF][propertyKey] = schema;
+};
+
+// @Controller(basePath, options?) stamps __palbase + controllerMeta.
+function Controller(basePath, options) {
+  return (Ctrl) => {
+    Ctrl.__palbase = 'controller';
+    const meta = { __palbase: 'controller', basePath: basePath || '' };
+    if (options && options.auth !== undefined) meta.defaultAuth = options.auth;
+    Object.defineProperty(Ctrl, CTRLMETA, { value: meta, enumerable: false, writable: true, configurable: true });
+    if (!Ctrl[ROUTES]) Object.defineProperty(Ctrl, ROUTES, { value: [], enumerable: false, writable: true, configurable: true });
+    return Ctrl;
+  };
+}
+
 class Resource {}
 const registry = [];
 module.exports = {
-  defineHandler, defineController, route, Resource,
-  // Runtime seam: record the installed services so a handler could read them
-  // (fixtures here return literals, so a no-op store is enough).
+  Controller, Get, Post, Put, Patch, Delete,
+  Body, Query, Headers, Param, User, OptionalUser, Client, RequestId, TraceId, Req, Returns,
+  Resource,
+  // Runtime seam: record the installed services (fixtures return literals, so a
+  // no-op store is enough).
   __setRuntime(services) { module.exports.__runtime = services; },
   __registerResource(r) { registry.push(r); },
   async __runResourceBoot() {},
@@ -714,98 +773,8 @@ module.exports = {
 `)
 }
 
-// fetchSpecRaw GETs /openapi.json once (the server is already known-ready) and
-// returns the raw response body so callers can inspect SERIALIZED key order,
-// which a parsed Go map would lose.
-func fetchSpecRaw(t *testing.T, ctx context.Context, port int) []byte {
-	t.Helper()
-	specURL := fmt.Sprintf("http://127.0.0.1:%d/openapi.json", port)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("fetch raw /openapi.json: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read raw /openapi.json body: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("raw /openapi.json status = %d, want 200\nbody: %s", resp.StatusCode, body)
-	}
-	return body
-}
-
-// orderedKeysOf navigates raw JSON object bytes down the given key path and
-// returns the target object's keys IN SERIALIZED ORDER. Each level is decoded
-// into map[string]json.RawMessage (which preserves the child bytes), then the
-// final object's keys are read in textual order with a json.Decoder token scan.
-func orderedKeysOf(t *testing.T, raw []byte, path ...string) []string {
-	t.Helper()
-	cur := json.RawMessage(raw)
-	for _, key := range path {
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(cur, &obj); err != nil {
-			t.Fatalf("decode object at %q: %v", key, err)
-		}
-		next, ok := obj[key]
-		if !ok {
-			t.Fatalf("key %q missing while navigating %v", key, path)
-		}
-		cur = next
-	}
-	keys, err := topLevelKeysInOrder(cur)
-	if err != nil {
-		t.Fatalf("read ordered keys at %v: %v", path, err)
-	}
-	return keys
-}
-
-// topLevelKeysInOrder returns the keys of a JSON object in serialized order by
-// scanning tokens (json.Decoder hands object keys back in document order).
-func topLevelKeysInOrder(raw []byte) ([]string, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, err
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return nil, fmt.Errorf("expected object, got %v", tok)
-	}
-	var keys []string
-	for dec.More() {
-		ktok, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		key, ok := ktok.(string)
-		if !ok {
-			return nil, fmt.Errorf("expected string key, got %v", ktok)
-		}
-		keys = append(keys, key)
-		// Consume the value (object/array/scalar) so the next token is a key.
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
-			return nil, err
-		}
-	}
-	return keys, nil
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // mustWrite writes body to root/rel, creating parent dirs. Shared by the
-// serve fixtures that materialise a temp endpoints/ tree.
+// serve fixtures that materialise a temp controllers/ tree.
 func mustWrite(t *testing.T, root, rel, body string) {
 	t.Helper()
 	p := filepath.Join(root, rel)

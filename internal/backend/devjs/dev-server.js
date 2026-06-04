@@ -1,20 +1,29 @@
 #!/usr/bin/env node
 /**
- * Palbase backend dev server (v2 — controllers/).
+ * Palbase backend dev server (class controllers).
  *
  * Local equivalent of the prod backend-runtime app-server
  * (modules/backend/internal/runtime/worker.js), tuned for hot reload +
  * interactive output. The shape of every user-facing surface (controllers,
- * handlers, the per-request `req`, the imported singleton services, resources)
+ * the per-request injection, the imported singleton services, resources)
  * matches prod so what runs under `palbase serve` runs identically in
- * services-shared/br-<ref> after a `git push` deploy.
+ * services-shared/br-<ref> after a `git push` deploy. This file is worker.js's
+ * LOCAL TWIN — its dispatch mirrors worker.js EXACTLY (keep them in lockstep).
  *
  * Routing surface: controllers/ ONLY. A controllers/*.ts file default-exports a
- * ControllerDef (`__palbase === 'controller'`); each route in `routes[mapKey]`
- * carries a HandlerDef at `.handler`. The full route path is `basePath +
- * route.path` and the verb is `route.method` — identical to the runtime's
- * dispatch + extract_meta.js + generator.go. There is NO v1 `endpoints/`
- * filename→method path (clean break).
+ * @Controller CLASS (`__palbase === 'controller'` is stamped on the class). The
+ * route registry lives in an ARRAY on `Symbol.for("palbase.backend.routes")`,
+ * each entry a RouteMeta `{ method, subpath, fnName, options:{auth?,rateLimit?},
+ * params: ParamMeta[] }`; `@Returns(zod)` schemas live in a separate buffer on
+ * `Symbol.for("palbase.backend.returnBuffer")` keyed by fnName; the controller
+ * meta (`{ __palbase, basePath, defaultAuth? }`) lives on
+ * `Symbol.for("palbase.backend.controllerMeta")`. The full route path is
+ * `basePath + subpath`; the verb is `route.method`. Each route is dispatched by
+ * calling the class method `instance[fnName](...args)` with positional param
+ * injection — identical to the runtime's dispatch + extract_meta.js +
+ * generator.go. There is NO old functional model (`controller.routes[mapKey]
+ * .handler` / `req.errors`) — clean cutover; errors are the global throw classes
+ * (Conflict/NotFound/…) caught by SHAPE (`{ status:number, error:string }`).
  *
  * Invocation (set by the Go CLI):
  *   PALBASE_DEV_PORT=4003 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
@@ -136,39 +145,121 @@ const CONTROLLER_FILE_RE = /\.(c?js|mjs|ts)$/i;
 
 // ── route table ────────────────────────────────────────────────────────
 //
-// controllers/ is the ONLY routing surface (v2 — clean break from v1
-// `endpoints/`). Each controllers/*.ts file default-exports a ControllerDef:
-//   { __palbase: 'controller', basePath, routes: { [mapKey]: RouteDef } }
-//   RouteDef = { __palbase: 'route', method, path, handler: HandlerDef }
-// The full route path is `basePath + route.path` and the verb is route.method —
-// identical to extract_meta.js / generator.go / worker.js's dispatch.
+// controllers/ is the ONLY routing surface. Each controllers/*.ts file
+// default-exports a @Controller CLASS. The route registry + controller meta +
+// @Returns buffer live on Symbols stamped on the class (see header). We read the
+// registry the SAME way worker.js does (readControllerRoutes), so dev = prod.
 //
 // Each route-table entry: { method, urlPattern, regex, paramNames,
-// controllerPath, routeKey }. `controllerPath` is the file to require();
-// `routeKey` (the map key) selects the route within the controller (mirroring
-// worker.js's `context.route_key`). urlPattern keeps `:param` colons for
-// printing + matching; the regex matches incoming requests with capture groups.
+// controllerPath, routeKey, effectiveAuth, params, returnSchema }.
+// `controllerPath` is the bundled file to require(); `routeKey` is the route's
+// fnName (mirroring worker.js's `context.route_key`); `params` is the ordered
+// ParamMeta injection plan; `returnSchema` is the live @Returns zod (or null);
+// `effectiveAuth` is the resolved route.options.auth ?? controller.defaultAuth
+// ?? true. urlPattern keeps `:param` colons for printing + matching; the regex
+// matches incoming requests with capture groups.
 const routes = new Map();
 
-// loadControllerDef require()s a controller file (cache-busted so saves take
-// effect without a restart) and returns its default-export ControllerDef.
-// Throws a clear error when the default export is not a controller — there is
-// no v1 fallback, matching extract_meta.js + worker.js.
-function loadControllerDef(controllerPath) {
+// Class-controller registry symbols — MUST match the SDK
+// (@palbase/backend src/decorators/registry.ts). worker.js reads the SAME
+// symbols (RETURN_BUFFER_SYMBOL + ROUTES_SYMBOL) — keep them in lockstep.
+const ROUTES_SYMBOL = Symbol.for('palbase.backend.routes');
+const RETURN_BUFFER_SYMBOL = Symbol.for('palbase.backend.returnBuffer');
+const CONTROLLER_META_SYMBOL = Symbol.for('palbase.backend.controllerMeta');
+
+// loadControllerClass require()s a controller file (cache-busted so saves take
+// effect without a restart) and returns its default-export @Controller CLASS.
+// Throws a clear error when the default export is not a controller class — there
+// is no functional-model fallback, matching extract_meta.js + worker.js.
+function loadControllerClass(controllerPath) {
   delete require.cache[require.resolve(controllerPath)];
   const mod = require(controllerPath);
-  const controller = mod.default ?? mod;
-  if (!controller || controller.__palbase !== 'controller') {
+  const Ctrl = mod.default ?? mod;
+  if (typeof Ctrl !== 'function' || Ctrl.__palbase !== 'controller') {
     const shown = controllerPath.startsWith(BUNDLED_CONTROLLERS_DIR)
       ? bundledToSrcRel(controllerPath)
       : path.relative(PROJECT_ROOT, controllerPath);
     throw new Error(
-      `${shown} must default-export a ControllerDef ` +
-      `(use defineController / a controllers/* file); got ` +
-      (controller && controller.__palbase ? `__palbase=${JSON.stringify(controller.__palbase)}` : 'a non-controller export'),
+      `${shown} must default-export a @Controller class ` +
+      `(a controllers/* file decorated with @Controller); got ` +
+      (Ctrl && Ctrl.__palbase ? `__palbase=${JSON.stringify(Ctrl.__palbase)}` : 'a non-controller export'),
     );
   }
-  return controller;
+  return Ctrl;
+}
+
+// runtimeModule resolves @palbase/backend best-effort (cached). The real project
+// always has it installed (it's the import); but we never let a resolve failure
+// crash the registry read — we fall straight to the raw-symbol path, which is the
+// contract's documented fallback. Returns null when the package isn't resolvable.
+let runtimeModuleCache; // undefined = not tried, null = absent, obj = loaded
+function runtimeModule() {
+  if (runtimeModuleCache !== undefined) return runtimeModuleCache;
+  try {
+    runtimeModuleCache = require('@palbase/backend');
+  } catch {
+    runtimeModuleCache = null;
+  }
+  return runtimeModuleCache;
+}
+
+// readControllerRoutes returns the route list for a @Controller class. Mirrors
+// worker.js: prefer the SDK's own getRoutes() (an Array<RouteMeta> with the
+// @Returns buffer merged) when the vendored SDK exports it, else read the raw
+// ROUTES_SYMBOL array and merge the returnBuffer ourselves. The registry holds
+// the LIVE zod schemas on each ParamMeta + in the return buffer, so the
+// dev-server validates against them directly (the sidecar JSON is only for
+// Go/OpenAPI). Returns a fresh array; never mutates the registry's own array.
+function readControllerRoutes(Ctrl) {
+  const runtime = runtimeModule();
+  if (runtime && typeof runtime.getRoutes === 'function') {
+    try {
+      const list = runtime.getRoutes(Ctrl);
+      if (Array.isArray(list)) return list;
+    } catch {
+      // fall through to the raw-symbol path
+    }
+  }
+  const raw = Ctrl[ROUTES_SYMBOL];
+  const list = Array.isArray(raw) ? raw.slice() : [];
+  const returnBuffer = Ctrl[RETURN_BUFFER_SYMBOL];
+  if (returnBuffer) {
+    return list.map((route) => {
+      if (route && route.returnSchema === undefined && returnBuffer[route.fnName] !== undefined) {
+        return Object.assign({}, route, { returnSchema: returnBuffer[route.fnName] });
+      }
+      return route;
+    });
+  }
+  return list;
+}
+
+// readControllerMeta returns the @Controller meta `{ __palbase, basePath,
+// defaultAuth? }`. Mirrors worker.js's contract: prefer the SDK's
+// resolveController() when exported, else read the raw CONTROLLER_META_SYMBOL.
+function readControllerMeta(Ctrl) {
+  const runtime = runtimeModule();
+  if (runtime && typeof runtime.resolveController === 'function') {
+    try {
+      const meta = runtime.resolveController(Ctrl);
+      if (meta && typeof meta === 'object') return meta;
+    } catch {
+      // fall through to the raw-symbol path
+    }
+  }
+  const meta = Ctrl[CONTROLLER_META_SYMBOL];
+  return (meta && typeof meta === 'object') ? meta : { __palbase: 'controller', basePath: '' };
+}
+
+// effectiveAuth resolves a route's auth via the controller→route cascade:
+// route.options.auth ?? controller.defaultAuth ?? true (secure-by-default).
+// Returns the raw AuthSpec (boolean | { required?, role? } | undefined-as-true);
+// isAuthRequired() lowers it to the enforcement decision.
+function effectiveAuth(routeOptions, controllerMeta) {
+  const routeAuth = routeOptions && typeof routeOptions === 'object' ? routeOptions.auth : undefined;
+  if (routeAuth !== undefined) return routeAuth;
+  if (controllerMeta && controllerMeta.defaultAuth !== undefined) return controllerMeta.defaultAuth;
+  return true;
 }
 
 // urlToRegex compiles a `/places/:id`-style pattern into { regex, paramNames }.
@@ -227,19 +318,21 @@ function registerControllers() {
 
   for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
     if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
-    let controller;
+    let Ctrl;
     try {
-      controller = loadControllerDef(file);
+      Ctrl = loadControllerClass(file);
     } catch (err) {
       log(`skipping ${bundledToSrcRel(file)} — ${err.message}`);
       continue;
     }
-    const routeMap = (controller.routes && typeof controller.routes === 'object') ? controller.routes : {};
-    for (const [routeKey, routeDef] of Object.entries(routeMap)) {
-      if (!routeDef || typeof routeDef !== 'object') continue;
-      const method = typeof routeDef.method === 'string' ? routeDef.method.toUpperCase() : '';
-      if (!method) continue;
-      const urlPattern = joinPath(controller.basePath, routeDef.path);
+    const meta = readControllerMeta(Ctrl);
+    const routeList = readControllerRoutes(Ctrl);
+    for (const route of routeList) {
+      if (!route || typeof route !== 'object') continue;
+      const method = typeof route.method === 'string' ? route.method.toUpperCase() : '';
+      const routeKey = typeof route.fnName === 'string' ? route.fnName : '';
+      if (!method || !routeKey) continue;
+      const urlPattern = joinPath(meta.basePath, route.subpath);
       const { regex, paramNames } = urlToRegex(urlPattern);
       routes.set(method + ' ' + urlPattern, {
         method,
@@ -248,6 +341,10 @@ function registerControllers() {
         paramNames,
         controllerPath: file,
         routeKey,
+        effectiveAuth: effectiveAuth(route.options, meta),
+        rateLimit: (route.options && typeof route.options === 'object') ? route.options.rateLimit : undefined,
+        params: Array.isArray(route.params) ? route.params : [],
+        returnSchema: route.returnSchema,
       });
     }
   }
@@ -287,21 +384,49 @@ function walk(dir) {
   return out;
 }
 
-// resolveHandlerDef re-loads the route's controller (cache-busted) and returns
-// the live HandlerDef for the route's mapKey — mirroring worker.js resolving
-// `controller.routes[route_key].handler`. Throws when the controller no longer
-// has the route (e.g. the file changed since registration).
-function resolveHandlerDef(route) {
-  const controller = loadControllerDef(route.controllerPath);
-  const routeDef = controller.routes && controller.routes[route.routeKey];
-  if (!routeDef || typeof routeDef !== 'object') {
+// controllerInstances caches ONE instance per controller bundle path. Mirrors
+// worker.js: class controllers are stateless-by-convention (services are
+// singletons), so a single instance is reused; `this` binds to it so
+// `this.someService` works in methods. The hot-reload (registerControllers →
+// rmBundledTree + re-bundle) drops the require cache for the controller file;
+// resolveRoute below detects a stale instance (its constructor differs from the
+// freshly-required class) and rebuilds it, so a save takes effect without a
+// restart. Keyed by the bundled controllerPath.
+const controllerInstances = new Map();
+
+// resolveRoute re-loads the route's controller class (cache-busted), finds the
+// live RouteMeta by fnName, and returns the cached-or-fresh class instance plus
+// the live route meta — mirroring worker.js's dispatch resolution. Throws when
+// the controller no longer has the route or the method is gone (e.g. the file
+// changed since registration). The returned route is the LIVE registry entry
+// (live zod schemas on its params + returnSchema), so validation runs off the
+// in-memory schemas exactly as worker.js does.
+function resolveRoute(route) {
+  const Ctrl = loadControllerClass(route.controllerPath);
+  const routeList = readControllerRoutes(Ctrl);
+  const live = routeList.find((r) => r && r.fnName === route.routeKey);
+  if (!live || typeof live !== 'object') {
     throw new Error(`route "${route.routeKey}" not found in ${bundledToSrcRel(route.controllerPath)}`);
   }
-  const handlerDef = routeDef.handler;
-  if (!handlerDef || typeof handlerDef !== 'object' || typeof handlerDef.handler !== 'function') {
-    throw new Error(`route "${route.routeKey}" has no handler function`);
+  if (typeof live.fnName !== 'string' || typeof Ctrl.prototype[live.fnName] !== 'function') {
+    throw new Error(`route "${route.routeKey}" has no method`);
   }
-  return handlerDef;
+  // Instantiate ONCE per bundle and cache; rebuild if the class identity changed
+  // (a hot-reload re-required the file → a new class object).
+  let instance = controllerInstances.get(route.controllerPath);
+  if (!instance || instance.constructor !== Ctrl) {
+    instance = new Ctrl();
+    controllerInstances.set(route.controllerPath, instance);
+  }
+  return { Ctrl, instance, route: live };
+}
+
+// findRouteParam returns the FIRST ParamMeta of the given kind on a route's
+// param list, or undefined — mirrors worker.js. The registry stores the LIVE
+// zod schema on the param meta (`.schema`), validated directly.
+function findRouteParam(params, kind) {
+  if (!Array.isArray(params)) return undefined;
+  return params.find((p) => p && p.kind === kind);
 }
 
 // ── module clients — bit-perfect twin of the prod runtime's services ────
@@ -461,14 +586,19 @@ function installRuntime() {
   });
 }
 
-// makeRequest builds the request-scoped object passed to the handler. Services
-// are NOT on it — they are the imported singletons (installed by
-// installRuntime). `req` here is the Node http request.
-function makeRequest(req, params, body, user) {
+// makeRequest builds the request-scoped object the dispatcher pulls injected
+// params from (@Body→input, @Query→query, @Param→params, @Headers→headers,
+// @User/@OptionalUser→user, @Client→client, @RequestId→requestId,
+// @TraceId→traceId, @Req→the whole object). Services are NOT on it — they are
+// the imported singletons (installed by installRuntime). Mirrors worker.js's
+// pbReq. `req` here is the Node http request; `query` is the parsed URL query;
+// `body` is the parsed JSON body. There is NO `errors` map — errors are the
+// global throw classes.
+function makeRequest(req, params, query, body, user) {
   return {
     input: body ?? {},
     params,
-    query: {},
+    query: query ?? {},
     headers: req.headers || {},
     user: user ?? null,
     client: clientInfoFromHeaders(req.headers || {}),
@@ -477,7 +607,6 @@ function makeRequest(req, params, body, user) {
     requestId: `req_dev_${Date.now().toString(36)}`,
     traceId: '0'.repeat(32),
     spanId: '0'.repeat(16),
-    errors: {},
   };
 }
 
@@ -523,15 +652,19 @@ function isAuthRequired(auth) {
 // ── /openapi.json — byte-identical to the prod backend-runtime spec ─────
 //
 // The deployed pod generates the spec in Go
-// (modules/backend/internal/openapi/generator.go) from the same
-// defineEndpoint() configs. `palbase mobile codegen` / `palbase types
-// --env local` fetch /openapi.json to drive local codegen, so the LOCAL spec
-// must match the REMOTE one the deployed pod serves — otherwise codegen output
-// silently differs between local serve and the deployed pod.
+// (modules/backend/internal/openapi/generator.go) from the same class-controller
+// registry. `palbase mobile codegen` / `palbase types --env local` fetch
+// /openapi.json to drive local codegen, so the LOCAL spec must match the REMOTE
+// one the deployed pod serves — otherwise codegen output silently differs
+// between local serve and the deployed pod. Request input is SPLIT by source:
+// @Body → requestBody, @Query → query parameters, @Param → path parameters,
+// @Headers → header parameters; @Returns → 200 response. Errors are the global
+// throw classes (no per-route table), so only the generic 400/401 responses are
+// emitted — exactly like generator.go.
 //
 // We rebuild the document fresh on every GET (not on the fs.watch reload):
 // it's the simpler correct option — controllers already reload per request via
-// resolveHandlerDef()'s cache-bust, so building here picks up edits with zero
+// resolveRoute()'s cache-bust, so building here picks up edits with zero
 // extra bookkeeping, and a spec fetch is far rarer + cheaper than a hot path.
 //
 // Byte-shape rules (matched to Go's json.MarshalIndent, which sorts map keys
@@ -633,11 +766,12 @@ function operationId(method, openPath) {
   return out;
 }
 
-// headerParameters lowers a headers JSON Schema (object, string-typed props)
-// into a name-sorted array of `in: header` parameters — matching
-// generator.go's headerParameters (struct order: name, in, required,
-// description?, schema).
-function headerParameters(schema) {
+// schemaParameters lowers an object JSON Schema into a name-sorted array of
+// OpenAPI parameters with the given `in` location ("path"/"query"/"header") —
+// matching generator.go's schemaParameters (struct order: name, in, required,
+// description?, schema). Required-ness comes from the schema's `required` array,
+// EXCEPT for path params which OpenAPI mandates be required:true regardless.
+function schemaParameters(schema, where) {
   if (!schema || typeof schema !== 'object') return [];
   const props = schema.properties;
   if (!props || typeof props !== 'object') return [];
@@ -645,7 +779,7 @@ function headerParameters(schema) {
   const out = [];
   for (const name of Object.keys(props).sort()) {
     const prop = props[name] && typeof props[name] === 'object' ? props[name] : {};
-    const param = { name, in: 'header', required: required.has(name) };
+    const param = { name, in: where, required: where === 'path' || required.has(name) };
     if (typeof prop.description === 'string' && prop.description !== '') {
       param.description = prop.description;
     }
@@ -655,51 +789,55 @@ function headerParameters(schema) {
   return out;
 }
 
-// buildHandlerMeta reads the spec-relevant fields off a route's HandlerDef.
-// method + path come from the route (controller basePath + route.path) — NOT
-// from the handler, which carries no routing — matching the dev-server's own
-// dispatch. auth uses the shared isAuthRequired() so spec == enforcement.
-function buildHandlerMeta(route, handlerDef) {
+// paramsSchemaFromRoute synthesizes the @Param JSON Schema — one
+// {type:"string"} property per @Param("name"), all required — matching
+// extract_meta.js / generator.go. Returns null when the route has no @Param.
+function paramsSchemaFromRoute(route) {
+  const names = [];
+  for (const p of (route.params || [])) {
+    if (p && p.kind === 'param' && typeof p.name === 'string' && p.name !== '') names.push(p.name);
+  }
+  if (names.length === 0) return null;
+  const properties = {};
+  for (const name of names.sort()) properties[name] = { type: 'string' };
+  return { type: 'object', properties, required: names.slice() };
+}
+
+// buildRouteMeta reads the spec-relevant fields off a route's live registry
+// entry. Input is SPLIT by source (body/query/params/headers) — each schema read
+// from the route's ParamMeta list (the live zod on a @Body/@Query/@Headers
+// param, or the synthesized @Param object). Output is @Returns. method + path
+// come from the route (controller basePath + subpath) — matching the
+// dev-server's own dispatch. auth uses the resolved effectiveAuth + the shared
+// isAuthRequired() so spec == enforcement.
+function buildRouteMeta(route) {
+  const auth = route.effectiveAuth;
+  const bodyParam = findRouteParam(route.params, 'body');
+  const queryParam = findRouteParam(route.params, 'query');
+  const headersParam = findRouteParam(route.params, 'headers');
   return {
     method: route.method,
     openPath: openApiPath(route.urlPattern),
-    authRequired: isAuthRequired(handlerDef.auth),
-    authRole: (handlerDef.auth && typeof handlerDef.auth === 'object' && typeof handlerDef.auth.role === 'string')
-      ? handlerDef.auth.role : '',
-    rateLimit: (handlerDef.rateLimit && typeof handlerDef.rateLimit === 'object'
-      && typeof handlerDef.rateLimit.max === 'number'
-      && typeof handlerDef.rateLimit.window === 'number')
-      ? { max: handlerDef.rateLimit.max, window: handlerDef.rateLimit.window } : null,
-    inputSchema: handlerDef.input ? zodToJSON(handlerDef.input) : null,
-    outputSchema: handlerDef.output ? zodToJSON(handlerDef.output) : null,
-    headersSchema: handlerDef.headers ? zodToJSON(handlerDef.headers) : null,
-    errors: extractErrors(handlerDef.errors),
+    authRequired: isAuthRequired(auth),
+    authRole: (auth && typeof auth === 'object' && typeof auth.role === 'string') ? auth.role : '',
+    rateLimit: (route.rateLimit && typeof route.rateLimit === 'object'
+      && typeof route.rateLimit.max === 'number'
+      && typeof route.rateLimit.window === 'number')
+      ? { max: route.rateLimit.max, window: route.rateLimit.window } : null,
+    bodySchema: bodyParam && bodyParam.schema ? zodToJSON(bodyParam.schema) : null,
+    querySchema: queryParam && queryParam.schema ? zodToJSON(queryParam.schema) : null,
+    paramsSchema: paramsSchemaFromRoute(route),
+    headersSchema: headersParam && headersParam.schema ? zodToJSON(headersParam.schema) : null,
+    outputSchema: route.returnSchema ? zodToJSON(route.returnSchema) : null,
   };
 }
 
-// extractErrors lowers a defineEndpoint({ errors }) table into the shape the
-// generator consumes: { name: { status, code, description, data } }.
-// description defaults to '' (the generator always emits the key);
-// data is the zod-to-json-schema body or null.
-function extractErrors(errors) {
-  if (!errors || typeof errors !== 'object') return null;
-  const out = {};
-  for (const [name, def] of Object.entries(errors)) {
-    if (!def || typeof def !== 'object') continue;
-    out[name] = {
-      status: def.status,
-      code: def.code,
-      description: typeof def.description === 'string' ? def.description : '',
-      data: def.data ? zodToJSON(def.data) : null,
-    };
-  }
-  return Object.keys(out).length > 0 ? out : null;
-}
-
 // buildOperation assembles one OpenAPI operation object with keys inserted in
-// Go's exact emission order. When x- extensions are present Go re-marshals the
-// whole operation as a flat map (all keys sorted alpha), so we sort the
-// top-level keys in that case — see sortOperationKeys.
+// Go's exact emission order (generator.go). When the x-rate-limit extension is
+// present Go re-marshals the whole operation as a flat map (all keys sorted
+// alpha), so we sort the top-level keys in that case — see sortOperationKeys.
+// Errors are global throw classes: only the generic 400/401 responses are
+// emitted (no per-route table, no x-palbase-errors).
 function buildOperation(meta) {
   const op = {};
   // struct field order: summary, operationId, tags, security, parameters,
@@ -715,20 +853,23 @@ function buildOperation(meta) {
     op.security = [{}];
   }
 
-  if (meta.headersSchema) {
-    const params = headerParameters(meta.headersSchema);
-    if (params.length > 0) op.parameters = params;
-  }
+  // Parameters: path (@Param) + query (@Query) + header (@Headers), appended in
+  // that group order, each name-sorted — matching generator.go's addEndpoint.
+  let params = [];
+  if (meta.paramsSchema) params = params.concat(schemaParameters(meta.paramsSchema, 'path'));
+  if (meta.querySchema) params = params.concat(schemaParameters(meta.querySchema, 'query'));
+  if (meta.headersSchema) params = params.concat(schemaParameters(meta.headersSchema, 'header'));
+  if (params.length > 0) op.parameters = params;
 
-  if (meta.inputSchema) {
+  if (meta.bodySchema) {
     op.requestBody = {
       required: true,
-      content: { 'application/json': { schema: meta.inputSchema } },
+      content: { 'application/json': { schema: meta.bodySchema } },
     };
   }
 
-  // responses — status keys inserted in sorted order ("200" < "400" < "401" <
-  // declared). 200 always; 400 always; 401 only when auth required.
+  // responses — status keys inserted in sorted order ("200" < "400" < "401").
+  // 200 always; 400 always; 401 only when auth required.
   const responses = {};
   const responseEntries = [];
   if (meta.outputSchema) {
@@ -744,65 +885,14 @@ function buildOperation(meta) {
     responseEntries.push(['401', { description: 'Unauthorized' }]);
   }
 
-  // Declared typed errors → per-status response envelope + x-palbase-errors.
+  // x-rate-limit extension (generator.go's only operation extension now that
+  // errors are global throw classes).
   const extensions = {};
   if (meta.rateLimit) {
     extensions['x-rate-limit'] = { max: meta.rateLimit.max, window: meta.rateLimit.window };
   }
-  if (meta.errors) {
-    const ext = {};
-    const byStatus = new Map();
-    for (const [name, e] of Object.entries(meta.errors)) {
-      if (!byStatus.has(e.status)) byStatus.set(e.status, []);
-      byStatus.get(e.status).push(name);
-    }
-    for (const status of byStatus.keys()) {
-      const names = byStatus.get(status).slice().sort();
-      const variants = [];
-      for (const name of names) {
-        const e = meta.errors[name];
-        const envelopeProps = {
-          error: { const: e.code, type: 'string' },
-          message: { type: 'string' },
-        };
-        const required = ['error'];
-        if (e.data) {
-          envelopeProps.data = e.data;
-          required.push('data');
-        }
-        // properties object: insert keys sorted (error < message[ < data]) —
-        // Go marshals envelopeProps as a map. error/message always; data when
-        // present. After sort: data, error, message.
-        const sortedProps = {};
-        for (const k of Object.keys(envelopeProps).sort()) sortedProps[k] = envelopeProps[k];
-        // variant struct is a map in Go → keys sorted: properties, required, type.
-        variants.push({ properties: sortedProps, required, type: 'object' });
-        ext[name] = {
-          code: e.code,
-          description: e.description,
-          hasData: e.data != null,
-          status: e.status,
-        };
-      }
-      const schema = variants.length === 1 ? variants[0] : { oneOf: variants };
-      responseEntries.push([String(status), {
-        description: 'Declared error response',
-        content: { 'application/json': { schema } },
-      }]);
-    }
-    // x-palbase-errors is a Go map[string]any (generator.go:324,378) re-marshaled
-    // through Operation.MarshalJSON's flat map (generator.go:60-83), so its
-    // error-NAME keys come out GLOBALLY lexicographically sorted — NOT in the
-    // status-grouped insertion order ext was built in above. Re-emit the names
-    // globally sorted so the bytes match Go for endpoints whose error names
-    // don't happen to sort the same as their status grouping (e.g. zeta@409,
-    // alpha@422, mid@409 → alpha, mid, zeta).
-    const sortedExt = {};
-    for (const name of Object.keys(ext).sort()) sortedExt[name] = ext[name];
-    extensions['x-palbase-errors'] = sortedExt;
-  }
 
-  // Insert response status keys in sorted order ("200" < "400" < "401" < …).
+  // Insert response status keys in sorted order ("200" < "400" < "401").
   const byCode = new Map(responseEntries);
   for (const code of [...byCode.keys()].sort(compareStatus)) {
     responses[code] = byCode.get(code);
@@ -840,14 +930,23 @@ function buildOpenApiSpec() {
   // then re-emit with sorted path keys and sorted method keys.
   const rawPaths = new Map();
   for (const route of routes.values()) {
-    let handlerDef;
+    let resolved;
     try {
-      handlerDef = resolveHandlerDef(route);
+      resolved = resolveRoute(route);
     } catch (err) {
       log(`openapi: skipping ${route.method} ${route.urlPattern} — ${err.message}`);
       continue;
     }
-    const meta = buildHandlerMeta(route, handlerDef);
+    // Carry the registration's effectiveAuth/rateLimit/urlPattern onto the live
+    // route meta so buildRouteMeta reads the resolved cascade + the path the
+    // dev-server actually matches.
+    const liveRoute = Object.assign({}, resolved.route, {
+      method: route.method,
+      urlPattern: route.urlPattern,
+      effectiveAuth: route.effectiveAuth,
+      rateLimit: route.rateLimit,
+    });
+    const meta = buildRouteMeta(liveRoute);
     const operation = buildOperation(meta);
     if (!rawPaths.has(meta.openPath)) rawPaths.set(meta.openPath, {});
     rawPaths.get(meta.openPath)[route.method.toLowerCase()] = operation;
@@ -868,7 +967,7 @@ function buildOpenApiSpec() {
     info: {
       title: 'Palbase Backend',
       version: '1.0.0',
-      description: 'Auto-generated from defineEndpoint() configs.',
+      description: 'Auto-generated from defineController()/defineHandler() configs.',
     },
     // servers OMITTED — prod's ServerURL is empty for the deployed spec.
     paths,
@@ -1026,16 +1125,22 @@ const server = http.createServer(async (req, res) => {
   const params = {};
   route.paramNames.forEach((name, i) => { params[name] = match[i + 1]; });
 
+  // Split request sources: body (POST/PUT/PATCH/DELETE JSON) → pbReq.input,
+  // URL query → pbReq.query. NOT folded together: the class controller injects
+  // @Body and @Query separately (worker.js keeps context.input vs context.query
+  // distinct), so a GET with `?name=x` must land in query, never input.
   let body = null;
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     body = await readJsonBody(req);
-  } else if (Object.keys(parsed.query).length > 0) {
-    body = parsed.query;
   }
+  const query = parsed.query || {};
 
-  let handlerDef;
+  // Resolve the live route + cached class instance (cache-busted require so a
+  // save takes effect without a restart) — mirrors worker.js's dispatch
+  // resolution by fnName off the class registry.
+  let resolved;
   try {
-    handlerDef = resolveHandlerDef(route);
+    resolved = resolveRoute(route);
   } catch (err) {
     res.statusCode = 500;
     res.setHeader('content-type', 'application/json');
@@ -1043,17 +1148,19 @@ const server = http.createServer(async (req, res) => {
     log(`[${req.method}] ${parsed.pathname}  500  ${Date.now() - start}ms  — ${err.message}`);
     return;
   }
+  const { instance, route: liveRoute } = resolved;
+  const routeParams = Array.isArray(liveRoute.params) ? liveRoute.params : [];
 
   // Auth gate — same contract as prod: optional => no token = pass with
-  // req.user=null, present token = palauth verify. Required => must have
-  // a token AND palauth must accept it. `authRequired` comes from the shared
-  // isAuthRequired() so the enforcement here and the served /openapi.json
-  // `security` block never drift (omitted auth → required, secure-by-default).
-  // Note: pass handlerDef.auth RAW — `handlerDef.auth || {}` would silently turn
-  // an explicit `auth: false` into `{}`, re-securing a route the developer
-  // opted out of.
-  const authCfg = (handlerDef.auth && typeof handlerDef.auth === 'object') ? handlerDef.auth : {};
-  const authRequired = isAuthRequired(handlerDef.auth);
+  // user=null, present token = palauth verify. Required => must have a token AND
+  // palauth must accept it. effectiveAuth is the resolved route→controller
+  // cascade (route.options.auth ?? controller.defaultAuth ?? true); isAuthRequired
+  // lowers it to the enforcement decision so the gate here and the served
+  // /openapi.json `security` block never drift (omitted → required,
+  // secure-by-default).
+  const authSpec = route.effectiveAuth;
+  const authRole = (authSpec && typeof authSpec === 'object' && typeof authSpec.role === 'string') ? authSpec.role : '';
+  const authRequired = isAuthRequired(authSpec);
   const authHeader = req.headers['authorization'] || '';
   let user = null;
   if (authHeader.toLowerCase().startsWith('bearer ')) {
@@ -1080,19 +1187,20 @@ const server = http.createServer(async (req, res) => {
     log(`[${req.method}] ${parsed.pathname}  401  ${Date.now() - start}ms  — auth required`);
     return;
   }
-  if (authCfg.role && user && user.role !== authCfg.role) {
+  if (authRole && user && user.role !== authRole) {
     res.statusCode = 403;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ error: 'forbidden', message: `role ${authCfg.role} required, got ${user.role}` }));
+    res.end(JSON.stringify({ error: 'forbidden', message: `role ${authRole} required, got ${user.role}` }));
     log(`[${req.method}] ${parsed.pathname}  403  ${Date.now() - start}ms  — role mismatch`);
     return;
   }
 
-  // Rate limit gate.
-  if (handlerDef.rateLimit) {
+  // Rate limit gate (route.options.rateLimit).
+  const rateLimit = route.rateLimit;
+  if (rateLimit && typeof rateLimit === 'object' && typeof rateLimit.max === 'number' && typeof rateLimit.window === 'number') {
     const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local').toString().split(',')[0].trim();
-    const result = rateLimitCheck(`${route.method} ${route.urlPattern}`, ip, handlerDef.rateLimit);
-    res.setHeader('x-ratelimit-limit', String(handlerDef.rateLimit.max));
+    const result = rateLimitCheck(`${route.method} ${route.urlPattern}`, ip, rateLimit);
+    res.setHeader('x-ratelimit-limit', String(rateLimit.max));
     res.setHeader('x-ratelimit-remaining', String(Math.max(0, result.remaining)));
     if (!result.allowed) {
       res.statusCode = 429;
@@ -1100,7 +1208,7 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({
         error: 'rate_limited',
-        message: `max ${handlerDef.rateLimit.max} req / ${handlerDef.rateLimit.window}s`,
+        message: `max ${rateLimit.max} req / ${rateLimit.window}s`,
         retry_after: result.retryAfter,
       }));
       log(`[${req.method}] ${parsed.pathname}  429  ${Date.now() - start}ms  — rate limited (retry in ${result.retryAfter}s)`);
@@ -1109,37 +1217,94 @@ const server = http.createServer(async (req, res) => {
   }
 
   installRuntime();
-  const pbReq = makeRequest(req, params, body, user);
+  const pbReq = makeRequest(req, params, query, body, user);
 
-  // Input validation — mirror worker.js: a Zod-compatible `input` schema parses
-  // pbReq.input; failure returns a 400 validation_error envelope (the parsed,
-  // stripped data replaces the raw input). This keeps `palbase serve` honest
-  // about the same 400s the deployed pod returns.
-  if (handlerDef.input && typeof handlerDef.input.safeParse === 'function') {
-    const parsedInput = handlerDef.input.safeParse(pbReq.input);
-    if (!parsedInput.success) {
-      const details = (parsedInput.error?.issues || []).map((issue) => ({
-        field: (issue.path || []).join('.') || 'input',
-        message: issue.message || 'Validation failed',
-      }));
-      res.statusCode = 400;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({
-        error: 'validation_error',
-        error_description: 'Input validation failed',
-        details,
-      }));
-      log(`[${req.method}] ${parsed.pathname}  400  ${Date.now() - start}ms  — input validation`);
+  // --- Validate present source schemas off the LIVE registry ---------------
+  // Each @Body/@Query/@Headers ParamMeta carries its live zod schema; @Param
+  // synthesizes required string path params. A failure → 400 with zod issues.
+  // Parsed/stripped values replace the raw source. Mirrors worker.js exactly.
+
+  // Body (from @Body(zod)).
+  const bodyParam = findRouteParam(routeParams, 'body');
+  if (bodyParam && bodyParam.schema && typeof bodyParam.schema.safeParse === 'function') {
+    const parsedBody = bodyParam.schema.safeParse(pbReq.input);
+    if (!parsedBody.success) {
+      send400(res, 'Input validation failed', parsedBody.error, 'input', req, parsed, start);
       return;
     }
-    pbReq.input = parsedInput.data;
+    pbReq.input = parsedBody.data;
   }
 
-  // Declared typed errors — re-project each `errors` entry as a thrower on
-  // pbReq.errors so the handler can `throw req.errors.todoLocked({...})`. Mirrors
-  // worker.js's HttpError minting (status/code/description + optional data).
-  if (handlerDef.errors && typeof handlerDef.errors === 'object') {
-    pbReq.errors = buildErrorThrowers(handlerDef.errors);
+  // Query (from @Query(zod)).
+  const queryParam = findRouteParam(routeParams, 'query');
+  if (queryParam && queryParam.schema && typeof queryParam.schema.safeParse === 'function') {
+    const parsedQuery = queryParam.schema.safeParse(pbReq.query);
+    if (!parsedQuery.success) {
+      send400(res, 'Query validation failed', parsedQuery.error, 'query', req, parsed, start);
+      return;
+    }
+    pbReq.query = parsedQuery.data;
+  }
+
+  // Headers (from @Headers(zod)). HTTP header names are case-insensitive, so
+  // match against a lowercase view, project the declared keys, parse, then merge
+  // the typed values back. Mirrors worker.js.
+  let parsedHeaders = pbReq.headers;
+  const headersParam = findRouteParam(routeParams, 'headers');
+  if (headersParam && headersParam.schema && typeof headersParam.schema.safeParse === 'function') {
+    const headersSchema = headersParam.schema;
+    const lower = {};
+    for (const k of Object.keys(pbReq.headers || {})) lower[k.toLowerCase()] = pbReq.headers[k];
+    const shape = headersSchema._def && headersSchema._def.shape;
+    const shapeObj = typeof shape === 'function' ? shape() : shape;
+    const declared = {};
+    for (const key of Object.keys(shapeObj || {})) {
+      const v = lower[key.toLowerCase()];
+      if (v !== undefined) declared[key] = v;
+    }
+    const parsedH = headersSchema.safeParse(declared);
+    if (!parsedH.success) {
+      send400(res, 'Header validation failed', parsedH.error, 'header', req, parsed, start);
+      return;
+    }
+    parsedHeaders = Object.assign({}, pbReq.headers, parsedH.data);
+    pbReq.headers = parsedHeaders;
+  }
+
+  // Path params (synthesized from @Param("name")). Each is a string on the wire;
+  // absence is a 400 (a route declares @Param only for a path segment that must
+  // exist). Mirrors worker.js.
+  const pathParams = pbReq.params || {};
+  for (const p of routeParams) {
+    if (p && p.kind === 'param' && typeof p.name === 'string') {
+      if (pathParams[p.name] === undefined) {
+        send400Detail(res, 'Path parameter validation failed', [{ field: p.name, message: 'required path parameter is missing' }], req, parsed, start);
+        return;
+      }
+    }
+  }
+
+  // --- Build the args array ordered by ParamMeta.index ----------------------
+  // Each param decorator injects its piece directly. @User/@OptionalUser both
+  // resolve to pbReq.user (null on a public/anon request). Mirrors worker.js.
+  const args = [];
+  for (const p of routeParams) {
+    if (!p || typeof p.index !== 'number') continue;
+    let value;
+    switch (p.kind) {
+      case 'body':         value = pbReq.input; break;
+      case 'query':        value = pbReq.query; break;
+      case 'param':        value = pathParams[p.name]; break;
+      case 'headers':      value = parsedHeaders; break;
+      case 'user':         value = pbReq.user; break;
+      case 'optionalUser': value = pbReq.user; break;
+      case 'client':       value = pbReq.client; break;
+      case 'requestId':    value = pbReq.requestId; break;
+      case 'traceId':      value = pbReq.traceId; break;
+      case 'req':          value = pbReq; break;
+      default:             value = undefined; break;
+    }
+    args[p.index] = value;
   }
 
   let result;
@@ -1149,14 +1314,18 @@ const server = http.createServer(async (req, res) => {
     // without the handler passing { userId } manually. Anonymous → null →
     // project defaults. Reset in finally so a later request never inherits it.
     currentRequestUserId = (pbReq.user && pbReq.user.id) || null;
-    result = await handlerDef.handler(pbReq);
+    // Execute the controller method bound to the cached instance so `this`
+    // resolves the controller's fields/services.
+    result = await instance[liveRoute.fnName](...args);
   } catch (err) {
-    // HttpError (a declared-error throw or a hand-built one) is a HANDLER
-    // OUTCOME, not infra failure: surface its status + envelope verbatim,
-    // mirroring worker.js's catch path.
-    if (err && typeof err === 'object' && err.name === 'HttpError' && typeof err.status === 'number') {
+    // The SDK's global throw classes (Conflict/NotFound/BadRequest/… and the
+    // base PalError/HttpError) all extend HttpError and set `.status` (number)
+    // + `.error` (string code). They are a HANDLER OUTCOME, not infra failure:
+    // surface the status + envelope verbatim. Match by SHAPE, not name —
+    // mirroring worker.js's catch path exactly.
+    if (err instanceof Error && typeof err.status === 'number' && typeof err.error === 'string') {
       const envelope = {
-        error: err.error || 'http_error',
+        error: err.error,
         error_description: err.errorDescription || err.message || 'request failed',
         status: err.status,
       };
@@ -1176,10 +1345,10 @@ const server = http.createServer(async (req, res) => {
     currentRequestUserId = null;
   }
 
-  // Output validation — mirror worker.js: a Zod `output` schema validates the
+  // Output validation — mirror worker.js: a Zod @Returns schema validates the
   // result; a failure is a 500 internal_error (detail logged, never leaked).
-  if (handlerDef.output && typeof handlerDef.output.safeParse === 'function') {
-    const out = handlerDef.output.safeParse(result);
+  if (liveRoute.returnSchema && typeof liveRoute.returnSchema.safeParse === 'function') {
+    const out = liveRoute.returnSchema.safeParse(result);
     if (!out.success) {
       log(`output validation failed: ${JSON.stringify(out.error && out.error.issues)}`);
       res.statusCode = 500;
@@ -1190,37 +1359,37 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // void / undefined / null → 204 (no response body), mirroring worker.js.
+  if (result === undefined || result === null) {
+    res.statusCode = 204;
+    res.end();
+    log(`[${req.method}] ${parsed.pathname}  204  ${Date.now() - start}ms`);
+    return;
+  }
+
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify(result ?? null));
+  res.end(JSON.stringify(result));
   log(`[${req.method}] ${parsed.pathname}  200  ${Date.now() - start}ms`);
 });
 
-// buildErrorThrowers re-projects a HandlerDef.errors map into thrower functions
-// the handler calls (`throw req.errors.todoLocked({...})`). Each returns an
-// Error tagged name='HttpError' carrying status/code/description (+ optional
-// data validated against the declared zod schema) — the exact wire-shape the
-// dispatch catch path serialises, identical to worker.js.
-function buildErrorThrowers(declaredErrors) {
-  const throwers = {};
-  for (const [name, def] of Object.entries(declaredErrors)) {
-    if (!def || typeof def !== 'object') continue;
-    const { status, code, description, data: dataSchema } = def;
-    throwers[name] = (payload) => {
-      let validated = payload;
-      if (dataSchema && typeof dataSchema.parse === 'function') {
-        validated = dataSchema.parse(payload);
-      }
-      const err = new Error(description || `${code} (${status})`);
-      err.name = 'HttpError';
-      err.status = status;
-      err.error = code;
-      err.errorDescription = description || `${code} (${status})`;
-      if (validated !== undefined) err.data = validated;
-      return err;
-    };
-  }
-  return throwers;
+// send400 writes a validation_error envelope from a zod error — the same wire
+// shape worker.js produces (error/error_description/details[]).
+function send400(res, description, zodError, fallbackField, req, parsed, start) {
+  const details = ((zodError && zodError.issues) || []).map((issue) => ({
+    field: (issue.path || []).join('.') || fallbackField,
+    message: issue.message || 'Validation failed',
+  }));
+  send400Detail(res, description, details, req, parsed, start);
+}
+
+// send400Detail writes a validation_error envelope from a pre-built details
+// array (used for synthesized path-param errors).
+function send400Detail(res, description, details, req, parsed, start) {
+  res.statusCode = 400;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ error: 'validation_error', error_description: description, details }));
+  log(`[${req.method}] ${parsed.pathname}  400  ${Date.now() - start}ms  — ${description}`);
 }
 
 function readJsonBody(req) {
