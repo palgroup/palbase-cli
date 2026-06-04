@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,34 @@ func localSpecServer(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 }
+
+// redirectHostTo installs a temporary RoundTripper on defaultHTTPClient that
+// rewrites requests to `host` (the hard-coded remote tenant host) to `targetURL`
+// (the httptest mock), leaving every other request untouched. Returns a restore
+// func. Used to exercise the serve-down deployed-spec fetch without a real host.
+func redirectHostTo(t *testing.T, host, targetURL string) func() {
+	t.Helper()
+	u, err := url.Parse(targetURL)
+	require.NoError(t, err)
+	prev := defaultHTTPClient.Transport
+	base := prev
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	defaultHTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == host {
+			req = req.Clone(req.Context())
+			req.URL.Scheme = u.Scheme
+			req.URL.Host = u.Host
+		}
+		return base.RoundTrip(req)
+	})
+	return func() { defaultHTTPClient.Transport = prev }
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // codegenURLStudio mocks apikey.reveal so lookupBackendTarget resolves a
 // REMOTE backend target (endpointRef erkut1230qe6um) plus serves an empty
@@ -71,38 +100,71 @@ func (cs *codegenURLStudio) resolvers(t *testing.T) Resolvers {
 	}
 }
 
-// TestGenerateIOSAuto_EmbedsRemoteURL_NotLocalhost pins the core fix: the
-// app config's runtime base URL must ALWAYS be the remote tenant host
-// (https://<endpointRef>.<publicHost>), never the local `palbase serve`
-// address — the app runs on a device/simulator that cannot reach the
-// developer's localhost:4003. A local serve only provides a fresher SPEC.
-//
-// This test runs without a local serve listening on 4003, so codegen takes
-// the deployed-spec fallback; either way the embedded URL must be remote.
-func TestGenerateIOSAuto_EmbedsRemoteURL_NotLocalhost(t *testing.T) {
+// TestGenerateIOSAuto_ServeUp_EmbedsLANIP pins Bug B's fix: when a local
+// `palbase serve` is reachable on 4003, the embedded runtime URL points at the
+// dev machine's LAN IP:4003 so both the simulator and a same-network physical
+// device reach the local backend. The remote host is used ONLY when serve is down.
+func TestGenerateIOSAuto_ServeUp_EmbedsLANIP(t *testing.T) {
 	// writeSwiftGenerated appends ".palbase/config.json" to ./.gitignore
 	// (relative to cwd). Run in a temp cwd so that stray file lands in the
 	// sandbox, not in the repo (a leftover internal/backend/.gitignore trips
 	// goreleaser's dirty-tree check at release time).
 	t.Chdir(t.TempDir())
 
-	localSpecServer(t) // local `palbase serve` is up → local-spec path
+	localSpecServer(t) // local `palbase serve` is up → local path
 	cs := &codegenURLStudio{}
 	r := cs.resolvers(t)
 
 	outFile := filepath.Join(t.TempDir(), "PalbaseGenerated.swift")
-	err := generateIOSAuto(
-		context.Background(),
-		r.Studio(),
-		r.Endpoints(),
-		"erkut1230qe6u", // bare ref
-		"main",
-		outFile,
-		&strings.Builder{},
-	)
-	require.NoError(t, err)
+	require.NoError(t, generateIOSAuto(
+		context.Background(), r.Studio(), r.Endpoints(),
+		"erkut1230qe6u", "main", outFile, &strings.Builder{},
+	))
 
-	// The JSON sidecar carries the runtime config the SDK reads at launch.
+	jsonBytes, err := os.ReadFile(strings.TrimSuffix(outFile, ".swift") + ".json")
+	require.NoError(t, err)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &cfg))
+
+	url, _ := cfg["url"].(string)
+	require.Contains(t, url, ":4003", "serve-up: URL must target the local serve port")
+	require.NotContains(t, url, "dev.palbase.studio", "serve-up: URL must NOT be the remote tenant host")
+	// The host is whatever outboundLANIP() resolved — LAN IP normally, or
+	// "localhost" in an offline sandbox. Both are valid serve-up targets.
+	expected := "http://" + outboundLANIP() + ":4003"
+	require.Equal(t, expected, url)
+
+	_, hasSource := cfg["source"]
+	require.False(t, hasSource, "PalbaseGenerated.json must not carry a 'source' key")
+}
+
+// TestGenerateIOSAuto_ServeDown_EmbedsRemote pins the fallback: with no local
+// serve on 4003, codegen embeds the remote tenant host.
+func TestGenerateIOSAuto_ServeDown_EmbedsRemote(t *testing.T) {
+	// Ensure 4003 is free so the local probe fails and we take the remote path.
+	if ln, err := net.Listen("tcp", "127.0.0.1:4003"); err == nil {
+		_ = ln.Close()
+	} else {
+		t.Skip("4003 is held by a real serve — cannot test the serve-down path")
+	}
+	t.Chdir(t.TempDir())
+	cs := &codegenURLStudio{}
+	r := cs.resolvers(t)
+
+	// The serve-down path fetches the deployed spec from target.URL
+	// (https://erkut1230qe6um.dev.palbase.studio/openapi.json). lookupBackendTarget
+	// hard-codes that real host, so redirect just that host's requests to the
+	// mock server for the duration of this test (target.URL itself is unchanged —
+	// we still assert the embedded url is the real remote host below).
+	restore := redirectHostTo(t, "erkut1230qe6um.dev.palbase.studio", cs.srvURL)
+	defer restore()
+
+	outFile := filepath.Join(t.TempDir(), "PalbaseGenerated.swift")
+	require.NoError(t, generateIOSAuto(
+		context.Background(), r.Studio(), r.Endpoints(),
+		"erkut1230qe6u", "main", outFile, &strings.Builder{},
+	))
+
 	jsonBytes, err := os.ReadFile(strings.TrimSuffix(outFile, ".swift") + ".json")
 	require.NoError(t, err)
 	var cfg map[string]any
@@ -110,9 +172,6 @@ func TestGenerateIOSAuto_EmbedsRemoteURL_NotLocalhost(t *testing.T) {
 
 	url, _ := cfg["url"].(string)
 	require.Equal(t, "https://erkut1230qe6um.dev.palbase.studio", url,
-		"app config URL must be the remote tenant host")
-	require.NotContains(t, url, "localhost",
-		"app config URL must NEVER be localhost — the app cannot reach the dev machine")
-	require.NotContains(t, url, "4003",
-		"app config URL must NEVER be the local serve port")
+		"serve-down: URL must be the remote tenant host")
+	require.NotContains(t, url, "4003")
 }

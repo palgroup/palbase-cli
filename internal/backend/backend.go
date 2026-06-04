@@ -1037,16 +1037,10 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 }
 
 func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
-	// The remote backend target (URL + publishable key + OAuth) is what the
-	// generated app config is ALWAYS wired to — the app runs on a device /
-	// simulator that cannot reach the developer's localhost:4003. A local
-	// `palbase serve` only ever provides a fresher SPEC (endpoint shapes for
-	// typed methods); it must NEVER become the app's runtime base URL.
-	//
-	// So: resolve the remote target first. If it fails (not logged in, no
-	// network, sandboxed build phase without credentials), there's nothing
-	// valid to embed — surface the error rather than writing a broken
-	// localhost config that silently makes the app dial the dev's machine.
+	// Resolve the remote target first — it carries the publishable key + OAuth
+	// the app needs, and it's the device fallback / serve-down runtime URL. If
+	// it fails (not logged in, no network, sandboxed build phase without
+	// credentials), there's nothing valid to embed — surface the error.
 	target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
 	if err != nil {
 		return err
@@ -1058,25 +1052,29 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 	}
 
 	// Prefer a local spec when `palbase serve` is up (fast, hot-reloaded
-	// endpoint shapes), else fall back to the deployed project's spec. Either
-	// way the embedded URL/key below stay the REMOTE target.
+	// endpoint shapes). When it IS up, the app should also TALK to it: embed
+	// the dev machine's LAN IP:4003 so both the simulator (via host loopback)
+	// and a same-network physical device reach the local backend. When serve
+	// is down, fall back to the deployed spec AND the remote tenant host.
 	localURL := "http://localhost:4003"
 	specBytes, localErr := fetchOpenAPISpec(ctx, localURL+"/openapi.json", "")
-	source := "local"
+	embedURL := target.URL // remote tenant host (device fallback / serve-down)
 	if localErr != nil {
-		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using deployed spec — run `palbase serve` for local endpoint shapes\n", localURL, localErr)
+		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using deployed spec + remote URL — run `palbase serve` for local dev\n", localURL, localErr)
 		specBytes, err = fetchOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey)
 		if err != nil {
 			return err
 		}
-		source = "remote"
+	} else {
+		// Serve is up — point the app at the LAN-reachable serve address.
+		embedURL = "http://" + outboundLANIP() + ":4003"
+		fmt.Fprintf(w, "local `palbase serve` detected — embedding %s (simulator + same-network device reach it)\n", embedURL)
 	}
 
 	return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
-		URL:    target.URL, // ALWAYS the remote tenant host, never localhost
+		URL:    embedURL,
 		APIKey: target.APIKey,
 		Branch: branch,
-		Source: source,
 		OAuth:  oauth,
 	}, outFile, w)
 }
@@ -1108,7 +1106,6 @@ func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, bran
 		URL:    target.URL,
 		APIKey: target.APIKey,
 		Branch: branch,
-		Source: "remote",
 		OAuth:  oauth,
 	}, outFile, w)
 }
@@ -1169,7 +1166,7 @@ func writeSwiftGenerated(specBytes []byte, cfg swiftGeneratedConfig, outFile str
 		fmt.Fprintf(w, "  (gitignore not updated: %v)\n", err)
 	}
 	fmt.Fprintf(w, "✓ wrote %s (%d operation(s))\n", outFile, len(ops))
-	fmt.Fprintf(w, "✓ wrote %s (config — %s)\n", jsonPath, cfg.Source)
+	fmt.Fprintf(w, "✓ wrote %s (config)\n", jsonPath)
 	return nil
 }
 
@@ -1186,15 +1183,10 @@ func writeGeneratedConfigJSON(path string, cfg swiftGeneratedConfig) error {
 	if branch == "" {
 		branch = "main"
 	}
-	source := cfg.Source
-	if source == "" {
-		source = "remote"
-	}
 	body := map[string]any{
 		"url":     cfg.URL,
 		"api_key": cfg.APIKey,
 		"branch":  branch,
-		"source":  source,
 	}
 	// Surface OAuth provider availability so the SDK can run
 	// `pb.auth.signInWithGoogle()` zero-arg (Bundle.main reads this
@@ -1250,8 +1242,7 @@ import Foundation
 		stubJSON := `{
   "url": "",
   "api_key": "",
-  "branch": "main",
-  "source": "setup"
+  "branch": "main"
 }
 `
 		if err := os.WriteFile(jsonPath, []byte(stubJSON), 0o644); err != nil {
