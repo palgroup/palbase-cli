@@ -493,12 +493,18 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			warnUndeployedSchema(cwd, branchName, os.Stderr)
 
 			// Reveal the project's publishable key so dev-server can wire its
-			// inline module clients (module-clients.js). Service-role keys are
-			// platform-internal and are never pulled into local dev.
+			// inline module clients (module-clients.js) + the Database edge for the
+			// anon/authenticated RLS path.
 			var revealResp struct {
 				EndpointRef    string `json:"endpointRef"`
 				PublishableKey string `json:"publishableKey"`
 			}
+			// Owner-gated service-role key for local asService() (BYPASSRLS). Only
+			// the project OWNER can reveal it; a non-owner serve runs without it and
+			// asService() throws an actionable hint (graceful degrade). The key is a
+			// presentable credential the owner already holds (like Supabase's local
+			// service_role key) — never logged (treated like a DB password).
+			var serviceRoleKey string
 			if ref != "" && ref != "local" {
 				// Thread the active branch so reveal returns THIS branch's
 				// endpoint_ref (e.g. test0r8q3p1) — otherwise serve's module
@@ -509,6 +515,15 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				}
 				if err := r.Studio().Query(ctx, "apikey.reveal", revealPayload, &revealResp); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.docs/ctx.storage/… will be unavailable\n", err)
+				}
+				// Best-effort owner-gated service-role reveal. A FORBIDDEN (non-owner)
+				// or NOT_FOUND is expected and silent — asService() then degrades.
+				var svcResp struct {
+					ServiceRoleKey string `json:"serviceRoleKey"`
+				}
+				if err := r.Studio().Query(ctx, "apikey.revealServiceRole", revealPayload, &svcResp); err == nil && svcResp.ServiceRoleKey != "" {
+					serviceRoleKey = svcResp.ServiceRoleKey
+					fmt.Fprintf(os.Stderr, "asService() enabled — service_role (BYPASSRLS) can read/write ALL rows in branch %q (prod-mirror dev data). Never commit this key.\n", branchName)
 				}
 			}
 
@@ -540,6 +555,12 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				fmt.Sprintf("PALBASE_BRANCH=%s", devBranchValue(branchFlag)),
 				fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
 			)
+			// Service-role key (owner only) — enables local asService() (BYPASSRLS).
+			// Appended separately so it's absent (not empty) for non-owners, which is
+			// exactly what dev-server.js checks to decide whether asService() works.
+			if serviceRoleKey != "" {
+				node.Env = append(node.Env, fmt.Sprintf("PALBASE_SERVICE_ROLE_APIKEY=%s", serviceRoleKey))
+			}
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr
 			// Best-effort: free the port if a stale dev-server is still holding
