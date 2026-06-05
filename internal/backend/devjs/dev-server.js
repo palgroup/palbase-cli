@@ -596,10 +596,14 @@ function databaseClient() {
 // the LIVE tenant gateway serves — auth, the SDK module APIs (/v1/...), storage,
 // pg-meta, OIDC discovery. `palbase serve` runs your controllers locally but is a
 // transparent window onto the deployed tenant for everything else (auth, flags,
-// docs, storage, realtime, …), so these are forwarded rather than 404'd. The
-// project's OWN Database edge (/v1/backend-db) is NOT forwarded — serve never
-// receives it (the SDK calls it from inside controllers, not over the HTTP face).
+// docs, storage, realtime, …), so these are forwarded rather than 404'd.
 function isTenantModuleRoute(pathname) {
+  // NEVER forward the authenticated Database edge. The SDK reaches it from INSIDE
+  // controllers (server-to-server), never over serve's public HTTP face. If a
+  // client hit localhost:4003/v1/backend-db directly we must NOT proxy it to the
+  // live gateway — that would expose the privileged Database edge anonymously on
+  // 0.0.0.0:4003. Let it fall through to a 404 instead.
+  if (pathname.startsWith('/v1/backend-db')) return false;
   return (
     pathname.startsWith('/auth/') || pathname === '/auth' ||
     pathname.startsWith('/v1/') ||
@@ -712,6 +716,25 @@ function makeLocalCache() {
     store.set(key, { value, expiresAt });
   };
 
+  // sweep drops every entry whose TTL deadline is already in the past. Lazy
+  // expiry (in `live`) only evicts a key when it's READ — a key that's written
+  // with a TTL and never read again would otherwise sit in the Map forever,
+  // leaking memory for serve's whole lifetime. The singleton drives this on a
+  // low-frequency unref'd interval (see localCache below); it's also exported on
+  // the cache so it can be tested directly. Returns the number of entries
+  // dropped. Synchronous (no I/O) so the interval callback can't overlap itself.
+  const sweep = () => {
+    const now = Date.now();
+    let dropped = 0;
+    for (const [key, entry] of store) {
+      if (entry.expiresAt !== null && now >= entry.expiresAt) {
+        store.delete(key);
+        dropped += 1;
+      }
+    }
+    return dropped;
+  };
+
   const cache = {
     async get(key) {
       const entry = live(key);
@@ -745,13 +768,37 @@ function makeLocalCache() {
       await cache.set(key, value, ttl);
       return value;
     },
+    // sweep evicts all expired entries up-front (background eviction; see above).
+    // Exposed so the singleton's interval — and the unit test — can drive it.
+    sweep,
+    // size reports the current Map size (used by the test to prove the sweeper
+    // actually shrinks the store, not just that reads miss). Not part of the
+    // prod CacheClient surface; dev-only introspection.
+    size() {
+      return store.size;
+    },
   };
   return cache;
 }
 
+// SWEEP_INTERVAL_MS is how often the cache singleton drops never-read-again
+// expired entries. Low frequency (45s) — this is a memory-leak guard, not a
+// precision timer; lazy-on-read expiry already keeps reads correct between
+// sweeps. A module-level constant so the interval is created ONCE.
+const SWEEP_INTERVAL_MS = 45 * 1000;
+
 let localCacheSingleton = null;
+let cacheSweeper = null;
 function localCache() {
-  if (!localCacheSingleton) localCacheSingleton = makeLocalCache();
+  if (!localCacheSingleton) {
+    localCacheSingleton = makeLocalCache();
+    // Create the sweep interval ONCE, alongside the singleton (the cache is
+    // module-level, so the timer must be too — never per request). unref() so
+    // this timer never keeps the Node process alive: serve must still exit
+    // cleanly on Ctrl+C / when stdin closes, exactly as before the sweeper.
+    cacheSweeper = setInterval(() => { localCacheSingleton.sweep(); }, SWEEP_INTERVAL_MS);
+    cacheSweeper.unref();
+  }
   return localCacheSingleton;
 }
 
@@ -1935,6 +1982,19 @@ async function main() {
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+
+  // Belt-and-suspenders cleanup: remove the temp esbuild bundle tree on ANY
+  // normal process exit, not only the SIGINT/SIGTERM path above. The signal
+  // handler covers Ctrl+C, but a plain `process.exit()` (e.g. the FATAL boot
+  // guard), an uncaught-then-exit, or the parent CLI closing our stdio can end
+  // the process WITHOUT a signal — and then BUNDLE_ROOT would leak in tmp until
+  // a reboot. 'exit' fires on every clean exit and MUST be synchronous (the loop
+  // is already stopping), so we use the sync fs.rmSync directly rather than the
+  // async drain. A SIGKILL/hard crash still can't run this — that leak is swept
+  // on the NEXT serve start by the Go side (backend.go sweepStaleServeTempDirs).
+  process.on('exit', () => {
+    try { fs.rmSync(BUNDLE_ROOT, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
 }
 
 // Auto-boot only when run directly (`node dev-server.js`). Guarded so the file

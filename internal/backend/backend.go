@@ -406,6 +406,54 @@ func freeDevPort(port int, w io.Writer) {
 	}
 }
 
+// serveTempPrefix is the os.MkdirTemp prefix for the per-serve dev-server
+// extract dir (holds the copied dev-server.js + the 0600 owner-token file).
+// Sweeping by THIS exact prefix is how a crashed previous serve's leftovers get
+// reclaimed — including the lingering owner-token, since it lives inside the dir.
+const serveTempPrefix = "palbase-dev-"
+
+// staleServeTempAge is how old a leftover serve temp dir must be before the
+// next serve start reclaims it. A small grace window so we never race a serve
+// that's launching concurrently in another shell (its fresh dir is younger than
+// this and is kept). The current run's own dir is created AFTER this sweep, so
+// it's never a candidate.
+const staleServeTempAge = 1 * time.Minute
+
+// sweepStaleServeTempDirs removes serve temp dirs left behind by a previous
+// crashed/SIGKILLed run. The graceful-exit paths (signal handler + the
+// dev-server's process-exit hook) clean up normally; this reclaims the dirs a
+// HARD crash couldn't. It only ever touches entries whose name starts with our
+// exact serveTempPrefix AND that are older than `olderThan` — never anything
+// else in the shared OS temp dir. Pure + injectable (tempRoot, prefix, now) so
+// it's unit-tested without depending on the real os.TempDir or wall clock.
+// Returns the directories it removed (for logging/testing). Best-effort: an
+// unreadable temp root or a dir we can't stat/remove is skipped, never fatal.
+func sweepStaleServeTempDirs(tempRoot, prefix string, now time.Time, olderThan time.Duration) []string {
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue // not ours — leave it strictly alone
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // can't tell its age → don't risk removing a live dir
+		}
+		if now.Sub(info.ModTime()) < olderThan {
+			continue // too fresh — could be a serve launching right now
+		}
+		full := filepath.Join(tempRoot, e.Name())
+		if err := os.RemoveAll(full); err != nil {
+			continue // best-effort
+		}
+		removed = append(removed, full)
+	}
+	return removed
+}
+
 // processComm returns the executable name of a pid via `ps -p <pid> -o comm=`.
 // Empty string when the process is gone or ps fails — callers treat a
 // non-"node" comm (including "") as "don't touch it".
@@ -462,7 +510,16 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				fmt.Fprintf(os.Stderr, "warning: could not regenerate palbase-env.d.ts (%v)\n", err)
 			}
 
-			tmpDir, err := os.MkdirTemp("", "palbase-dev-*")
+			// Reclaim serve temp dirs leaked by a previous HARD crash (SIGKILL /
+			// power loss) before we create this run's dir. Graceful exits clean up
+			// themselves (signal handler + the dev-server's process-exit hook); this
+			// catches only what a crash couldn't. Scoped to our exact prefix + an age
+			// grace so a serve launching concurrently in another shell is untouched.
+			for _, stale := range sweepStaleServeTempDirs(os.TempDir(), serveTempPrefix, time.Now(), staleServeTempAge) {
+				fmt.Fprintf(os.Stderr, "cleaned up stale serve temp dir from a previous run: %s\n", stale)
+			}
+
+			tmpDir, err := os.MkdirTemp("", serveTempPrefix+"*")
 			if err != nil {
 				return err
 			}

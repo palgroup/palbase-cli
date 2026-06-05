@@ -56,6 +56,40 @@ test('Cache: a zero/absent TTL never expires', async () => {
   assert.strictEqual(await c.get('zero'), 'y');
 });
 
+test('Cache: sweep evicts a never-read-again expired key (no unbounded growth)', async () => {
+  const c = makeLocalCache();
+  // A short-TTL key that we NEVER read again after writing: lazy-on-read expiry
+  // would never fire for it, so without the sweeper the Map would grow forever.
+  await c.set('leak', 'gone-soon', 1);
+  // A no-TTL key the sweeper must NOT touch.
+  await c.set('keep', 'stays');
+  assert.strictEqual(c.size(), 2, 'both keys present before expiry');
+
+  // Wait past the TTL deadline without ever reading 'leak'.
+  await new Promise((r) => setTimeout(r, 1100));
+
+  // The key is still physically in the Map (no read has lazily evicted it).
+  assert.strictEqual(c.size(), 2, 'expired-but-unread key still occupies the Map');
+
+  // Run one sweep (what the unref'd singleton interval calls): it must drop the
+  // expired key and report it, while leaving the live no-TTL key alone.
+  const dropped = c.sweep();
+  assert.strictEqual(dropped, 1, 'sweep drops exactly the one expired entry');
+  assert.strictEqual(c.size(), 1, 'Map shrank — expired key physically removed');
+  assert.strictEqual(await c.get('keep'), 'stays', 'live no-TTL key survives the sweep');
+  assert.strictEqual(await c.get('leak'), null, 'swept key reads as a miss');
+});
+
+test('Cache: sweep keeps lazy-on-read eviction working between sweeps', async () => {
+  const c = makeLocalCache();
+  await c.set('lazy', 'v', 1);
+  await new Promise((r) => setTimeout(r, 1100));
+  // No sweep yet — a READ must still expire it (lazy eviction kept alongside the
+  // sweeper, since a key can expire in the gap between two sweeps).
+  assert.strictEqual(await c.get('lazy'), null, 'read expires the key without a sweep');
+  assert.strictEqual(c.size(), 0, 'lazy read also removed it from the Map');
+});
+
 test('Cache: incr increments atomically and starts from 0', async () => {
   const c = makeLocalCache();
   assert.strictEqual(await c.incr('count'), 1);
