@@ -27,6 +27,15 @@ func (c *Credentials) IsExpired() bool {
 	return time.Now().After(c.ExpiresAt)
 }
 
+// ExpiresSoon returns true if the access token has less than `within` of life
+// left (including already-expired). It is the refresh-AHEAD counterpart to
+// IsExpired: callers that must never hand out a soon-to-die token (e.g. a
+// periodic token-file refresher) refresh on ExpiresSoon(skew) rather than
+// waiting for IsExpired. A non-positive `within` collapses to IsExpired.
+func (c *Credentials) ExpiresSoon(within time.Duration) bool {
+	return time.Until(c.ExpiresAt) < within
+}
+
 func credentialsPath(mode string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

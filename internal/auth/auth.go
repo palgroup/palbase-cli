@@ -411,6 +411,35 @@ func (c *Client) GetValidToken(ctx context.Context) (string, error) {
 	return creds.AccessToken, nil
 }
 
+// GetFreshToken returns an access token guaranteed to have at least
+// minRemaining of life left, refreshing AHEAD of expiry when it doesn't.
+//
+// GetValidToken only refreshes once the token is ALREADY expired
+// (creds.IsExpired()): a caller that polls on a fixed tick can therefore write
+// out a token with only a few seconds left, which then expires before the next
+// tick fires — leaving a stale-token window (e.g. `palbase serve`'s asService()
+// silently returns empty until the next refresh actually triggers).
+// GetFreshToken closes that window: it refreshes when the token has LESS THAN
+// minRemaining left, so the returned token always has a comfortable margin.
+//
+// This is deliberately a SEPARATE method from GetValidToken (and does NOT touch
+// Credentials.IsExpired, which every other caller relies on) so the
+// refresh-ahead policy is opt-in per call site.
+func (c *Client) GetFreshToken(ctx context.Context, minRemaining time.Duration) (string, error) {
+	creds, err := LoadCredentials(c.Cfg.Mode)
+	if err != nil {
+		return "", err
+	}
+
+	if creds.ExpiresSoon(minRemaining) {
+		creds, err = c.RefreshTokens(ctx, creds)
+		if err != nil {
+			return "", err
+		}
+	}
+	return creds.AccessToken, nil
+}
+
 func openURL(u string) error {
 	switch runtime.GOOS {
 	case "darwin":

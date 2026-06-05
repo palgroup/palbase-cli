@@ -577,10 +577,14 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			}
 			// Keep the owner-token file fresh while serve runs so asService()
 			// (BYPASSRLS) doesn't silently break when the session token expires.
-			// GetValidToken refreshes transparently once the token is expired; we
-			// poll FREQUENTLY (every 30s) so the stale window between expiry and
-			// the next refresh is at most ~30s rather than minutes. Stops when the
-			// context is cancelled (Ctrl+C) or node exits.
+			// We REFRESH-AHEAD: GetFreshToken refreshes whenever the token has
+			// less than 5 minutes of life left (not only once it's already
+			// expired, as GetValidToken does), so the file we write always holds
+			// a token with several minutes of margin. Combined with the 30s tick
+			// this closes the stale window entirely — a tick can no longer
+			// rewrite a token that's seconds from expiry. Stops when the context
+			// is cancelled (Ctrl+C) or node exits.
+			const ownerTokenMinRemaining = 5 * time.Minute
 			if ownerToken != "" {
 				go func() {
 					t := time.NewTicker(30 * time.Second)
@@ -590,7 +594,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 						case <-ctx.Done():
 							return
 						case <-t.C:
-							if tok, err := r.Auth().GetValidToken(ctx); err == nil && tok != "" {
+							if tok, err := r.Auth().GetFreshToken(ctx, ownerTokenMinRemaining); err == nil && tok != "" {
 								_ = os.WriteFile(ownerTokenFile, []byte(tok), 0o600)
 							}
 						}
