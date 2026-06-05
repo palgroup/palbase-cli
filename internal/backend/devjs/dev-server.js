@@ -275,15 +275,18 @@ function effectiveAuth(routeOptions, controllerMeta) {
   return true;
 }
 
-// urlToRegex compiles a `/places/:id`-style pattern into { regex, paramNames }.
-// The full path produced by `basePath + route.path` uses `:param` for path
-// params (the SDK's own convention); we keep that here for matching.
+// urlToRegex compiles a `/todos/{id}`-style pattern into { regex, paramNames }.
+// Class controllers (@Get("/{id}")) emit path params in BRACE form `{param}` —
+// that's the one true form the route registry uses (worker.js + the OpenAPI
+// generator agree). A path segment that is wholly `{name}` is a capture; anything
+// else is a literal (regex-escaped). (Legacy `:param` is gone — clean cutover.)
 function urlToRegex(urlPattern) {
   const segments = urlPattern.split('/').filter((s) => s !== '');
   const paramNames = [];
   const body = segments.map((s) => {
-    if (s.startsWith(':')) {
-      paramNames.push(s.slice(1));
+    const m = /^\{(.+)\}$/.exec(s);
+    if (m) {
+      paramNames.push(m[1]);
       return '([^/]+)';
     }
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
