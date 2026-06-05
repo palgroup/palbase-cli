@@ -1107,6 +1107,169 @@ function buildCmsClient(http) {
   };
 }
 
+// ─── Database edge client (DBClient over /v1/backend-db) ─────────────────
+//
+// `palbase serve`'s Database surface. In the deployed pod the Database singleton
+// talks to the runtime's 127.0.0.1 internal-api (worker.js dbOps); that pool is
+// pod-local and not externally reachable, so locally we proxy the SAME @palbase/
+// backend DBClient surface (insert/update/delete/findById/findMany/query +
+// transaction + asService) to the br-pod's AUTHENTICATED edge:
+//
+//   POST <gateway>/v1/backend-db/<op>     op ∈ {insert,update,delete,findById,
+//                                              findMany,query,begin,commit,rollback}
+//
+// Auth (Kong stamps the principal the edge derives RLS identity from):
+//   - non-service: `apikey` = the project publishable key (anon/authenticated)
+//     + `Authorization: Bearer <userToken>` when the in-flight request has a
+//     verified user (the edge's authenticated RLS path). Anonymous → no Bearer.
+//   - service: `apikey` = the project SERVICE-ROLE key (service_role/BYPASSRLS).
+//     service_role is principal-less → NO Bearer.
+//
+// Request bodies match the deployed worker's internal-api contract (worker.js
+// dbOps): insert→{table,data}, update→{table,data,where:{id}}, delete→{table,
+// where:{id}}, findById→{table,id}, findMany→{table,opts:toFindManyOpts(query)},
+// query→{sql,params}. begin→{} returns {tx_token}; commit/rollback thread that
+// token via the `X-Transaction-Token` header. Returns are enveloped (insert/
+// update/findById→{row}, findMany/query→{rows}) and unwrapped here so the
+// DBClient contract returns the bare row/rows.
+//
+// `fetchImpl` is injectable so the unit test can drive the wire contract with a
+// fakeFetch; it defaults to the global fetch the dev-server runs on.
+function buildDbEdgeClient({ baseUrl, apiKey, serviceRoleApiKey, getToken, fetchImpl }) {
+  const root = `${String(baseUrl).replace(/\/+$/, '')}/v1/backend-db`;
+  const doFetch = fetchImpl || fetch;
+
+  // headers builds the per-op header set. apikey selects the principal scope:
+  // the service-role key in service mode (service_role/BYPASSRLS), else the
+  // publishable key. In non-service mode the current request's user token (when
+  // present) rides as a Bearer so the edge derives the authenticated RLS
+  // identity; in service mode there is NO Bearer (service_role is principal-less).
+  function headers(extra, { service } = {}) {
+    const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
+    h.apikey = service ? serviceRoleApiKey : apiKey;
+    if (!service) {
+      const token = typeof getToken === 'function' ? getToken() : null;
+      if (token) h.Authorization = `Bearer ${token}`;
+    }
+    return h;
+  }
+
+  // call POSTs one op to the edge. `txToken` (when set) pins the op to a
+  // server-side transaction session via X-Transaction-Token. A 404 means the
+  // table/migration isn't deployed yet (the edge couldn't resolve it) — surface
+  // the actionable "git push to deploy the migration first" hint with a
+  // `not_found` code. Other non-2xx → a clear "db edge <op> → <status>" error.
+  // 204 (no content) → null; any other 2xx is JSON-parsed.
+  async function call(op, body, txToken, opts) {
+    const extra = txToken ? { 'X-Transaction-Token': txToken } : undefined;
+    const resp = await doFetch(`${root}/${op}`, {
+      method: 'POST',
+      headers: headers(extra, opts || {}),
+      body: JSON.stringify(body || {}),
+    });
+    if (resp.status === 404) {
+      let detail = '';
+      try { detail = await resp.text(); } catch { /* ignore */ }
+      const err = new Error(
+        `Table not found under \`palbase serve\` (db edge ${op} → 404). ` +
+        `\`git push\` to deploy the migration first, then retry.` +
+        (detail ? ` — ${detail}` : ''),
+      );
+      err.code = 'not_found';
+      throw err;
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+      let detail = '';
+      try { detail = await resp.text(); } catch { /* ignore */ }
+      throw new Error(`db edge ${op} → ${resp.status}: ${detail}`);
+    }
+    if (resp.status === 204) return null;
+    try {
+      return await resp.json();
+    } catch {
+      return null;
+    }
+  }
+
+  // ops builds the six raw DBClient operations for a given tx + mode. `txToken`
+  // pins them to a transaction (undefined = each op its own scoped tx); `opts`
+  // ({ service }) selects the service-role principal. Bodies + envelope unwrap
+  // mirror worker.js dbOps exactly.
+  function ops(txToken, opts) {
+    return {
+      insert: (table, data) =>
+        call('insert', { table, data }, txToken, opts).then((r) => r && r.row),
+      update: (table, id, data) =>
+        call('update', { table, data, where: { id } }, txToken, opts).then((r) => r && r.row),
+      delete: (table, id) =>
+        call('delete', { table, where: { id } }, txToken, opts).then(() => undefined),
+      findById: (table, id) =>
+        call('findById', { table, id }, txToken, opts).then((r) => (r && r.row) || null),
+      findMany: (table, query) =>
+        call('findMany', findManyBody(table, query), txToken, opts).then((r) => (r && r.rows) || []),
+      query: (sql, params) =>
+        call('query', { sql, params }, txToken, opts).then((r) => (r && r.rows) || []),
+    };
+  }
+
+  // findManyBody lowers the DBClient eq-map query ({ col: value }) to the edge's
+  // QueryOpts ({ where: [{ field, operator: 'eq', value }] }), matching
+  // worker.js's toFindManyOpts. An absent/empty query omits `opts` entirely
+  // ("no WHERE" → return all). Without this the filter is silently dropped
+  // server-side and findMany leaks every row (the cross-user leak class).
+  function findManyBody(table, query) {
+    if (!query || typeof query !== 'object') return { table };
+    const where = Object.entries(query).map(([field, value]) => ({ field, operator: 'eq', value }));
+    return where.length > 0 ? { table, opts: { where } } : { table };
+  }
+
+  // makeTransaction returns a transaction(fn) bound to a mode (undefined =
+  // request role, { service: true } = service_role). begin reads `tx_token`;
+  // the callback's tx ops + commit/rollback thread that token. Commit on a clean
+  // return, rollback on a throw (best-effort — the server watchdog owns cleanup
+  // if rollback itself fails), then re-throw so the handler sees the error.
+  function makeTransaction(modeOpts) {
+    return async function transaction(fn) {
+      const begin = await call('begin', {}, undefined, modeOpts);
+      const txToken = begin && begin.tx_token;
+      if (!txToken) throw new Error('failed to begin transaction (no tx_token in begin response)');
+      const tx = ops(txToken, modeOpts);
+      try {
+        const result = await fn(tx);
+        await call('commit', {}, txToken, modeOpts);
+        return result;
+      } catch (err) {
+        try { await call('rollback', {}, txToken, modeOpts); } catch { /* swallow */ }
+        throw err;
+      }
+    };
+  }
+
+  // asService returns the service_role sibling: the same op surface running with
+  // the service-role apikey (BYPASSRLS, no Bearer) PLUS a service-mode
+  // transaction. It deliberately does NOT re-expose asService (no double-bypass),
+  // matching the DBClient contract (Omit<DBClient,"asService">). Requires the
+  // project's service-role key — only the project OWNER can reveal it locally.
+  function asService() {
+    if (!serviceRoleApiKey) {
+      throw new Error(
+        'Database.asService() needs the project\'s service-role key. ' +
+        'Run `palbase serve` as the project OWNER (only owners can reveal it), ' +
+        'or `git push` to test service-role paths.',
+      );
+    }
+    return Object.assign(ops(undefined, { service: true }), {
+      transaction: makeTransaction({ service: true }),
+    });
+  }
+
+  // Default surface: request-role ops + request-role transaction + asService.
+  return Object.assign(ops(undefined, undefined), {
+    transaction: makeTransaction(undefined),
+    asService,
+  });
+}
+
 // ─── Factory ────────────────────────────────────────────────────────────
 // Builds the full ctx.* module surface from a single publishable-key/baseUrl
 // pair.
@@ -1147,6 +1310,7 @@ function buildModuleClients(palbase, options) {
 module.exports = {
   PalbaseError,
   buildModuleClients,
+  buildDbEdgeClient,
   // Exported for tests so individual clients can be exercised in isolation.
   makeHttpClient,
   buildAuthClient,

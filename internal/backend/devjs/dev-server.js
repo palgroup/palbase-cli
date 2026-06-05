@@ -462,7 +462,7 @@ function findRouteParam(params, kind) {
 // internal/runtime/module-clients.js. Keep them in lockstep — edit both
 // when changing any client surface. There is no @palbase/server dep
 // anymore; customers only add @palbase/backend.
-const { buildModuleClients } = require('./module-clients.js');
+const { buildModuleClients, buildDbEdgeClient } = require('./module-clients.js');
 
 // Request-scoped user id for auto-binding flags resolution to the current
 // request's user — mirrors worker.js's `currentRequestUserId`. The dev-server
@@ -477,6 +477,13 @@ const { buildModuleClients } = require('./module-clients.js');
 // one-developer dev tool, not the multi-tenant pod. Prod's per-subprocess model
 // gives the same guarantee structurally.
 let currentRequestUserId = null;
+
+// Request-scoped raw Bearer for the current request's verified user. The
+// Database edge client (buildDbEdgeClient) reads this lazily via getToken() to
+// forward the user's token on the authenticated RLS path — the same set/clear
+// lifecycle as currentRequestUserId (set before dispatch, cleared in finally).
+// NEVER logged. Null on anonymous requests (no Bearer → the edge runs anon).
+let currentRequestUserToken = null;
 
 let palbaseClientSingleton = null;
 function getPalbaseClients() {
@@ -535,24 +542,28 @@ function moduleClients() {
 }
 
 // The Database singleton = the project's own Postgres surface in deployed
-// mode. In `palbase serve` we don't have access to the per-tenant pgx pool
-// (that's tied to the backend-runtime pod's internal-API on 127.0.0.1, not
-// externally reachable). Rather than half-fake it and have handlers silently
-// behave differently in dev vs prod, every Database op throws a clear
-// "use Documents in serve, or deploy to test" hint on first call. This
-// keeps dev = prod for everything we CAN honestly mirror (Documents, Storage,
-// Notifications, Flags, …) and names the one surface that needs a deploy.
-function dbClient() {
-  const hint =
-    'Database is not available under `palbase serve` (no local Postgres ' +
-    'tunnel to the tenant pool). For local dev, use Documents.collection() ' +
-    'which proxies through the deployed module. For Database tests, ' +
-    '`git push` to deploy and exercise the deployed endpoint.';
-  return new Proxy({}, {
-    get(_t, method) {
-      if (typeof method !== 'string') return undefined;
-      return () => { throw new Error(hint); };
-    },
+// mode. In `palbase serve` we don't have a local pgx pool (that's pod-local on
+// 127.0.0.1), so we proxy the SAME @palbase/backend DBClient surface
+// (insert/update/delete/findById/findMany/query + transaction + asService) to
+// the br-pod's AUTHENTICATED edge at POST <gateway>/v1/backend-db/<op>. The edge
+// derives RLS identity from the Kong-stamped principal: the publishable apikey
+// (anon/authenticated) + the current request's user Bearer on the authenticated
+// path, OR the service-role apikey (BYPASSRLS, no Bearer) for asService(). This
+// keeps dev = prod — local Database hits the deployed tables with full RLS, the
+// same as a deployed handler. Requires login (PALBASE_URL + TENANT_APIKEY);
+// without it the Database slot throws notConfiguredModule('Database') on use.
+function databaseClient() {
+  if (!PALBASE_URL || !TENANT_APIKEY) return notConfiguredModule('Database');
+  return buildDbEdgeClient({
+    baseUrl: PALBASE_URL,
+    apiKey: TENANT_APIKEY,
+    // The service-role key is injected (when the project owner runs serve) so
+    // asService() can take the BYPASSRLS path. Absent → asService() throws the
+    // owner hint. The Go env-injection of this is a separate task.
+    serviceRoleApiKey: process.env.PALBASE_SERVICE_ROLE_APIKEY || undefined,
+    // Lazy getter — read at DB-call time so it sees the in-flight request's
+    // verified user token (set by the http handler). Mirrors getCurrentUserId.
+    getToken: () => currentRequestUserToken,
   });
 }
 
@@ -596,7 +607,7 @@ function clientInfoFromHeaders(headers) {
 function installRuntime() {
   const clients = moduleClients();
   require('@palbase/backend').__setRuntime({
-    Database: dbClient(),
+    Database: databaseClient(),
     Documents: clients.docs,
     Storage: clients.storage,
     Cache: notConfiguredModule('Cache'),
@@ -616,12 +627,21 @@ function installRuntime() {
 // `body` is the parsed JSON body. There is NO `errors` map — errors are the
 // global throw classes.
 function makeRequest(req, params, query, body, user) {
+  // The handler-visible user MUST match prod's pbReq.user ({id, email?, role,
+  // metadata}) — the raw Bearer is threaded to the Database edge separately (via
+  // currentRequestUserToken) and is NEVER exposed to handler code. Strip `token`
+  // here so `@User()`/`@Req()` never hand a secret to user endpoints.
+  let publicUser = null;
+  if (user) {
+    const { token: _omitToken, ...rest } = user;
+    publicUser = rest;
+  }
   return {
     input: body ?? {},
     params,
     query: query ?? {},
     headers: req.headers || {},
-    user: user ?? null,
+    user: publicUser,
     client: clientInfoFromHeaders(req.headers || {}),
     file: null,
     method: req.method,
@@ -1075,6 +1095,10 @@ async function verifyTokenViaPalauth(token) {
       email: profile.email || '',
       role: typeof claims.role === 'string' ? claims.role : 'authenticated',
       metadata: claims.metadata && typeof claims.metadata === 'object' ? claims.metadata : {},
+      // RETAIN the raw Bearer so the Database edge client can forward it on the
+      // authenticated RLS path (the edge derives identity from this). NEVER
+      // logged — only the JWT fingerprint (sub/exp/iat) is ever printed.
+      token,
     },
   };
   tokenCache.set(token, { value, expires: Date.now() + TOKEN_TTL_MS });
@@ -1335,6 +1359,13 @@ const server = http.createServer(async (req, res) => {
     // without the handler passing { userId } manually. Anonymous → null →
     // project defaults. Reset in finally so a later request never inherits it.
     currentRequestUserId = (pbReq.user && pbReq.user.id) || null;
+    // Make the request's raw Bearer visible to the Database edge client so it
+    // forwards the user token on the authenticated RLS path (mirrors
+    // currentRequestUserId). Sourced from the verify-result `user` (which RETAINS
+    // the token) — NOT pbReq.user, which is stripped of the token before handlers
+    // see it. Anonymous → null → the edge runs anon. NEVER logged. Reset in
+    // finally so a later request never inherits it.
+    currentRequestUserToken = (user && user.token) || null;
     // Execute the controller method bound to the cached instance so `this`
     // resolves the controller's fields/services.
     result = await instance[liveRoute.fnName](...args);
@@ -1364,6 +1395,7 @@ const server = http.createServer(async (req, res) => {
     return;
   } finally {
     currentRequestUserId = null;
+    currentRequestUserToken = null;
   }
 
   // Output validation — mirror worker.js: a Zod @Returns schema validates the
