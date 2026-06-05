@@ -169,8 +169,8 @@ const CONTROLLER_FILE_RE = /\.(c?js|mjs|ts)$/i;
 // fnName (mirroring worker.js's `context.route_key`); `params` is the ordered
 // ParamMeta injection plan; `returnSchema` is the live @Returns zod (or null);
 // `effectiveAuth` is the resolved route.options.auth ?? controller.defaultAuth
-// ?? true. urlPattern keeps `:param` colons for printing + matching; the regex
-// matches incoming requests with capture groups.
+// ?? true. urlPattern keeps the class-controller `{param}` braces for printing;
+// urlToRegex turns each `{param}` segment into a capture group for matching.
 const routes = new Map();
 
 // Class-controller registry symbols — MUST match the SDK
@@ -1474,10 +1474,15 @@ const server = http.createServer(async (req, res) => {
       log(`[${req.method}] ${parsed.pathname}  ${err.status}  ${Date.now() - start}ms  — ${envelope.error}`);
       return;
     }
+    // Don't leak the stack (absolute file paths, internal line numbers) in the
+    // HTTP response — it's noise for the client and an info-leak. Print it to the
+    // serve terminal for the developer, and return a clean envelope matching the
+    // platform error shape.
     res.statusCode = 500;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ error: 'handler_error', message: err.message, stack: err.stack }));
+    res.end(JSON.stringify({ error: 'handler_error', error_description: err.message, status: 500 }));
     log(`[${req.method}] ${parsed.pathname}  500  ${Date.now() - start}ms  — ${err.message}`);
+    if (err.stack) console.error(err.stack);
     return;
   } finally {
     currentRequestUserId = null;

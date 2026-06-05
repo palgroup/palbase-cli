@@ -577,11 +577,13 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			}
 			// Keep the owner-token file fresh while serve runs so asService()
 			// (BYPASSRLS) doesn't silently break when the session token expires.
-			// GetValidToken refreshes transparently; we rewrite the file every few
-			// minutes. Stops when the context is cancelled (Ctrl+C) or node exits.
+			// GetValidToken refreshes transparently once the token is expired; we
+			// poll FREQUENTLY (every 30s) so the stale window between expiry and
+			// the next refresh is at most ~30s rather than minutes. Stops when the
+			// context is cancelled (Ctrl+C) or node exits.
 			if ownerToken != "" {
 				go func() {
-					t := time.NewTicker(5 * time.Minute)
+					t := time.NewTicker(30 * time.Second)
 					defer t.Stop()
 					for {
 						select {
