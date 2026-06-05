@@ -571,6 +571,58 @@ function databaseClient() {
   });
 }
 
+// isTenantModuleRoute reports whether an unknown (non-controller) path is a route
+// the LIVE tenant gateway serves — auth, the SDK module APIs (/v1/...), storage,
+// pg-meta, OIDC discovery. `palbase serve` runs your controllers locally but is a
+// transparent window onto the deployed tenant for everything else (auth, flags,
+// docs, storage, realtime, …), so these are forwarded rather than 404'd. The
+// project's OWN Database edge (/v1/backend-db) is NOT forwarded — serve never
+// receives it (the SDK calls it from inside controllers, not over the HTTP face).
+function isTenantModuleRoute(pathname) {
+  return (
+    pathname.startsWith('/auth/') || pathname === '/auth' ||
+    pathname.startsWith('/v1/') ||
+    pathname.startsWith('/storage/') ||
+    pathname.startsWith('/pg-meta') ||
+    pathname.startsWith('/.well-known/') ||
+    pathname.startsWith('/oauth')
+  );
+}
+
+// proxyToTenant forwards an unknown module request to the live tenant gateway
+// (PALBASE_URL) with the apikey injected and the caller's Authorization + content
+// type preserved, then streams the upstream status/body back. Keeps `palbase
+// serve` honest: auth/login/flags/etc. behave EXACTLY as deployed, so an app
+// pointed at local serve can fully log in and use every module — only the
+// controllers run locally.
+async function proxyToTenant(req, res, parsed, start) {
+  const target = PALBASE_URL.replace(/\/+$/, '') + req.url;
+  const headers = { apikey: TENANT_APIKEY };
+  if (req.headers['authorization']) headers['authorization'] = req.headers['authorization'];
+  if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
+  // Collect the body (module calls are small JSON) for non-GET/HEAD.
+  let body;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    body = Buffer.concat(chunks);
+  }
+  try {
+    const upstream = await fetch(target, { method: req.method, headers, body });
+    res.statusCode = upstream.status;
+    const ct = upstream.headers.get('content-type');
+    if (ct) res.setHeader('content-type', ct);
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.end(buf);
+    log(`[${req.method}] ${parsed.pathname}  ${upstream.status}  ${Date.now() - start}ms  → tenant`);
+  } catch (err) {
+    res.statusCode = 502;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ error: 'tenant_proxy_failed', message: err.message }));
+    log(`[${req.method}] ${parsed.pathname}  502  ${Date.now() - start}ms  — tenant proxy: ${err.message}`);
+  }
+}
+
 // dev log surface (the Log singleton in serve mode).
 function makeLog() {
   return {
@@ -1166,6 +1218,17 @@ const server = http.createServer(async (req, res) => {
     if (m) { route = r; match = m; break; }
   }
   if (!route) {
+    // Not one of THIS project's controllers. It may still be a tenant-module
+    // route the live gateway serves (auth, flags, docs, storage, …). `palbase
+    // serve` runs YOUR controllers locally but is otherwise a transparent
+    // window onto the deployed tenant — same as it proxies Database/ctx.* to the
+    // live branch. So forward unknown module routes to the tenant gateway
+    // (PALBASE_URL) with the apikey + the caller's Authorization preserved.
+    // Everything else is a genuine 404.
+    if (PALBASE_URL && TENANT_APIKEY && isTenantModuleRoute(parsed.pathname)) {
+      await proxyToTenant(req, res, parsed, start);
+      return;
+    }
     res.statusCode = 404;
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ error: 'not_found', path: parsed.pathname, method: req.method }));
