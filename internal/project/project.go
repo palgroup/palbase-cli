@@ -43,7 +43,6 @@ type projectRow struct {
 	Region    string    `json:"region"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
-	OrgID     string    `json:"org_id"`
 }
 
 func listCmd(rest func() REST) *cobra.Command {

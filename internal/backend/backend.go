@@ -9,7 +9,7 @@
 // a tar bundle.
 //
 // All remote calls go through Studio's tRPC layer via the studio
-// package — never directly to br-<ref> — so org-membership + the
+// package — never directly to br-<ref> — so project-membership + the
 // backend_enabled gate are enforced server-side.
 package backend
 

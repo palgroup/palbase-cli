@@ -2,7 +2,7 @@
 // backend init/deploy/...`. We talk to Studio's tRPC endpoints directly
 // because the CLI's auth model — user JWT carried as a bearer token —
 // matches Studio's own session reader, and we get every Phase 7
-// authorization check (org membership + backend_enabled gate) for free.
+// authorization check (project membership + backend_enabled gate) for free.
 package studio
 
 import (

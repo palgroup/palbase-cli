@@ -21,11 +21,12 @@ type REST interface {
 // caller polls `project status <ref>`.
 func createCmd(rest func() REST) *cobra.Command {
 	var (
-		orgID   string
-		name    string
-		tier    string
-		region  string
-		jsonOut bool
+		name          string
+		tier          string
+		region        string
+		githubAccount string
+		repoName      string
+		jsonOut       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "create <ref>",
@@ -33,10 +34,23 @@ func createCmd(rest func() REST) *cobra.Command {
 		Short: "Create a new project (async — poll `project status <ref>`)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := args[0]
-			if orgID == "" {
-				return fmt.Errorf("--org is required")
+			if name == "" {
+				return fmt.Errorf("--name is required")
 			}
-			body := map[string]any{"ref": ref, "orgId": orgID, "name": name}
+			if githubAccount == "" {
+				return fmt.Errorf("--github-account is required (\"personal\" or a GitHub App installation id)")
+			}
+			if repoName == "" {
+				return fmt.Errorf("--repo is required (the GitHub repo name to create for this project)")
+			}
+			// Ownership is the authenticated user (projects.owner_user_id); there
+			// is no org layer. The server derives the owner from the session.
+			body := map[string]any{
+				"ref":           ref,
+				"name":          name,
+				"githubAccount": githubAccount,
+				"repoName":      repoName,
+			}
 			if tier != "" {
 				body["tier"] = tier
 			}
@@ -59,8 +73,9 @@ func createCmd(rest func() REST) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&orgID, "org", "", "Organization ID that owns the project (required)")
-	cmd.Flags().StringVar(&name, "name", "", "Human-readable project name")
+	cmd.Flags().StringVar(&name, "name", "", "Human-readable project name (required)")
+	cmd.Flags().StringVar(&githubAccount, "github-account", "", `GitHub target: "personal" or an installation id (required)`)
+	cmd.Flags().StringVar(&repoName, "repo", "", "GitHub repo name to create for this project (required)")
 	cmd.Flags().StringVar(&tier, "tier", "", "Tier: free|pro|scale|enterprise (default free)")
 	cmd.Flags().StringVar(&region, "region", "", "Region (default northeurope)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")

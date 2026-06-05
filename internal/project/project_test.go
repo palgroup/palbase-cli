@@ -60,26 +60,30 @@ func TestProjectCreate_REST_202Handle(t *testing.T) {
 	})
 
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--org", "org_1", "--name", "Demo", "--tier", "pro", "--json"})
+	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--github-account", "personal", "--repo", "demo-repo", "--tier", "pro", "--json"})
 	require.NoError(t, cmd.Execute())
 
 	require.Equal(t, "abcd1234", gotBody["ref"])
-	require.Equal(t, "org_1", gotBody["orgId"])
 	require.Equal(t, "Demo", gotBody["name"])
+	require.Equal(t, "personal", gotBody["githubAccount"])
+	require.Equal(t, "demo-repo", gotBody["repoName"])
 	require.Equal(t, "pro", gotBody["tier"])
+	// No org layer: the owner is the authenticated user, server-derived.
+	_, hasOrg := gotBody["orgId"]
+	require.False(t, hasOrg, "create body must not carry orgId (org layer removed)")
 }
 
-func TestProjectCreate_RequiresOrg(t *testing.T) {
+func TestProjectCreate_RequiresGithubAccount(t *testing.T) {
 	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API without --org")
+		t.Fatal("must not call the API without --github-account")
 	})
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234"})
+	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--repo", "demo-repo"})
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--org is required")
+	require.Contains(t, err.Error(), "--github-account is required")
 }
 
 func TestProjectStatus_REST(t *testing.T) {
