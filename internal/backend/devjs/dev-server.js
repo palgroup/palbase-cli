@@ -60,6 +60,7 @@ const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
 const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
+const WORKERS_DIR = path.join(PROJECT_ROOT, 'workers');
 
 // ── esbuild bundling — IDENTICAL to the deploy path ────────────────────────
 //
@@ -79,6 +80,7 @@ const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
 const BUNDLE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-serve-bundle-'));
 const BUNDLED_CONTROLLERS_DIR = path.join(BUNDLE_ROOT, 'controllers');
 const BUNDLED_RESOURCES_DIR = path.join(BUNDLE_ROOT, 'resources');
+const BUNDLED_WORKERS_DIR = path.join(BUNDLE_ROOT, 'workers');
 
 // A {"type":"commonjs"} marker in BUNDLE_ROOT pins our --format=cjs `.js`
 // bundles to CommonJS regardless of the project's package.json "type" — the
@@ -671,12 +673,215 @@ function clientInfoFromHeaders(headers) {
   };
 }
 
+// ── Cache (local, in-process) ──────────────────────────────────────────────
+//
+// The deployed runtime backs Cache with the pod-local internal-api (/internal-api
+// /cache/* → the runtime's Redis), reachable ONLY from inside the br-pod — there
+// is no external tenant route for it (no /v1/cache in Kong), so `palbase serve`
+// can't proxy to it the way it proxies Documents. Instead we give serve a LOCAL,
+// in-process cache so a controller calling Cache.get/set/incr/getOrSet actually
+// WORKS for dev (rather than throwing a false "no credentials" error). It is
+// dev-only and non-durable: the store is a single-process Map that vanishes when
+// serve stops, and there's no cross-replica coordination (serve is one process).
+// The method surface matches @palbase/backend's CacheClient EXACTLY
+// (get/set/del/incr/getOrSet) so a handler that works here works once deployed.
+//
+// TTL is honored (unlike the unit-test mock): an expired key reads back as a
+// miss, mirroring the prod cache's lazy expiry. The cache is a module-level
+// singleton (built once, NOT per request) so values survive across the
+// per-request installRuntime() calls — the same lifetime pattern as the
+// Database/module-client singletons above.
+function makeLocalCache() {
+  // key → { value, expiresAt } where expiresAt is an epoch-ms deadline or null
+  // (no TTL). Values are stored structurally (already JSON-serializable), so any
+  // JSON value round-trips, matching the JSON-typed prod cache.
+  const store = new Map();
+
+  const live = (key) => {
+    const entry = store.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expiresAt !== null && Date.now() >= entry.expiresAt) {
+      store.delete(key); // lazy expiry
+      return undefined;
+    }
+    return entry;
+  };
+
+  const put = (key, value, ttl) => {
+    const expiresAt = typeof ttl === 'number' && ttl > 0 ? Date.now() + ttl * 1000 : null;
+    store.set(key, { value, expiresAt });
+  };
+
+  const cache = {
+    async get(key) {
+      const entry = live(key);
+      return entry === undefined ? null : entry.value;
+    },
+    async set(key, value, ttl) {
+      put(key, value, ttl);
+    },
+    async del(key) {
+      store.delete(key);
+    },
+    async incr(key) {
+      // Single-process serve → no concurrent writers, so a read-modify-write is
+      // atomic enough. A non-number current value coerces like the prod cache's
+      // INCR (parse-or-zero), so an incr after a string set still advances.
+      const entry = live(key);
+      const raw = entry === undefined ? 0 : entry.value;
+      const current = typeof raw === 'number' ? raw : (parseInt(String(raw), 10) || 0);
+      const next = current + 1;
+      // incr preserves any existing TTL deadline (prod INCR doesn't reset expiry).
+      const expiresAt = entry === undefined ? null : entry.expiresAt;
+      store.set(key, { value: next, expiresAt });
+      return next;
+    },
+    // getOrSet is single-process here, so no distributed lock is needed — it is
+    // just get-miss → fn → set, the same simplification the SDK test mock uses.
+    async getOrSet(key, ttl, fn) {
+      const hit = await cache.get(key);
+      if (hit !== null) return hit;
+      const value = await fn();
+      await cache.set(key, value, ttl);
+      return value;
+    },
+  };
+  return cache;
+}
+
+let localCacheSingleton = null;
+function localCache() {
+  if (!localCacheSingleton) localCacheSingleton = makeLocalCache();
+  return localCacheSingleton;
+}
+
+// ── Queue (local, in-process, worker-backed) ───────────────────────────────
+//
+// Like Cache, the deployed Queue is pod-local internal-api only (/internal-api/
+// queue/push → the runtime's queue, drained by the Go processor running the
+// project's workers/). There is no external route to proxy to. So serve runs the
+// project's workers IN-PROCESS: workers/ is discovered + bundled at boot (the
+// same esbuild path as controllers/), and Queue.push(worker, payload) schedules
+// the matching defineWorker handler to run asynchronously, returning { jobId }.
+//
+// This is dev-only/non-durable: there is no persistence, retry/backoff, or DLQ —
+// a thrown worker handler is logged (mirroring the prod processor's "job failed"
+// log) and dropped. But the happy path WORKS: a controller that enqueues a job
+// sees its worker actually run, so `palbase serve` exercises the full flow.
+
+// workerRegistry: worker name → ResolvedWorkerConfig (from defineWorker). Rebuilt
+// at boot (and not hot-reloaded — workers/ changes need a serve restart, like
+// resources/). A module-level singleton so push() resolves against the live set.
+const workerRegistry = new Map();
+
+// registerWorkers discovers + bundles workers/, then registers each file's
+// default-exported defineWorker config by name. Best-effort: a bundle error or a
+// file without a valid worker export is logged and skipped so the rest of serve
+// still runs (a project may have controllers but no workers, or a half-written
+// worker). Returns the count registered.
+function registerWorkers() {
+  workerRegistry.clear();
+  if (!fs.existsSync(WORKERS_DIR)) return 0;
+
+  rmBundledTree(BUNDLED_WORKERS_DIR);
+  try {
+    if (!bundleSrcDir(WORKERS_DIR, BUNDLED_WORKERS_DIR)) return 0;
+  } catch (err) {
+    log(`⚠ esbuild failed for workers/ — ${esbuildErr(err)} — Queue.push will have no workers to run`);
+    return 0;
+  }
+
+  let registered = 0;
+  for (const file of walk(BUNDLED_WORKERS_DIR)) {
+    if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    let mod;
+    try {
+      mod = require(file);
+    } catch (err) {
+      log(`workers: skipping ${path.join('workers', path.relative(BUNDLED_WORKERS_DIR, file))} — ${err.message}`);
+      continue;
+    }
+    const cfg = mod && (mod.default ?? mod);
+    // defineWorker returns a ResolvedWorkerConfig: { name, handler, retry, ... }.
+    if (!cfg || typeof cfg !== 'object' || typeof cfg.name !== 'string' || typeof cfg.handler !== 'function') {
+      log(`workers: skipping ${path.join('workers', path.relative(BUNDLED_WORKERS_DIR, file))} — not a defineWorker default export`);
+      continue;
+    }
+    workerRegistry.set(cfg.name, cfg);
+    registered += 1;
+  }
+  if (registered > 0) log(`registered ${registered} worker(s): ${[...workerRegistry.keys()].join(', ')}`);
+  return registered;
+}
+
+// workerMeta builds the WorkerMeta passed to a worker handler — mirrors the SDK's
+// WorkerMeta shape ({ env, user, requestId, projectId, environmentId }). Local
+// dev has no per-branch secret injection, so env is the developer's own env (a
+// copy, matching resourceEnvMap). The enqueuing user isn't threaded through the
+// local queue, so user is null (background jobs are usually system-initiated).
+function workerMeta() {
+  return {
+    env: Object.assign({}, process.env),
+    user: null,
+    requestId: `req_job_${Date.now().toString(36)}`,
+    projectId: PROJECT_REF,
+    environmentId: process.env.PALBASE_BRANCH || 'main',
+  };
+}
+
+// makeLocalQueue returns the Queue singleton surface (push). push schedules the
+// worker to run on the next tick (fire-and-forget, like enqueue → async drain in
+// prod) and resolves immediately with a jobId so the caller never blocks on the
+// job. A missing worker is logged (mirroring the prod processor's "no handler
+// registered") but still returns a jobId — push's contract is "accepted", not
+// "ran".
+function makeLocalQueue() {
+  let seq = 0;
+  return {
+    async push(worker, payload) {
+      const jobId = `job_dev_${Date.now().toString(36)}_${(seq++).toString(36)}`;
+      const cfg = workerRegistry.get(worker);
+      if (!cfg) {
+        log(`Queue.push: no worker registered for "${worker}" — job ${jobId} dropped ` +
+          `(add workers/${worker}.ts with defineWorker({ name: "${worker}", ... }))`);
+        return { jobId };
+      }
+      // Run async so push() returns immediately (the prod queue is async too).
+      // installRuntime() has already wired the singletons the handler imports, so
+      // the worker reaches Database/Cache/Log exactly as a controller does.
+      setImmediate(async () => {
+        try {
+          await cfg.handler(payload, workerMeta());
+          log(`Queue: job ${jobId} (${worker}) completed`);
+        } catch (err) {
+          // No retry/DLQ in dev — log like the prod processor's "job failed" and drop.
+          log(`Queue: job ${jobId} (${worker}) failed — ${err && err.message ? err.message : String(err)}`);
+        }
+      });
+      return { jobId };
+    },
+  };
+}
+
+let localQueueSingleton = null;
+function localQueue() {
+  if (!localQueueSingleton) localQueueSingleton = makeLocalQueue();
+  return localQueueSingleton;
+}
+
 // installRuntime injects the dev service clients into the shared
 // @palbase/backend instance, mirroring worker.js's runtime seam. Both
 // dev-server.js (temp dir) and the user's controllers/handlers resolve
 // @palbase/backend from the same project node_modules (NODE_PATH), so they
 // share ONE module instance and a handler's `import { Database }` sees what we
 // set here.
+//
+// Cache and Queue are LOCAL in-process implementations (the deployed pod backs
+// them with pod-local internal-api/Redis, which has no external route serve could
+// proxy to). They're dev-only/non-durable but functional, so a controller using
+// Cache.*/Queue.* WORKS under serve instead of throwing a false "no credentials"
+// error. Both are module-level singletons (built once) so cached values and the
+// worker registry survive across the per-request installRuntime() calls.
 //
 // EXCLUDED on purpose: Realtime, Functions, CMS, Links, Analytics, Auth.
 function installRuntime() {
@@ -685,8 +890,8 @@ function installRuntime() {
     Database: databaseClient(),
     Documents: clients.docs,
     Storage: clients.storage,
-    Cache: notConfiguredModule('Cache'),
-    Queue: notConfiguredModule('Queue'),
+    Cache: localCache(),
+    Queue: localQueue(),
     Log: makeLog(),
     Notifications: clients.notifications,
     Flags: clients.flags,
@@ -1083,7 +1288,7 @@ function buildOpenApiSpec() {
     info: {
       title: 'Palbase Backend',
       version: '1.0.0',
-      description: 'Auto-generated from defineController()/defineHandler() configs.',
+      description: 'Auto-generated from @Controller class decorators.',
     },
     // servers OMITTED — prod's ServerURL is empty for the deployed spec.
     paths,
@@ -1696,6 +1901,10 @@ async function main() {
   }
   watchControllers();
   await bootResources();
+  // Discover workers/ so Queue.push(worker, payload) can run them in-process.
+  // After installRuntime() wires Queue → localQueue() per request, a controller
+  // enqueuing a job sees its worker actually execute (dev-only, non-durable).
+  registerWorkers();
 
   server.listen(PORT, '0.0.0.0', () => {
     const ip = lanIP();
@@ -1728,7 +1937,17 @@ async function main() {
   process.on('SIGTERM', onSignal);
 }
 
-main().catch((err) => {
-  log(`FATAL: dev-server boot failed: ${err && err.stack ? err.stack : String(err)}`);
-  process.exit(1);
-});
+// Auto-boot only when run directly (`node dev-server.js`). Guarded so the file
+// can be require()d by tests (e.g. the local Cache/Queue unit test) without
+// starting a server or running the boot side effects.
+if (require.main === module) {
+  main().catch((err) => {
+    log(`FATAL: dev-server boot failed: ${err && err.stack ? err.stack : String(err)}`);
+    process.exit(1);
+  });
+}
+
+// Exported for unit tests (dev-server.test.js): the local Cache/Queue factories
+// and the worker registry. Not used by the running dev-server, which calls them
+// directly. Keeping the export minimal avoids leaking the whole internal surface.
+module.exports = { makeLocalCache, makeLocalQueue, workerRegistry };
