@@ -499,12 +499,6 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				EndpointRef    string `json:"endpointRef"`
 				PublishableKey string `json:"publishableKey"`
 			}
-			// Owner-gated service-role key for local asService() (BYPASSRLS). Only
-			// the project OWNER can reveal it; a non-owner serve runs without it and
-			// asService() throws an actionable hint (graceful degrade). The key is a
-			// presentable credential the owner already holds (like Supabase's local
-			// service_role key) — never logged (treated like a DB password).
-			var serviceRoleKey string
 			if ref != "" && ref != "local" {
 				// Thread the active branch so reveal returns THIS branch's
 				// endpoint_ref (e.g. test0r8q3p1) — otherwise serve's module
@@ -516,16 +510,17 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				if err := r.Studio().Query(ctx, "apikey.reveal", revealPayload, &revealResp); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.docs/ctx.storage/… will be unavailable\n", err)
 				}
-				// Best-effort owner-gated service-role reveal. A FORBIDDEN (non-owner)
-				// or NOT_FOUND is expected and silent — asService() then degrades.
-				var svcResp struct {
-					ServiceRoleKey string `json:"serviceRoleKey"`
-				}
-				if err := r.Studio().Query(ctx, "apikey.revealServiceRole", revealPayload, &svcResp); err == nil && svcResp.ServiceRoleKey != "" {
-					serviceRoleKey = svcResp.ServiceRoleKey
-					fmt.Fprintf(os.Stderr, "asService() enabled — service_role (BYPASSRLS) can read/write ALL rows in branch %q (prod-mirror dev data). Never commit this key.\n", branchName)
-				}
 			}
+
+			// KEYLESS asService(): we do NOT pull the service-role key to the laptop
+			// (a leaked/committed BYPASSRLS key is a disaster). Instead serve forwards
+			// the OWNER's normal palauth session token to the Database edge; the edge
+			// verifies project ownership against control-pg (via Studio) and grants
+			// service_role server-side as a tx-local SET LOCAL ROLE — no service-role
+			// credential ever reaches the laptop. ownerToken is the same login session
+			// serve already uses to call Studio; it's a short-lived, refreshable,
+			// revocable USER session, NOT a service-role credential.
+			ownerToken, _ := r.Auth().GetValidToken(ctx) // best-effort; empty → asService degrades
 
 			node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
 			// dev-server.js runs from a temp dir but needs to require()
@@ -555,11 +550,19 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				fmt.Sprintf("PALBASE_BRANCH=%s", devBranchValue(branchFlag)),
 				fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
 			)
-			// Service-role key (owner only) — enables local asService() (BYPASSRLS).
-			// Appended separately so it's absent (not empty) for non-owners, which is
-			// exactly what dev-server.js checks to decide whether asService() works.
-			if serviceRoleKey != "" {
-				node.Env = append(node.Env, fmt.Sprintf("PALBASE_SERVICE_ROLE_APIKEY=%s", serviceRoleKey))
+			// The owner's palauth session token — enables local asService() KEYLESSLY:
+			// dev-server.js forwards it to the Database edge, which verifies project
+			// ownership (control-pg, via Studio) and grants service_role server-side.
+			// NOT a service-role credential — a short-lived, refreshable USER session.
+			// Written to a FILE (not a static env) and refreshed periodically while
+			// serve runs, because a session token expires (~30m) — a static env
+			// would silently break asService() mid-session. dev-server.js reads the
+			// file fresh on each asService() call. Absent file → asService() degrades.
+			ownerTokenFile := filepath.Join(tmpDir, "owner-token")
+			if ownerToken != "" {
+				if werr := os.WriteFile(ownerTokenFile, []byte(ownerToken), 0o600); werr == nil {
+					node.Env = append(node.Env, fmt.Sprintf("PALBASE_OWNER_TOKEN_FILE=%s", ownerTokenFile))
+				}
 			}
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr
@@ -571,6 +574,26 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			freeDevPort(port, os.Stderr)
 			if err := node.Start(); err != nil {
 				return fmt.Errorf("start node: %w (is Node.js installed?)", err)
+			}
+			// Keep the owner-token file fresh while serve runs so asService()
+			// (BYPASSRLS) doesn't silently break when the session token expires.
+			// GetValidToken refreshes transparently; we rewrite the file every few
+			// minutes. Stops when the context is cancelled (Ctrl+C) or node exits.
+			if ownerToken != "" {
+				go func() {
+					t := time.NewTicker(5 * time.Minute)
+					defer t.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-t.C:
+							if tok, err := r.Auth().GetValidToken(ctx); err == nil && tok != "" {
+								_ = os.WriteFile(ownerTokenFile, []byte(tok), 0o600)
+							}
+						}
+					}
+				}()
 			}
 			waitErr := node.Wait()
 			// Translate the typical SIGINT exit so the user doesn't see a

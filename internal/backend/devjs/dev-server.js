@@ -552,6 +552,22 @@ function moduleClients() {
 // hint, which the edge verifies server-side before granting service_role. The
 // service-role key NEVER touches the laptop. This keeps dev = prod — local
 // Database hits the deployed tables with full RLS, the same as a deployed
+// readOwnerToken returns the project OWNER's current session token for keyless
+// asService(). serve writes it to PALBASE_OWNER_TOKEN_FILE and REFRESHES that file
+// periodically (a session token expires ~30m), so we read it FRESH on every
+// asService() call rather than caching a stale boot-time value. Returns undefined
+// when not logged in (file absent/unreadable) → asService() throws the owner hint.
+function readOwnerToken() {
+  const f = process.env.PALBASE_OWNER_TOKEN_FILE;
+  if (!f) return undefined;
+  try {
+    const t = fs.readFileSync(f, 'utf8').trim();
+    return t || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // handler. Requires login (PALBASE_URL + TENANT_APIKEY); without it the Database
 // slot throws notConfiguredModule('Database') on use.
 function databaseClient() {
@@ -567,7 +583,7 @@ function databaseClient() {
     // asService() forwards it + a `service_role` intent hint; the edge grants
     // service_role only after verifying ownership. Absent → asService() throws
     // the actionable owner/login hint. NEVER logged.
-    getOwnerToken: () => process.env.PALBASE_OWNER_TOKEN || undefined,
+    getOwnerToken: readOwnerToken,
   });
 }
 
