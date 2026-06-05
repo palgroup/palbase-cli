@@ -1118,12 +1118,18 @@ function buildCmsClient(http) {
 //   POST <gateway>/v1/backend-db/<op>     op ∈ {insert,update,delete,findById,
 //                                              findMany,query,begin,commit,rollback}
 //
-// Auth (Kong stamps the principal the edge derives RLS identity from):
-//   - non-service: `apikey` = the project publishable key (anon/authenticated)
-//     + `Authorization: Bearer <userToken>` when the in-flight request has a
-//     verified user (the edge's authenticated RLS path). Anonymous → no Bearer.
-//   - service: `apikey` = the project SERVICE-ROLE key (service_role/BYPASSRLS).
-//     service_role is principal-less → NO Bearer.
+// Auth (the apikey is ALWAYS the publishable/anon key — the service-role key
+// NEVER touches the laptop). The edge derives RLS identity from the Bearer +
+// the non-authoritative intent hint:
+//   - non-service: `Authorization: Bearer <userToken>` when the in-flight
+//     request has a verified user (the edge's authenticated RLS path).
+//     Anonymous → no Bearer. No intent hint.
+//   - service (asService): `Authorization: Bearer <ownerToken>` — the project
+//     OWNER's normal palauth SESSION token (NOT a service-role credential) —
+//     plus `X-Palbase-Request-Role: service_role`, a non-authoritative INTENT
+//     hint. The edge re-decides authoritatively: it verifies the bearer is the
+//     project owner server-side and only then grants service_role. A non-owner
+//     bearer is silently downgraded to its normal authenticated role.
 //
 // Request bodies match the deployed worker's internal-api contract (worker.js
 // dbOps): insert→{table,data}, update→{table,data,where:{id}}, delete→{table,
@@ -1133,22 +1139,31 @@ function buildCmsClient(http) {
 // update/findById→{row}, findMany/query→{rows}) and unwrapped here so the
 // DBClient contract returns the bare row/rows.
 //
+// `getUserToken()` returns the current request user's Bearer (authenticated RLS
+// path); `getOwnerToken()` returns the project OWNER's palauth session token
+// (a normal user session, NOT a service-role credential) used by asService().
 // `fetchImpl` is injectable so the unit test can drive the wire contract with a
 // fakeFetch; it defaults to the global fetch the dev-server runs on.
-function buildDbEdgeClient({ baseUrl, apiKey, serviceRoleApiKey, getToken, fetchImpl }) {
+function buildDbEdgeClient({ baseUrl, apiKey, getUserToken, getOwnerToken, fetchImpl }) {
   const root = `${String(baseUrl).replace(/\/+$/, '')}/v1/backend-db`;
   const doFetch = fetchImpl || fetch;
 
-  // headers builds the per-op header set. apikey selects the principal scope:
-  // the service-role key in service mode (service_role/BYPASSRLS), else the
-  // publishable key. In non-service mode the current request's user token (when
-  // present) rides as a Bearer so the edge derives the authenticated RLS
-  // identity; in service mode there is NO Bearer (service_role is principal-less).
+  // headers builds the per-op header set. The apikey is ALWAYS the publishable
+  // key — the service-role key never touches the laptop. In NON-service mode the
+  // current request's user token (when present) rides as the Bearer so the edge
+  // derives the authenticated RLS identity. In SERVICE mode (asService) the
+  // OWNER's session token is the Bearer plus `X-Palbase-Request-Role:
+  // service_role`, a NON-authoritative intent hint; the edge verifies ownership
+  // server-side and authoritatively decides whether to grant service_role.
   function headers(extra, { service } = {}) {
     const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
-    h.apikey = service ? serviceRoleApiKey : apiKey;
-    if (!service) {
-      const token = typeof getToken === 'function' ? getToken() : null;
+    h.apikey = apiKey;
+    if (service) {
+      const token = typeof getOwnerToken === 'function' ? getOwnerToken() : null;
+      if (token) h.Authorization = `Bearer ${token}`;
+      h['X-Palbase-Request-Role'] = 'service_role';
+    } else {
+      const token = typeof getUserToken === 'function' ? getUserToken() : null;
       if (token) h.Authorization = `Bearer ${token}`;
     }
     return h;
@@ -1193,8 +1208,8 @@ function buildDbEdgeClient({ baseUrl, apiKey, serviceRoleApiKey, getToken, fetch
 
   // ops builds the six raw DBClient operations for a given tx + mode. `txToken`
   // pins them to a transaction (undefined = each op its own scoped tx); `opts`
-  // ({ service }) selects the service-role principal. Bodies + envelope unwrap
-  // mirror worker.js dbOps exactly.
+  // ({ service }) selects service mode (owner Bearer + intent hint). Bodies +
+  // envelope unwrap mirror worker.js dbOps exactly.
   function ops(txToken, opts) {
     return {
       insert: (table, data) =>
@@ -1245,17 +1260,23 @@ function buildDbEdgeClient({ baseUrl, apiKey, serviceRoleApiKey, getToken, fetch
     };
   }
 
-  // asService returns the service_role sibling: the same op surface running with
-  // the service-role apikey (BYPASSRLS, no Bearer) PLUS a service-mode
-  // transaction. It deliberately does NOT re-expose asService (no double-bypass),
-  // matching the DBClient contract (Omit<DBClient,"asService">). Requires the
-  // project's service-role key — only the project OWNER can reveal it locally.
+  // asService returns the service_role sibling: the same op surface in SERVICE
+  // mode (owner-session Bearer + `X-Palbase-Request-Role: service_role` intent
+  // hint — NO service-role key) PLUS a service-mode transaction. It deliberately
+  // does NOT re-expose asService (no double-bypass), matching the DBClient
+  // contract (Omit<DBClient,"asService">). Requires an owner session token: the
+  // edge grants service_role only after verifying ownership server-side, so a
+  // non-owner who is logged in sends their token + hint and the edge runs them
+  // as their normal authenticated role (correct server-side denial — no client
+  // pre-check needed). With NO owner token (serve not logged in) there is nobody
+  // to forward, so throw an actionable hint instead.
   function asService() {
-    if (!serviceRoleApiKey) {
+    const ownerToken = typeof getOwnerToken === 'function' ? getOwnerToken() : null;
+    if (!ownerToken) {
       throw new Error(
-        'Database.asService() needs the project\'s service-role key. ' +
-        'Run `palbase serve` as the project OWNER (only owners can reveal it), ' +
-        'or `git push` to test service-role paths.',
+        'Database.asService() needs you to be logged in as the project OWNER ' +
+        '(run `palbase login`). Only the owner can use service_role locally; ' +
+        '`git push` to test service-role paths on the deployed runtime.',
       );
     }
     return Object.assign(ops(undefined, { service: true }), {

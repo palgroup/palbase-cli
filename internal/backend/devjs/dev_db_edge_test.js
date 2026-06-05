@@ -8,8 +8,11 @@
  * Runnable with a plain `node dev_db_edge_test.js` (no test framework) — uses
  * a fakeFetch that captures requests so we can assert the exact wire contract:
  * URL, apikey header, Bearer header, request bodies, the findMany eq-map
- * lowering, transaction begin/commit/rollback token threading, and the
- * service-role (asService) path (service-role apikey + NO Bearer).
+ * lowering, transaction begin/commit/rollback token threading, and the KEYLESS
+ * service-role (asService) path: the project OWNER's session token rides as the
+ * Bearer + a non-authoritative `X-Palbase-Request-Role: service_role` intent
+ * hint. NO service-role apikey ever touches the laptop — the edge verifies
+ * ownership server-side and grants service_role.
  */
 
 const assert = require('assert');
@@ -47,7 +50,8 @@ function makeFakeFetch(script) {
 
 const BASE = 'https://abc123m.dev.palbase.studio';
 const ANON_KEY = 'pb_abc123m_canon0000000000000000';
-const SERVICE_KEY = 'pb_abc123m_sservice000000000000';
+const OWNER_TOKEN = 'owner-session-token';
+const INTENT_HEADER = 'X-Palbase-Request-Role';
 
 let passed = 0;
 function ok(name) { passed += 1; console.log(`  ok - ${name}`); }
@@ -57,8 +61,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ insert: { json: { row: { id: 'r1', title: 't' } } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const row = await db.insert('todos', { title: 't' });
     const call = fetchImpl.calls[0];
@@ -66,18 +70,19 @@ async function run() {
     assert.strictEqual(call.method, 'POST', 'insert method');
     assert.strictEqual(call.headers.apikey, ANON_KEY, 'insert apikey = publishable');
     assert.strictEqual(call.headers.Authorization, 'Bearer usertok', 'insert Bearer = user token');
+    assert.ok(!(INTENT_HEADER in call.headers), 'non-service op carries no intent hint');
     assert.strictEqual(call.headers['Content-Type'], 'application/json', 'insert content-type');
     assert.deepStrictEqual(call.body, { table: 'todos', data: { title: 't' } }, 'insert body');
     assert.deepStrictEqual(row, { id: 'r1', title: 't' }, 'insert returns r.row (unwrapped)');
-    ok('insert: URL + apikey + Bearer + body + unwrap r.row');
+    ok('insert: URL + apikey + Bearer + body + unwrap r.row (no intent hint)');
   }
 
   // ── 2. update → {table,data,where:{id}}, returns r.row
   {
     const fetchImpl = makeFakeFetch({ update: { json: { row: { id: 'r1', done: true } } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const row = await db.update('todos', 'r1', { done: true });
     const call = fetchImpl.calls[0];
@@ -91,8 +96,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ delete: { json: { deleted: 1 } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const result = await db.delete('todos', 'r1');
     const call = fetchImpl.calls[0];
@@ -106,8 +111,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ findById: { json: { row: null } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const row = await db.findById('todos', 'missing');
     const call = fetchImpl.calls[0];
@@ -121,8 +126,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ findMany: { json: { rows: [{ id: 'a' }, { id: 'b' }] } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const rows = await db.findMany('todos', { user_id: 'u1', done: false });
     const call = fetchImpl.calls[0];
@@ -142,8 +147,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ findMany: { json: { rows: [] } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const rows = await db.findMany('todos');
     const call = fetchImpl.calls[0];
@@ -156,8 +161,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ query: { json: { rows: [{ n: 1 }] } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const rows = await db.query('SELECT 1 WHERE x=$1', [42]);
     const call = fetchImpl.calls[0];
@@ -167,18 +172,19 @@ async function run() {
     ok('query: {sql,params} body + r.rows');
   }
 
-  // ── 8. no token → NO Authorization header (anonymous path)
+  // ── 8. no user token → NO Authorization header, NO intent hint (anonymous path)
   {
     const fetchImpl = makeFakeFetch({ findMany: { json: { rows: [] } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => null, fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => null, getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     await db.findMany('todos');
     const call = fetchImpl.calls[0];
     assert.strictEqual(call.headers.apikey, ANON_KEY, 'anon apikey = publishable');
-    assert.ok(!('Authorization' in call.headers), 'no Bearer when token absent');
-    ok('no token: apikey only, no Bearer (anonymous path)');
+    assert.ok(!('Authorization' in call.headers), 'no Bearer when user token absent');
+    assert.ok(!(INTENT_HEADER in call.headers), 'no intent hint on the non-service path');
+    ok('no user token: apikey only, no Bearer, no intent hint (anonymous path)');
   }
 
   // ── 9. transaction: begin (read tx_token) + commit; ops threaded with token
@@ -189,8 +195,8 @@ async function run() {
       commit: { json: {} },
     });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const result = await db.transaction(async (tx) => {
       const row = await tx.insert('todos', { title: 'x' });
@@ -218,8 +224,8 @@ async function run() {
       rollback: { json: {} },
     });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     let threw = null;
     try {
@@ -240,8 +246,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ begin: { json: {} } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     let threw = null;
     try {
@@ -251,26 +257,27 @@ async function run() {
     ok('transaction: begin without tx_token throws');
   }
 
-  // ── 12. asService: service-role apikey + NO Bearer (principal-less)
+  // ── 12. asService (KEYLESS): owner-session Bearer + intent hint, publishable apikey
   {
     const fetchImpl = makeFakeFetch({ findMany: { json: { rows: [{ id: 's' }] } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     const svc = db.asService();
     const rows = await svc.findMany('todos');
     const call = fetchImpl.calls[0];
-    assert.strictEqual(call.headers.apikey, SERVICE_KEY, 'asService apikey = service-role key');
-    assert.ok(!('Authorization' in call.headers), 'asService sends NO Bearer (service_role is principal-less)');
+    assert.strictEqual(call.headers.apikey, ANON_KEY, 'asService apikey = publishable (NOT a service-role key)');
+    assert.strictEqual(call.headers.Authorization, `Bearer ${OWNER_TOKEN}`, 'asService Bearer = OWNER session token');
+    assert.strictEqual(call.headers[INTENT_HEADER], 'service_role', 'asService carries the service_role intent hint');
     assert.deepStrictEqual(rows, [{ id: 's' }], 'asService findMany returns rows');
     // asService sibling does NOT re-expose asService (no double-bypass).
     assert.strictEqual(typeof svc.asService, 'undefined', 'asService sibling does not re-expose asService');
     assert.strictEqual(typeof svc.transaction, 'function', 'asService sibling exposes transaction');
-    ok('asService: service-role apikey, no Bearer, no re-exposed asService');
+    ok('asService: keyless — publishable apikey + owner Bearer + intent hint, no re-exposed asService');
   }
 
-  // ── 13. asService transaction runs in service mode (service-role key, no Bearer)
+  // ── 13. asService transaction (KEYLESS): owner Bearer + intent hint on every op
   {
     const fetchImpl = makeFakeFetch({
       begin: { json: { tx_token: 'TXS' } },
@@ -278,39 +285,42 @@ async function run() {
       commit: { json: {} },
     });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     await db.asService().transaction(async (tx) => { await tx.insert('todos', { x: 1 }); });
     for (const call of fetchImpl.calls) {
-      assert.strictEqual(call.headers.apikey, SERVICE_KEY, `${call.op} uses service-role key`);
-      assert.ok(!('Authorization' in call.headers), `${call.op} sends no Bearer in service tx`);
+      assert.strictEqual(call.headers.apikey, ANON_KEY, `${call.op} uses publishable apikey (no service-role key)`);
+      assert.strictEqual(call.headers.Authorization, `Bearer ${OWNER_TOKEN}`, `${call.op} sends owner Bearer in service tx`);
+      assert.strictEqual(call.headers[INTENT_HEADER], 'service_role', `${call.op} carries service_role intent hint`);
     }
     assert.strictEqual(fetchImpl.calls[1].headers['X-Transaction-Token'], 'TXS', 'service tx threads token');
-    ok('asService transaction: service-role key + no Bearer + token threaded');
+    ok('asService transaction: keyless owner Bearer + intent hint + token threaded');
   }
 
-  // ── 14. asService WITHOUT a service-role key → owner hint
+  // ── 14. asService WITHOUT an owner token (serve not logged in) → owner hint
   {
     const fetchImpl = makeFakeFetch({});
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: undefined,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => undefined, fetchImpl,
     });
     let threw = null;
     try { db.asService(); } catch (err) { threw = err; }
-    assert.ok(threw, 'asService without service-role key throws');
-    assert.ok(/service-role key/i.test(threw.message), 'message names the service-role key');
-    assert.ok(/OWNER/i.test(threw.message), 'message hints running serve as OWNER');
-    ok('asService without key: owner hint thrown');
+    assert.ok(threw, 'asService without an owner token throws');
+    assert.ok(/palbase login/i.test(threw.message), 'message hints `palbase login`');
+    assert.ok(/OWNER/i.test(threw.message), 'message names the project OWNER');
+    assert.ok(/git push/i.test(threw.message), 'message offers git push as the alternative');
+    assert.strictEqual(fetchImpl.calls.length, 0, 'asService throws before any request (no pre-check fetch)');
+    ok('asService without owner token: actionable owner/login hint thrown');
   }
 
   // ── 15. 404 → clear "table not found / git push" error (code not_found)
   {
     const fetchImpl = makeFakeFetch({ insert: { status: 404, json: { error: 'not_found' } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     let threw = null;
     try { await db.insert('ghost', {}); } catch (err) { threw = err; }
@@ -324,8 +334,8 @@ async function run() {
   {
     const fetchImpl = makeFakeFetch({ insert: { status: 500, json: { error: 'boom' } } });
     const db = buildDbEdgeClient({
-      baseUrl: BASE, apiKey: ANON_KEY, serviceRoleApiKey: SERVICE_KEY,
-      getToken: () => 'usertok', fetchImpl,
+      baseUrl: BASE, apiKey: ANON_KEY,
+      getUserToken: () => 'usertok', getOwnerToken: () => OWNER_TOKEN, fetchImpl,
     });
     let threw = null;
     try { await db.insert('todos', {}); } catch (err) { threw = err; }

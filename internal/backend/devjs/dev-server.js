@@ -546,24 +546,28 @@ function moduleClients() {
 // 127.0.0.1), so we proxy the SAME @palbase/backend DBClient surface
 // (insert/update/delete/findById/findMany/query + transaction + asService) to
 // the br-pod's AUTHENTICATED edge at POST <gateway>/v1/backend-db/<op>. The edge
-// derives RLS identity from the Kong-stamped principal: the publishable apikey
-// (anon/authenticated) + the current request's user Bearer on the authenticated
-// path, OR the service-role apikey (BYPASSRLS, no Bearer) for asService(). This
-// keeps dev = prod — local Database hits the deployed tables with full RLS, the
-// same as a deployed handler. Requires login (PALBASE_URL + TENANT_APIKEY);
-// without it the Database slot throws notConfiguredModule('Database') on use.
+// derives RLS identity from the publishable apikey + a Bearer: the current
+// request's user token on the authenticated path, OR — for asService() — the
+// project OWNER's session token plus a non-authoritative `service_role` intent
+// hint, which the edge verifies server-side before granting service_role. The
+// service-role key NEVER touches the laptop. This keeps dev = prod — local
+// Database hits the deployed tables with full RLS, the same as a deployed
+// handler. Requires login (PALBASE_URL + TENANT_APIKEY); without it the Database
+// slot throws notConfiguredModule('Database') on use.
 function databaseClient() {
   if (!PALBASE_URL || !TENANT_APIKEY) return notConfiguredModule('Database');
   return buildDbEdgeClient({
     baseUrl: PALBASE_URL,
     apiKey: TENANT_APIKEY,
-    // The service-role key is injected (when the project owner runs serve) so
-    // asService() can take the BYPASSRLS path. Absent → asService() throws the
-    // owner hint. The Go env-injection of this is a separate task.
-    serviceRoleApiKey: process.env.PALBASE_SERVICE_ROLE_APIKEY || undefined,
     // Lazy getter — read at DB-call time so it sees the in-flight request's
     // verified user token (set by the http handler). Mirrors getCurrentUserId.
-    getToken: () => currentRequestUserToken,
+    getUserToken: () => currentRequestUserToken,
+    // The OWNER's palauth session token (a normal user session, NOT a service-
+    // role credential), set by `serve` only when logged in as the project owner.
+    // asService() forwards it + a `service_role` intent hint; the edge grants
+    // service_role only after verifying ownership. Absent → asService() throws
+    // the actionable owner/login hint. NEVER logged.
+    getOwnerToken: () => process.env.PALBASE_OWNER_TOKEN || undefined,
   });
 }
 
