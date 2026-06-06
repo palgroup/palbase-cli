@@ -67,7 +67,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // internal/runtime/module-clients.js). Both files must land in the temp
 // dir so the relative resolve works.
 //
-//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js
+//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js
 var devServerFS embed.FS
 
 // Resolvers returns lazy accessors for the shared CLI globals, so the

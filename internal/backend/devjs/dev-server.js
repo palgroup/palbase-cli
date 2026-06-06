@@ -81,6 +81,12 @@ const BUNDLE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-serve-bundle-
 const BUNDLED_CONTROLLERS_DIR = path.join(BUNDLE_ROOT, 'controllers');
 const BUNDLED_RESOURCES_DIR = path.join(BUNDLE_ROOT, 'resources');
 const BUNDLED_WORKERS_DIR = path.join(BUNDLE_ROOT, 'workers');
+// Staging tree for controllers with return-schema bindings injected, BEFORE
+// esbuild. Keeps the user's source untouched. MUST be a sibling of
+// PROJECT_ROOT/controllers so a staged controller's `../models` / `../services`
+// relative imports resolve to the real project dirs (the same depth as the
+// original). Cleaned up between rebuilds + on exit.
+const STAGED_CONTROLLERS_DIR = path.join(PROJECT_ROOT, '.palbase-serve-controllers');
 
 // A {"type":"commonjs"} marker in BUNDLE_ROOT pins our --format=cjs `.js`
 // bundles to CommonJS regardless of the project's package.json "type" — the
@@ -96,6 +102,38 @@ fs.writeFileSync(path.join(BUNDLE_ROOT, 'package.json'), '{"type":"commonjs"}\n'
 // source (the TS-idiomatic ESM form) still resolves.
 const ESBUILD_EXTERNAL = '@palbase/backend';
 const ESBUILD_RESOLVE_EXTENSIONS = '.ts,.tsx,.js,.jsx,.json';
+
+// Return-type → response-schema binder (shared VERBATIM with the deploy
+// extractor: modules/backend/internal/runtime/return_types.js). Reads each
+// controller's method RETURN TYPE from source and injects the matching zod
+// binding (the @Returns replacement). Required — a missing/disallowed return
+// type is a HARD error here, exactly as on deploy.
+const returnTypes = require('./return_types.js');
+
+// stageControllersWithReturnBindings copies controllers/*.ts into a staging dir,
+// appending each file's return-type schema injection, and returns the staging
+// dir for esbuild to bundle. The user's source is never modified. A return-type
+// violation throws (caught by registerControllers and surfaced loudly), matching
+// the deploy behavior so serve == deploy.
+function stageControllersWithReturnBindings(srcDir, stageDir) {
+  rmBundledTree(stageDir);
+  fs.mkdirSync(stageDir, { recursive: true });
+  for (const file of walk(srcDir)) {
+    const rel = path.relative(srcDir, file);
+    const dest = path.join(stageDir, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    // Only controllers carry route methods; inject into *.controller.ts only,
+    // copy everything else (imported services/models) verbatim so relative
+    // imports still resolve from the staging tree.
+    if (/\.controller\.(c?ts|tsx)$/i.test(path.basename(file))) {
+      const src = fs.readFileSync(file, 'utf8');
+      fs.writeFileSync(dest, returnTypes.injectReturnBindings(src, rel));
+    } else {
+      fs.copyFileSync(file, dest);
+    }
+  }
+  return stageDir;
+}
 
 // bundleSrcDir esbuild-bundles every entry file under srcDir into outDir,
 // preserving the relative tree (--outbase=srcDir). One esbuild invocation for
@@ -320,12 +358,18 @@ function registerControllers() {
   // CJS, so extensionless relative imports resolve exactly as they do on deploy.
   rmBundledTree(BUNDLED_CONTROLLERS_DIR);
   try {
-    bundleSrcDir(CONTROLLERS_DIR, BUNDLED_CONTROLLERS_DIR);
+    // Inject return-type → response-schema bindings into a staging copy, then
+    // bundle THAT. A return-type violation (missing annotation, inline/union
+    // type, unimported schema) throws here and is surfaced loudly below.
+    const staged = stageControllersWithReturnBindings(CONTROLLERS_DIR, STAGED_CONTROLLERS_DIR);
+    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR);
   } catch (err) {
-    // A bundle error (syntax error, unresolved import) must be LOUD — otherwise
-    // the dir scan below finds nothing and silently registers 0 routes.
-    log(`esbuild failed for controllers/ — ${esbuildErr(err)}`);
-    log('registered 0 route(s) (fix the build error above and save to retry)');
+    // A bundle error (syntax error, unresolved import) OR a return-type
+    // violation must be LOUD — otherwise the dir scan below finds nothing and
+    // silently registers 0 routes.
+    const msg = err instanceof returnTypes.ReturnTypeError ? err.message : esbuildErr(err);
+    log(`controllers/ build failed — ${msg}`);
+    log('registered 0 route(s) (fix the error above and save to retry)');
     return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
   }
 
@@ -1977,6 +2021,7 @@ async function main() {
   const onSignal = async () => {
     await shutdownResources();
     rmBundledTree(BUNDLE_ROOT);
+    rmBundledTree(STAGED_CONTROLLERS_DIR); // staging lives under PROJECT_ROOT — never leave it behind
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   };
@@ -1994,6 +2039,7 @@ async function main() {
   // on the NEXT serve start by the Go side (backend.go sweepStaleServeTempDirs).
   process.on('exit', () => {
     try { fs.rmSync(BUNDLE_ROOT, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { fs.rmSync(STAGED_CONTROLLERS_DIR, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 }
 
