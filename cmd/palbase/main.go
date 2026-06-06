@@ -14,6 +14,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/branch"
 	"github.com/palgroup/palbase-cli/internal/config"
+	dbcmd "github.com/palgroup/palbase-cli/internal/db"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/studio"
@@ -112,6 +113,9 @@ func main() {
 			REST: func() apikey.REST { return managementREST() },
 		}),
 		secret.Cmd(secret.Resolvers{
+			Studio: func() *studio.Client { return studioClient },
+		}),
+		dbcmd.Cmd(dbcmd.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
 		}),
 		admin.NewCommand(admin.Resolvers{
