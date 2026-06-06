@@ -81,15 +81,17 @@ func TestServeOpenAPISpec(t *testing.T) {
 	//  - create: POST "/create" → full path /todos/create. auth required,
 	//    rateLimit, @Body + @Returns (fake zod: zodToJSON only checks for a _def
 	//    object; the stub converter returns a fixed schema).
-	//  - byId: GET "/:id" → full path /todos/:id (→ {id}), auth omitted →
-	//    secure-by-default (required), ByParam operationId, @Param("id").
+	//  - byId: GET "/{id}" → full path /todos/{id}, auth omitted →
+	//    secure-by-default (required), ByParam operationId, @Param("id"). Path
+	//    params use the canonical BRACE form ({id}) — the one true form the route
+	//    registry + dev-server + OpenAPI generator agree on (legacy :id is gone).
 	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture(
 		`{ __palbase: 'controller', basePath: '/todos' }`,
 		`[
       { method: 'POST', subpath: '/create', fnName: 'create',
         options: { auth: { required: true }, rateLimit: { max: 5, window: 60 } },
         params: [ { index: 0, kind: 'body', schema: `+fakeZod+` } ] },
-      { method: 'GET', subpath: '/:id', fnName: 'byId',
+      { method: 'GET', subpath: '/{id}', fnName: 'byId',
         options: {},
         params: [ { index: 0, kind: 'param', name: 'id' } ] },
     ]`,
@@ -242,8 +244,8 @@ func TestServeOpenAPISpec(t *testing.T) {
 		t.Fatalf("@Query route missing in:query parameters: %v", publicOp["parameters"])
 	}
 
-	// :id → {id} path key + ByParam operationId; secure-by-default (auth
-	// omitted). Full path = basePath /todos + subpath /:id → /todos/{id}. The
+	// {id} → {id} path key + ByParam operationId; secure-by-default (auth
+	// omitted). Full path = basePath /todos + subpath /{id} → /todos/{id}. The
 	// @Param("id") synthesizes an in:path parameter named "id".
 	byIdOp := operationAt(t, paths, "/todos/{id}", "get")
 	if byIdOp["operationId"] != "getTodosById" {
@@ -393,11 +395,14 @@ func TestServeQueryAndParamDispatch(t *testing.T) {
 
 	// A controller whose method declares @Query (index 0) + @Param("id") (index
 	// 1). The fakeZod query schema passes the raw query through. basePath "/echo",
-	// subpath "/:id" → full path /echo/{id}; auth:false via defaultAuth.
+	// subpath "/{id}" → full path /echo/{id}; auth:false via defaultAuth. Path
+	// params use the canonical BRACE form ({id}) the dev-server matches — the
+	// dispatcher's urlToRegex turns a wholly-{name} segment into a capture group
+	// (a legacy :id segment is matched LITERALLY → never matches /echo/abc → 404).
 	mustWrite(t, root, "controllers/echo.controller.js", controllerFixture(
 		`{ __palbase: 'controller', basePath: '/echo', defaultAuth: false }`,
 		`[
-      { method: 'GET', subpath: '/:id', fnName: 'echo',
+      { method: 'GET', subpath: '/{id}', fnName: 'echo',
         options: {},
         params: [
           { index: 0, kind: 'query', schema: `+fakeZod+` },
@@ -521,30 +526,58 @@ export function listTodos() {
   return [{ id: "t1", title: "first" }];
 }
 `)
+
+	// Response models — the canonical authoring shape: a named exported zod const
+	// the controller imports and names as the method's RETURN TYPE. The return-type
+	// stager (return_types.js, shared verbatim with deploy) reads that annotation
+	// and binds the schema as the route's response — there is no @Returns anymore,
+	// and a route method with NO return type is a HARD build error. (`z.infer` is
+	// type-only and erased by esbuild; the const is the runtime value the stager
+	// binds.)
+	mustWrite(t, root, "models/todos/list.ts", `
+import { z } from "@palbase/backend";
+
+export const TodosListResponse = z.object({
+  items: z.array(z.object({ id: z.string(), title: z.string() })),
+  gotMethod: z.string(),
+});
+export type TodosListResponse = z.infer<typeof TodosListResponse>;
+`)
+	mustWrite(t, root, "models/health/check.ts", `
+import { z } from "@palbase/backend";
+
+export const HealthStatus = z.object({ status: z.string() });
+export type HealthStatus = z.infer<typeof HealthStatus>;
+`)
+
 	// Controller imports the service WITHOUT a .ts/.js extension (canonical). The
 	// method declares @Req so the dev-server injects the whole request (req.method
-	// echoes back). auth:false via @Controller defaultAuth.
+	// echoes back) and names its response via the imported model schema (the new
+	// return-type contract). auth:false via @Controller defaultAuth.
 	mustWrite(t, root, "controllers/todos.controller.ts", `
 import { Controller, Get, Req } from "@palbase/backend";
 import { listTodos } from "../services/todo.service";
+import { TodosListResponse } from "../models/todos/list";
 
 @Controller("/todos", { auth: false })
 export default class TodosController {
   @Get("")
-  list(@Req() req: any) {
+  list(@Req() req: any): TodosListResponse {
     return { items: listTodos(), gotMethod: req.method };
   }
 }
 `)
 
-	// A second controller (no service), also class-shaped.
+	// A second controller (no service), also class-shaped, with its own named
+	// return-type model.
 	mustWrite(t, root, "controllers/health.controller.ts", `
 import { Controller, Get } from "@palbase/backend";
+import { HealthStatus } from "../models/health/check";
 
 @Controller("/health", { auth: false })
 export default class HealthController {
   @Get("")
-  check() {
+  check(): HealthStatus {
     return { status: "ok" };
   }
 }
@@ -589,6 +622,7 @@ func startDevServer(t *testing.T, root string) int {
 		t.Skip("node not on PATH")
 	}
 	requireEsbuild(t)
+	requireTypescript(t, root)
 	devDir := t.TempDir()
 	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
 		t.Fatalf("extract dev server: %v", err)
@@ -627,6 +661,40 @@ func requireEsbuild(t *testing.T) {
 	defer cancel()
 	if err := exec.CommandContext(ctx, "npx", "--yes", "esbuild", "--version").Run(); err != nil {
 		t.Skipf("esbuild not reachable via npx (%v)", err)
+	}
+}
+
+// requireTypescript guarantees the dev-server's return-type stager can
+// `require('typescript')` from the fixture's node_modules. The stager (shared
+// verbatim with the deploy extractor) parses each controller to derive its
+// success-response schema from the method's return type, so a serve run without
+// `typescript` resolvable registers 0 routes and the dispatch tests 404. We
+// resolve a typescript already present on the host (via Node's own resolver) and
+// symlink it into <root>/node_modules/typescript so the test exercises the REAL
+// stager. When no typescript is resolvable anywhere (a bare CI runner with no
+// project install), the test is an integration test that cannot run — skip it,
+// mirroring the node/esbuild guards above.
+func requireTypescript(t *testing.T, root string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "node", "-e", "process.stdout.write(require.resolve('typescript'))").Output()
+	if err != nil || len(out) == 0 {
+		t.Skip("typescript not resolvable on host — serve stager needs it (integration-only)")
+	}
+	// require.resolve points at <pkg>/lib/typescript.js — the package dir is two
+	// levels up. Symlink that dir as <root>/node_modules/typescript so the
+	// dev-server (NODE_PATH=<root>/node_modules) resolves it.
+	pkgDir := filepath.Dir(filepath.Dir(string(out)))
+	dst := filepath.Join(root, "node_modules", "typescript")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatalf("mkdir node_modules: %v", err)
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return // already present (e.g. a stub written by the fixture)
+	}
+	if err := os.Symlink(pkgDir, dst); err != nil {
+		t.Skipf("cannot link typescript into fixture (%v)", err)
 	}
 }
 
@@ -757,12 +825,33 @@ function Controller(basePath, options) {
   };
 }
 
+// Minimal permissive zod-ish 'z' — the surface a model file uses
+// (z.object/z.string/z.number/z.boolean/z.array, and the type-only z.infer,
+// erased by esbuild). Each builder returns a schema carrying a '_def' object
+// (so zodToJSON's 'typeof z._def === object' guard passes → the openapi body
+// converts) PLUS a permissive safeParse (so request/output validation always
+// passes through, the same philosophy as fakeZod). The return-type stager
+// (return_types.js) names a model's exported schema as the route's response
+// type and injects 'z.array(Schema)'/'Schema' bindings; this 'z' makes those
+// bindings real runtime values so a controller authored the canonical way
+// (named-zod return type) loads + dispatches under serve exactly as on deploy.
+function makeSchema(typeName) {
+  return { _def: { typeName }, safeParse: (v) => ({ success: true, data: v }) };
+}
+const z = {
+  object: () => makeSchema('ZodObject'),
+  string: () => makeSchema('ZodString'),
+  number: () => makeSchema('ZodNumber'),
+  boolean: () => makeSchema('ZodBoolean'),
+  array: () => makeSchema('ZodArray'),
+};
+
 class Resource {}
 const registry = [];
 module.exports = {
   Controller, Get, Post, Put, Patch, Delete,
   Body, Query, Headers, Param, User, OptionalUser, Client, RequestId, TraceId, Req, Returns,
-  Resource,
+  z, Resource,
   // Runtime seam: record the installed services (fixtures return literals, so a
   // no-op store is enough).
   __setRuntime(services) { module.exports.__runtime = services; },
