@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -83,6 +85,8 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase db diff -f <name>   Generate a migration from db/schema.ts vs the live DB.
   palbase db check            Fail (non-zero) if the schema has drifted but no
                               migration was generated yet (pre-push gate).
+  palbase db install-hook     Install the git pre-push hook (db check gate) into
+                              an existing project that predates the scaffolded hook.
 
 The diff is computed server-side: db/schema.ts is sent to Palbase, which diffs
 it against the deployed branch's database and returns the migration SQL.`,
@@ -90,8 +94,64 @@ it against the deployed branch's database and returns the migration SQL.`,
 	cmd.AddCommand(
 		diffCmd(r.Studio),
 		checkCmd(r.Studio),
+		installHookCmd(),
 	)
 	return cmd
+}
+
+// prePushHook is the git pre-push hook body — IDENTICAL to the one the scaffold
+// ships (modules/orchestrator/internal/activities/backend_template/hooks/pre-push).
+// Keep the two in sync: both run `palbase db check` and abort the push on drift.
+const prePushHook = `#!/bin/sh
+# palbase pre-push: block a push when db/schema.ts has changes not yet captured
+# in a migration. Bypass with ` + "`git push --no-verify`" + ` (the deploy-time
+# drift gate is the backstop). Requires the palbase CLI on PATH.
+if [ -f db/schema.ts ]; then
+  if command -v palbase >/dev/null 2>&1; then
+    palbase db check || {
+      echo "" >&2
+      echo "✗ db/schema.ts has changes not covered by a migration." >&2
+      echo "  Run: palbase db diff -f <name>   (generates db/migrations/<ts>_<name>.sql)" >&2
+      echo "  Then: git add db/migrations && git commit && git push" >&2
+      echo "  (bypass: git push --no-verify — the deploy will still gate it)" >&2
+      exit 1
+    }
+  fi
+fi
+exit 0
+`
+
+// installHookCmd writes hooks/pre-push + points git's core.hooksPath at hooks/,
+// exactly as the scaffold's package.json "prepare" script does for new projects.
+// For projects created before the hook shipped (no hooks/ dir), this is how a
+// developer opts into the client-side drift gate.
+func installHookCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install-hook",
+		Short: "Install the git pre-push drift gate into an existing project",
+		Long: `Write hooks/pre-push (runs ` + "`palbase db check`" + `) and set git's
+core.hooksPath to hooks/, so a push with un-migrated schema changes is blocked
+client-side. New projects get this automatically; this is for existing ones.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if _, err := os.Stat(".git"); err != nil {
+				return fmt.Errorf("not a git repository (run from the project root)")
+			}
+			if err := os.MkdirAll("hooks", 0o755); err != nil {
+				return fmt.Errorf("create hooks/: %w", err)
+			}
+			hookPath := filepath.Join("hooks", "pre-push")
+			if err := os.WriteFile(hookPath, []byte(prePushHook), 0o755); err != nil {
+				return fmt.Errorf("write %s: %w", hookPath, err)
+			}
+			if out, err := exec.Command("git", "config", "core.hooksPath", "hooks").CombinedOutput(); err != nil {
+				return fmt.Errorf("git config core.hooksPath: %w (%s)", err, strings.TrimSpace(string(out)))
+			}
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "✓ installed %s + set core.hooksPath=hooks\n", hookPath)
+			fmt.Fprintln(w, "  a push with un-migrated schema changes is now blocked (bypass: git push --no-verify)")
+			return nil
+		},
+	}
 }
 
 // projectRef resolves the linked project ref (mirrors secret.projectRef).
@@ -156,6 +216,47 @@ func sanitizeName(raw string) string {
 	return strings.Trim(s, "_")
 }
 
+// unpushedMigrations returns db/migrations/*.sql files that git reports as
+// untracked, modified, or committed-but-not-yet-pushed (ahead of upstream) —
+// i.e. migrations the deployed branch's live DB has almost certainly NOT applied
+// yet. Best-effort: any git error (not a repo, no upstream) yields an empty
+// list so `db diff` never blocks on git plumbing.
+func unpushedMigrations() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			return
+		}
+		if !strings.HasPrefix(p, "db/migrations/") || !strings.HasSuffix(p, ".sql") {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+
+	// Untracked or modified working-tree migration files.
+	if b, err := exec.Command("git", "status", "--porcelain", "--", "db/migrations").Output(); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if len(line) < 4 {
+				continue
+			}
+			add(line[3:]) // strip the 2-char XY status + space
+		}
+	}
+
+	// Committed but not yet pushed (ahead of the tracked upstream).
+	if b, err := exec.Command("git", "diff", "--name-only", "@{u}..HEAD", "--", "db/migrations").Output(); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			add(line)
+		}
+	}
+
+	sort.Strings(out)
+	return out
+}
+
 func diffCmd(studioFn func() *studio.Client) *cobra.Command {
 	var (
 		refFlag    string
@@ -194,6 +295,22 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 			if resp.Plan.empty() {
 				fmt.Fprintln(out, "✓ schema in sync — no migration needed")
 				return nil
+			}
+
+			// The diff is computed against the LIVE (applied) database. If there
+			// are migration files locally that haven't been deployed yet, the live
+			// DB doesn't reflect them — so this diff may RE-generate their changes,
+			// producing a duplicate migration. Warn (don't block: a hand-written
+			// or already-pushed migration is fine), so the user pushes pending
+			// migrations before generating the next one.
+			if pending := unpushedMigrations(); len(pending) > 0 {
+				fmt.Fprintf(out, "⚠ %d local migration(s) may not be deployed yet:\n", len(pending))
+				for _, m := range pending {
+					fmt.Fprintf(out, "    %s\n", m)
+				}
+				fmt.Fprintln(out, "  This diff is computed against the LIVE database, which does NOT")
+				fmt.Fprintln(out, "  reflect un-deployed migrations — the new file may duplicate their")
+				fmt.Fprintln(out, "  changes. Commit + `git push` pending migrations first, then re-run.")
 			}
 
 			migDir := filepath.Join("db", "migrations")

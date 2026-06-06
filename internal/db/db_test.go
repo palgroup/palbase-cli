@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -260,4 +261,58 @@ func TestCheck_ErrorsWhenDrift(t *testing.T) {
 	require.Contains(t, e, "old.gone")
 	require.Contains(t, e, "users.age")
 	require.Contains(t, e, "palbase db diff")
+}
+
+// TestInstallHook writes hooks/pre-push (executable) + sets core.hooksPath in a
+// real temp git repo, so an existing project can opt into the client-side gate.
+func TestInstallHook(t *testing.T) {
+	dir := t.TempDir()
+	// Minimal git repo.
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	// Run install-hook from the repo dir.
+	old, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return nil }})
+	cmd.SetArgs([]string{"install-hook"})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	// Hook file present + executable.
+	info, err := os.Stat(filepath.Join(dir, "hooks", "pre-push"))
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&0o111, "pre-push hook must be executable")
+	body, err := os.ReadFile(filepath.Join(dir, "hooks", "pre-push"))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "palbase db check")
+
+	// core.hooksPath wired.
+	out, err := exec.Command("git", "-C", dir, "config", "core.hooksPath").Output()
+	require.NoError(t, err)
+	require.Equal(t, "hooks", strings.TrimSpace(string(out)))
+}
+
+// TestInstallHook_NotAGitRepo errors cleanly outside a git repo.
+func TestInstallHook_NotAGitRepo(t *testing.T) {
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	require.NoError(t, os.Chdir(dir))
+
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return nil }})
+	cmd.SetArgs([]string{"install-hook"})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	cmd.SilenceUsage = true
+	require.Error(t, cmd.Execute())
 }
