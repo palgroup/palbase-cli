@@ -50,6 +50,22 @@ All changes are applied to the branch's remote configuration via Studio tRPC.`,
 	return cmd
 }
 
+// reservedKeyPrefix is the env-var namespace owned by the platform's managed
+// provider secrets (`palbase notifications add` uploads cert/key/api-key secrets
+// under PB_NOTIFICATIONS_*). A hand-set `palbase secret set PB_*` is REFUSED so a
+// user can't shadow or collide with a managed secret — they're meant to be set
+// via the guided `notifications` commands, which derive the exact key.
+const reservedKeyPrefix = "PB_"
+
+// guardReservedKey refuses a key under the reserved PB_ namespace. Returns a
+// clear error pointing the user at the right command.
+func guardReservedKey(key string) error {
+	if strings.HasPrefix(key, reservedKeyPrefix) {
+		return fmt.Errorf("key %q is in the reserved %s* namespace (managed provider secrets) — set provider secrets with `palbase notifications add <provider>`, not `secret set`", key, reservedKeyPrefix)
+	}
+	return nil
+}
+
 // projectRef resolves the linked project ref. Order:
 //  1. --ref flag override
 //  2. .palbase/config.json in the project directory
@@ -121,6 +137,9 @@ file itself stays local (gitignored); only its encrypted value is uploaded.`,
 			}
 			if key == "" {
 				return fmt.Errorf("key must not be empty")
+			}
+			if err := guardReservedKey(key); err != nil {
+				return err
 			}
 
 			ref, err := projectRef(refFlag)
@@ -324,9 +343,18 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 			var toPush []plan
 			var newUnclassified []string
 			var skippedSecrets []string
+			var skippedReserved []string
 			for _, key := range sortedKeys(local) {
 				val := local[key]
 				_, existsRemote := remoteSecret[key]
+
+				// Never push a reserved provider-secret key — it's managed by
+				// `palbase notifications add` (which sets it directly), so a stale
+				// .env.local copy must not clobber it.
+				if guardReservedKey(key) != nil {
+					skippedReserved = append(skippedReserved, key)
+					continue
+				}
 
 				if !existsRemote {
 					// New key. Default secret unless explicitly --plain.
@@ -378,6 +406,9 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 
 			for _, k := range skippedSecrets {
 				fmt.Fprintf(cmd.OutOrStdout(), "· skipped %s (existing secret — masked; pass --force-secrets to overwrite)\n", k)
+			}
+			for _, k := range skippedReserved {
+				fmt.Fprintf(cmd.OutOrStdout(), "· skipped %s (reserved %s* namespace — managed by `palbase notifications add`)\n", k, reservedKeyPrefix)
 			}
 
 			pushed := 0

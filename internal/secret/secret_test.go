@@ -115,6 +115,31 @@ func TestSecretSet_MissingEquals(t *testing.T) {
 	require.Error(t, cmd.Execute())
 }
 
+// TestSecretSet_RefusesReservedKey locks the PB_* reserved-namespace guard:
+// `secret set PB_*` must be refused (managed by `palbase notifications add`) and
+// must NOT call the API.
+func TestSecretSet_RefusesReservedKey(t *testing.T) {
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call API for a reserved key")
+	})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"set", "--ref", "myproj", "--secret", "PB_NOTIFICATIONS_APNS_P8=whatever"})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reserved")
+	require.Contains(t, err.Error(), "notifications add")
+}
+
+// TestGuardReservedKey is a direct unit test of the namespace check.
+func TestGuardReservedKey(t *testing.T) {
+	require.Error(t, guardReservedKey("PB_NOTIFICATIONS_APNS_P8"))
+	require.Error(t, guardReservedKey("PB_ANYTHING"))
+	require.NoError(t, guardReservedKey("DATABASE_URL"))
+	require.NoError(t, guardReservedKey("MY_API_KEY"))
+}
+
 // TestSecretList calls env.list and verifies both plain and secret rows.
 func TestSecretList(t *testing.T) {
 	secretVal := "hidden"

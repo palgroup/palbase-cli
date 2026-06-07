@@ -15,6 +15,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/branch"
 	"github.com/palgroup/palbase-cli/internal/config"
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
+	"github.com/palgroup/palbase-cli/internal/notifications"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/storage"
@@ -120,6 +121,9 @@ func main() {
 			Studio: func() *studio.Client { return studioClient },
 		}),
 		storage.Cmd(),
+		notifications.Cmd(notifications.Resolvers{
+			Studio: func() *studio.Client { return studioClient },
+		}),
 		admin.NewCommand(admin.Resolvers{
 			REST: func() admin.REST { return managementREST() },
 		}),
