@@ -17,6 +17,7 @@ import (
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/secret"
+	"github.com/palgroup/palbase-cli/internal/storage"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
@@ -118,6 +119,7 @@ func main() {
 		dbcmd.Cmd(dbcmd.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
 		}),
+		storage.Cmd(),
 		admin.NewCommand(admin.Resolvers{
 			REST: func() admin.REST { return managementREST() },
 		}),
