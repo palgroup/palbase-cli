@@ -47,16 +47,21 @@ type swiftOAuthGoogle struct {
 // cross-module reflection: typed methods compile against the SDK,
 // the SDK loads its config from the bundle at startup.
 func emitSwift(ops []swiftOp) string {
-	// `auth` and `analytics` are reserved on `pb` (pb.auth.*, pb.analytics.*);
-	// skip endpoints whose top segment collides with either.
+	// Reserved namespaces on `pb`: pb.auth.* / pb.analytics.* / pb.flags.* /
+	// pb.realtime.* are SDK-owned surfaces. An endpoint whose top segment
+	// collides with one would shadow it (Swift redeclaration / a confusing
+	// `pb.realtime.foo()` mixing SDK + generated), so skip those endpoints.
+	reserved := map[string]bool{
+		"auth":      true,
+		"analytics": true,
+		"flags":     true,
+		"realtime":  true,
+	}
 	var usable []swiftOp
 	for _, op := range ops {
 		segs := opSegments(op.operationID)
-		if len(segs) > 0 {
-			top := strings.ToLower(segs[0])
-			if top == "auth" || top == "analytics" {
-				continue
-			}
+		if len(segs) > 0 && reserved[strings.ToLower(segs[0])] {
+			continue
 		}
 		usable = append(usable, op)
 	}

@@ -183,6 +183,32 @@ func TestEmitSwift(t *testing.T) {
 	}
 }
 
+// TestEmitSwift_SkipsReservedNamespaces locks that endpoints whose top
+// operationId segment is an SDK-owned namespace (auth / analytics / flags /
+// realtime) are skipped, so a customer endpoint can't shadow `pb.auth.*`,
+// `pb.analytics.*`, `pb.flags.*`, or `pb.realtime.*`. A non-reserved endpoint
+// in the same set is still emitted (the skip is precise, not a blanket drop).
+func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "auth.login", method: "post", path: "/auth/login"},
+		{operationID: "analytics.track", method: "post", path: "/analytics/track"},
+		{operationID: "flags.list", method: "post", path: "/flags/list"},
+		{operationID: "realtime.publish", method: "post", path: "/realtime/publish"},
+		{operationID: "rooms.create", method: "post", path: "/rooms/create"},
+	}
+	out := emitSwift(ops)
+
+	for _, reserved := range []string{"login", "track", "func list", "publish"} {
+		if strings.Contains(out, "func "+reserved) {
+			t.Errorf("reserved-namespace endpoint should be skipped, but %q appeared:\n%s", reserved, out)
+		}
+	}
+	// The non-reserved endpoint must still be generated.
+	if !strings.Contains(out, "func create") {
+		t.Errorf("non-reserved rooms.create should be emitted, but was missing:\n%s", out)
+	}
+}
+
 // TestStructLines_IdentifierCollisionDeduped guards the codegen against
 // schemas that declare the same field in two conventions (e.g. an AI-written
 // Zod object with both `deviceId` and `device_id`). Both wire keys sanitize to
