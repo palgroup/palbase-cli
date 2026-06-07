@@ -75,17 +75,50 @@ func setCmd(studioFn func() *studio.Client) *cobra.Command {
 	var (
 		refFlag  string
 		isSecret bool
+		fileFlag string
+		plain    bool
 	)
 	cmd := &cobra.Command{
-		Use:   "set <KEY=value>",
-		Short: "Set an env var (use --secret to mark as encrypted)",
-		Args:  cobra.ExactArgs(1),
+		Use:   "set <KEY=value> | set <KEY> --file <path>",
+		Short: "Set an env var (use --secret to mark encrypted; --file for a multi-line cert/key)",
+		Long: `Set an env var on the branch. Two forms:
+
+  palbase secret set API_URL=https://...           inline value (plain by default)
+  palbase secret set API_URL=https://... --secret  inline value, marked encrypted
+  palbase secret set APNS_P8 --file AuthKey.p8      value from a file (multi-line
+                                                    certs/keys/JSON), encrypted by
+                                                    default — pass --plain to opt out
+
+The --file form takes a bare KEY arg (no =value) and reads the file's contents
+verbatim as the value, so PEM keys and service-account JSON survive intact. The
+file itself stays local (gitignored); only its encrypted value is uploaded.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			parts := strings.SplitN(args[0], "=", 2)
-			if len(parts) != 2 {
-				return fmt.Errorf("argument must be in KEY=value format (got %q)", args[0])
+			var key, value string
+
+			if fileFlag != "" {
+				// --file form: the arg is a bare KEY (no =value), value comes from the file.
+				key = args[0]
+				if strings.Contains(key, "=") {
+					return fmt.Errorf("with --file, pass a bare KEY (got %q) — the value is read from the file", key)
+				}
+				data, err := os.ReadFile(fileFlag)
+				if err != nil {
+					return fmt.Errorf("read --file %q: %w", fileFlag, err)
+				}
+				value = string(data)
+				// A file value (cert/key/JSON) is a secret unless explicitly --plain.
+				if !plain {
+					isSecret = true
+				}
+			} else {
+				// Inline KEY=value form.
+				parts := strings.SplitN(args[0], "=", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("argument must be in KEY=value format (got %q) — or use --file for a file value", args[0])
+				}
+				key, value = parts[0], parts[1]
 			}
-			key, value := parts[0], parts[1]
 			if key == "" {
 				return fmt.Errorf("key must not be empty")
 			}
@@ -109,6 +142,8 @@ func setCmd(studioFn func() *studio.Client) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().BoolVar(&isSecret, "secret", false, "Mark value as encrypted secret (masked in list)")
+	cmd.Flags().StringVar(&fileFlag, "file", "", "Read the value from a file (multi-line certs/keys/JSON); encrypted by default")
+	cmd.Flags().BoolVar(&plain, "plain", false, "With --file, store the value as a plain (non-secret) env var")
 	return cmd
 }
 

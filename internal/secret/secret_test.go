@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -174,3 +176,60 @@ func TestSecretRemove_RequiresKey(t *testing.T) {
 }
 
 var _ = strings.Contains // keep import used
+
+// TestSecretSet_File uploads a multi-line file (PEM/JSON) as an encrypted secret
+// via `secret set KEY --file <path>`. The KEY is bare (no =value) and the value
+// is the file contents verbatim, secret-by-default.
+func TestSecretSet_File(t *testing.T) {
+	dir := t.TempDir()
+	p8 := filepath.Join(dir, "AuthKey_XYZ.p8")
+	pem := "-----BEGIN PRIVATE KEY-----\nMIGTAgEA...\nline2\n-----END PRIVATE KEY-----\n"
+	require.NoError(t, os.WriteFile(p8, []byte(pem), 0o600))
+
+	var got map[string]any
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/trpc/env.set", r.URL.Path)
+		got = innerInput(t, r)
+		trpcOK(w, nil)
+	})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"set", "--ref", "myproj", "APNS_P8", "--file", p8})
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, "APNS_P8", got["key"])
+	require.Equal(t, pem, got["value"], "multi-line PEM must survive verbatim")
+	require.Equal(t, true, got["isSecret"], "a --file value is a secret by default")
+}
+
+// TestSecretSet_File_Plain stores a --file value as a non-secret with --plain.
+func TestSecretSet_File_Plain(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.txt")
+	require.NoError(t, os.WriteFile(p, []byte("not-sensitive"), 0o600))
+
+	var got map[string]any
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		got = innerInput(t, r)
+		trpcOK(w, nil)
+	})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"set", "--ref", "myproj", "CFG", "--file", p, "--plain"})
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, false, got["isSecret"])
+}
+
+// TestSecretSet_File_RejectsKeyEqualsValue errors when --file is combined with KEY=value.
+func TestSecretSet_File_RejectsKeyEqualsValue(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x")
+	require.NoError(t, os.WriteFile(p, []byte("v"), 0o600))
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) { trpcOK(w, nil) })
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"set", "--ref", "myproj", "K=v", "--file", p})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	cmd.SilenceUsage = true
+	require.Error(t, cmd.Execute())
+}
