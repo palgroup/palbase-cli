@@ -1164,11 +1164,11 @@ func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.En
 	// and a same-network physical device reach the local backend. When serve
 	// is down, fall back to the deployed spec AND the remote tenant host.
 	localURL := "http://localhost:4003"
-	specBytes, localErr := fetchOpenAPISpec(ctx, localURL+"/openapi.json", "")
+	specBytes, localErr := fetchLocalOpenAPISpec(ctx, localURL+"/openapi.json")
 	embedURL := target.URL // remote tenant host (device fallback / serve-down)
 	if localErr != nil {
 		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using deployed spec + remote URL — run `palbase serve` for local dev\n", localURL, localErr)
-		specBytes, err = fetchOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey)
+		specBytes, err = fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
 		if err != nil {
 			return err
 		}
@@ -1195,7 +1195,7 @@ func generateIOSRemote(ctx context.Context, sc *studio.Client, endpoints config.
 }
 
 func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, branch, outFile string, w io.Writer) error {
-	specBytes, err := fetchOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey)
+	specBytes, err := fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
 	if err != nil {
 		return err
 	}
@@ -2151,7 +2151,7 @@ func palbaseCodegenPhaseBlock(shellPhaseID, genDir string) string {
 		"fi\n" +
 		"palbase --version\n" +
 		"if ! palbase mobile codegen ios; then\n" +
-		"  echo \"warning: palbase mobile codegen ios failed; using last generated files (check your login + project link)\"\n" +
+		"  echo \"warning: palbase mobile codegen ios failed — generated types may be STALE (codegen waits out a cold backend wake; this means a real error: check your login + project link, or the backend never woke)\"\n" +
 		"fi\n" +
 		"exit 0\n"
 	return "\t\t" + shellPhaseID + " /* Palbase Codegen iOS */ = {\n" +
@@ -2355,7 +2355,7 @@ func pullSwiftTypes(ctx context.Context, sc *studio.Client, endpoints config.End
 	if err != nil {
 		return err
 	}
-	specBytes, err := fetchOpenAPISpec(ctx, specURL, apiKey)
+	specBytes, err := fetchRemoteOpenAPISpec(ctx, specURL, apiKey, w)
 	if err != nil {
 		return err
 	}
@@ -2382,7 +2382,7 @@ func pullTypesTo(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 		return err
 	}
 
-	specBytes, err := fetchOpenAPISpec(ctx, specURL, apiKey)
+	specBytes, err := fetchRemoteOpenAPISpec(ctx, specURL, apiKey, w)
 	if err != nil {
 		return err
 	}
@@ -2535,29 +2535,155 @@ func googleRedirectURIFromClientID(clientID string) string {
 	return "com.googleusercontent.apps." + id + ":/oauthredirect"
 }
 
-// fetchOpenAPISpec issues a GET against the project's /openapi.json
-// with the apikey header set. Returns raw bytes — we don't parse here
-// because the caller writes the JSON straight to disk.
-func fetchOpenAPISpec(ctx context.Context, specURL, apiKey string) ([]byte, error) {
-	req, err := newJSONRequest(ctx, "GET", specURL, nil)
+// fetchOpts tunes the wake-aware retry loop in fetchOpenAPISpecOpts.
+//
+//   - attemptTimeout caps a single GET. It must comfortably exceed the
+//     gateway's wake-and-hold (~90s) so a slow-but-OK cold wake returns on the
+//     held connection instead of being aborted client-side.
+//   - totalBudget caps the whole loop (all attempts + backoff) so codegen never
+//     blocks an Xcode build forever.
+//   - minBackoff is the floor between retries when the backend gives no
+//     Retry-After hint.
+type fetchOpts struct {
+	attemptTimeout time.Duration
+	totalBudget    time.Duration
+	minBackoff     time.Duration
+	progress       io.Writer // optional: a line is written before each retry
+}
+
+// defaultFetchOpts sizes the loop for a Free-tier cold wake. A scaled-to-zero
+// br-<ref> pod is woken synchronously by Kong (up to ~90s plugin hold) and, when
+// node capacity is starved, the orchestrator returns 503 backend_unavailable
+// (Retry-After: 5) until a node is provisioned. 120s per attempt covers the
+// hold; the 150s total budget allows ~2 short 503 retries on top.
+var defaultFetchOpts = fetchOpts{
+	attemptTimeout: 120 * time.Second,
+	totalBudget:    150 * time.Second,
+	minBackoff:     2 * time.Second,
+}
+
+// fetchRemoteOpenAPISpec is the wake-aware fetch used for REMOTE tenant hosts
+// (https://<ref>.dev.palbase.studio), where a Free-tier pod may be idle-paused
+// and Kong holds the request while it cold-wakes. It prints "backend waking…"
+// progress to w so a long first build after idle doesn't look like a hang.
+func fetchRemoteOpenAPISpec(ctx context.Context, specURL, apiKey string, w io.Writer) ([]byte, error) {
+	opts := defaultFetchOpts
+	opts.progress = w
+	return fetchOpenAPISpecOpts(ctx, specURL, apiKey, opts)
+}
+
+// fetchLocalOpenAPISpec probes a local `palbase serve` with a single short
+// attempt and NO wake retries — when serve is down the connection refuses
+// instantly and the caller falls back to the remote host without delay.
+func fetchLocalOpenAPISpec(ctx context.Context, specURL string) ([]byte, error) {
+	return fetchOpenAPISpecOpts(ctx, specURL, "", fetchOpts{
+		attemptTimeout: 3 * time.Second,
+		totalBudget:    3 * time.Second,
+		minBackoff:     time.Second,
+	})
+}
+
+// fetchOpenAPISpecOpts is the wake-aware core. It retries ONLY on signals that
+// mean "the backend pod is still waking" — HTTP 502/503 and per-attempt
+// timeouts — honoring a Retry-After header when present. Everything else fails
+// immediately: a connection-refused (the local `palbase serve` probe when serve
+// is down) returns fast so the remote fallback kicks in without burning the
+// budget, and a hard 4xx (e.g. 401 invalid_apikey) is a real error, not a wake.
+func fetchOpenAPISpecOpts(ctx context.Context, specURL, apiKey string, opts fetchOpts) ([]byte, error) {
+	deadline := time.Now().Add(opts.totalBudget)
+	var lastErr error
+	attempt := 0
+	for {
+		attempt++
+		body, retryAfter, err := fetchOnce(ctx, specURL, apiKey, opts.attemptTimeout)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !errors.As(err, new(wakeRetryable)) {
+			return nil, err // hard error (conn-refused, 4xx, body read) — no retry
+		}
+		// Wake in progress. Back off (Retry-After if the gateway gave one, else
+		// the floor) but never past the total budget.
+		wait := opts.minBackoff
+		if retryAfter > wait {
+			wait = retryAfter
+		}
+		if time.Now().Add(wait).After(deadline) {
+			return nil, fmt.Errorf("fetch %s: backend did not wake within %s (last: %w)", specURL, opts.totalBudget, lastErr)
+		}
+		if opts.progress != nil {
+			fmt.Fprintf(opts.progress, "backend waking (attempt %d): %v — retrying in %s\n", attempt, err, wait.Round(time.Second))
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// wakeRetryable marks an error returned by fetchOnce as a transient "pod is
+// waking" condition (502/503 or a per-attempt timeout) that fetchOpenAPISpecOpts
+// should retry, as opposed to a hard failure.
+type wakeRetryable struct{ err error }
+
+func (w wakeRetryable) Error() string { return w.err.Error() }
+func (w wakeRetryable) Unwrap() error { return w.err }
+
+// fetchOnce does a single GET with its own timeout. The second return is a
+// parsed Retry-After (0 if absent/unparseable).
+func fetchOnce(ctx context.Context, specURL, apiKey string, timeout time.Duration) ([]byte, time.Duration, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := newJSONRequest(attemptCtx, "GET", specURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("apikey", apiKey)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	resp, err := defaultHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", specURL, err)
+		// Caller cancelled → surface as-is (do not mask as retryable).
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		// Per-attempt timeout while a cold pod is held → retryable wake signal.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, 0, wakeRetryable{fmt.Errorf("fetch %s: attempt timed out after %s", specURL, timeout)}
+		}
+		// Connection-refused / DNS / TLS etc. — a hard error (e.g. local serve
+		// down). Fail fast so the caller falls back without retrying.
+		return nil, 0, fmt.Errorf("fetch %s: %w", specURL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, 0, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway {
+		return nil, parseRetryAfter(resp.Header.Get("Retry-After")),
+			wakeRetryable{fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, string(body))
+		return nil, 0, fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, string(body))
 	}
-	return body, nil
+	return body, 0, nil
+}
+
+// parseRetryAfter reads a delta-seconds Retry-After value. We only honor the
+// numeric form (the gateway emits retry_after_seconds=5); an HTTP-date form or
+// garbage yields 0 and the caller's floor backoff applies.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs < 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // writeAutogenFile writes data to path with a header comment that
