@@ -1913,6 +1913,18 @@ func iosGeneratedDirFor(folder string) string {
 // ios`. Falls back to a bare "Generated" (never the case-colliding capital
 // "Palbase/Generated") when no project/target is resolvable.
 func resolveIOSGeneratedDir() string {
+	// Explicit override wins. The Xcode build phase sets this from
+	// $SCRIPT_OUTPUT_FILE_0 (the declared outputPath, e.g.
+	// ".../palbase/Generated/PalbaseGenerated.swift") so codegen writes EXACTLY
+	// where Xcode's user-script sandbox grants write permission. Without it,
+	// resolveXcodeProject below does os.ReadDir(".") to find the .xcodeproj —
+	// but the user-script sandbox blocks reading the project directory during a
+	// build, so the lookup fails and we fall back to a bare "Generated" at cwd,
+	// which the sandbox then refuses to mkdir ("operation not permitted"). The
+	// env var sidesteps runtime project discovery entirely.
+	if dir := strings.TrimSpace(os.Getenv("PALBASE_IOS_GENERATED_DIR")); dir != "" {
+		return dir
+	}
 	projectPath, err := resolveXcodeProject("")
 	if err != nil {
 		return fallbackIOSGeneratedDir
@@ -2142,9 +2154,19 @@ func palbaseCodegenPhaseBlock(shellPhaseID, genDir string) string {
 	// terminal. Prepend the standard install locations so the lookup
 	// succeeds; this keeps the fail-soft `command -v` guard meaningful (it
 	// now only trips when the CLI is genuinely absent, not merely off-PATH).
+	// The codegen line exports PALBASE_IOS_GENERATED_DIR from Xcode's declared
+	// outputPath ($SCRIPT_OUTPUT_FILE_0 = .../palbase/Generated/Palbase…swift).
+	// Under the user-script sandbox, codegen can't os.ReadDir(".") to discover
+	// the .xcodeproj, so it would fall back to a bare "Generated" at cwd and fail
+	// with "mkdir Generated: operation not permitted". The declared output dir is
+	// the only place the sandbox grants write access — point codegen straight at
+	// it (resolveIOSGeneratedDir reads this env first).
 	script := "echo \"Palbase Codegen iOS: running\"\n" +
 		"cd \"${SRCROOT:-.}\"\n" +
 		"export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/go/bin:$HOME/.local/bin:$PATH\"\n" +
+		"if [ -n \"${SCRIPT_OUTPUT_FILE_0:-}\" ]; then\n" +
+		"  export PALBASE_IOS_GENERATED_DIR=\"$(dirname \"$SCRIPT_OUTPUT_FILE_0\")\"\n" +
+		"fi\n" +
 		"if ! command -v palbase >/dev/null 2>&1; then\n" +
 		"  echo \"warning: palbase CLI not found; skipping Palbase iOS codegen\"\n" +
 		"  exit 0\n" +

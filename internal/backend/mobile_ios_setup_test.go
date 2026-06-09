@@ -218,6 +218,12 @@ func TestPatchXcodeProjectModernSyncedTarget(t *testing.T) {
 		"$(SRCROOT)/palbase/Generated/PalbaseGenerated.json",
 		"alwaysOutOfDate = 1;",
 		"palbase mobile codegen ios",
+		// The phase must export PALBASE_IOS_GENERATED_DIR from Xcode's declared
+		// output path so codegen writes inside the sandbox-permitted dir (the
+		// fix for "mkdir Generated: operation not permitted" under user-script
+		// sandboxing, where runtime .xcodeproj discovery is blocked).
+		"PALBASE_IOS_GENERATED_DIR=",
+		"SCRIPT_OUTPUT_FILE_0",
 	} {
 		if !strings.Contains(out, must) {
 			t.Fatalf("patched project missing %q:\n%s", must, out)
@@ -476,5 +482,23 @@ func TestEnsureSyncedFolderGroup_UnrelatedSyncFolderDoesNotFalseSkip(t *testing.
 	out2, did2 := ensureSyncedFolderGroup(out, syncID, "Palbase/Generated")
 	if did2 {
 		t.Fatalf("second call must be a no-op once our group exists:\n%s", out2)
+	}
+}
+
+// resolveIOSGeneratedDir must honour PALBASE_IOS_GENERATED_DIR. The Xcode build
+// phase sets it (from $SCRIPT_OUTPUT_FILE_0) so codegen writes inside the
+// sandbox-permitted output directory instead of attempting runtime .xcodeproj
+// discovery — which the user-script sandbox blocks, causing the bare-"Generated"
+// fallback and "mkdir Generated: operation not permitted".
+func TestResolveIOSGeneratedDir_EnvOverrideWins(t *testing.T) {
+	want := "/build/sandbox/palbase/Generated"
+	t.Setenv("PALBASE_IOS_GENERATED_DIR", want)
+	if got := resolveIOSGeneratedDir(); got != want {
+		t.Fatalf("resolveIOSGeneratedDir() = %q, want env override %q", got, want)
+	}
+	// Whitespace is trimmed so a stray newline from $(dirname …) can't break it.
+	t.Setenv("PALBASE_IOS_GENERATED_DIR", "  "+want+"\n")
+	if got := resolveIOSGeneratedDir(); got != want {
+		t.Fatalf("resolveIOSGeneratedDir() with padded env = %q, want %q", got, want)
 	}
 }
