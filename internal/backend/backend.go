@@ -2278,28 +2278,46 @@ func insertBeforeMarker(s, marker, insertion string) (string, bool) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Adım B14 — `palbase types`
+// `palbase types`
 //
-// Pulls the deployed `/openapi.json` for the project and writes
-// `.palbase/openapi.json` + `.palbase/types.d.ts`. Both files are
-// auto-generated and overwritten on every run; users edit the
-// underlying `defineEndpoint` source instead.
+// Fetches the backend's `/openapi.json` and generates a typed client
+// module: `palbe.gen.ts` for the palbe web SDK (default) or a Swift
+// file for the Palbe iOS SDK. Output is auto-generated and overwritten
+// on every run; users edit their controllers instead.
 // ─────────────────────────────────────────────────────────────────────
 
 func newTypesCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var envFlag string
-	var outDir string
+	var outFlag string
 	var langFlag string
+	var softFlag bool
 	cmd := &cobra.Command{
 		Use:   "types",
-		Short: "Pull the deployed OpenAPI spec + generate typed client code",
-		Long: `Fetch the OpenAPI document from the deployed backend and generate
-typed client code.
+		Short: "Generate a typed client from your backend's OpenAPI spec",
+		Long: `Fetch the OpenAPI document from your backend and generate typed
+client code.
 
-  --lang ts     (default) writes .palbase/openapi.json + .palbase/types.d.ts
+  --lang ts     (default) writes palbe.gen.ts — typed namespaced calls
+                (pb.rooms.create(...)) plus the embedded runtime config for
+                the palbe web SDK. Commit the file and re-run after every
+                deploy (a predev/prebuild script keeps it fresh).
   --lang swift  writes a Swift file of namespaced typed calls
                 (pb.rooms.create(...)) for the Palbe iOS SDK
+
+Spec source (--env):
+  auto    (default) probe a local 'palbase serve' on localhost:4003 first;
+          when it is up, the generated config points at the local server and
+          OAuth discovery is skipped (works without login/network). When it
+          is down, fall back to the deployed backend. With --lang swift,
+          auto behaves as remote — the local-first iOS flow is
+          'palbase mobile codegen ios'.
+  local   require the local 'palbase serve' (error when it is down)
+  remote  always use the deployed backend (wake-aware fetch through Kong)
+
+--soft turns ANY failure into a 'warning: codegen skipped (...)' line and
+exit 0, so a predev/prebuild hook never blocks a machine without login or
+network access.
 
 Swift codegen is self-contained (no Node/npx). The generated file
 'import Palbe' and lowers each call to the SDK's public seam, so it
@@ -2308,35 +2326,60 @@ build phase for automatic regeneration on every build:
 
   palbase types --lang swift \
     --out "$DERIVED_FILE_DIR/PalbaseEndpoints.swift" \
-    --env "$([ "$CONFIGURATION" = Debug ] && echo local || echo remote)"
-
-Re-run after every deploy to stay in sync with the live spec.`,
+    --env "$([ "$CONFIGURATION" = Debug ] && echo local || echo remote)"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
-			if err != nil {
+			out := cmd.OutOrStdout()
+			run := func() error {
+				ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), out)
+				if err != nil {
+					return err
+				}
+				// Branch = the linked .palbase/config.json DefaultEnv (the same
+				// source the mobile codegen flow reads). --ref makes
+				// resolveOrLinkRef return without writing the config, so a
+				// fresh cwd falls back to main.
+				branch := "main"
+				if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg.DefaultEnv != "" {
+					branch = cfg.DefaultEnv
+				}
+				switch langFlag {
+				case "swift":
+					outFile := outFlag
+					if outFile == "" {
+						outFile = "PalbaseEndpoints.swift"
+					}
+					env := envFlag
+					if env == "auto" {
+						// Swift keeps remote semantics for auto — its
+						// local-first path is `palbase mobile codegen ios`.
+						env = "remote"
+					}
+					return pullSwiftTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, env, outFile, out)
+				case "ts", "":
+					outFile := outFlag
+					if outFile == "" {
+						outFile = "palbe.gen.ts"
+					}
+					return pullTSTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, envFlag, outFile, out)
+				default:
+					return fmt.Errorf("unknown --lang %q (expected ts|swift)", langFlag)
+				}
+			}
+			if err := run(); err != nil {
+				if softFlag {
+					fmt.Fprintf(out, "warning: codegen skipped (%v)\n", err)
+					return nil
+				}
 				return err
 			}
-			switch langFlag {
-			case "swift":
-				out := outDir
-				if out == ".palbase" || out == "" {
-					out = "PalbaseEndpoints.swift" // swift default: a file, not a dir
-				}
-				return pullSwiftTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, envFlag, out, os.Stdout)
-			case "ts", "":
-				if outDir == "" {
-					outDir = ".palbase"
-				}
-				return pullTypesTo(cmd.Context(), r.Studio(), r.Endpoints(), ref, envFlag, outDir, os.Stdout)
-			default:
-				return fmt.Errorf("unknown --lang %q (expected ts|swift)", langFlag)
-			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&envFlag, "env", "remote", "Spec source: remote (Kong gateway) | local (palbase serve on localhost:4003)")
+	cmd.Flags().StringVar(&envFlag, "env", "auto", "Spec source: auto (local serve when up, else deployed) | local | remote")
 	cmd.Flags().StringVar(&langFlag, "lang", "ts", "Output language: ts | swift")
-	cmd.Flags().StringVar(&outDir, "out", ".palbase", "Output: dir for ts (.palbase), file for swift (PalbaseEndpoints.swift)")
+	cmd.Flags().StringVar(&outFlag, "out", "", "Output file (default: palbe.gen.ts for ts, PalbaseEndpoints.swift for swift)")
+	cmd.Flags().BoolVar(&softFlag, "soft", false, "Never fail: print a warning and exit 0 on any error (for predev/prebuild hooks)")
 	return cmd
 }
 
@@ -2384,11 +2427,6 @@ No-op when the project has no db/schema.ts.`,
 	}
 }
 
-// pullTypesTo does the actual work — fetch /openapi.json, write JSON,
-// shell out to `npx openapi-typescript` for the .d.ts. Failures emit a
-// warning but don't block; the JSON file alone is useful (Studio,
-// Postman). Augmentation of `interface BackendEndpoints` is what
-// drives the typed `pb.backend.call(name, input)` API.
 // pullSwiftTypes fetches the OpenAPI spec and generates a Swift file of
 // namespaced typed calls for the Palbe iOS SDK. Self-contained — no npx.
 func pullSwiftTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env, outFile string, w io.Writer) error {
@@ -2417,42 +2455,81 @@ func pullSwiftTypes(ctx context.Context, sc *studio.Client, endpoints config.End
 	return nil
 }
 
-func pullTypesTo(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, env, outDir string, w io.Writer) error {
-	specURL, apiKey, err := openAPIURL(ctx, sc, endpoints, ref, env)
+// pullTSTypes implements `palbase types --lang ts`: resolve the spec source
+// per --env, parse the OpenAPI document, and write the palbe.gen.ts module
+// (typed namespaced calls + embedded __configure runtime config) for the
+// palbe web SDK. The file is meant to be COMMITTED — unlike the retired
+// .palbase/openapi.json + types.d.ts pair, it is the app's typed client.
+//
+// env routing:
+//   - "auto" (default): probe the local `palbase serve` (localhost:4003,
+//     single 3s fast-fail attempt). Serve up → the config points at the
+//     local server (apiKey empty — serve's spec is unauthenticated) and
+//     OAuth discovery is SKIPPED, so a logged-out / offline machine still
+//     regenerates against serve. Serve down → remote.
+//   - "local": like the auto local path, but serve-down is a hard error.
+//   - "remote": resolve the branch target (apikey.reveal), wake-aware fetch
+//     of the deployed spec, best-effort OAuth discovery.
+func pullTSTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, env, outFile string, w io.Writer) error {
+	if env == "" {
+		env = "auto"
+	}
+	cfg := tsGeneratedConfig{Branch: branch}
+	var specBytes []byte
+
+	const localURL = "http://localhost:4003"
+	useRemote := false
+	switch env {
+	case "auto", "local":
+		b, localErr := fetchLocalOpenAPISpec(ctx, localURL+"/openapi.json")
+		switch {
+		case localErr == nil:
+			specBytes = b
+			cfg.URL = localURL
+		case env == "local":
+			return fmt.Errorf("no local `palbase serve` at %s (%w) — start `palbase serve` or use --env remote", localURL, localErr)
+		default:
+			fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using the deployed spec — run `palbase serve` for local dev\n", localURL, localErr)
+			useRemote = true
+		}
+	case "remote":
+		useRemote = true
+	default:
+		return fmt.Errorf("unknown --env %q (expected auto|local|remote)", env)
+	}
+
+	if useRemote {
+		target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
+		if err != nil {
+			return err
+		}
+		specBytes, err = fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
+		if err != nil {
+			return err
+		}
+		cfg.URL = target.URL
+		cfg.APIKey = target.APIKey
+		oauth, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey)
+		if oauthErr != nil {
+			fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
+		}
+		cfg.OAuth = oauth
+	}
+
+	ops, err := parseOpenAPIForSwift(specBytes)
 	if err != nil {
 		return err
 	}
-
-	specBytes, err := fetchRemoteOpenAPISpec(ctx, specURL, apiKey, w)
-	if err != nil {
-		return err
+	tsOut := emitTypeScript(ops, cfg)
+	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
 	}
-
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", outDir, err)
+	if err := os.WriteFile(outFile, []byte(tsOut), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outFile, err)
 	}
-	jsonPath := filepath.Join(outDir, "openapi.json")
-	if err := writeAutogenFile(jsonPath, specBytes); err != nil {
-		return fmt.Errorf("write %s: %w", jsonPath, err)
-	}
-	fmt.Fprintf(w, "✓ wrote %s\n", jsonPath)
-
-	// .palbase/types.d.ts via openapi-typescript shell-out. Optional —
-	// users without Node.js still get the JSON contract.
-	tsPath := filepath.Join(outDir, "types.d.ts")
-	if err := generateTypesDecl(ctx, jsonPath, tsPath); err != nil {
-		fmt.Fprintf(w, "  (skipped types.d.ts: %v)\n", err)
-	} else {
-		fmt.Fprintf(w, "✓ wrote %s\n", tsPath)
-	}
-
-	// Ensure .palbase/ is gitignored so generated artifacts don't end
-	// up in customer commits. Idempotent — append a single line if
-	// neither `.palbase/` nor `.palbase` is already listed.
-	if err := ensureGitignored(".gitignore", ".palbase/"); err != nil {
-		fmt.Fprintf(w, "  (gitignore not updated: %v)\n", err)
-	}
-
+	fmt.Fprintf(w, "✓ wrote %s (%d operations)\n", outFile, len(ops))
 	return nil
 }
 
@@ -2725,38 +2802,6 @@ func parseRetryAfter(v string) time.Duration {
 		return 0
 	}
 	return time.Duration(secs) * time.Second
-}
-
-// writeAutogenFile writes data to path with a header comment that
-// surfaces "do not edit" when the file is opened. JSON files take a
-// `// AUTO-GENERATED` line via a key in the JSON itself rather than a
-// comment (JSON has no comments) — so we just write the bytes as-is
-// and rely on the OpenAPI document's `info.description` from the
-// backend SDK.
-func writeAutogenFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0o644)
-}
-
-// generateTypesDecl runs `npx openapi-typescript <jsonPath> -o <tsPath>`
-// to produce a .d.ts file. Requires Node.js + npx on PATH; if absent
-// the function returns an error and the caller logs a warning.
-func generateTypesDecl(ctx context.Context, jsonPath, tsPath string) error {
-	if _, err := exec.LookPath("npx"); err != nil {
-		return fmt.Errorf("npx not on PATH (Node.js required for types.d.ts generation)")
-	}
-	cmd := exec.CommandContext(ctx, "npx", "--yes", "openapi-typescript@^7", jsonPath, "-o", tsPath)
-	cmd.Stderr = io.Discard
-	cmd.Stdout = io.Discard
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("openapi-typescript: %w", err)
-	}
-	// Prepend the AUTO-GENERATED header so editors flag it.
-	existing, err := os.ReadFile(tsPath)
-	if err != nil {
-		return err
-	}
-	header := []byte("// AUTO-GENERATED FROM YOUR DEPLOYED BACKEND. DO NOT EDIT — RUN 'palbase types' TO REFRESH.\n\n")
-	return os.WriteFile(tsPath, append(header, existing...), 0o644)
 }
 
 // envGenExternals are kept external when bundling db/schema.ts so the bundle

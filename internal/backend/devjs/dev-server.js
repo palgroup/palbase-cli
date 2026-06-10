@@ -204,13 +204,16 @@ const CONTROLLER_FILE_RE = /\.(c?js|mjs|ts)$/i;
 // registry the SAME way worker.js does (readControllerRoutes), so dev = prod.
 //
 // Each route-table entry: { method, urlPattern, regex, paramNames,
-// controllerPath, routeKey, effectiveAuth, params, returnSchema }.
-// `controllerPath` is the bundled file to require(); `routeKey` is the route's
-// fnName (mirroring worker.js's `context.route_key`); `params` is the ordered
-// ParamMeta injection plan; `returnSchema` is the live @Returns zod (or null);
-// `effectiveAuth` is the resolved route.options.auth ?? controller.defaultAuth
-// ?? true. urlPattern keeps the class-controller `{param}` braces for printing;
-// urlToRegex turns each `{param}` segment into a capture group for matching.
+// controllerPath, controllerName, routeKey, effectiveAuth, params,
+// returnSchema }. `controllerPath` is the bundled file to require();
+// `controllerName` is the dotted-operationId namespace derived from the live
+// class name (deriveControllerName — "" falls back to the flat id); `routeKey`
+// is the route's fnName (mirroring worker.js's `context.route_key`); `params`
+// is the ordered ParamMeta injection plan; `returnSchema` is the live @Returns
+// zod (or null); `effectiveAuth` is the resolved route.options.auth ??
+// controller.defaultAuth ?? true. urlPattern keeps the class-controller
+// `{param}` braces for printing; urlToRegex turns each `{param}` segment into
+// a capture group for matching.
 const routes = new Map();
 
 // Class-controller registry symbols — MUST match the SDK
@@ -409,6 +412,7 @@ function registerControllers() {
         regex,
         paramNames,
         controllerPath: file,
+        controllerName: deriveControllerName(Ctrl),
         routeKey,
         effectiveAuth: effectiveAuth(route.options, meta),
         rateLimit: (route.options && typeof route.options === 'object') ? route.options.rateLimit : undefined,
@@ -1161,10 +1165,29 @@ function openApiPath(urlPattern) {
   return urlPattern.replace(/:([^/]+)/g, '{$1}');
 }
 
-// operationId mirrors generator.go's operationID: toLower(method) + per
-// non-empty path segment, `By`+Capitalize(param) for `{param}` else
-// Capitalize(segment). e.g. POST /todos/create → postTodosCreate;
-// GET /rooms/{id} → getRoomsById.
+// deriveControllerName lowers a controller CLASS name into the dotted
+// operationId namespace: strip ONE trailing "Controller" suffix
+// (case-sensitive), then lower-case the first letter.
+// MembersController → "members", UserProfileController → "userProfile",
+// Members → "members". Returns "" when the derivation is empty (a class named
+// exactly "Controller", or an anonymous class) — buildOperation then falls
+// back to the flat operationId. MUST stay byte-for-byte identical to
+// deriveControllerName in the prod extractor (modules/backend
+// internal/runtime/extract_meta.js) and @palbase/backend's
+// openapi/discover.ts — the three spec twins.
+function deriveControllerName(Ctrl) {
+  let name = typeof Ctrl === 'function' && typeof Ctrl.name === 'string' ? Ctrl.name : '';
+  if (name.endsWith('Controller')) name = name.slice(0, -'Controller'.length);
+  if (name === '') return '';
+  return name.charAt(0).toLowerCase() + name.slice(1);
+}
+
+// operationId mirrors generator.go's flatOperationID — the FALLBACK id used
+// when no controllerName can be derived: toLower(method) + per non-empty path
+// segment, `By`+Capitalize(param) for `{param}` else Capitalize(segment).
+// e.g. POST /todos/create → postTodosCreate; GET /rooms/{id} → getRoomsById.
+// Controller routes normally get the dotted `<controllerName>.<fnName>` id
+// instead (see buildOperation), matching generator.go's operationID.
 function operationId(method, openPath) {
   let out = method.toLowerCase();
   for (const seg of openPath.split('/')) {
@@ -1221,7 +1244,8 @@ function paramsSchemaFromRoute(route) {
 // param, or the synthesized @Param object). Output is @Returns. method + path
 // come from the route (controller basePath + subpath) — matching the
 // dev-server's own dispatch. auth uses the resolved effectiveAuth + the shared
-// isAuthRequired() so spec == enforcement.
+// isAuthRequired() so spec == enforcement. controllerName + fnName feed the
+// dotted operationId (`<controllerName>.<fnName>`, flat fallback when empty).
 function buildRouteMeta(route) {
   const auth = route.effectiveAuth;
   const bodyParam = findRouteParam(route.params, 'body');
@@ -1230,6 +1254,8 @@ function buildRouteMeta(route) {
   return {
     method: route.method,
     openPath: openApiPath(route.urlPattern),
+    controllerName: typeof route.controllerName === 'string' ? route.controllerName : '',
+    fnName: typeof route.fnName === 'string' ? route.fnName : '',
     authRequired: isAuthRequired(auth),
     authRole: (auth && typeof auth === 'object' && typeof auth.role === 'string') ? auth.role : '',
     rateLimit: (route.rateLimit && typeof route.rateLimit === 'object'
@@ -1255,7 +1281,13 @@ function buildOperation(meta) {
   // struct field order: summary, operationId, tags, security, parameters,
   // requestBody, responses (summary/tags omitted — dev-server has no
   // description/tags on the route; they'd be empty).
-  op.operationId = operationId(meta.method, meta.openPath);
+  //
+  // operationId is DOTTED `<controllerName>.<fnName>` (members.getUser) when
+  // both are present — generator.go's operationID — with the flat
+  // verb-prefixed derivation as the fallback (empty controllerName).
+  op.operationId = (meta.controllerName && meta.fnName)
+    ? meta.controllerName + '.' + meta.fnName
+    : operationId(meta.method, meta.openPath);
 
   if (meta.authRequired) {
     // bearerAuth then apiKey — generator.go emits them in that array order.
@@ -1349,14 +1381,16 @@ function buildOpenApiSpec() {
       log(`openapi: skipping ${route.method} ${route.urlPattern} — ${err.message}`);
       continue;
     }
-    // Carry the registration's effectiveAuth/rateLimit/urlPattern onto the live
-    // route meta so buildRouteMeta reads the resolved cascade + the path the
-    // dev-server actually matches.
+    // Carry the registration's effectiveAuth/rateLimit/urlPattern (and the
+    // controllerName derived from the live class at registration) onto the
+    // live route meta so buildRouteMeta reads the resolved cascade + the path
+    // the dev-server actually matches.
     const liveRoute = Object.assign({}, resolved.route, {
       method: route.method,
       urlPattern: route.urlPattern,
       effectiveAuth: route.effectiveAuth,
       rateLimit: route.rateLimit,
+      controllerName: route.controllerName,
     });
     const meta = buildRouteMeta(liveRoute);
     const operation = buildOperation(meta);

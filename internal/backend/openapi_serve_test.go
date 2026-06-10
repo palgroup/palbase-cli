@@ -26,22 +26,25 @@ import (
 // object literal ({ __palbase:'controller', basePath, defaultAuth? }); `routes`
 // is a JS array literal of RouteMeta; `methods` is a class-body of methods;
 // `returnBuf` is the returnBuffer object literal (fnName → zod-ish). The methods
-// are real functions so dispatch runs.
-func controllerFixture(metaBody, routes, methods, returnBuf string) string {
+// are real functions so dispatch runs. `className` is the live class NAME the
+// dev-server derives the dotted-operationId namespace from (TodosController →
+// todos) — a named class expression keeps the template's `Ctrl` binding while
+// giving Ctrl.name the fixture's chosen name.
+func controllerFixture(className, metaBody, routes, methods, returnBuf string) string {
 	return fmt.Sprintf(`
 'use strict';
 const ROUTES = Symbol.for('palbase.backend.routes');
 const RETBUF = Symbol.for('palbase.backend.returnBuffer');
 const CTRLMETA = Symbol.for('palbase.backend.controllerMeta');
-class Ctrl {
+const Ctrl = class %s {
 %s
-}
+};
 Ctrl.__palbase = 'controller';
 Ctrl[CTRLMETA] = %s;
 Ctrl[ROUTES] = %s;
 Ctrl[RETBUF] = %s;
 module.exports.default = Ctrl;
-`, methods, metaBody, routes, returnBuf)
+`, className, methods, metaBody, routes, returnBuf)
 }
 
 // fakeZod returns a JS expression for a fake zod schema: a `_def` object (so
@@ -63,6 +66,10 @@ const fakeZod = `{ _def: { typeName: 'ZodObject' }, safeParse: (v) => ({ success
 //   - a @Query route emits in:query parameters; a @Param route emits in:path
 //   - the full route path is basePath + subpath (controller composition)
 //   - errors are global throw classes → NO x-palbase-errors / declared statuses
+//   - operationIds are DOTTED `<controllerName>.<fnName>` (TodosController →
+//     todos.create), with the flat verb-prefixed derivation as the fallback
+//     when the class name lowers to "" — matching the prod generator.go +
+//     extract_meta.js contract
 //
 // The fixture controllers stamp the real runtime registry symbols on a class
 // (controllerFixture), so the dev-server's getRoutes/symbol-fallback load path
@@ -86,6 +93,7 @@ func TestServeOpenAPISpec(t *testing.T) {
 	//    params use the canonical BRACE form ({id}) — the one true form the route
 	//    registry + dev-server + OpenAPI generator agree on (legacy :id is gone).
 	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture(
+		"TodosController",
 		`{ __palbase: 'controller', basePath: '/todos' }`,
 		`[
       { method: 'POST', subpath: '/create', fnName: 'create',
@@ -105,6 +113,7 @@ func TestServeOpenAPISpec(t *testing.T) {
 	// "/public". Explicit opt-out cascades to the route → optional auth, no 401.
 	// The route also declares a @Query so the spec carries in:query parameters.
 	mustWrite(t, root, "controllers/public.controller.js", controllerFixture(
+		"PublicController",
 		`{ __palbase: 'controller', basePath: '', defaultAuth: false }`,
 		`[
       { method: 'GET', subpath: '/public', fnName: 'list',
@@ -113,6 +122,20 @@ func TestServeOpenAPISpec(t *testing.T) {
     ]`,
 		`
   async list() { return { public: true }; }`,
+		`{}`,
+	))
+
+	// A class named exactly "Controller" derives an EMPTY controllerName
+	// (strip-one-suffix leaves nothing) → the operationId must fall back to the
+	// FLAT verb-prefixed derivation, mirroring extract_meta.js + generator.go.
+	mustWrite(t, root, "controllers/legacy.controller.js", controllerFixture(
+		"Controller",
+		`{ __palbase: 'controller', basePath: '/legacy', defaultAuth: false }`,
+		`[
+      { method: 'GET', subpath: '/', fnName: 'list', options: {}, params: [] },
+    ]`,
+		`
+  async list() { return { legacy: true }; }`,
 		`{}`,
 	))
 
@@ -199,8 +222,8 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if resps["400"] == nil || resps["200"] == nil {
 		t.Fatalf("op missing standard 200/400: %v", resps)
 	}
-	if createOp["operationId"] != "postTodosCreate" {
-		t.Fatalf("operationId = %v, want postTodosCreate", createOp["operationId"])
+	if createOp["operationId"] != "todos.create" {
+		t.Fatalf("operationId = %v, want todos.create (dotted: TodosController → todos)", createOp["operationId"])
 	}
 	// rateLimit → x-rate-limit { max, window }.
 	rl, _ := createOp["x-rate-limit"].(map[string]any)
@@ -228,6 +251,9 @@ func TestServeOpenAPISpec(t *testing.T) {
 	// explicit auth:false (via @Controller defaultAuth:false cascading to the
 	// route): GET /public → security [{}], NO 401, and an in:query parameter.
 	publicOp := operationAt(t, paths, "/public", "get")
+	if publicOp["operationId"] != "public.list" {
+		t.Fatalf("operationId = %v, want public.list (dotted: PublicController → public)", publicOp["operationId"])
+	}
 	sec, _ := publicOp["security"].([]any)
 	if len(sec) != 1 {
 		t.Fatalf("auth:false op security = %v, want [{}]", publicOp["security"])
@@ -244,16 +270,23 @@ func TestServeOpenAPISpec(t *testing.T) {
 		t.Fatalf("@Query route missing in:query parameters: %v", publicOp["parameters"])
 	}
 
-	// {id} → {id} path key + ByParam operationId; secure-by-default (auth
+	// {id} → {id} path key + dotted operationId; secure-by-default (auth
 	// omitted). Full path = basePath /todos + subpath /{id} → /todos/{id}. The
 	// @Param("id") synthesizes an in:path parameter named "id".
 	byIdOp := operationAt(t, paths, "/todos/{id}", "get")
-	if byIdOp["operationId"] != "getTodosById" {
-		t.Fatalf("operationId = %v, want getTodosById", byIdOp["operationId"])
+	if byIdOp["operationId"] != "todos.byId" {
+		t.Fatalf("operationId = %v, want todos.byId (dotted: TodosController → todos)", byIdOp["operationId"])
 	}
 	assertAuthRequiredSecurity(t, byIdOp)
 	if !hasParameterNamedIn(byIdOp, "id", "path") {
 		t.Fatalf("@Param('id') route missing in:path parameter 'id': %v", byIdOp["parameters"])
+	}
+
+	// A class named exactly "Controller" → controllerName "" → FLAT fallback
+	// operationId (getLegacy), never ".list" or a bare dot-id.
+	legacyOp := operationAt(t, paths, "/legacy", "get")
+	if legacyOp["operationId"] != "getLegacy" {
+		t.Fatalf("operationId = %v, want getLegacy (flat fallback for empty controllerName)", legacyOp["operationId"])
 	}
 }
 
@@ -400,6 +433,7 @@ func TestServeQueryAndParamDispatch(t *testing.T) {
 	// dispatcher's urlToRegex turns a wholly-{name} segment into a capture group
 	// (a legacy :id segment is matched LITERALLY → never matches /echo/abc → 404).
 	mustWrite(t, root, "controllers/echo.controller.js", controllerFixture(
+		"EchoController",
 		`{ __palbase: 'controller', basePath: '/echo', defaultAuth: false }`,
 		`[
       { method: 'GET', subpath: '/{id}', fnName: 'echo',
@@ -455,6 +489,7 @@ func TestServeControllerDispatch(t *testing.T) {
 	// test can assert req.method threaded through. `this.first` exercises the
 	// cached-instance `this` binding.
 	mustWrite(t, root, "controllers/todos.controller.js", controllerFixture(
+		"TodosController",
 		`{ __palbase: 'controller', basePath: '/todos', defaultAuth: false }`,
 		`[
       { method: 'GET', subpath: '/', fnName: 'list',
