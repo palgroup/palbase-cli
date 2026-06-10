@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/spf13/cobra"
 )
 
@@ -27,6 +28,7 @@ func createCmd(rest func() REST) *cobra.Command {
 		githubAccount string
 		repoName      string
 		jsonOut       bool
+		yes           bool
 	)
 	cmd := &cobra.Command{
 		Use:   "create <ref>",
@@ -37,19 +39,19 @@ func createCmd(rest func() REST) *cobra.Command {
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
-			if githubAccount == "" {
-				return fmt.Errorf("--github-account is required (\"personal\" or a GitHub App installation id)")
-			}
-			if repoName == "" {
-				return fmt.Errorf("--repo is required (the GitHub repo name to create for this project)")
-			}
 			// Ownership is the authenticated user (projects.owner_user_id); there
 			// is no org layer. The server derives the owner from the session.
 			body := map[string]any{
-				"ref":           ref,
-				"name":          name,
-				"githubAccount": githubAccount,
-				"repoName":      repoName,
+				"ref":  ref,
+				"name": name,
+			}
+			// GitHub is optional. Both flags present → github mode (deploy via
+			// git push → webhook); absent → platform mode (deploy via tarball).
+			mode := "platform"
+			if githubAccount != "" && repoName != "" {
+				body["githubAccount"] = githubAccount
+				body["repoName"] = repoName
+				mode = "github"
 			}
 			if tier != "" {
 				body["tier"] = tier
@@ -64,6 +66,16 @@ func createCmd(rest func() REST) *cobra.Command {
 			if err := rest().Do(cmd.Context(), http.MethodPost, "/api/v1/projects", body, &handle); err != nil {
 				return err
 			}
+			// Persist the link so subsequent commands (deploy, secret, …) key
+			// off the ref + mode without re-prompting. The create response
+			// carries no ref, so we use the positional arg the user passed.
+			cwd, _ := os.Getwd()
+			_ = auth.SaveProjectConfigIn(cwd, &auth.ProjectConfig{
+				Ref:        ref,
+				DefaultEnv: "main",
+				Mode:       mode,
+				GithubRepo: repoName, // "" in platform mode
+			})
 			if jsonOut {
 				return encodeJSON(handle)
 			}
@@ -74,11 +86,12 @@ func createCmd(rest func() REST) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Human-readable project name (required)")
-	cmd.Flags().StringVar(&githubAccount, "github-account", "", `GitHub target: "personal" or an installation id (required)`)
-	cmd.Flags().StringVar(&repoName, "repo", "", "GitHub repo name to create for this project (required)")
+	cmd.Flags().StringVar(&githubAccount, "github-account", "", `GitHub target: "personal" or an installation id (optional — omit for platform mode)`)
+	cmd.Flags().StringVar(&repoName, "repo", "", "GitHub repo name to create for this project (optional — omit for platform mode)")
 	cmd.Flags().StringVar(&tier, "tier", "", "Tier: free|pro|scale|enterprise (default free)")
 	cmd.Flags().StringVar(&region, "region", "", "Region (default northeurope)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip prompts (headless)")
 	return cmd
 }
 

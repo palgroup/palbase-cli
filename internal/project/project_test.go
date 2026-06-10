@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
@@ -59,8 +60,13 @@ func TestProjectCreate_REST_202Handle(t *testing.T) {
 		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
 	})
 
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	require.NoError(t, os.Chdir(dir))
+
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--github-account", "personal", "--repo", "demo-repo", "--tier", "pro", "--json"})
+	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--github-account", "personal", "--repo", "demo-repo", "--tier", "pro", "--json", "--yes"})
 	require.NoError(t, cmd.Execute())
 
 	require.Equal(t, "abcd1234", gotBody["ref"])
@@ -73,17 +79,64 @@ func TestProjectCreate_REST_202Handle(t *testing.T) {
 	require.False(t, hasOrg, "create body must not carry orgId (org layer removed)")
 }
 
-func TestProjectCreate_RequiresGithubAccount(t *testing.T) {
+func TestCreate_NoGithub_SendsPlatformBodyAndWritesMode(t *testing.T) {
+	var gotBody map[string]any
 	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API without --github-account")
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/api/v1/projects", r.URL.Path)
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
 	})
+
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	require.NoError(t, os.Chdir(dir))
+
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--repo", "demo-repo"})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--github-account is required")
+	cmd.SetArgs([]string{"create", "todoapp", "--name", "Todo App", "--yes"})
+	require.NoError(t, cmd.Execute())
+
+	// No github flags → body must not carry github fields.
+	if v, ok := gotBody["githubAccount"]; ok && v != "" {
+		t.Fatalf("expected no githubAccount, got %v", v)
+	}
+	if v, ok := gotBody["repoName"]; ok && v != "" {
+		t.Fatalf("expected no repoName, got %v", v)
+	}
+
+	cfg, err := auth.LoadProjectConfig()
+	require.NoError(t, err)
+	require.Equal(t, "todoapp", cfg.Ref)
+	require.Equal(t, "main", cfg.DefaultEnv)
+	require.Equal(t, "platform", cfg.Mode)
+	require.Equal(t, "", cfg.GithubRepo)
+}
+
+func TestCreate_WithGithub_SendsGithubBodyAndWritesMode(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
+	})
+
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	require.NoError(t, os.Chdir(dir))
+
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--github-account", "personal", "--repo", "demo-repo", "--yes"})
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, "personal", gotBody["githubAccount"])
+	require.Equal(t, "demo-repo", gotBody["repoName"])
+
+	cfg, err := auth.LoadProjectConfig()
+	require.NoError(t, err)
+	require.Equal(t, "abcd1234", cfg.Ref)
+	require.Equal(t, "github", cfg.Mode)
+	require.Equal(t, "demo-repo", cfg.GithubRepo)
 }
 
 func TestProjectStatus_REST(t *testing.T) {
