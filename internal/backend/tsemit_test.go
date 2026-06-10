@@ -181,8 +181,10 @@ func TestEmitTypeScriptRegistration_NestedReserved(t *testing.T) {
 	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
 
 	must(t, out, `// codegen: skipped operation "todos.then" (reserved segment "then")`)
-	// The non-skipped op todos.create must still be emitted in the registration block.
-	must(t, out, "    create: { method: 'POST'")
+	// The non-skipped op todos.create must still be emitted in the registration
+	// block — pinned as the FULL single-line descriptor so a regression that
+	// suppresses input:'none' on an input-less POST cannot pass.
+	must(t, out, "    create: { method: 'POST', path: '/todos/create', input: 'none' },")
 	if strings.Contains(out, "    then:") {
 		t.Errorf("reserved nested segment 'then' must not appear in registration:\n%s", out)
 	}
