@@ -212,6 +212,14 @@ func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
 	if !strings.Contains(out, "func create") {
 		t.Errorf("non-reserved rooms.create should be emitted, but was missing:\n%s", out)
 	}
+
+	// Visible skip comments must appear at the top of the namespaces section.
+	for _, ns := range []string{"analytics", "auth", "flags", "realtime"} {
+		want := `// codegen: skipped reserved namespace "` + ns + `" (SDK-owned)`
+		if !strings.Contains(out, want) {
+			t.Errorf("missing reserved-namespace skip comment for %q:\n%s", ns, out)
+		}
+	}
 }
 
 // TestStructLines_IdentifierCollisionDeduped guards the codegen against

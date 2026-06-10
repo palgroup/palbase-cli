@@ -28,7 +28,10 @@ const tsFixtureOpenAPI = `{
           "properties":{"error":{"type":"string","const":"room_locked"},"data":{"type":"object","properties":{"locked_until":{"type":"string"}},"required":["locked_until"]}},
           "required":["error","data"]}}}}
       },
-      "x-palbase-errors":{"roomLocked":{"status":409,"code":"room_locked","hasData":true,"description":"Room is locked"}}}},
+      "x-palbase-errors":{
+        "roomLocked":{"status":409,"code":"room_locked","hasData":true,"description":"Room is locked"},
+        "roomFull":{"status":423,"code":"room_full","hasData":false,"description":"Room is full"}
+      }}},
     "/todos/{id}":{"get":{"operationId":"todos.get",
       "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
@@ -93,12 +96,12 @@ func TestEmitTypeScriptRegistration(t *testing.T) {
 	// generate an empty SDK against every real backend.
 	must(t, out, "  getHello: { method: 'GET', path: '/hello', input: 'none' },")
 
-	// rooms.create — multi-line (has errors map)
+	// rooms.create — multi-line (has errors map, sorted by code)
 	must(t, out, "  rooms: {")
 	must(t, out, "    create: {")
 	must(t, out, "      method: 'POST',")
 	must(t, out, "      path: '/rooms/create',")
-	must(t, out, "      errors: { room_locked: (e) => new RoomsCreateRoomLockedError(e) },")
+	must(t, out, "      errors: { room_full: (e) => new RoomsCreateRoomFullError(e), room_locked: (e) => new RoomsCreateRoomLockedError(e) },")
 	must(t, out, "    },")
 	must(t, out, "  },")
 
@@ -667,6 +670,126 @@ func TestEmitTypeScriptTypes_QuotedMethodKey(t *testing.T) {
 	}
 	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
 	must(t, out, "'delete-all'(options?: CallOptions): Promise<void>;")
+}
+
+// TestEmitTypeScriptTypedErrors_ClassShape locks the typed-error class emission:
+// hasData:true includes data field + this.data assignment;
+// hasData:false omits them entirely; both carry name/code/status/cause.
+func TestEmitTypeScriptTypedErrors_ClassShape(t *testing.T) {
+	ops, err := parseOpenAPIForSwift([]byte(tsFixtureOpenAPI))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out := emitTypeScript(ops, tsFullCfg)
+
+	// --- hasData:true (roomLocked) ---
+	must(t, out, "export class RoomsCreateRoomLockedError extends Error {")
+	must(t, out, "  readonly name = 'RoomsCreateRoomLockedError';")
+	must(t, out, "  readonly code = 'room_locked';")
+	must(t, out, "  readonly status = 409;")
+	must(t, out, "  readonly data: RoomsCreateRoomLockedData;")
+	must(t, out, "  readonly cause: BackendError;")
+	must(t, out, "  constructor(cause: BackendError) {")
+	must(t, out, "    super(cause.message);")
+	must(t, out, "    this.cause = cause;")
+	must(t, out, "    this.data = cause.data as RoomsCreateRoomLockedData;")
+	must(t, out, "  }")
+
+	// --- hasData:false (roomFull) — no data field, no this.data line ---
+	must(t, out, "export class RoomsCreateRoomFullError extends Error {")
+	must(t, out, "  readonly name = 'RoomsCreateRoomFullError';")
+	must(t, out, "  readonly code = 'room_full';")
+	must(t, out, "  readonly status = 423;")
+	if strings.Contains(out, "readonly data: RoomsCreateRoomFullData") {
+		t.Errorf("hasData:false error must NOT have data field:\n%s", out)
+	}
+	if strings.Contains(out, "this.data = cause.data as RoomsCreateRoomFullData") {
+		t.Errorf("hasData:false error must NOT have this.data assignment:\n%s", out)
+	}
+
+	// section header must appear
+	must(t, out, "// ── Typed errors ───────────────────────────────────────────────────")
+
+	// section must appear between Types and Namespaces
+	typesIdx := strings.Index(out, "// ── Types ──")
+	errorsIdx := strings.Index(out, "// ── Typed errors ──")
+	nsIdx := strings.Index(out, "// ── Namespaces ──")
+	if typesIdx == -1 || errorsIdx == -1 || nsIdx == -1 {
+		t.Fatalf("section headers missing (types=%d errors=%d namespaces=%d)", typesIdx, errorsIdx, nsIdx)
+	}
+	if !(typesIdx < errorsIdx && errorsIdx < nsIdx) {
+		t.Errorf("typed errors section must be between Types and Namespaces (types=%d errors=%d ns=%d)", typesIdx, errorsIdx, nsIdx)
+	}
+}
+
+// TestEmitTypeScriptTypedErrors_ReservedCode locks that infra-reserved error
+// codes are skipped in both the typed-errors section and the errors map.
+func TestEmitTypeScriptTypedErrors_ReservedCode(t *testing.T) {
+	ops := []swiftOp{
+		{
+			operationID: "users.login",
+			method:      "POST",
+			path:        "/users/login",
+			errors: []swiftErrorDef{
+				{name: "unauthorizedAccess", code: "unauthorized", status: 401, description: "Not authorized"},
+				{name: "userLocked", code: "user_locked", status: 423, description: "User locked"},
+			},
+		},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	// reserved code skipped with comment in both errors section and descriptor
+	must(t, out, "// codegen: skipped error code \"unauthorized\" (reserved infra code)")
+	// class for reserved code must NOT be emitted
+	if strings.Contains(out, "UsersLoginUnauthorizedAccessError") {
+		t.Errorf("reserved infra code must not emit a class:\n%s", out)
+	}
+	// reserved code must NOT appear in errors map
+	if strings.Contains(out, "unauthorized:") {
+		t.Errorf("reserved infra code must not appear in errors map:\n%s", out)
+	}
+	// non-reserved code must still emit normally
+	must(t, out, "export class UsersLoginUserLockedError extends Error {")
+	must(t, out, "user_locked: (e) => new UsersLoginUserLockedError(e)")
+}
+
+// TestEmitTypeScriptTypedErrors_NoErrors locks that when no ops have errors,
+// the Typed errors section is omitted entirely AND BackendError is NOT imported.
+func TestEmitTypeScriptTypedErrors_NoErrors(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "getHello", method: "GET", path: "/hello",
+			output: &swiftSchema{kind: "object", props: []swiftProp{{name: "ok", schema: swiftSchema{kind: "boolean"}, required: true}}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	// No BackendError import
+	if strings.Contains(out, "BackendError") {
+		t.Errorf("no errors → BackendError must NOT be in import:\n%s", out)
+	}
+	must(t, out, "import type { CallOptions } from 'palbe';")
+
+	// No typed errors section
+	if strings.Contains(out, "// ── Typed errors ──") {
+		t.Errorf("no errors → Typed errors section must be absent:\n%s", out)
+	}
+}
+
+// TestEmitTypeScriptTypedErrors_ZeroOps locks that a zero-op spec still
+// emits valid TS: header + configure + empty registration.
+func TestEmitTypeScriptTypedErrors_ZeroOps(t *testing.T) {
+	out := emitTypeScript([]swiftOp{}, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	must(t, out, "// AUTO-GENERATED by `palbase types --lang ts` — DO NOT EDIT.")
+	must(t, out, "import type { CallOptions } from 'palbe';")
+	must(t, out, "__configure({")
+	must(t, out, "__registerNamespaces({")
+	must(t, out, "__registerNamespaces({\n});")
+	if strings.Contains(out, "BackendError") {
+		t.Errorf("zero ops → BackendError must NOT appear:\n%s", out)
+	}
+	if strings.Contains(out, "// ── Typed errors ──") {
+		t.Errorf("zero ops → Typed errors section must be absent:\n%s", out)
+	}
 }
 
 // must is a helper that fails the test when the substring is absent.

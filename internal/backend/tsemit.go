@@ -53,7 +53,17 @@ func emitTypeScript(ops []swiftOp, cfg tsGeneratedConfig) string {
 	b.WriteString("// Regenerate: palbase types   (or automatically via the predev/prebuild script)\n")
 
 	// --- Imports ---
-	b.WriteString("import type { BackendError, CallOptions } from 'palbe';\n")
+	// BackendError is only needed when at least one typed error class will be
+	// emitted. Determine this BEFORE we start writing the imports by scanning
+	// the full usable set (collision ops not yet known, but we check for
+	// hasData/code/reserved inline in emitTSTypedErrors — a pre-scan is
+	// sufficient to detect ANY emittable class, which is all we need here).
+	needsBackendError := hasAnyEmittableErrorClass(ops)
+	if needsBackendError {
+		b.WriteString("import type { BackendError, CallOptions } from 'palbe';\n")
+	} else {
+		b.WriteString("import type { CallOptions } from 'palbe';\n")
+	}
 	b.WriteString("import { __configure, __registerNamespaces } from 'palbe/internal';\n\n")
 
 	// --- __configure ---
@@ -434,10 +444,106 @@ func tsInlineObject(s swiftSchema) string {
 	return "{ " + strings.Join(parts, "; ") + " }"
 }
 
-// emitTSTypedErrors is the Task 4 seam. It returns an empty string; Task 4
-// replaces this function body with the actual typed-error class emission.
-func emitTSTypedErrors(_ []swiftOp, _ map[string]bool) string {
-	return ""
+// hasAnyEmittableErrorClass reports whether any op in the full set (before
+// collision filtering) will produce at least one typed error class. Used to
+// decide whether to include `BackendError` in the import line.
+func hasAnyEmittableErrorClass(ops []swiftOp) bool {
+	for _, op := range ops {
+		segs := opSegments(op.operationID)
+		if len(segs) == 0 || tsReservedTopLevel(segs[0]) {
+			continue
+		}
+		for _, e := range op.errors {
+			if e.code != "__proto__" && !tsInfraReservedCodes[e.code] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tsInfraReservedCodes is the set of error codes reserved by the palbe
+// runtime infrastructure. Emitting a class for these would shadow or
+// collide with palbe's own error-handling seams, so they are skipped with
+// a loud inline comment.
+var tsInfraReservedCodes = map[string]bool{
+	"not_configured":         true,
+	"network_error":          true,
+	"decode_error":           true,
+	"validation_error":       true,
+	"unauthorized":           true,
+	"rate_limited":           true,
+	"invalid_endpoint_name":  true,
+	"unsupported_get_input":  true,
+	"missing_path_param":     true,
+	"unexpected_argument":    true,
+	"invalid_query_value":    true,
+	"reserved_namespace":     true,
+	"invalid_namespace_tree": true,
+	"aborted":                true,
+	"http_error":             true,
+}
+
+// emitTSTypedErrors emits the `// ── Typed errors ──` section: one exported
+// class per liftable error definition across all registrable ops.
+// Returns "" when no registrable op declares any emittable errors.
+func emitTSTypedErrors(ops []swiftOp, collisionOps map[string]bool) string {
+	var lines []string
+	for _, op := range ops {
+		if collisionOps[op.operationID] {
+			continue
+		}
+		pfx := typePrefix(op.operationID)
+		// Sort by code for deterministic output.
+		sorted := make([]swiftErrorDef, len(op.errors))
+		copy(sorted, op.errors)
+		sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].code < sorted[j].code })
+		seen := map[string]bool{}
+		for _, e := range sorted {
+			if e.code == "__proto__" || seen[e.code] {
+				continue
+			}
+			if tsInfraReservedCodes[e.code] {
+				lines = append(lines,
+					"// codegen: skipped error code \""+e.code+"\" (reserved infra code)")
+				continue
+			}
+			seen[e.code] = true
+			className := pfx + typeNameOf(e.name) + "Error"
+			hasData := e.data != nil
+			lines = append(lines, "export class "+className+" extends Error {")
+			lines = append(lines, "  readonly name = '"+className+"';")
+			lines = append(lines, "  readonly code = '"+e.code+"';")
+			lines = append(lines, "  readonly status = "+strconv.Itoa(e.status)+";")
+			if hasData {
+				dataName := pfx + typeNameOf(e.name) + "Data"
+				lines = append(lines, "  readonly data: "+dataName+";")
+			}
+			lines = append(lines, "  readonly cause: BackendError;")
+			lines = append(lines, "  constructor(cause: BackendError) {")
+			lines = append(lines, "    super(cause.message);")
+			lines = append(lines, "    this.cause = cause;")
+			if hasData {
+				dataName := pfx + typeNameOf(e.name) + "Data"
+				lines = append(lines, "    this.data = cause.data as "+dataName+";")
+			}
+			lines = append(lines, "  }")
+			lines = append(lines, "}")
+			lines = append(lines, "")
+		}
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("// ── Typed errors ───────────────────────────────────────────────────\n\n")
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // --- Registration tree --------------------------------------------------
@@ -559,7 +665,8 @@ func renderTSDescriptor(op swiftOp, methodSeg string, indentSpaces int) string {
 	// parse order); duplicate codes keep the FIRST occurrence; a code of
 	// `__proto__` is never emitted — even quoted, a literal '__proto__':
 	// key sets the object's prototype in a JS object literal, so it is
-	// skipped with a loud comment instead.
+	// skipped with a loud comment instead. Reserved infra codes are also
+	// skipped with a loud comment.
 	var liftable []swiftErrorDef
 	var errComments []string
 	if len(op.errors) > 0 {
@@ -570,6 +677,10 @@ func renderTSDescriptor(op swiftOp, methodSeg string, indentSpaces int) string {
 		for _, e := range sorted {
 			if e.code == "__proto__" {
 				errComments = append(errComments, "// codegen: skipped error code \"__proto__\"")
+				continue
+			}
+			if tsInfraReservedCodes[e.code] {
+				errComments = append(errComments, "// codegen: skipped error code \""+e.code+"\" (reserved infra code)")
 				continue
 			}
 			if seen[e.code] {

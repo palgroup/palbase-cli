@@ -51,6 +51,32 @@ export interface TodosListResponseItem {
 
 export type TodosListResponse = TodosListResponseItem[];
 
+// ── Typed errors ───────────────────────────────────────────────────
+
+export class RoomsCreateRoomFullError extends Error {
+  readonly name = 'RoomsCreateRoomFullError';
+  readonly code = 'room_full';
+  readonly status = 423;
+  readonly cause: BackendError;
+  constructor(cause: BackendError) {
+    super(cause.message);
+    this.cause = cause;
+  }
+}
+
+export class RoomsCreateRoomLockedError extends Error {
+  readonly name = 'RoomsCreateRoomLockedError';
+  readonly code = 'room_locked';
+  readonly status = 409;
+  readonly data: RoomsCreateRoomLockedData;
+  readonly cause: BackendError;
+  constructor(cause: BackendError) {
+    super(cause.message);
+    this.cause = cause;
+    this.data = cause.data as RoomsCreateRoomLockedData;
+  }
+}
+
 // ── Namespaces ─────────────────────────────────────────────────────
 
 // codegen: skipped reserved namespace "auth"
@@ -61,7 +87,7 @@ __registerNamespaces({
     create: {
       method: 'POST',
       path: '/rooms/create',
-      errors: { room_locked: (e) => new RoomsCreateRoomLockedError(e) },
+      errors: { room_full: (e) => new RoomsCreateRoomFullError(e), room_locked: (e) => new RoomsCreateRoomLockedError(e) },
     },
   },
   todos: {
