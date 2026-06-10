@@ -140,6 +140,9 @@ func main() {
 		Auth:      func() *auth.Client { return authClient },
 		Studio:    func() *studio.Client { return studioClient },
 		Endpoints: func() config.Endpoints { return resolved.Endpoints },
+		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
+		// project/apikey) for the mode-aware push/pull/clone verbs.
+		REST: func() backend.REST { return managementREST() },
 	})...)
 
 	if err := rootCmd.Execute(); err != nil {

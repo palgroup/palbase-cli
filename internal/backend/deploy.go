@@ -1,11 +1,14 @@
 package backend
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/spf13/cobra"
 )
 
 // deployClient is the multipart-POST surface the platform-mode deploy needs.
@@ -143,4 +146,110 @@ func runPull(d pullDeps) error {
 		return fmt.Errorf("platform-mode pull is not yet available (bundle refetch not wired)")
 	}
 	return d.refetch()
+}
+
+// ── cobra command constructors ──────────────────────────────────────────
+//
+// push/pull/clone are mode-aware: github mode shells out to git, platform mode
+// rides the Management API. The REST accessor (r.REST) is only CALLED inside
+// RunE, never at construction, so Commands(Resolvers{}) can't panic on a nil
+// accessor (the structural registration tests build the tree with a zero
+// Resolvers).
+
+// newPushCmd wires `palbase push`. github mode: `git push` (orchestrator
+// deploys via webhook). platform mode: tarball the cwd and POST it to the
+// Management-API deploy endpoint.
+func newPushCmd(r Resolvers) *cobra.Command {
+	var branch string
+	cmd := &cobra.Command{
+		Use:   "push",
+		Short: "Deploy the current backend (github: git push; platform: tarball upload)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPush(pushDeps{git: execGit, rest: r.REST(), branch: branch})
+		},
+	}
+	cmd.Flags().StringVar(&branch, "branch", "main", "target branch")
+	return cmd
+}
+
+// newPullCmd wires `palbase pull`. github mode: `git pull`. platform mode:
+// bundle refetch — not yet wired, so runPull returns a clear error there.
+func newPullCmd(_ Resolvers) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pull",
+		Short: "Update the local backend to the latest deployed version",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// platform-mode bundle refetch is not yet available → runPull returns
+			// a clear error in platform mode (nil refetch); github mode execs
+			// `git pull`.
+			return runPull(pullDeps{git: execGit, refetch: nil})
+		},
+	}
+}
+
+// newCloneCmd wires `palbase clone <project>`. github mode: `git clone <url>
+// <ref>` + write a github-mode link. platform mode: bundle download — not yet
+// wired, so runClone returns a clear error there.
+func newCloneCmd(r Resolvers) *cobra.Command {
+	var branch string
+	cmd := &cobra.Command{
+		Use:   "clone <project>",
+		Short: "Download a project locally (github: git clone; platform: bundle)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref := args[0]
+			mode, repoURL, err := lookupProjectMode(cmd.Context(), r, ref)
+			if err != nil {
+				return err
+			}
+			return runClone(cloneDeps{
+				git: execGit, mode: mode, repoURL: repoURL, ref: ref,
+				branch: branch, writeCfg: auth.SaveProjectConfigIn,
+				download: nil, // platform-mode bundle download not yet wired
+			})
+		},
+	}
+	cmd.Flags().StringVar(&branch, "branch", "main", "branch to clone")
+	return cmd
+}
+
+// lookupProjectMode resolves the deploy mode + (github-mode) repo URL for a
+// project the caller wants to clone.
+//
+// The Management API's GET /api/v1/projects/{ref} (project status surface)
+// returns only id/ref/name/tier/region/status — it carries NEITHER a `mode`
+// field NOR the github repo URL (that lives in control-pg's project_repos and
+// is not surfaced to the CLI's REST surface). So this can't read the mode off
+// the server. What it CAN do — and must, for a clear error before we touch the
+// filesystem — is verify the project exists and the caller has access (the GET
+// 404s as project_not_found for a non-member or unknown ref).
+//
+// Mode resolution, in order:
+//  1. An already-linked cwd whose .palbase/config.json carries an explicit
+//     Mode (+ GithubRepo for github) wins — a re-clone of a linked dir keeps
+//     its mode.
+//  2. Otherwise membership-check the project, then default to platform mode:
+//     github-mode clone needs a repo URL the API doesn't expose, so we can't
+//     drive `git clone` from here. Platform-mode clone is the honest path —
+//     it currently returns "bundle download not yet wired" until that lands.
+//
+// This is the documented inference fallback: when the server can't tell us the
+// mode, prefer platform (no resolvable repo URL → github clone can't run).
+func lookupProjectMode(ctx context.Context, r Resolvers, ref string) (mode, repoURL string, err error) {
+	// 1. Honour an explicit local link if the cwd is already linked.
+	if cfg, cerr := auth.LoadProjectConfig(); cerr == nil && cfg.Ref == ref && cfg.Mode != "" {
+		return cfg.Mode, cfg.GithubRepo, nil
+	}
+
+	// 2. Membership-check + existence via the project status surface. We
+	//    discard the row (it carries no mode/repo) — the call's job is to fail
+	//    fast with a clear auth/404 error before we hit the filesystem.
+	var row struct {
+		Ref string `json:"ref"`
+	}
+	if err := r.REST().Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &row); err != nil {
+		return "", "", err
+	}
+	// No mode/repo from the server → inference fallback: platform mode.
+	return "platform", "", nil
 }

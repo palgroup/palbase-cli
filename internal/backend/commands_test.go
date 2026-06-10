@@ -36,11 +36,30 @@ func TestCommands_FlatSurface(t *testing.T) {
 	}
 
 	// Removed: no init/enable/disable (backend is the default — the CLI never
-	// enables or tears down), no `dev` (→ serve), no `backend` parent, and no
-	// push/pull/merge — deploy moved to the GitHub-native `git push` flow, so
-	// the tar + go-git deploy verbs are retired.
-	for _, gone := range []string{"init", "deploy", "dev", "disable", "enable", "backend", "config", "push", "pull", "merge"} {
+	// enables or tears down), no `dev` (→ serve), no `backend` parent. `merge`
+	// stays retired (the go-git merge verb is gone). push/pull are BACK as
+	// mode-aware verbs (github: git push/pull; platform: tarball/bundle) — see
+	// TestCommands_IncludesGitNativeVerbs.
+	for _, gone := range []string{"init", "deploy", "dev", "disable", "enable", "backend", "config", "merge"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
+	}
+}
+
+// TestCommands_IncludesGitNativeVerbs pins that the mode-aware deploy verbs
+// (push/pull/clone) are registered as top-level commands. They route by the
+// linked project's mode: github (git push/pull/clone) or platform (tarball /
+// bundle). Constructing with a zero-value Resolvers must not panic — the REST
+// accessor is only called at RunE time.
+func TestCommands_IncludesGitNativeVerbs(t *testing.T) {
+	cmds := Commands(Resolvers{})
+	have := map[string]bool{}
+	for _, c := range cmds {
+		have[c.Name()] = true
+	}
+	for _, want := range []string{"push", "pull", "clone"} {
+		if !have[want] {
+			t.Fatalf("Commands() missing %q; have %v", want, have)
+		}
 	}
 }
 

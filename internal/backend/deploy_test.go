@@ -14,6 +14,11 @@ import (
 // breaks the build here, not at the wiring site.
 var _ deployClient = (*transport.Client)(nil)
 
+// Compile-time guard: the real mgmt client must satisfy the backend.REST
+// accessor type (Do + PostMultipart) that main.go wires into Resolvers.REST.
+// A signature drift breaks the build here, not at the main.go wiring site.
+var _ REST = (*transport.Client)(nil)
+
 func TestResolveMode(t *testing.T) {
 	cases := []struct {
 		name string

@@ -70,6 +70,16 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 //go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js
 var devServerFS embed.FS
 
+// REST is the subset of the Management-API transport the mode-aware deploy
+// verbs (push/pull/clone) use: PostMultipart for the platform-mode tarball
+// deploy and Do for the project lookup. *transport.Client satisfies it; tests
+// substitute a stub. Kept as a narrow interface (mirroring project.REST) so the
+// backend package doesn't depend on internal/transport and stays testable.
+type REST interface {
+	Do(ctx context.Context, method, path string, body, out any) error
+	PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error)
+}
+
 // Resolvers returns lazy accessors for the shared CLI globals, so the
 // `backend` command tree can be wired into cobra at startup without
 // the auth + studio clients having been initialised yet (cobra's
@@ -78,6 +88,10 @@ type Resolvers struct {
 	Auth      func() *auth.Client
 	Studio    func() *studio.Client
 	Endpoints func() config.Endpoints
+	// REST returns the authed Management-API client used by push/pull/clone.
+	// Lazy (a func) like the other accessors, and only CALLED at RunE time —
+	// constructing the command tree with a zero-value Resolvers must not panic.
+	REST func() REST
 }
 
 // Commands returns the flat, top-level command set the root mounts
@@ -90,10 +104,12 @@ type Resolvers struct {
 // tears down the backend — it assumes the linked project is ready. The
 // server-side gating is owned by the platform, not the CLI.
 //
-// There is no `push`/`pull`/`merge`: deploy is GitHub-native (`git push`
-// to the project's GitHub repo → webhook → orchestrator deploys + applies
-// the repo's config-as-code). The CLI keeps local dev (`serve`) and the
-// observation/control verbs (list, rollback, status, types, mobile).
+// push/pull/clone are mode-aware deploy verbs: for a github-mode project they
+// shell out to git (push/pull/clone → webhook → orchestrator deploys); for a
+// platform-mode project they upload/fetch a tarball bundle via the Management
+// API. `merge` stays retired (the old go-git merge verb is gone). Alongside
+// them the CLI keeps local dev (`serve`) and the observation/control verbs
+// (list, rollback, status, types, mobile).
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newMobileCmd(r),
@@ -103,6 +119,9 @@ func Commands(r Resolvers) []*cobra.Command {
 		newStatusCmd(r),
 		newTypesCmd(r),
 		newGenTypesCmd(r),
+		newCloneCmd(r),
+		newPullCmd(r),
+		newPushCmd(r),
 	}
 }
 
