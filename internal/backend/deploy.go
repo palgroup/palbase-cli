@@ -214,42 +214,36 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 }
 
 // lookupProjectMode resolves the deploy mode + (github-mode) repo URL for a
-// project the caller wants to clone.
+// project the caller wants to clone, reading both straight off the Management
+// API's GET /api/v1/projects/{ref} response.
 //
-// The Management API's GET /api/v1/projects/{ref} (project status surface)
-// returns only id/ref/name/tier/region/status — it carries NEITHER a `mode`
-// field NOR the github repo URL (that lives in control-pg's project_repos and
-// is not surfaced to the CLI's REST surface). So this can't read the mode off
-// the server. What it CAN do — and must, for a clear error before we touch the
-// filesystem — is verify the project exists and the caller has access (the GET
-// 404s as project_not_found for a non-member or unknown ref).
+// That surface now returns `mode` ("github" | "platform") and `github_repo`
+// (the "org/repo" full name, or null in platform mode) alongside
+// id/ref/name/tier/region/status. So we read the authoritative mode from the
+// server — no local-config inference. The GET also membership-checks: it 404s
+// as project_not_found for a non-member or unknown ref, failing fast with a
+// clear error before we touch the filesystem.
 //
-// Mode resolution, in order:
-//  1. An already-linked cwd whose .palbase/config.json carries an explicit
-//     Mode (+ GithubRepo for github) wins — a re-clone of a linked dir keeps
-//     its mode.
-//  2. Otherwise membership-check the project, then default to platform mode:
-//     github-mode clone needs a repo URL the API doesn't expose, so we can't
-//     drive `git clone` from here. Platform-mode clone is the honest path —
-//     it currently returns "bundle download not yet wired" until that lands.
-//
-// This is the documented inference fallback: when the server can't tell us the
-// mode, prefer platform (no resolvable repo URL → github clone can't run).
+// For github mode the clone needs a cloneable URL; `github_repo` is the
+// "org/repo" full name, so the clone URL is
+// https://github.com/<org/repo>.git. Platform mode has no repo → empty URL.
 func lookupProjectMode(ctx context.Context, r Resolvers, ref string) (mode, repoURL string, err error) {
-	// 1. Honour an explicit local link if the cwd is already linked.
-	if cfg, cerr := auth.LoadProjectConfig(); cerr == nil && cfg.Ref == ref && cfg.Mode != "" {
-		return cfg.Mode, cfg.GithubRepo, nil
+	var resp struct {
+		Mode       string `json:"mode"`
+		GithubRepo string `json:"github_repo"` // "org/repo"; null decodes to ""
 	}
-
-	// 2. Membership-check + existence via the project status surface. We
-	//    discard the row (it carries no mode/repo) — the call's job is to fail
-	//    fast with a clear auth/404 error before we hit the filesystem.
-	var row struct {
-		Ref string `json:"ref"`
-	}
-	if err := r.REST().Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &row); err != nil {
+	if err := r.REST().Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &resp); err != nil {
 		return "", "", err
 	}
-	// No mode/repo from the server → inference fallback: platform mode.
-	return "platform", "", nil
+	return resp.Mode, repoURLFromFullName(resp.GithubRepo), nil
+}
+
+// repoURLFromFullName turns a GitHub "org/repo" full name into a cloneable
+// https URL (https://github.com/org/repo.git). An empty full name (platform
+// mode, where github_repo is null) yields an empty URL.
+func repoURLFromFullName(fullName string) string {
+	if fullName == "" {
+		return ""
+	}
+	return "https://github.com/" + fullName + ".git"
 }

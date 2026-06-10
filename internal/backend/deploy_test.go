@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -161,5 +163,56 @@ func TestClone_PlatformMode_WithoutDownloaderErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected platform-mode clone without a downloader to error")
+	}
+}
+
+// fakeProjectREST stubs the REST surface lookupProjectMode hits. Its Do mirrors
+// the real transport.Client.Do contract: that method unwraps the `{data: {...}}`
+// success envelope and unmarshals the INNER project object into out — so here we
+// populate out with just that inner object (mode + github_repo), not the
+// envelope. github_repo is null in platform mode (repo == "").
+type fakeProjectREST struct {
+	mode string
+	repo string // "org/repo" full name; "" → github_repo null
+}
+
+func (f *fakeProjectREST) Do(ctx context.Context, method, path string, body, out any) error {
+	payload := map[string]any{"ref": "todoapp", "mode": f.mode, "github_repo": nil}
+	if f.repo != "" {
+		payload["github_repo"] = f.repo
+	}
+	b, _ := json.Marshal(payload)
+	return json.Unmarshal(b, out)
+}
+
+func (f *fakeProjectREST) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
+	return nil, nil
+}
+
+func TestLookupProjectMode_Github(t *testing.T) {
+	r := Resolvers{REST: func() REST { return &fakeProjectREST{mode: "github", repo: "palcore/app"} }}
+	mode, repoURL, err := lookupProjectMode(context.Background(), r, "todoapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != "github" {
+		t.Fatalf("mode=%q", mode)
+	}
+	if repoURL != "https://github.com/palcore/app.git" {
+		t.Fatalf("repoURL=%q", repoURL)
+	}
+}
+
+func TestLookupProjectMode_Platform(t *testing.T) {
+	r := Resolvers{REST: func() REST { return &fakeProjectREST{mode: "platform"} }}
+	mode, repoURL, err := lookupProjectMode(context.Background(), r, "todoapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != "platform" {
+		t.Fatalf("mode=%q", mode)
+	}
+	if repoURL != "" {
+		t.Fatalf("repoURL=%q", repoURL)
 	}
 }
