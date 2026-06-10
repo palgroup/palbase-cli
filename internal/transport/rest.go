@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -94,17 +96,6 @@ type errorEnvelope struct {
 // envelope's `data` is decoded into out (out may be nil to discard). On a
 // non-2xx the error envelope is parsed into an *APIError.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
-	if c.Key == nil {
-		return fmt.Errorf("management API: no dpop key — run `palbase login` to provision one")
-	}
-	if c.PAT == "" {
-		return fmt.Errorf("management API: not authenticated — run `palbase login` " +
-			"(or, for headless use, export PALBASE_ACCESS_TOKEN with a Dashboard-issued " +
-			"DPoP-bound PAT)")
-	}
-
-	fullURL := c.BaseURL + path
-
 	var reqBody io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -114,28 +105,13 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 		reqBody = bytes.NewReader(raw)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), fullURL, reqBody)
+	req, err := c.newSignedRequest(ctx, method, path, reqBody)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return err
 	}
-	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-
-	// DPoP-bound credential + a fresh per-request proof. The proof's
-	// htm/htu MUST equal this request's method + URL (RFC 9449 §4.2);
-	// `ath` binds it to the PAT.
-	req.Header.Set("Authorization", "DPoP "+c.PAT)
-	proof, err := c.Key.NewProof(auth.ProofOptions{
-		HTTPMethod:  strings.ToUpper(method),
-		URL:         fullURL,
-		AccessToken: c.PAT,
-	})
-	if err != nil {
-		return fmt.Errorf("sign dpop proof: %w", err)
-	}
-	req.Header.Set("DPoP", proof)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -166,6 +142,98 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("decode response data: %w", err)
 	}
 	return nil
+}
+
+// newSignedRequest builds a Management-API request with the DPoP-bound
+// credential and a fresh per-request proof attached. The proof's htm/htu
+// equal this request's method + URL (RFC 9449 §4.2) and `ath` binds it to
+// the PAT — identical signing for every verb (JSON Do or multipart upload),
+// so the single source of truth for auth lives here. Fails closed when the
+// key or PAT is missing.
+func (c *Client) newSignedRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	if c.Key == nil {
+		return nil, fmt.Errorf("management API: no dpop key — run `palbase login` to provision one")
+	}
+	if c.PAT == "" {
+		return nil, fmt.Errorf("management API: not authenticated — run `palbase login` " +
+			"(or, for headless use, export PALBASE_ACCESS_TOKEN with a Dashboard-issued " +
+			"DPoP-bound PAT)")
+	}
+
+	method = strings.ToUpper(method)
+	fullURL := c.BaseURL + path
+
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	req.Header.Set("Authorization", "DPoP "+c.PAT)
+	proof, err := c.Key.NewProof(auth.ProofOptions{
+		HTTPMethod:  method,
+		URL:         fullURL,
+		AccessToken: c.PAT,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sign dpop proof: %w", err)
+	}
+	req.Header.Set("DPoP", proof)
+	return req, nil
+}
+
+// PostMultipart uploads a gzipped tarball to a Management-API endpoint as
+// multipart/form-data: a file part named `tarball` (filename bundle.tar.gz,
+// Content-Type application/gzip) plus one text field per fields entry. It
+// reuses the exact DPoP/PAT signing of every other request (newSignedRequest),
+// so the proof's htm/htu match this POST. Returns the raw 2xx response body;
+// a non-2xx is surfaced as an *APIError (same envelope shape as Do).
+func (c *Client) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			return nil, fmt.Errorf("write multipart field %q: %w", k, err)
+		}
+	}
+
+	hdr := textproto.MIMEHeader{}
+	hdr.Set("Content-Disposition", `form-data; name="tarball"; filename="bundle.tar.gz"`)
+	hdr.Set("Content-Type", "application/gzip")
+	part, err := mw.CreatePart(hdr)
+	if err != nil {
+		return nil, fmt.Errorf("create multipart file part: %w", err)
+	}
+	if _, err := part.Write(tarball); err != nil {
+		return nil, fmt.Errorf("write tarball part: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	// Build + sign AFTER the body exists; the multipart Content-Type
+	// (with boundary) must be the writer's FormDataContentType().
+	req, err := c.newSignedRequest(context.Background(), http.MethodPost, path, &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("management API request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, parseError(raw, resp.StatusCode)
+	}
+	return raw, nil
 }
 
 // parseError turns a non-2xx body into an *APIError. The body is normally
