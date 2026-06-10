@@ -2293,6 +2293,7 @@ func newTypesCmd(r Resolvers) *cobra.Command {
 	var outFlag string
 	var langFlag string
 	var softFlag bool
+	var watchFlag bool
 	cmd := &cobra.Command{
 		Use:   "types",
 		Short: "Generate a typed client from your backend's OpenAPI spec",
@@ -2323,6 +2324,12 @@ local serve, regenerate with --env remote before a release build.
 exit 0, so a predev/prebuild hook never blocks a machine without login or
 network access.
 
+--watch (--lang ts only) keeps running, polling the local 'palbase serve'
+on :4003 every second and rewriting palbe.gen.ts whenever the spec changes.
+Start 'palbase serve' first; --watch handles the case where serve is not yet
+up (useful in split-terminal dev). Remote sync (release / CI) happens via the
+predev/prebuild hook — --watch is for local development only.
+
 Swift codegen is self-contained (no Node/npx). The generated file
 'import Palbe' and lowers each call to the SDK's public seam, so it
 compiles in the consumer app target. Use it from an Xcode Run Script
@@ -2348,6 +2355,9 @@ build phase for automatic regeneration on every build:
 				}
 				switch langFlag {
 				case "swift":
+					if watchFlag {
+						return fmt.Errorf("--watch is only supported for --lang ts")
+					}
 					outFile := outFlag
 					if outFile == "" {
 						outFile = "PalbaseEndpoints.swift"
@@ -2363,6 +2373,9 @@ build phase for automatic regeneration on every build:
 					outFile := outFlag
 					if outFile == "" {
 						outFile = "palbe.gen.ts"
+					}
+					if watchFlag {
+						return runTypesWatch(cmd.Context(), r, ref, branch, envFlag, outFile, softFlag, out)
 					}
 					return pullTSTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, envFlag, outFile, out)
 				default:
@@ -2384,6 +2397,7 @@ build phase for automatic regeneration on every build:
 	cmd.Flags().StringVar(&langFlag, "lang", "ts", "Output language: ts | swift")
 	cmd.Flags().StringVar(&outFlag, "out", "", "Output file (default: palbe.gen.ts for ts, PalbaseEndpoints.swift for swift)")
 	cmd.Flags().BoolVar(&softFlag, "soft", false, "Never fail: print a warning and exit 0 on any error (for predev/prebuild hooks)")
+	cmd.Flags().BoolVar(&watchFlag, "watch", false, "Watch mode (--lang ts only): poll local serve on :4003 and regenerate on spec changes")
 	return cmd
 }
 
@@ -2547,16 +2561,11 @@ func pullTSTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 		}
 		fmt.Fprintf(w, "warning: live spec has 0 operations — %s registers no calls (fix your controllers and rerun)\n", outFile)
 	}
-	tsOut := emitTypeScript(ops, cfg)
-	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
+	nOps, writeErr := emitAndWriteTS(specBytes, cfg, outFile)
+	if writeErr != nil {
+		return writeErr
 	}
-	if err := os.WriteFile(outFile, []byte(tsOut), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", outFile, err)
-	}
-	fmt.Fprintf(w, "✓ wrote %s (%d operations)\n", outFile, len(ops))
+	fmt.Fprintf(w, "✓ wrote %s (%d operations)\n", outFile, nOps)
 	return nil
 }
 
