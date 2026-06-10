@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubCodegen replaces webLinkCodegen for tests — writes a sentinel file so we
-// can verify the seam was called without a real network.
+// stubCodegenFunc replaces webLinkCodegen for tests — writes a sentinel file
+// so we can verify the seam was called without a real network.
 func stubCodegenFunc(sentinelContent string) func(context.Context, Resolvers, string, string, io.Writer) error {
 	return func(_ context.Context, _ Resolvers, _ string, outFile string, _ io.Writer) error {
 		return os.WriteFile(outFile, []byte(sentinelContent), 0o644)
@@ -30,14 +30,6 @@ func installStubCodegen(t *testing.T, content string) {
 	t.Cleanup(func() { webLinkCodegen = orig })
 }
 
-// webLinkCmd returns the `web link` subcommand wired with noop resolvers.
-func webLinkCmd(t *testing.T) *webCmd {
-	t.Helper()
-	return &webCmd{r: noopResolvers()}
-}
-
-// ── package.json helpers ─────────────────────────────────────────────────────
-
 // minimalPkgJSON returns the smallest valid package.json (no scripts section).
 func minimalPkgJSON() string {
 	return `{
@@ -46,36 +38,32 @@ func minimalPkgJSON() string {
 }`
 }
 
-// pkgJSONWithScripts returns a package.json that already has a scripts section.
-func pkgJSONWithScripts(scripts map[string]string) string {
-	var sb strings.Builder
-	sb.WriteString(`{
-  "name": "myapp",
-  "version": "1.0.0",
-  "scripts": {`)
-	first := true
-	for k, v := range scripts {
-		if !first {
-			sb.WriteString(",")
-		}
-		sb.WriteString("\n    \"")
-		sb.WriteString(k)
-		sb.WriteString(`": "`)
-		sb.WriteString(v)
-		sb.WriteString(`"`)
-		first = false
-	}
-	sb.WriteString("\n  },\n  \"dependencies\": {}\n}")
-	return sb.String()
-}
-
 // writePkgJSON writes content to package.json in the current directory.
 func writePkgJSON(t *testing.T, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile("package.json", []byte(content), 0o644))
 }
 
+// runWebLink executes `web link` with the given extra args and returns stdout.
+func runWebLink(t *testing.T, args ...string) string {
+	t.Helper()
+	cmd := newWebCmd(noopResolvers())
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(append([]string{"link"}, args...))
+	require.NoError(t, cmd.Execute())
+	return out.String()
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
+
+// TestWebLink_HookLiteral pins the exact predev/prebuild value: `|| exit 0`
+// covers a machine without the CLI installed (exit 127 — --soft alone can't
+// swallow command-not-found).
+func TestWebLink_HookLiteral(t *testing.T) {
+	require.Equal(t, "palbase types --soft || exit 0", webTypesCmd)
+}
 
 // TestWebLink_NoPkgJSON: errors when package.json is absent.
 func TestWebLink_NoPkgJSON(t *testing.T) {
@@ -106,12 +94,7 @@ func TestWebLink_HappyPath(t *testing.T) {
 export default function Layout() {}
 `), 0o644))
 
-	cmd := newWebCmd(noopResolvers())
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "testref1"})
-	require.NoError(t, cmd.Execute())
+	runWebLink(t, "--ref", "testref1")
 
 	// .palbase/config.json must be written.
 	cfg, err := auth.LoadProjectConfig()
@@ -123,11 +106,11 @@ export default function Layout() {}
 	require.NoError(t, err)
 	require.Contains(t, string(genContent), "palbe gen sentinel")
 
-	// scripts.predev + scripts.prebuild must be added.
+	// scripts.predev + scripts.prebuild must be added with the exact hook value.
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
-	require.Contains(t, string(pkgBody), `"predev": "palbase types --soft"`)
-	require.Contains(t, string(pkgBody), `"prebuild": "palbase types --soft"`)
+	require.Contains(t, string(pkgBody), `"predev": "palbase types --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"prebuild": "palbase types --soft || exit 0"`)
 
 	// import must be inserted into app/layout.tsx.
 	entryBody, err := os.ReadFile("app/layout.tsx")
@@ -157,12 +140,7 @@ func TestWebLink_EntryVariants(t *testing.T) {
 			require.NoError(t, os.MkdirAll(tc.dir, 0o755))
 			require.NoError(t, os.WriteFile(tc.path, []byte("// entry\n"), 0o644))
 
-			cmd := newWebCmd(noopResolvers())
-			var out bytes.Buffer
-			cmd.SetOut(&out)
-			cmd.SetErr(&out)
-			cmd.SetArgs([]string{"link", "--ref", "ref1"})
-			require.NoError(t, cmd.Execute())
+			runWebLink(t, "--ref", "ref1")
 
 			body, err := os.ReadFile(tc.path)
 			require.NoError(t, err)
@@ -181,16 +159,112 @@ func TestWebLink_EntryFlagOverride(t *testing.T) {
 	require.NoError(t, os.MkdirAll("src", 0o755))
 	require.NoError(t, os.WriteFile("src/custom-entry.tsx", []byte("// custom\n"), 0o644))
 
-	cmd := newWebCmd(noopResolvers())
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "ref1", "--entry", "src/custom-entry.tsx"})
-	require.NoError(t, cmd.Execute())
+	runWebLink(t, "--ref", "ref1", "--entry", "src/custom-entry.tsx")
 
 	body, err := os.ReadFile("src/custom-entry.tsx")
 	require.NoError(t, err)
 	require.Contains(t, string(body), "palbe.gen")
+}
+
+// TestWebLink_UseClientDirective: a 'use client' directive must STAY the first
+// statement — the generated import lands after the directive prologue.
+func TestWebLink_UseClientDirective(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+
+	input := `'use client';
+
+export default function Layout() {}
+`
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte(input), 0o644))
+
+	runWebLink(t, "--ref", "ref1")
+
+	body, err := os.ReadFile("app/layout.tsx")
+	require.NoError(t, err)
+	expected := `'use client';
+
+import '../palbe.gen';
+export default function Layout() {}
+`
+	require.Equal(t, expected, string(body))
+	require.True(t, strings.HasPrefix(string(body), "'use client';"),
+		"file must still START with the directive")
+}
+
+// TestWebLink_MultilineImport: a multiline `import { ... } from '...';` must
+// never be spliced mid-statement — the generated import lands after the whole
+// statement. Exact-file golden.
+func TestWebLink_MultilineImport(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("src", 0o755))
+
+	input := `import {
+  useState,
+} from 'react';
+
+export default function App() {}
+`
+	require.NoError(t, os.WriteFile("src/main.tsx", []byte(input), 0o644))
+
+	runWebLink(t, "--ref", "ref1")
+
+	body, err := os.ReadFile("src/main.tsx")
+	require.NoError(t, err)
+	expected := `import {
+  useState,
+} from 'react';
+import '../palbe.gen';
+
+export default function App() {}
+`
+	require.Equal(t, expected, string(body))
+}
+
+// TestWebLink_ImportIdempotencyExactMatch (M1): the skip check is an exact
+// module-specifier match — './palbe.gen.extra' must NOT suppress the insert,
+// while './palbe.gen' / '../palbe.gen' must.
+func TestWebLink_ImportIdempotencyExactMatch(t *testing.T) {
+	t.Run("near-miss specifier still gets the import", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		installStubCodegen(t, "// gen")
+		writePkgJSON(t, minimalPkgJSON())
+		require.NoError(t, os.MkdirAll("src", 0o755))
+		require.NoError(t, os.WriteFile("src/main.tsx", []byte(`import './palbe.gen.extra';
+
+export const x = 1;
+`), 0o644))
+
+		runWebLink(t, "--ref", "ref1")
+
+		body, err := os.ReadFile("src/main.tsx")
+		require.NoError(t, err)
+		require.Contains(t, string(body), `import './palbe.gen.extra';`)
+		require.Equal(t, 1, strings.Count(string(body), `'../palbe.gen'`),
+			"the real gen import must be inserted exactly once")
+	})
+
+	t.Run("exact specifier suppresses the insert", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		installStubCodegen(t, "// gen")
+		writePkgJSON(t, minimalPkgJSON())
+		require.NoError(t, os.MkdirAll("src", 0o755))
+		input := `import '../palbe.gen';
+
+export const x = 1;
+`
+		require.NoError(t, os.WriteFile("src/main.tsx", []byte(input), 0o644))
+
+		runWebLink(t, "--ref", "ref1")
+
+		body, err := os.ReadFile("src/main.tsx")
+		require.NoError(t, err)
+		require.Equal(t, input, string(body), "already-imported entry must be untouched")
+	})
 }
 
 // TestWebLink_ConflictingScript: warns but does not clobber an existing
@@ -206,24 +280,18 @@ func TestWebLink_ConflictingScript(t *testing.T) {
   }
 }`)
 
-	cmd := newWebCmd(noopResolvers())
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "ref1"})
-	require.NoError(t, cmd.Execute())
+	outStr := runWebLink(t, "--ref", "ref1")
 
-	// Warning must be printed.
-	outStr := out.String()
+	// Warning must be printed with the suggested value.
 	require.Contains(t, outStr, "predev")
-	require.Contains(t, outStr, "palbase types --soft")
+	require.Contains(t, outStr, "palbase types --soft || exit 0")
 
 	// The existing script must NOT be clobbered.
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
 	require.Contains(t, string(pkgBody), `"predev": "my-custom-hook"`)
 	// prebuild (absent) should be added.
-	require.Contains(t, string(pkgBody), `"prebuild": "palbase types --soft"`)
+	require.Contains(t, string(pkgBody), `"prebuild": "palbase types --soft || exit 0"`)
 }
 
 // TestWebLink_KeyOrderPreserved: package.json key order is preserved, and keys
@@ -244,12 +312,7 @@ func TestWebLink_KeyOrderPreserved(t *testing.T) {
 }`
 	writePkgJSON(t, original)
 
-	cmd := newWebCmd(noopResolvers())
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "ref1"})
-	require.NoError(t, cmd.Execute())
+	runWebLink(t, "--ref", "ref1")
 
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
@@ -267,14 +330,116 @@ func TestWebLink_KeyOrderPreserved(t *testing.T) {
 	require.True(t, scriptsIdx < afterIdx, "scripts before after_scripts")
 
 	// The new script keys must be present.
-	require.Contains(t, content, `"predev": "palbase types --soft"`)
-	require.Contains(t, content, `"prebuild": "palbase types --soft"`)
+	require.Contains(t, content, `"predev": "palbase types --soft || exit 0"`)
+	require.Contains(t, content, `"prebuild": "palbase types --soft || exit 0"`)
 
 	// Original "dev" script must still be there.
 	require.Contains(t, content, `"dev": "vite"`)
 
 	// Unrelated content byte-identical: "zebra": "last" untouched.
 	require.Contains(t, content, `"zebra": "last"`)
+}
+
+// TestWebPatchPackageJSON_Golden: FULL-FILE golden compares for the
+// byte-splice editor — everything outside the spliced range must be
+// byte-identical, including nested non-alphabetical objects, `&&` values,
+// and deliberately weird indentation.
+func TestWebPatchPackageJSON_Golden(t *testing.T) {
+	run := func(t *testing.T, input, expected string) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "package.json")
+		require.NoError(t, os.WriteFile(path, []byte(input), 0o644))
+		var warn strings.Builder
+		require.NoError(t, patchPackageJSONScripts(path, &warn))
+		body, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, expected, string(body))
+	}
+
+	t.Run("nested exports + zzz-first + && — splice only", func(t *testing.T) {
+		input := `{
+  "name": "myapp",
+  "exports": {
+    "./z": "./dist/z.js",
+    "./a": "./dist/a.js"
+  },
+  "scripts": {
+    "zzz": "echo z",
+    "build": "tsc && vite build"
+  },
+  "version": "1.0.0"
+}
+`
+		expected := `{
+  "name": "myapp",
+  "exports": {
+    "./z": "./dist/z.js",
+    "./a": "./dist/a.js"
+  },
+  "scripts": {
+    "zzz": "echo z",
+    "build": "tsc && vite build",
+    "predev": "palbase types --soft || exit 0",
+    "prebuild": "palbase types --soft || exit 0"
+  },
+  "version": "1.0.0"
+}
+`
+		run(t, input, expected)
+	})
+
+	t.Run("weird indentation preserved outside the splice", func(t *testing.T) {
+		input := `{
+      "name": "x",
+  "scripts": {
+        "dev":    "vite"
+  },
+   "odd":  true
+}
+`
+		expected := `{
+      "name": "x",
+  "scripts": {
+        "dev":    "vite",
+        "predev": "palbase types --soft || exit 0",
+        "prebuild": "palbase types --soft || exit 0"
+  },
+   "odd":  true
+}
+`
+		run(t, input, expected)
+	})
+
+	t.Run("no scripts object — spliced before closing brace", func(t *testing.T) {
+		input := `{
+  "name": "myapp",
+  "version": "1.0.0"
+}
+`
+		expected := `{
+  "name": "myapp",
+  "version": "1.0.0",
+  "scripts": {
+    "predev": "palbase types --soft || exit 0",
+    "prebuild": "palbase types --soft || exit 0"
+  }
+}
+`
+		run(t, input, expected)
+	})
+
+	t.Run("already correct — byte identical", func(t *testing.T) {
+		input := `{
+  "name": "myapp",
+  "scripts": {
+    "predev": "palbase types --soft || exit 0",
+    "prebuild": "palbase types --soft || exit 0"
+  }
+}
+`
+		run(t, input, input)
+	})
 }
 
 // TestWebLink_IdempotentRelink: running link a second time doesn't duplicate
@@ -287,17 +452,8 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte(`import React from 'react';
 `), 0o644))
 
-	run := func() {
-		cmd := newWebCmd(noopResolvers())
-		var out bytes.Buffer
-		cmd.SetOut(&out)
-		cmd.SetErr(&out)
-		cmd.SetArgs([]string{"link", "--ref", "ref1"})
-		require.NoError(t, cmd.Execute())
-	}
-
-	run()
-	run() // second run
+	runWebLink(t, "--ref", "ref1")
+	runWebLink(t, "--ref", "ref1") // second run
 
 	// Only ONE import line referencing palbe.gen.
 	entryBody, err := os.ReadFile("app/layout.tsx")
@@ -312,35 +468,104 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 	require.Equal(t, 1, strings.Count(string(pkgBody), `"prebuild"`))
 }
 
+// TestWebLink_RefRelinkUpdatesConfig (I3): `web link --ref B` in a cwd linked
+// to A must update the config's Ref to B (keeping DefaultEnv — the active
+// branch is a local choice) and regenerate via the seam with B.
+func TestWebLink_RefRelinkUpdatesConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var gotRef string
+	orig := webLinkCodegen
+	webLinkCodegen = func(_ context.Context, _ Resolvers, ref, outFile string, _ io.Writer) error {
+		gotRef = ref
+		return os.WriteFile(outFile, []byte("// gen"), 0o644)
+	}
+	t.Cleanup(func() { webLinkCodegen = orig })
+
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: "projA", DefaultEnv: "staging"}))
+
+	outStr := runWebLink(t, "--ref", "projB")
+
+	cfg, err := auth.LoadProjectConfig()
+	require.NoError(t, err)
+	require.Equal(t, "projB", cfg.Ref, "config must be re-linked to the new ref")
+	require.Equal(t, "staging", cfg.DefaultEnv, "re-link must keep the active branch")
+	require.Equal(t, "projB", gotRef, "codegen must run against the new ref")
+	require.Contains(t, outStr, "projB")
+}
+
+// TestWebLink_EnsuresPalbaseGitignored (I4): link keeps the per-machine
+// .palbase/ link dir out of git, like mobile link does.
+func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
+	t.Run("creates .gitignore when absent", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		installStubCodegen(t, "// gen")
+		writePkgJSON(t, minimalPkgJSON())
+
+		runWebLink(t, "--ref", "ref1")
+
+		body, err := os.ReadFile(".gitignore")
+		require.NoError(t, err)
+		require.Contains(t, string(body), ".palbase/")
+	})
+
+	t.Run("appends to an existing .gitignore", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		installStubCodegen(t, "// gen")
+		writePkgJSON(t, minimalPkgJSON())
+		require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n"), 0o644))
+
+		runWebLink(t, "--ref", "ref1")
+
+		body, err := os.ReadFile(".gitignore")
+		require.NoError(t, err)
+		require.Equal(t, "node_modules/\n.palbase/\n", string(body))
+	})
+
+	t.Run("does not duplicate on re-link", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		installStubCodegen(t, "// gen")
+		writePkgJSON(t, minimalPkgJSON())
+
+		runWebLink(t, "--ref", "ref1")
+		runWebLink(t, "--ref", "ref1")
+
+		body, err := os.ReadFile(".gitignore")
+		require.NoError(t, err)
+		require.Equal(t, 1, strings.Count(string(body), ".palbase/"))
+	})
+}
+
 // TestWebLink_GitignoreWarning: prints a loud warning when .gitignore ignores
-// the gen file, but does not modify .gitignore.
+// the gen file. The offending rule is reported, never edited (the only write
+// is the appended .palbase/ link-dir entry).
 func TestWebLink_GitignoreWarning(t *testing.T) {
-	for _, ignoreContent := range []string{
-		"palbe.gen.ts\n",
-		"*.gen.ts\n",
-		"# auto-gen\npalbe.gen.ts\n",
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"exact filename", "palbe.gen.ts\n"},
+		{"glob *.gen.ts", "*.gen.ts\n"},
+		{"with comment", "# auto-gen\npalbe.gen.ts\n"},
 	} {
-		t.Run(ignoreContent[:min(len(ignoreContent), 20)], func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
 			installStubCodegen(t, "// gen")
 			writePkgJSON(t, minimalPkgJSON())
-			require.NoError(t, os.WriteFile(".gitignore", []byte(ignoreContent), 0o644))
+			require.NoError(t, os.WriteFile(".gitignore", []byte(tc.content), 0o644))
 
-			cmd := newWebCmd(noopResolvers())
-			var out bytes.Buffer
-			cmd.SetOut(&out)
-			cmd.SetErr(&out)
-			cmd.SetArgs([]string{"link", "--ref", "ref1"})
-			require.NoError(t, cmd.Execute())
+			outStr := runWebLink(t, "--ref", "ref1")
 
-			outStr := out.String()
 			require.Contains(t, outStr, "WARNING", "should print a loud warning about .gitignore")
 			require.Contains(t, outStr, "palbe.gen.ts", "warning should mention the gen file")
 
-			// .gitignore must not be modified.
+			// The offending rule must NOT be rewritten/removed; the only
+			// change is the appended .palbase/ entry.
 			body, err := os.ReadFile(".gitignore")
 			require.NoError(t, err)
-			require.Equal(t, ignoreContent, string(body))
+			require.True(t, strings.HasPrefix(string(body), tc.content),
+				"existing rules must stay byte-identical, got: %q", string(body))
+			require.Contains(t, string(body), ".palbase/")
 		})
 	}
 }
@@ -353,14 +578,7 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 	writePkgJSON(t, minimalPkgJSON())
 	// No entry file created.
 
-	cmd := newWebCmd(noopResolvers())
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "ref1"})
-	require.NoError(t, cmd.Execute(), "unknown layout must exit 0")
-
-	outStr := out.String()
+	outStr := runWebLink(t, "--ref", "ref1")
 	require.Contains(t, outStr, "palbe.gen", "manual instruction should mention gen file")
 }
 
@@ -373,8 +591,8 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 	writePkgJSON(t, `{
   "name": "myapp",
   "scripts": {
-    "predev": "palbase types --soft",
-    "prebuild": "palbase types --soft"
+    "predev": "palbase types --soft || exit 0",
+    "prebuild": "palbase types --soft || exit 0"
   }
 }`)
 
@@ -398,9 +616,11 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(pkgBody), `"predev"`)
 
-	// Output mentions what was left.
+	// Output mentions what was left — generic wording (unlink has no --out
+	// knowledge, so it must not hardcode palbe.gen.ts).
 	outStr := out.String()
-	require.Contains(t, outStr, "palbe.gen.ts")
+	require.Contains(t, outStr, "generated client file")
+	require.NotContains(t, outStr, "palbe.gen.ts")
 }
 
 // TestWebUnlink_Idempotent: running unlink twice is a no-op on the second run.
@@ -423,12 +643,7 @@ func TestWebLink_CustomOut(t *testing.T) {
 	require.NoError(t, os.MkdirAll("app", 0o755))
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
 
-	cmd := newWebCmd(noopResolvers())
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "ref1", "--out", "my.custom.gen.ts"})
-	require.NoError(t, cmd.Execute())
+	runWebLink(t, "--ref", "ref1", "--out", "my.custom.gen.ts")
 
 	_, err := os.Stat("my.custom.gen.ts")
 	require.NoError(t, err, "custom out file should exist")
@@ -438,4 +653,3 @@ func TestWebLink_CustomOut(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(entryBody), "my.custom.gen")
 }
-

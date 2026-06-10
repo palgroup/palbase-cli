@@ -5,13 +5,21 @@ package backend
 // `palbase web link` wires a web project (package.json present) to a Palbase
 // project:
 //   1. Verifies package.json exists in the cwd.
-//   2. resolveOrLinkRef — writes .palbase/config.json when missing.
-//   3. Runs TS codegen (via webLinkCodegen seam) → --out (default palbe.gen.ts).
-//   4. Patches package.json: adds scripts.predev / scripts.prebuild to run
-//      `palbase types --soft`, preserving top-level key order and warning (not
-//      clobbering) when a script already has a different value.
-//   5. Inserts `import './<rel-to-gen>';` at the top of the detected entry file.
-//   6. Warns (exit 0) when .gitignore ignores the gen file.
+//   2. resolveOrLinkRef — writes/updates .palbase/config.json (a --ref that
+//      differs from the existing link re-links, keeping the active branch).
+//   3. Ensures .gitignore covers .palbase/ (the link file is per-machine).
+//   4. Runs TS codegen (via webLinkCodegen seam) → --out (default palbe.gen.ts).
+//   5. Patches package.json: adds scripts.predev / scripts.prebuild running
+//      `palbase types --soft || exit 0` via a BYTE-SPLICE editor — only the
+//      inserted entries are new bytes, every other byte of the file (key
+//      order, nested objects, indentation, `&&` in script values) is left
+//      untouched. An existing script with a different value is warned about,
+//      never clobbered.
+//   6. Inserts `import '<rel-to-gen>';` into the detected entry file —
+//      directive-prologue aware ('use client' stays first) and multiline-
+//      import aware (never splices mid-statement).
+//   7. Warns LOUDLY (exit 0) when .gitignore ignores the gen file itself —
+//      that file must be committed; the rule is reported, not edited.
 //
 // `palbase web unlink` removes .palbase/config.json (+ dir if empty), leaving
 // the gen file and scripts untouched.
@@ -42,13 +50,15 @@ var webLinkCodegen = func(ctx context.Context, r Resolvers, ref, outFile string,
 	return pullTSTypes(ctx, r.Studio(), r.Endpoints(), ref, branch, "auto", outFile, w)
 }
 
-// webCmd holds the resolvers for the web command group. Exported as a struct
-// so tests can get a handle on it without a full cobra setup.
+// webCmd holds the resolvers for the web command group.
 type webCmd struct {
 	r Resolvers
 }
 
-const webTypesCmd = "palbase types --soft"
+// webTypesCmd is the predev/prebuild hook value. `|| exit 0` covers a machine
+// without the CLI installed (command-not-found exits 127, which --soft alone
+// cannot swallow) so CI/dev hooks never block on a missing palbase binary.
+const webTypesCmd = "palbase types --soft || exit 0"
 
 // newWebCmd builds the `palbase web` command group.
 func newWebCmd(r Resolvers) *cobra.Command {
@@ -100,32 +110,47 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				return err
 			}
 			// resolveOrLinkRef only writes .palbase/config.json when it goes
-			// through the picker path (no override). When --ref is supplied in a
-			// fresh cwd the config is absent. Materialise it so subsequent steps
-			// (codegen branch resolution, re-runs) always find the link.
-			if _, cfgErr := auth.LoadProjectConfig(); cfgErr != nil {
+			// through the picker path (no override). Materialise the link when
+			// missing, and RE-LINK when an explicit --ref differs from the
+			// existing link (keeping DefaultEnv — the active branch is a local
+			// choice the new ref shouldn't reset).
+			cfg, cfgErr := auth.LoadProjectConfig()
+			switch {
+			case cfgErr != nil:
 				if saveErr := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}); saveErr != nil {
 					return fmt.Errorf("save .palbase/config.json: %w", saveErr)
 				}
 				fmt.Fprintf(out, "✓ Linked to %s\n", ref)
+			case refFlag != "" && cfg.Ref != ref:
+				prev := cfg.Ref
+				cfg.Ref = ref
+				if saveErr := auth.SaveProjectConfig(cfg); saveErr != nil {
+					return fmt.Errorf("save .palbase/config.json: %w", saveErr)
+				}
+				fmt.Fprintf(out, "✓ Re-linked to %s (was %s)\n", ref, prev)
 			}
 
-			// 3. First codegen.
+			// 3. Keep the per-machine link file out of git (same as mobile link).
+			if err := ensureGitignored(".gitignore", ".palbase/"); err != nil {
+				return fmt.Errorf("update .gitignore: %w", err)
+			}
+
+			// 4. First codegen.
 			if err := webLinkCodegen(ctx, wc.r, ref, outFile, out); err != nil {
 				return fmt.Errorf("codegen: %w", err)
 			}
 
-			// 4. Patch package.json scripts.
+			// 5. Patch package.json scripts.
 			if err := patchPackageJSONScripts("package.json", out); err != nil {
 				return fmt.Errorf("patch package.json: %w", err)
 			}
 
-			// 5. Wire import in entry file.
+			// 6. Wire import in entry file.
 			if err := wireEntryImport(entryFlag, outFile, out); err != nil {
 				return fmt.Errorf("wire entry import: %w", err)
 			}
 
-			// 6. Gitignore guard.
+			// 7. Gitignore guard for the GEN file (warn only, never edit the rule).
 			checkGitignoreGuard(outFile, out)
 
 			return nil
@@ -155,25 +180,35 @@ func (wc *webCmd) newWebUnlinkCmd() *cobra.Command {
 				_ = os.Remove(".palbase")
 			}
 
+			// unlink doesn't know the --out the link used, so speak generically.
 			fmt.Fprintln(out, "✓ unlinked — removed .palbase/config.json")
-			fmt.Fprintln(out, "  palbe.gen.ts and package.json scripts left in place — re-link with `palbase web link`")
+			fmt.Fprintln(out, "  generated client file and package.json scripts left in place — re-link with `palbase web link`")
 			return nil
 		},
 	}
 }
 
-// ── package.json ordered editing ─────────────────────────────────────────────
+// The .palbase/ gitignore append reuses ensureGitignored (backend.go) — the
+// shared idempotent helper that creates/appends the entry when missing.
+
+// ── package.json byte-splice editing ─────────────────────────────────────────
+//
+// The editor NEVER round-trips the file through Go data structures: it locates
+// the byte range of the `scripts` object with json.Decoder.InputOffset() and
+// splices the new entries into the ORIGINAL bytes. Everything outside the
+// splice — key order at every depth, nested objects, indentation quirks,
+// `&&` in script values — stays byte-identical.
 
 // orderedKV is a single key-value pair in a JSON object, preserving insertion
-// order (encoding/json's map doesn't guarantee order).
+// order. Used only to INSPECT the existing scripts (which hooks are present,
+// with what value) — never to re-serialise the file.
 type orderedKV struct {
 	key string
 	raw json.RawMessage
 }
 
 // parseOrderedObject parses a JSON object into a slice of key-value pairs,
-// preserving key order. Only the TOP level of the object is ordered; nested
-// values are kept as raw JSON and are not re-ordered.
+// preserving key order.
 func parseOrderedObject(data []byte) ([]orderedKV, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -188,7 +223,6 @@ func parseOrderedObject(data []byte) ([]orderedKV, error) {
 
 	var pairs []orderedKV
 	for dec.More() {
-		// key
 		keyTok, err := dec.Token()
 		if err != nil {
 			return nil, err
@@ -197,7 +231,6 @@ func parseOrderedObject(data []byte) ([]orderedKV, error) {
 		if !ok {
 			return nil, fmt.Errorf("expected string key, got %T", keyTok)
 		}
-		// value — capture as raw JSON
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
 			return nil, err
@@ -207,139 +240,243 @@ func parseOrderedObject(data []byte) ([]orderedKV, error) {
 	return pairs, nil
 }
 
-// marshalOrderedObject serialises a []orderedKV back into a JSON object with
-// 2-space indent, matching npm's default package.json style.
-func marshalOrderedObject(pairs []orderedKV, indent string) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteString("{\n")
-	for i, kv := range pairs {
-		keyBytes, err := json.Marshal(kv.key)
-		if err != nil {
-			return nil, err
-		}
-		// Re-indent the raw value. If it starts with { or [ we need to
-		// indent its inner lines; otherwise it's a scalar and needs none.
-		valIndented, err := reindentJSON(kv.raw, indent+"  ")
-		if err != nil {
-			return nil, err
-		}
-		buf.WriteString(indent + "  ")
-		buf.Write(keyBytes)
-		buf.WriteString(": ")
-		buf.Write(valIndented)
-		if i < len(pairs)-1 {
-			buf.WriteByte(',')
-		}
-		buf.WriteByte('\n')
-	}
-	buf.WriteString(indent + "}")
-	return buf.Bytes(), nil
+// scriptsLocation is the byte geography of package.json the splice needs.
+type scriptsLocation struct {
+	found    bool
+	valStart int // offset of the '{' opening the scripts value
+	valEnd   int // offset just past the '}' closing the scripts value
+	topEnd   int // offset of the top-level closing '}'
 }
 
-// reindentJSON takes a raw JSON value and returns it with its inner lines
-// re-indented to `innerIndent`. For scalars (string, number, bool, null),
-// it's returned as-is. For objects and arrays, json.MarshalIndent is used.
-func reindentJSON(raw json.RawMessage, innerIndent string) ([]byte, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return raw, nil
-	}
-	if trimmed[0] != '{' && trimmed[0] != '[' {
-		return trimmed, nil
-	}
-	// Re-marshal the inner object with the chosen indent.
-	var v interface{}
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	dec.UseNumber()
-	if err := dec.Decode(&v); err != nil {
-		return trimmed, nil
-	}
-	out, err := json.MarshalIndent(v, strings.TrimSuffix(innerIndent, "  "), "  ")
+// locatePackageJSONScripts walks the top-level object with json.Decoder and
+// records the exact byte range of the `scripts` value (when present) plus the
+// top-level closing brace, using InputOffset() — no re-serialisation.
+func locatePackageJSONScripts(data []byte) (scriptsLocation, error) {
+	var loc scriptsLocation
+	dec := json.NewDecoder(bytes.NewReader(data))
+
+	tok, err := dec.Token()
 	if err != nil {
-		return trimmed, nil
+		return loc, err
 	}
-	return out, nil
+	if tok != json.Delim('{') {
+		return loc, fmt.Errorf("expected a top-level object")
+	}
+
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return loc, err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return loc, fmt.Errorf("expected object key, got %T", keyTok)
+		}
+		afterKey := int(dec.InputOffset()) // just past the key's closing quote
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return loc, err
+		}
+		if key == "scripts" && !loc.found {
+			// Value starts at the first non-(whitespace|colon) byte after the key.
+			start := afterKey
+			for start < len(data) {
+				if data[start] == ':' || data[start] == ' ' || data[start] == '\t' || data[start] == '\n' || data[start] == '\r' {
+					start++
+					continue
+				}
+				break
+			}
+			loc.found = true
+			loc.valStart = start
+			loc.valEnd = int(dec.InputOffset()) // just past the value
+		}
+	}
+	if _, err := dec.Token(); err != nil { // top-level '}'
+		return loc, err
+	}
+	loc.topEnd = int(dec.InputOffset()) - 1 // offset OF the closing '}'
+	return loc, nil
 }
 
-// patchPackageJSONScripts reads package.json, adds/warns-about
-// scripts.predev and scripts.prebuild, and writes it back preserving key order.
+// patchPackageJSONScripts adds scripts.predev / scripts.prebuild via byte
+// splice. Hooks already set to a different value are warned about and left
+// untouched; when nothing is missing the file is not rewritten at all.
 func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
 	data, err := os.ReadFile(pkgPath)
 	if err != nil {
 		return err
 	}
 
-	pairs, err := parseOrderedObject(data)
+	loc, err := locatePackageJSONScripts(data)
 	if err != nil {
 		return fmt.Errorf("parse package.json: %w", err)
 	}
 
-	// Find or create the "scripts" key.
-	scriptsIdx := -1
-	for i, kv := range pairs {
-		if kv.key == "scripts" {
-			scriptsIdx = i
+	if !loc.found {
+		return os.WriteFile(pkgPath, spliceNewScriptsObject(data, loc.topEnd), 0o644)
+	}
+
+	pairs, err := parseOrderedObject(data[loc.valStart:loc.valEnd])
+	if err != nil {
+		return fmt.Errorf("parse package.json scripts: %w", err)
+	}
+
+	var missing []string
+	for _, hook := range []string{"predev", "prebuild"} {
+		present := false
+		for _, kv := range pairs {
+			if kv.key != hook {
+				continue
+			}
+			present = true
+			var existing string
+			_ = json.Unmarshal(kv.raw, &existing)
+			if existing != webTypesCmd {
+				fmt.Fprintf(w, "warning: scripts.%s is already set to %q — skipping (suggested value: %q)\n", hook, existing, webTypesCmd)
+			}
 			break
 		}
+		if !present {
+			missing = append(missing, hook)
+		}
+	}
+	if len(missing) == 0 {
+		return nil // byte-identical: don't touch the file
 	}
 
-	var scriptPairs []orderedKV
-	if scriptsIdx >= 0 {
-		// Parse the existing scripts object.
-		sp, err := parseOrderedObject(pairs[scriptsIdx].raw)
-		if err != nil {
-			return fmt.Errorf("parse scripts: %w", err)
-		}
-		scriptPairs = sp
-	}
+	return os.WriteFile(pkgPath, spliceScriptEntries(data, loc, missing), 0o644)
+}
 
-	// For each hook key, check / add / warn.
-	for _, hookKey := range []string{"predev", "prebuild"} {
-		existing := ""
-		existIdx := -1
-		for i, kv := range scriptPairs {
-			if kv.key == hookKey {
-				// Unmarshal the existing value to compare.
-				var s string
-				if err := json.Unmarshal(kv.raw, &s); err == nil {
-					existing = s
-				}
-				existIdx = i
-				break
+// spliceScriptEntries inserts the missing hook entries at the END of the
+// existing scripts object (right after its last entry), leaving every other
+// byte alone.
+func spliceScriptEntries(data []byte, loc scriptsLocation, hooks []string) []byte {
+	keyIndent := indentOfLineAt(data, loc.valStart)
+	entryIndent := scriptsEntryIndent(data, loc, keyIndent)
+
+	last := lastNonWS(data, loc.valStart+1, loc.valEnd-1)
+	var b strings.Builder
+	if last < 0 {
+		// Empty scripts object: open it across lines.
+		for i, h := range hooks {
+			if i > 0 {
+				b.WriteString(",")
 			}
+			b.WriteString("\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(webTypesCmd))
 		}
-		if existIdx >= 0 {
-			if existing != webTypesCmd {
-				// Warn, leave untouched.
-				fmt.Fprintf(w, "warning: scripts.%s is already set to %q — skipping (suggested value: %q)\n", hookKey, existing, webTypesCmd)
-			}
-			// Already correct — nothing to do.
+		b.WriteString("\n" + keyIndent)
+		return splice(data, loc.valStart+1, b.String())
+	}
+	for _, h := range hooks {
+		b.WriteString(",\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(webTypesCmd))
+	}
+	return splice(data, last+1, b.String())
+}
+
+// spliceNewScriptsObject inserts a whole `"scripts": {...}` block before the
+// top-level closing brace (stable choice: scripts lands last, like the
+// previous appended-at-end behaviour).
+func spliceNewScriptsObject(data []byte, topEnd int) []byte {
+	unit := topUnitIndent(data)
+	entryIndent := unit + unit
+
+	var inner strings.Builder
+	for i, h := range []string{"predev", "prebuild"} {
+		if i > 0 {
+			inner.WriteString(",")
+		}
+		inner.WriteString("\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(webTypesCmd))
+	}
+	block := `"scripts": {` + inner.String() + "\n" + unit + "}"
+
+	brace := bytes.IndexByte(data, '{')
+	last := lastNonWS(data, brace+1, topEnd)
+	if last < 0 {
+		// Empty top-level object.
+		return splice(data, brace+1, "\n"+unit+block+"\n")
+	}
+	return splice(data, last+1, ",\n"+unit+block)
+}
+
+// splice returns data with text inserted at offset `at`.
+func splice(data []byte, at int, text string) []byte {
+	out := make([]byte, 0, len(data)+len(text))
+	out = append(out, data[:at]...)
+	out = append(out, text...)
+	out = append(out, data[at:]...)
+	return out
+}
+
+// lastNonWS returns the index of the last non-whitespace byte in data[from:to),
+// or -1 when the range is all whitespace.
+func lastNonWS(data []byte, from, to int) int {
+	for i := to - 1; i >= from; i-- {
+		if data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r' {
 			continue
 		}
-		// Add the key.
-		val, _ := json.Marshal(webTypesCmd)
-		scriptPairs = append(scriptPairs, orderedKV{key: hookKey, raw: val})
+		return i
 	}
+	return -1
+}
 
-	// Serialise the scripts sub-object.
-	scriptsBytes, err := marshalOrderedObject(scriptPairs, "  ")
-	if err != nil {
-		return fmt.Errorf("marshal scripts: %w", err)
+// indentOfLineAt returns the leading whitespace of the line containing offset.
+func indentOfLineAt(data []byte, off int) string {
+	lineStart := bytes.LastIndexByte(data[:off], '\n') + 1
+	i := lineStart
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t') {
+		i++
 	}
+	return string(data[lineStart:i])
+}
 
-	if scriptsIdx >= 0 {
-		pairs[scriptsIdx].raw = scriptsBytes
-	} else {
-		// Append a new "scripts" key at the end.
-		pairs = append(pairs, orderedKV{key: "scripts", raw: scriptsBytes})
+// scriptsEntryIndent detects the indentation of the scripts object's entries
+// from its first entry line; falls back to the key line's indent + 2 spaces.
+func scriptsEntryIndent(data []byte, loc scriptsLocation, keyIndent string) string {
+	inner := data[loc.valStart+1 : loc.valEnd-1]
+	if nl := bytes.IndexByte(inner, '\n'); nl >= 0 {
+		j := nl + 1
+		k := j
+		for k < len(inner) && (inner[k] == ' ' || inner[k] == '\t') {
+			k++
+		}
+		if k > j && k < len(inner) {
+			return string(inner[j:k])
+		}
 	}
+	return keyIndent + "  "
+}
 
-	out, err := marshalOrderedObject(pairs, "")
-	if err != nil {
-		return fmt.Errorf("marshal package.json: %w", err)
+// topUnitIndent detects the file's top-level indent unit from the first key
+// line; defaults to two spaces (npm's package.json style).
+func topUnitIndent(data []byte) string {
+	brace := bytes.IndexByte(data, '{')
+	if brace < 0 {
+		return "  "
 	}
-	out = append(out, '\n')
-	return os.WriteFile(pkgPath, out, 0o644)
+	nl := bytes.IndexByte(data[brace:], '\n')
+	if nl < 0 {
+		return "  "
+	}
+	i := brace + nl + 1
+	j := i
+	for j < len(data) && (data[j] == ' ' || data[j] == '\t') {
+		j++
+	}
+	if j > i {
+		return string(data[i:j])
+	}
+	return "  "
+}
+
+// encodeJSONString encodes s as a JSON string WITHOUT HTML escaping, so
+// `&&`/`<`/`>` in script values stay readable.
+func encodeJSONString(s string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s)
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 // ── entry file import wiring ──────────────────────────────────────────────────
@@ -355,12 +492,11 @@ var autoEntryPaths = []string{
 }
 
 // wireEntryImport inserts `import '<rel>';` into the detected (or explicit)
-// entry file. Idempotent: skips if an import of a path ending in the gen stem
-// already exists.
+// entry file. Idempotent on EXACT module-specifier match (a path ending in
+// /<stem>), directive-prologue aware, and multiline-import aware.
 func wireEntryImport(entryFlag, outFile string, w io.Writer) error {
-	genStem := strings.TrimSuffix(outFile, ".ts") // e.g. "palbe.gen"
+	stem := strings.TrimSuffix(filepath.Base(outFile), ".ts") // e.g. "palbe.gen"
 
-	// Resolve entry file.
 	entryPath := entryFlag
 	if entryPath == "" {
 		for _, candidate := range autoEntryPaths {
@@ -374,70 +510,156 @@ func wireEntryImport(entryFlag, outFile string, w io.Writer) error {
 	if entryPath == "" {
 		// Unknown layout — print manual instruction, exit 0.
 		fmt.Fprintf(w, "note: could not detect an entry file — add the following import manually:\n")
-		fmt.Fprintf(w, "  import './%s';\n", genStem)
+		fmt.Fprintf(w, "  import './%s';\n", strings.TrimSuffix(outFile, ".ts"))
 		return nil
 	}
 
-	// Compute the relative import path from the entry file's dir to the gen file.
-	entryDir := filepath.Dir(entryPath)
-	// genFile lives in cwd.
-	rel, err := filepath.Rel(entryDir, outFile)
+	// Compute the POSIX relative import path from the entry file's dir to the
+	// gen file, extension stripped, with a leading ./ or ../.
+	rel, err := filepath.Rel(filepath.Dir(entryPath), outFile)
 	if err != nil {
-		return fmt.Errorf("rel path from %s to %s: %w", entryDir, outFile, err)
+		return fmt.Errorf("rel path from %s to %s: %w", filepath.Dir(entryPath), outFile, err)
 	}
-	// POSIX path, strip .ts extension.
-	rel = filepath.ToSlash(rel)
-	rel = strings.TrimSuffix(rel, ".ts")
-	// Ensure leading ./
+	rel = strings.TrimSuffix(filepath.ToSlash(rel), ".ts")
 	if !strings.HasPrefix(rel, ".") {
 		rel = "./" + rel
 	}
-
 	importLine := fmt.Sprintf("import '%s';", rel)
 
 	body, err := os.ReadFile(entryPath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", entryPath, err)
 	}
+	lines := strings.Split(string(body), "\n")
 
-	// Idempotency: skip if any line already imports a path ending with the stem.
-	for _, line := range strings.Split(string(body), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "import ") && strings.Contains(trimmed, genStem) {
+	// Idempotency: skip only on an EXACT specifier match — a quoted path that
+	// IS the gen module ('./palbe.gen', '../palbe.gen'), not any substring
+	// (e.g. './palbe.gen.extra' must NOT suppress the insert).
+	for _, line := range lines {
+		if lineImportsGen(line, stem) {
 			return nil
 		}
 	}
 
-	// Insert after the last contiguous top-of-file import statement.
-	lines := strings.Split(string(body), "\n")
-	insertAfter := -1
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+	insertAt := entryImportInsertIndex(lines)
+	newLines := make([]string, 0, len(lines)+1)
+	newLines = append(newLines, lines[:insertAt]...)
+	newLines = append(newLines, importLine)
+	newLines = append(newLines, lines[insertAt:]...)
+	return os.WriteFile(entryPath, []byte(strings.Join(newLines, "\n")), 0o644)
+}
+
+// entryImportInsertIndex returns the line index BEFORE which the generated
+// import is inserted: after the last top-of-file import statement (consuming
+// multiline imports whole), or — when there are no imports — right after the
+// directive prologue ('use client' & friends must stay the first statement).
+func entryImportInsertIndex(lines []string) int {
+	i := 0
+	// Directive prologue: directives, blank lines, line comments.
+	for i < len(lines) {
+		t := strings.TrimSpace(lines[i])
+		if t == "" || strings.HasPrefix(t, "//") || isDirectiveLine(t) {
+			i++
 			continue
 		}
-		if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "//") {
-			insertAfter = i
-		} else {
-			break
+		break
+	}
+	insertAt := i // no imports → insert right after the prologue
+
+	for i < len(lines) {
+		t := strings.TrimSpace(lines[i])
+		if t == "" || strings.HasPrefix(t, "//") {
+			i++
+			continue
+		}
+		if !isImportStart(t) {
+			break // first real (non-import) code line
+		}
+		// Consume the whole statement: an unbalanced `import {` continues
+		// until a line containing from '…'/from "…" or ending '; / ";.
+		j := i
+		for j < len(lines)-1 && !importStatementComplete(strings.TrimSpace(lines[j])) {
+			j++
+		}
+		insertAt = j + 1
+		i = j + 1
+	}
+	return insertAt
+}
+
+// isImportStart reports whether a trimmed line begins an import statement.
+func isImportStart(t string) bool {
+	return strings.HasPrefix(t, "import ") ||
+		strings.HasPrefix(t, "import{") ||
+		strings.HasPrefix(t, "import'") ||
+		strings.HasPrefix(t, "import\"")
+}
+
+// importStatementComplete reports whether a trimmed line completes an import
+// statement: it carries the from-clause, or terminates a (side-effect) import.
+func importStatementComplete(t string) bool {
+	if strings.Contains(t, "from '") || strings.Contains(t, "from \"") {
+		return true
+	}
+	if strings.HasSuffix(t, "';") || strings.HasSuffix(t, "\";") {
+		return true
+	}
+	// Bare side-effect import without semicolon: import './x'
+	return strings.HasSuffix(t, "'") || strings.HasSuffix(t, "\"")
+}
+
+// isDirectiveLine reports whether a trimmed line is a module directive that
+// must stay at the very top of the file.
+func isDirectiveLine(t string) bool {
+	for _, d := range []string{"use client", "use server", "use strict"} {
+		for _, q := range []string{"'", `"`} {
+			base := q + d + q
+			if t == base || t == base+";" {
+				return true
+			}
 		}
 	}
+	return false
+}
 
-	var newLines []string
-	if insertAfter < 0 {
-		// No imports — prepend.
-		newLines = append([]string{importLine}, lines...)
-	} else {
-		newLines = append(lines[:insertAfter+1], append([]string{importLine}, lines[insertAfter+1:]...)...)
+// lineImportsGen reports whether the line imports the generated module: an
+// import-ish line whose quoted specifier equals, or path-ends with, the gen
+// stem. Exact match only — './palbe.gen.extra' does not count.
+func lineImportsGen(line, stem string) bool {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, "import") && !strings.Contains(t, "from ") {
+		return false
 	}
+	for _, q := range quotedStrings(t) {
+		if q == stem || q == "./"+stem || strings.HasSuffix(q, "/"+stem) {
+			return true
+		}
+	}
+	return false
+}
 
-	return os.WriteFile(entryPath, []byte(strings.Join(newLines, "\n")), 0o644)
+// quotedStrings extracts the contents of '…' and "…" substrings of s.
+func quotedStrings(s string) []string {
+	var out []string
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '\'' && c != '"' {
+			continue
+		}
+		j := strings.IndexByte(s[i+1:], c)
+		if j < 0 {
+			break
+		}
+		out = append(out, s[i+1:i+1+j])
+		i = i + 1 + j
+	}
+	return out
 }
 
 // ── gitignore guard ───────────────────────────────────────────────────────────
 
 // checkGitignoreGuard prints a loud warning if .gitignore would ignore the gen
-// file. Does NOT modify .gitignore.
+// file. It reports the rule, never edits it.
 func checkGitignoreGuard(outFile string, w io.Writer) {
 	data, err := os.ReadFile(".gitignore")
 	if err != nil {
