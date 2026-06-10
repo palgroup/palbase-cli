@@ -126,14 +126,14 @@ func TestEmitSwift(t *testing.T) {
 		// emitted literally). Body-bearing ops put path params FIRST, then
 		// the input. No-body ops (get/delete) take just the path param.
 		"func get(id: String) async throws(BackendError) -> TodosGetResponse",
-		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)", as: TodosGetResponse.self)`,
+		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self)`,
 		"func delete(id: String) async throws(BackendError) {",
-		`_invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)")`,
+		`_invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)")`,
 		"func update(id: String, _ input: TodosUpdateRequest) async throws(BackendError) -> TodosUpdateResponse",
-		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)", input, as: TodosUpdateResponse.self)`,
+		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", input, as: TodosUpdateResponse.self)`,
 		// Multiple path params → both as args in path order, both interpolated.
 		"func get(orgId: String, userId: String) async throws(BackendError) -> OrgsMembersGetResponse",
-		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userId)"`,
+		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? userId)"`,
 		// Gap 2 — ARRAY-OF-OBJECT RESPONSE. `GET /todos` emits a NAMED item
 		// struct (Codable+Sendable, snake_case→camelCase) and the response is
 		// a typed `[Item]`, not an opaque `[AnyCodableValue]`.

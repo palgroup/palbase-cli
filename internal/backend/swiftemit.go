@@ -90,6 +90,19 @@ func emitSwift(ops []swiftOp) string {
 	b.WriteString("\n// MARK: - Namespaced calls (pb.*)\n\n")
 	b.WriteString(emitNamespaceTree(usable))
 
+	// Shared percent-encoding helper — emitted once per generated file so
+	// both path interpolation and query string encoding use a single,
+	// consistent allowed-character set that matches JS encodeURIComponent:
+	// alphanumerics + `-_.!~*'()`. This is stricter than .urlPathAllowed
+	// (which passes '/') and .urlQueryAllowed (which passes '&', '=', '+'),
+	// giving wire parity with the web SDK's encodeURIComponent calls.
+	b.WriteString("\n// MARK: - Generated support\n\n")
+	b.WriteString("private extension CharacterSet {\n")
+	b.WriteString("    // encodeURIComponent-equivalent: alphanumerics + `-_.!~*'()`\n")
+	b.WriteString("    static let pbURIComponentAllowed = CharacterSet(\n")
+	b.WriteString("        charactersIn: \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()\")\n")
+	b.WriteString("}\n")
+
 	return b.String()
 }
 
@@ -241,14 +254,16 @@ func indent(d int) string { return strings.Repeat("    ", d) }
 // `{name}` is replaced by a percent-encoding interpolation of the matching
 // `name: String` method arg:
 //
-//	"/todos/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)/notes/\(...)"
+//	"/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)/notes/\(...)"
 //
-// `.urlPathAllowed` keeps a path segment from being broken by a slash/space
-// in the id; the `?? name` fallback can't fail in practice but keeps the
-// expression non-optional. `params` is the path-ordered name list parsed by
-// pathParamNames, so the literal substitutes the exact `{name}` tokens. Each
-// arg is referenced by its sanitized Swift ident (matching the method
-// parameter name), so a param like `note-id` interpolates as `noteId`.
+// `.pbURIComponentAllowed` is a generated helper matching JS encodeURIComponent
+// (alphanumerics + `-_.!~*'()`). This is stricter than `.urlPathAllowed` (which
+// leaves '/' unencoded, allowing an id containing '/' to split the route). The
+// `?? name` fallback can't fail in practice but keeps the expression non-optional.
+// `params` is the path-ordered name list parsed by pathParamNames, so the literal
+// substitutes the exact `{name}` tokens. Each arg is referenced by its sanitized
+// Swift ident (matching the method parameter name), so a param like `note-id`
+// interpolates as `noteId`.
 func interpolatedPathLiteral(path string, params []string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -260,7 +275,7 @@ func interpolatedPathLiteral(path string, params []string) string {
 		}
 		b.WriteString(escapeForSwiftLiteral(path[:idx]))
 		ident := identOf(name)
-		b.WriteString("\\(" + ident + ".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? " + ident + ")")
+		b.WriteString("\\(" + ident + ".addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? " + ident + ")")
 		path = path[idx+len(token):]
 	}
 	b.WriteString(escapeForSwiftLiteral(path))
@@ -407,8 +422,10 @@ func headerStructLines(name string, s swiftSchema) []string {
 // queryStructLines emits the <Op>Query struct (typed fields, like any request
 // struct) PLUS an `asQueryString()` method that flattens it to a wire query
 // string ("?a=1&b=2", or "" when nothing is set). Field VALUES are
-// percent-encoded with `.urlQueryAllowed`; field NAMES keep their declared
-// casing. Optional fields are omitted when nil. Enum fields use rawValue,
+// percent-encoded with `.pbURIComponentAllowed` (the generated
+// encodeURIComponent-equivalent helper); field NAMES keep their declared
+// casing. Using `.pbURIComponentAllowed` instead of `.urlQueryAllowed` prevents
+// query injection via '&', '=', or '+' in a value. Optional fields are omitted when nil. Enum fields use rawValue,
 // non-string scalars use String(describing:). The method is appended to the
 // method's `path:` argument by the caller so no SDK seam change is needed —
 // query params fold into the path the existing _invoke already sends.
@@ -438,7 +455,7 @@ func queryStructLines(name string, s swiftSchema) []string {
 		}
 		// encExpr percent-encodes the rendered String for a query value.
 		encExpr := func(v string) string {
-			return "(" + v + ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? " + v + ")"
+			return "(" + v + ".addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? " + v + ")"
 		}
 		if optional {
 			rendered := rawExpr("v")
@@ -781,8 +798,9 @@ func renderNSNode(node *nsNode) string {
 		// args, typed `String` (path params are strings on the wire), in
 		// path order. The seam `path:` literal is rewritten from a plain
 		// string into a Swift interpolation that percent-encodes each arg
-		// with `.urlPathAllowed` so slashes/spaces in an id can't break out
-		// of the path segment. `pathExpr` is `httpPath` as a Swift string
+		// with `.pbURIComponentAllowed` (encodeURIComponent-equivalent) so
+		// a '/' in an id can't break out of the path segment and land on a
+		// different route. `pathExpr` is `httpPath` as a Swift string
 		// literal when there are no params (byte-identical to before), or
 		// the interpolated form when there are.
 		var pathParamArgs []string
