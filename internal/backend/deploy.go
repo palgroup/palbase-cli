@@ -83,3 +83,64 @@ func runPush(d pushDeps) error {
 	})
 	return err
 }
+
+// cloneDeps are the injected collaborators for runClone — the git runner and
+// the config writer (github mode), plus the bundle downloader (platform mode,
+// wired by the Task 12 command constructor).
+type cloneDeps struct {
+	git      gitRunner
+	mode     string
+	repoURL  string
+	ref      string
+	branch   string
+	writeCfg func(dir string, cfg *auth.ProjectConfig) error
+	// download, when set, fetches+extracts the platform-mode bundle into ./<ref>
+	// and writes the platform-mode config. Injected by the command constructor.
+	download func(ref, branch string) error
+}
+
+// runClone routes `palbase clone` by the requested mode:
+//   - github:   exec `git clone <url> <ref>`, then write a github-mode
+//     .palbase/config.json into ./<ref>.
+//   - platform: delegate to the injected bundle downloader; without one wired,
+//     return a clear error (the download is wired in Task 12).
+func runClone(d cloneDeps) error {
+	if d.mode == "github" {
+		if err := d.git("git", "clone", d.repoURL, d.ref); err != nil {
+			return err
+		}
+		return d.writeCfg(d.ref, &auth.ProjectConfig{
+			Ref: d.ref, DefaultEnv: d.branch, Mode: "github", GithubRepo: d.repoURL,
+		})
+	}
+	// platform mode
+	if d.download == nil {
+		return fmt.Errorf("platform-mode clone is not yet available (bundle download not wired)")
+	}
+	return d.download(d.ref, d.branch)
+}
+
+// pullDeps are the injected collaborators for runPull — the git runner (github
+// mode) and the bundle refetcher (platform mode).
+type pullDeps struct {
+	git     gitRunner
+	refetch func() error
+}
+
+// runPull routes `palbase pull` by the linked project's mode:
+//   - github:   exec `git pull`.
+//   - platform: delegate to the injected refetcher; without one wired, return
+//     a clear error.
+func runPull(d pullDeps) error {
+	mode, err := resolveMode()
+	if err != nil {
+		return err
+	}
+	if mode == "github" {
+		return d.git("git", "pull")
+	}
+	if d.refetch == nil {
+		return fmt.Errorf("platform-mode pull is not yet available (bundle refetch not wired)")
+	}
+	return d.refetch()
+}

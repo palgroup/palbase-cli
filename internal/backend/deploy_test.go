@@ -99,3 +99,62 @@ type fakeDeployClient struct {
 func (f *fakeDeployClient) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
 	return f.onPostMultipart(path, tarball, fields)
 }
+
+func TestClone_GithubMode_ExecsGitClone(t *testing.T) {
+	var gotArgs []string
+	runner := func(name string, args ...string) error { gotArgs = append([]string{name}, args...); return nil }
+
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+
+	err := runClone(cloneDeps{
+		git:      runner,
+		mode:     "github",
+		repoURL:  "https://github.com/palcore/app.git",
+		ref:      "app",
+		branch:   "main",
+		writeCfg: auth.SaveProjectConfigIn,
+	})
+	if err != nil {
+		t.Fatalf("runClone: %v", err)
+	}
+	if len(gotArgs) < 3 || gotArgs[0] != "git" || gotArgs[1] != "clone" {
+		t.Fatalf("git args = %v, want git clone <url>", gotArgs)
+	}
+}
+
+func TestPull_GithubMode_ExecsGitPull(t *testing.T) {
+	dir := t.TempDir()
+	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "r", DefaultEnv: "main", Mode: "github"})
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+
+	var gotArgs []string
+	runner := func(name string, args ...string) error { gotArgs = append([]string{name}, args...); return nil }
+	if err := runPull(pullDeps{git: runner}); err != nil {
+		t.Fatalf("runPull: %v", err)
+	}
+	if len(gotArgs) < 2 || gotArgs[1] != "pull" {
+		t.Fatalf("git args = %v, want git pull", gotArgs)
+	}
+}
+
+func TestClone_PlatformMode_WithoutDownloaderErrors(t *testing.T) {
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+	err := runClone(cloneDeps{
+		git:      func(string, ...string) error { return nil },
+		mode:     "platform",
+		ref:      "app",
+		branch:   "main",
+		writeCfg: auth.SaveProjectConfigIn,
+	})
+	if err == nil {
+		t.Fatal("expected platform-mode clone without a downloader to error")
+	}
+}
