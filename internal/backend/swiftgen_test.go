@@ -150,6 +150,11 @@ func TestEmitSwift(t *testing.T) {
 		"public func asQueryString() -> String {",
 		"func run(query: SearchRunQuery) async throws(BackendError) -> SearchRunResponse",
 		`_invoke(method: "GET", path: "/search" + query.asQueryString(), as: SearchRunResponse.self)`,
+		// The shared percent-encoding helper DEFINITION must be emitted —
+		// the path/query use-sites above reference .pbURIComponentAllowed,
+		// so dropping the extension would leave dangling references that
+		// only surface at the customer's Swift compile.
+		"static let pbURIComponentAllowed = CharacterSet(",
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
