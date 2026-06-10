@@ -294,6 +294,266 @@ func TestEmitTypeScriptRegistration_TreeAndQuoting(t *testing.T) {
 	}
 }
 
+// TestEmitTypeScriptGolden compares the full emitTypeScript output byte-for-byte
+// against testdata/palbe_gen.golden.ts. Run with UPDATE_GOLDEN=1 to regenerate.
+func TestEmitTypeScriptGolden(t *testing.T) {
+	ops, err := parseOpenAPIForSwift([]byte(tsFixtureOpenAPI))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := emitTypeScript(ops, tsFullCfg)
+
+	goldenPath := "testdata/palbe_gen.golden.ts"
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		t.Logf("golden updated: %s", goldenPath)
+		return
+	}
+
+	goldenBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden (run with UPDATE_GOLDEN=1 to create): %v", err)
+	}
+	want := string(goldenBytes)
+	if got == want {
+		return
+	}
+	// Print first differing line for diagnosis.
+	gotLines := strings.Split(got, "\n")
+	wantLines := strings.Split(want, "\n")
+	for i := 0; i < len(gotLines) && i < len(wantLines); i++ {
+		if gotLines[i] != wantLines[i] {
+			start := i - 2
+			if start < 0 {
+				start = 0
+			}
+			end := i + 4
+			if end > len(gotLines) {
+				end = len(gotLines)
+			}
+			t.Errorf("golden mismatch at line %d:\n  got:  %q\n  want: %q\ncontext (got lines %d-):\n%s",
+				i+1, gotLines[i], wantLines[i], start+1,
+				strings.Join(gotLines[start:end], "\n"))
+			return
+		}
+	}
+	if len(gotLines) != len(wantLines) {
+		t.Errorf("golden mismatch: got %d lines, want %d lines", len(gotLines), len(wantLines))
+	}
+}
+
+// TestEmitTypeScriptTypes is a substring battery covering type-emission rules.
+func TestEmitTypeScriptTypes(t *testing.T) {
+	// Extended fixture adding: optional+nullable, nested object, header op,
+	// type-name collision pair, kind-mismatch collision pair.
+	const fixtureExt = `{
+  "openapi":"3.1.0","info":{"title":"t","version":"1"},
+  "paths":{
+    "/rooms/create":{"post":{"operationId":"rooms.create",
+      "requestBody":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{
+          "name":{"type":"string"},
+          "capacity":{"type":"integer"},
+          "kind":{"type":"string","enum":["public","private"]},
+          "note":{"type":"string","nullable":true}
+        },
+        "required":["name","kind"]}}}},
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{
+          "id":{"type":"string"},
+          "tags":{"type":"array","items":{"type":"string"}},
+          "score":{"type":"number","nullable":true},
+          "owner":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}
+        },
+        "required":["id","tags","score","owner"]}}}}}
+    }},
+    "/todos":{"get":{"operationId":"todos.list",
+      "parameters":[
+        {"name":"done","in":"query","required":false,"schema":{"type":"boolean"}},
+        {"name":"limit","in":"query","required":true,"schema":{"type":"integer"}}
+      ],
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"array","items":{"type":"object",
+        "properties":{"id":{"type":"string"}},
+        "required":["id"]}}}}}}}},
+    "/files/sign":{"post":{"operationId":"files.sign",
+      "parameters":[
+        {"name":"if-match","in":"header","required":true,"schema":{"type":"string"}},
+        {"name":"x-trace-id","in":"header","required":false,"schema":{"type":"string"}}
+      ],
+      "requestBody":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"path":{"type":"string"}},"required":["path"]}}}},
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"url":{"type":"string"}},"required":["url"]}}}}}}},
+    "/widgets/get":{"get":{"operationId":"widgets.get",
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}}}}}}},
+    "/widgetsGet":{"get":{"operationId":"widgetsGet",
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}}}}}}}
+  }
+}`
+
+	ops, err := parseOpenAPIForSwift([]byte(fixtureExt))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	// optional non-required prop → `?`
+	must(t, out, "capacity?: number;")
+
+	// nullable → `| null`
+	must(t, out, "score: number | null;")
+
+	// optional + nullable → `?: T | null`
+	must(t, out, "note?: string | null;")
+
+	// enum union
+	must(t, out, "kind: 'public' | 'private';")
+
+	// array of strings
+	must(t, out, "tags: string[];")
+
+	// array-of-object response → named ResponseItem + type alias
+	must(t, out, "export interface TodosListResponseItem {")
+	must(t, out, "export type TodosListResponse = TodosListResponseItem[];")
+
+	// nested object prop → inline literal
+	must(t, out, "owner: { id: string };")
+
+	// header op: required header → non-optional options arg with headers intersection
+	must(t, out, "options: CallOptions & { headers: { 'if-match': string; 'x-trace-id'?: string } }")
+
+	// type-name collision: first op wins, second skipped with comment
+	// widgets.get prefix = "WidgetsGet"; widgetsGet prefix = "WidgetsGet" → collision
+	must(t, out, `// codegen: skipped type "WidgetsGet" (collides with operation "widgets.get")`)
+	// The second op (widgetsGet) must be absent from augmentation
+	if strings.Contains(out, "widgetsGet(") {
+		t.Errorf("colliding op widgetsGet must be absent from augmentation:\n%s", out)
+	}
+
+	// files.sign with required header: options NOT optional
+	if strings.Contains(out, "sign(input: FilesSignRequest, options?: CallOptions") {
+		t.Errorf("files.sign has required header — options must NOT be optional:\n%s", out)
+	}
+	must(t, out, "sign(input: FilesSignRequest, options: CallOptions")
+
+	// all-optional headers → options?
+	// (no op with all-optional headers in this fixture; tested separately below)
+}
+
+// TestEmitTypeScriptTypes_AllOptionalHeaders tests that when all headers are
+// optional, the options parameter becomes optional too.
+func TestEmitTypeScriptTypes_AllOptionalHeaders(t *testing.T) {
+	const fixture = `{
+  "openapi":"3.1.0","info":{"title":"t","version":"1"},
+  "paths":{
+    "/files/check":{"post":{"operationId":"files.check",
+      "parameters":[
+        {"name":"x-trace-id","in":"header","required":false,"schema":{"type":"string"}}
+      ],
+      "requestBody":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"path":{"type":"string"}},"required":["path"]}}}},
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"ok":{"type":"boolean"}},"required":["ok"]}}}}}}}
+  }}`
+
+	ops, err := parseOpenAPIForSwift([]byte(fixture))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "check(input: FilesCheckRequest, options?: CallOptions & { headers?: { 'x-trace-id'?: string } })")
+}
+
+// TestEmitTypeScriptTypes_KindMismatch tests that when an op key collides with
+// an existing namespace node (e.g. "things" as namespace AND "things" as method),
+// the later-sorted one is skipped.
+func TestEmitTypeScriptTypes_KindMismatch(t *testing.T) {
+	// "things" and "things.create": "things" as a standalone op collides with
+	// the "things" namespace node needed for "things.create".
+	ops := []swiftOp{
+		{operationID: "things", method: "GET", path: "/things"},
+		{operationID: "things.create", method: "POST", path: "/things/create", input: &swiftSchema{kind: "object", props: []swiftProp{{name: "name", schema: swiftSchema{kind: "string"}, required: true}}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	// One of these must be skipped with a kind-mismatch comment.
+	hasMismatchComment := strings.Contains(out, `// codegen: skipped operation`) &&
+		strings.Contains(out, "key collides")
+	if !hasMismatchComment {
+		t.Errorf("expected kind-mismatch skip comment:\n%s", out)
+	}
+}
+
+// TestEmitTypeScriptTypes_AnyKind checks that `any` schema kind → `unknown`.
+func TestEmitTypeScriptTypes_AnyKind(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "things.get", method: "GET", path: "/things",
+			output: &swiftSchema{kind: "object", props: []swiftProp{
+				{name: "data", schema: swiftSchema{kind: "any"}, required: true},
+			}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "data: unknown;")
+}
+
+// TestEmitTypeScriptTypes_ArrayPrimitive checks array-of-primitive → `T[]` type alias.
+func TestEmitTypeScriptTypes_ArrayPrimitive(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "tags.list", method: "GET", path: "/tags",
+			output: &swiftSchema{kind: "array", elem: &swiftSchema{kind: "string"}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "export type TagsListResponse = string[];")
+	// No ResponseItem interface for primitive arrays.
+	if strings.Contains(out, "ResponseItem") {
+		t.Errorf("primitive array must not emit ResponseItem interface:\n%s", out)
+	}
+}
+
+// TestEmitTypeScriptTypes_NullableEnum checks nullable enum wraps in parens.
+func TestEmitTypeScriptTypes_NullableEnum(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "x.get", method: "GET", path: "/x",
+			output: &swiftSchema{kind: "object", props: []swiftProp{
+				{name: "status", schema: swiftSchema{kind: "enum", nullable: true, enumVals: []string{"a", "b"}}, required: true},
+			}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "status: ('a' | 'b') | null;")
+}
+
+// TestEmitTypeScriptTypes_RootMethodNoInput checks root-level no-input op augmentation.
+func TestEmitTypeScriptTypes_RootMethodNoInput(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "getHello", method: "GET", path: "/hello",
+			output: &swiftSchema{kind: "object", props: []swiftProp{
+				{name: "ok", schema: swiftSchema{kind: "boolean"}, required: true},
+			}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "getHello(options?: CallOptions): Promise<GetHelloResponse>;")
+}
+
+// TestEmitTypeScriptTypes_NoOutput checks that ops without output get Promise<void>.
+func TestEmitTypeScriptTypes_NoOutput(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "things.delete", method: "DELETE", path: "/things"},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "delete(options?: CallOptions): Promise<void>;")
+}
+
+// TestEmitTypeScriptTypes_QuotedMethodKey checks that non-identifier method keys
+// are quoted in the augmentation.
+func TestEmitTypeScriptTypes_QuotedMethodKey(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "todos.delete-all", method: "DELETE", path: "/todos/all"},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+	must(t, out, "'delete-all'(options?: CallOptions): Promise<void>;")
+}
+
 // must is a helper that fails the test when the substring is absent.
 func must(t *testing.T, out, want string) {
 	t.Helper()
