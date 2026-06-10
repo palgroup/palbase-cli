@@ -3,6 +3,7 @@ package backend
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -59,18 +60,24 @@ func emitTypeScript(ops []swiftOp, cfg tsGeneratedConfig) string {
 	b.WriteString(emitTSConfigure(cfg))
 	b.WriteString("\n")
 
+	// --- Per-operation gates ---
+	// Nested-reserved / body+query / non-primitive-query / kind-mismatch
+	// filtering happens BEFORE type emission, so skipped ops neither emit
+	// dead types nor squat type-name prefixes against later ops.
+	candidates, opSkips := filterTSOps(usable)
+
 	// --- Types section ---
-	// emitTSTypes also determines which ops have type-name collisions; those
-	// ops are excluded from registration and augmentation.
-	typesOut, collisionSkips, typeCollisionOps := emitTSTypes(usable)
+	// emitTSTypes also runs the type-name collision seen-set; colliding ops
+	// are excluded from registration and augmentation too.
+	typesOut, collisionSkips, typeCollisionOps := emitTSTypes(candidates)
 	b.WriteString(typesOut)
 
 	// --- Typed errors section (Task 4 seam — placeholder returns "") ---
-	b.WriteString(emitTSTypedErrors(usable, typeCollisionOps))
+	b.WriteString(emitTSTypedErrors(candidates, typeCollisionOps))
 
-	// Filter out type-collision ops from registration/augmentation.
+	// Type-collision ops have no usable types — they must not be callable-typed.
 	var registerable []swiftOp
-	for _, op := range usable {
+	for _, op := range candidates {
 		if !typeCollisionOps[op.operationID] {
 			registerable = append(registerable, op)
 		}
@@ -78,18 +85,19 @@ func emitTypeScript(ops []swiftOp, cfg tsGeneratedConfig) string {
 
 	// --- Namespaces section ---
 	b.WriteString("// ── Namespaces ─────────────────────────────────────────────────────\n\n")
-	// Skip comments: reserved-namespace skips first, then type-collision skips.
+	// Skip comments: reserved-namespace, then per-op gates, then type collisions.
 	for _, ns := range skippedNS {
 		b.WriteString("// codegen: skipped reserved namespace \"")
 		b.WriteString(ns)
 		b.WriteString("\"\n")
 	}
+	for _, l := range opSkips {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
 	for _, c := range collisionSkips {
 		b.WriteString(c)
 		b.WriteString("\n")
-	}
-	if len(skippedNS) > 0 || len(collisionSkips) > 0 {
-		b.WriteString("")
 	}
 	b.WriteString(emitTSRegistration(registerable))
 
@@ -147,6 +155,88 @@ func renderTSOAuth(o *swiftOAuthConfig) string {
 	return b.String()
 }
 
+// --- Per-operation gates ------------------------------------------------
+
+// filterTSOps applies the per-op gates that decide whether an operation can
+// register at all: reserved nested segments, body+query conflict, query
+// params the runtime's serializeQuery cannot handle, and namespace/method
+// kind mismatches (a key claimed as both). Returns the surviving ops (input
+// order preserved) plus loud skip-comment lines. Type emission and the
+// collision seen-set run over the SURVIVING set only.
+func filterTSOps(ops []swiftOp) ([]swiftOp, []string) {
+	var out []swiftOp
+	var skips []string
+	root := newTSNode() // shape-only trie for kind-mismatch detection
+
+	for _, op := range ops {
+		segs := opSegments(op.operationID)
+		if len(segs) == 0 {
+			continue
+		}
+		// Nested reserved check covers EVERY non-first segment — both the
+		// intermediate namespace segments and the final method segment
+		// (the palbe runtime guards each property key it materializes).
+		skip := false
+		for _, seg := range segs[1:] {
+			if tsReservedNested(seg) {
+				skips = append(skips,
+					"// codegen: skipped operation \""+op.operationID+"\" (reserved segment \""+seg+"\")")
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		// A descriptor's `input` is single-valued: body (default) or query.
+		if op.input != nil && op.query != nil {
+			skips = append(skips,
+				"// codegen: skipped operation \""+op.operationID+"\" (both body and query declared — unsupported)")
+			continue
+		}
+		// Non-primitive query params would make the runtime's serializeQuery
+		// throw (it String()s values) — skip the whole op loudly.
+		if op.query != nil {
+			if bad, found := firstNonPrimitiveQueryProp(*op.query); found {
+				skips = append(skips,
+					"// codegen: skipped operation \""+op.operationID+"\" (non-primitive query parameter \""+bad+"\")")
+				continue
+			}
+		}
+		// Kind-mismatch: a key claimed as both namespace and method.
+		node := root
+		mismatch := false
+		for _, seg := range segs[:len(segs)-1] {
+			if node = node.childNode(seg); node == nil {
+				mismatch = true
+				break
+			}
+		}
+		if mismatch || !node.addMethod(segs[len(segs)-1], op) {
+			skips = append(skips,
+				"// codegen: skipped operation \""+op.operationID+"\" (key collides with existing namespace/method)")
+			continue
+		}
+		out = append(out, op)
+	}
+	return out, skips
+}
+
+// firstNonPrimitiveQueryProp returns the name of the first query property
+// whose schema cannot be serialized into a query string (anything beyond
+// string/number/integer/boolean/enum), or found=false when all are primitive.
+func firstNonPrimitiveQueryProp(q swiftSchema) (name string, found bool) {
+	for _, p := range q.props {
+		switch p.schema.kind {
+		case "string", "number", "integer", "boolean", "enum":
+			// primitive — serializeQuery handles it
+		default:
+			return p.name, true
+		}
+	}
+	return "", false
+}
+
 // --- Types section ----------------------------------------------------------
 
 // emitTSTypes emits the `// ── Types ──` section: one named interface or type
@@ -194,7 +284,7 @@ func emitTSTypes(ops []swiftOp) (section string, collisionSkips []string, collis
 				continue
 			}
 			dataName := pfx + typeNameOf(e.name) + "Data"
-			docComment := "/** " + e.code + " (" + itoa(e.status) + "): " + e.description + " */"
+			docComment := "/** " + e.code + " (" + strconv.Itoa(e.status) + "): " + e.description + " */"
 			lines = append(lines, docComment)
 			lines = append(lines, tsNamedTypeLines(dataName, *e.data)...)
 		}
@@ -237,10 +327,16 @@ func tsResponseTypeLines(pfx string, s swiftSchema) []string {
 }
 
 // tsInterfaceLines renders `export interface Name { ... }` with sorted props.
+// A property named __proto__ is skipped loudly: writing it in a JS object
+// literal sets the prototype, and JSON.stringify drops it — wire-dead anyway.
 func tsInterfaceLines(name string, s swiftSchema) []string {
 	var lines []string
 	lines = append(lines, "export interface "+name+" {")
 	for _, p := range s.props {
+		if p.name == "__proto__" {
+			lines = append(lines, "  // codegen: skipped property \"__proto__\"")
+			continue
+		}
 		opt := ""
 		if !p.required {
 			opt = "?"
@@ -318,42 +414,24 @@ func tsEnumUnion(vals []string) string {
 }
 
 // tsInlineObject renders `{ k: T; k2?: U }` for a nested object schema.
+// __proto__ props are dropped here too (same foot-gun as tsInterfaceLines;
+// no comment slot inside a single-line literal).
 func tsInlineObject(s swiftSchema) string {
-	if len(s.props) == 0 {
-		return "Record<string, unknown>"
-	}
 	var parts []string
 	for _, p := range s.props {
+		if p.name == "__proto__" {
+			continue
+		}
 		opt := ""
 		if !p.required {
 			opt = "?"
 		}
 		parts = append(parts, tsPropKey(p.name)+opt+": "+tsTypeOf(p.schema))
 	}
+	if len(parts) == 0 {
+		return "Record<string, unknown>"
+	}
 	return "{ " + strings.Join(parts, "; ") + " }"
-}
-
-// itoa is a minimal int-to-string for doc comments (avoids strconv import churn).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
 
 // emitTSTypedErrors is the Task 4 seam. It returns an empty string; Task 4
@@ -409,67 +487,37 @@ func (n *tsNode) addMethod(key string, op swiftOp) bool {
 	return true
 }
 
-// emitTSRegistration renders the __registerNamespaces({…}) call (no section
-// header or skip comments — those are written by emitTypeScript above).
-func emitTSRegistration(ops []swiftOp) string {
+// buildTSTrie arranges PRE-FILTERED ops (filterTSOps survivors, possibly minus
+// type-collision ops) into the namespace trie. Kind mismatches are impossible
+// here — removing ops from a mismatch-free set never creates one — so build
+// failures are silently skipped as unreachable defensive guards.
+func buildTSTrie(ops []swiftOp) *tsNode {
 	root := newTSNode()
-	var skipLines []string
-
 	for _, op := range ops {
 		segs := opSegments(op.operationID)
 		if len(segs) == 0 {
 			continue
 		}
-		// Nested reserved check covers EVERY non-first segment — both the
-		// intermediate namespace segments and the final method segment.
-		skip := false
-		for _, seg := range segs[1:] {
-			if tsReservedNested(seg) {
-				skipLines = append(skipLines,
-					"// codegen: skipped operation \""+op.operationID+"\" (reserved segment \""+seg+"\")")
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-		// A descriptor's `input` is single-valued: body (default) or query.
-		if op.input != nil && op.query != nil {
-			skipLines = append(skipLines,
-				"// codegen: skipped operation \""+op.operationID+"\" (both body and query declared — unsupported)")
-			continue
-		}
-
-		// Walk/build the trie, detecting kind mismatches.
 		node := root
-		mismatch := false
 		for _, seg := range segs[:len(segs)-1] {
-			child := node.childNode(seg)
-			if child == nil {
-				skipLines = append(skipLines,
-					"// codegen: skipped operation \""+op.operationID+"\" (key collides with existing namespace/method)")
-				mismatch = true
-				break
+			if node = node.childNode(seg); node == nil {
+				break // unreachable: pre-filtered by filterTSOps
 			}
-			node = child
 		}
-		if mismatch {
-			continue
-		}
-		if !node.addMethod(segs[len(segs)-1], op) {
-			skipLines = append(skipLines,
-				"// codegen: skipped operation \""+op.operationID+"\" (key collides with existing namespace/method)")
+		if node != nil {
+			node.addMethod(segs[len(segs)-1], op)
 		}
 	}
+	return root
+}
 
+// emitTSRegistration renders the __registerNamespaces({…}) call (no section
+// header or skip comments — those are written by emitTypeScript above; ops
+// arrive pre-filtered through filterTSOps).
+func emitTSRegistration(ops []swiftOp) string {
 	var b strings.Builder
-	for _, l := range skipLines {
-		b.WriteString(l)
-		b.WriteString("\n")
-	}
 	b.WriteString("__registerNamespaces({\n")
-	renderTSNode(&b, root, 2)
+	renderTSNode(&b, buildTSTrie(ops), 2)
 	b.WriteString("});\n")
 	return b.String()
 }
@@ -606,89 +654,19 @@ func renderTSStringArray(ss []string) string {
 
 // emitTSAugmentation renders the `declare module 'palbe' { interface PB { ... } }`
 // block, mirroring the registration trie shape with typed method signatures.
+// Ops arrive pre-filtered (same set as emitTSRegistration).
 func emitTSAugmentation(ops []swiftOp) string {
-	// Build a parallel trie for the augmentation. We re-use the same trie
-	// structure but render method signatures instead of descriptors.
-	root := newTSAugNode()
-	for _, op := range ops {
-		segs := opSegments(op.operationID)
-		if len(segs) == 0 {
-			continue
-		}
-		// Skip nested-reserved and body+query conflicts (same filters as registration).
-		skip := false
-		for _, seg := range segs[1:] {
-			if tsReservedNested(seg) {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-		if op.input != nil && op.query != nil {
-			continue
-		}
-		node := root
-		for _, seg := range segs[:len(segs)-1] {
-			node = node.getOrCreateChild(seg)
-			if node == nil {
-				break
-			}
-		}
-		if node == nil {
-			continue
-		}
-		node.addAugMethod(segs[len(segs)-1], op)
-	}
-
 	var b strings.Builder
 	b.WriteString("declare module 'palbe' {\n")
 	b.WriteString("  interface PB {\n")
-	renderTSAugNode(&b, root, 4)
+	renderTSAugNode(&b, buildTSTrie(ops), 4)
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
 	return b.String()
 }
 
-// tsAugNode is a trie node for the augmentation.
-type tsAugNode struct {
-	entries []*tsAugEntry
-	index   map[string]*tsAugEntry
-}
-
-type tsAugEntry struct {
-	key   string
-	child *tsAugNode // namespace
-	op    *swiftOp   // method
-}
-
-func newTSAugNode() *tsAugNode { return &tsAugNode{index: map[string]*tsAugEntry{}} }
-
-func (n *tsAugNode) getOrCreateChild(key string) *tsAugNode {
-	if e, ok := n.index[key]; ok {
-		if e.child != nil {
-			return e.child
-		}
-		return nil // kind mismatch
-	}
-	e := &tsAugEntry{key: key, child: newTSAugNode()}
-	n.entries = append(n.entries, e)
-	n.index[key] = e
-	return e.child
-}
-
-func (n *tsAugNode) addAugMethod(key string, op swiftOp) {
-	if _, ok := n.index[key]; ok {
-		return // collision already handled
-	}
-	e := &tsAugEntry{key: key, op: &op}
-	n.entries = append(n.entries, e)
-	n.index[key] = e
-}
-
 // renderTSAugNode renders augmentation entries at the given indent.
-func renderTSAugNode(b *strings.Builder, node *tsAugNode, indentSpaces int) {
+func renderTSAugNode(b *strings.Builder, node *tsNode, indentSpaces int) {
 	ind := strings.Repeat(" ", indentSpaces)
 	for _, e := range node.entries {
 		if e.child != nil {
@@ -716,12 +694,17 @@ func renderTSMethodSignature(op swiftOp) string {
 	pfx := typePrefix(op.operationID)
 	var args []string
 
-	// Leading path params.
+	// Leading path params. Wire names are sanitized into valid TS identifiers
+	// (`{user-id}` → userId, reserved words escaped, repeats deduped) — the
+	// names are purely positional: the runtime substitutes via the descriptor's
+	// pathParams, which keep the WIRE names, so renaming here is safe.
+	used := map[string]bool{}
 	for _, p := range op.pathParams {
-		args = append(args, p+": string")
+		args = append(args, tsParamIdent(p, used)+": string")
 	}
 
-	// Input arg.
+	// Input arg. A zero-prop object body still takes a real `input` arg (lead
+	// decision): `{}` is a valid wire body and the descriptor defaults to body.
 	if op.input != nil {
 		args = append(args, "input: "+pfx+"Request")
 	} else if op.query != nil {
@@ -777,6 +760,42 @@ func buildOptionsArg(headers *swiftSchema) string {
 	return "options?: CallOptions & { headers" + headersOpt + ": " + headersType + " }"
 }
 
+// tsParamIdent converts a wire path-param name into a safe TS parameter
+// identifier: camelCase-sanitized (`user-id` → userId), TS reserved words and
+// the fixed signature arg names (input/query/options) escaped with a trailing
+// underscore (`delete` → delete_), repeats deduped with a numeric suffix
+// (`{id}/{id}` → id, id2). Records the chosen name in `used`.
+func tsParamIdent(name string, used map[string]bool) string {
+	id := sanitize(name, false)
+	if tsReservedWords[id] || id == "input" || id == "query" || id == "options" {
+		id += "_"
+	}
+	candidate := id
+	for n := 2; used[candidate]; n++ {
+		candidate = id + strconv.Itoa(n)
+	}
+	used[candidate] = true
+	return candidate
+}
+
+// tsReservedWords are ECMAScript keywords plus strict-mode reserved names that
+// cannot be used as parameter binding identifiers in a module.
+var tsReservedWords = map[string]bool{
+	"await": true, "break": true, "case": true, "catch": true, "class": true,
+	"const": true, "continue": true, "debugger": true, "default": true,
+	"delete": true, "do": true, "else": true, "enum": true, "export": true,
+	"extends": true, "false": true, "finally": true, "for": true,
+	"function": true, "if": true, "import": true, "in": true,
+	"instanceof": true, "new": true, "null": true, "return": true,
+	"super": true, "switch": true, "this": true, "throw": true, "true": true,
+	"try": true, "typeof": true, "var": true, "void": true, "while": true,
+	"with": true, "yield": true,
+	// strict-mode reserved / restricted binding names
+	"implements": true, "interface": true, "let": true, "package": true,
+	"private": true, "protected": true, "public": true, "static": true,
+	"arguments": true, "eval": true,
+}
+
 // tsBareKeyRe matches identifiers that are valid bare TS object keys.
 var tsBareKeyRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 
@@ -819,7 +838,7 @@ func tsReservedTopLevel(seg string) bool {
 // nested positions. This is the Object.prototype members + `then`, but
 // NOT `call` or `upload` (those are only reserved at the top level).
 // Applied to every non-first segment including the final method segment —
-// see emitTSRegistration for why.
+// see filterTSOps for why.
 func tsReservedNested(seg string) bool {
 	switch seg {
 	case "then":

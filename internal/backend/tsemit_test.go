@@ -468,20 +468,135 @@ func TestEmitTypeScriptTypes_AllOptionalHeaders(t *testing.T) {
 
 // TestEmitTypeScriptTypes_KindMismatch tests that when an op key collides with
 // an existing namespace node (e.g. "things" as namespace AND "things" as method),
-// the later-sorted one is skipped.
+// the later one (in input order) is skipped — both insertion orders.
 func TestEmitTypeScriptTypes_KindMismatch(t *testing.T) {
-	// "things" and "things.create": "things" as a standalone op collides with
-	// the "things" namespace node needed for "things.create".
+	mkOps := func() (method, nested swiftOp) {
+		method = swiftOp{operationID: "things", method: "GET", path: "/things"}
+		nested = swiftOp{operationID: "things.create", method: "POST", path: "/things/create",
+			input: &swiftSchema{kind: "object", props: []swiftProp{{name: "name", schema: swiftSchema{kind: "string"}, required: true}}}}
+		return
+	}
+
+	t.Run("method first — nested op skipped", func(t *testing.T) {
+		method, nested := mkOps()
+		out := emitTypeScript([]swiftOp{method, nested}, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+		must(t, out, `// codegen: skipped operation "things.create" (key collides with existing namespace/method)`)
+		must(t, out, "  things: { method: 'GET', path: '/things', input: 'none' },")
+	})
+
+	t.Run("nested first — method op skipped", func(t *testing.T) {
+		method, nested := mkOps()
+		out := emitTypeScript([]swiftOp{nested, method}, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+		must(t, out, `// codegen: skipped operation "things" (key collides with existing namespace/method)`)
+		must(t, out, "    create: { method: 'POST', path: '/things/create' },")
+	})
+}
+
+// TestEmitTypeScriptAugmentation_PathParamIdents locks that wire path-param
+// names are sanitized into valid TS parameter identifiers in the augmentation.
+// The names are purely positional — the runtime substitutes via the
+// descriptor's pathParams (which keep the WIRE names) — so renaming is safe.
+func TestEmitTypeScriptAugmentation_PathParamIdents(t *testing.T) {
 	ops := []swiftOp{
-		{operationID: "things", method: "GET", path: "/things"},
-		{operationID: "things.create", method: "POST", path: "/things/create", input: &swiftSchema{kind: "object", props: []swiftProp{{name: "name", schema: swiftSchema{kind: "string"}, required: true}}}},
+		{operationID: "users.posts", method: "GET", path: "/users/{user-id}/posts", pathParams: []string{"user-id"}},
+		{operationID: "keys.get", method: "GET", path: "/k/{delete}", pathParams: []string{"delete"}},
+		{operationID: "items.update", method: "POST", path: "/i/{input}", pathParams: []string{"input"},
+			input: &swiftSchema{kind: "object", props: []swiftProp{{name: "v", schema: swiftSchema{kind: "string"}, required: true}}}},
+		{operationID: "pairs.get", method: "GET", path: "/p/{id}/{id}", pathParams: []string{"id", "id"}},
 	}
 	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
-	// One of these must be skipped with a kind-mismatch comment.
-	hasMismatchComment := strings.Contains(out, `// codegen: skipped operation`) &&
-		strings.Contains(out, "key collides")
-	if !hasMismatchComment {
-		t.Errorf("expected kind-mismatch skip comment:\n%s", out)
+
+	// kebab-case wire name → camelCase identifier
+	must(t, out, "posts(userId: string, options?: CallOptions)")
+	if strings.Contains(out, "user-id: string") {
+		t.Errorf("raw kebab-case param name must not appear as a TS identifier:\n%s", out)
+	}
+	// TS reserved word escaped with trailing underscore
+	must(t, out, "get(delete_: string, options?: CallOptions)")
+	// collision with the fixed `input` arg name escaped; input arg itself unchanged
+	must(t, out, "update(input_: string, input: ItemsUpdateRequest, options?: CallOptions)")
+	// repeated names deduped positionally
+	must(t, out, "get(id: string, id2: string, options?: CallOptions)")
+	// registration keeps the WIRE names verbatim
+	must(t, out, "pathParams: ['user-id']")
+	must(t, out, "pathParams: ['delete']")
+	must(t, out, "pathParams: ['id', 'id']")
+}
+
+// TestEmitTypeScript_NonPrimitiveQuerySkipped locks that an op whose query
+// schema has a non-primitive prop (object/array/any — serializeQuery would
+// throw at runtime) is skipped loudly, while enum query params stay allowed.
+func TestEmitTypeScript_NonPrimitiveQuerySkipped(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "search.run", method: "GET", path: "/search",
+			query: &swiftSchema{kind: "object", props: []swiftProp{
+				{name: "filter", schema: swiftSchema{kind: "object", props: []swiftProp{{name: "x", schema: swiftSchema{kind: "string"}, required: true}}}, required: false},
+			}},
+			output: &swiftSchema{kind: "object", props: []swiftProp{{name: "hits", schema: swiftSchema{kind: "number"}, required: true}}}},
+		{operationID: "tags.list", method: "GET", path: "/tags",
+			query: &swiftSchema{kind: "object", props: []swiftProp{
+				{name: "kind", schema: swiftSchema{kind: "enum", enumVals: []string{"a", "b"}}, required: true},
+			}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	must(t, out, `// codegen: skipped operation "search.run" (non-primitive query parameter "filter")`)
+	// Skipped op emits NO types, registration entry, or augmentation method.
+	if strings.Contains(out, "SearchRun") {
+		t.Errorf("skipped op must not emit types:\n%s", out)
+	}
+	if strings.Contains(out, "run(") || strings.Contains(out, "path: '/search'") {
+		t.Errorf("skipped op must not register or augment:\n%s", out)
+	}
+	// Enum query props are primitive — the op survives with full typing.
+	must(t, out, "list: { method: 'GET', path: '/tags', input: 'query' },")
+	must(t, out, "kind: 'a' | 'b';")
+}
+
+// TestEmitTypeScript_SkippedOpsEmitNoTypes locks that type emission + the
+// type-name collision seen-set run over the REGISTRABLE set: an op skipped by
+// the nested-reserved filter must neither emit dead types nor squat its type
+// prefix against a later op with the same prefix.
+func TestEmitTypeScript_SkippedOpsEmitNoTypes(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "todos.then", method: "GET", path: "/todos/then",
+			output: &swiftSchema{kind: "object", props: []swiftProp{{name: "a", schema: swiftSchema{kind: "string"}, required: true}}}},
+		{operationID: "todosThen", method: "GET", path: "/todos-then",
+			output: &swiftSchema{kind: "object", props: []swiftProp{{name: "b", schema: swiftSchema{kind: "string"}, required: true}}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	must(t, out, `// codegen: skipped operation "todos.then" (reserved segment "then")`)
+	// The reserved-skipped op must NOT squat the TodosThen type prefix...
+	if strings.Contains(out, `// codegen: skipped type "TodosThen"`) {
+		t.Errorf("reserved-skipped op must not squat the type prefix:\n%s", out)
+	}
+	// ...nor leak its own types (prop `a` belongs only to the skipped op).
+	if strings.Contains(out, "a: string") {
+		t.Errorf("reserved-skipped op must not emit types:\n%s", out)
+	}
+	// The surviving todosThen op gets the prefix and full typing.
+	must(t, out, "b: string;")
+	must(t, out, "todosThen(options?: CallOptions): Promise<TodosThenResponse>;")
+}
+
+// TestEmitTypeScriptTypes_ProtoPropSkipped locks that a body property named
+// __proto__ is skipped with a loud comment inside the interface (JS object-
+// literal prototype foot-gun; JSON.stringify drops the key — wire-dead).
+func TestEmitTypeScriptTypes_ProtoPropSkipped(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "things.create", method: "POST", path: "/things",
+			input: &swiftSchema{kind: "object", props: []swiftProp{
+				{name: "__proto__", schema: swiftSchema{kind: "string"}, required: true},
+				{name: "ok", schema: swiftSchema{kind: "boolean"}, required: true},
+			}}},
+	}
+	out := emitTypeScript(ops, tsGeneratedConfig{URL: "https://x.example.com", APIKey: "k", Branch: "main"})
+
+	must(t, out, `  // codegen: skipped property "__proto__"`)
+	must(t, out, "ok: boolean;")
+	if strings.Contains(out, "__proto__:") {
+		t.Errorf("__proto__ must never be emitted as a property key:\n%s", out)
 	}
 }
 
