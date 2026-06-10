@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
@@ -97,6 +99,48 @@ func TestPush_PlatformMode_BuildsAndPostsTarball(t *testing.T) {
 	if !posted.hadTar {
 		t.Fatal("expected a tarball in the multipart post")
 	}
+}
+
+func TestPush_PrintsSuccess(t *testing.T) {
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	t.Run("platform mode prints deploy-started + deployment id", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "todoapp", DefaultEnv: "main", Mode: "platform"})
+		_ = os.WriteFile(filepath.Join(dir, "index.ts"), []byte("export const x=1"), 0o644)
+		_ = os.Chdir(dir)
+
+		rest := &fakeDeployClient{onPostMultipart: func(string, []byte, map[string]string) ([]byte, error) {
+			// the real deploy route wraps the payload in a {data:...} envelope
+			return []byte(`{"data":{"workflowId":"wf1","runId":"r1","deploymentId":"dep_42"},"request_id":"req_x"}`), nil
+		}}
+		var out bytes.Buffer
+		if err := runPush(pushDeps{git: func(string, ...string) error { return nil }, rest: rest, branch: "main", out: &out}); err != nil {
+			t.Fatalf("runPush: %v", err)
+		}
+		got := out.String()
+		if !strings.Contains(got, "✓ deploy started for todoapp") {
+			t.Fatalf("missing success line; got:\n%s", got)
+		}
+		if !strings.Contains(got, "dep_42") {
+			t.Fatalf("missing deployment id; got:\n%s", got)
+		}
+	})
+
+	t.Run("github mode prints pushed-to-github", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "r", DefaultEnv: "main", Mode: "github"})
+		_ = os.Chdir(dir)
+
+		var out bytes.Buffer
+		if err := runPush(pushDeps{git: func(string, ...string) error { return nil }, branch: "main", out: &out}); err != nil {
+			t.Fatalf("runPush: %v", err)
+		}
+		if !strings.Contains(out.String(), "✓ pushed to GitHub") {
+			t.Fatalf("missing github success line; got:\n%s", out.String())
+		}
+	})
 }
 
 type fakeDeployClient struct {

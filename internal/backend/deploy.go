@@ -2,7 +2,9 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -46,25 +48,37 @@ func resolveMode() (string, error) {
 }
 
 // pushDeps are the injected collaborators for runPush — the git runner
-// (github mode), the mgmt deploy client (platform mode), and the target
-// branch.
+// (github mode), the mgmt deploy client (platform mode), the target branch,
+// and the writer success output is reported to.
 type pushDeps struct {
 	git    gitRunner
 	rest   deployClient
 	branch string
+	out    io.Writer
 }
 
 // runPush routes `palbase push` by the linked project's mode:
 //   - github:   exec `git push` (orchestrator deploys via webhook).
 //   - platform: build a tarball of the cwd and POST it to the Management
 //     API deploy endpoint for the project.
+//
+// On success it prints a one-line confirmation so the command is never silent.
 func runPush(d pushDeps) error {
+	out := d.out
+	if out == nil {
+		out = os.Stdout
+	}
+
 	mode, err := resolveMode()
 	if err != nil {
 		return err
 	}
 	if mode == "github" {
-		return d.git("git", "push")
+		if err := d.git("git", "push"); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "✓ pushed to GitHub — deploy will run via webhook")
+		return nil
 	}
 
 	cfg, err := auth.LoadProjectConfig()
@@ -80,11 +94,35 @@ func runPush(d pushDeps) error {
 		return fmt.Errorf("package backend: %w", err)
 	}
 	path := fmt.Sprintf("/api/v1/projects/%s/deploy", cfg.Ref)
-	_, err = d.rest.PostMultipart(path, tarball, map[string]string{
+	body, err := d.rest.PostMultipart(path, tarball, map[string]string{
 		"branch":  d.branch,
 		"message": "deploy via cli",
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "✓ deploy started for %s (branch %s)\n", cfg.Ref, d.branch)
+	if id := deploymentIDFromResponse(body); id != "" {
+		fmt.Fprintf(out, "  deployment: %s\n", id)
+	}
+	fmt.Fprintf(out, "  track it:   palbase status\n")
+	return nil
+}
+
+// deploymentIDFromResponse extracts the deploymentId from the deploy endpoint's
+// `{ "data": { "deploymentId": ... }, "request_id": ... }` envelope. A parse
+// miss is non-fatal — the deploy already succeeded; we just skip the id line.
+func deploymentIDFromResponse(body []byte) string {
+	var env struct {
+		Data struct {
+			DeploymentID string `json:"deploymentId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return ""
+	}
+	return env.Data.DeploymentID
 }
 
 // cloneDeps are the injected collaborators for runClone — the git runner and
@@ -165,7 +203,7 @@ func newPushCmd(r Resolvers) *cobra.Command {
 		Use:   "push",
 		Short: "Deploy the current backend (github: git push; platform: tarball upload)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPush(pushDeps{git: execGit, rest: r.REST(), branch: branch})
+			return runPush(pushDeps{git: execGit, rest: r.REST(), branch: branch, out: cmd.OutOrStdout()})
 		},
 	}
 	cmd.Flags().StringVar(&branch, "branch", "main", "target branch")
