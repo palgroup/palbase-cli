@@ -48,3 +48,27 @@ func TestUnlinkProjectConfigIsIdempotent(t *testing.T) {
 		t.Fatalf("UnlinkProjectConfig on unlinked dir: %v", err)
 	}
 }
+
+func TestProjectConfig_ModeRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	want := &ProjectConfig{
+		Ref:        "todoappm8p6zm",
+		DefaultEnv: "main",
+		Mode:       "platform",
+		GithubRepo: "",
+	}
+	if err := SaveProjectConfigIn(dir, want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+
+	got, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Mode != "platform" {
+		t.Fatalf("mode = %q, want platform", got.Mode)
+	}
+}

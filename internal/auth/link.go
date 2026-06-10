@@ -17,6 +17,11 @@ import (
 type ProjectConfig struct {
 	Ref        string `json:"ref"`
 	DefaultEnv string `json:"default_env"`
+	// Mode is "platform" (GitHub-free, deploy via tarball) or "github"
+	// (deploy via git push → webhook). Empty defaults to "github" for
+	// backward compatibility with pre-existing linked projects.
+	Mode       string `json:"mode,omitempty"`
+	GithubRepo string `json:"github_repo,omitempty"`
 }
 
 // Project represents a project as the Studio tRPC layer returns it.
