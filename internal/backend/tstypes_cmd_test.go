@@ -19,21 +19,28 @@ import (
 	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
-// localTSSpecServer binds the fixed local-codegen port (4003) and serves the
-// shared TS OpenAPI fixture, so the `--env auto` probe takes the LOCAL path.
-// Skips the test when a real `palbase serve` already holds the port.
-func localTSSpecServer(t *testing.T) {
+// local4003Server binds the fixed local-codegen port (4003) with the given
+// handler, standing in for a local `palbase serve`. Skips the test when a
+// real serve already holds the port. Base for the local-path rigs below.
+func local4003Server(t *testing.T, handler http.Handler) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:4003")
 	if err != nil {
 		t.Skipf("localhost:4003 unavailable (%v) — skipping local-spec path test", err)
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(tsFixtureOpenAPI))
-	})}
+	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
+}
+
+// localTSSpecServer serves the shared TS OpenAPI fixture on 4003, so the
+// `--env auto` probe takes the LOCAL path.
+func localTSSpecServer(t *testing.T) {
+	t.Helper()
+	local4003Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(tsFixtureOpenAPI))
+	}))
 }
 
 // require4003Free skips the test when something already listens on the fixed
@@ -198,6 +205,94 @@ func TestTypesTS_SoftFlag(t *testing.T) {
 		cmd.SetArgs([]string{"--ref", "abc123"})
 		require.Error(t, cmd.Execute())
 	})
+}
+
+// deadStudioResolvers points the Studio client at a closed port so any remote
+// round-trip fails loudly — used by tests whose code path must never leave
+// the loopback.
+func deadStudioResolvers() Resolvers {
+	dead := studio.New("http://127.0.0.1:1", func(_ context.Context) (string, error) { return "tok", nil })
+	return Resolvers{
+		Studio:    func() *studio.Client { return dead },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
+	}
+}
+
+// TestTypesTS_ZeroOps_KeepsExistingFile pins the zero-op overwrite guard: a
+// live spec with 0 operations almost always means the backend's controller
+// metadata extraction broke (the "zero endpoints collected" failure class),
+// not that the app has no endpoints — it must NOT clobber a previously good
+// palbe.gen.ts. Warn + exit 0 so a predev hook doesn't fail the build.
+func TestTypesTS_ZeroOps_KeepsExistingFile(t *testing.T) {
+	localSpecServer(t) // empty spec (paths:{}) on 4003 → 0 operations
+	r := deadStudioResolvers()
+
+	outFile := filepath.Join(t.TempDir(), "palbe.gen.ts")
+	const previous = "// previously generated good client\n"
+	require.NoError(t, os.WriteFile(outFile, []byte(previous), 0o644))
+
+	var w strings.Builder
+	require.NoError(t, pullTSTypes(
+		context.Background(), r.Studio(), r.Endpoints(),
+		"abc123", "main", "local", outFile, &w,
+	), "zero-op keep must be a SUCCESS exit (predev hooks)")
+
+	body, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	require.Equal(t, previous, string(body), "existing palbe.gen.ts must not be overwritten by an empty client")
+	require.Contains(t, w.String(), "warning: live spec has 0 operations — keeping existing")
+	require.Contains(t, w.String(), "fix your controllers and rerun")
+	require.NotContains(t, w.String(), "✓ wrote")
+}
+
+// TestTypesTS_ZeroOps_NoExistingFile_WritesWithWarning pins the other half of
+// the guard: with nothing to protect, the (empty) client IS written — a fresh
+// project should still get a compilable module — but with a loud warning.
+func TestTypesTS_ZeroOps_NoExistingFile_WritesWithWarning(t *testing.T) {
+	localSpecServer(t) // empty spec (paths:{}) on 4003 → 0 operations
+	r := deadStudioResolvers()
+
+	outFile := filepath.Join(t.TempDir(), "palbe.gen.ts")
+	var w strings.Builder
+	require.NoError(t, pullTSTypes(
+		context.Background(), r.Studio(), r.Endpoints(),
+		"abc123", "main", "local", outFile, &w,
+	))
+
+	body, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "__configure(")
+	require.Contains(t, w.String(), "warning: live spec has 0 operations")
+	require.Contains(t, w.String(), "✓ wrote")
+}
+
+// TestTypesTS_AutoFallback_LocalHTTPError pins the fallback wording split: a
+// serve that ANSWERED with an HTTP error is a different situation from
+// nothing listening — the auto-fallback print must say "responded with an
+// error (HTTP <code>)" instead of the misleading "not found".
+func TestTypesTS_AutoFallback_LocalHTTPError(t *testing.T) {
+	local4003Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	rig := &tsTypesStudio{}
+	r := rig.resolvers(t)
+	restore := redirectHostTo(t, "erkut1230qe6um.dev.palbase.studio", rig.srvURL)
+	defer restore()
+
+	outFile := filepath.Join(t.TempDir(), "palbe.gen.ts")
+	var w strings.Builder
+	require.NoError(t, pullTSTypes(
+		context.Background(), r.Studio(), r.Endpoints(),
+		"erkut1230qe6u", "main", "auto", outFile, &w,
+	))
+
+	require.Contains(t, w.String(), "local serve responded with an error (HTTP 500)")
+	require.NotContains(t, w.String(), "local spec not found")
+
+	// And it still fell back to the deployed spec.
+	body, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "url: 'https://erkut1230qe6um.dev.palbase.studio'")
 }
 
 // TestTypesSwift_EnvAutoMapsToRemote pins the shared-flag migration: the --env

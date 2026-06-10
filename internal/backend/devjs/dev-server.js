@@ -153,6 +153,15 @@ function bundleSrcDir(srcDir, outDir) {
     '--platform=node',
     '--format=cjs',
     '--target=es2022',
+    // Preserve `class.name` through bundling — prod parity with the deploy
+    // bundler (modules/backend internal/deploy/bundler.go, same flag). The
+    // dotted operationId namespace derives from the live Ctrl.name; when a
+    // controller class and an imported service class share a name, esbuild's
+    // scope hoisting renames the controller's binding (TodosController →
+    // TodosController2), and without --keep-names the local spec would emit
+    // todosController2.create while the deployed pod emits todos.create. Not
+    // a tunable — a correctness requirement, always on.
+    '--keep-names',
     `--outdir=${outDir}`,
     `--outbase=${srcDir}`,
     `--resolve-extensions=${ESBUILD_RESOLVE_EXTENSIONS}`,

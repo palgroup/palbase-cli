@@ -113,6 +113,7 @@ type Resolvers struct {
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newMobileCmd(r),
+		newWebCmd(r),
 		newDevCmd(r),
 		newListCmd(r),
 		newRollbackCmd(r),
@@ -2315,6 +2316,9 @@ Spec source (--env):
   local   require the local 'palbase serve' (error when it is down)
   remote  always use the deployed backend (wake-aware fetch through Kong)
 
+The committed file embeds the spec source URL — if you develop against a
+local serve, regenerate with --env remote before a release build.
+
 --soft turns ANY failure into a 'warning: codegen skipped (...)' line and
 exit 0, so a predev/prebuild hook never blocks a machine without login or
 network access.
@@ -2489,7 +2493,15 @@ func pullTSTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 		case env == "local":
 			return fmt.Errorf("no local `palbase serve` at %s (%w) — start `palbase serve` or use --env remote", localURL, localErr)
 		default:
-			fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using the deployed spec — run `palbase serve` for local dev\n", localURL, localErr)
+			// Distinguish "serve ANSWERED with an error" (it is up — fix it,
+			// don't start it) from "nothing listening" before falling back to
+			// the deployed spec.
+			var hs httpStatusError
+			if errors.As(localErr, &hs) {
+				fmt.Fprintf(w, "local serve responded with an error (HTTP %d) at %s/openapi.json; using the deployed spec — fix `palbase serve` for local dev\n", hs.status, localURL)
+			} else {
+				fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using the deployed spec — run `palbase serve` for local dev\n", localURL, localErr)
+			}
 			useRemote = true
 		}
 	case "remote":
@@ -2519,6 +2531,21 @@ func pullTSTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 	ops, err := parseOpenAPIForSwift(specBytes)
 	if err != nil {
 		return err
+	}
+	// Zero-op overwrite guard. A live spec with 0 operations almost always
+	// means the backend's controller metadata extraction broke (the "zero
+	// endpoints collected" failure class — deploy reports success anyway),
+	// not that the app has no endpoints. Never clobber a previously good
+	// palbe.gen.ts with an empty client; warn and exit 0 so a predev hook
+	// doesn't fail the build. With nothing to protect, write the (empty)
+	// module anyway — a fresh project still gets a compilable file — but
+	// warn loudly.
+	if len(ops) == 0 {
+		if existing, readErr := os.ReadFile(outFile); readErr == nil && len(existing) > 0 {
+			fmt.Fprintf(w, "warning: live spec has 0 operations — keeping existing %s (fix your controllers and rerun)\n", outFile)
+			return nil
+		}
+		fmt.Fprintf(w, "warning: live spec has 0 operations — %s registers no calls (fix your controllers and rerun)\n", outFile)
 	}
 	tsOut := emitTypeScript(ops, cfg)
 	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
@@ -2749,6 +2776,18 @@ type wakeRetryable struct{ err error }
 func (w wakeRetryable) Error() string { return w.err.Error() }
 func (w wakeRetryable) Unwrap() error { return w.err }
 
+// httpStatusError marks a fetchOnce failure where the server ANSWERED with a
+// non-2xx status (excluding the wake-retryable 502/503), so callers can
+// distinguish "it is up but erroring" from "nothing listening" (connection
+// refused). pullTSTypes's auto-fallback wording depends on the split.
+type httpStatusError struct {
+	status int
+	err    error
+}
+
+func (e httpStatusError) Error() string { return e.err.Error() }
+func (e httpStatusError) Unwrap() error { return e.err }
+
 // fetchOnce does a single GET with its own timeout. The second return is a
 // parsed Retry-After (0 if absent/unparseable).
 func fetchOnce(ctx context.Context, specURL, apiKey string, timeout time.Duration) ([]byte, time.Duration, error) {
@@ -2784,7 +2823,10 @@ func fetchOnce(ctx context.Context, specURL, apiKey string, timeout time.Duratio
 			wakeRetryable{fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, 0, fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, string(body))
+		return nil, 0, httpStatusError{
+			status: resp.StatusCode,
+			err:    fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, string(body)),
+		}
 	}
 	return body, 0, nil
 }

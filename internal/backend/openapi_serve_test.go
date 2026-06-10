@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -643,6 +644,91 @@ export default class HealthController {
 	health := getJSONUntilReady(t, ctx, port, "/health")
 	if health["status"] != "ok" {
 		t.Fatalf("GET /health = %v, want {status:ok}", health)
+	}
+}
+
+// TestServeDottedIdSurvivesBundleNameCollision pins the --keep-names
+// requirement on the dev-server's esbuild bundling (prod parity — the deploy
+// bundler carries it as a correctness flag): when a controller class and a
+// transitively-imported service class share a NAME, esbuild's scope hoisting
+// renames the controller's binding (ClashController → ClashController2).
+// Without --keep-names the live Ctrl.name is the RENAMED identifier and the
+// dotted operationId silently becomes clashController2.status locally while
+// the deployed pod emits clash.status — codegen output would differ between
+// serve and prod. --keep-names preserves `class.name`, so local spec == prod.
+func TestServeDottedIdSurvivesBundleNameCollision(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+
+	root := t.TempDir()
+	mustWrite(t, root, "tsconfig.json", `{ "compilerOptions": { "experimentalDecorators": true, "target": "es2022", "module": "esnext" } }`)
+
+	// A service class with the SAME name as the controller class — the bundle
+	// scope collision that triggers esbuild's rename.
+	mustWrite(t, root, "services/clash.service.ts", `
+export class ClashController {
+  tag(): string { return "service"; }
+}
+`)
+	mustWrite(t, root, "models/clash/status.ts", `
+import { z } from "@palbase/backend";
+
+export const ClashStatus = z.object({ tag: z.string() });
+export type ClashStatus = z.infer<typeof ClashStatus>;
+`)
+	mustWrite(t, root, "controllers/clash.controller.ts", `
+import { Controller, Get } from "@palbase/backend";
+import { ClashController as ServiceClash } from "../services/clash.service";
+import { ClashStatus } from "../models/clash/status";
+
+@Controller("/clash", { auth: false })
+export default class ClashController {
+  @Get("")
+  status(): ClashStatus {
+    return { tag: new ServiceClash().tag() };
+  }
+}
+`)
+
+	writeBackendStub(t, root)
+
+	port := startDevServer(t, root)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	spec := fetchSpecUntilReady(t, ctx, port)
+	paths, _ := spec["paths"].(map[string]any)
+	op := operationAt(t, paths, "/clash", "get")
+	if op["operationId"] != "clash.status" {
+		t.Fatalf("operationId = %v, want clash.status — a bundle class-name collision leaked the renamed identifier into the dotted id (is --keep-names on bundleSrcDir?)", op["operationId"])
+	}
+}
+
+// TestBundleSrcDirKeepsNames is the always-running twin of
+// TestServeDottedIdSurvivesBundleNameCollision (which needs node + esbuild +
+// a resolvable typescript and skips otherwise): the embedded dev-server's
+// bundleSrcDir esbuild invocation MUST carry --keep-names — prod parity with
+// the deploy bundler, whose bundler_test pins the same flag on its args. The
+// dotted operationId namespace derives from the live Ctrl.name, which only
+// survives esbuild scope-hoisting renames under --keep-names.
+func TestBundleSrcDirKeepsNames(t *testing.T) {
+	src, err := devServerFS.ReadFile("devjs/dev-server.js")
+	if err != nil {
+		t.Fatalf("read embedded dev-server.js: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "function bundleSrcDir")
+	if start < 0 {
+		t.Fatal("bundleSrcDir not found in embedded dev-server.js")
+	}
+	fn := body[start:]
+	if end := strings.Index(fn, "\nfunction "); end >= 0 {
+		fn = fn[:end]
+	}
+	if !strings.Contains(fn, "'--keep-names'") {
+		t.Fatal("bundleSrcDir esbuild args must include --keep-names (dotted-id parity: Ctrl.name must survive bundle scope-hoisting renames)")
 	}
 }
 
