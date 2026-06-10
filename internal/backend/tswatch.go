@@ -3,22 +3,21 @@ package backend
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
-// emitAndWriteTS parses specBytes and writes the TypeScript client to outFile.
-// Returns (nOps, err). The zero-op guard is NOT applied here — the caller
-// decides what to do with 0 ops (pullTSTypes and watchTSLoop have different
-// policies). The caller is responsible for creating parent directories.
-func emitAndWriteTS(specBytes []byte, cfg tsGeneratedConfig, outFile string) (int, error) {
-	ops, err := parseOpenAPIForSwift(specBytes)
-	if err != nil {
-		return 0, err
-	}
+// emitAndWriteTS emits the TypeScript client for already-parsed ops and writes
+// it to outFile. Returns (nOps, err). The zero-op guard is NOT applied here —
+// the caller decides what to do with 0 ops (pullTSTypes and watchTSLoop have
+// different policies). Parent directories are created as needed.
+func emitAndWriteTS(ops []swiftOp, cfg tsGeneratedConfig, outFile string) (int, error) {
 	if dir := filepath.Dir(outFile); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return 0, fmt.Errorf("mkdir %s: %w", dir, err)
@@ -35,16 +34,33 @@ func emitAndWriteTS(specBytes []byte, cfg tsGeneratedConfig, outFile string) (in
 // It should return the raw spec bytes (as fetchLocalOpenAPISpec does) or an error.
 type fetchFuncType func(ctx context.Context, url string) ([]byte, error)
 
+// watchSignalContext wraps the watch context with SIGINT/SIGTERM cancellation
+// (mirrors `palbase serve`'s signal.NotifyContext) so a real Ctrl-C cancels
+// the loop's ctx → clean "watch stopped" exit 0, instead of a hard kill that
+// could truncate palbe.gen.ts mid-WriteFile and leak the ticker goroutine.
+// Package-level var as a test seam: delivering a real SIGINT in a test is
+// hazardous (a mistimed signal kills the test runner), so tests stub this to
+// assert the dispatch wraps with it and drive cancellation through the
+// returned ctx — the loop's ctx-cancel path itself is covered by
+// TestWatchTSLoop_Cancellation.
+var watchSignalContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+}
+
 // runTypesWatch is the watch-mode entry point called from newTypesCmd.
 // It performs the initial generation (via pullTSTypes), then enters watchTSLoop
 // with a real 1-second ticker and fetchLocalOpenAPISpec as the fetch function.
 //
 // Initial failure policy:
-//   - Hard error (softFlag=false): if pullTSTypes fails, return the error and
-//     do NOT start the watch loop.
+//   - Hard error (softFlag=false, env != "local"): if pullTSTypes fails,
+//     return the error and do NOT start the watch loop.
 //   - Soft mode (softFlag=true): if pullTSTypes fails, print the soft warning
 //     and CONTINUE into the watch loop — the whole point is to wait for
 //     `palbase serve` to come up.
+//   - env="local": an initial failure is ALWAYS treated as soft. --env local's
+//     only failure mode is the local serve being down/erroring, and the watch
+//     loop exists precisely to wait for it (matches the --watch help text:
+//     "--watch handles the case where serve is not yet up").
 func runTypesWatch(
 	ctx context.Context,
 	r Resolvers,
@@ -52,9 +68,13 @@ func runTypesWatch(
 	softFlag bool,
 	w io.Writer,
 ) error {
+	if env == "remote" {
+		fmt.Fprintln(w, "note: --watch follows the local `palbase serve` — after the initial remote generation, spec changes on :4003 rewrite the file with the localhost config")
+	}
+
 	// Initial generation.
 	if err := pullTSTypes(ctx, r.Studio(), r.Endpoints(), ref, branch, env, outFile, w); err != nil {
-		if !softFlag {
+		if !softFlag && env != "local" {
 			return err
 		}
 		fmt.Fprintf(w, "warning: codegen skipped (%v)\n", err)
@@ -105,11 +125,18 @@ func runTypesWatch(
 //
 // It polls localSpecURL (always http://localhost:4003/openapi.json) using the
 // injected fetchFn. On each tick:
-//   - If fetch fails: print "waiting for palbase serve on :4003…" ONCE per
-//     down-transition (suppress repeated prints while serve stays down).
-//   - If fetch succeeds: SHA-256 the body; if the hash differs from the last
-//     EMITTED hash → run emitAndWriteTS + print regenerated message.
-//     Zero-op guard: if 0 ops and existing file → keep + warn once per occurrence.
+//   - Fetch fails: print a down message ONCE per transition — "waiting for
+//     palbase serve on :4003…" when nothing is listening, or "local serve
+//     responded with an error (HTTP n)" when serve answered with an error
+//     (mirrors pullTSTypes' httpStatusError wording split). The message is
+//     reprinted only when it CHANGES (up→down, or refused↔HTTP-error).
+//   - Fetch succeeds: SHA-256 the body. Hash equals the last EMITTED hash →
+//     no change, skip. Hash equals the last WARNED-bad hash → the same broken
+//     body, stay silent (no re-parse, no warn-spam every tick). Otherwise
+//     parse + emit + write. A bad body (unparseable, or 0 ops with an
+//     existing file to protect) warns once and records its hash; a DIFFERENT
+//     bad body is a new occurrence and warns again. A successful emit resets
+//     the bad-hash state, so the same bad body reappearing later warns anew.
 //
 // Hash state starts EMPTY intentionally: the first successful local fetch
 // always regenerates. This is correct because the initial pullTSTypes call
@@ -129,8 +156,10 @@ func watchTSLoop(
 	w io.Writer,
 ) error {
 	var lastEmittedHash [32]byte
-	var hashSet bool  // true once we have emitted at least once
-	serveWasDown := false
+	var hashSet bool // true once we have emitted at least once
+	var lastBadHash [32]byte
+	var badHashSet bool // true while the last warned-about bad body stands
+	lastDownMsg := ""   // last printed down message; "" = serve was up
 
 	for {
 		select {
@@ -147,45 +176,53 @@ func watchTSLoop(
 
 		specBytes, err := fetchFn(ctx, localSpecURL)
 		if err != nil {
-			if !serveWasDown {
-				fmt.Fprintln(w, "waiting for palbase serve on :4003…")
-				serveWasDown = true
+			msg := "waiting for palbase serve on :4003…"
+			var hs httpStatusError
+			if errors.As(err, &hs) {
+				msg = fmt.Sprintf("local serve responded with an error (HTTP %d) — fix `palbase serve`", hs.status)
+			}
+			if msg != lastDownMsg {
+				fmt.Fprintln(w, msg)
+				lastDownMsg = msg
 			}
 			continue
 		}
 
 		// Serve is (back) up.
-		serveWasDown = false
+		lastDownMsg = ""
 
 		h := sha256.Sum256(specBytes)
 		if hashSet && h == lastEmittedHash {
-			// No change — skip.
-			continue
+			continue // no change since the last emit
+		}
+		if badHashSet && h == lastBadHash {
+			continue // same bad body we already warned about — stay silent
 		}
 
-		// Parse and apply zero-op guard.
 		ops, err := parseOpenAPIForSwift(specBytes)
 		if err != nil {
 			fmt.Fprintf(w, "warning: failed to parse spec: %v\n", err)
+			lastBadHash, badHashSet = h, true
 			continue
 		}
 		if len(ops) == 0 {
 			if existing, readErr := os.ReadFile(outFile); readErr == nil && len(existing) > 0 {
 				fmt.Fprintf(w, "warning: live spec has 0 operations — keeping existing %s (fix your controllers and rerun)\n", outFile)
-				// Do NOT update lastEmittedHash — let it retry next tick.
+				lastBadHash, badHashSet = h, true
 				continue
 			}
 		}
 
-		// Write the file.
-		nOps, err := emitAndWriteTS(specBytes, cfg, outFile)
+		nOps, err := emitAndWriteTS(ops, cfg, outFile)
 		if err != nil {
+			// Environmental write failure (disk) — not spec-dependent, so do
+			// not record a bad hash; the next tick retries.
 			fmt.Fprintf(w, "warning: codegen error: %v\n", err)
 			continue
 		}
 
-		lastEmittedHash = h
-		hashSet = true
+		lastEmittedHash, hashSet = h, true
+		badHashSet = false // a good emit resets the warn-dedup state
 		fmt.Fprintf(w, "regenerated %s (%d operations)\n", outFile, nOps)
 	}
 }

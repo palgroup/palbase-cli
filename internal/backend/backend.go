@@ -2375,7 +2375,12 @@ build phase for automatic regeneration on every build:
 						outFile = "palbe.gen.ts"
 					}
 					if watchFlag {
-						return runTypesWatch(cmd.Context(), r, ref, branch, envFlag, outFile, softFlag, out)
+						// SIGINT/SIGTERM cancel the watch ctx (serve's pattern)
+						// so Ctrl-C exits the loop cleanly — "watch stopped",
+						// exit 0, no mid-write truncation of palbe.gen.ts.
+						wctx, stop := watchSignalContext(cmd.Context())
+						defer stop()
+						return runTypesWatch(wctx, r, ref, branch, envFlag, outFile, softFlag, out)
 					}
 					return pullTSTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, envFlag, outFile, out)
 				default:
@@ -2561,7 +2566,7 @@ func pullTSTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoi
 		}
 		fmt.Fprintf(w, "warning: live spec has 0 operations — %s registers no calls (fix your controllers and rerun)\n", outFile)
 	}
-	nOps, writeErr := emitAndWriteTS(specBytes, cfg, outFile)
+	nOps, writeErr := emitAndWriteTS(ops, cfg, outFile)
 	if writeErr != nil {
 		return writeErr
 	}
