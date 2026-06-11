@@ -81,8 +81,8 @@ func emitTypeScript(ops []swiftOp, cfg tsGeneratedConfig) string {
 
 	// Imports. `BackendError` is referenced only by emitted error classes;
 	// `CallOptions` only by augmentation method signatures. When neither is
-	// used, the whole `import type ... from 'palbe'` line is omitted — the
-	// runtime import from 'palbe/internal' always stays.
+	// used, the whole `import type ... from '@palbase/web'` line is omitted — the
+	// runtime import from '@palbase/web/internal' always stays.
 	var typeImports []string
 	if classCount > 0 {
 		typeImports = append(typeImports, "BackendError")
@@ -91,9 +91,9 @@ func emitTypeScript(ops []swiftOp, cfg tsGeneratedConfig) string {
 		typeImports = append(typeImports, "CallOptions")
 	}
 	if len(typeImports) > 0 {
-		b.WriteString("import type { " + strings.Join(typeImports, ", ") + " } from 'palbe';\n")
+		b.WriteString("import type { " + strings.Join(typeImports, ", ") + " } from '@palbase/web';\n")
 	}
-	b.WriteString("import { __configure, __registerNamespaces } from 'palbe/internal';\n\n")
+	b.WriteString("import { __configure, __registerNamespaces } from '@palbase/web/internal';\n\n")
 
 	// __configure.
 	b.WriteString(emitTSConfigure(cfg))
@@ -777,14 +777,14 @@ func renderTSStringArray(ss []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// --- Augmentation (declare module 'palbe') ----------------------------------
+// --- Augmentation (declare module '@palbase/web') ---------------------------
 
-// emitTSAugmentation renders the `declare module 'palbe' { interface PB { ... } }`
+// emitTSAugmentation renders the `declare module '@palbase/web' { interface PB { ... } }`
 // block, mirroring the registration trie shape with typed method signatures.
 // Ops arrive pre-filtered (same set as emitTSRegistration).
 func emitTSAugmentation(ops []swiftOp) string {
 	var b strings.Builder
-	b.WriteString("declare module 'palbe' {\n")
+	b.WriteString("declare module '@palbase/web' {\n")
 	b.WriteString("  interface PB {\n")
 	renderTSAugNode(&b, buildTSTrie(ops), 4)
 	b.WriteString("  }\n")
