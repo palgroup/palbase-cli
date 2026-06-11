@@ -44,17 +44,18 @@ type swiftOp struct {
 	output      *swiftSchema
 	headers     *swiftSchema    // declared request headers (parameters[in:header]) → <Op>Headers struct
 	query       *swiftSchema    // declared query params (parameters[in:query]) → <Op>Query struct
-	errors      []swiftErrorDef // declared errors via defineEndpoint({ errors: { … } })
+	errors      []swiftErrorDef // inferred errors via the `x-palbase-errors` extension (stage-time throw analysis)
 }
 
-// swiftErrorDef describes one declared error from an endpoint's
-// `x-palbase-errors` OpenAPI extension. The friendly TS-side `name` is
-// the iOS enum case identifier; the wire `code` is what the envelope
-// carries and what `TypedBackendError.init(envelope:)` matches on.
-// `data`, when present, is the JSON schema for the structured payload
-// the typed enum case lifts as an associated value.
+// swiftErrorDef describes one inferred error from an endpoint's
+// `x-palbase-errors` OpenAPI extension. The lowerCamel error-class
+// `name` is the iOS enum case identifier; the wire `code` is what the
+// envelope carries and what the generated `GeneratedFailure.init(_
+// backend:)` matches against `ServerFailure.code`. `data`, when
+// present, is the JSON schema for the structured payload the typed
+// enum case lifts as an associated value.
 type swiftErrorDef struct {
-	name        string       // TS-side key (e.g. "todoLocked") — becomes the Swift case identifier
+	name        string       // lowerCamel class name (e.g. "todoLocked") — becomes the Swift case identifier
 	code        string       // wire `error` value (e.g. "todo_locked") — matched at decode time
 	status      int          // HTTP status — kept for doc-comments and quick-help
 	description string       // optional human description
@@ -106,12 +107,16 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 }
 
 // declaredErrors reads the `x-palbase-errors` OpenAPI extension the
-// backend SDK stashes on each operation when `defineEndpoint({errors:…})`
-// is set. Returns nil when the endpoint has no declared errors — that
-// flips the emit path back to plain `_invoke` (no `<Endpoint>.Error` enum,
-// the wire envelope surfaces as `BackendError.server` on iOS).
+// backend runtime stashes on each operation. In the @palbase/backend
+// 6.x class-controller model the error set is INFERRED from the
+// endpoint's throw sites (controller/service `throw new NotFound()` /
+// defineError classes, collected by stage-time throw analysis) — never
+// declared by hand. Returns nil when no errors were inferred; the op
+// still gets a `.other(BackendError)`-only GeneratedFailure enum, so
+// the emit path is uniform across all operations.
 //
-// The extension shape mirrors palbase-ts/backend/src/openapi/convert.ts:
+// The extension shape (wire format v1, emitted identically by the prod
+// generator, the dev-server, and palbase-ts's spec twin):
 //
 //	"x-palbase-errors": {
 //	  "todoNotFound": { "status": 404, "code": "todo_not_found", "hasData": false, "description": "..." },
