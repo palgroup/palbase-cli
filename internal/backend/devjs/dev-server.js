@@ -109,6 +109,16 @@ const ESBUILD_RESOLVE_EXTENSIONS = '.ts,.tsx,.js,.jsx,.json';
 // binding (the @Returns replacement). Required — a missing/disallowed return
 // type is a HARD error here, exactly as on deploy.
 const returnTypes = require('./return_types.js');
+// Shared throw-site analyzer — VERBATIM-identical to the deploy copy
+// (modules/backend/internal/runtime/throw_analysis.js), the same parity rule
+// as return_types.js: serve and deploy must infer identical error sets.
+const throwAnalysis = require('./throw_analysis.js');
+
+// The named SDK classes' canonical wire codes — ad-hoc `throw new NotFound()`
+// is always allowed and never trips the conformance guard (worker.js twin).
+const GUARD_BUILTIN_CODES = new Set([
+  'bad_request', 'unauthorized', 'forbidden', 'not_found', 'conflict', 'too_many_requests',
+]);
 
 // stageControllersWithReturnBindings copies controllers/*.ts into a staging dir,
 // appending each file's return-type schema injection, and returns the staging
@@ -127,7 +137,20 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
     // imports still resolve from the staging tree.
     if (/\.controller\.(c?ts|tsx)$/i.test(path.basename(file))) {
       const src = fs.readFileSync(file, 'utf8');
-      fs.writeFileSync(dest, returnTypes.injectReturnBindings(src, rel));
+      let out = returnTypes.injectReturnBindings(src, rel);
+      // Throw inference runs AFTER return bindings, against the controller's
+      // REAL path so `../services` / `../models` imports resolve in the real
+      // project tree (mirrors the deploy stager). Only the defineError
+      // non-literal violation can throw (surfaced loudly like a return-type
+      // violation — serve == deploy).
+      out = throwAnalysis.injectThrowBindings(out, file, {
+        readFile: (p) => {
+          try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
+        },
+        fileExists: (p) => fs.existsSync(p),
+        projectRoot: PROJECT_ROOT,
+      });
+      fs.writeFileSync(dest, out);
     } else {
       fs.copyFileSync(file, dest);
     }
@@ -1276,7 +1299,38 @@ function buildRouteMeta(route) {
     paramsSchema: paramsSchemaFromRoute(route),
     headersSchema: headersParam && headersParam.schema ? zodToJSON(headersParam.schema) : null,
     outputSchema: route.returnSchema ? zodToJSON(route.returnSchema) : null,
+    throws: resolveRouteThrows(route),
   };
+}
+
+// resolveRouteThrows joins the route's inferred throw descriptors (stamped by
+// the staged recordThrows IIFEs) with the SDK error registry — by CODE, the
+// single source of truth for status/data schema. Unknown codes are skipped
+// silently and a stale SDK (no getErrorRegistry) degrades to no errors,
+// exactly like extract_meta.js on the deploy side.
+function resolveRouteThrows(route) {
+  if (!Array.isArray(route.throws) || route.throws.length === 0) return [];
+  let sdk;
+  try {
+    sdk = runtimeModule();
+  } catch {
+    return [];
+  }
+  if (!sdk || typeof sdk.getErrorRegistry !== 'function') return [];
+  const registry = sdk.getErrorRegistry();
+  const out = [];
+  for (const t of route.throws) {
+    if (!t || typeof t.code !== 'string' || typeof t.name !== 'string') continue;
+    const reg = registry.get(t.code);
+    if (!reg) continue;
+    const entry = { name: t.name, code: t.code, status: reg.status, hasData: Boolean(reg.dataSchema) };
+    if (reg.dataSchema) {
+      const js = zodToJSON(reg.dataSchema);
+      if (js) entry.dataJsonSchema = js;
+    }
+    out.push(entry);
+  }
+  return out;
 }
 
 // buildOperation assembles one OpenAPI operation object with keys inserted in
@@ -1337,10 +1391,20 @@ function buildOperation(meta) {
   if (meta.authRequired) {
     responseEntries.push(['401', { description: 'Unauthorized' }]);
   }
+  // Typed-error responses are pushed AFTER the static placeholders so a typed
+  // envelope on the same status OVERWRITES the generic one (the Map below is
+  // last-wins) — generator.go's exact rule.
+  for (const [status, response] of errorResponseEntries(meta.throws || [])) {
+    responseEntries.push([status, response]);
+  }
 
-  // x-rate-limit extension (generator.go's only operation extension now that
-  // errors are global throw classes).
   const extensions = {};
+  // x-palbase-errors (wire format v1 — swiftgen's declaredErrors parses
+  // exactly this; byte-shape twin of generator.go errorsExtension).
+  if (meta.throws && meta.throws.length > 0) {
+    extensions['x-palbase-errors'] = errorsExtension(meta.throws);
+  }
+  // x-rate-limit extension (generator.go's other operation extension).
   if (meta.rateLimit) {
     extensions['x-rate-limit'] = { max: meta.rateLimit.max, window: meta.rateLimit.window };
   }
@@ -1363,6 +1427,84 @@ function buildOperation(meta) {
 // keys: lexicographically as strings ("200" < "400" < "401" < "404" < "409").
 function compareStatus(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// errorsExtension — byte-shape twin of generator.go errorsExtension. Key =
+// lowerCamel(class name); when several errors share a class name ALL of them
+// disambiguate as "<name>_<code>" (order-independent). Keys emitted sorted
+// (Go marshals map keys sorted).
+function errorsExtension(throws) {
+  const nameCount = new Map();
+  for (const t of throws) {
+    const k = lowerCamelName(t.name);
+    nameCount.set(k, (nameCount.get(k) || 0) + 1);
+  }
+  const entries = [];
+  for (const t of throws) {
+    let key = lowerCamelName(t.name);
+    if (nameCount.get(key) > 1) key = key + '_' + t.code;
+    entries.push([key, {
+      // Go marshals map[string]any with sorted keys: code, description,
+      // hasData, status.
+      code: t.code,
+      description: '',
+      hasData: t.hasData,
+      status: t.status,
+    }]);
+  }
+  entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const out = {};
+  for (const [k, v] of entries) out[k] = v;
+  return out;
+}
+
+// errorResponseEntries — byte-shape twin of generator.go errorResponses:
+// group by status, sort each group by code, single → bare envelope schema,
+// multiple → oneOf (variants in code order), description "Error: a | b".
+function errorResponseEntries(throws) {
+  const byStatus = new Map();
+  for (const t of throws) {
+    const key = String(t.status);
+    if (!byStatus.has(key)) byStatus.set(key, []);
+    byStatus.get(key).push(t);
+  }
+  const out = [];
+  for (const [status, group] of byStatus) {
+    group.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+    const schema = group.length === 1
+      ? errorEnvelopeSchema(group[0])
+      : { oneOf: group.map(errorEnvelopeSchema) };
+    out.push([status, {
+      // Alphabetical key order (content, description) — Go struct marshal.
+      content: { 'application/json': { schema } },
+      description: 'Error: ' + group.map((t) => t.code).join(' | '),
+    }]);
+  }
+  return out;
+}
+
+// errorEnvelopeSchema — twin of generator.go errorEnvelopeSchema. Properties
+// inserted in Go's sorted-map order: data?, error, error_description,
+// request_id, status; top level: properties, required, type.
+function errorEnvelopeSchema(t) {
+  const props = {};
+  if (t.hasData && t.dataJsonSchema) props.data = t.dataJsonSchema;
+  props.error = { const: t.code };
+  props.error_description = { type: 'string' };
+  props.request_id = { type: 'string' };
+  props.status = { type: 'integer' };
+  return {
+    properties: props,
+    required: ['error', 'error_description', 'status'],
+    type: 'object',
+  };
+}
+
+// lowerCamelName — twin of generator.go lowerCamel ("TodoLocked" →
+// "todoLocked", "NotFound" → "notFound").
+function lowerCamelName(name) {
+  if (!name) return name;
+  return name.charAt(0).toLowerCase() + name.slice(1);
 }
 
 // sortOperationKeys re-emits an operation's TOP-LEVEL keys alphabetically,
@@ -1801,6 +1943,23 @@ const server = http.createServer(async (req, res) => {
     // surface the status + envelope verbatim. Match by SHAPE, not name —
     // mirroring worker.js's catch path exactly.
     if (err instanceof Error && typeof err.status === 'number' && typeof err.error === 'string') {
+      // Typed-errors conformance guard (mirrors worker.js byte-for-byte): an
+      // analyzed route (throws meta present, EMPTY INCLUDED) throwing a code
+      // that is neither inferred nor a built-in means the throw site was
+      // statically invisible — say so loudly at first occurrence. The
+      // response envelope is untouched.
+      if (Array.isArray(liveRoute.throws)
+        && !liveRoute.throws.some((t) => t && t.code === err.error)
+        && !GUARD_BUILTIN_CODES.has(err.error)) {
+        // The live class NAME (worker.js twin prints TodosController, not the
+        // lowered namespace).
+        const ctrl = (instance && instance.constructor && instance.constructor.name)
+          || (route.controllerName && String(route.controllerName)) || 'Controller';
+        console.error(
+          `[palbase] ${ctrl}.${liveRoute.fnName} threw "${err.error}" — statically invisible throw site; ` +
+          'make the throw resolvable (direct throw / singleton service method) so typed clients see it',
+        );
+      }
       const envelope = {
         error: err.error,
         error_description: err.errorDescription || err.message || 'request failed',

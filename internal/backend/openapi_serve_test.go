@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -67,7 +68,7 @@ const fakeZod = `{ _def: { typeName: 'ZodObject' }, safeParse: (v) => ({ success
 //   - a @Body route has requestBody.content.application/json.schema
 //   - a @Query route emits in:query parameters; a @Param route emits in:path
 //   - the full route path is basePath + subpath (controller composition)
-//   - errors are global throw classes → NO x-palbase-errors / declared statuses
+//   - a route without throws meta → NO x-palbase-errors / declared statuses
 //   - operationIds are DOTTED `<controllerName>.<fnName>` (TodosController →
 //     todos.create), with the flat verb-prefixed derivation as the fallback
 //     when the class name lowers to "" — matching the prod generator.go +
@@ -242,12 +243,14 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if rbJSON == nil || rbJSON["schema"] == nil {
 		t.Fatalf("requestBody.content.application/json.schema missing: %v", reqBody)
 	}
-	// Errors are global throw classes now: NO declared 409 + NO x-palbase-errors.
+	// No inferred throws meta on this route → NO declared 409 + NO
+	// x-palbase-errors (typed errors are emitted only for routes carrying
+	// recordThrows metadata — see TestServeOpenAPISpec_TypedErrors).
 	if resps["409"] != nil {
-		t.Fatalf("unexpected declared error 409 (errors are global throw classes): %v", resps)
+		t.Fatalf("unexpected declared error 409 (route has no throws meta): %v", resps)
 	}
 	if createOp["x-palbase-errors"] != nil {
-		t.Fatalf("x-palbase-errors must NOT be emitted (errors are global throw classes)")
+		t.Fatalf("x-palbase-errors must NOT be emitted for a route without throws meta")
 	}
 
 	// explicit auth:false (via @Controller defaultAuth:false cascading to the
@@ -1067,4 +1070,207 @@ func mustWrite(t *testing.T, root, rel, body string) {
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writePalbaseBackendStub installs a minimal @palbase/backend with ONLY
+// getErrorRegistry — the dev-server's typed-error join surface. getRoutes is
+// deliberately absent so route loading exercises the raw-symbol fallback the
+// fixtures stamp. The registry carries one defineError-style entry (with a
+// fake zod dataSchema the zod-to-json-schema stub converts) and one built-in.
+func writePalbaseBackendStub(t *testing.T, root string) {
+	t.Helper()
+	mustWrite(t, root, "node_modules/@palbase/backend/package.json",
+		`{"name":"@palbase/backend","version":"0.0.0-test","main":"index.js"}`)
+	mustWrite(t, root, "node_modules/@palbase/backend/index.js", `
+'use strict';
+const registry = new Map();
+registry.set('room_locked', {
+  code: 'room_locked', status: 409, className: 'RoomLocked', builtin: false,
+  dataSchema: { _def: { typeName: 'ZodObject' } },
+});
+registry.set('not_found', { code: 'not_found', status: 404, className: 'NotFound', builtin: true });
+module.exports = {
+  getErrorRegistry: () => registry,
+  // dispatch installs the runtime clients into the SDK on first request —
+  // a no-op here (the typed-errors test only exercises spec + guard).
+  __setRuntime: () => {},
+};
+`)
+}
+
+// TestServeOpenAPISpec_TypedErrors locks the dev-server's typed-error spec
+// twin against the prod generator.go byte-shape: a route carrying recordThrows
+// metadata emits x-palbase-errors (v1) + per-status envelope responses; an
+// unknown code is skipped silently; an analyzed-EMPTY route emits nothing.
+func TestServeOpenAPISpec_TypedErrors(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+
+	root := t.TempDir()
+	seedEsbuild(t, root)
+
+	// rooms controller: create carries inferred throws (one defineError'd code
+	// with data, one built-in, one GHOST code absent from the registry → must
+	// be skipped silently). list is analyzed-empty (throws: []) → guard armed
+	// at runtime but NO spec surface.
+	mustWrite(t, root, "controllers/rooms.controller.js", controllerFixture(
+		"RoomsController",
+		`{ __palbase: 'controller', basePath: '/rooms', defaultAuth: false }`,
+		`[
+      { method: 'POST', subpath: '/create', fnName: 'create', options: {}, params: [],
+        throws: [
+          { name: 'RoomLocked', code: 'room_locked' },
+          { name: 'NotFound', code: 'not_found' },
+          { name: 'Ghost', code: 'ghost_code' },
+        ] },
+      { method: 'GET', subpath: '/list', fnName: 'list', options: {}, params: [], throws: [] },
+      { method: 'POST', subpath: '/boom', fnName: 'boom', options: {}, params: [], throws: [] },
+      { method: 'POST', subpath: '/gone', fnName: 'gone', options: {}, params: [], throws: [] },
+    ]`,
+		`
+  async create() { return { ok: true }; }
+  async list() { return { rooms: [] }; }
+  async boom() { const e = new Error('whoops'); e.status = 409; e.error = 'mystery_code'; throw e; }
+  async gone() { const e = new Error('gone'); e.status = 404; e.error = 'not_found'; throw e; }`,
+		`{}`,
+	))
+
+	writeZodToJSONStub(t, root)
+	writePalbaseBackendStub(t, root)
+
+	devDir := t.TempDir()
+	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
+		t.Fatalf("extract dev server: %v", err)
+	}
+
+	port := freeTCPPort(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, nodeBin, filepath.Join(devDir, "dev-server.js"))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
+		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
+		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
+		"PALBASE_PROJECT_REF=local",
+	)
+	var serveErr syncBuffer
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = &serveErr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dev-server: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	spec := fetchSpecUntilReady(t, ctx, port)
+	paths, _ := spec["paths"].(map[string]any)
+	if paths == nil {
+		t.Fatalf("paths missing: %v", spec)
+	}
+
+	createOp := operationAt(t, paths, "/rooms/create", "post")
+
+	// x-palbase-errors — BYTE-shape lock vs generator.go (encoding/json sorts
+	// map keys, so re-marshaling the parsed map reproduces Go's exact bytes;
+	// the expected literal is copied from the prod generator_test golden form).
+	extJSON, err := json.Marshal(createOp["x-palbase-errors"])
+	if err != nil {
+		t.Fatalf("marshal extension: %v", err)
+	}
+	wantExt := `{"notFound":{"code":"not_found","description":"","hasData":false,"status":404},` +
+		`"roomLocked":{"code":"room_locked","description":"","hasData":true,"status":409}}`
+	if string(extJSON) != wantExt {
+		t.Fatalf("x-palbase-errors byte-shape drift\n got: %s\nwant: %s", extJSON, wantExt)
+	}
+
+	resps, _ := createOp["responses"].(map[string]any)
+	conflictJSON, err := json.Marshal(resps["409"])
+	if err != nil {
+		t.Fatalf("marshal 409: %v", err)
+	}
+	// The data schema is the zod-to-json-schema STUB's fixed output.
+	want409 := `{"content":{"application/json":{"schema":` +
+		`{"properties":{` +
+		`"data":{"properties":{"title":{"type":"string"}},"required":["title"],"type":"object"},` +
+		`"error":{"const":"room_locked"},` +
+		`"error_description":{"type":"string"},` +
+		`"request_id":{"type":"string"},` +
+		`"status":{"type":"integer"}},` +
+		`"required":["error","error_description","status"],"type":"object"}}},` +
+		`"description":"Error: room_locked"}`
+	if string(conflictJSON) != want409 {
+		t.Fatalf("409 envelope byte-shape drift\n got: %s\nwant: %s", conflictJSON, want409)
+	}
+	if resps["404"] == nil {
+		t.Fatalf("built-in not_found must emit a 404 response: %v", resps)
+	}
+	// Ghost code skipped: exactly 2 extension keys (asserted by wantExt) and
+	// no response for a status the registry never produced beyond 404/409/200/400.
+
+	// Analyzed-empty route: no extension, no declared statuses.
+	listOp := operationAt(t, paths, "/rooms/list", "get")
+	if listOp["x-palbase-errors"] != nil {
+		t.Fatalf("analyzed-empty route must NOT emit x-palbase-errors: %v", listOp)
+	}
+	listResps, _ := listOp["responses"].(map[string]any)
+	if listResps["409"] != nil || listResps["404"] != nil {
+		t.Fatalf("analyzed-empty route must NOT declare error statuses: %v", listResps)
+	}
+
+	// Conformance guard (worker.js twin): an analyzed route (EMPTY set) that
+	// throws an unlisted code goes RED on the serve console; a built-in code
+	// stays silent. The envelope must be untouched either way.
+	boomResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/rooms/boom", port), "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("POST /rooms/boom: %v\nserve stderr:\n%s", err, serveErr.String())
+	}
+	boomBody, _ := io.ReadAll(boomResp.Body)
+	boomResp.Body.Close()
+	if boomResp.StatusCode != 409 || !strings.Contains(string(boomBody), `"error":"mystery_code"`) {
+		t.Fatalf("guard must not change the envelope: %d %s", boomResp.StatusCode, boomBody)
+	}
+	goneResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/rooms/gone", port), "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("POST /rooms/gone: %v", err)
+	}
+	goneResp.Body.Close()
+
+	wantGuard := `[palbase] RoomsController.boom threw "mystery_code" — statically invisible throw site; ` +
+		`make the throw resolvable (direct throw / singleton service method) so typed clients see it`
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(serveErr.String(), wantGuard) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	stderrText := serveErr.String()
+	if !strings.Contains(stderrText, wantGuard) {
+		t.Fatalf("serve console missing the guard line\nwant: %s\nstderr:\n%s", wantGuard, stderrText)
+	}
+	if strings.Contains(stderrText, `threw "not_found"`) {
+		t.Fatalf("guard must stay SILENT for built-in codes\nstderr:\n%s", stderrText)
+	}
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer safe for the exec stderr pipe
+// writing concurrently with the test's polling reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

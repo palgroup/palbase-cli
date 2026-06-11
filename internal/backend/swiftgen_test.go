@@ -17,9 +17,18 @@ const fixtureOpenAPI = `{
       "requestBody":{"content":{"application/json":{"schema":{"type":"object",
         "properties":{"name":{"type":"string"},"capacity":{"type":"integer"},"kind":{"type":"string","enum":["public","private"]}},
         "required":["name","kind"]}}}},
-      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
-        "properties":{"id":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"score":{"type":"number","nullable":true}},
-        "required":["id","tags","score"]}}}}}}},
+      "responses":{
+        "200":{"content":{"application/json":{"schema":{"type":"object",
+          "properties":{"id":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"score":{"type":"number","nullable":true}},
+          "required":["id","tags","score"]}}}},
+        "409":{"content":{"application/json":{"schema":{"type":"object",
+          "properties":{"error":{"type":"string","const":"room_locked"},"data":{"type":"object","properties":{"retry_after":{"type":"integer"}},"required":["retry_after"]}},
+          "required":["error","data"]}}}}
+      },
+      "x-palbase-errors":{
+        "roomLocked":{"status":409,"code":"room_locked","hasData":true,"description":"Room is locked"},
+        "roomFull":{"status":423,"code":"room_full","hasData":false,"description":"Room is full"}
+      }}},
     "/rooms/id/get":{"post":{"operationId":"rooms.id.get",
       "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}},
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}}}}},
@@ -82,9 +91,13 @@ func TestEmitSwift(t *testing.T) {
 		"public nonisolated struct RoomsIdGetResponse: Codable, Sendable {",
 		// Call signature references the flat top-level names. rooms.create
 		// declares headers, so the method gains a `headers:` parameter and
-		// the seam call forwards `headers.asHeaderDict()`.
-		"func create(_ input: RoomsCreateRequest, headers: RoomsCreateHeaders) async throws(BackendError) -> RoomsCreateResponse",
-		`_invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, headers: headers.asHeaderDict())`,
+		// the seam call forwards `headers.asHeaderDict()`. Every op now
+		// throws ITS OWN GeneratedFailure enum (typed throws) and lowers
+		// to plain `_invoke` wrapped in the enum-mapping do/catch.
+		"func create(_ input: RoomsCreateRequest, headers: RoomsCreateHeaders) async throws(RoomsCreateError) -> RoomsCreateResponse",
+		`do { return try await _pb._invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, headers: headers.asHeaderDict()) }`,
+		"catch let e as BackendError { throw RoomsCreateError(e) }",
+		"catch { throw RoomsCreateError(.transport(TransportFailure(message: String(describing: error)))) }",
 		// <Op>Headers struct: required header non-optional, optional one
 		// String?, wire names preserved via CodingKeys, asHeaderDict()
 		// flattens to [String:String] (required direct, optional if-let).
@@ -125,14 +138,14 @@ func TestEmitSwift(t *testing.T) {
 		// percent-encoding interpolation of that arg (the `{id}` is no longer
 		// emitted literally). Body-bearing ops put path params FIRST, then
 		// the input. No-body ops (get/delete) take just the path param.
-		"func get(id: String) async throws(BackendError) -> TodosGetResponse",
+		"func get(id: String) async throws(TodosGetError) -> TodosGetResponse",
 		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self)`,
-		"func delete(id: String) async throws(BackendError) {",
-		`_invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)")`,
-		"func update(id: String, _ input: TodosUpdateRequest) async throws(BackendError) -> TodosUpdateResponse",
+		"func delete(id: String) async throws(TodosDeleteError) {",
+		`do { try await _pb._invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)") }`,
+		"func update(id: String, _ input: TodosUpdateRequest) async throws(TodosUpdateError) -> TodosUpdateResponse",
 		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", input, as: TodosUpdateResponse.self)`,
 		// Multiple path params → both as args in path order, both interpolated.
-		"func get(orgId: String, userId: String) async throws(BackendError) -> OrgsMembersGetResponse",
+		"func get(orgId: String, userId: String) async throws(OrgsMembersGetError) -> OrgsMembersGetResponse",
 		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? userId)"`,
 		// Gap 2 — ARRAY-OF-OBJECT RESPONSE. `GET /todos` emits a NAMED item
 		// struct (Codable+Sendable, snake_case→camelCase) and the response is
@@ -148,7 +161,7 @@ func TestEmitSwift(t *testing.T) {
 		"public let q: String",     // required query param
 		"public let limit: Int?",   // optional query param
 		"public func asQueryString() -> String {",
-		"func run(query: SearchRunQuery) async throws(BackendError) -> SearchRunResponse",
+		"func run(query: SearchRunQuery) async throws(SearchRunError) -> SearchRunResponse",
 		`_invoke(method: "GET", path: "/search" + query.asQueryString(), as: SearchRunResponse.self)`,
 		// The shared percent-encoding helper DEFINITION must be emitted —
 		// the path/query use-sites above reference .pbURIComponentAllowed,
@@ -159,6 +172,68 @@ func TestEmitSwift(t *testing.T) {
 	for _, m := range must {
 		if !strings.Contains(out, m) {
 			t.Errorf("generated Swift missing: %q\n---\n%s", m, out)
+		}
+	}
+
+	// Typed-throws error enums (golden blocks, exact). EVERY operation gets a
+	// GeneratedFailure enum — even with zero declared errors — so the wrapper's
+	// `throws(<Op>Error)` always names a concrete type. Ops WITH x-palbase-errors
+	// additionally get payload structs + cases + a code-switch init that maps
+	// `ServerFailure.code` and tolerantly decodes the payload (decode miss →
+	// `.other(backend)`, never a trap). Case order is sorted by case name.
+	goldenBlocks := []string{
+		// (a) no-errors op → `.other`-only enum with a one-line init.
+		`public nonisolated enum TodosGetError: GeneratedFailure {
+    case other(BackendError)
+    public nonisolated init(_ backend: BackendError) { self = .other(backend) }
+}`,
+		// (b) with-errors op → payload struct + bare/data cases + code-switch init.
+		`public nonisolated enum RoomsCreateError: GeneratedFailure {
+    public nonisolated struct RoomLockedData: Codable, Sendable {
+        public let retryAfter: Int
+        public init(retryAfter: Int) {
+            self.retryAfter = retryAfter
+        }
+    }
+    case roomFull
+    case roomLocked(RoomLockedData)
+    case other(BackendError)
+    public nonisolated init(_ backend: BackendError) {
+        guard case .server(let f) = backend else { self = .other(backend); return }
+        switch f.code {
+        case "room_full": self = .roomFull
+        case "room_locked":
+            if let data = f.decodeData(RoomLockedData.self) { self = .roomLocked(data) } else { self = .other(backend) }
+        default: self = .other(backend)
+        }
+    }
+}`,
+		// Wrapper lowering (exact): typed throws + do/catch mapping. The init
+		// is pure mapping — no hook calls in generated code (the SDK fires
+		// onError once at _invokeCore).
+		`    public func get(id: String) async throws(TodosGetError) -> TodosGetResponse {
+        do { return try await _pb._invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self) }
+        catch let e as BackendError { throw TodosGetError(e) }
+        catch { throw TodosGetError(.transport(TransportFailure(message: String(describing: error)))) }
+    }`,
+	}
+	for _, g := range goldenBlocks {
+		if !strings.Contains(out, g) {
+			t.Errorf("generated Swift missing golden block:\n%s\n---\n%s", g, out)
+		}
+	}
+
+	// One GeneratedFailure enum per emitted op (10 usable ops in the fixture;
+	// auth.login is reserved-skipped).
+	if n := strings.Count(out, ": GeneratedFailure {"); n != 10 {
+		t.Errorf("expected 10 GeneratedFailure enums (one per op), got %d\n---\n%s", n, out)
+	}
+
+	// The OLD typed surface is deleted in the SDK — generated code must not
+	// reference any of it, and no op may fall back to `throws(BackendError)`.
+	for _, banned := range []string{"_invokeTyped", "TypedBackendError", "init?(envelope:", ", errors: ", "throws(BackendError)"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("generated Swift references removed surface %q\n---\n%s", banned, out)
 		}
 	}
 
@@ -304,5 +379,37 @@ func TestStructLines_MixedCaseVariants(t *testing.T) {
 	// Exactly three surviving stored properties (one collision removed).
 	if n := strings.Count(out, "public let "); n != 3 {
 		t.Errorf("expected 3 stored properties, got %d\n---\n%s", n, out)
+	}
+}
+
+// TestTopLevelErrorEnumLines_OtherIdentReserved guards the new `.other`
+// fallback case: every GeneratedFailure enum ends with `case
+// other(BackendError)`, so a declared error whose name sanitizes to `other`
+// (or to a previous case's ident) would emit an uncompilable redeclaration.
+// Such a case is skipped with a visible comment — the wire code still
+// surfaces at runtime through `.other(backend)`.
+func TestTopLevelErrorEnumLines_OtherIdentReserved(t *testing.T) {
+	errs := []swiftErrorDef{
+		{name: "notFound", code: "not_found", status: 404},
+		{name: "other", code: "weird_other", status: 409},
+	}
+	out := strings.Join(topLevelErrorEnumLines("RoomsCreateError", errs), "\n")
+
+	if n := strings.Count(out, "case other(BackendError)"); n != 1 {
+		t.Errorf("expected exactly 1 `case other(BackendError)`, got %d\n---\n%s", n, out)
+	}
+	if !strings.Contains(out, "case notFound") {
+		t.Errorf("surviving declared case notFound missing\n---\n%s", out)
+	}
+	if !strings.Contains(out, `case "not_found": self = .notFound`) {
+		t.Errorf("switch mapping for surviving code missing\n---\n%s", out)
+	}
+	// The colliding declared error is dropped visibly, and its code must NOT
+	// appear in the switch (it would map onto the fallback case's ident).
+	if !strings.Contains(out, "skipped declared error") {
+		t.Errorf("expected a visible skip comment for the `other` collision\n---\n%s", out)
+	}
+	if strings.Contains(out, `"weird_other"`) {
+		t.Errorf("dropped error's code leaked into the switch\n---\n%s", out)
 	}
 }

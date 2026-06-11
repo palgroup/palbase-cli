@@ -67,7 +67,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // internal/runtime/module-clients.js). Both files must land in the temp
 // dir so the relative resolve works.
 //
-//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js
+//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js
 var devServerFS embed.FS
 
 // REST is the subset of the Management-API transport the mode-aware deploy
