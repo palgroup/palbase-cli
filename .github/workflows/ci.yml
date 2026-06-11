@@ -1,0 +1,52 @@
+name: cli ci
+
+# Build + vet + unit gate on every push to main and on PRs. Before this
+# workflow existed, the 43 test files only ran in the tag-triggered Release
+# workflow — pushes to main between releases ran nothing.
+#
+# The test invocation mirrors release.yml exactly (go test ./... -race
+# -count=1); the e2e suite under tests/e2e is gated by the `e2e` build tag
+# and needs a live dev stack, so it stays out of this gate by construction.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: build + vet + unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        # Same flags as the Release workflow's test gate. internal/backend
+        # tests exercise the local dev-server path via the runner's
+        # preinstalled Node (exec.LookPath("node")).
+        run: go test ./... -race -count=1
+
+      # golangci-lint: no released version supports go1.26 yet (same toolchain
+      # lag as palanalytics ci / palbase palmessaging-ci) — keep it reporting
+      # but non-blocking; go vet above is the enforced static gate.
+      # TODO: drop continue-on-error once a go1.26-compatible release ships.
+      - name: Lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
