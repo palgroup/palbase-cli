@@ -288,6 +288,54 @@ function resolveThrownNew(ctx, fileInfo, newExpr, out) {
 // ---------------------------------------------------------------------------
 
 // classMethod finds a (static or instance) method body on a class declaration.
+// classProperty finds a non-static property declaration by name on a class.
+function classProperty(tsapi, classNode, name) {
+  for (const m of classNode.members) {
+    if (!tsapi.isPropertyDeclaration(m)) continue;
+    if (!m.name || !tsapi.isIdentifier(m.name) || m.name.text !== name) continue;
+    const isStatic = (m.modifiers || []).some((x) => x.kind === tsapi.SyntaxKind.StaticKeyword);
+    if (isStatic) continue;
+    return m;
+  }
+  return null;
+}
+
+// resolveInstanceMethodFromInit resolves `<init>.<methodName>` where <init> is
+// a service-instance initializer expression: `new SvcClass(...)` directly, or
+// an identifier that (through imports / one var hop) reaches the singleton
+// (`export const todoService = new TodoService()`). Returns a walk target or
+// null.
+function resolveInstanceMethodFromInit(ctx, fileInfo, init, methodName, hop = 0) {
+  const tsapi = loadTS();
+  if (!init || hop > MAX_DEPTH) return null;
+  if (tsapi.isNewExpression(init) && tsapi.isIdentifier(init.expression)) {
+    const clsBinding = resolveBinding(ctx, fileInfo, init.expression.text, 0);
+    if (!clsBinding || clsBinding.kind !== 'class') return null;
+    const m = classMethod(tsapi, clsBinding.node, methodName, /* static */ false);
+    if (!m) return null;
+    const clsName = clsBinding.node.name ? clsBinding.node.name.text : '<anon>';
+    return {
+      file: clsBinding.file,
+      body: m.body,
+      classNode: clsBinding.node,
+      key: `${clsBinding.file.path}#${clsName}.${methodName}`,
+    };
+  }
+  if (tsapi.isIdentifier(init)) {
+    const binding = resolveBinding(ctx, fileInfo, init.text, 0);
+    if (!binding) return null;
+    if (binding.kind === 'var') {
+      return resolveInstanceMethodFromInit(ctx, binding.file, binding.node, methodName, hop + 1);
+    }
+    if (binding.kind === 'class') {
+      // `private todos = TodoService` (class object itself) — instance call
+      // through a class REFERENCE is not the singleton idiom; skip.
+      return null;
+    }
+  }
+  return null;
+}
+
 function classMethod(tsapi, classNode, methodName, wantStatic) {
   for (const m of classNode.members) {
     if (!tsapi.isMethodDeclaration(m) || !m.body) continue;
@@ -337,6 +385,22 @@ function resolveCallTarget(ctx, fileInfo, classNode, callExpr) {
       };
     }
 
+    // this.<prop>.m(...) — class property holding a service instance
+    // (`private todos = todoService;` / `private svc = new SvcClass();`) —
+    // the documented thin-controller idiom. Resolve through the PROPERTY
+    // DECLARATION's initializer.
+    if (
+      tsapi.isPropertyAccessExpression(callee.expression) &&
+      callee.expression.expression.kind === tsapi.SyntaxKind.ThisKeyword &&
+      tsapi.isIdentifier(callee.expression.name)
+    ) {
+      if (!classNode) return null;
+      const propName = callee.expression.name.text;
+      const prop = classProperty(tsapi, classNode, propName);
+      if (!prop || !prop.initializer) return null;
+      return resolveInstanceMethodFromInit(ctx, fileInfo, prop.initializer, methodName);
+    }
+
     if (!tsapi.isIdentifier(callee.expression)) return null; // a.b.c(...) → skip
     const objName = callee.expression.text;
     const binding = resolveBinding(ctx, fileInfo, objName, 0);
@@ -357,19 +421,7 @@ function resolveCallTarget(ctx, fileInfo, classNode, callExpr) {
 
     // svc.method(...) where svc = new SvcClass(...) (the singleton idiom).
     if (binding.kind === 'var') {
-      const init = binding.node;
-      if (!init || !loadTS().isNewExpression(init) || !tsapi.isIdentifier(init.expression)) return null;
-      const clsBinding = resolveBinding(ctx, binding.file, init.expression.text, 0);
-      if (!clsBinding || clsBinding.kind !== 'class') return null;
-      const m = classMethod(tsapi, clsBinding.node, methodName, /* static */ false);
-      if (!m) return null;
-      const clsName = clsBinding.node.name ? clsBinding.node.name.text : '<anon>';
-      return {
-        file: clsBinding.file,
-        body: m.body,
-        classNode: clsBinding.node,
-        key: `${clsBinding.file.path}#${clsName}.${methodName}`,
-      };
+      return resolveInstanceMethodFromInit(ctx, binding.file, binding.node, methodName);
     }
   }
 
