@@ -96,8 +96,7 @@ func TestEmitSwift(t *testing.T) {
 		// to plain `_invoke` wrapped in the enum-mapping do/catch.
 		"func create(_ input: RoomsCreateRequest, headers: RoomsCreateHeaders) async throws(RoomsCreateError) -> RoomsCreateResponse",
 		`do { return try await _pb._invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, headers: headers.asHeaderDict()) }`,
-		"catch let e as BackendError { throw RoomsCreateError(e) }",
-		"catch { throw RoomsCreateError(.transport(TransportFailure(message: String(describing: error)))) }",
+		"catch { throw RoomsCreateError(error) }",
 		// <Op>Headers struct: required header non-optional, optional one
 		// String?, wire names preserved via CodingKeys, asHeaderDict()
 		// flattens to [String:String] (required direct, optional if-let).
@@ -213,8 +212,7 @@ func TestEmitSwift(t *testing.T) {
 		// onError once at _invokeCore).
 		`    public func get(id: String) async throws(TodosGetError) -> TodosGetResponse {
         do { return try await _pb._invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self) }
-        catch let e as BackendError { throw TodosGetError(e) }
-        catch { throw TodosGetError(.transport(TransportFailure(message: String(describing: error)))) }
+        catch { throw TodosGetError(error) }
     }`,
 	}
 	for _, g := range goldenBlocks {

@@ -882,10 +882,13 @@ func renderNSNode(node *nsNode) string {
 			if returns {
 				ret = "return "
 			}
+			// The SDK seam is typed (`_invoke ... throws(BackendError)`), so a
+			// single catch binds `error` AS BackendError directly — an
+			// `as BackendError` test would be statically always-true and emit
+			// a warning into every consumer build.
 			return []string{
 				indent(2) + "do { " + ret + "try await " + call + " }",
-				indent(2) + "catch let e as BackendError { throw " + errEnum + "(e) }",
-				indent(2) + "catch { throw " + errEnum + "(.transport(TransportFailure(message: String(describing: error)))) }",
+				indent(2) + "catch { throw " + errEnum + "(error) }",
 			}
 		}
 
