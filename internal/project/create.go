@@ -34,10 +34,31 @@ func createCmd(rest func() REST) *cobra.Command {
 		Use:   "create <ref>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Create a new project (async — poll `project status <ref>`)",
+		Long: `Create a new project. Provisioning is async: the command returns a
+workflow handle; poll progress with ` + "`palbase project status <ref>`" + `.
+
+GitHub is OPTIONAL. Two modes:
+
+  platform mode (default — no GitHub flags):
+      The platform manages your project's code; no GitHub repo is created.
+      Deploy from your working directory with the tarball flow:
+      ` + "`palbase push`" + ` (and sync with ` + "`palbase clone` / `palbase pull`" + `).
+
+  github mode (--github-account AND --repo):
+      A GitHub repo is created and linked; deploys trigger on ` + "`git push`" + `
+      via webhook.
+
+Pass both GitHub flags or neither — exactly one is an error.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := args[0]
 			if name == "" {
 				return fmt.Errorf("--name is required")
+			}
+			// GitHub mode needs both halves; the server contract rejects a
+			// lone field too. Catch it client-side with a clear message
+			// instead of silently degrading to platform mode.
+			if (githubAccount != "") != (repoName != "") {
+				return fmt.Errorf("use both --github-account and --repo for GitHub mode, or neither for platform mode")
 			}
 			// Ownership is the authenticated user (projects.owner_user_id); there
 			// is no org layer. The server derives the owner from the session.
@@ -47,6 +68,8 @@ func createCmd(rest func() REST) *cobra.Command {
 			}
 			// GitHub is optional. Both flags present → github mode (deploy via
 			// git push → webhook); absent → platform mode (deploy via tarball).
+			// In platform mode the github fields are OMITTED from the payload
+			// entirely (the server treats "both absent" as platform mode).
 			mode := "platform"
 			if githubAccount != "" && repoName != "" {
 				body["githubAccount"] = githubAccount

@@ -97,13 +97,13 @@ func TestCreate_NoGithub_SendsPlatformBodyAndWritesMode(t *testing.T) {
 	cmd.SetArgs([]string{"create", "todoapp", "--name", "Todo App", "--yes"})
 	require.NoError(t, cmd.Execute())
 
-	// No github flags → body must not carry github fields.
-	if v, ok := gotBody["githubAccount"]; ok && v != "" {
-		t.Fatalf("expected no githubAccount, got %v", v)
-	}
-	if v, ok := gotBody["repoName"]; ok && v != "" {
-		t.Fatalf("expected no repoName, got %v", v)
-	}
+	// No github flags → the keys must be ABSENT from the payload entirely
+	// (the server contract treats "both absent" as platform mode; an empty
+	// string would trip its exactly-one/shape validation).
+	_, hasAccount := gotBody["githubAccount"]
+	require.False(t, hasAccount, "platform-mode body must omit githubAccount entirely, got %v", gotBody["githubAccount"])
+	_, hasRepo := gotBody["repoName"]
+	require.False(t, hasRepo, "platform-mode body must omit repoName entirely, got %v", gotBody["repoName"])
 
 	cfg, err := auth.LoadProjectConfig()
 	require.NoError(t, err)
@@ -137,6 +137,89 @@ func TestCreate_WithGithub_SendsGithubBodyAndWritesMode(t *testing.T) {
 	require.Equal(t, "abcd1234", cfg.Ref)
 	require.Equal(t, "github", cfg.Mode)
 	require.Equal(t, "demo-repo", cfg.GithubRepo)
+}
+
+// TestCreate_GithubFlagMatrix locks the flag-combination contract:
+//   - neither flag  → platform mode, github keys ABSENT from the payload
+//   - both flags    → github mode, both keys present
+//   - exactly one   → client-side validation error, no request sent
+//
+// This mirrors the server contract (send NEITHER for platform mode, BOTH
+// for github mode, exactly one = validation error).
+func TestCreate_GithubFlagMatrix(t *testing.T) {
+	tests := []struct {
+		name        string
+		extraArgs   []string
+		wantErr     string // "" = expect success
+		wantAccount string // expected githubAccount value; "" = key must be absent
+		wantRepo    string // expected repoName value; "" = key must be absent
+	}{
+		{
+			name:      "neither flag → platform mode, keys omitted",
+			extraArgs: nil,
+		},
+		{
+			name:        "both flags → github mode, keys present",
+			extraArgs:   []string{"--github-account", "personal", "--repo", "demo-repo"},
+			wantAccount: "personal",
+			wantRepo:    "demo-repo",
+		},
+		{
+			name:      "only --github-account → error, no request",
+			extraArgs: []string{"--github-account", "personal"},
+			wantErr:   "use both --github-account and --repo for GitHub mode, or neither for platform mode",
+		},
+		{
+			name:      "only --repo → error, no request",
+			extraArgs: []string{"--repo", "demo-repo"},
+			wantErr:   "use both --github-account and --repo for GitHub mode, or neither for platform mode",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			requestSent := false
+			c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+				requestSent = true
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
+			})
+
+			dir := t.TempDir()
+			wd, _ := os.Getwd()
+			t.Cleanup(func() { _ = os.Chdir(wd) })
+			require.NoError(t, os.Chdir(dir))
+
+			cmd := Cmd(Resolvers{REST: func() REST { return c }})
+			args := append([]string{"create", "abcd1234", "--name", "Demo", "--yes"}, tt.extraArgs...)
+			cmd.SetArgs(args)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			err := cmd.Execute()
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+				require.False(t, requestSent, "half-specified github flags must fail before any request is sent")
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, requestSent)
+
+			gotAccount, hasAccount := gotBody["githubAccount"]
+			gotRepo, hasRepo := gotBody["repoName"]
+			if tt.wantAccount == "" {
+				require.False(t, hasAccount, "payload must omit githubAccount entirely, got %v", gotAccount)
+			} else {
+				require.Equal(t, tt.wantAccount, gotAccount)
+			}
+			if tt.wantRepo == "" {
+				require.False(t, hasRepo, "payload must omit repoName entirely, got %v", gotRepo)
+			} else {
+				require.Equal(t, tt.wantRepo, gotRepo)
+			}
+		})
+	}
 }
 
 func TestProjectStatus_REST(t *testing.T) {
