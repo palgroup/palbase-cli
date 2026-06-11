@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -81,9 +82,9 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if err != nil {
 		t.Skip("node not on PATH")
 	}
-	requireEsbuild(t)
 
 	root := t.TempDir()
+	seedEsbuild(t, root)
 
 	// todos controller: basePath "/todos".
 	//  - create: POST "/create" → full path /todos/create. auth required,
@@ -707,8 +708,8 @@ export default class ClashController {
 }
 
 // TestBundleSrcDirKeepsNames is the always-running twin of
-// TestServeDottedIdSurvivesBundleNameCollision (which needs node + esbuild +
-// a resolvable typescript and skips otherwise): the embedded dev-server's
+// TestServeDottedIdSurvivesBundleNameCollision (which needs a Node toolchain
+// and skips only without one): the embedded dev-server's
 // bundleSrcDir esbuild invocation MUST carry --keep-names — prod parity with
 // the deploy bundler, whose bundler_test pins the same flag on its args. The
 // dotted operationId namespace derives from the live Ctrl.name, which only
@@ -742,8 +743,16 @@ func startDevServer(t *testing.T, root string) int {
 	if err != nil {
 		t.Skip("node not on PATH")
 	}
-	requireEsbuild(t)
-	requireTypescript(t, root)
+	// Self-sufficient fixture: the return-type stager needs `typescript`, the
+	// bundler needs `esbuild` — seed BOTH into <root>/node_modules. Seeding only
+	// typescript left a node_modules without esbuild, which broke the
+	// dev-server's `npx --yes esbuild` resolution on hosts where npx wouldn't
+	// auto-install (npm treats the fixture as the local project and stops
+	// there) — and on hosts without a resolvable typescript the tests silently
+	// skipped. With both seeded, npx prefers the LOCAL bin: deterministic, no
+	// network, same production resolution path.
+	seedNodePkg(t, root, "typescript")
+	seedEsbuild(t, root)
 	devDir := t.TempDir()
 	if err := extractFS(devServerFS, "devjs", devDir); err != nil {
 		t.Fatalf("extract dev server: %v", err)
@@ -769,53 +778,117 @@ func startDevServer(t *testing.T, root string) int {
 	return port
 }
 
-// requireEsbuild skips the test when esbuild is not reachable via `npx --yes
-// esbuild` — the dev-server now bundles controllers/ + resources/ through it
-// (mirroring the deploy bundler), so a serve test cannot run without it. Kept
-// cheap: a single `--version` probe with a short timeout.
-func requireEsbuild(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skip("npx not on PATH (esbuild bundling unavailable)")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if err := exec.CommandContext(ctx, "npx", "--yes", "esbuild", "--version").Run(); err != nil {
-		t.Skipf("esbuild not reachable via npx (%v)", err)
-	}
-}
+// ── self-sufficient fixture deps (typescript + esbuild) ─────────────────────
+//
+// The dev-server needs two REAL npm packages at runtime: `typescript` (the
+// return-type stager parses controllers with it) and `esbuild` (controller
+// bundling via `npx --yes esbuild`). Both are seeded into the fixture's
+// node_modules so a serve test is hermetic and runs on ANY host with a Node
+// toolchain. (Seeding typescript alone created a fixture node_modules WITHOUT
+// esbuild — npm then treats the fixture as the local project and, on hosts
+// where npx doesn't fall through to an install, `npx esbuild` exits 127; on
+// hosts without a resolvable typescript the tests silently skipped. They were
+// host-dependent either way.)
+//
+// Per package, resolution order: the host's own install (Node's resolver from
+// the test's cwd), else a one-time `npm i --no-save` into a cached prefix
+// under os.TempDir() reused across runs. Only a genuinely missing toolchain
+// (no node / no npm) skips; an install failure FAILS the test — the host
+// claims the capability, so the error is actionable, not skippable.
 
-// requireTypescript guarantees the dev-server's return-type stager can
-// `require('typescript')` from the fixture's node_modules. The stager (shared
-// verbatim with the deploy extractor) parses each controller to derive its
-// success-response schema from the method's return type, so a serve run without
-// `typescript` resolvable registers 0 routes and the dispatch tests 404. We
-// resolve a typescript already present on the host (via Node's own resolver) and
-// symlink it into <root>/node_modules/typescript so the test exercises the REAL
-// stager. When no typescript is resolvable anywhere (a bare CI runner with no
-// project install), the test is an integration test that cannot run — skip it,
-// mirroring the node/esbuild guards above.
-func requireTypescript(t *testing.T, root string) {
+var (
+	testDepMu   sync.Mutex
+	testDepDirs = map[string]string{}
+)
+
+// hostNodePkgDir returns the package ROOT directory of an installed npm
+// package, resolving the host's own install first and falling back to the
+// cached test-dep prefix. Results are memoized for the test run.
+func hostNodePkgDir(t *testing.T, name string) string {
 	t.Helper()
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+	testDepMu.Lock()
+	defer testDepMu.Unlock()
+	if dir, ok := testDepDirs[name]; ok {
+		return dir
+	}
+	// 1) Host-resolvable install. Prefer <name>/package.json (gives the pkg
+	// root directly); when an exports map blocks that subpath, resolve the main
+	// entry and walk up to the directory holding package.json.
+	resolve := fmt.Sprintf(`
+const path = require('path'), fs = require('fs');
+let d;
+try { d = path.dirname(require.resolve(%[1]q + '/package.json')); }
+catch {
+  d = path.dirname(require.resolve(%[1]q));
+  while (!fs.existsSync(path.join(d, 'package.json'))) d = path.dirname(d);
+}
+process.stdout.write(d);`, name)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "node", "-e", "process.stdout.write(require.resolve('typescript'))").Output()
-	if err != nil || len(out) == 0 {
-		t.Skip("typescript not resolvable on host — serve stager needs it (integration-only)")
+	if out, err := exec.CommandContext(ctx, "node", "-e", resolve).Output(); err == nil && len(out) > 0 {
+		testDepDirs[name] = string(out)
+		return testDepDirs[name]
 	}
-	// require.resolve points at <pkg>/lib/typescript.js — the package dir is two
-	// levels up. Symlink that dir as <root>/node_modules/typescript so the
-	// dev-server (NODE_PATH=<root>/node_modules) resolves it.
-	pkgDir := filepath.Dir(filepath.Dir(string(out)))
-	dst := filepath.Join(root, "node_modules", "typescript")
+	// 2) Cached prefix install — downloads once per machine, reused across runs.
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
+	prefix := filepath.Join(os.TempDir(), "palbase-cli-testdeps", name)
+	pkgDir := filepath.Join(prefix, "node_modules", name)
+	if _, err := os.Stat(filepath.Join(pkgDir, "package.json")); err != nil {
+		ictx, icancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer icancel()
+		cmd := exec.CommandContext(ictx, "npm", "i", "--no-save", "--prefix", prefix, name)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("npm i %s into test-dep cache %s: %v\n%s", name, prefix, err, out)
+		}
+	}
+	testDepDirs[name] = pkgDir
+	return pkgDir
+}
+
+// seedNodePkg symlinks an installed npm package into <root>/node_modules/<name>
+// so the dev-server (cwd + NODE_PATH resolution) finds it. No-op when the
+// fixture already provides one (e.g. a stub written by the test).
+func seedNodePkg(t *testing.T, root, name string) string {
+	t.Helper()
+	dst := filepath.Join(root, "node_modules", name)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		t.Fatalf("mkdir node_modules: %v", err)
 	}
 	if _, err := os.Lstat(dst); err == nil {
-		return // already present (e.g. a stub written by the fixture)
+		return dst // already present (e.g. a stub written by the fixture)
 	}
-	if err := os.Symlink(pkgDir, dst); err != nil {
-		t.Skipf("cannot link typescript into fixture (%v)", err)
+	if err := os.Symlink(hostNodePkgDir(t, name), dst); err != nil {
+		t.Fatalf("link %s into fixture: %v", name, err)
+	}
+	return dst
+}
+
+// seedEsbuild seeds the real esbuild package AND a node_modules/.bin/esbuild
+// launcher into the fixture so the dev-server's `npx --yes esbuild` resolves
+// the LOCAL install — npx prefers a project-local bin: deterministic, no
+// network, and the production resolution path stays exercised. The .bin entry
+// points at the package's own bin/esbuild (the native binary after a normal
+// npm install, or the JS shim — both runnable); the platform package
+// (@esbuild/<os>-<arch>) resolves from the REAL package directory through the
+// symlink (Node realpaths it), so it needs no seeding of its own.
+func seedEsbuild(t *testing.T, root string) {
+	t.Helper()
+	pkg := seedNodePkg(t, root, "esbuild")
+	binDir := filepath.Join(root, "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir node_modules/.bin: %v", err)
+	}
+	dst := filepath.Join(binDir, "esbuild")
+	if _, err := os.Lstat(dst); err == nil {
+		return
+	}
+	if err := os.Symlink(filepath.Join(pkg, "bin", "esbuild"), dst); err != nil {
+		t.Fatalf("link esbuild bin into fixture: %v", err)
 	}
 }
 

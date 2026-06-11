@@ -130,6 +130,12 @@ func TestGenerateEnvTypes(t *testing.T) {
 
 	root := t.TempDir()
 
+	// Self-sufficient fixture: bundleSchemaTS shells out to `npx --yes esbuild`
+	// from the project root — seed esbuild locally so npx resolves the fixture's
+	// own bin (same trap as the serve tests: a fixture node_modules without
+	// esbuild makes npx resolution host-dependent).
+	seedEsbuild(t, root)
+
 	// The project's installed @palbase/backend (resolved via NODE_PATH).
 	mustWrite(t, root, "node_modules/@palbase/backend/package.json",
 		`{"name":"@palbase/backend","version":"0.0.0-test","main":"index.js"}`)
