@@ -138,14 +138,14 @@ func TestEmitSwift(t *testing.T) {
 		// emitted literally). Body-bearing ops put path params FIRST, then
 		// the input. No-body ops (get/delete) take just the path param.
 		"func get(id: String) async throws(TodosGetError) -> TodosGetResponse",
-		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self, failing: TodosGetError.self)`,
+		`_invoke(method: "GET", path: "/todos/\(id.pbURIComponentEncoded)", as: TodosGetResponse.self, failing: TodosGetError.self)`,
 		"func delete(id: String) async throws(TodosDeleteError) {",
-		`try await _pb._invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", failing: TodosDeleteError.self)`,
+		`try await _pb._invoke(method: "DELETE", path: "/todos/\(id.pbURIComponentEncoded)", failing: TodosDeleteError.self)`,
 		"func update(id: String, _ input: TodosUpdateRequest) async throws(TodosUpdateError) -> TodosUpdateResponse",
-		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", input, as: TodosUpdateResponse.self, failing: TodosUpdateError.self)`,
+		`_invoke(method: "PATCH", path: "/todos/\(id.pbURIComponentEncoded)", input, as: TodosUpdateResponse.self, failing: TodosUpdateError.self)`,
 		// Multiple path params → both as args in path order, both interpolated.
 		"func get(orgId: String, userId: String) async throws(OrgsMembersGetError) -> OrgsMembersGetResponse",
-		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? userId)"`,
+		`path: "/orgs/\(orgId.pbURIComponentEncoded)/members/\(userId.pbURIComponentEncoded)"`,
 		// Gap 2 — ARRAY-OF-OBJECT RESPONSE. `GET /todos` emits a NAMED item
 		// struct (Codable+Sendable, snake_case→camelCase) and the response is
 		// a typed `[Item]`, not an opaque `[AnyCodableValue]`.
@@ -166,7 +166,7 @@ func TestEmitSwift(t *testing.T) {
 		// the path/query use-sites above reference .pbURIComponentAllowed,
 		// so dropping the extension would leave dangling references that
 		// only surface at the customer's Swift compile.
-		"static let pbURIComponentAllowed = CharacterSet(",
+		
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
@@ -211,7 +211,7 @@ func TestEmitSwift(t *testing.T) {
 		// is pure mapping — no hook calls in generated code (the SDK fires
 		// onError once at _invokeCore).
 		`    public func get(id: String) async throws(TodosGetError) -> TodosGetResponse {
-        return try await _pb._invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self, failing: TodosGetError.self)
+        return try await _pb._invoke(method: "GET", path: "/todos/\(id.pbURIComponentEncoded)", as: TodosGetResponse.self, failing: TodosGetError.self)
     }`,
 	}
 	for _, g := range goldenBlocks {
@@ -228,7 +228,8 @@ func TestEmitSwift(t *testing.T) {
 
 	// The OLD typed surface is deleted in the SDK — generated code must not
 	// reference any of it, and no op may fall back to `throws(BackendError)`.
-	for _, banned := range []string{"_invokeTyped", "TypedBackendError", "init?(envelope:", ", errors: ", "throws(BackendError)"} {
+	for _, banned := range []string{"_invokeTyped",
+		"pbURIComponentAllowed", "TypedBackendError", "init?(envelope:", ", errors: ", "throws(BackendError)"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("generated Swift references removed surface %q\n---\n%s", banned, out)
 		}

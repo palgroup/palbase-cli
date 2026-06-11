@@ -102,20 +102,6 @@ func emitSwift(ops []swiftOp) string {
 	}
 	b.WriteString(emitNamespaceTree(usable))
 
-	// Shared percent-encoding helper — emitted once per generated file so
-	// both path interpolation and query string encoding use a single,
-	// consistent allowed-character set that matches JS encodeURIComponent:
-	// alphanumerics + `-_.!~*'()`. This is stricter than .urlPathAllowed
-	// (which passes '/') and .urlQueryAllowed (which passes '&', '=', '+'),
-	// giving wire parity with the web SDK's encodeURIComponent calls.
-	b.WriteString("\n// MARK: - Generated support\n\n")
-	b.WriteString("private extension CharacterSet {\n")
-	b.WriteString("    // encodeURIComponent-equivalent: alphanumerics + `-_.!~*'()`\n")
-	b.WriteString("    // nonisolated: app targets with MainActor default isolation would\n")
-	b.WriteString("    // otherwise isolate this static away from the request builders.\n")
-	b.WriteString("    nonisolated static let pbURIComponentAllowed = CharacterSet(\n")
-	b.WriteString("        charactersIn: \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()\")\n")
-	b.WriteString("}\n")
 
 	return b.String()
 }
@@ -270,7 +256,7 @@ func indent(d int) string { return strings.Repeat("    ", d) }
 //
 //	"/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)/notes/\(...)"
 //
-// `.pbURIComponentAllowed` is a generated helper matching JS encodeURIComponent
+// `.pbURIComponentEncoded` is the SDK's SPI helper matching JS encodeURIComponent
 // (alphanumerics + `-_.!~*'()`). This is stricter than `.urlPathAllowed` (which
 // leaves '/' unencoded, allowing an id containing '/' to split the route). The
 // `?? name` fallback can't fail in practice but keeps the expression non-optional.
@@ -289,7 +275,7 @@ func interpolatedPathLiteral(path string, params []string) string {
 		}
 		b.WriteString(escapeForSwiftLiteral(path[:idx]))
 		ident := identOf(name)
-		b.WriteString("\\(" + ident + ".addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? " + ident + ")")
+		b.WriteString("\\(" + ident + ".pbURIComponentEncoded)")
 		path = path[idx+len(token):]
 	}
 	b.WriteString(escapeForSwiftLiteral(path))
@@ -469,7 +455,7 @@ func queryStructLines(name string, s swiftSchema) []string {
 		}
 		// encExpr percent-encodes the rendered String for a query value.
 		encExpr := func(v string) string {
-			return "(" + v + ".addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? " + v + ")"
+			return v + ".pbURIComponentEncoded"
 		}
 		if optional {
 			rendered := rawExpr("v")
