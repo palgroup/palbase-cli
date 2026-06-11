@@ -111,7 +111,9 @@ func emitSwift(ops []swiftOp) string {
 	b.WriteString("\n// MARK: - Generated support\n\n")
 	b.WriteString("private extension CharacterSet {\n")
 	b.WriteString("    // encodeURIComponent-equivalent: alphanumerics + `-_.!~*'()`\n")
-	b.WriteString("    static let pbURIComponentAllowed = CharacterSet(\n")
+	b.WriteString("    // nonisolated: app targets with MainActor default isolation would\n")
+	b.WriteString("    // otherwise isolate this static away from the request builders.\n")
+	b.WriteString("    nonisolated static let pbURIComponentAllowed = CharacterSet(\n")
 	b.WriteString("        charactersIn: \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()\")\n")
 	b.WriteString("}\n")
 
@@ -793,7 +795,10 @@ func renderNSNode(node *nsNode) string {
 	if isRoot {
 		lines = append(lines, "public extension PalBackendClient {")
 	} else {
-		lines = append(lines, "public struct "+nsTypeName(node.path)+": Sendable {")
+		// nonisolated: app targets with MainActor default isolation would
+		// otherwise pin the namespace (and every call on it) to the main
+		// actor — pb.* must stay callable from any concurrency context.
+		lines = append(lines, "public nonisolated struct "+nsTypeName(node.path)+": Sendable {")
 		lines = append(lines, "    let _pb: PalBackendClient")
 	}
 	vis := "public "
@@ -813,7 +818,7 @@ func renderNSNode(node *nsNode) string {
 	for _, seg := range keys {
 		child := node.children[seg]
 		ct := nsTypeName(child.path)
-		lines = append(lines, indent(1)+vis+"var "+identOf(seg)+": "+ct+" { "+ct+"(_pb: "+pbRef+") }")
+		lines = append(lines, indent(1)+vis+"nonisolated var "+identOf(seg)+": "+ct+" { "+ct+"(_pb: "+pbRef+") }")
 	}
 
 	for _, op := range node.methods {
@@ -866,30 +871,20 @@ func renderNSNode(node *nsNode) string {
 		// no response → -> Void with no @discardableResult.
 		//
 		// Every method uses TYPED THROWS against its own GeneratedFailure
-		// enum: the body lowers to the SDK's untyped `_invoke` seam inside
-		// a `do`, maps any thrown BackendError through the enum's
-		// `init(_ backend:)`, and folds anything else (defensive — the
-		// seam only throws BackendError) into `.transport`. Inferred
-		// errors surface as typed cases; everything else as
-		// `.other(BackendError)`. The wrapper never fires the SDK's
-		// onError hook — the SDK fires it once at `_invokeCore`.
+		// enum and lowers to ONE forwarding line: the SDK's typed-failure
+		// seam (`_invoke(..., failing: <Op>Error.self)`, Palbe >= 0.9.1)
+		// owns the BackendError → enum mapping — no do/catch block ever
+		// appears in generated code. The seam fires the onError hook once
+		// at `_invokeCore`.
 		errEnum := errorEnumName(op.operationID)
 		throwsKw := "throws(" + errEnum + ")"
-		// wrapBody renders the three-line typed-throws wrapper body around
-		// the seam call expression (shared by all four shapes).
-		wrapBody := func(call string, returns bool) []string {
+		failingArg := ", failing: " + errEnum + ".self"
+		seamBody := func(call string, returns bool) []string {
 			ret := ""
 			if returns {
 				ret = "return "
 			}
-			// The SDK seam is typed (`_invoke ... throws(BackendError)`), so a
-			// single catch binds `error` AS BackendError directly — an
-			// `as BackendError` test would be statically always-true and emit
-			// a warning into every consumer build.
-			return []string{
-				indent(2) + "do { " + ret + "try await " + call + " }",
-				indent(2) + "catch { throw " + errEnum + "(error) }",
-			}
+			return []string{indent(2) + ret + "try await " + call}
 		}
 
 		// Declared headers add a `headers: <Op>Headers` parameter to the
@@ -925,17 +920,17 @@ func renderNSNode(node *nsNode) string {
 		case op.input != nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
 			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, queryParam, headerParam)+") async "+throwsKw+" -> "+resType+" {")
-			lines = append(lines, wrapBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input, as: "+resType+".self"+headerArg+")", true)...)
+			lines = append(lines, seamBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input, as: "+resType+".self"+failingArg+headerArg+")", true)...)
 		case op.input != nil && op.output == nil:
 			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams("_ input: "+reqType, queryParam, headerParam)+") async "+throwsKw+" {")
-			lines = append(lines, wrapBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input"+headerArg+")", false)...)
+			lines = append(lines, seamBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", input"+failingArg+headerArg+")", false)...)
 		case op.input == nil && op.output != nil:
 			lines = append(lines, indent(1)+"@discardableResult")
 			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(queryParam, headerParam)+") async "+throwsKw+" -> "+resType+" {")
-			lines = append(lines, wrapBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", as: "+resType+".self"+headerArg+")", true)...)
+			lines = append(lines, seamBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+", as: "+resType+".self"+failingArg+headerArg+")", true)...)
 		default: // no input, no output
 			lines = append(lines, indent(1)+vis+"func "+method+"("+joinParams(queryParam, headerParam)+") async "+throwsKw+" {")
-			lines = append(lines, wrapBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+headerArg+")", false)...)
+			lines = append(lines, seamBody(pbRef+"._invoke(method: "+swiftStringLiteral(httpMethod)+", path: "+pathExpr+failingArg+headerArg+")", false)...)
 		}
 		lines = append(lines, indent(1)+"}")
 	}

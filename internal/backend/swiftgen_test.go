@@ -95,8 +95,8 @@ func TestEmitSwift(t *testing.T) {
 		// throws ITS OWN GeneratedFailure enum (typed throws) and lowers
 		// to plain `_invoke` wrapped in the enum-mapping do/catch.
 		"func create(_ input: RoomsCreateRequest, headers: RoomsCreateHeaders) async throws(RoomsCreateError) -> RoomsCreateResponse",
-		`do { return try await _pb._invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, headers: headers.asHeaderDict()) }`,
-		"catch { throw RoomsCreateError(error) }",
+		`return try await _pb._invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, failing: RoomsCreateError.self, headers: headers.asHeaderDict())`,
+		"failing: RoomsCreateError.self",
 		// <Op>Headers struct: required header non-optional, optional one
 		// String?, wire names preserved via CodingKeys, asHeaderDict()
 		// flattens to [String:String] (required direct, optional if-let).
@@ -138,11 +138,11 @@ func TestEmitSwift(t *testing.T) {
 		// emitted literally). Body-bearing ops put path params FIRST, then
 		// the input. No-body ops (get/delete) take just the path param.
 		"func get(id: String) async throws(TodosGetError) -> TodosGetResponse",
-		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self)`,
+		`_invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self, failing: TodosGetError.self)`,
 		"func delete(id: String) async throws(TodosDeleteError) {",
-		`do { try await _pb._invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)") }`,
+		`try await _pb._invoke(method: "DELETE", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", failing: TodosDeleteError.self)`,
 		"func update(id: String, _ input: TodosUpdateRequest) async throws(TodosUpdateError) -> TodosUpdateResponse",
-		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", input, as: TodosUpdateResponse.self)`,
+		`_invoke(method: "PATCH", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", input, as: TodosUpdateResponse.self, failing: TodosUpdateError.self)`,
 		// Multiple path params → both as args in path order, both interpolated.
 		"func get(orgId: String, userId: String) async throws(OrgsMembersGetError) -> OrgsMembersGetResponse",
 		`path: "/orgs/\(orgId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? orgId)/members/\(userId.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? userId)"`,
@@ -161,7 +161,7 @@ func TestEmitSwift(t *testing.T) {
 		"public let limit: Int?",   // optional query param
 		"public func asQueryString() -> String {",
 		"func run(query: SearchRunQuery) async throws(SearchRunError) -> SearchRunResponse",
-		`_invoke(method: "GET", path: "/search" + query.asQueryString(), as: SearchRunResponse.self)`,
+		`_invoke(method: "GET", path: "/search" + query.asQueryString(), as: SearchRunResponse.self, failing: SearchRunError.self)`,
 		// The shared percent-encoding helper DEFINITION must be emitted —
 		// the path/query use-sites above reference .pbURIComponentAllowed,
 		// so dropping the extension would leave dangling references that
@@ -211,8 +211,7 @@ func TestEmitSwift(t *testing.T) {
 		// is pure mapping — no hook calls in generated code (the SDK fires
 		// onError once at _invokeCore).
 		`    public func get(id: String) async throws(TodosGetError) -> TodosGetResponse {
-        do { return try await _pb._invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self) }
-        catch { throw TodosGetError(error) }
+        return try await _pb._invoke(method: "GET", path: "/todos/\(id.addingPercentEncoding(withAllowedCharacters: .pbURIComponentAllowed) ?? id)", as: TodosGetResponse.self, failing: TodosGetError.self)
     }`,
 	}
 	for _, g := range goldenBlocks {
