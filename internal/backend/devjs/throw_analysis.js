@@ -68,6 +68,14 @@ const SDK_NAMED_ERRORS = {
   TooManyRequests: 'too_many_requests',
 };
 
+// The named built-ins whose ctor is DATA-FIRST (`new X(data, message?)`) rather
+// than the data-less `(message?, code?)` shape. Their 2nd arg is a message, NOT
+// a code override — so the canonical code from the table always wins and the
+// site must NOT be dropped when the 2nd arg is a non-string (it is the data
+// object or a variable). Must stay in lockstep with the SDK: these are the
+// errors error-registry.ts pre-seeds with a dataSchema.
+const SDK_DATA_FIRST_ERRORS = new Set(['BadRequest', 'TooManyRequests']);
+
 // Raw SDK error classes — ctor (status, code, message, data?): the code is the
 // SECOND argument. Both surface under the name "PalError" (HttpError is the
 // base; the distinction carries no client meaning).
@@ -237,7 +245,20 @@ function resolveThrownNew(ctx, fileInfo, newExpr, out) {
   if (binding.kind === 'sdk') {
     const original = binding.original;
     if (SDK_NAMED_ERRORS[original]) {
-      // ctor (message?, code?, data?) — a present second arg overrides the code.
+      // Two ctor shapes coexist among the named built-ins:
+      //   data-first (data, message?): `new TooManyRequests({retryAfter}, "msg")`
+      //     — the 2nd arg is a MESSAGE, never a code. The canonical table code
+      //     always wins; the site must NOT be dropped when the 1st/2nd arg is a
+      //     non-string (the old "non-literal 2nd arg → return" silently lost
+      //     these typed-data built-in throws — caught live on the share/bulk
+      //     endpoints).
+      //   data-less (message?, code?): `new NotFound("msg", "custom_code")` — a
+      //     string-literal 2nd arg overrides the canonical code; a non-literal
+      //     override is unresolvable and still degrades the site to .other.
+      if (SDK_DATA_FIRST_ERRORS.has(original)) {
+        addDescriptor(out, original, SDK_NAMED_ERRORS[original]);
+        return;
+      }
       if (args.length >= 2) {
         const override = literalString(tsapi, args[1]);
         if (override === null) return; // non-literal override → site degrades to .other
