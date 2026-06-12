@@ -17,6 +17,17 @@ var defaultIgnoreDirs = map[string]bool{
 	"node_modules": true,
 }
 
+// defaultIgnoreFiles are filename globs ALWAYS excluded from the deploy bundle,
+// regardless of .palignore — they carry local secrets that must never leave the
+// developer's machine inside a tarball the running tenant code (or anyone with
+// deploy-bundle read) could recover. `palbase secret pull` writes decrypted
+// branch secrets to .env.local, so .env* must be excluded by default (CWE-538).
+var defaultIgnoreFiles = []string{
+	".env", ".env.*", "*.env",
+	"*.pem", "*.key", "*.p8", "*.p12", "*.pfx",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+}
+
 // BuildTarball walks dir and returns a gzip-compressed tar with paths relative
 // to dir (no wrapper directory), matching what /internal/push expects. It skips
 // defaultIgnoreDirs and any glob in an optional .palignore file at the root.
@@ -48,7 +59,17 @@ func BuildTarball(dir string) ([]byte, error) {
 			}
 			return nil
 		}
-		if defaultIgnoreDirs[top] || matchesAny(filepath.ToSlash(rel), patterns) {
+		// Never follow symlinks (CWE-61): filepath.Walk uses Lstat, so a symlink
+		// reports as a non-dir and would otherwise reach writeTarFile, which used
+		// to os.Stat/os.Open the TARGET — packing files OUTSIDE the project tree
+		// (e.g. a `creds -> ~/.palbase/credentials.json` entry in a cloned starter
+		// template). Skip any non-regular file entirely.
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil
+		}
+		if defaultIgnoreDirs[top] ||
+			matchesAny(filepath.ToSlash(rel), defaultIgnoreFiles) ||
+			matchesAny(filepath.ToSlash(rel), patterns) {
 			return nil
 		}
 		return writeTarFile(tw, dir, rel)
@@ -67,9 +88,15 @@ func BuildTarball(dir string) ([]byte, error) {
 
 func writeTarFile(tw *tar.Writer, dir, rel string) error {
 	full := filepath.Join(dir, rel)
-	fi, err := os.Stat(full)
+	// Lstat (not Stat) so a symlink is never followed — defense in depth behind
+	// the walk-level skip. Only regular files are packed; anything else (symlink,
+	// device, socket) is silently dropped rather than dereferenced.
+	fi, err := os.Lstat(full)
 	if err != nil {
 		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil
 	}
 	hdr, err := tar.FileInfoHeader(fi, "")
 	if err != nil {
