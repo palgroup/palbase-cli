@@ -80,7 +80,10 @@ func TestEmitSwift(t *testing.T) {
 	out := emitSwift(ops)
 
 	must := []string{
-		"@_spi(Generated) import Palbe",
+		// Generated code now targets the PUBLIC typed-network surface, so a
+		// plain `import Palbe` (no `@_spi(Generated)`) — the old `_invoke`
+		// seam is no longer referenced.
+		"import Palbe",
 		"public extension PalBackendClient {",
 		"var rooms: PBRoomsNamespace",
 		// Top-level Request / Response structs per operation — no
@@ -89,14 +92,22 @@ func TestEmitSwift(t *testing.T) {
 		"public nonisolated struct RoomsCreateResponse: Codable, Sendable {",
 		"public nonisolated struct RoomsIdGetRequest: Codable, Sendable {",
 		"public nonisolated struct RoomsIdGetResponse: Codable, Sendable {",
-		// Call signature references the flat top-level names. rooms.create
-		// declares headers, so the method gains a `headers:` parameter and
-		// the seam call forwards `headers.asHeaderDict()`. Every op now
-		// throws ITS OWN GeneratedFailure enum (typed throws) and lowers
-		// to plain `_invoke` wrapped in the enum-mapping do/catch.
+		// Per-op ENDPOINT STRUCT — `: PBEndpoint` for a body-returning op,
+		// stored inputs as `let`s, computed `pbRequest`. rooms.create
+		// declares headers, so the struct holds `headers` and forwards
+		// `headers.asHeaderDict()` into the PBRequest. Path is the segment
+		// array (literals bare, params `.param(...)`), NOT an interpolated
+		// string.
+		"public nonisolated struct RoomsCreateEndpoint: PBEndpoint {",
+		"public typealias Response = RoomsCreateResponse",
+		"public typealias Failure = RoomsCreateError",
+		"let input: RoomsCreateRequest",
+		`public var pbRequest: PBRequest { PBRequest(.post, ["rooms", "create"], body: input, headers: headers.asHeaderDict()) }`,
+		// Call signature is UNCHANGED (path params/body/query/headers, typed
+		// throws, @discardableResult); only the BODY collapses to one
+		// `pb.call(<Op>Endpoint(...))` forwarding line — no as:/failing:/where.
 		"func create(_ input: RoomsCreateRequest, headers: RoomsCreateHeaders) async throws(RoomsCreateError) -> RoomsCreateResponse",
-		`return try await _pb._invoke(method: "POST", path: "/rooms/create", input, as: RoomsCreateResponse.self, failing: RoomsCreateError.self, headers: headers.asHeaderDict())`,
-		"failing: RoomsCreateError.self",
+		`return try await _pb.call(RoomsCreateEndpoint(input: input, headers: headers))`,
 		// <Op>Headers struct: required header non-optional, optional one
 		// String?, wire names preserved via CodingKeys, asHeaderDict()
 		// flattens to [String:String] (required direct, optional if-let).
@@ -128,45 +139,48 @@ func TestEmitSwift(t *testing.T) {
 		// z.string().nullable()) lowers to String? — NOT
 		// AnyCodableValue. Without the type-array lowering the
 		// generated code would expose AnyCodableValue in public
-		// position and the SDK's SPI gate would reject it.
+		// position.
 		"public nonisolated struct HasNullableResponse: Codable, Sendable {",
 		"public let error: String?",
 		"public let ok: Bool",
-		// Gap 1 — PATH PARAMETERS. A `{id}` path segment threads an `id:
-		// String` LEADING method arg, and the seam `path:` literal becomes a
-		// percent-encoding interpolation of that arg (the `{id}` is no longer
-		// emitted literally). Body-bearing ops put path params FIRST, then
-		// the input. No-body ops (get/delete) take just the path param.
+		// PATH PARAMETERS. A `{id}` path segment threads an `id: String`
+		// LEADING method arg; the endpoint struct stores it and emits it as a
+		// `.param(id)` PBPathSegment (NOT an interpolated literal). Body-
+		// bearing ops put path params FIRST, then the input; no-body ops
+		// (get/delete) take just the path param.
 		"func get(id: String) async throws(TodosGetError) -> TodosGetResponse",
-		`_invoke(method: "GET", path: "/todos/\(id.pbURIComponentEncoded)", as: TodosGetResponse.self, failing: TodosGetError.self)`,
+		`return try await _pb.call(TodosGetEndpoint(id: id))`,
+		`public var pbRequest: PBRequest { PBRequest(.get, ["todos", .param(id)]) }`,
+		// No-body op → `: PBVoidEndpoint` (no Response typealias), void
+		// method body (no @discardableResult, no `return`).
+		"public nonisolated struct TodosDeleteEndpoint: PBVoidEndpoint {",
 		"func delete(id: String) async throws(TodosDeleteError) {",
-		`try await _pb._invoke(method: "DELETE", path: "/todos/\(id.pbURIComponentEncoded)", failing: TodosDeleteError.self)`,
+		`try await _pb.call(TodosDeleteEndpoint(id: id))`,
+		`public var pbRequest: PBRequest { PBRequest(.delete, ["todos", .param(id)]) }`,
 		"func update(id: String, _ input: TodosUpdateRequest) async throws(TodosUpdateError) -> TodosUpdateResponse",
-		`_invoke(method: "PATCH", path: "/todos/\(id.pbURIComponentEncoded)", input, as: TodosUpdateResponse.self, failing: TodosUpdateError.self)`,
-		// Multiple path params → both as args in path order, both interpolated.
+		`return try await _pb.call(TodosUpdateEndpoint(id: id, input: input))`,
+		`public var pbRequest: PBRequest { PBRequest(.patch, ["todos", .param(id)], body: input) }`,
+		// Multiple path params → both as args in path order, both as `.param`.
 		"func get(orgId: String, userId: String) async throws(OrgsMembersGetError) -> OrgsMembersGetResponse",
-		`path: "/orgs/\(orgId.pbURIComponentEncoded)/members/\(userId.pbURIComponentEncoded)"`,
-		// Gap 2 — ARRAY-OF-OBJECT RESPONSE. `GET /todos` emits a NAMED item
-		// struct (Codable+Sendable, snake_case→camelCase) and the response is
-		// a typed `[Item]`, not an opaque `[AnyCodableValue]`.
+		`return try await _pb.call(OrgsMembersGetEndpoint(orgId: orgId, userId: userId))`,
+		`public var pbRequest: PBRequest { PBRequest(.get, ["orgs", .param(orgId), "members", .param(userId)]) }`,
+		// ARRAY-OF-OBJECT RESPONSE. `GET /todos` emits a NAMED item struct
+		// (Codable+Sendable, snake_case→camelCase) and the response is a
+		// typed `[Item]`, not an opaque `[AnyCodableValue]`.
 		"public nonisolated struct TodosListResponseItem: Codable, Sendable {",
 		"public let completed: Bool",
 		"public let createdAt: String", // created_at → camelCase
 		"public typealias TodosListResponse = [TodosListResponseItem]",
 		// QUERY PARAMETERS. A `parameters[in:query]` op gains a `query:
-		// <Op>Query` method arg and the seam `path:` literal is suffixed with
-		// `+ query.asQueryString()` so the params ride the existing _invoke.
+		// <Op>Query` method arg; the endpoint struct stores it and passes it
+		// as `PBRequest(query:)` — the SDK's renderQuery does the encoding, so
+		// the <Op>Query struct is a BARE Codable struct (NO asQueryString()).
 		"public nonisolated struct SearchRunQuery: Codable, Sendable {",
 		"public let q: String",     // required query param
 		"public let limit: Int?",   // optional query param
-		"public func asQueryString() -> String {",
 		"func run(query: SearchRunQuery) async throws(SearchRunError) -> SearchRunResponse",
-		`_invoke(method: "GET", path: "/search" + query.asQueryString(), as: SearchRunResponse.self, failing: SearchRunError.self)`,
-		// The shared percent-encoding helper DEFINITION must be emitted —
-		// the path/query use-sites above reference .pbURIComponentAllowed,
-		// so dropping the extension would leave dangling references that
-		// only surface at the customer's Swift compile.
-		
+		`return try await _pb.call(SearchRunEndpoint(query: query))`,
+		`public var pbRequest: PBRequest { PBRequest(.get, ["search"], query: query) }`,
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
@@ -182,12 +196,12 @@ func TestEmitSwift(t *testing.T) {
 	// `.other(backend)`, never a trap). Case order is sorted by case name.
 	goldenBlocks := []string{
 		// (a) no-errors op → `.other`-only enum with a one-line init.
-		`public nonisolated enum TodosGetError: GeneratedFailure {
+		`public nonisolated enum TodosGetError: PBError {
     case other(BackendError)
     public nonisolated init(_ backend: BackendError) { self = .other(backend) }
 }`,
 		// (b) with-errors op → payload struct + bare/data cases + code-switch init.
-		`public nonisolated enum RoomsCreateError: GeneratedFailure {
+		`public nonisolated enum RoomsCreateError: PBError {
     public nonisolated struct RoomLockedData: Codable, Sendable {
         public let retryAfter: Int
         public init(retryAfter: Int) {
@@ -207,11 +221,20 @@ func TestEmitSwift(t *testing.T) {
         }
     }
 }`,
-		// Wrapper lowering (exact): typed throws + do/catch mapping. The init
-		// is pure mapping — no hook calls in generated code (the SDK fires
-		// onError once at _invokeCore).
+		// (c) the per-op ENDPOINT STRUCT (exact): PBEndpoint, stored input,
+		// computed pbRequest with a path-segment array.
+		`public nonisolated struct TodosGetEndpoint: PBEndpoint {
+    public typealias Response = TodosGetResponse
+    public typealias Failure = TodosGetError
+    let id: String
+    public var pbRequest: PBRequest { PBRequest(.get, ["todos", .param(id)]) }
+}`,
+		// (d) wrapper lowering (exact): unchanged signature, body is ONE
+		// `pb.call(<Op>Endpoint(...))` line — the SDK infers Response/Failure
+		// from the endpoint (no as:/failing:/where) and fires onError once at
+		// _invokeCore.
 		`    public func get(id: String) async throws(TodosGetError) -> TodosGetResponse {
-        return try await _pb._invoke(method: "GET", path: "/todos/\(id.pbURIComponentEncoded)", as: TodosGetResponse.self, failing: TodosGetError.self)
+        return try await _pb.call(TodosGetEndpoint(id: id))
     }`,
 	}
 	for _, g := range goldenBlocks {
@@ -220,16 +243,28 @@ func TestEmitSwift(t *testing.T) {
 		}
 	}
 
-	// One GeneratedFailure enum per emitted op (10 usable ops in the fixture;
-	// auth.login is reserved-skipped).
-	if n := strings.Count(out, ": GeneratedFailure {"); n != 10 {
-		t.Errorf("expected 10 GeneratedFailure enums (one per op), got %d\n---\n%s", n, out)
+	// One PBError enum per emitted op (10 usable ops in the fixture;
+	// auth.login is reserved-skipped). New output emits the `PBError`
+	// spelling, not the old `GeneratedFailure`.
+	if n := strings.Count(out, ": PBError {"); n != 10 {
+		t.Errorf("expected 10 PBError enums (one per op), got %d\n---\n%s", n, out)
 	}
 
-	// The OLD typed surface is deleted in the SDK — generated code must not
-	// reference any of it, and no op may fall back to `throws(BackendError)`.
-	for _, banned := range []string{"_invokeTyped",
-		"pbURIComponentAllowed", "TypedBackendError", "init?(envelope:", ", errors: ", "throws(BackendError)"} {
+	// One endpoint struct per emitted op — body-returning ops adopt
+	// PBEndpoint, no-body ops adopt PBVoidEndpoint, summing to 10.
+	if n := strings.Count(out, ": PBEndpoint {") + strings.Count(out, ": PBVoidEndpoint {"); n != 10 {
+		t.Errorf("expected 10 endpoint structs (PBEndpoint + PBVoidEndpoint), got %d\n---\n%s", n, out)
+	}
+
+	// Phase B retires the old typed seam: generated code now forwards to the
+	// public `pb.call(<Op>Endpoint(...))` surface, so NONE of the old
+	// `_invoke`/`failing:`/`asQueryString`/path-interpolation/`@_spi`/
+	// `GeneratedFailure`-spelling artifacts may appear. No op may fall back to
+	// `throws(BackendError)` either.
+	for _, banned := range []string{"_invoke", "_invokeTyped", "failing:",
+		"asQueryString", "pbURIComponentEncoded", "pbURIComponentAllowed",
+		"@_spi(Generated)", ": GeneratedFailure", "TypedBackendError",
+		"init?(envelope:", ", errors: ", "throws(BackendError)"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("generated Swift references removed surface %q\n---\n%s", banned, out)
 		}

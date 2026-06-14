@@ -35,7 +35,7 @@ func TestEmitSwift_RealEmitterFixture(t *testing.T) {
 
 	// The with-errors op: enum cases from the REAL emitter's extension.
 	must := []string{
-		"public nonisolated enum RoomsCreateError: GeneratedFailure {",
+		"public nonisolated enum RoomsCreateError: PBError {",
 		"case notFound",
 		"case roomLocked(RoomLockedData)",
 		"case other(BackendError)",
@@ -61,10 +61,10 @@ func TestEmitSwift_RealEmitterFixture(t *testing.T) {
 	// EVERY op gets its own enum — ops with no inferred errors carry only
 	// `.other`. The fixture's getOne (unknown overridden code, extension
 	// skipped by the emitter) must be exactly the bare shape.
-	if !strings.Contains(out, "public nonisolated enum RoomsGetOneError: GeneratedFailure {\n    case other(BackendError)") {
+	if !strings.Contains(out, "public nonisolated enum RoomsGetOneError: PBError {\n    case other(BackendError)") {
 		t.Fatalf("no-errors op must get the bare .other enum\n----\n%s", out)
 	}
-	if strings.Contains(out, "RoomsGetOneError: GeneratedFailure {\n    case roomNotFound") {
+	if strings.Contains(out, "RoomsGetOneError: PBError {\n    case roomNotFound") {
 		t.Fatalf("unknown overridden code must NOT produce a typed case")
 	}
 }
