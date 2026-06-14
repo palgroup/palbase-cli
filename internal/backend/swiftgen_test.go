@@ -298,20 +298,22 @@ func TestEmitSwift(t *testing.T) {
 
 // TestEmitSwift_SkipsReservedNamespaces locks that endpoints whose top
 // operationId segment is an SDK-owned namespace (auth / analytics / flags /
-// realtime) are skipped, so a customer endpoint can't shadow `pb.auth.*`,
-// `pb.analytics.*`, `pb.flags.*`, or `pb.realtime.*`. A non-reserved endpoint
-// in the same set is still emitted (the skip is precise, not a blanket drop).
+// realtime / notifications) are skipped, so a customer endpoint can't shadow
+// `pb.auth.*`, `pb.analytics.*`, `pb.flags.*`, `pb.realtime.*`, or
+// `pb.notifications.*`. A non-reserved endpoint in the same set is still
+// emitted (the skip is precise, not a blanket drop).
 func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
 	ops := []swiftOp{
 		{operationID: "auth.login", method: "post", path: "/auth/login"},
 		{operationID: "analytics.track", method: "post", path: "/analytics/track"},
 		{operationID: "flags.list", method: "post", path: "/flags/list"},
 		{operationID: "realtime.publish", method: "post", path: "/realtime/publish"},
+		{operationID: "notifications.send", method: "post", path: "/notifications/send"},
 		{operationID: "rooms.create", method: "post", path: "/rooms/create"},
 	}
 	out := emitSwift(ops)
 
-	for _, reserved := range []string{"login", "track", "func list", "publish"} {
+	for _, reserved := range []string{"login", "track", "func list", "publish", "send"} {
 		if strings.Contains(out, "func "+reserved) {
 			t.Errorf("reserved-namespace endpoint should be skipped, but %q appeared:\n%s", reserved, out)
 		}
@@ -322,7 +324,7 @@ func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
 	}
 
 	// Visible skip comments must appear at the top of the namespaces section.
-	for _, ns := range []string{"analytics", "auth", "flags", "realtime"} {
+	for _, ns := range []string{"analytics", "auth", "flags", "notifications", "realtime"} {
 		want := `// codegen: skipped reserved namespace "` + ns + `" (SDK-owned)`
 		if !strings.Contains(out, want) {
 			t.Errorf("missing reserved-namespace skip comment for %q:\n%s", ns, out)

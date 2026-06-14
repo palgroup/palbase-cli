@@ -48,15 +48,17 @@ type swiftOAuthGoogle struct {
 // the SDK loads its config from the bundle at startup.
 func emitSwift(ops []swiftOp) string {
 	// Reserved namespaces on `pb`: pb.auth.* / pb.analytics.* / pb.flags.* /
-	// pb.realtime.* are SDK-owned surfaces. An endpoint whose top segment
-	// collides with one would shadow it (Swift redeclaration / a confusing
-	// `pb.realtime.foo()` mixing SDK + generated), so skip those endpoints
-	// and emit a visible comment so the developer knows what was dropped.
+	// pb.realtime.* / pb.notifications.* are SDK-owned surfaces. An endpoint
+	// whose top segment collides with one would shadow it (Swift redeclaration
+	// / a confusing `pb.realtime.foo()` mixing SDK + generated), so skip those
+	// endpoints and emit a visible comment so the developer knows what was
+	// dropped.
 	reserved := map[string]bool{
-		"auth":      true,
-		"analytics": true,
-		"flags":     true,
-		"realtime":  true,
+		"auth":          true,
+		"analytics":     true,
+		"flags":         true,
+		"realtime":      true,
+		"notifications": true,
 	}
 	var usable []swiftOp
 	var swiftSkippedNS []string
