@@ -45,6 +45,19 @@ type swiftOp struct {
 	headers     *swiftSchema    // declared request headers (parameters[in:header]) → <Op>Headers struct
 	query       *swiftSchema    // declared query params (parameters[in:query]) → <Op>Query struct
 	errors      []swiftErrorDef // inferred errors via the `x-palbase-errors` extension (stage-time throw analysis)
+	upload      *swiftUpload    // direct-storage upload (@Upload) via `x-palbase-upload` — nil for a normal op
+}
+
+// swiftUpload describes one @Upload operation, parsed from the
+// `x-palbase-upload` OpenAPI extension. Its presence makes the emitter generate
+// a PBUploadEndpoint + pb.<ns>.upload(file:input:onProgress:) instead of a
+// normal endpoint. The bytes go client→storage directly; the operation's
+// response is the typed completion result.
+type swiftUpload struct {
+	bucket       string
+	pathTemplate string
+	maxSize      int64    // 0 = the bucket's own fileSizeLimit applies
+	allowedTypes []string // empty = the bucket's own allowlist applies
 }
 
 // swiftErrorDef describes one inferred error from an endpoint's
@@ -99,6 +112,7 @@ func parseOpenAPIForSwift(specBytes []byte) ([]swiftOp, error) {
 				headers:     headerSchema(op),
 				query:       querySchema(op),
 				errors:      declaredErrors(op),
+				upload:      declaredUpload(op),
 			})
 		}
 	}
@@ -159,6 +173,44 @@ func declaredErrors(op map[string]any) []swiftErrorDef {
 	// Deterministic order: by case name.
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out
+}
+
+// declaredUpload reads the `x-palbase-upload` OpenAPI extension the backend
+// runtime stashes on each @Upload operation. Returns nil for a normal op (the
+// extension is absent). Its presence makes the emitter generate a
+// PBUploadEndpoint. The extension shape (emitted identically by the prod
+// generator via uploadExtension):
+//
+//	"x-palbase-upload": {
+//	  "bucket": "docs", "pathTemplate": "{userId}/{uploadId}-{filename}",
+//	  "maxSize": 26214400, "allowedTypes": ["application/pdf", "image/png"]
+//	}
+//
+// bucket + pathTemplate are required; maxSize/allowedTypes are optional.
+func declaredUpload(op map[string]any) *swiftUpload {
+	ext, ok := op["x-palbase-upload"].(map[string]any)
+	if !ok || len(ext) == 0 {
+		return nil
+	}
+	bucket, _ := ext["bucket"].(string)
+	pathTemplate, _ := ext["pathTemplate"].(string)
+	if bucket == "" || pathTemplate == "" {
+		// Malformed extension — treat as a non-upload op rather than emit a
+		// broken PBUploadEndpoint (visible-fail over silent-wrong).
+		return nil
+	}
+	u := &swiftUpload{bucket: bucket, pathTemplate: pathTemplate}
+	if ms, ok := ext["maxSize"].(float64); ok && ms > 0 {
+		u.maxSize = int64(ms)
+	}
+	if raw, ok := ext["allowedTypes"].([]any); ok {
+		for _, t := range raw {
+			if s, ok := t.(string); ok && s != "" {
+				u.allowedTypes = append(u.allowedTypes, s)
+			}
+		}
+	}
+	return u
 }
 
 // errorDataSchema pulls the data-payload schema out of a declared error's
