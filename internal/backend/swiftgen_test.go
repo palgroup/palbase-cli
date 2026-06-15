@@ -68,7 +68,18 @@ const fixtureOpenAPI = `{
         {"name":"q","in":"query","required":true,"schema":{"type":"string"}},
         {"name":"limit","in":"query","required":false,"schema":{"type":"integer"}}
       ],
-      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}}}}}}}
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}}}}}}},
+    "/docs":{"post":{"operationId":"docs.upload",
+      "requestBody":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"title":{"type":"string"},"folder":{"type":"string"}},
+        "required":["title"]}}}},
+      "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"id":{"type":"string"},"url":{"type":"string"}},
+        "required":["id","url"]}}}}},
+      "x-palbase-upload":{
+        "bucket":"docs","pathTemplate":"{userId}/{uploadId}-{filename}",
+        "maxSize":26214400,"allowedTypes":["application/pdf","image/png"]
+      }}}
   }
 }`
 
@@ -129,12 +140,12 @@ func TestEmitSwift(t *testing.T) {
 		// struct body (Swift type-nesting); field references the short
 		// name. `body` is optional (not in required); `meta` is required.
 		"public nonisolated struct PostsCreateRequest: Codable, Sendable {",
-		"public nonisolated struct Meta: Codable, Sendable {",        // nested struct
-		"public let pinned: Bool?",                       // nested optional
-		"public let tags: [String]",                      // nested required
-		"public let body: String?",                       // parent optional
-		"public let meta: Meta",                          // parent → short ref
-		"public let title: String",                       // parent required
+		"public nonisolated struct Meta: Codable, Sendable {", // nested struct
+		"public let pinned: Bool?",                            // nested optional
+		"public let tags: [String]",                           // nested required
+		"public let body: String?",                            // parent optional
+		"public let meta: Meta",                               // parent → short ref
+		"public let title: String",                            // parent required
 		// `type: ["string","null"]` (zod-to-json-schema for
 		// z.string().nullable()) lowers to String? — NOT
 		// AnyCodableValue. Without the type-array lowering the
@@ -176,11 +187,23 @@ func TestEmitSwift(t *testing.T) {
 		// as `PBRequest(query:)` — the SDK's renderQuery does the encoding, so
 		// the <Op>Query struct is a BARE Codable struct (NO asQueryString()).
 		"public nonisolated struct SearchRunQuery: Codable, Sendable {",
-		"public let q: String",     // required query param
-		"public let limit: Int?",   // optional query param
+		"public let q: String",   // required query param
+		"public let limit: Int?", // optional query param
 		"func run(query: SearchRunQuery) async throws(SearchRunError) -> SearchRunResponse",
 		`return try await _pb.call(SearchRunEndpoint(query: query))`,
 		`public var pbRequest: PBRequest { PBRequest(.get, ["search"], query: query) }`,
+		// @UPLOAD. An op carrying x-palbase-upload emits a DIFFERENT endpoint
+		// protocol (PBUploadEndpoint, NOT PBEndpoint) that computes an
+		// `authorizeRequest` (the POST JSON pre-flight carrying the author body)
+		// instead of `pbRequest`; the bytes go client→storage directly. The
+		// namespace method takes `file: PBFileSource` + the author `input:` +
+		// trailing `onProgress:`, and forwards both to the upload overload
+		// `pb.call(_:file:onProgress:)`. Response/Failure infer from the endpoint
+		// exactly like a normal call.
+		"public nonisolated struct DocsUploadEndpoint: PBUploadEndpoint {",
+		"public var authorizeRequest: PBRequest { PBRequest(.post, [\"docs\"], body: input) }",
+		"func upload(file: PBFileSource, input: DocsUploadRequest, onProgress: (@Sendable (BackendUploadProgress) -> Void)? = nil) async throws(DocsUploadError) -> DocsUploadResponse {",
+		"return try await _pb.call(DocsUploadEndpoint(input: input), file: file, onProgress: onProgress)",
 	}
 	for _, m := range must {
 		if !strings.Contains(out, m) {
@@ -236,6 +259,23 @@ func TestEmitSwift(t *testing.T) {
 		`    public func get(id: String) async throws(TodosGetError) -> TodosGetResponse {
         return try await _pb.call(TodosGetEndpoint(id: id))
     }`,
+		// (e) the @Upload ENDPOINT STRUCT (exact): adopts PBUploadEndpoint, holds
+		// only the author `input` (the file source is a call-site arg, never
+		// stored), and computes `authorizeRequest` — the POST pre-flight — rather
+		// than `pbRequest`.
+		`public nonisolated struct DocsUploadEndpoint: PBUploadEndpoint {
+    public typealias Response = DocsUploadResponse
+    public typealias Failure = DocsUploadError
+    let input: DocsUploadRequest
+    public var authorizeRequest: PBRequest { PBRequest(.post, ["docs"], body: input) }
+}`,
+		// (f) the @Upload NAMESPACE METHOD (exact): file + input + trailing
+		// onProgress, forwarding both to the upload overload of pb.call. Body is
+		// ONE line; @discardableResult like any body-returning call.
+		`    @discardableResult
+    public func upload(file: PBFileSource, input: DocsUploadRequest, onProgress: (@Sendable (BackendUploadProgress) -> Void)? = nil) async throws(DocsUploadError) -> DocsUploadResponse {
+        return try await _pb.call(DocsUploadEndpoint(input: input), file: file, onProgress: onProgress)
+    }`,
 	}
 	for _, g := range goldenBlocks {
 		if !strings.Contains(out, g) {
@@ -243,17 +283,24 @@ func TestEmitSwift(t *testing.T) {
 		}
 	}
 
-	// One PBError enum per emitted op (10 usable ops in the fixture;
-	// auth.login is reserved-skipped). New output emits the `PBError`
-	// spelling, not the old `GeneratedFailure`.
-	if n := strings.Count(out, ": PBError {"); n != 10 {
-		t.Errorf("expected 10 PBError enums (one per op), got %d\n---\n%s", n, out)
+	// One PBError enum per emitted op (11 usable ops in the fixture: 10 normal
+	// + docs.upload; auth.login is reserved-skipped). New output emits the
+	// `PBError` spelling, not the old `GeneratedFailure`.
+	if n := strings.Count(out, ": PBError {"); n != 11 {
+		t.Errorf("expected 11 PBError enums (one per op), got %d\n---\n%s", n, out)
 	}
 
-	// One endpoint struct per emitted op — body-returning ops adopt
-	// PBEndpoint, no-body ops adopt PBVoidEndpoint, summing to 10.
+	// One endpoint struct per emitted op. The 10 NON-upload ops adopt
+	// PBEndpoint (body-returning) or PBVoidEndpoint (no body); the single
+	// @Upload op (docs.upload) adopts PBUploadEndpoint instead — it MUST NOT
+	// land in the PBEndpoint/PBVoidEndpoint bucket (that would mean the
+	// upload-kind branch was skipped and the bytes would route through the
+	// br-pod).
 	if n := strings.Count(out, ": PBEndpoint {") + strings.Count(out, ": PBVoidEndpoint {"); n != 10 {
 		t.Errorf("expected 10 endpoint structs (PBEndpoint + PBVoidEndpoint), got %d\n---\n%s", n, out)
+	}
+	if n := strings.Count(out, ": PBUploadEndpoint {"); n != 1 {
+		t.Errorf("expected exactly 1 PBUploadEndpoint struct (docs.upload), got %d\n---\n%s", n, out)
 	}
 
 	// Phase B retires the old typed seam: generated code now forwards to the

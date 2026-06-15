@@ -105,7 +105,6 @@ func emitSwift(ops []swiftOp) string {
 	}
 	b.WriteString(emitNamespaceTree(usable))
 
-
 	return b.String()
 }
 
@@ -151,7 +150,7 @@ func requestTypeName(opID string) string  { return typePrefix(opID) + "Request" 
 func responseTypeName(opID string) string { return typePrefix(opID) + "Response" }
 func errorEnumName(opID string) string    { return typePrefix(opID) + "Error" }
 func headersTypeName(opID string) string  { return typePrefix(opID) + "Headers" }
-func queryTypeName(opID string) string     { return typePrefix(opID) + "Query" }
+func queryTypeName(opID string) string    { return typePrefix(opID) + "Query" }
 
 func sanitize(s string, firstUpper bool) string {
 	var parts []string
@@ -362,6 +361,16 @@ func pathSegmentsExpr(path string) string {
 // the DTO structs: PBEndpoint/PBVoidEndpoint require `Sendable`, and a wire
 // value type is pure data.
 func endpointStructLines(op swiftOp) []string {
+	// An @Upload op adopts a DIFFERENT protocol (PBUploadEndpoint) and computes
+	// an `authorizeRequest` (the POST pre-flight) instead of `pbRequest`. The
+	// bytes go client→storage directly; this struct only carries the author
+	// `@Body` input (+ path params) the br-pod needs to authorize + mint the
+	// signed upload URL. Must be checked FIRST: an upload op may also have a 200
+	// body (the completion Response), which would otherwise fall into PBEndpoint.
+	if op.upload != nil {
+		return uploadEndpointStructLines(op)
+	}
+
 	name := endpointStructName(op.operationID)
 	hasBody := op.output != nil
 
@@ -412,6 +421,52 @@ func endpointStructLines(op swiftOp) []string {
 		args = append(args, "headers: headers.asHeaderDict()")
 	}
 	lines = append(lines, indent(1)+"public var pbRequest: PBRequest { PBRequest("+strings.Join(args, ", ")+") }")
+	lines = append(lines, "}")
+	return lines
+}
+
+// uploadEndpointStructLines emits one `public nonisolated struct <Op>Endpoint`
+// that adopts `PBUploadEndpoint` (op carries `x-palbase-upload`). Unlike the
+// normal endpoint struct, the file bytes never touch the br-pod: the struct
+// computes an `authorizeRequest` — the POST JSON pre-flight that carries the
+// author `@Body` input so the br-pod can run its quota/ownership guard and mint
+// a signed upload URL. The file source + progress are call-site arguments on
+// `pb.call(_:file:onProgress:)`, NOT stored here, so one endpoint value can
+// upload any file. `Response` is the typed completion (the @Upload method's
+// return), `Failure` the typed error enum — both infer at the call site exactly
+// like PBEndpoint.
+//
+// Stored inputs mirror endpointStructLines' order: path params first (in path
+// order, each a `String`), then the author body as `<Op>Request`. Query/headers
+// are not threaded onto an upload's pre-flight (the upload metadata travels in
+// the body the runtime builds); they stay out of the generated struct.
+func uploadEndpointStructLines(op swiftOp) []string {
+	name := endpointStructName(op.operationID)
+
+	var lines []string
+	lines = append(lines, "public nonisolated struct "+name+": PBUploadEndpoint {")
+	lines = append(lines, indent(1)+"public typealias Response = "+responseTypeName(op.operationID))
+	lines = append(lines, indent(1)+"public typealias Failure = "+errorEnumName(op.operationID))
+
+	for _, p := range op.pathParams {
+		lines = append(lines, indent(1)+"let "+identOf(p)+": String")
+	}
+	if op.input != nil {
+		lines = append(lines, indent(1)+"let input: "+requestTypeName(op.operationID))
+	}
+
+	// authorizeRequest: the pre-flight is always a POST (mint-signed-URL), with
+	// the path rendered like any normal endpoint's pbRequest and the author body
+	// carried as `body: input` when the op declares one.
+	httpPath := op.path
+	if httpPath == "" {
+		httpPath = "/" + strings.ReplaceAll(op.operationID, ".", "/")
+	}
+	args := []string{".post", pathSegmentsExpr(httpPath)}
+	if op.input != nil {
+		args = append(args, "body: input")
+	}
+	lines = append(lines, indent(1)+"public var authorizeRequest: PBRequest { PBRequest("+strings.Join(args, ", ")+") }")
 	lines = append(lines, "}")
 	return lines
 }
@@ -833,6 +888,17 @@ func renderNSNode(node *nsNode) string {
 		errEnum := errorEnumName(op.operationID)
 		throwsKw := "throws(" + errEnum + ")"
 
+		// An @Upload op gets a DIFFERENT method shape: it takes `file:
+		// PBFileSource` + the author `input:` (labelled, not `_`) + a trailing
+		// `onProgress:` closure, and forwards both to the upload overload
+		// `pb.call(_:file:onProgress:)`. The endpoint struct (PBUploadEndpoint)
+		// holds only the author input/path params; the file + progress are
+		// call-site args. Handled first, then `continue` past the normal path.
+		if op.upload != nil {
+			lines = append(lines, renderUploadMethodLines(op, method, reqType, resType, throwsKw, vis, pbRef)...)
+			continue
+		}
+
 		// The method SIGNATURE is unchanged from the old emitter: path params
 		// are LEADING `String` args (in path order), then the request body as
 		// `_ input: <Op>Request`, then `query: <Op>Query`, then
@@ -909,6 +975,61 @@ func renderNSNode(node *nsNode) string {
 
 	lines = append(lines, "}")
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// renderUploadMethodLines emits the namespace method for an @Upload op. It
+// forwards to the upload overload of `pb.call`:
+//
+//	func upload(file: PBFileSource, input: <Op>Request,
+//	            onProgress: (@Sendable (BackendUploadProgress) -> Void)? = nil)
+//	            async throws(<Op>Error) -> <Op>Response {
+//	    try await <pb>.call(<Op>Endpoint(input: input), file: file, onProgress: onProgress)
+//	}
+//
+// Path params (if any) are LEADING `String` args (path order) and thread into
+// the endpoint's memberwise init exactly like a normal endpoint. The author
+// `input:` is omitted entirely when the op declares no `@Body` schema. The file
+// source + progress are call-site args (not stored on the endpoint), so the same
+// generated endpoint value can upload any file.
+func renderUploadMethodLines(op swiftOp, method, reqType, resType, throwsKw, vis, pbRef string) []string {
+	// Method params: path params first, then file:, then input: (when present),
+	// then the trailing onProgress: closure (defaulted to nil).
+	var params []string
+	for _, name := range op.pathParams {
+		params = append(params, identOf(name)+": String")
+	}
+	params = append(params, "file: PBFileSource")
+	if op.input != nil {
+		params = append(params, "input: "+reqType)
+	}
+	params = append(params, "onProgress: (@Sendable (BackendUploadProgress) -> Void)? = nil")
+
+	// Endpoint-construction args mirror uploadEndpointStructLines' stored order:
+	// path params (label==name), then `input: input` when the op has a body.
+	var endpointArgs []string
+	for _, name := range op.pathParams {
+		id := identOf(name)
+		endpointArgs = append(endpointArgs, id+": "+id)
+	}
+	if op.input != nil {
+		endpointArgs = append(endpointArgs, "input: input")
+	}
+	callExpr := endpointStructName(op.operationID) + "(" + strings.Join(endpointArgs, ", ") + ")"
+
+	resultType := resType
+	if op.output == nil {
+		// An upload op without a declared completion body still returns the
+		// generated Response type alias; guard defensively so the signature is
+		// always well-formed (the runtime always emits a 200 for @Upload).
+		resultType = responseTypeName(op.operationID)
+	}
+
+	var lines []string
+	lines = append(lines, indent(1)+"@discardableResult")
+	lines = append(lines, indent(1)+vis+"func "+method+"("+strings.Join(params, ", ")+") async "+throwsKw+" -> "+resultType+" {")
+	lines = append(lines, indent(2)+"return try await "+pbRef+".call("+callExpr+", file: file, onProgress: onProgress)")
+	lines = append(lines, indent(1)+"}")
+	return lines
 }
 
 func max0(n int) int {
