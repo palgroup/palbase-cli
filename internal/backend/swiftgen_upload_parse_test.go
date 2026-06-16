@@ -4,7 +4,8 @@ import "testing"
 
 // TestParseUpload_ThreadsXPalbaseUpload locks the codegen end of the upload
 // metadata threading: an operation carrying the x-palbase-upload extension
-// parses into swiftOp.upload (bucket/pathTemplate/maxSize/allowedTypes). If this
+// parses into swiftOp.upload (bucket + pathTemplate — the only fields, since the
+// size/type limits live on the bucket and are storage-enforced). If this
 // regresses, the generated client silently loses upload-kind — the exact
 // "endpoint silently disappears" class. The generator end is locked by
 // TestGenerateSpec_Upload (backend runtime); together they prove the full
@@ -17,8 +18,7 @@ func TestParseUpload_ThreadsXPalbaseUpload(t *testing.T) {
       "responses":{"200":{"content":{"application/json":{"schema":{"type":"object",
         "properties":{"id":{"type":"string"}},"required":["id"]}}}}},
       "x-palbase-upload":{
-        "bucket":"docs","pathTemplate":"{userId}/{uploadId}-{filename}",
-        "maxSize":26214400,"allowedTypes":["application/pdf","image/png"]
+        "bucket":"docs","pathTemplate":"{userId}/{uploadId}-{filename}"
       }
     }},
     "/todos":{"get":{"operationId":"todos.list",
@@ -51,12 +51,6 @@ func TestParseUpload_ThreadsXPalbaseUpload(t *testing.T) {
 	}
 	if upload.upload.pathTemplate != "{userId}/{uploadId}-{filename}" {
 		t.Errorf("pathTemplate = %q", upload.upload.pathTemplate)
-	}
-	if upload.upload.maxSize != 26214400 {
-		t.Errorf("maxSize = %d, want 26214400", upload.upload.maxSize)
-	}
-	if len(upload.upload.allowedTypes) != 2 || upload.upload.allowedTypes[0] != "application/pdf" {
-		t.Errorf("allowedTypes = %v", upload.upload.allowedTypes)
 	}
 
 	// A normal route MUST NOT acquire an upload — absence is what keeps it a

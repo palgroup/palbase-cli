@@ -77,8 +77,7 @@ const fixtureOpenAPI = `{
         "properties":{"id":{"type":"string"},"url":{"type":"string"}},
         "required":["id","url"]}}}}},
       "x-palbase-upload":{
-        "bucket":"docs","pathTemplate":"{userId}/{uploadId}-{filename}",
-        "maxSize":26214400,"allowedTypes":["application/pdf","image/png"]
+        "bucket":"docs","pathTemplate":"{userId}/{uploadId}-{filename}"
       }}}
   }
 }`

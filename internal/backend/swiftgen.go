@@ -56,8 +56,9 @@ type swiftOp struct {
 type swiftUpload struct {
 	bucket       string
 	pathTemplate string
-	maxSize      int64    // 0 = the bucket's own fileSizeLimit applies
-	allowedTypes []string // empty = the bucket's own allowlist applies
+	// No maxSize/allowedTypes: @Upload names only the bucket — the size limit +
+	// MIME allowlist live on the bucket (config/storage.ts) and are enforced by
+	// storage at the PUT, so x-palbase-upload carries only bucket + pathTemplate.
 }
 
 // swiftErrorDef describes one inferred error from an endpoint's
@@ -182,9 +183,11 @@ func declaredErrors(op map[string]any) []swiftErrorDef {
 // generator via uploadExtension):
 //
 //	"x-palbase-upload": {
-//	  "bucket": "docs", "pathTemplate": "{userId}/{uploadId}-{filename}",
-//	  "maxSize": 26214400, "allowedTypes": ["application/pdf", "image/png"]
+//	  "bucket": "docs", "pathTemplate": "{userId}/{uploadId}-{filename}"
 //	}
+//
+// Only bucket + pathTemplate — the size/type limits live on the bucket and are
+// storage-enforced, so the client (and thus this codegen) never needs them.
 //
 // bucket + pathTemplate are required; maxSize/allowedTypes are optional.
 func declaredUpload(op map[string]any) *swiftUpload {
@@ -199,18 +202,7 @@ func declaredUpload(op map[string]any) *swiftUpload {
 		// broken PBUploadEndpoint (visible-fail over silent-wrong).
 		return nil
 	}
-	u := &swiftUpload{bucket: bucket, pathTemplate: pathTemplate}
-	if ms, ok := ext["maxSize"].(float64); ok && ms > 0 {
-		u.maxSize = int64(ms)
-	}
-	if raw, ok := ext["allowedTypes"].([]any); ok {
-		for _, t := range raw {
-			if s, ok := t.(string); ok && s != "" {
-				u.allowedTypes = append(u.allowedTypes, s)
-			}
-		}
-	}
-	return u
+	return &swiftUpload{bucket: bucket, pathTemplate: pathTemplate}
 }
 
 // errorDataSchema pulls the data-payload schema out of a declared error's
