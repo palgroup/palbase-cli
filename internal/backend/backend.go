@@ -184,49 +184,19 @@ func (s *stringFlag) String() string     { return s.value }
 func (s *stringFlag) Set(v string) error { s.value = v; return nil }
 func (s *stringFlag) Type() string       { return "string" }
 
-// projectRef resolves the linked project ref. Order:
-//  1. --ref flag override
-//  2. .palbase/config.json's ref (link writes it)
-//  3. ErrNotLinked — caller decides whether to prompt or fail.
-//
-// Returning ErrNotLinked instead of bubbling the underlying os.IsNotExist
-// lets the serve/observation commands auto-link via project.list when the
-// cwd has no .palbase/config.json yet (the interactive picker writes it).
-func projectRef(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	cfg, err := auth.LoadProjectConfig()
-	if err != nil {
-		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "not linked") {
-			return "", ErrNotLinked
-		}
-		return "", err
-	}
-	if cfg.Ref == "" {
-		return "", ErrNotLinked
-	}
-	return cfg.Ref, nil
-}
-
-// ErrNotLinked is returned by projectRef when the cwd doesn't carry a
-// .palbase/config.json. Subcommands catch this and offer to pick a
-// project from the user's project.list before falling through.
-var ErrNotLinked = errors.New("project not linked")
-
-// resolveOrLinkRef wraps projectRef with an interactive picker that
-// reads project.list, prompts the user when there's >1, and writes the
+// resolveOrLinkRef wraps auth.ResolveProjectRef with an interactive picker
+// that reads project.list, prompts the user when there's >1, and writes the
 // chosen ref to .palbase/config.json so subsequent runs are silent.
 //
 // The picker fires only when stdin is a TTY — non-interactive callers
-// (CI, piped scripts) get the original ErrNotLinked back so they can
+// (CI, piped scripts) get the original auth.ErrNotLinked back so they can
 // fail loudly instead of hanging waiting for input.
 func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, out io.Writer) (string, error) {
-	ref, err := projectRef(override)
+	ref, err := auth.ResolveProjectRef(override)
 	if err == nil {
 		return ref, nil
 	}
-	if !errors.Is(err, ErrNotLinked) {
+	if !errors.Is(err, auth.ErrNotLinked) {
 		return "", err
 	}
 
@@ -548,7 +518,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				return fmt.Errorf("extract dev server: %w", err)
 			}
 
-			ref, _ := projectRef("") // best-effort; default ref to "local" inside the JS
+			ref, _ := auth.ResolveProjectRef("") // best-effort; default ref to "local" inside the JS
 
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()

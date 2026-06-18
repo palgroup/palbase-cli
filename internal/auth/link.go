@@ -3,10 +3,12 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProjectConfig holds the linked project configuration (.palbase/config.json).
@@ -160,6 +162,45 @@ func LoadProjectConfig() (*ProjectConfig, error) {
 		return nil, fmt.Errorf(".palbase/config.json missing ref — run: palbase link <ref>")
 	}
 	return &cfg, nil
+}
+
+// ErrNotLinked is returned by ResolveProjectRef when the cwd has no usable
+// .palbase/config.json (missing, or present without a ref) and no --ref
+// override was passed.
+//
+// Subcommands catch this with errors.Is to decide whether to prompt the user
+// for a project (the interactive picker in backend.resolveOrLinkRef) or fail
+// loudly. The message is the canonical "not linked" guidance shown to users.
+var ErrNotLinked = errors.New("project not linked — pass --ref or run from a project directory")
+
+// ResolveProjectRef resolves the linked project ref. Order:
+//  1. --ref flag override (returned verbatim)
+//  2. .palbase/config.json's ref (link writes it)
+//  3. ErrNotLinked — caller decides whether to prompt or fail.
+//
+// This is the single source of truth for "which project am I in"; every
+// cwd-scoped subcommand (backend/db/secret/notifications) calls it. Returning
+// the ErrNotLinked sentinel (rather than bubbling LoadProjectConfig's raw
+// "not linked" string) lets callers branch on errors.Is — the backend serve
+// path uses that to auto-link via project.list before failing.
+func ResolveProjectRef(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	cfg, err := LoadProjectConfig()
+	if err != nil {
+		// LoadProjectConfig returns a not-linked / missing-ref error when there's
+		// no usable config; collapse those to the ErrNotLinked sentinel. Any other
+		// error (read failure, malformed JSON) is a real problem — surface it.
+		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "not linked") || strings.Contains(err.Error(), "missing ref") {
+			return "", ErrNotLinked
+		}
+		return "", err
+	}
+	if cfg.Ref == "" {
+		return "", ErrNotLinked
+	}
+	return cfg.Ref, nil
 }
 
 func ensureGitignore() error {

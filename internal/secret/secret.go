@@ -5,7 +5,6 @@
 package secret
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -66,27 +65,6 @@ func guardReservedKey(key string) error {
 	return nil
 }
 
-// projectRef resolves the linked project ref. Order:
-//  1. --ref flag override
-//  2. .palbase/config.json in the project directory
-//  3. error if neither is available
-func projectRef(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	cfg, err := auth.LoadProjectConfig()
-	if err != nil {
-		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "not linked") {
-			return "", fmt.Errorf("project not linked — pass --ref or run from a project directory")
-		}
-		return "", err
-	}
-	if cfg.Ref == "" {
-		return "", fmt.Errorf("project not linked — pass --ref or run from a project directory")
-	}
-	return cfg.Ref, nil
-}
-
 func setCmd(studioFn func() *studio.Client) *cobra.Command {
 	var (
 		refFlag  string
@@ -142,7 +120,7 @@ file itself stays local (gitignored); only its encrypted value is uploaded.`,
 				return err
 			}
 
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}
@@ -180,7 +158,7 @@ func listCmd(studioFn func() *studio.Client) *cobra.Command {
 		Use:   "list",
 		Short: "List all env vars for the branch (secrets shown masked)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}
@@ -226,7 +204,7 @@ with exactly the remote set instead of merging.
 
 The file is gitignored by the scaffold — secrets never enter git.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}
@@ -285,7 +263,7 @@ after a pull is a no-op. A key's secret-ness is preserved from remote; mark NEW
 keys as secret with --secret KEY1,KEY2. Push never DELETES remote keys that are
 absent locally (use ` + "`secret remove`" + ` for that).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}
@@ -549,7 +527,7 @@ func removeCmd(studioFn func() *studio.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}

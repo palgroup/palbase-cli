@@ -19,7 +19,6 @@ package db
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -154,25 +153,6 @@ client-side. New projects get this automatically; this is for existing ones.`,
 	}
 }
 
-// projectRef resolves the linked project ref (mirrors secret.projectRef).
-// Order: 1) --ref flag override, 2) .palbase/config.json, 3) error.
-func projectRef(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	cfg, err := auth.LoadProjectConfig()
-	if err != nil {
-		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "not linked") {
-			return "", fmt.Errorf("project not linked — pass --ref or run from a project directory")
-		}
-		return "", err
-	}
-	if cfg.Ref == "" {
-		return "", fmt.Errorf("project not linked — pass --ref or run from a project directory")
-	}
-	return cfg.Ref, nil
-}
-
 // schemaPath is the project-relative path to the declared schema source.
 const schemaPath = "db/schema.ts"
 
@@ -277,7 +257,7 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 				return fmt.Errorf("-f/--name is required (a short migration name, e.g. -f add_todos)")
 			}
 
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}
@@ -367,7 +347,7 @@ match; exits non-zero (printing the drift) when they differ. This is the gate
 the pre-push hook uses to stop a push that would deploy unmigrated schema
 changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := projectRef(refFlag)
+			ref, err := auth.ResolveProjectRef(refFlag)
 			if err != nil {
 				return err
 			}

@@ -56,21 +56,6 @@ encrypted env vars — they never enter git.`,
 	return cmd
 }
 
-// projectRef resolves the linked project ref (flag override → .palbase/config.json).
-func projectRef(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	cfg, err := auth.LoadProjectConfig()
-	if err != nil {
-		return "", fmt.Errorf("project not linked — pass --ref or run from a project directory")
-	}
-	if cfg.Ref == "" {
-		return "", fmt.Errorf("project not linked — pass --ref or run from a project directory")
-	}
-	return cfg.Ref, nil
-}
-
 // providersCmd lists the catalog + which providers are configured in config.
 func providersCmd() *cobra.Command {
 	return &cobra.Command{
@@ -135,7 +120,7 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			}
 
 			refOverride, _ := cmd.Flags().GetString("ref")
-			ref, err := projectRef(refOverride)
+			ref, err := auth.ResolveProjectRef(refOverride)
 			if err != nil {
 				return err
 			}

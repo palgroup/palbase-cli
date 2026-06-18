@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,6 +48,62 @@ func TestUnlinkProjectConfigIsIdempotent(t *testing.T) {
 	if err := UnlinkProjectConfig(); err != nil {
 		t.Fatalf("UnlinkProjectConfig on unlinked dir: %v", err)
 	}
+}
+
+// TestResolveProjectRef is the single source of truth for "which project am I
+// in" — backend/db/secret/notifications all key off it. The override path, the
+// linked-config path, and the ErrNotLinked sentinel (which the backend serve
+// flow branches on via errors.Is) are all locked here.
+func TestResolveProjectRef(t *testing.T) {
+	t.Run("override wins without touching config", func(t *testing.T) {
+		chdirTemp(t) // empty dir: no .palbase/config.json
+		ref, err := ResolveProjectRef("explicitm8p6zm")
+		if err != nil {
+			t.Fatalf("override should not error: %v", err)
+		}
+		if ref != "explicitm8p6zm" {
+			t.Fatalf("ref = %q, want explicitm8p6zm", ref)
+		}
+	})
+
+	t.Run("reads ref from linked config", func(t *testing.T) {
+		chdirTemp(t)
+		if err := SaveProjectConfig(&ProjectConfig{Ref: "todoappm8p6zm", DefaultEnv: "main"}); err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+		ref, err := ResolveProjectRef("")
+		if err != nil {
+			t.Fatalf("ResolveProjectRef: %v", err)
+		}
+		if ref != "todoappm8p6zm" {
+			t.Fatalf("ref = %q, want todoappm8p6zm", ref)
+		}
+	})
+
+	t.Run("no config returns ErrNotLinked sentinel", func(t *testing.T) {
+		chdirTemp(t) // no .palbase/config.json
+		_, err := ResolveProjectRef("")
+		if !errors.Is(err, ErrNotLinked) {
+			t.Fatalf("err = %v, want errors.Is ErrNotLinked", err)
+		}
+	})
+
+	t.Run("config without ref returns ErrNotLinked sentinel", func(t *testing.T) {
+		chdirTemp(t)
+		// Write a config.json with an empty ref directly — SaveProjectConfig is
+		// happy to persist it; LoadProjectConfig rejects it, which ResolveProjectRef
+		// must collapse to the sentinel so callers can branch on errors.Is.
+		if err := os.MkdirAll(".palbase", 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(".palbase", "config.json"), []byte(`{"ref":""}`), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		_, err := ResolveProjectRef("")
+		if !errors.Is(err, ErrNotLinked) {
+			t.Fatalf("err = %v, want errors.Is ErrNotLinked", err)
+		}
+	})
 }
 
 func TestProjectConfig_ModeRoundTrips(t *testing.T) {
