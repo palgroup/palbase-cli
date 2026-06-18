@@ -285,6 +285,23 @@ func emitTypeTree(ops []swiftOp) string {
 			}
 			lines = append(lines, topLevelDeclLines(responseTypeName(op.operationID), *op.output)...)
 			emitted = true
+		} else if op.upload != nil {
+			// An @Upload op ALWAYS surfaces a typed completion Response (the
+			// uploadEndpointStructLines + namespace method reference
+			// `<Op>Response` unconditionally). When the backend's OpenAPI
+			// declares the @Upload 200 with no JSON body (responseSchema → nil,
+			// so op.output is nil), we must STILL emit a concrete Response type
+			// or the generated `typealias Response = <Op>Response` dangles and
+			// the whole file fails to compile. Emit an empty Codable struct: it
+			// decodes `{}` and tolerates extra fields, so a real completion body
+			// (or none) both round-trip. Without this, a body-less @Upload op
+			// silently breaks the entire generated SDK.
+			if emitted {
+				lines = append(lines, "")
+			}
+			lines = append(lines, "public nonisolated struct "+responseTypeName(op.operationID)+": Codable, Sendable {")
+			lines = append(lines, "}")
+			emitted = true
 		}
 		if op.headers != nil {
 			if emitted {

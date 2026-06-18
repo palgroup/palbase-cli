@@ -494,3 +494,56 @@ func TestTopLevelErrorEnumLines_OtherIdentReserved(t *testing.T) {
 		t.Errorf("dropped error's code leaked into the switch\n---\n%s", out)
 	}
 }
+
+// bodylessUploadOpenAPI mirrors the REAL shape the backend runtime emits for an
+// @Upload op: the 200 response is declared but carries NO JSON body (content is
+// empty), so responseSchema → nil and op.output is nil. This is exactly the
+// todoapp `POST /docs/` (docs.upload) op observed on the live OpenAPI
+// (responses 200/400/401, all with empty content). The earlier TestEmitSwift
+// fixture gave docs.upload a FULL 200 body, which is why it never caught this.
+const bodylessUploadOpenAPI = `{
+  "openapi":"3.1.0","info":{"title":"t","version":"1"},
+  "paths":{
+    "/docs/":{"post":{"operationId":"docs.upload",
+      "requestBody":{"content":{"application/json":{"schema":{"type":"object",
+        "properties":{"title":{"type":"string"}},"required":["title"]}}}},
+      "responses":{
+        "200":{"description":"ok"},
+        "400":{"description":"bad"},
+        "401":{"description":"unauthorized"}
+      },
+      "x-palbase-upload":{"bucket":"docs","pathTemplate":"{userId}/{uploadId}-{filename}"}}}
+  }
+}`
+
+// TestEmitSwift_bodylessUploadEmitsResponseStruct locks the fix for the @Upload
+// codegen bug that broke the entire iOS SDK build: an @Upload op whose OpenAPI
+// 200 has no JSON body still references `<Op>Response` in its endpoint struct
+// (`typealias Response = DocsUploadResponse`) and namespace method, so the
+// emitter MUST emit a concrete `DocsUploadResponse` type or the generated file
+// fails to compile with "cannot find type 'DocsUploadResponse' in scope".
+//
+// Mutation proof: revert the `else if op.upload != nil` Response-struct branch
+// in emitTypeTree and this test goes RED (no DocsUploadResponse declaration),
+// while the dangling `typealias Response = DocsUploadResponse` still appears.
+func TestEmitSwift_bodylessUploadEmitsResponseStruct(t *testing.T) {
+	ops, err := parseOpenAPIForSwift([]byte(bodylessUploadOpenAPI))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out := emitSwift(ops)
+
+	// The endpoint struct (and method) reference DocsUploadResponse...
+	if !strings.Contains(out, "public typealias Response = DocsUploadResponse") {
+		t.Fatalf("upload endpoint must reference DocsUploadResponse\n---\n%s", out)
+	}
+	// ...so a concrete DocsUploadResponse TYPE must be declared, or the file
+	// won't compile. An empty Codable struct is the contract-correct stand-in.
+	if !strings.Contains(out, "struct DocsUploadResponse: Codable, Sendable {") {
+		t.Errorf("body-less @Upload op must still emit a concrete DocsUploadResponse struct (else the generated SDK fails to build)\n---\n%s", out)
+	}
+	// And it must stay an @Upload (PBUploadEndpoint), not silently fall back.
+	if !strings.Contains(out, "struct DocsUploadEndpoint: PBUploadEndpoint {") {
+		t.Errorf("body-less upload op must still adopt PBUploadEndpoint\n---\n%s", out)
+	}
+}
