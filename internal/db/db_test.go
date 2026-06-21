@@ -63,7 +63,8 @@ func chdirTemp(t *testing.T, schemaSrc string) string {
 }
 
 // migSQLResponse is the shape the br-pod (via Studio backend.migrationSQL)
-// returns: {sql, plan{addTables,addColumns,dropColumns,dropTables,typeChanges}}.
+// returns: {sql, plan{...}}. All 9 DiffPlan fields are included so the CLI
+// can decode addConstraints/dropConstraints/addIndexes/dropIndexes correctly.
 func migSQLResponse(sql string, plan map[string][]string) map[string]any {
 	get := func(k string) []string {
 		if v, ok := plan[k]; ok {
@@ -74,11 +75,15 @@ func migSQLResponse(sql string, plan map[string][]string) map[string]any {
 	return map[string]any{
 		"sql": sql,
 		"plan": map[string]any{
-			"addTables":   get("addTables"),
-			"addColumns":  get("addColumns"),
-			"dropColumns": get("dropColumns"),
-			"dropTables":  get("dropTables"),
-			"typeChanges": get("typeChanges"),
+			"addTables":       get("addTables"),
+			"addColumns":      get("addColumns"),
+			"dropColumns":     get("dropColumns"),
+			"dropTables":      get("dropTables"),
+			"typeChanges":     get("typeChanges"),
+			"addConstraints":  get("addConstraints"),
+			"dropConstraints": get("dropConstraints"),
+			"addIndexes":      get("addIndexes"),
+			"dropIndexes":     get("dropIndexes"),
 		},
 	}
 }
@@ -135,6 +140,8 @@ func TestDiff_WritesMigrationFile_WhenPlanNonEmpty(t *testing.T) {
 	require.Contains(t, out.String(), filepath.Join("db", "migrations", name))
 	require.Contains(t, out.String(), "1 table(s) +")
 	require.Contains(t, out.String(), "1 column(s) +")
+	require.Contains(t, out.String(), "0 constraint(s)")
+	require.Contains(t, out.String(), "0 index(es)")
 	require.Contains(t, out.String(), "0 destructive")
 }
 
@@ -186,6 +193,109 @@ func TestDiff_NoOp_WhenPlanEmpty(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, "db", "migrations"))
 	require.True(t, os.IsNotExist(err), "db/migrations must not be created when schema is in sync")
 	require.Contains(t, out.String(), "in sync")
+}
+
+// TestDiff_WritesMigrationFile_WhenOnlyConstraints verifies that a plan with
+// ONLY addConstraints populated is NOT treated as empty — the CLI must write a
+// migration file even when the only change is a new constraint.
+func TestDiff_WritesMigrationFile_WhenOnlyConstraints(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({ todos: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"ALTER TABLE todos ADD CONSTRAINT todos_title_not_empty CHECK (title <> '');",
+			map[string][]string{"addConstraints": {"todos.todos_title_not_empty"}},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_constraint"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	// Migration file MUST be written — constraint-only is NOT in sync.
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "constraint-only diff must write a migration file")
+
+	body, _ := os.ReadFile(filepath.Join(dir, "db", "migrations", entries[0].Name()))
+	require.Contains(t, string(body), "ALTER TABLE todos ADD CONSTRAINT")
+
+	// Summary must show 1 constraint, not "in sync".
+	o := out.String()
+	require.NotContains(t, o, "in sync")
+	require.Contains(t, o, "1 constraint(s)")
+	require.Contains(t, o, "0 destructive")
+}
+
+// TestDiff_WritesMigrationFile_WhenOnlyIndexes verifies that a plan with ONLY
+// addIndexes populated is NOT treated as empty.
+func TestDiff_WritesMigrationFile_WhenOnlyIndexes(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({ todos: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"CREATE INDEX todos_title_idx ON todos (title);",
+			map[string][]string{"addIndexes": {"todos.todos_title_idx"}},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_index"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	// Migration file MUST be written — index-only is NOT in sync.
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "index-only diff must write a migration file")
+
+	body, _ := os.ReadFile(filepath.Join(dir, "db", "migrations", entries[0].Name()))
+	require.Contains(t, string(body), "CREATE INDEX todos_title_idx")
+
+	// Summary must show 1 index, not "in sync".
+	o := out.String()
+	require.NotContains(t, o, "in sync")
+	require.Contains(t, o, "1 index(es)")
+	require.Contains(t, o, "0 destructive")
+}
+
+// TestDiff_DropConstraint_IsNotDestructive verifies that dropping a constraint
+// does NOT trigger the destructive warning — DROP CONSTRAINT loses no rows.
+func TestDiff_DropConstraint_IsNotDestructive(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({ todos: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"ALTER TABLE todos DROP CONSTRAINT todos_title_not_empty;",
+			map[string][]string{"dropConstraints": {"todos.todos_title_not_empty"}},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "drop_constraint"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	// Migration file IS written.
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	o := out.String()
+	// 0 destructive — dropping a constraint doesn't drop data.
+	require.Contains(t, o, "0 destructive")
+	// No WARNING banner.
+	require.NotContains(t, strings.ToUpper(o), "WARNING")
 }
 
 func TestDiff_RequiresName(t *testing.T) {
