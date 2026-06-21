@@ -50,6 +50,12 @@ type diffPlan struct {
 	DropColumns []string `json:"dropColumns"`
 	DropTables  []string `json:"dropTables"`
 	TypeChanges []string `json:"typeChanges"`
+	// Constraint and index operations — non-data-losing but still require a
+	// migration file. Field tags match the server's DiffPlan JSON exactly.
+	AddConstraints  []string `json:"addConstraints"`
+	DropConstraints []string `json:"dropConstraints"`
+	AddIndexes      []string `json:"addIndexes"`
+	DropIndexes     []string `json:"dropIndexes"`
 }
 
 // empty reports whether the live DB already matches the declared schema.
@@ -58,7 +64,11 @@ func (p diffPlan) empty() bool {
 		len(p.AddColumns) == 0 &&
 		len(p.DropColumns) == 0 &&
 		len(p.DropTables) == 0 &&
-		len(p.TypeChanges) == 0
+		len(p.TypeChanges) == 0 &&
+		len(p.AddConstraints) == 0 &&
+		len(p.DropConstraints) == 0 &&
+		len(p.AddIndexes) == 0 &&
+		len(p.DropIndexes) == 0
 }
 
 // hasDestructive reports whether applying the migration would drop data
@@ -314,8 +324,11 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 
 			destructive := len(resp.Plan.DropColumns) + len(resp.Plan.DropTables)
 			fmt.Fprintf(out, "✓ wrote %s\n", relPath)
-			fmt.Fprintf(out, "  %d table(s) +, %d column(s) +, %d destructive\n",
-				len(resp.Plan.AddTables), len(resp.Plan.AddColumns), destructive)
+			fmt.Fprintf(out, "  %d table(s) +, %d column(s) +, %d constraint(s), %d index(es), %d destructive\n",
+				len(resp.Plan.AddTables), len(resp.Plan.AddColumns),
+				len(resp.Plan.AddConstraints)+len(resp.Plan.DropConstraints),
+				len(resp.Plan.AddIndexes)+len(resp.Plan.DropIndexes),
+				destructive)
 			if resp.Plan.hasDestructive() {
 				fmt.Fprintln(out, "  WARNING: this migration DROPS data (columns/tables) — review the SQL before pushing.")
 				for _, c := range resp.Plan.DropColumns {
@@ -376,11 +389,15 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 					fmt.Fprintf(errOut, "  %s %s\n", label, it)
 				}
 			}
-			report("+ table   ", resp.Plan.AddTables)
-			report("+ column  ", resp.Plan.AddColumns)
-			report("~ type    ", resp.Plan.TypeChanges)
-			report("- column  ", resp.Plan.DropColumns)
-			report("- table   ", resp.Plan.DropTables)
+			report("+ table      ", resp.Plan.AddTables)
+			report("+ column     ", resp.Plan.AddColumns)
+			report("~ type       ", resp.Plan.TypeChanges)
+			report("- column     ", resp.Plan.DropColumns)
+			report("- table      ", resp.Plan.DropTables)
+			report("+ constraint ", resp.Plan.AddConstraints)
+			report("- constraint ", resp.Plan.DropConstraints)
+			report("+ index      ", resp.Plan.AddIndexes)
+			report("- index      ", resp.Plan.DropIndexes)
 			fmt.Fprintln(errOut, "run `palbase db diff -f <name>` to generate a migration")
 			return fmt.Errorf("schema drift: migration needed")
 		},
