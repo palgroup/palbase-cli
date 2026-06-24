@@ -10,6 +10,7 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/admin"
 	"github.com/palgroup/palbase-cli/internal/apikey"
+	"github.com/palgroup/palbase-cli/internal/apps"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/branch"
@@ -114,6 +115,9 @@ func main() {
 		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST: func() apikey.REST { return managementREST() },
+		}),
+		apps.Cmd(apps.Resolvers{
+			Studio: func() apps.Studio { return studioClient },
 		}),
 		secret.Cmd(secret.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
