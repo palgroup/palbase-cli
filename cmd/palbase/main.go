@@ -22,6 +22,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/storage"
 	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/palgroup/palbase-cli/internal/testuser"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
@@ -133,6 +134,7 @@ func main() {
 		admin.NewCommand(admin.Resolvers{
 			REST: func() admin.REST { return managementREST() },
 		}),
+		authCmd(),
 	)
 
 	// CLI-1 flat redesign: the backend lifecycle commands (pull/push/dev/
@@ -153,6 +155,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// authCmd is the `palbase auth ...` command group. It hosts auth-related
+// developer tooling that talks to Studio's tRPC — today, `test-user` (mint
+// disposable is_test users, optionally populated from a saved scenario). The
+// top-level login/logout/whoami verbs stay where they are; this group is for
+// the per-environment auth admin actions exposed via the Studio tRPC surface.
+func authCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Authentication tooling (test users, …)",
+	}
+	cmd.AddCommand(
+		testuser.Cmd(testuser.Resolvers{
+			// *studio.Client satisfies testuser.Studio (Query/Mutation).
+			Studio: func() testuser.Studio { return studioClient },
+		}),
+	)
+	return cmd
 }
 
 func loginCmd() *cobra.Command {
