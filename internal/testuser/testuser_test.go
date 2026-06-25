@@ -120,6 +120,24 @@ func TestTestUserCreate_PlainCountFlag(t *testing.T) {
 	require.EqualValues(t, 3, body["count"])
 }
 
+// TestTestUserCreate_CountAndScenarioMutuallyExclusive asserts that combining
+// --count with --scenario is rejected before any network call is made.
+func TestTestUserCreate_CountAndScenarioMutuallyExclusive(t *testing.T) {
+	called := false
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		trpcOK(w, map[string]any{})
+	})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd.SetArgs([]string{"create", "abcd1234", "--scenario", "demo", "--count", "2"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--count cannot be combined with --scenario")
+	require.False(t, called, "transport must not be called when flag validation fails")
+}
+
 // TestTestUserCreate_ScenarioJSON proves the --scenario path calls
 // testData.runScenario with the scenario name and emits the minted user's
 // creds+token (with inserted summary) as JSON.
