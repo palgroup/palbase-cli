@@ -2,7 +2,6 @@ package backend
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -305,30 +304,26 @@ func pbxQuote(s string) string {
 // Info.plist (nothing on disk to patch — surfaced to the caller).
 //
 // CONFIG-CUTOVER: the runtime config moved to the per-env Palbase-Info.plist,
-// which codegen `--app` emits. This helper still reads a legacy
-// PalbaseGenerated.json IF ONE EXISTS next to the .swift output, but the
-// cutover stopped writing it — so on the bare-link path it simply no-ops
-// (returns nil on the missing-file read). The Google URL scheme is then wired
-// the next time `apps config` / codegen `--app` produces the plist.
+// which `palbase apps config` / codegen `--app` emits next to the .swift
+// output. The Google redirect-URI is sourced from that plist's
+// `oauth.google.redirect_uri` (it used to come from the now-retired
+// PalbaseGenerated.json). On the bare-link path (no `--app` run yet) there's
+// no plist on disk, so this no-ops (returns nil) until codegen `--app`
+// produces the plist.
+//
+// SOURCE = Palbase-Info.plist's oauth.google (next to the generated swift);
+// TARGET = the app target's own Info.plist (CFBundleURLTypes). The two are
+// kept distinct: we READ the redirect-URI from the SOURCE and INJECT the
+// scheme into the TARGET.
 func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPath string, w io.Writer) error {
-	// A legacy JSON config, if present next to the .swift codegen output.
-	jsonPath := filepath.Join(filepath.Dir(generatedSwiftPath), "PalbaseGenerated.json")
-	data, err := os.ReadFile(jsonPath)
+	// SOURCE: the per-env Palbase-Info.plist emitted next to the .swift output.
+	srcPlistPath := filepath.Join(filepath.Dir(generatedSwiftPath), "Palbase-Info.plist")
+	redirectURI, err := googleRedirectURIFromPlist(srcPlistPath)
 	if err != nil {
-		return nil // no JSON config (the cutover stopped emitting it) — skip
+		return fmt.Errorf("read Google config from %s: %w", filepath.Base(srcPlistPath), err)
 	}
-	var gen struct {
-		OAuth *struct {
-			Google *struct {
-				RedirectURI string `json:"redirect_uri"`
-			} `json:"google"`
-		} `json:"oauth"`
-	}
-	if err := json.Unmarshal(data, &gen); err != nil {
-		return fmt.Errorf("parse %s: %w", jsonPath, err)
-	}
-	if gen.OAuth == nil || gen.OAuth.Google == nil || gen.OAuth.Google.RedirectURI == "" {
-		return nil // no Google provider configured — nothing to wire
+	if redirectURI == "" {
+		return nil // no Palbase-Info.plist yet, or no Google provider — nothing to wire
 	}
 
 	pbxPath := filepath.Join(projectPath, "project.pbxproj")
@@ -343,11 +338,12 @@ func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPat
 		return err
 	}
 	configIDs := appTargetConfigIDs(pbx, target)
+	// TARGET: the app's own Info.plist (NOT the SOURCE Palbase-Info.plist).
 	plistPath := resolveInfoPlistPath(pbx, projectPath, configIDs)
 	if plistPath == "" {
-		return fmt.Errorf("target %q uses a generated Info.plist — add the Google URL scheme (%s) manually", target.name, gen.OAuth.Google.RedirectURI)
+		return fmt.Errorf("target %q uses a generated Info.plist — add the Google URL scheme (%s) manually", target.name, redirectURI)
 	}
-	changed, err := ensureGoogleURLScheme(plistPath, gen.OAuth.Google.RedirectURI)
+	changed, err := ensureGoogleURLScheme(plistPath, redirectURI)
 	if err != nil {
 		return err
 	}
@@ -356,6 +352,61 @@ func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPat
 	}
 	return nil
 }
+
+// googleRedirectURIFromPlist reads the Google OAuth redirect-URI from the
+// per-env Palbase-Info.plist's `oauth.google.redirect_uri`. The plist carries
+// one config dict per build config (Debug=dev env, Release=production); the
+// FIRST `google` dict's redirect_uri is returned — the Debug (dev) env's,
+// matching the single redirect_uri the retired PalbaseGenerated.json carried.
+//
+// Returns ("", nil) — a graceful no-op — when the plist is absent (no `apps
+// config` / codegen `--app` run yet) or carries no oauth.google block (Google
+// not configured), mirroring how the JSON path degraded by omitting the block.
+func googleRedirectURIFromPlist(plistPath string) (string, error) {
+	data, err := os.ReadFile(plistPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // no plist yet (bare-link path) — skip
+		}
+		return "", fmt.Errorf("read %s: %w", plistPath, err)
+	}
+	content := string(data)
+	// Scope to the first `google` dict so we don't pick up an unrelated
+	// `redirect_uri` from elsewhere in the plist. The emitter (apps package)
+	// writes `<key>google</key>` immediately before the provider's dict.
+	gi := strings.Index(content, "<key>google</key>")
+	if gi == -1 {
+		return "", nil // no Google provider configured — nothing to wire
+	}
+	ri := strings.Index(content[gi:], "<key>redirect_uri</key>")
+	if ri == -1 {
+		return "", nil // google block without a redirect_uri — nothing to wire
+	}
+	rest := content[gi+ri:]
+	open := strings.Index(rest, "<string>")
+	if open == -1 {
+		return "", nil
+	}
+	rest = rest[open+len("<string>"):]
+	end := strings.Index(rest, "</string>")
+	if end == -1 {
+		return "", nil
+	}
+	return plistUnescape(rest[:end]), nil
+}
+
+// plistUnescape reverses the XML metacharacter escaping the apps-package
+// emitter applies (plistEscape), so a redirect_uri containing &amp;/&lt;/&gt;
+// round-trips to its literal form before we derive the URL scheme.
+func plistUnescape(s string) string {
+	return plistXMLUnescaper.Replace(s)
+}
+
+var plistXMLUnescaper = strings.NewReplacer(
+	"&amp;", "&",
+	"&lt;", "<",
+	"&gt;", ">",
+)
 
 // --- Per-env Palbase-Info.plist (build-config-conditioned) ----------------
 
