@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -176,39 +177,51 @@ func deleteCmd(studioFn func() Studio) *cobra.Command {
 	return cmd
 }
 
-// configArtifact mirrors the apps.configArtifact return shape — the
+// ConfigArtifact mirrors the apps.configArtifact return shape — the
 // per-(app × env) config the SDKs consume. This REPLACES the old
-// PalbaseGenerated.json shape.
-type configArtifact struct {
-	AppID       string  `json:"app_id"`
-	ProjectRef  string  `json:"project_ref"`
-	EndpointRef string  `json:"endpoint_ref"`
-	APIKey      string  `json:"api_key"`
-	BaseURL     string  `json:"base_url"`
-	EnvPreset   *string `json:"env_preset"`
-	Platform    string  `json:"platform"`
-	Identifier  string  `json:"identifier"`
+// PalbaseGenerated.json shape. Exported so the mobile codegen path
+// (Track A2) can reuse emitConfig with the same artifact.
+type ConfigArtifact struct {
+	AppID       string `json:"app_id"`
+	ProjectRef  string `json:"project_ref"`
+	EndpointRef string `json:"endpoint_ref"`
+	APIKey      string `json:"api_key"`
+	BaseURL     string `json:"base_url"`
+	EnvPreset   string `json:"env_preset"`
+	Platform    string `json:"platform"`
+	Identifier  string `json:"identifier"`
 }
 
 func configCmd(studioFn func() Studio) *cobra.Command {
 	var (
-		appID   string
-		env     string
-		branch  string
-		outPath string
-		// jsonOut is accepted for surface compatibility; the artifact is
-		// always emitted as JSON, so the flag is a documented no-op.
-		jsonOut bool
+		appID    string
+		env      string
+		branch   string
+		platform string
+		outPath  string
 	)
-	_ = jsonOut
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Fetch the per-(app × env) config artifact",
-		Long: "Fetch the config artifact for an app in a given env. Writes JSON\n" +
-			"to stdout (default) or to a file with -o. The artifact carries\n" +
-			"{app_id, project_ref, endpoint_ref, api_key, base_url, env_preset,\n" +
-			"platform, identifier}.",
+		Short: "Write the per-(app × env) config file the SDK reads",
+		Long: "Fetch the config artifact for an app in a given env and write the\n" +
+			"per-env config file the SDK loads to enforce config-match:\n" +
+			"  --platform ios → Palbase-Info.plist (an Apple plist)\n" +
+			"  --platform web → palbase-config.json\n" +
+			"Both carry {app_id, identifier, env_preset, base_url, api_key}.\n" +
+			"An unconfigured binding (empty identifier — the app has not declared\n" +
+			"its bundle id / web origin yet) is REFUSED: no partial file is\n" +
+			"written, because a config without an identifier cannot enforce\n" +
+			"config-match.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if platform == "" {
+				platform = derivePlatform(appID)
+			}
+			if !isValidPlatform(platform) {
+				return fmt.Errorf("--platform must be one of: ios, web")
+			}
+			if platform == "android" {
+				return fmt.Errorf("--platform android is not yet supported by apps config")
+			}
 			// --env is the env's project ref; --branch optionally selects a
 			// branch-specific env. The server resolves endpoint_ref from the
 			// project ref, so we pass the (optionally branch-composed) ref.
@@ -216,37 +229,136 @@ func configCmd(studioFn func() Studio) *cobra.Command {
 			if branch != "" {
 				projectRef = env + ":" + branch
 			}
-			var art configArtifact
+			var art ConfigArtifact
 			if err := studioFn().Query(cmd.Context(), "apps.configArtifact", map[string]any{
 				"appId":      appID,
 				"projectRef": projectRef,
 			}, &art); err != nil {
 				return err
 			}
-			raw, err := json.MarshalIndent(art, "", "  ")
-			if err != nil {
-				return fmt.Errorf("encode artifact: %w", err)
+			out := outPath
+			if out == "" {
+				out = defaultConfigFilename(platform)
 			}
-			if outPath != "" {
-				if err := os.WriteFile(outPath, append(raw, '\n'), 0o600); err != nil {
-					return fmt.Errorf("write %s: %w", outPath, err)
-				}
-				fmt.Fprintf(os.Stdout, "✓ wrote config artifact to %s\n", outPath)
-				return nil
+			if err := emitConfig(art, platform, out); err != nil {
+				return err
 			}
-			fmt.Fprintln(os.Stdout, string(raw))
+			fmt.Fprintf(os.Stdout, "✓ wrote %s config to %s\n", platform, out)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
 	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch slug (optional)")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON (the artifact is always JSON)")
-	cmd.Flags().StringVarP(&outPath, "out", "o", "", "write the artifact to a file instead of stdout")
+	cmd.Flags().StringVar(&platform, "platform", "", "Target platform: ios | web (defaults from the app id prefix)")
+	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (defaults: Palbase-Info.plist | palbase-config.json)")
 	_ = cmd.MarkFlagRequired("app")
 	_ = cmd.MarkFlagRequired("env")
 	return cmd
 }
+
+// defaultConfigFilename is the conventional output name per platform when -o
+// is omitted.
+func defaultConfigFilename(platform string) string {
+	if platform == "ios" {
+		return "Palbase-Info.plist"
+	}
+	return "palbase-config.json"
+}
+
+// derivePlatform best-effort infers the platform from common app-id prefixes
+// so `--platform` can be omitted in the simple case. Empty when unknown; the
+// caller then surfaces the validation error.
+func derivePlatform(appID string) string {
+	switch {
+	case len(appID) >= 4 && appID[:4] == "ios_":
+		return "ios"
+	case len(appID) >= 4 && appID[:4] == "web_":
+		return "web"
+	default:
+		return ""
+	}
+}
+
+// emitConfig writes the per-env config file the SDK reads. platform "ios"
+// writes a minimal Apple plist (Palbase-Info.plist); "web" writes JSON
+// (palbase-config.json). Both carry exactly {app_id, identifier, env_preset,
+// base_url, api_key}.
+//
+// REFUSES (returns an error, writes NOTHING) when the artifact has no
+// identifier: an empty identifier means the binding is unconfigured (the app
+// has not declared its bundle id / web origin), and a config file without an
+// identifier cannot enforce config-match — writing it would be a footgun that
+// mirrors the orchestrator's unconfigured-binding rule.
+func emitConfig(art ConfigArtifact, platform, path string) error {
+	if art.Identifier == "" {
+		return fmt.Errorf("refusing to write %s: app %q has an unconfigured binding (no identifier) — declare the bundle id (ios) / origin (web) before emitting a config", path, art.AppID)
+	}
+	switch platform {
+	case "web":
+		return writeWebConfig(art, path)
+	case "ios":
+		return writeIOSPlist(art, path)
+	default:
+		return fmt.Errorf("emitConfig: unsupported platform %q", platform)
+	}
+}
+
+// writeWebConfig marshals the five config-match fields to JSON.
+func writeWebConfig(art ConfigArtifact, path string) error {
+	raw, err := json.MarshalIndent(map[string]string{
+		"app_id":     art.AppID,
+		"identifier": art.Identifier,
+		"env_preset": art.EnvPreset,
+		"base_url":   art.BaseURL,
+		"api_key":    art.APIKey,
+	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode web config: %w", err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeIOSPlist writes a minimal, valid Apple plist carrying the five
+// config-match fields as a flat <key>/<string> dict.
+func writeIOSPlist(art ConfigArtifact, path string) error {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
+	b.WriteString(`<plist version="1.0">` + "\n")
+	b.WriteString("<dict>\n")
+	for _, kv := range []struct{ key, val string }{
+		{"app_id", art.AppID},
+		{"identifier", art.Identifier},
+		{"env_preset", art.EnvPreset},
+		{"base_url", art.BaseURL},
+		{"api_key", art.APIKey},
+	} {
+		b.WriteString("\t<key>" + plistEscape(kv.key) + "</key>\n")
+		b.WriteString("\t<string>" + plistEscape(kv.val) + "</string>\n")
+	}
+	b.WriteString("</dict>\n")
+	b.WriteString("</plist>\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// plistEscape escapes the XML metacharacters that can appear in plist text
+// nodes so the emitted plist stays valid for arbitrary identifiers/URLs/keys.
+func plistEscape(s string) string {
+	return xmlReplacer.Replace(s)
+}
+
+var xmlReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+)
 
 func isValidPlatform(p string) bool {
 	switch p {

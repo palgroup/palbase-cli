@@ -155,9 +155,11 @@ func TestAppsDelete_Mutation(t *testing.T) {
 	require.Equal(t, "app_9", body["appId"])
 }
 
-// TestAppsConfig_WritesArtifactToFile exercises apps.configArtifact and the
-// -o file-output path, asserting the per-(app × env) artifact shape.
-func TestAppsConfig_WritesArtifactToFile(t *testing.T) {
+// TestAppsConfig_WritesConfigFileToPath exercises apps.configArtifact and the
+// end-to-end config-emit path: the fetched (app × env) artifact is written as
+// the per-env config file the SDK reads (here an ios plist via --platform ios
+// and -o).
+func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 	var body map[string]any
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
@@ -170,23 +172,23 @@ func TestAppsConfig_WritesArtifactToFile(t *testing.T) {
 		trpcOK(w, map[string]any{
 			"app_id": "app_1", "project_ref": "abcd1234", "endpoint_ref": "abcd1234m",
 			"api_key": "pb_abcd1234m_c_x", "base_url": "https://abcd1234m.dev.palbase.studio",
-			"env_preset": nil, "platform": "ios", "identifier": "com.example.app",
+			"env_preset": "development", "platform": "ios", "identifier": "com.example.app",
 		})
 	})
 	dir := t.TempDir()
-	outFile := filepath.Join(dir, "artifact.json")
+	outFile := filepath.Join(dir, "Palbase-Info.plist")
 	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"config", "--app", "app_1", "--env", "abcd1234", "-o", outFile})
+	cmd.SetArgs([]string{"config", "--app", "app_1", "--env", "abcd1234", "--platform", "ios", "-o", outFile})
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, "app_1", body["appId"])
 	require.Equal(t, "abcd1234", body["projectRef"])
 
 	raw, err := os.ReadFile(outFile)
 	require.NoError(t, err)
-	var art configArtifact
-	require.NoError(t, json.Unmarshal(raw, &art))
-	require.Equal(t, "app_1", art.AppID)
-	require.Equal(t, "abcd1234m", art.EndpointRef)
-	require.Equal(t, "ios", art.Platform)
-	require.Equal(t, "com.example.app", art.Identifier)
+	got := parsePlistDict(t, raw)
+	require.Equal(t, "app_1", got["app_id"])
+	require.Equal(t, "com.example.app", got["identifier"])
+	require.Equal(t, "development", got["env_preset"])
+	require.Equal(t, "https://abcd1234m.dev.palbase.studio", got["base_url"])
+	require.Equal(t, "pb_abcd1234m_c_x", got["api_key"])
 }
