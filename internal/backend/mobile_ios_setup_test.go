@@ -215,7 +215,6 @@ func TestPatchXcodeProjectModernSyncedTarget(t *testing.T) {
 	for _, must := range []string{
 		"name = \"Palbase Codegen iOS\";",
 		"$(SRCROOT)/palbase/Generated/PalbaseGenerated.swift",
-		"$(SRCROOT)/palbase/Generated/PalbaseGenerated.json",
 		"alwaysOutOfDate = 1;",
 		"palbase mobile codegen ios",
 		// The phase must export PALBASE_IOS_GENERATED_DIR from Xcode's declared
@@ -237,6 +236,10 @@ func TestPatchXcodeProjectModernSyncedTarget(t *testing.T) {
 		syncID,                      // our deterministic sync-folder id never appears
 		"path = Palbase/Generated;", // the case-colliding capital path
 		"path = palbase/Generated;", // we don't add OUR OWN synced folder either
+		// CONFIG-CUTOVER: codegen no longer emits PalbaseGenerated.json, so the
+		// build phase must NOT declare it as an output (Xcode would expect a file
+		// that's never produced). Mutation-evident: re-add it to outputPaths → RED.
+		"PalbaseGenerated.json",
 	} {
 		if strings.Contains(out, gone) {
 			t.Fatalf("patched project must NOT add %q (app folder already covers it):\n%s", gone, out)

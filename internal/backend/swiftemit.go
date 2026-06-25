@@ -6,23 +6,15 @@ import (
 	"strings"
 )
 
-type swiftGeneratedConfig struct {
-	URL    string
-	APIKey string
-	Branch string
-	// OAuth captures the provider availability map fetched from
-	// palauth's public `/auth/oauth/providers` endpoint. Nil means
-	// "fetch failed or the project has no providers configured" —
-	// the iOS SDK's zero-arg `pb.auth.signInWithGoogle()` will throw
-	// AuthError.invalidCredentials("Google not configured") in that
-	// case (and `signInWithApple()` will still work because Apple's
-	// flow doesn't need a client_id from the Bundle).
-	OAuth *swiftOAuthConfig
-}
-
-// swiftOAuthConfig is what we serialise under `oauth` in
-// PalbaseGenerated.json. Strictly secret-free — palauth's public
-// endpoint never returns secrets so we have nothing to filter here.
+// swiftOAuthConfig is the provider-availability map fetched from palauth's
+// public `/auth/oauth/providers` endpoint (Apple enabled flag, Google
+// client_id/redirect_uri). Strictly secret-free — palauth's public endpoint
+// never returns secrets. After the config cutover it is mapped onto the per-env
+// Palbase-Info.plist's `oauth` block (via swiftOAuthToApps), the SOLE config
+// source the iOS SDK reads; it is no longer serialized into a
+// PalbaseGenerated.json. Nil means "fetch failed or no providers configured" —
+// the iOS SDK's zero-arg `pb.auth.signInWithGoogle()` then throws (and
+// `signInWithApple()` still works because Apple's flow needs no client_id).
 type swiftOAuthConfig struct {
 	Apple  *swiftOAuthApple  `json:"apple,omitempty"`
 	Google *swiftOAuthGoogle `json:"google,omitempty"`
@@ -40,12 +32,12 @@ type swiftOAuthGoogle struct {
 
 // emitSwift turns parsed operations into one PalbaseGenerated.swift.
 //
-// The Swift file is types + endpoint methods only; the runtime
-// config (url / apiKey / branch / source) ships separately as
-// PalbaseGenerated.json — a Bundle resource the Palbe SDK reads at
-// `pb.configure()` time. The split keeps customer apps off any
-// cross-module reflection: typed methods compile against the SDK,
-// the SDK loads its config from the bundle at startup.
+// The Swift file is types + endpoint methods only; the runtime config
+// (url / apiKey / oauth) ships separately as the per-env Palbase-Info.plist —
+// a Bundle resource the Palbe SDK reads at startup (the SOLE config source
+// after the JSON-config cutover). The split keeps customer apps off any
+// cross-module reflection: typed methods compile against the SDK, the SDK loads
+// its config from the bundle at startup.
 func emitSwift(ops []swiftOp) string {
 	// Reserved namespaces on `pb`: pb.auth.* / pb.analytics.* / pb.flags.* /
 	// pb.realtime.* / pb.notifications.* / pb.perf.* are SDK-owned surfaces. An
@@ -91,11 +83,11 @@ func emitSwift(ops []swiftOp) string {
 	// seam is no longer referenced.
 	b.WriteString("import Palbe\n\n")
 
-	// Backend config (url/apiKey/branch/source) is written separately as
-	// PalbaseGenerated.json next to this file and loaded by the Palbe SDK
-	// from Bundle.main at `pb.configure()` time. Keeps this Swift file
-	// pure types + endpoint methods; no static-let config literal that
-	// the SDK would otherwise need cross-module reflection to find.
+	// Backend config (url/apiKey/oauth) is carried separately by the per-env
+	// Palbase-Info.plist (codegen `--app`) and loaded by the Palbe SDK from
+	// Bundle.main at startup — the SOLE config source. Keeps this Swift file
+	// pure types + endpoint methods; no static-let config literal that the SDK
+	// would otherwise need cross-module reflection to find.
 
 	b.WriteString("// MARK: - Request / response types\n\n")
 	b.WriteString(emitTypeTree(usable))

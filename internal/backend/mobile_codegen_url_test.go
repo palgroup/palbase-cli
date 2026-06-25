@@ -100,18 +100,20 @@ func (cs *codegenURLStudio) resolvers(t *testing.T) Resolvers {
 	}
 }
 
-// TestGenerateIOSAuto_ServeUp_EmbedsLANIP pins Bug B's fix: when a local
-// `palbase serve` is reachable on 4003, the embedded runtime URL points at the
-// dev machine's LAN IP:4003 so both the simulator and a same-network physical
-// device reach the local backend. The remote host is used ONLY when serve is down.
-func TestGenerateIOSAuto_ServeUp_EmbedsLANIP(t *testing.T) {
+// TestGenerateIOSAuto_ServeUp_WritesSwiftNotJSON pins the config cutover on the
+// serve-UP path: when a local `palbase serve` is reachable on 4003, codegen
+// generates the typed client (PalbaseGenerated.swift) against the local spec and
+// writes NO PalbaseGenerated.json config (retired — the per-env
+// Palbase-Info.plist is the SOLE config source). Mutation-evident: re-add the
+// JSON-config writer and the "json absent" assertion goes RED.
+func TestGenerateIOSAuto_ServeUp_WritesSwiftNotJSON(t *testing.T) {
 	// writeSwiftGenerated appends ".palbase/config.json" to ./.gitignore
 	// (relative to cwd). Run in a temp cwd so that stray file lands in the
 	// sandbox, not in the repo (a leftover internal/backend/.gitignore trips
 	// goreleaser's dirty-tree check at release time).
 	t.Chdir(t.TempDir())
 
-	localSpecServer(t) // local `palbase serve` is up → local path
+	localSpecServer(t) // local `palbase serve` is up → local-spec path
 	cs := &codegenURLStudio{}
 	r := cs.resolvers(t)
 
@@ -121,26 +123,21 @@ func TestGenerateIOSAuto_ServeUp_EmbedsLANIP(t *testing.T) {
 		"erkut1230qe6u", "main", outFile, &strings.Builder{},
 	))
 
-	jsonBytes, err := os.ReadFile(strings.TrimSuffix(outFile, ".swift") + ".json")
+	// The typed client IS written.
+	swiftBytes, err := os.ReadFile(outFile)
 	require.NoError(t, err)
-	var cfg map[string]any
-	require.NoError(t, json.Unmarshal(jsonBytes, &cfg))
+	require.Contains(t, string(swiftBytes), "import Palbe", "the typed client must be generated")
 
-	url, _ := cfg["url"].(string)
-	require.Contains(t, url, ":4003", "serve-up: URL must target the local serve port")
-	require.NotContains(t, url, "dev.palbase.studio", "serve-up: URL must NOT be the remote tenant host")
-	// The host is whatever outboundLANIP() resolved — LAN IP normally, or
-	// "localhost" in an offline sandbox. Both are valid serve-up targets.
-	expected := "http://" + outboundLANIP() + ":4003"
-	require.Equal(t, expected, url)
-
-	_, hasSource := cfg["source"]
-	require.False(t, hasSource, "PalbaseGenerated.json must not carry a 'source' key")
+	// The JSON config is NOT written (cutover: plist is the sole config source).
+	_, statErr := os.Stat(strings.TrimSuffix(outFile, ".swift") + ".json")
+	require.True(t, os.IsNotExist(statErr),
+		"PalbaseGenerated.json config must NOT be written after the cutover")
 }
 
-// TestGenerateIOSAuto_ServeDown_EmbedsRemote pins the fallback: with no local
-// serve on 4003, codegen embeds the remote tenant host.
-func TestGenerateIOSAuto_ServeDown_EmbedsRemote(t *testing.T) {
+// TestGenerateIOSAuto_ServeDown_WritesSwiftNotJSON pins the same cutover on the
+// serve-DOWN path: with no local serve on 4003, codegen fetches the deployed
+// spec, generates the typed client, and still writes NO JSON config.
+func TestGenerateIOSAuto_ServeDown_WritesSwiftNotJSON(t *testing.T) {
 	// Ensure 4003 is free so the local probe fails and we take the remote path.
 	if ln, err := net.Listen("tcp", "127.0.0.1:4003"); err == nil {
 		_ = ln.Close()
@@ -154,8 +151,7 @@ func TestGenerateIOSAuto_ServeDown_EmbedsRemote(t *testing.T) {
 	// The serve-down path fetches the deployed spec from target.URL
 	// (https://erkut1230qe6um.dev.palbase.studio/openapi.json). lookupBackendTarget
 	// hard-codes that real host, so redirect just that host's requests to the
-	// mock server for the duration of this test (target.URL itself is unchanged —
-	// we still assert the embedded url is the real remote host below).
+	// mock server for the duration of this test.
 	restore := redirectHostTo(t, "erkut1230qe6um.dev.palbase.studio", cs.srvURL)
 	defer restore()
 
@@ -165,13 +161,11 @@ func TestGenerateIOSAuto_ServeDown_EmbedsRemote(t *testing.T) {
 		"erkut1230qe6u", "main", outFile, &strings.Builder{},
 	))
 
-	jsonBytes, err := os.ReadFile(strings.TrimSuffix(outFile, ".swift") + ".json")
+	swiftBytes, err := os.ReadFile(outFile)
 	require.NoError(t, err)
-	var cfg map[string]any
-	require.NoError(t, json.Unmarshal(jsonBytes, &cfg))
+	require.Contains(t, string(swiftBytes), "import Palbe", "the typed client must be generated")
 
-	url, _ := cfg["url"].(string)
-	require.Equal(t, "https://erkut1230qe6um.dev.palbase.studio", url,
-		"serve-down: URL must be the remote tenant host")
-	require.NotContains(t, url, "4003")
+	_, statErr := os.Stat(strings.TrimSuffix(outFile, ".swift") + ".json")
+	require.True(t, os.IsNotExist(statErr),
+		"PalbaseGenerated.json config must NOT be written after the cutover")
 }

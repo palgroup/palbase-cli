@@ -128,9 +128,9 @@ func Commands(r Resolvers) []*cobra.Command {
 
 // The Swift codegen output (typed methods + types) lands in a "Generated"
 // subfolder INSIDE the app target's own source folder (e.g.
-// palbase/Generated/PalbaseGenerated.swift), with the matching JSON next to
-// it (the runtime config the Palbe SDK loads from Bundle.main at
-// pb.configure()). Living inside the target folder is what makes it appear
+// palbase/Generated/PalbaseGenerated.swift). The runtime config the Palbe SDK
+// loads from Bundle.main is the per-env Palbase-Info.plist (codegen `--app`),
+// emitted alongside. Living inside the target folder is what makes it appear
 // ONCE, naturally, in the navigator: a modern Xcode 16 app folder is itself
 // a synchronized folder, so a nested Generated/ auto-joins the target with
 // ZERO pbxproj plumbing. Writing to a top-level "Palbase/Generated" instead
@@ -145,7 +145,6 @@ func Commands(r Resolvers) []*cobra.Command {
 const (
 	fallbackIOSGeneratedDir = "Generated"
 	iosGeneratedSwiftName   = "PalbaseGenerated.swift"
-	iosGeneratedJSONName    = "PalbaseGenerated.json"
 )
 
 // iosGeneratedSwiftFile returns the Swift output path for a generated dir.
@@ -1078,14 +1077,15 @@ func newMobileLinkIOSCmd(r Resolvers) *cobra.Command {
 
 			// Google URL scheme — runs AFTER codegen because the
 			// reversed-DNS redirect scheme is derived from the Google
-			// client_id, which codegen just fetched from palauth and
-			// wrote into PalbaseGenerated.json. No-op when the project
-			// has no Google provider configured.
+			// client_id. CONFIG-CUTOVER: the redirect URI now rides in the
+			// per-env Palbase-Info.plist (codegen `--app`); on the bare-link
+			// path (no `--app`) there's no config file yet, so this no-ops
+			// until the app is registered + codegen re-runs with `--app`.
 			if err := wireGoogleURLSchemeFromGenerated(project, target, iosGeneratedSwiftFile(resolveIOSGeneratedDir()), os.Stdout); err != nil {
 				fmt.Fprintf(os.Stdout, "  (Google URL scheme not wired: %v)\n", err)
 			}
 
-			fmt.Fprintln(os.Stdout, "✓ done — the SDK auto-configures from PalbaseGenerated.json; just `import Palbe` and call pb.*")
+			fmt.Fprintln(os.Stdout, "✓ done — the SDK auto-configures from the per-env Palbase-Info.plist; just `import Palbe` and call pb.*")
 			return nil
 		},
 	}
@@ -1160,46 +1160,33 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 }
 
 func generateIOSAuto(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
-	// Resolve the remote target first — it carries the publishable key + OAuth
-	// the app needs, and it's the device fallback / serve-down runtime URL. If
-	// it fails (not logged in, no network, sandboxed build phase without
-	// credentials), there's nothing valid to embed — surface the error.
+	// Resolve the remote target first — it's the serve-down spec source
+	// (deployed openapi.json + publishable key). If it fails (not logged in, no
+	// network, sandboxed build phase without credentials), there's nothing to
+	// fetch the spec from — surface the error.
 	target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
 	if err != nil {
 		return err
 	}
 
-	oauth, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey)
-	if oauthErr != nil {
-		fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
-	}
-
 	// Prefer a local spec when `palbase serve` is up (fast, hot-reloaded
-	// endpoint shapes). When it IS up, the app should also TALK to it: embed
-	// the dev machine's LAN IP:4003 so both the simulator (via host loopback)
-	// and a same-network physical device reach the local backend. When serve
-	// is down, fall back to the deployed spec AND the remote tenant host.
+	// endpoint shapes); fall back to the deployed spec when serve is down. Only
+	// the SPEC source is chosen here — CONFIG-CUTOVER: the runtime URL/key/oauth
+	// the app boots from now lives in the per-env Palbase-Info.plist (codegen
+	// `--app`), NOT in a PalbaseGenerated.json this path used to write.
 	localURL := "http://localhost:4003"
 	specBytes, localErr := fetchLocalOpenAPISpec(ctx, localURL+"/openapi.json")
-	embedURL := target.URL // remote tenant host (device fallback / serve-down)
 	if localErr != nil {
-		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using deployed spec + remote URL — run `palbase serve` for local dev\n", localURL, localErr)
+		fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using deployed spec — run `palbase serve` for local dev\n", localURL, localErr)
 		specBytes, err = fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
 		if err != nil {
 			return err
 		}
 	} else {
-		// Serve is up — point the app at the LAN-reachable serve address.
-		embedURL = "http://" + outboundLANIP() + ":4003"
-		fmt.Fprintf(w, "local `palbase serve` detected — embedding %s (simulator + same-network device reach it)\n", embedURL)
+		fmt.Fprintf(w, "local `palbase serve` detected — generating against the local spec\n")
 	}
 
-	return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
-		URL:    embedURL,
-		APIKey: target.APIKey,
-		Branch: branch,
-		OAuth:  oauth,
-	}, outFile, w)
+	return writeSwiftGenerated(specBytes, outFile, w)
 }
 
 func generateIOSRemote(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, outFile string, w io.Writer) error {
@@ -1215,22 +1202,7 @@ func generateIOSRemoteWithTarget(ctx context.Context, target backendTarget, bran
 	if err != nil {
 		return err
 	}
-	// Best-effort OAuth providers fetch — palauth's public endpoint
-	// returns just the secret-free bits the SDK needs (Apple enabled
-	// flag, Google client_id). A network blip or an older palauth
-	// without the route lands as nil; the codegen continues without
-	// an `oauth` block and the SDK falls back to the explicit-
-	// parameter signInWithGoogle overload.
-	oauth, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey)
-	if oauthErr != nil {
-		fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
-	}
-	return writeSwiftGenerated(specBytes, swiftGeneratedConfig{
-		URL:    target.URL,
-		APIKey: target.APIKey,
-		Branch: branch,
-		OAuth:  oauth,
-	}, outFile, w)
+	return writeSwiftGenerated(specBytes, outFile, w)
 }
 
 func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string, branch string) (backendTarget, error) {
@@ -1258,7 +1230,13 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 	}, nil
 }
 
-func writeSwiftGenerated(specBytes []byte, cfg swiftGeneratedConfig, outFile string, w io.Writer) error {
+// writeSwiftGenerated emits the typed client (PalbaseGenerated.swift) ONLY.
+//
+// CONFIG-CUTOVER (FINAL): the runtime config (url/apiKey/branch/oauth) is NO
+// LONGER emitted as PalbaseGenerated.json — the per-env Palbase-Info.plist
+// (codegen `--app` → emitIOSPerEnvPlist) is the SOLE config source the Palbe
+// SDK reads at startup. This path writes ONLY the typed client.
+func writeSwiftGenerated(specBytes []byte, outFile string, w io.Writer) error {
 	ops, err := parseOpenAPIForSwift(specBytes)
 	if err != nil {
 		return err
@@ -1272,65 +1250,16 @@ func writeSwiftGenerated(specBytes []byte, cfg swiftGeneratedConfig, outFile str
 	if err := os.WriteFile(outFile, []byte(swift), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", outFile, err)
 	}
-	// Companion JSON bundle resource — what `pb.configure()` reads via
-	// Bundle.main.url(forResource: "PalbaseGenerated", withExtension:
-	// "json"). Lives in the same outDir so the xcodeproj wiring covers
-	// both files in one shot.
-	jsonPath := filepath.Join(filepath.Dir(outFile), "PalbaseGenerated.json")
-	if err := writeGeneratedConfigJSON(jsonPath, cfg); err != nil {
-		return fmt.Errorf("write %s: %w", jsonPath, err)
-	}
-	// The generated Swift + JSON now live in a VISIBLE, committed folder
+	// The generated Swift now lives in a VISIBLE, committed folder
 	// (Palbase/Generated/) referenced as a synchronized Xcode folder, so
-	// we no longer gitignore them — committing generated code is standard
+	// we no longer gitignore it — committing generated code is standard
 	// for SwiftGen/R.swift teams. Only the hidden .palbase/config.json
 	// (project ref + URL cache) stays out of git.
 	if err := ensureGitignored(".gitignore", ".palbase/config.json"); err != nil {
 		fmt.Fprintf(w, "  (gitignore not updated: %v)\n", err)
 	}
 	fmt.Fprintf(w, "✓ wrote %s (%d operation(s))\n", outFile, len(ops))
-	fmt.Fprintf(w, "✓ wrote %s (config)\n", jsonPath)
 	return nil
-}
-
-// writeGeneratedConfigJSON writes the config struct as JSON next to the
-// Swift file. The Palbe SDK reads this from Bundle.main at
-// `pb.configure()` time, so the app's call site stays a single line
-// without a struct literal at the call site.
-//
-// Field names match PalBackendGeneratedConfig's JSON key naming
-// (snake_case for cross-language friendliness; Swift's
-// .convertFromSnakeCase decoder handles it).
-func writeGeneratedConfigJSON(path string, cfg swiftGeneratedConfig) error {
-	branch := cfg.Branch
-	if branch == "" {
-		branch = "main"
-	}
-	body := map[string]any{
-		"url":     cfg.URL,
-		"api_key": cfg.APIKey,
-		"branch":  branch,
-	}
-	// Surface OAuth provider availability so the SDK can run
-	// `pb.auth.signInWithGoogle()` zero-arg (Bundle.main reads this
-	// JSON at startup, hands the values to GoogleSignIn at call
-	// time). Apple's block is just `enabled: true` because the iOS
-	// flow doesn't need client_id on the device. Omitted entirely
-	// when the project has no enabled+configured providers — keeps
-	// the JSON minimal for projects that don't use OAuth.
-	if cfg.OAuth != nil {
-		body["oauth"] = cfg.OAuth
-	}
-	bytes, err := json.MarshalIndent(body, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal generated config: %w", err)
-	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
-	}
-	return os.WriteFile(path, append(bytes, '\n'), 0o644)
 }
 
 func ensureIOSGeneratedStub(outFile string) error {
@@ -1346,31 +1275,17 @@ func ensureIOSGeneratedStub(outFile string) error {
 	}
 	// Minimal Swift stub — empty so the Xcode target compiles before the
 	// first real codegen run. Re-running `palbase mobile codegen ios`
-	// overwrites this with typed methods + writes PalbaseGenerated.json
-	// next to it (the actual runtime config the Palbe SDK loads from
-	// Bundle.main).
+	// overwrites this with typed methods. CONFIG-CUTOVER (FINAL): the runtime
+	// config is the per-env Palbase-Info.plist (codegen `--app`), NOT a
+	// PalbaseGenerated.json — so no config stub is written here.
 	stub := `// Generated by palbase mobile link ios. Re-run palbase mobile codegen ios.
-// Once codegen runs against your project, this file gains typed pb.* methods
-// and PalbaseGenerated.json (in the same directory) carries the runtime config.
+// Once codegen runs against your project, this file gains typed pb.* methods.
+// The runtime config (url/apiKey/oauth) is the per-env Palbase-Info.plist
+// emitted by ` + "`palbase mobile codegen ios --app <app-id>`" + `.
 import Foundation
 `
 	if err := os.WriteFile(outFile, []byte(stub), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", outFile, err)
-	}
-	// Empty JSON stub so pb.configure() doesn't crash before first
-	// codegen — fields are empty strings; Palbe SDK fatalErrors with a
-	// clear message ("run palbase mobile codegen ios") on empty url.
-	jsonPath := filepath.Join(filepath.Dir(outFile), "PalbaseGenerated.json")
-	if _, err := os.Stat(jsonPath); os.IsNotExist(err) {
-		stubJSON := `{
-  "url": "",
-  "api_key": "",
-  "branch": "main"
-}
-`
-		if err := os.WriteFile(jsonPath, []byte(stubJSON), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", jsonPath, err)
-		}
 	}
 	// The stub lives in the visible, committed Palbase/Generated/ folder
 	// (synchronized Xcode folder ref) — not gitignored. Only the hidden
@@ -2217,7 +2132,6 @@ func palbaseCodegenPhaseBlock(shellPhaseID, genDir string) string {
 		"\t\t\toutputFileListPaths = (\n\t\t\t);\n" +
 		"\t\t\toutputPaths = (\n" +
 		"\t\t\t\t\"$(SRCROOT)/" + genDir + "/" + iosGeneratedSwiftName + "\",\n" +
-		"\t\t\t\t\"$(SRCROOT)/" + genDir + "/" + iosGeneratedJSONName + "\",\n" +
 		"\t\t\t);\n" +
 		"\t\t\trunOnlyForDeploymentPostprocessing = 0;\n" +
 		"\t\t\tshellPath = /bin/sh;\n" +
@@ -2601,8 +2515,10 @@ func openAPIURL(ctx context.Context, sc *studio.Client, endpoints config.Endpoin
 }
 
 // fetchOAuthProviders calls palauth's public `/auth/oauth/providers`
-// endpoint (anon-key authed, secret-free) and lowers the response
-// into the swiftOAuthConfig we serialise into PalbaseGenerated.json.
+// endpoint (anon-key authed, secret-free) and lowers the response into a
+// swiftOAuthConfig. After the config cutover this is mapped onto the per-env
+// Palbase-Info.plist's `oauth` block (via swiftOAuthToApps), the SOLE config
+// source the iOS SDK reads.
 //
 // Best-effort: a 404 (older palauth without the endpoint), a
 // non-OAuth-providers response, or a network failure all return

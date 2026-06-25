@@ -8,8 +8,9 @@ import (
 )
 
 // tsGeneratedConfig carries the runtime config values the generated
-// palbe.gen.ts writes into __configure(). Mirrors swiftGeneratedConfig but
-// targets the web SDK seam. OAuth reuses the existing swiftOAuthConfig struct.
+// palbe.gen.ts writes into __configure() (the web SDK seam — web still embeds
+// config in the generated module, unlike iOS which reads the per-env plist).
+// OAuth reuses the swiftOAuthConfig struct.
 type tsGeneratedConfig struct {
 	URL    string
 	APIKey string

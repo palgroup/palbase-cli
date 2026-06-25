@@ -299,17 +299,23 @@ func pbxQuote(s string) string {
 	return s
 }
 
-// wireGoogleURLSchemeFromGenerated reads the Google redirect URI baked
-// into PalbaseGenerated.json by codegen and injects the matching
+// wireGoogleURLSchemeFromGenerated injects the Google redirect-URI
 // CFBundleURLTypes entry into the app target's Info.plist. No-op (nil)
 // when the project has no Google provider, or uses a generated
 // Info.plist (nothing on disk to patch — surfaced to the caller).
+//
+// CONFIG-CUTOVER: the runtime config moved to the per-env Palbase-Info.plist,
+// which codegen `--app` emits. This helper still reads a legacy
+// PalbaseGenerated.json IF ONE EXISTS next to the .swift output, but the
+// cutover stopped writing it — so on the bare-link path it simply no-ops
+// (returns nil on the missing-file read). The Google URL scheme is then wired
+// the next time `apps config` / codegen `--app` produces the plist.
 func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPath string, w io.Writer) error {
-	// The JSON sits next to the .swift codegen output.
+	// A legacy JSON config, if present next to the .swift codegen output.
 	jsonPath := filepath.Join(filepath.Dir(generatedSwiftPath), "PalbaseGenerated.json")
 	data, err := os.ReadFile(jsonPath)
 	if err != nil {
-		return nil // codegen didn't write one (e.g. local-only) — skip
+		return nil // no JSON config (the cutover stopped emitting it) — skip
 	}
 	var gen struct {
 		OAuth *struct {
