@@ -329,7 +329,21 @@ func writeIOSPlist(art ConfigArtifact, path string) error {
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
 	b.WriteString(`<plist version="1.0">` + "\n")
-	b.WriteString("<dict>\n")
+	writeIOSConfigDict(&b, art, "")
+	b.WriteString("</plist>\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeIOSConfigDict appends a `<dict>` carrying the five config-match fields
+// (app_id, identifier, env_preset, base_url, api_key) to b, indented by
+// `indent`. Shared by the single-env (`writeIOSPlist`) and the build-config-
+// conditioned multi-env (`EmitIOSPlistPerEnv`) emitters so the per-env dict
+// serialization is written in exactly ONE place.
+func writeIOSConfigDict(b *strings.Builder, art ConfigArtifact, indent string) {
+	b.WriteString(indent + "<dict>\n")
 	for _, kv := range []struct{ key, val string }{
 		{"app_id", art.AppID},
 		{"identifier", art.Identifier},
@@ -337,8 +351,55 @@ func writeIOSPlist(art ConfigArtifact, path string) error {
 		{"base_url", art.BaseURL},
 		{"api_key", art.APIKey},
 	} {
-		b.WriteString("\t<key>" + plistEscape(kv.key) + "</key>\n")
-		b.WriteString("\t<string>" + plistEscape(kv.val) + "</string>\n")
+		b.WriteString(indent + "\t<key>" + plistEscape(kv.key) + "</key>\n")
+		b.WriteString(indent + "\t<string>" + plistEscape(kv.val) + "</string>\n")
+	}
+	b.WriteString(indent + "</dict>\n")
+}
+
+// Build-config keys the multi-env plist is keyed by. The iOS SDK selects the
+// dict matching the running app's build configuration at runtime (Debug vs
+// Release), so ONE plist file carries BOTH envs' config (spec §2.5
+// "Debug→dev env, Release→production").
+const (
+	BuildConfigDebug   = "Debug"
+	BuildConfigRelease = "Release"
+)
+
+// EmitIOSPlistPerEnv writes ONE build-config-conditioned Palbase-Info.plist that
+// carries BOTH envs' config, keyed by build configuration: the Debug artifact
+// under <key>Debug</key>, the Release artifact under <key>Release</key>. A Debug
+// build of the app reads its env's values; a Release build reads the other's —
+// the per-env config that lets one bundle match the right env at runtime.
+//
+// It reuses writeIOSConfigDict (the same per-env dict serialization
+// writeIOSPlist uses) so the two emitters never drift.
+//
+// REFUSES (returns an error, writes NOTHING) when EITHER artifact has an empty
+// identifier: an unconfigured binding cannot enforce config-match, and a
+// build-config plist missing one env's identifier is a footgun (mirrors
+// emitConfig's single-env refuse rule).
+func EmitIOSPlistPerEnv(debug, release ConfigArtifact, path string) error {
+	if debug.Identifier == "" {
+		return fmt.Errorf("refusing to write %s: Debug env app %q has an unconfigured binding (no identifier) — declare the bundle id before emitting a config", path, debug.AppID)
+	}
+	if release.Identifier == "" {
+		return fmt.Errorf("refusing to write %s: Release env app %q has an unconfigured binding (no identifier) — declare the bundle id before emitting a config", path, release.AppID)
+	}
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
+	b.WriteString(`<plist version="1.0">` + "\n")
+	b.WriteString("<dict>\n")
+	for _, e := range []struct {
+		key string
+		art ConfigArtifact
+	}{
+		{BuildConfigDebug, debug},
+		{BuildConfigRelease, release},
+	} {
+		b.WriteString("\t<key>" + plistEscape(e.key) + "</key>\n")
+		writeIOSConfigDict(&b, e.art, "\t")
 	}
 	b.WriteString("</dict>\n")
 	b.WriteString("</plist>\n")

@@ -1,12 +1,15 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/palgroup/palbase-cli/internal/apps"
 )
 
 // Xcode capability wiring for `palbase mobile link ios`:
@@ -346,4 +349,60 @@ func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPat
 		fmt.Fprintf(w, "✓ wired Google URL scheme into %s\n", filepath.Base(plistPath))
 	}
 	return nil
+}
+
+// --- Per-env Palbase-Info.plist (build-config-conditioned) ----------------
+
+// configArtifactFetch fetches the per-(app × env) config artifact for one env.
+// It abstracts the Studio apps.configArtifact query so the codegen emit is
+// unit-testable without a live tRPC server (tests inject a stub that returns
+// the dev / production artifacts directly).
+type configArtifactFetch func(ctx context.Context, appID, envRef string) (apps.ConfigArtifact, error)
+
+// emitIOSPerEnvPlist resolves the app's DEV binding (devEnvRef) and PRODUCTION
+// binding (prodEnvRef) — two apps.configArtifact fetches, one per env — and
+// writes ONE build-config-conditioned Palbase-Info.plist that carries BOTH
+// envs' config: the Debug build reads the dev env's values, the Release build
+// reads the production env's (spec §2.5 "Debug→dev env, Release→production").
+//
+// This REPLACES the old single-env PalbaseGenerated.json emit on the codegen
+// path: ONE plist file now carries both envs, and the app picks by build config
+// at runtime. The actual plist serialization is reused from the apps package
+// (apps.EmitIOSPlistPerEnv) so the file format never drifts from `palbase apps
+// config`.
+func emitIOSPerEnvPlist(ctx context.Context, fetch configArtifactFetch, appID, devEnvRef, prodEnvRef, outPath string) error {
+	devArt, err := fetch(ctx, appID, devEnvRef)
+	if err != nil {
+		return fmt.Errorf("fetch dev (%s) config artifact: %w", devEnvRef, err)
+	}
+	prodArt, err := fetch(ctx, appID, prodEnvRef)
+	if err != nil {
+		return fmt.Errorf("fetch production (%s) config artifact: %w", prodEnvRef, err)
+	}
+	if dir := filepath.Dir(outPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	return apps.EmitIOSPlistPerEnv(devArt, prodArt, outPath)
+}
+
+// studioConfigArtifactFetch is the production configArtifactFetch the codegen
+// command supplies: it runs the apps.configArtifact tRPC query for the
+// (app × env) pair (the SAME query `palbase apps config` uses). The env's
+// project ref is passed as projectRef; the server resolves the endpoint_ref +
+// mints/looks up the env-main key.
+func studioConfigArtifactFetch(q interface {
+	Query(ctx context.Context, path string, input any, out any) error
+}) configArtifactFetch {
+	return func(ctx context.Context, appID, envRef string) (apps.ConfigArtifact, error) {
+		var art apps.ConfigArtifact
+		if err := q.Query(ctx, "apps.configArtifact", map[string]any{
+			"appId":      appID,
+			"projectRef": envRef,
+		}, &art); err != nil {
+			return apps.ConfigArtifact{}, err
+		}
+		return art, nil
+	}
 }

@@ -1097,6 +1097,7 @@ func newMobileLinkIOSCmd(r Resolvers) *cobra.Command {
 
 func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 	var refFlag string
+	var appID string
 	cmd := &cobra.Command{
 		Use:   "ios",
 		Args:  cobra.NoArgs,
@@ -1126,10 +1127,35 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 			if branch == "" {
 				branch = "main"
 			}
-			return generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, iosGeneratedSwiftFile(resolveIOSGeneratedDir()), os.Stdout)
+			outDir := resolveIOSGeneratedDir()
+			if err := generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, iosGeneratedSwiftFile(outDir), os.Stdout); err != nil {
+				return err
+			}
+			// With --app, also emit the per-env Palbase-Info.plist (the
+			// service.json-equivalent the SDK reads for config-match): ONE
+			// plist carrying BOTH envs keyed by build config — Debug→the dev
+			// env (the linked branch), Release→production (project main) —
+			// per spec §2.5. Replaces the old single-env PalbaseGenerated.json
+			// on this path. No --app → skip (codegen stays usable for the
+			// pre-app-registration flow).
+			if appID != "" {
+				// Mirror `apps config`'s env-ref convention: production is the
+				// project main ref; the dev env is the branch-composed ref.
+				devEnvRef := ref
+				if branch != "" && branch != "main" {
+					devEnvRef = ref + ":" + branch
+				}
+				plistPath := filepath.Join(filepath.Dir(iosGeneratedSwiftFile(outDir)), "Palbase-Info.plist")
+				if err := emitIOSPerEnvPlist(cmd.Context(), studioConfigArtifactFetch(r.Studio()), appID, devEnvRef, ref, plistPath); err != nil {
+					return fmt.Errorf("emit per-env Palbase-Info.plist: %w", err)
+				}
+				fmt.Fprintf(os.Stdout, "✓ wrote %s (Debug=dev, Release=production)\n", plistPath)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref to link (skips the interactive picker; required in non-interactive shells)")
+	cmd.Flags().StringVar(&appID, "app", "", "App id — emit the per-env Palbase-Info.plist (Debug=dev env, Release=production) for config-match")
 	return cmd
 }
 
