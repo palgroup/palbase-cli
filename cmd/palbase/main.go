@@ -118,7 +118,8 @@ func main() {
 			REST: func() apikey.REST { return managementREST() },
 		}),
 		apps.Cmd(apps.Resolvers{
-			Studio: func() apps.Studio { return studioClient },
+			Studio:     func() apps.Studio { return studioClient },
+			OAuthFetch: backend.AppsOAuthFetcher(),
 		}),
 		secret.Cmd(secret.Resolvers{
 			Studio: func() *studio.Client { return studioClient },

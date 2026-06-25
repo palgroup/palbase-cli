@@ -392,6 +392,15 @@ func emitIOSPerEnvPlist(ctx context.Context, fetch configArtifactFetch, appID, d
 // (app × env) pair (the SAME query `palbase apps config` uses). The env's
 // project ref is passed as projectRef; the server resolves the endpoint_ref +
 // mints/looks up the env-main key.
+//
+// The tRPC apps.configArtifact result does NOT carry OAuth, so this wrapper
+// ALSO fetches palauth's public `/auth/oauth/providers` (the SAME source the
+// legacy PalbaseGenerated.json path uses) against the artifact's base_url +
+// api_key and merges the result into ConfigArtifact.OAuth — making the per-env
+// plist a true superset of the JSON's config role (closes the OAuth regression
+// the config cutover would otherwise open). The fetch is best-effort: a blip
+// leaves OAuth nil and the plist omits the block, exactly as the JSON path
+// degrades.
 func studioConfigArtifactFetch(q interface {
 	Query(ctx context.Context, path string, input any, out any) error
 }) configArtifactFetch {
@@ -403,6 +412,47 @@ func studioConfigArtifactFetch(q interface {
 		}, &art); err != nil {
 			return apps.ConfigArtifact{}, err
 		}
+		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)
+		art.OAuth = swiftOAuthToApps(oauth)
 		return art, nil
+	}
+}
+
+// swiftOAuthToApps maps the backend package's swiftOAuthConfig (the shape
+// fetchOAuthProviders returns, also embedded in PalbaseGenerated.json) onto
+// the apps package's OAuthConfig (embedded in the per-env plist). The two
+// shapes are field-identical by design so the iOS SDK decodes the plist's
+// `oauth` block the same way it decodes the JSON's. Nil in → nil out.
+func swiftOAuthToApps(in *swiftOAuthConfig) *apps.OAuthConfig {
+	if in == nil {
+		return nil
+	}
+	out := &apps.OAuthConfig{}
+	if in.Apple != nil {
+		out.Apple = &apps.OAuthApple{Enabled: in.Apple.Enabled}
+	}
+	if in.Google != nil {
+		out.Google = &apps.OAuthGoogle{
+			Enabled:     in.Google.Enabled,
+			ClientID:    in.Google.ClientID,
+			RedirectURI: in.Google.RedirectURI,
+		}
+	}
+	if out.Apple == nil && out.Google == nil {
+		return nil
+	}
+	return out
+}
+
+// AppsOAuthFetcher adapts the backend package's fetchOAuthProviders (the
+// owner of the palauth `/auth/oauth/providers` fetch + the JSON oauth shape)
+// into an apps.OAuthFetcher, so `palbase apps config` can embed the same
+// `oauth` block the codegen plist + the legacy JSON carry — without the apps
+// package importing backend (which would cycle). Wired in main. Best-effort:
+// a fetch error degrades to nil (the config writes without `oauth`).
+func AppsOAuthFetcher() apps.OAuthFetcher {
+	return func(ctx context.Context, baseURL, apiKey string) *apps.OAuthConfig {
+		oauth, _ := fetchOAuthProviders(ctx, baseURL, apiKey)
+		return swiftOAuthToApps(oauth)
 	}
 }

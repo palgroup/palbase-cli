@@ -43,7 +43,18 @@ type Studio interface {
 // secret.Resolvers' pattern).
 type Resolvers struct {
 	Studio func() Studio
+	// OAuthFetch resolves the env's provider availability (palauth's public
+	// `/auth/oauth/providers`) so `apps config` can embed `oauth` in the
+	// per-env file — making it a true superset of the legacy
+	// PalbaseGenerated.json's config role. Injected by main (the `backend`
+	// package owns the fetch + JSON shape; `apps` cannot import it without a
+	// cycle). Nil → no oauth merge (the config still writes, sans `oauth`).
+	OAuthFetch OAuthFetcher
 }
+
+// OAuthFetcher returns the env's secret-free provider availability for the
+// given tenant base_url + api_key, or nil when none/unreachable (best-effort).
+type OAuthFetcher func(ctx context.Context, baseURL, apiKey string) *OAuthConfig
 
 // Cmd returns the `palbase apps` parent command.
 func Cmd(r Resolvers) *cobra.Command {
@@ -65,7 +76,7 @@ All operations go through Studio (membership/role-gated server-side).`,
 		listCmd(r.Studio),
 		createCmd(r.Studio),
 		deleteCmd(r.Studio),
-		configCmd(r.Studio),
+		configCmd(r.Studio, r.OAuthFetch),
 	)
 	return cmd
 }
@@ -190,9 +201,40 @@ type ConfigArtifact struct {
 	EnvPreset   string `json:"env_preset"`
 	Platform    string `json:"platform"`
 	Identifier  string `json:"identifier"`
+	// OAuth carries the provider-availability map fetched from palauth's
+	// public `/auth/oauth/providers` endpoint, mirroring the field the
+	// legacy PalbaseGenerated.json path embeds. Nil means the env has no
+	// enabled+configured providers; the per-env plist then omits the
+	// `oauth` sub-dict and the iOS SDK's zero-arg
+	// `pb.auth.signInWithGoogle()` overload throws. Making the plist a
+	// true SUPERSET of the JSON's config role closes the OAuth regression
+	// the config cutover would otherwise open. The tRPC apps.configArtifact
+	// query does NOT return this — the CLI fetches providers separately and
+	// merges it in (see backend.withOAuth), exactly as the JSON path does.
+	OAuth *OAuthConfig `json:"oauth,omitempty"`
 }
 
-func configCmd(studioFn func() Studio) *cobra.Command {
+// OAuthConfig is the secret-free provider-availability map embedded in the
+// per-env config artifact (plist). Shape mirrors PalbaseGenerated.json's
+// `oauth` block so the iOS SDK decodes it identically. palauth's public
+// `/auth/oauth/providers` endpoint never returns secrets, so there is
+// nothing to filter here.
+type OAuthConfig struct {
+	Apple  *OAuthApple  `json:"apple,omitempty"`
+	Google *OAuthGoogle `json:"google,omitempty"`
+}
+
+type OAuthApple struct {
+	Enabled bool `json:"enabled"`
+}
+
+type OAuthGoogle struct {
+	Enabled     bool   `json:"enabled"`
+	ClientID    string `json:"client_id"`
+	RedirectURI string `json:"redirect_uri"`
+}
+
+func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
 	var (
 		appID    string
 		env      string
@@ -235,6 +277,14 @@ func configCmd(studioFn func() Studio) *cobra.Command {
 				"projectRef": projectRef,
 			}, &art); err != nil {
 				return err
+			}
+			// apps.configArtifact does NOT return OAuth — fetch palauth's
+			// public providers separately (the SAME source the JSON path
+			// uses) and merge, so the emitted config is a superset of the
+			// legacy JSON's role. Best-effort: nil leaves the `oauth` block
+			// out, the rest of the config still writes.
+			if oauthFetch != nil {
+				art.OAuth = oauthFetch(cmd.Context(), art.BaseURL, art.APIKey)
 			}
 			out := outPath
 			if out == "" {
@@ -354,7 +404,54 @@ func writeIOSConfigDict(b *strings.Builder, art ConfigArtifact, indent string) {
 		b.WriteString(indent + "\t<key>" + plistEscape(kv.key) + "</key>\n")
 		b.WriteString(indent + "\t<string>" + plistEscape(kv.val) + "</string>\n")
 	}
+	writeIOSOAuthDict(b, art.OAuth, indent+"\t")
 	b.WriteString(indent + "</dict>\n")
+}
+
+// writeIOSOAuthDict appends an `oauth` nested <dict> to b when the artifact
+// carries provider availability, mirroring PalbaseGenerated.json's `oauth`
+// block so the plist is a true superset of the JSON's config role. Nil OAuth
+// (no enabled+configured providers) writes NOTHING — the SDK then falls back
+// to the explicit-parameter signInWithGoogle overload, exactly as the JSON
+// path does when it omits the block. apple → `{enabled}`; google →
+// `{enabled, client_id, redirect_uri}` (snake_case wire, matching the five
+// string fields above and the JSON shape the iOS decoder expects).
+func writeIOSOAuthDict(b *strings.Builder, oauth *OAuthConfig, indent string) {
+	if oauth == nil || (oauth.Apple == nil && oauth.Google == nil) {
+		return
+	}
+	b.WriteString(indent + "<key>oauth</key>\n")
+	b.WriteString(indent + "<dict>\n")
+	if oauth.Apple != nil {
+		b.WriteString(indent + "\t<key>apple</key>\n")
+		b.WriteString(indent + "\t<dict>\n")
+		b.WriteString(indent + "\t\t<key>enabled</key>\n")
+		b.WriteString(indent + "\t\t" + plistBool(oauth.Apple.Enabled) + "\n")
+		b.WriteString(indent + "\t</dict>\n")
+	}
+	if oauth.Google != nil {
+		b.WriteString(indent + "\t<key>google</key>\n")
+		b.WriteString(indent + "\t<dict>\n")
+		b.WriteString(indent + "\t\t<key>enabled</key>\n")
+		b.WriteString(indent + "\t\t" + plistBool(oauth.Google.Enabled) + "\n")
+		for _, kv := range []struct{ key, val string }{
+			{"client_id", oauth.Google.ClientID},
+			{"redirect_uri", oauth.Google.RedirectURI},
+		} {
+			b.WriteString(indent + "\t\t<key>" + plistEscape(kv.key) + "</key>\n")
+			b.WriteString(indent + "\t\t<string>" + plistEscape(kv.val) + "</string>\n")
+		}
+		b.WriteString(indent + "\t</dict>\n")
+	}
+	b.WriteString(indent + "</dict>\n")
+}
+
+// plistBool renders an Apple plist boolean node.
+func plistBool(v bool) string {
+	if v {
+		return "<true/>"
+	}
+	return "<false/>"
 }
 
 // Build-config keys the multi-env plist is keyed by. The iOS SDK selects the

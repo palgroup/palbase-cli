@@ -155,3 +155,68 @@ func TestMobileIOSCodegen_EmitsPerEnvPlist(t *testing.T) {
 	require.Equal(t, "ios_todoapp", dbg["app_id"])
 	require.Equal(t, "ios_todoapp", rel["app_id"])
 }
+
+// TestMobileIOSCodegen_PlistCarriesOAuth pins that the codegen `--app` path
+// embeds the per-env `oauth` block in the Palbase-Info.plist — the field the
+// legacy PalbaseGenerated.json carried. A fetcher returning an artifact with
+// OAuth set must surface that block in the emitted plist, making the plist a
+// true SUPERSET of the JSON's config role (closes the OAuth regression).
+//
+// Mutation-evident: drop apps.writeIOSOAuthDict's emit and the client_id
+// assertion below fails.
+func TestMobileIOSCodegen_PlistCarriesOAuth(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "Palbase-Info.plist")
+
+	devOAuth := &apps.OAuthConfig{Google: &apps.OAuthGoogle{
+		Enabled: true, ClientID: "dev-client.apps.googleusercontent.com",
+		RedirectURI: "com.googleusercontent.apps.dev-client:/oauthredirect",
+	}}
+	prodOAuth := &apps.OAuthConfig{
+		Apple: &apps.OAuthApple{Enabled: true},
+		Google: &apps.OAuthGoogle{
+			Enabled: true, ClientID: "prod-client.apps.googleusercontent.com",
+			RedirectURI: "com.googleusercontent.apps.prod-client:/oauthredirect",
+		},
+	}
+	fetcher := &stubArtifactFetcher{byEnv: map[string]apps.ConfigArtifact{
+		"todoappm8p6zm": {Identifier: "com.x.todo.dev", EnvPreset: "development", OAuth: devOAuth},
+		"todoappprod":   {Identifier: "com.x.todo", EnvPreset: "production", OAuth: prodOAuth},
+	}}
+
+	err := emitIOSPerEnvPlist(
+		context.Background(), fetcher.configArtifact,
+		"ios_todoapp", "todoappm8p6zm", "todoappprod", out,
+	)
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(out)
+	require.NoError(t, err)
+	s := string(raw)
+
+	require.Contains(t, s, "<key>oauth</key>")
+	require.Contains(t, s, "dev-client.apps.googleusercontent.com", "Debug env oauth client_id present")
+	require.Contains(t, s, "prod-client.apps.googleusercontent.com", "Release env oauth client_id present")
+	require.Contains(t, s, "<key>apple</key>", "prod apple provider present")
+}
+
+// TestSwiftOAuthToApps maps the backend fetchOAuthProviders shape onto the
+// apps plist shape field-for-field (the bridge that lets the codegen path
+// reuse the JSON path's `/auth/oauth/providers` fetch).
+func TestSwiftOAuthToApps(t *testing.T) {
+	require.Nil(t, swiftOAuthToApps(nil))
+	require.Nil(t, swiftOAuthToApps(&swiftOAuthConfig{}), "no providers collapses to nil")
+
+	in := &swiftOAuthConfig{
+		Apple: &swiftOAuthApple{Enabled: true},
+		Google: &swiftOAuthGoogle{
+			Enabled: true, ClientID: "x.apps.googleusercontent.com",
+			RedirectURI: "com.googleusercontent.apps.x:/oauthredirect",
+		},
+	}
+	got := swiftOAuthToApps(in)
+	require.NotNil(t, got)
+	require.True(t, got.Apple.Enabled)
+	require.Equal(t, "x.apps.googleusercontent.com", got.Google.ClientID)
+	require.Equal(t, "com.googleusercontent.apps.x:/oauthredirect", got.Google.RedirectURI)
+}
