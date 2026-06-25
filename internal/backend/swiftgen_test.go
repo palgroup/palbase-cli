@@ -344,10 +344,10 @@ func TestEmitSwift(t *testing.T) {
 
 // TestEmitSwift_SkipsReservedNamespaces locks that endpoints whose top
 // operationId segment is an SDK-owned namespace (auth / analytics / flags /
-// realtime / notifications) are skipped, so a customer endpoint can't shadow
-// `pb.auth.*`, `pb.analytics.*`, `pb.flags.*`, `pb.realtime.*`, or
-// `pb.notifications.*`. A non-reserved endpoint in the same set is still
-// emitted (the skip is precise, not a blanket drop).
+// realtime / notifications / perf) are skipped, so a customer endpoint can't
+// shadow `pb.auth.*`, `pb.analytics.*`, `pb.flags.*`, `pb.realtime.*`,
+// `pb.notifications.*`, or `pb.perf.*`. A non-reserved endpoint in the same set
+// is still emitted (the skip is precise, not a blanket drop).
 func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
 	ops := []swiftOp{
 		{operationID: "auth.login", method: "post", path: "/auth/login"},
@@ -355,11 +355,12 @@ func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
 		{operationID: "flags.list", method: "post", path: "/flags/list"},
 		{operationID: "realtime.publish", method: "post", path: "/realtime/publish"},
 		{operationID: "notifications.send", method: "post", path: "/notifications/send"},
+		{operationID: "perf.startTrace", method: "post", path: "/perf/start-trace"},
 		{operationID: "rooms.create", method: "post", path: "/rooms/create"},
 	}
 	out := emitSwift(ops)
 
-	for _, reserved := range []string{"login", "track", "func list", "publish", "send"} {
+	for _, reserved := range []string{"login", "track", "func list", "publish", "send", "startTrace"} {
 		if strings.Contains(out, "func "+reserved) {
 			t.Errorf("reserved-namespace endpoint should be skipped, but %q appeared:\n%s", reserved, out)
 		}
@@ -370,11 +371,32 @@ func TestEmitSwift_SkipsReservedNamespaces(t *testing.T) {
 	}
 
 	// Visible skip comments must appear at the top of the namespaces section.
-	for _, ns := range []string{"analytics", "auth", "flags", "notifications", "realtime"} {
+	for _, ns := range []string{"analytics", "auth", "flags", "notifications", "perf", "realtime"} {
 		want := `// codegen: skipped reserved namespace "` + ns + `" (SDK-owned)`
 		if !strings.Contains(out, want) {
 			t.Errorf("missing reserved-namespace skip comment for %q:\n%s", ns, out)
 		}
+	}
+}
+
+// TestEmitSwift_ReservedPerf is the focused lock for the PalPerf reservation
+// (Faz 1, Task 1b-5): `perf` is reserved like auth/analytics so a customer's
+// `perf` controller can never collide with the `pb.perf` facade.
+func TestEmitSwift_ReservedPerf(t *testing.T) {
+	ops := []swiftOp{
+		{operationID: "perf.record", method: "post", path: "/perf/record"},
+		{operationID: "rooms.create", method: "post", path: "/rooms/create"},
+	}
+	out := emitSwift(ops)
+
+	if strings.Contains(out, "func record") {
+		t.Errorf("perf.record should be skipped (reserved), but appeared:\n%s", out)
+	}
+	if !strings.Contains(out, `// codegen: skipped reserved namespace "perf" (SDK-owned)`) {
+		t.Errorf("missing reserved-namespace skip comment for perf:\n%s", out)
+	}
+	if !strings.Contains(out, "func create") {
+		t.Errorf("non-reserved rooms.create should still be emitted:\n%s", out)
 	}
 }
 
