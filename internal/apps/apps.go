@@ -372,26 +372,28 @@ func writeWebConfig(art ConfigArtifact, path string) error {
 	return nil
 }
 
-// writeIOSPlist writes a minimal, valid Apple plist carrying the five
-// config-match fields as a flat <key>/<string> dict.
+// writeIOSPlist writes the build-config-conditioned Palbase-Info.plist the iOS
+// SDK reads. The SDK (PalbaseAppConfig.load) decodes a `{ "Debug": {...},
+// "Release": {...} }` map and selects the sub-dict for the running build
+// configuration — a FLAT top-level dict has no Debug/Release keys, so the SDK
+// fails to decode it. `apps config` resolves ONE env's artifact, so it emits
+// that single resolved env under BOTH build-config keys (Debug AND Release) via
+// the SAME EmitIOSPlistPerEnv emitter `palbase mobile codegen ios --app` uses:
+// the plist then decodes (and works) in either build configuration, and the two
+// emit paths produce byte-identical plist STRUCTURE so they never drift.
+//
+// (codegen --app resolves two distinct artifacts — dev for Debug, production for
+// Release; the single-env apps-config path has only one, so the same artifact
+// fills both keys.)
 func writeIOSPlist(art ConfigArtifact, path string) error {
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString(`<plist version="1.0">` + "\n")
-	writeIOSConfigDict(&b, art, "")
-	b.WriteString("</plist>\n")
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
+	return EmitIOSPlistPerEnv(art, art, path)
 }
 
 // writeIOSConfigDict appends a `<dict>` carrying the five config-match fields
 // (app_id, identifier, env_preset, base_url, api_key) to b, indented by
-// `indent`. Shared by the single-env (`writeIOSPlist`) and the build-config-
-// conditioned multi-env (`EmitIOSPlistPerEnv`) emitters so the per-env dict
-// serialization is written in exactly ONE place.
+// `indent`. Called once per build-config key by EmitIOSPlistPerEnv (the sole
+// nested-plist emitter both `apps config` and `mobile codegen --app` funnel
+// through) so the per-env dict serialization is written in exactly ONE place.
 func writeIOSConfigDict(b *strings.Builder, art ConfigArtifact, indent string) {
 	b.WriteString(indent + "<dict>\n")
 	for _, kv := range []struct{ key, val string }{

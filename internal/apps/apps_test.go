@@ -185,7 +185,12 @@ func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 
 	raw, err := os.ReadFile(outFile)
 	require.NoError(t, err)
-	got := parsePlistDict(t, raw)
+	// The plist the SDK decodes is build-config-conditioned (Debug/Release);
+	// the single resolved env fills both keys, so either build config decodes.
+	envs := parseNestedPlist(t, raw)
+	require.Contains(t, envs, BuildConfigDebug)
+	require.Contains(t, envs, BuildConfigRelease)
+	got := envs[BuildConfigDebug]
 	require.Equal(t, "app_1", got["app_id"])
 	require.Equal(t, "com.example.app", got["identifier"])
 	require.Equal(t, "development", got["env_preset"])
