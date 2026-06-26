@@ -185,12 +185,13 @@ func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 
 	raw, err := os.ReadFile(outFile)
 	require.NoError(t, err)
-	// The plist the SDK decodes is build-config-conditioned (Debug/Release);
-	// the single resolved env fills both keys, so either build config decodes.
+	// The plist the SDK decodes is bundle-id-keyed; the single resolved env is
+	// filed under its own identifier (bundle id), and the SDK selects it by
+	// matching Bundle.main.bundleIdentifier.
 	envs := parseNestedPlist(t, raw)
-	require.Contains(t, envs, BuildConfigDebug)
-	require.Contains(t, envs, BuildConfigRelease)
-	got := envs[BuildConfigDebug]
+	require.Len(t, envs, 1, "single-env apps-config plist must carry exactly one bundle-id key")
+	require.Contains(t, envs, "com.example.app", "plist must be keyed by the env's bundle id")
+	got := envs["com.example.app"]
 	require.Equal(t, "app_1", got["app_id"])
 	require.Equal(t, "com.example.app", got["identifier"])
 	require.Equal(t, "development", got["env_preset"])

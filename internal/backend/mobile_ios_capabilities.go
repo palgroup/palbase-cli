@@ -354,10 +354,11 @@ func wireGoogleURLSchemeFromGenerated(projectPath, targetName, generatedSwiftPat
 }
 
 // googleRedirectURIFromPlist reads the Google OAuth redirect-URI from the
-// per-env Palbase-Info.plist's `oauth.google.redirect_uri`. The plist carries
-// one config dict per build config (Debug=dev env, Release=production); the
-// FIRST `google` dict's redirect_uri is returned — the Debug (dev) env's,
-// matching the single redirect_uri the retired PalbaseGenerated.json carried.
+// bundle-id-keyed Palbase-Info.plist's `oauth.google.redirect_uri`. The plist
+// carries one config dict per registered environment (keyed by bundle id); the
+// FIRST `google` dict's redirect_uri is returned — the URL scheme is derived
+// from it for the app target's Info.plist (matching the single redirect_uri the
+// retired PalbaseGenerated.json carried).
 //
 // Returns ("", nil) — a graceful no-op — when the plist is absent (no `apps
 // config` / codegen `--app` run yet) or carries no oauth.google block (Google
@@ -408,40 +409,68 @@ var plistXMLUnescaper = strings.NewReplacer(
 	"&gt;", ">",
 )
 
-// --- Per-env Palbase-Info.plist (build-config-conditioned) ----------------
+// --- Bundle-id-keyed Palbase-Info.plist ----------------------------------
 
 // configArtifactFetch fetches the per-(app × env) config artifact for one env.
 // It abstracts the Studio apps.configArtifact query so the codegen emit is
 // unit-testable without a live tRPC server (tests inject a stub that returns
-// the dev / production artifacts directly).
+// the per-env artifacts directly). The envRef is always a BARE project ref (the
+// binding's project_ref); there is no branch-composed ref.
 type configArtifactFetch func(ctx context.Context, appID, envRef string) (apps.ConfigArtifact, error)
 
-// emitIOSPerEnvPlist resolves the app's DEV binding (devEnvRef) and PRODUCTION
-// binding (prodEnvRef) — two apps.configArtifact fetches, one per env — and
-// writes ONE build-config-conditioned Palbase-Info.plist that carries BOTH
-// envs' config: the Debug build reads the dev env's values, the Release build
-// reads the production env's (spec §2.5 "Debug→dev env, Release→production").
+// AppBinding is the subset of an apps.listBindings row the codegen emit needs:
+// the env's bare project ref, its registered bundle id (identifier — '' when the
+// binding has not declared one yet), and its preset. Field tags match the
+// snake_case listBindings tRPC row shape (project_ref, env_preset, identifier).
+type AppBinding struct {
+	ProjectRef string `json:"project_ref"`
+	EnvPreset  string `json:"env_preset"`
+	Identifier string `json:"identifier"`
+}
+
+// bindingLister lists an app's (app × env) bindings. Abstracts the Studio
+// apps.listBindings query so the codegen emit is unit-testable without a live
+// tRPC server (tests inject a stub returning a fixed binding list).
+type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
+
+// emitIOSBundleKeyedPlist resolves EVERY environment the app is registered for
+// via listBindings(appId), fetches each binding's ConfigArtifact by its BARE
+// project_ref (no branch), and writes ONE Palbase-Info.plist keyed by binding
+// identifier (bundle id). A binding with an empty identifier is SKIPPED with a
+// warning (the env has not registered a bundle id yet); if NO binding carries an
+// identifier the emit errors (nothing to write).
 //
-// This REPLACES the old single-env PalbaseGenerated.json emit on the codegen
-// path: ONE plist file now carries both envs, and the app picks by build config
-// at runtime. The actual plist serialization is reused from the apps package
-// (apps.EmitIOSPlistPerEnv) so the file format never drifts from `palbase apps
-// config`.
-func emitIOSPerEnvPlist(ctx context.Context, fetch configArtifactFetch, appID, devEnvRef, prodEnvRef, outPath string) error {
-	devArt, err := fetch(ctx, appID, devEnvRef)
+// This REPLACES the old build-config-conditioned (Debug/Release) emit: the plist
+// is now keyed by bundle id, and the iOS SDK selects the env dict by matching
+// the running app's Bundle.main.bundleIdentifier at runtime. The actual plist
+// serialization is reused from the apps package (apps.EmitIOSPlistByBundle) so
+// the file format never drifts from `palbase apps config`.
+func emitIOSBundleKeyedPlist(ctx context.Context, list bindingLister, fetch configArtifactFetch, appID, outPath string, w io.Writer) error {
+	bindings, err := list(ctx, appID)
 	if err != nil {
-		return fmt.Errorf("fetch dev (%s) config artifact: %w", devEnvRef, err)
+		return fmt.Errorf("list app %q bindings: %w", appID, err)
 	}
-	prodArt, err := fetch(ctx, appID, prodEnvRef)
-	if err != nil {
-		return fmt.Errorf("fetch production (%s) config artifact: %w", prodEnvRef, err)
+	var arts []apps.ConfigArtifact
+	for _, bnd := range bindings {
+		if bnd.Identifier == "" {
+			fmt.Fprintf(w, "skipping env %s: no registered bundle id (configure it in Studio → apps → bindings)\n", bnd.ProjectRef)
+			continue
+		}
+		art, err := fetch(ctx, appID, bnd.ProjectRef) // BARE project ref, no branch
+		if err != nil {
+			return fmt.Errorf("fetch config artifact for env %s: %w", bnd.ProjectRef, err)
+		}
+		arts = append(arts, art)
+	}
+	if len(arts) == 0 {
+		return fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before codegen", appID)
 	}
 	if dir := filepath.Dir(outPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
-	return apps.EmitIOSPlistPerEnv(devArt, prodArt, outPath)
+	return apps.EmitIOSPlistByBundle(arts, outPath)
 }
 
 // studioConfigArtifactFetch is the production configArtifactFetch the codegen
@@ -472,6 +501,25 @@ func studioConfigArtifactFetch(q interface {
 		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)
 		art.OAuth = swiftOAuthToApps(oauth)
 		return art, nil
+	}
+}
+
+// studioBindingLister is the production bindingLister the codegen command
+// supplies: it runs the apps.listBindings tRPC query (the SAME query Studio's
+// binding-matrix UI uses) for the app and returns every (app × env) binding's
+// bare project_ref + registered identifier + preset. The codegen emit then
+// fetches each binding's config artifact and keys the plist by identifier.
+func studioBindingLister(q interface {
+	Query(ctx context.Context, path string, input any, out any) error
+}) bindingLister {
+	return func(ctx context.Context, appID string) ([]AppBinding, error) {
+		var bindings []AppBinding
+		if err := q.Query(ctx, "apps.listBindings", map[string]any{
+			"appId": appID,
+		}, &bindings); err != nil {
+			return nil, err
+		}
+		return bindings, nil
 	}
 }
 

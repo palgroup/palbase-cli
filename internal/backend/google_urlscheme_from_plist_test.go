@@ -8,39 +8,16 @@ import (
 	"testing"
 )
 
-// A per-env Palbase-Info.plist (as emitted by `apps config` / codegen `--app`)
-// carrying oauth.google for both build configs. The Debug dict is the dev env
-// the bare-link app wires its URL scheme from (Debug=dev, Release=production).
+// A bundle-id-keyed Palbase-Info.plist (as emitted by `apps config` / codegen
+// `--app`) carrying oauth.google for two envs. The bare-link app wires its URL
+// scheme from the FIRST `google` dict encountered. The emitter sorts keys, so
+// com.x.todo (prod) precedes com.x.todo.dev (dev) — the prod env's google block
+// is first, matching the single redirect_uri the retired JSON carried.
 const perEnvPlistWithGoogle = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Debug</key>
-	<dict>
-		<key>app_id</key>
-		<string>app_1</string>
-		<key>identifier</key>
-		<string>com.x.todo.dev</string>
-		<key>env_preset</key>
-		<string>development</string>
-		<key>base_url</key>
-		<string>https://dev.example.com</string>
-		<key>api_key</key>
-		<string>pb_dev</string>
-		<key>oauth</key>
-		<dict>
-			<key>google</key>
-			<dict>
-				<key>enabled</key>
-				<true/>
-				<key>client_id</key>
-				<string>123-abc.apps.googleusercontent.com</string>
-				<key>redirect_uri</key>
-				<string>com.googleusercontent.apps.123-abc:/oauthredirect</string>
-			</dict>
-		</dict>
-	</dict>
-	<key>Release</key>
+	<key>com.x.todo</key>
 	<dict>
 		<key>app_id</key>
 		<string>app_1</string>
@@ -59,9 +36,34 @@ const perEnvPlistWithGoogle = `<?xml version="1.0" encoding="UTF-8"?>
 				<key>enabled</key>
 				<true/>
 				<key>client_id</key>
-				<string>999-rel.apps.googleusercontent.com</string>
+				<string>123-abc.apps.googleusercontent.com</string>
 				<key>redirect_uri</key>
-				<string>com.googleusercontent.apps.999-rel:/oauthredirect</string>
+				<string>com.googleusercontent.apps.123-abc:/oauthredirect</string>
+			</dict>
+		</dict>
+	</dict>
+	<key>com.x.todo.dev</key>
+	<dict>
+		<key>app_id</key>
+		<string>app_1</string>
+		<key>identifier</key>
+		<string>com.x.todo.dev</string>
+		<key>env_preset</key>
+		<string>development</string>
+		<key>base_url</key>
+		<string>https://dev.example.com</string>
+		<key>api_key</key>
+		<string>pb_dev</string>
+		<key>oauth</key>
+		<dict>
+			<key>google</key>
+			<dict>
+				<key>enabled</key>
+				<true/>
+				<key>client_id</key>
+				<string>999-dev.apps.googleusercontent.com</string>
+				<key>redirect_uri</key>
+				<string>com.googleusercontent.apps.999-dev:/oauthredirect</string>
 			</dict>
 		</dict>
 	</dict>
@@ -75,7 +77,7 @@ const perEnvPlistNoGoogle = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Debug</key>
+	<key>com.x.todo.dev</key>
 	<dict>
 		<key>app_id</key>
 		<string>app_1</string>
@@ -94,7 +96,7 @@ const perEnvPlistNoGoogle = `<?xml version="1.0" encoding="UTF-8"?>
 
 // --- googleRedirectURIFromPlist: the new SOURCE (Palbase-Info.plist) ----------
 
-// TestGoogleRedirectURIFromPlist_Present pins that the Debug env's
+// TestGoogleRedirectURIFromPlist_Present pins that the FIRST env's
 // oauth.google.redirect_uri is extracted from the Palbase-Info.plist — the
 // SOURCE that replaced the retired PalbaseGenerated.json. The scheme injected
 // into the app's Info.plist (everything before the first ':') derives from it.
@@ -108,8 +110,8 @@ func TestGoogleRedirectURIFromPlist_Present(t *testing.T) {
 	if err != nil {
 		t.Fatalf("googleRedirectURIFromPlist: %v", err)
 	}
-	// Debug (dev) env's redirect_uri — first env dict wins, matching the
-	// single redirect_uri the JSON path used to carry.
+	// First env dict's redirect_uri wins (keys sorted: com.x.todo precedes
+	// com.x.todo.dev), matching the single redirect_uri the JSON path carried.
 	want := "com.googleusercontent.apps.123-abc:/oauthredirect"
 	if got != want {
 		t.Fatalf("redirect_uri = %q, want %q", got, want)

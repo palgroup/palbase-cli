@@ -65,13 +65,13 @@ func TestSingleEnvPlist_EmitsOAuthSubDict(t *testing.T) {
 	require.Greater(t, oauthIdx, apiKeyIdx, "oauth must follow the flat config fields inside the env dict")
 }
 
-// TestPerEnvPlist_EmitsOAuthPerEnv pins that the build-config-conditioned
-// plist carries each env's own oauth block (Debug=dev providers,
-// Release=prod providers), keeping the per-env superset property.
+// TestByBundlePlist_EmitsOAuthPerEnv pins that the bundle-id-keyed plist carries
+// each env's own oauth block (the dev bundle's providers, the prod bundle's
+// providers), keeping the per-env superset property.
 //
 // Mutation-evident: if oauth weren't emitted per env, the two distinct
 // client_ids below would not BOTH appear.
-func TestPerEnvPlist_EmitsOAuthPerEnv(t *testing.T) {
+func TestByBundlePlist_EmitsOAuthPerEnv(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "Palbase-Info.plist")
 
@@ -83,15 +83,15 @@ func TestPerEnvPlist_EmitsOAuthPerEnv(t *testing.T) {
 		RedirectURI: "com.googleusercontent.apps.dev-client:/oauthredirect",
 	}}
 
-	rel := oauthArt() // prod google client id from oauthArt()
+	prod := oauthArt() // prod google client id from oauthArt(), identifier com.x.todo
 
-	require.NoError(t, EmitIOSPlistPerEnv(dev, rel, out))
+	require.NoError(t, EmitIOSPlistByBundle([]ConfigArtifact{dev, prod}, out))
 	raw, err := os.ReadFile(out)
 	require.NoError(t, err)
 	s := string(raw)
 
-	require.Contains(t, s, "dev-client.apps.googleusercontent.com", "Debug env oauth client_id present")
-	require.Contains(t, s, "123-abc.apps.googleusercontent.com", "Release env oauth client_id present")
+	require.Contains(t, s, "dev-client.apps.googleusercontent.com", "dev bundle oauth client_id present")
+	require.Contains(t, s, "123-abc.apps.googleusercontent.com", "prod bundle oauth client_id present")
 	require.Equal(t, 2, strings.Count(s, "<key>oauth</key>"), "one oauth dict per env")
 }
 

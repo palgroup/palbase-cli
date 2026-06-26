@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -238,7 +239,6 @@ func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
 	var (
 		appID    string
 		env      string
-		branch   string
 		platform string
 		outPath  string
 	)
@@ -247,9 +247,12 @@ func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
 		Short: "Write the per-(app × env) config file the SDK reads",
 		Long: "Fetch the config artifact for an app in a given env and write the\n" +
 			"per-env config file the SDK loads to enforce config-match:\n" +
-			"  --platform ios → Palbase-Info.plist (an Apple plist)\n" +
+			"  --platform ios → Palbase-Info.plist (an Apple plist whose top-level\n" +
+			"                   dict is keyed by the env's bundle id)\n" +
 			"  --platform web → palbase-config.json\n" +
 			"Both carry {app_id, identifier, env_preset, base_url, api_key}.\n" +
+			"--env is the env's BARE project ref; the server resolves the\n" +
+			"endpoint_ref from it (the env's main branch).\n" +
 			"An unconfigured binding (empty identifier — the app has not declared\n" +
 			"its bundle id / web origin yet) is REFUSED: no partial file is\n" +
 			"written, because a config without an identifier cannot enforce\n" +
@@ -264,17 +267,13 @@ func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
 			if platform == "android" {
 				return fmt.Errorf("--platform android is not yet supported by apps config")
 			}
-			// --env is the env's project ref; --branch optionally selects a
-			// branch-specific env. The server resolves endpoint_ref from the
-			// project ref, so we pass the (optionally branch-composed) ref.
-			projectRef := env
-			if branch != "" {
-				projectRef = env + ":" + branch
-			}
+			// --env is the env's BARE project ref. The server resolves the
+			// endpoint_ref from the bare ref (the env's main branch); there is
+			// no branch-composed ref.
 			var art ConfigArtifact
 			if err := studioFn().Query(cmd.Context(), "apps.configArtifact", map[string]any{
 				"appId":      appID,
-				"projectRef": projectRef,
+				"projectRef": env,
 			}, &art); err != nil {
 				return err
 			}
@@ -299,7 +298,6 @@ func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
 	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch slug (optional)")
 	cmd.Flags().StringVar(&platform, "platform", "", "Target platform: ios | web (defaults from the app id prefix)")
 	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (defaults: Palbase-Info.plist | palbase-config.json)")
 	_ = cmd.MarkFlagRequired("app")
@@ -372,26 +370,25 @@ func writeWebConfig(art ConfigArtifact, path string) error {
 	return nil
 }
 
-// writeIOSPlist writes the build-config-conditioned Palbase-Info.plist the iOS
-// SDK reads. The SDK (PalbaseAppConfig.load) decodes a `{ "Debug": {...},
-// "Release": {...} }` map and selects the sub-dict for the running build
-// configuration — a FLAT top-level dict has no Debug/Release keys, so the SDK
-// fails to decode it. `apps config` resolves ONE env's artifact, so it emits
-// that single resolved env under BOTH build-config keys (Debug AND Release) via
-// the SAME EmitIOSPlistPerEnv emitter `palbase mobile codegen ios --app` uses:
-// the plist then decodes (and works) in either build configuration, and the two
-// emit paths produce byte-identical plist STRUCTURE so they never drift.
+// writeIOSPlist writes the bundle-id-keyed Palbase-Info.plist the iOS SDK
+// reads. The SDK (PalbaseAppConfig.load) decodes a `{ "<bundle-id>": {...}, ...
+// }` map and selects the env dict whose KEY equals the running app's
+// Bundle.main.bundleIdentifier — there is NO build-config axis. `apps config`
+// resolves ONE env's artifact, so it emits a one-key map keyed by that env's
+// `identifier` (its registered bundle id) via the SAME EmitIOSPlistByBundle
+// emitter `palbase mobile codegen ios --app` uses, so the two emit paths never
+// drift.
 //
-// (codegen --app resolves two distinct artifacts — dev for Debug, production for
-// Release; the single-env apps-config path has only one, so the same artifact
-// fills both keys.)
+// (codegen --app resolves every registered env's artifact and emits one key per
+// env keyed by its bundle id; the single-env apps-config path has only one, so
+// the map has exactly one key.)
 func writeIOSPlist(art ConfigArtifact, path string) error {
-	return EmitIOSPlistPerEnv(art, art, path)
+	return EmitIOSPlistByBundle([]ConfigArtifact{art}, path)
 }
 
 // writeIOSConfigDict appends a `<dict>` carrying the five config-match fields
 // (app_id, identifier, env_preset, base_url, api_key) to b, indented by
-// `indent`. Called once per build-config key by EmitIOSPlistPerEnv (the sole
+// `indent`. Called once per bundle-id key by EmitIOSPlistByBundle (the sole
 // nested-plist emitter both `apps config` and `mobile codegen --app` funnel
 // through) so the per-env dict serialization is written in exactly ONE place.
 func writeIOSConfigDict(b *strings.Builder, art ConfigArtifact, indent string) {
@@ -456,49 +453,50 @@ func plistBool(v bool) string {
 	return "<false/>"
 }
 
-// Build-config keys the multi-env plist is keyed by. The iOS SDK selects the
-// dict matching the running app's build configuration at runtime (Debug vs
-// Release), so ONE plist file carries BOTH envs' config (spec §2.5
-// "Debug→dev env, Release→production").
-const (
-	BuildConfigDebug   = "Debug"
-	BuildConfigRelease = "Release"
-)
-
-// EmitIOSPlistPerEnv writes ONE build-config-conditioned Palbase-Info.plist that
-// carries BOTH envs' config, keyed by build configuration: the Debug artifact
-// under <key>Debug</key>, the Release artifact under <key>Release</key>. A Debug
-// build of the app reads its env's values; a Release build reads the other's —
-// the per-env config that lets one bundle match the right env at runtime.
+// EmitIOSPlistByBundle writes ONE Palbase-Info.plist whose TOP-LEVEL dict is
+// keyed by BUNDLE IDENTIFIER: one env config dict per registered environment,
+// filed under that env's `Identifier` (its registered bundle id). The iOS SDK
+// (PalbaseAppConfig.load) selects the env dict by matching the running app's
+// Bundle.main.bundleIdentifier against these keys at runtime — there is NO
+// build-config axis. N environments → N bundle-id keys.
 //
 // It reuses writeIOSConfigDict (the same per-env dict serialization
 // writeIOSPlist uses) so the two emitters never drift.
 //
-// REFUSES (returns an error, writes NOTHING) when EITHER artifact has an empty
-// identifier: an unconfigured binding cannot enforce config-match, and a
-// build-config plist missing one env's identifier is a footgun (mirrors
-// emitConfig's single-env refuse rule).
-func EmitIOSPlistPerEnv(debug, release ConfigArtifact, path string) error {
-	if debug.Identifier == "" {
-		return fmt.Errorf("refusing to write %s: Debug env app %q has an unconfigured binding (no identifier) — declare the bundle id before emitting a config", path, debug.AppID)
+// REFUSES (returns an error, writes NOTHING) when: there are no artifacts to
+// emit; ANY artifact has an empty identifier (an unconfigured binding cannot
+// enforce config-match); or two artifacts collide on the same identifier key (a
+// duplicate bundle id would silently drop one env). Determinism: keys are
+// emitted in sorted order so the file is golden-stable regardless of input
+// order.
+func EmitIOSPlistByBundle(arts []ConfigArtifact, path string) error {
+	if len(arts) == 0 {
+		return fmt.Errorf("refusing to write %s: no registered environments to emit", path)
 	}
-	if release.Identifier == "" {
-		return fmt.Errorf("refusing to write %s: Release env app %q has an unconfigured binding (no identifier) — declare the bundle id before emitting a config", path, release.AppID)
+	byKey := make(map[string]ConfigArtifact, len(arts))
+	for _, art := range arts {
+		if art.Identifier == "" {
+			return fmt.Errorf("refusing to write %s: env %q (app %q) has an unconfigured binding (no identifier / bundle id) — register the bundle id before emitting a config", path, art.ProjectRef, art.AppID)
+		}
+		if _, dup := byKey[art.Identifier]; dup {
+			return fmt.Errorf("refusing to write %s: two environments share the bundle id %q — each environment must register a distinct bundle id", path, art.Identifier)
+		}
+		byKey[art.Identifier] = art
 	}
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
 	b.WriteString(`<plist version="1.0">` + "\n")
 	b.WriteString("<dict>\n")
-	for _, e := range []struct {
-		key string
-		art ConfigArtifact
-	}{
-		{BuildConfigDebug, debug},
-		{BuildConfigRelease, release},
-	} {
-		b.WriteString("\t<key>" + plistEscape(e.key) + "</key>\n")
-		writeIOSConfigDict(&b, e.art, "\t")
+	for _, k := range keys {
+		b.WriteString("\t<key>" + plistEscape(k) + "</key>\n")
+		writeIOSConfigDict(&b, byKey[k], "\t")
 	}
 	b.WriteString("</dict>\n")
 	b.WriteString("</plist>\n")

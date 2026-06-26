@@ -1131,31 +1131,31 @@ func newCodegenIOSCmd(r Resolvers) *cobra.Command {
 			if err := generateIOSAuto(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, iosGeneratedSwiftFile(outDir), os.Stdout); err != nil {
 				return err
 			}
-			// With --app, also emit the per-env Palbase-Info.plist (the
-			// service.json-equivalent the SDK reads for config-match): ONE
-			// plist carrying BOTH envs keyed by build config — Debug→the dev
-			// env (the linked branch), Release→production (project main) —
-			// per spec §2.5. Replaces the old single-env PalbaseGenerated.json
-			// on this path. No --app → skip (codegen stays usable for the
-			// pre-app-registration flow).
+			// With --app, also emit the bundle-id-keyed Palbase-Info.plist (the
+			// service.json-equivalent the SDK reads for config-match): ONE plist
+			// carrying one env config dict per REGISTERED bundle id. The iOS SDK
+			// selects the env dict by matching the running app's
+			// Bundle.main.bundleIdentifier at runtime — there is NO build-config
+			// axis. The app's environments are resolved via listBindings (each
+			// binding's bare project_ref + its registered identifier). No --app →
+			// skip (codegen stays usable for the pre-app-registration flow).
 			if appID != "" {
-				// Mirror `apps config`'s env-ref convention: production is the
-				// project main ref; the dev env is the branch-composed ref.
-				devEnvRef := ref
-				if branch != "" && branch != "main" {
-					devEnvRef = ref + ":" + branch
-				}
 				plistPath := filepath.Join(filepath.Dir(iosGeneratedSwiftFile(outDir)), "Palbase-Info.plist")
-				if err := emitIOSPerEnvPlist(cmd.Context(), studioConfigArtifactFetch(r.Studio()), appID, devEnvRef, ref, plistPath); err != nil {
-					return fmt.Errorf("emit per-env Palbase-Info.plist: %w", err)
+				if err := emitIOSBundleKeyedPlist(
+					cmd.Context(),
+					studioBindingLister(r.Studio()),
+					studioConfigArtifactFetch(r.Studio()),
+					appID, plistPath, os.Stdout,
+				); err != nil {
+					return fmt.Errorf("emit Palbase-Info.plist: %w", err)
 				}
-				fmt.Fprintf(os.Stdout, "✓ wrote %s (Debug=dev, Release=production)\n", plistPath)
+				fmt.Fprintf(os.Stdout, "✓ wrote %s (one env dict per registered bundle id)\n", plistPath)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref to link (skips the interactive picker; required in non-interactive shells)")
-	cmd.Flags().StringVar(&appID, "app", "", "App id — emit the per-env Palbase-Info.plist (Debug=dev env, Release=production) for config-match")
+	cmd.Flags().StringVar(&appID, "app", "", "App id — emit the bundle-id-keyed Palbase-Info.plist (one env dict per registered bundle id) for config-match")
 	return cmd
 }
 
@@ -1233,8 +1233,8 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 // writeSwiftGenerated emits the typed client (PalbaseGenerated.swift) ONLY.
 //
 // CONFIG-CUTOVER (FINAL): the runtime config (url/apiKey/branch/oauth) is NO
-// LONGER emitted as PalbaseGenerated.json — the per-env Palbase-Info.plist
-// (codegen `--app` → emitIOSPerEnvPlist) is the SOLE config source the Palbe
+// LONGER emitted as PalbaseGenerated.json — the bundle-id-keyed Palbase-Info.plist
+// (codegen `--app` → emitIOSBundleKeyedPlist) is the SOLE config source the Palbe
 // SDK reads at startup. This path writes ONLY the typed client.
 func writeSwiftGenerated(specBytes []byte, outFile string, w io.Writer) error {
 	ops, err := parseOpenAPIForSwift(specBytes)
