@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -134,6 +135,73 @@ func loadPalignore(path string) ([]string, error) {
 		pats = append(pats, line)
 	}
 	return pats, sc.Err()
+}
+
+// extractTarGz unpacks a gzip-compressed tar stream from r into dst, creating
+// dst if it does not exist. Entries are restricted to regular files (symlinks,
+// devices, sockets are dropped). Path traversal is blocked: any entry whose
+// cleaned path escapes dst — i.e. starts with ".." after cleaning — is rejected
+// (CWE-22). Safe to call on bundles from the server; any malformed entry is an
+// error, not a silent skip.
+func extractTarGz(dst string, r io.Reader) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("create destination directory: %w", err)
+	}
+	zr, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("open gzip stream: %w", err)
+	}
+	defer zr.Close()
+
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+
+		// Normalize and guard against path traversal (CWE-22).
+		// filepath.Clean collapses "../../evil" → "../../evil"; we then
+		// check whether joining with dst yields something under dst.
+		clean := filepath.Clean(hdr.Name)
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("tar entry %q would escape destination (path traversal rejected)", hdr.Name)
+		}
+
+		target := filepath.Join(dst, clean)
+		// Belt-and-suspenders: after Join+Clean, verify the result is still
+		// rooted under dst. filepath.Join already calls Clean, but an absolute
+		// hdr.Name (e.g. "/etc/passwd") would still be caught here.
+		if !strings.HasPrefix(target, dst+string(filepath.Separator)) && target != dst {
+			return fmt.Errorf("tar entry %q escapes destination (path traversal rejected)", hdr.Name)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create directory %q: %w", clean, err)
+			}
+		case tar.TypeReg, 0: // TypeReg is '\x00' in old bundles
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("create parent for %q: %w", clean, err)
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode())
+			if err != nil {
+				return fmt.Errorf("create file %q: %w", clean, err)
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return fmt.Errorf("write file %q: %w", clean, err)
+			}
+			f.Close()
+		default:
+			// Skip symlinks, hard links, devices, etc. — same policy as BuildTarball.
+		}
+	}
+	return nil
 }
 
 func matchesAny(rel string, patterns []string) bool {

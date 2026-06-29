@@ -1,7 +1,9 @@
 package backend
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -186,6 +188,59 @@ func runPull(d pullDeps) error {
 	return d.refetch()
 }
 
+// pullResponse mirrors the backend.pull tRPC query result:
+//
+//	{ version: string, archive: string /* base64 */, size: number }
+//
+// Studio fetches the deployed bundle from the br-pod (/internal/pull/{envId}),
+// base64-encodes it for JSON-RPC transport, and returns the version SHA from
+// the X-Version header. We decode it client-side and extract via extractTarGz.
+type pullResponse struct {
+	Version string `json:"version"`
+	Archive string `json:"archive"` // base64-encoded tar.gz
+	Size    int    `json:"size"`
+}
+
+// platformPullBundle fetches the deployed bundle for ref/branch from Studio
+// (backend.pull tRPC query), base64-decodes the archive, and extracts it into
+// dst. dst must already exist (for pull it is cwd; for clone the caller creates
+// it). Prints a one-line success message to w.
+func platformPullBundle(ctx context.Context, r Resolvers, ref, branch, dst string, w io.Writer) error {
+	input := map[string]any{"ref": ref}
+	if branch != "" && branch != "main" {
+		input["branch"] = branch
+	}
+	var resp pullResponse
+	if err := r.Studio().Query(ctx, "backend.pull", input, &resp); err != nil {
+		return fmt.Errorf("backend.pull: %w", err)
+	}
+	if resp.Archive == "" {
+		return fmt.Errorf("backend.pull: server returned empty archive")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(resp.Archive)
+	if err != nil {
+		return fmt.Errorf("decode bundle: %w", err)
+	}
+	if err := extractTarGz(dst, bytes.NewReader(decoded)); err != nil {
+		return fmt.Errorf("extract bundle: %w", err)
+	}
+	version := resp.Version
+	if version == "" {
+		version = "(unknown)"
+	}
+	fmt.Fprintf(w, "✓ pulled %s (branch %s, version %s)\n", ref, branchLabel(branch), version)
+	return nil
+}
+
+// branchLabel returns the branch for display; falls back to "main" when empty
+// (the tRPC input omits "main" for back-compat, but the user should see it).
+func branchLabel(b string) string {
+	if b == "" {
+		return "main"
+	}
+	return b
+}
+
 // ── cobra command constructors ──────────────────────────────────────────
 //
 // push/pull/clone are mode-aware: github mode shells out to git, platform mode
@@ -211,23 +266,33 @@ func newPushCmd(r Resolvers) *cobra.Command {
 }
 
 // newPullCmd wires `palbase pull`. github mode: `git pull`. platform mode:
-// bundle refetch — not yet wired, so runPull returns a clear error there.
-func newPullCmd(_ Resolvers) *cobra.Command {
+// fetches the deployed bundle from Studio (backend.pull tRPC) and extracts
+// it over the cwd, updating tracked files in-place.
+func newPullCmd(r Resolvers) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pull",
 		Short: "Update the local backend to the latest deployed version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// platform-mode bundle refetch is not yet available → runPull returns
-			// a clear error in platform mode (nil refetch); github mode execs
-			// `git pull`.
-			return runPull(pullDeps{git: execGit, refetch: nil})
+			refetch := func() error {
+				cfg, err := auth.LoadProjectConfig()
+				if err != nil {
+					return err
+				}
+				cwd, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				return platformPullBundle(cmd.Context(), r, cfg.Ref, cfg.DefaultEnv, cwd, cmd.OutOrStdout())
+			}
+			return runPull(pullDeps{git: execGit, refetch: refetch})
 		},
 	}
 }
 
 // newCloneCmd wires `palbase clone <project>`. github mode: `git clone <url>
-// <ref>` + write a github-mode link. platform mode: bundle download — not yet
-// wired, so runClone returns a clear error there.
+// <ref>` + write a github-mode link. platform mode: downloads the deployed
+// bundle from Studio (backend.pull tRPC), extracts it into ./<ref>, and
+// writes a platform-mode .palbase/config.json.
 func newCloneCmd(r Resolvers) *cobra.Command {
 	var branch string
 	cmd := &cobra.Command{
@@ -240,10 +305,19 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			download := func(ref, branch string) error {
+				dst := ref // clone into ./<ref>/
+				if err := platformPullBundle(cmd.Context(), r, ref, branch, dst, cmd.OutOrStdout()); err != nil {
+					return err
+				}
+				return auth.SaveProjectConfigIn(dst, &auth.ProjectConfig{
+					Ref: ref, DefaultEnv: branch, Mode: "platform",
+				})
+			}
 			return runClone(cloneDeps{
 				git: execGit, mode: mode, repoURL: repoURL, ref: ref,
 				branch: branch, writeCfg: auth.SaveProjectConfigIn,
-				download: nil, // platform-mode bundle download not yet wired
+				download: download,
 			})
 		},
 	}

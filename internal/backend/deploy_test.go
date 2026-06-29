@@ -1,15 +1,22 @@
 package backend
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
@@ -151,6 +158,48 @@ func (f *fakeDeployClient) PostMultipart(path string, tarball []byte, fields map
 	return f.onPostMultipart(path, tarball, fields)
 }
 
+// fakeStudioServer builds an httptest.Server that acts as a minimal tRPC
+// endpoint for backend.pull. It returns a tar.gz containing the given files
+// (name → content), base64-encoded in the tRPC success envelope.
+func fakeStudioServer(t *testing.T, version string, files map[string]string) *studio.Client {
+	t.Helper()
+	// Build a real tar.gz to return.
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for name, body := range files {
+		hdr := &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprint(tw, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = tw.Close()
+	_ = gw.Close()
+	archiveB64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// tRPC success envelope wrapping {version, archive, size}.
+		resp := map[string]any{
+			"result": map[string]any{
+				"data": map[string]any{
+					"json": map[string]any{
+						"version": version,
+						"archive": archiveB64,
+						"size":    len(buf.Bytes()),
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return studio.New(srv.URL, nil)
+}
+
 func TestClone_GithubMode_ExecsGitClone(t *testing.T) {
 	var gotArgs []string
 	runner := func(name string, args ...string) error { gotArgs = append([]string{name}, args...); return nil }
@@ -258,5 +307,112 @@ func TestLookupProjectMode_Platform(t *testing.T) {
 	}
 	if repoURL != "" {
 		t.Fatalf("repoURL=%q", repoURL)
+	}
+}
+
+// TestClone_PlatformMode_DownloadsAndExtractsBundleAndWritesConfig tests the
+// happy path: a wired download func is called, extracts files into ./<ref>/,
+// and writes platform-mode .palbase/config.json.
+func TestClone_PlatformMode_DownloadsAndExtractsBundleAndWritesConfig(t *testing.T) {
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+
+	sc := fakeStudioServer(t, "sha-abc123", map[string]string{
+		"index.ts": "export const x = 1",
+	})
+	r := Resolvers{Studio: func() *studio.Client { return sc }}
+
+	var out bytes.Buffer
+	var downloadCalled bool
+	download := func(ref, branch string) error {
+		downloadCalled = true
+		dst := ref
+		if err := platformPullBundle(context.Background(), r, ref, branch, dst, &out); err != nil {
+			return err
+		}
+		return auth.SaveProjectConfigIn(dst, &auth.ProjectConfig{
+			Ref: ref, DefaultEnv: branch, Mode: "platform",
+		})
+	}
+	err := runClone(cloneDeps{
+		git:      func(string, ...string) error { return nil },
+		mode:     "platform",
+		ref:      "todoapp",
+		branch:   "main",
+		writeCfg: auth.SaveProjectConfigIn,
+		download: download,
+	})
+	if err != nil {
+		t.Fatalf("runClone: %v", err)
+	}
+	if !downloadCalled {
+		t.Fatal("download func was not called")
+	}
+	// Bundle was extracted into ./todoapp/
+	if _, err := os.Stat(filepath.Join("todoapp", "index.ts")); err != nil {
+		t.Fatalf("expected todoapp/index.ts to exist: %v", err)
+	}
+	// Config was written with mode=platform — read it directly to avoid needing
+	// a LoadProjectConfigFrom helper that doesn't exist.
+	cfgData, err := os.ReadFile(filepath.Join("todoapp", ".palbase", "config.json"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg auth.ProjectConfig
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if cfg.Mode != "platform" {
+		t.Fatalf("config mode = %q, want platform", cfg.Mode)
+	}
+	if cfg.Ref != "todoapp" {
+		t.Fatalf("config ref = %q", cfg.Ref)
+	}
+	// Success line was printed
+	if !strings.Contains(out.String(), "✓ pulled todoapp") {
+		t.Fatalf("missing success line; got: %s", out.String())
+	}
+}
+
+// TestPull_PlatformMode_RefetchesBundle tests that runPull with a wired
+// refetch func downloads and overwrites files in cwd.
+func TestPull_PlatformMode_RefetchesBundle(t *testing.T) {
+	dir := t.TempDir()
+	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{
+		Ref: "todoapp", DefaultEnv: "main", Mode: "platform",
+	})
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+
+	sc := fakeStudioServer(t, "sha-def456", map[string]string{
+		"controllers/todo.controller.ts": "// updated",
+	})
+	r := Resolvers{Studio: func() *studio.Client { return sc }}
+
+	var out bytes.Buffer
+	var refetchCalled bool
+	refetch := func() error {
+		refetchCalled = true
+		cfg, err := auth.LoadProjectConfig()
+		if err != nil {
+			return err
+		}
+		return platformPullBundle(context.Background(), r, cfg.Ref, cfg.DefaultEnv, dir, &out)
+	}
+	if err := runPull(pullDeps{git: func(string, ...string) error { return nil }, refetch: refetch}); err != nil {
+		t.Fatalf("runPull: %v", err)
+	}
+	if !refetchCalled {
+		t.Fatal("refetch func was not called")
+	}
+	// File was extracted into cwd.
+	if _, err := os.Stat(filepath.Join(dir, "controllers", "todo.controller.ts")); err != nil {
+		t.Fatalf("expected controllers/todo.controller.ts to exist: %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ pulled todoapp") {
+		t.Fatalf("missing success line; got: %s", out.String())
 	}
 }

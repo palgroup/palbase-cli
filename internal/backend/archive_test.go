@@ -4,12 +4,114 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
+
+// makeTarGz builds an in-memory tar.gz with the given entries (name → content).
+// Passing an entry with a "/" suffix creates a directory entry.
+func makeTarGz(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for name, body := range entries {
+		var hdr *tar.Header
+		if strings.HasSuffix(name, "/") {
+			hdr = &tar.Header{Name: name, Typeflag: tar.TypeDir, Mode: 0o755}
+		} else {
+			hdr = &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprint(tw, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractTarGz_HappyPath(t *testing.T) {
+	gz := makeTarGz(t, map[string]string{
+		"index.ts":              "export const x = 1",
+		"controllers/":          "",
+		"controllers/todo.ts":   "// ctrl",
+		"nested/deep/file.txt":  "deep",
+	})
+	dst := t.TempDir()
+	if err := extractTarGz(dst, bytes.NewReader(gz)); err != nil {
+		t.Fatalf("extractTarGz: %v", err)
+	}
+	for _, rel := range []string{"index.ts", "controllers/todo.ts", "nested/deep/file.txt"} {
+		if _, err := os.Stat(filepath.Join(dst, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("expected %s to exist: %v", rel, err)
+		}
+	}
+	content, err := os.ReadFile(filepath.Join(dst, "index.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "export const x = 1" {
+		t.Fatalf("index.ts content = %q", string(content))
+	}
+}
+
+func TestExtractTarGz_PathTraversalRejected(t *testing.T) {
+	cases := []string{
+		"../evil",
+		"../../etc/passwd",
+		"foo/../../evil",
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			gz := makeTarGz(t, map[string]string{name: "boom"})
+			dst := t.TempDir()
+			err := extractTarGz(dst, bytes.NewReader(gz))
+			if err == nil {
+				t.Fatalf("extractTarGz with entry %q should have errored (path traversal)", name)
+			}
+			if !strings.Contains(err.Error(), "path traversal") {
+				t.Fatalf("expected 'path traversal' in error, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestExtractTarGz_AbsolutePathSanitised verifies that a tar entry with an
+// absolute path (e.g. "/etc/passwd") is sanitised by filepath.Join and lands
+// UNDER dst rather than at the absolute filesystem path. Go's filepath.Join
+// strips the leading slash from subsequent args, so this is inherently safe;
+// the test pins that contract so a future refactor can't accidentally break it.
+func TestExtractTarGz_AbsolutePathSanitised(t *testing.T) {
+	gz := makeTarGz(t, map[string]string{"/etc/passwd": "root:x"})
+	dst := t.TempDir()
+	if err := extractTarGz(dst, bytes.NewReader(gz)); err != nil {
+		t.Fatalf("extractTarGz: %v", err)
+	}
+	// File MUST land under dst, never at /etc/passwd.
+	under := filepath.Join(dst, "etc", "passwd")
+	if _, err := os.Stat(under); err != nil {
+		t.Fatalf("expected file at %s (under dst): %v", under, err)
+	}
+	// Confirm the real /etc/passwd was not overwritten (it should exist and NOT
+	// contain our payload).
+	real, err := os.ReadFile("/etc/passwd")
+	if err == nil && strings.Contains(string(real), "root:x") && string(real) == "root:x" {
+		t.Fatal("/etc/passwd was overwritten — absolute path escaped dst")
+	}
+}
 
 func tarEntries(t *testing.T, gz []byte) []string {
 	t.Helper()

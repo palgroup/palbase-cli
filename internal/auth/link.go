@@ -159,7 +159,7 @@ func LoadProjectConfig() (*ProjectConfig, error) {
 		return nil, fmt.Errorf("parse project config: %w", err)
 	}
 	if cfg.Ref == "" {
-		return nil, fmt.Errorf(".palbase/config.json missing ref — run: palbase link <ref>")
+		return nil, fmt.Errorf(".palbase/config.json has a missing ref — clone the project with `palbase clone <ref>` or run from a project directory")
 	}
 	return &cfg, nil
 }
