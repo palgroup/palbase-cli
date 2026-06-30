@@ -56,6 +56,14 @@ type diffPlan struct {
 	DropConstraints []string `json:"dropConstraints"`
 	AddIndexes      []string `json:"addIndexes"`
 	DropIndexes     []string `json:"dropIndexes"`
+	// RLS additions — an rls-only diff (table already exists, the user just added
+	// rls:true or a new policy) is a real change. Without these fields the JSON
+	// unmarshal silently DROPPED them, so empty() returned true and `db diff`
+	// printed "schema in sync" even though the backend generated CREATE POLICY
+	// SQL. Tags must match the server DiffPlan JSON exactly.
+	EnableRLS      []string `json:"enableRLS"`
+	AddPolicies    []string `json:"addPolicies"`
+	ChangePolicies []string `json:"changePolicies"`
 }
 
 // empty reports whether the live DB already matches the declared schema.
@@ -68,7 +76,10 @@ func (p diffPlan) empty() bool {
 		len(p.AddConstraints) == 0 &&
 		len(p.DropConstraints) == 0 &&
 		len(p.AddIndexes) == 0 &&
-		len(p.DropIndexes) == 0
+		len(p.DropIndexes) == 0 &&
+		len(p.EnableRLS) == 0 &&
+		len(p.AddPolicies) == 0 &&
+		len(p.ChangePolicies) == 0
 }
 
 // hasDestructive reports whether applying the migration would drop data

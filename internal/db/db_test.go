@@ -84,6 +84,9 @@ func migSQLResponse(sql string, plan map[string][]string) map[string]any {
 			"dropConstraints": get("dropConstraints"),
 			"addIndexes":      get("addIndexes"),
 			"dropIndexes":     get("dropIndexes"),
+			"enableRLS":       get("enableRLS"),
+			"addPolicies":     get("addPolicies"),
+			"changePolicies":  get("changePolicies"),
 		},
 	}
 }
@@ -229,6 +232,47 @@ func TestDiff_WritesMigrationFile_WhenOnlyConstraints(t *testing.T) {
 	require.NotContains(t, o, "in sync")
 	require.Contains(t, o, "1 constraint(s)")
 	require.Contains(t, o, "0 destructive")
+}
+
+// TestDiff_WritesMigrationFile_WhenOnlyPolicies verifies that adding a NEW RLS
+// policy to an EXISTING table (the live table already exists, the user just
+// added a policy in schema.ts) is NOT treated as "in sync". The backend emits
+// the CREATE POLICY SQL and populates plan.addPolicies; before the fix the CLI's
+// diffPlan struct lacked enableRLS/addPolicies/changePolicies, so JSON unmarshal
+// dropped them and empty() wrongly returned true → "schema in sync — no
+// migration needed" (a real bug a Penny dev and a membership-RLS test both hit).
+func TestDiff_WritesMigrationFile_WhenOnlyPolicies(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({ documents: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"CREATE POLICY doc_owner_select ON documents AS PERMISSIVE FOR SELECT TO authenticated USING (user_id = (select auth.uid()));",
+			// addPolicies ALONE (no enableRLS) — RLS already on, the user just
+			// added a new policy to the existing table. Isolating addPolicies
+			// proves empty() checks THAT field, not just enableRLS.
+			map[string][]string{
+				"addPolicies": {"documents.doc_owner_select"},
+			},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_policy"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	// Migration file MUST be written — a policy-only diff is NOT in sync.
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "policy-only diff must write a migration file")
+
+	body, _ := os.ReadFile(filepath.Join(dir, "db", "migrations", entries[0].Name()))
+	require.Contains(t, string(body), "CREATE POLICY doc_owner_select")
+
+	require.NotContains(t, out.String(), "in sync")
 }
 
 // TestDiff_WritesMigrationFile_WhenOnlyIndexes verifies that a plan with ONLY
