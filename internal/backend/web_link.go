@@ -39,15 +39,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// webLinkCodegenEnv is the env value passed to pullTSTypes by the production
+// webLinkCodegen closure. Exposed as a constant so tests can assert the env
+// without stubbing the entire seam or requiring a real network.
+//
+// "remote" is the correct default for a linked platform project: "auto" tries
+// localhost:4003 first and will emit whatever app happens to be at that port —
+// or an empty client — if no local `palbase serve` is running. A linked
+// project's source of truth is the deployed backend, not the local machine.
+// Users who want local-first iteration can run `palbase types --env local` or
+// keep `palbase serve` running separately; the prebuild hook also pins
+// --env remote so CI/builds never regress to a localhost URL.
+const webLinkCodegenEnv = "remote"
+
 // webLinkCodegen is the codegen seam. Tests replace it with a stub; production
-// calls pullTSTypes via the real ts codegen pipeline (env "auto").
+// calls pullTSTypes via the real ts codegen pipeline (env webLinkCodegenEnv).
 var webLinkCodegen = func(ctx context.Context, r Resolvers, ref, outFile string, w io.Writer) error {
 	// branch: load from .palbase/config.json DefaultEnv, or default to "main".
 	branch := "main"
 	if cfg, err := auth.LoadProjectConfig(); err == nil && cfg.DefaultEnv != "" {
 		branch = cfg.DefaultEnv
 	}
-	return pullTSTypes(ctx, r.Studio(), r.Endpoints(), ref, branch, "auto", outFile, w)
+	return pullTSTypes(ctx, r.Studio(), r.Endpoints(), ref, branch, webLinkCodegenEnv, outFile, w)
 }
 
 // webCmd holds the resolvers for the web command group.
@@ -55,10 +68,12 @@ type webCmd struct {
 	r Resolvers
 }
 
-// webTypesCmd is the predev/prebuild hook value. `|| exit 0` covers a machine
-// without the CLI installed (command-not-found exits 127, which --soft alone
-// cannot swallow) so CI/dev hooks never block on a missing palbase binary.
-const webTypesCmd = "palbase types --soft || exit 0"
+// webTypesCmd is the predev/prebuild hook value. --env remote pins codegen to
+// the deployed backend so repeated builds never regress to a localhost URL
+// (the "auto" default tries localhost:4003 first and can pick up whatever
+// happens to be running there). `|| exit 0` covers a machine without the CLI
+// installed (command-not-found exits 127, which --soft alone cannot swallow).
+const webTypesCmd = "palbase types --env remote --soft || exit 0"
 
 // newWebCmd builds the `palbase web` command group.
 func newWebCmd(r Resolvers) *cobra.Command {
@@ -150,7 +165,17 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				return fmt.Errorf("wire entry import: %w", err)
 			}
 
-			// 7. Gitignore guard for the GEN file (warn only, never edit the rule).
+			// 7. For Next.js App Router layouts, ensure providers.tsx exists so
+			// the browser bundle also imports and configures the generated client.
+			// (The server layout import covers Server Components; the client bundle
+			// has its OWN module graph and needs a separate import via a "use client"
+			// component — without this, pb is not configured in the browser and every
+			// pb call throws "Palbe is not configured".)
+			if err := wireNextProviders(entryFlag, outFile, out); err != nil {
+				return fmt.Errorf("wire providers.tsx: %w", err)
+			}
+
+			// 8. Gitignore guard for the GEN file (warn only, never edit the rule).
 			checkGitignoreGuard(outFile, out)
 
 			return nil
@@ -701,4 +726,69 @@ func printGitignoreWarning(w io.Writer, outFile string) {
 	fmt.Fprintf(w, "         (it is the typed client your app imports, not a build artifact)\n")
 	fmt.Fprintf(w, "         Remove the matching .gitignore rule or force-add the file:\n")
 	fmt.Fprintf(w, "           git add -f %s\n\n", outFile)
+}
+
+// ── Next.js providers.tsx wiring ─────────────────────────────────────────────
+
+// nextAppDirs lists the App Router layout paths that indicate a Next.js project.
+// When the detected entry file is one of these, we also create providers.tsx in
+// the same directory so the CLIENT bundle imports and configures the gen file.
+//
+// Background: app/layout.tsx is a Server Component. Its module graph configures
+// pb for the server. The browser's client-component bundle has a SEPARATE module
+// graph — it never executes the layout's top-level imports. Without a "use client"
+// component that also imports palbe.gen, pb.auth/pb.backend/etc. throw
+// "Palbe is not configured" in every client component.
+var nextAppLayouts = map[string]bool{
+	"app/layout.tsx":     true,
+	"src/app/layout.tsx": true,
+}
+
+// wireNextProviders creates app/providers.tsx (or src/app/providers.tsx) when
+// the project is a Next.js App Router app. It is idempotent: a providers file
+// that already imports the gen stem is left untouched.
+func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
+	// Determine the entry file that was (or would be) used by wireEntryImport.
+	entryPath := entryFlag
+	if entryPath == "" {
+		for _, candidate := range autoEntryPaths {
+			if _, err := os.Stat(candidate); err == nil {
+				entryPath = candidate
+				break
+			}
+		}
+	}
+	if !nextAppLayouts[entryPath] {
+		return nil // not an App Router project — nothing to do
+	}
+
+	appDir := filepath.Dir(entryPath) // "app" or "src/app"
+	providersPath := filepath.Join(appDir, "providers.tsx")
+	genStem := strings.TrimSuffix(filepath.Base(outFile), ".ts") // e.g. "palbe.gen"
+
+	// Idempotency: if providers.tsx already imports the gen file, skip.
+	if existing, err := os.ReadFile(providersPath); err == nil {
+		for _, line := range strings.Split(string(existing), "\n") {
+			if lineImportsGen(line, genStem) {
+				return nil // already configured
+			}
+		}
+	}
+
+	// Compute the relative import path from appDir to the gen file.
+	rel, err := filepath.Rel(appDir, outFile)
+	if err != nil {
+		return fmt.Errorf("rel path from %s to %s: %w", appDir, outFile, err)
+	}
+	rel = strings.TrimSuffix(filepath.ToSlash(rel), ".ts")
+	if !strings.HasPrefix(rel, ".") {
+		rel = "./" + rel
+	}
+
+	content := fmt.Sprintf("'use client';\nimport '%s'; // configures pb in the client bundle\nimport { setupPalbeNext } from '@palbase/web/next/client';\n\nsetupPalbeNext(); // switches session storage to cookies\n\nexport function Providers({ children }: { children: React.ReactNode }) {\n  return children;\n}\n", rel)
+	if err := os.WriteFile(providersPath, []byte(content), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "✓ wrote %s — render <Providers> inside your root layout\n", providersPath)
+	return nil
 }
