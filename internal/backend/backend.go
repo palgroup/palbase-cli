@@ -846,6 +846,7 @@ func resolveActiveBranch(flag string) string {
 
 func newStatusCmd(r Resolvers) *cobra.Command {
 	var refFlag string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the project's active version + deploy state",
@@ -866,6 +867,14 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			if err := r.Studio().Query(cmd.Context(), "backend.status", map[string]any{"ref": ref}, &resp); err != nil {
 				return fmt.Errorf("backend.status: %w", err)
 			}
+			// --json: emit the raw status so a script/CI can poll deploy state
+			// without parsing the human lines. Mirrors `project status --json` /
+			// `apikey list --json`; the flag was missing here, so `palbase status
+			// --json` errored "unknown flag" and a poll loop got no output.
+			if jsonOut {
+				fmt.Println(renderJSON(resp))
+				return nil
+			}
 			fmt.Printf("ref:    %s\n", resp.Ref)
 			if resp.Head != nil {
 				fmt.Printf("head:   %s\n", *resp.Head)
@@ -877,6 +886,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
 	return cmd
 }
 
