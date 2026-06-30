@@ -14,7 +14,32 @@ const assert = require('node:assert');
 
 // require()ing dev-server.js is side-effect-light because main() is guarded by
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
-const { makeLocalCache, makeLocalQueue, workerRegistry } = require('./dev-server.js');
+const { makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv } = require('./dev-server.js');
+
+test('parseDotenv: parses KEY=VALUE, skips comments/blanks, strips quotes', () => {
+  const env = parseDotenv(
+    [
+      '# a comment',
+      '',
+      'OPENAI_API_KEY=sk-abc123',
+      'QUOTED="with spaces"',
+      "SINGLE='single quoted'",
+      '  PADDED = trimmed ',
+      'EQUALS_IN_VALUE=a=b=c',
+      '=novalue', // empty key — skipped
+      'NO_EQUALS_LINE', // no `=` — skipped
+    ].join('\n'),
+  );
+  assert.strictEqual(env.OPENAI_API_KEY, 'sk-abc123');
+  assert.strictEqual(env.QUOTED, 'with spaces'); // surrounding quotes stripped
+  assert.strictEqual(env.SINGLE, 'single quoted');
+  assert.strictEqual(env.PADDED, 'trimmed'); // key + value trimmed
+  assert.strictEqual(env.EQUALS_IN_VALUE, 'a=b=c'); // only the first `=` splits
+  assert.ok(!('' in env), 'empty key is dropped');
+  assert.ok(!('NO_EQUALS_LINE' in env), 'a line without = is dropped');
+  // A comment/blank produces no keys.
+  assert.deepStrictEqual(parseDotenv('# only a comment\n\n'), {});
+});
 
 test('Cache: set then get round-trips JSON values', async () => {
   const c = makeLocalCache();

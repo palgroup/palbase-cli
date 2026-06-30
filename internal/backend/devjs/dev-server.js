@@ -56,6 +56,52 @@ function lanIP() {
 }
 
 const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
+
+// parseDotenv parses dotenv text into a {KEY: value} map. Pure (no I/O, no
+// process.env) so it is unit-testable. Skips blank lines and `#` comments,
+// requires a non-empty key before `=`, and strips one pair of surrounding
+// single/double quotes from the value.
+function parseDotenv(text) {
+  const out = {};
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!key) continue;
+    let val = line.slice(eq + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
+// Auto-load <PROJECT_ROOT>/.env.local (then .env) into process.env for local dev
+// — the same file `palbase secret pull` writes. Without this, a Resource that
+// reads process.env.OPENAI_API_KEY (etc.) got an empty value locally even after
+// the secret was pulled (the docs implied serve loads it; it did not). An
+// ALREADY-SET process.env var WINS (explicit `FOO=bar palbase serve` overrides
+// the file; an earlier file's key wins over a later one).
+(function loadDotEnvLocal() {
+  for (const name of ['.env.local', '.env']) {
+    let text;
+    try {
+      text = fs.readFileSync(path.join(PROJECT_ROOT, name), 'utf8');
+    } catch {
+      continue; // file absent — fine
+    }
+    for (const [key, val] of Object.entries(parseDotenv(text))) {
+      if (!Object.prototype.hasOwnProperty.call(process.env, key)) process.env[key] = val;
+    }
+  }
+})();
+
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
@@ -1689,6 +1735,31 @@ const server = http.createServer(async (req, res) => {
   const start = Date.now();
   const parsed = url.parse(req.url, true);
 
+  // CORS for local dev: a Next.js app on localhost:3000 calling this dev server
+  // on :4003 is cross-origin, so without these headers the browser blocks every
+  // request (and the OPTIONS preflight 405'd). REFLECT the request Origin rather
+  // than send `*` — that keeps credentialed requests (cookies/Authorization)
+  // working, which `*` forbids. This is the LOCAL dev server only (deployed
+  // tenants sit behind Kong, which owns prod CORS); it is never the production
+  // path, so reflecting origin here is not the wildcard-CORS anti-pattern.
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      req.headers['access-control-request-headers'] || 'authorization,apikey,content-type',
+    );
+    res.setHeader('Access-Control-Max-Age', '86400');
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
   // /openapi.json — served before route matching so it never falls through to
   // the 404 path. Built fresh per request (see buildOpenApiSpec comment) and
   // serialized with 2-space indent. Never crashes the route: any failure logs
@@ -2258,4 +2329,4 @@ if (require.main === module) {
 // Exported for unit tests (dev-server.test.js): the local Cache/Queue factories
 // and the worker registry. Not used by the running dev-server, which calls them
 // directly. Keeping the export minimal avoids leaking the whole internal surface.
-module.exports = { makeLocalCache, makeLocalQueue, workerRegistry };
+module.exports = { makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv };
