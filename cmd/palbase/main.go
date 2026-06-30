@@ -109,7 +109,8 @@ func main() {
 		whoamiCmd(),
 		configCmd(),
 		project.Cmd(project.Resolvers{
-			REST: func() project.REST { return managementREST() },
+			REST:   func() project.REST { return managementREST() },
+			Studio: func() *studio.Client { return studioClient },
 		}),
 		branch.Cmd(branch.Resolvers{
 			REST: func() branch.REST { return managementREST() },
