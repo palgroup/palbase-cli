@@ -70,6 +70,9 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase apps delete <appId>                           Delete an app.
   palbase apps config --app <appId> --env <ref>         Fetch an (app × env)
                                                         config artifact.
+  palbase apps bind --app <appId> --env <ref> --identifier <bundleId>
+                                                        Set the (app × env)
+                                                        binding's identifier.
 
 All operations go through Studio (membership/role-gated server-side).`,
 	}
@@ -78,6 +81,7 @@ All operations go through Studio (membership/role-gated server-side).`,
 		createCmd(r.Studio),
 		deleteCmd(r.Studio),
 		configCmd(r.Studio, r.OAuthFetch),
+		bindCmd(r.Studio),
 	)
 	return cmd
 }
@@ -186,6 +190,75 @@ func deleteCmd(studioFn func() Studio) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	return cmd
+}
+
+// bindCmd wires `palbase apps bind`: it sets the (app × env) binding's
+// identifier (bundle id / package name / web origin) plus optional iOS
+// attestation material, by calling the apps.configureBinding tRPC mutation —
+// the SAME UPDATE Studio's binding-matrix UI runs (admin+ gated server-side).
+//
+// --env is the env's BARE project ref (control-pg projects.ref), NOT a branch
+// endpoint ref: the binding row is keyed by project_ref = projects.ref (the
+// service resolves the env's branch endpoint_ref itself when it later mints
+// keys). This is exactly the ref `apps config --env` and listBindings already
+// use, so the binding round-trips with pull-spec.
+func bindCmd(studioFn func() Studio) *cobra.Command {
+	var (
+		appID      string
+		env        string
+		identifier string
+		teamID     string
+		apns       string
+		jsonOut    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "bind",
+		Short: "Set an (app × env) binding's identifier (bundle id / origin)",
+		Long: "Configure the (app × env) binding the SDK config-match enforces.\n" +
+			"Sets the env's --identifier (the app's bundle id / package name / web\n" +
+			"origin) so the env's config artifact resolves and pull-spec emits it.\n" +
+			"--env is the env's BARE project ref (the same ref `apps config --env`\n" +
+			"takes), never a branch endpoint ref.\n" +
+			"--team-id and --apns are optional iOS App Attest material.\n" +
+			"Runs through Studio (admin+ on the app's group, server-side).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if apns != "" && apns != "sandbox" && apns != "production" {
+				return fmt.Errorf("--apns must be one of: sandbox, production")
+			}
+			input := map[string]any{
+				"appId":      appID,
+				"projectRef": env,
+				"identifier": identifier,
+			}
+			if teamID != "" {
+				input["teamId"] = teamID
+			}
+			if apns != "" {
+				input["apnsEnvironment"] = apns
+			}
+			var out struct {
+				OK bool `json:"ok"`
+			}
+			if err := studioFn().Mutation(cmd.Context(), "apps.configureBinding", input, &out); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(map[string]any{"ok": out.OK, "appId": appID, "projectRef": env, "identifier": identifier})
+			}
+			fmt.Fprintf(os.Stdout, "✓ bound app %s to env %s as %s\n", appID, env, identifier)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
+	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
+	cmd.Flags().StringVar(&identifier, "identifier", "", "Bundle id / package name / web origin (required)")
+	cmd.Flags().StringVar(&teamID, "team-id", "", "Apple Developer Team id (iOS App Attest, optional)")
+	cmd.Flags().StringVar(&apns, "apns", "", "APNs environment: sandbox | production (optional)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	_ = cmd.MarkFlagRequired("app")
+	_ = cmd.MarkFlagRequired("env")
+	_ = cmd.MarkFlagRequired("identifier")
 	return cmd
 }
 
