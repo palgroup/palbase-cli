@@ -2,6 +2,7 @@
 // Management API REST transport (Authorization: DPoP <pat> + per-request
 // proof). The legacy tRPC path is gone for project — only the REST
 // client is used here (Spec 1, S5.4).
+// project.delete is tRPC-only (no REST route) and uses the Studio client.
 package project
 
 import (
@@ -12,25 +13,28 @@ import (
 
 	"fmt"
 
+	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
 
 // Resolvers lets the cobra wiring read the lazily-built REST client from
 // main.go's PersistentPreRunE — mirrors backend.Resolvers' pattern.
 type Resolvers struct {
-	REST func() REST
+	REST   func() REST
+	Studio func() *studio.Client
 }
 
 // Cmd returns the `palbase project` parent command.
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
-		Short: "Create, list, and inspect Palbase projects",
+		Short: "Create, list, inspect, and delete Palbase projects",
 	}
 	cmd.AddCommand(
 		listCmd(r.REST),
 		createCmd(r.REST),
 		statusCmd(r.REST),
+		deleteCmd(r.Studio),
 	)
 	return cmd
 }
