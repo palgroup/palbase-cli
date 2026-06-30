@@ -120,6 +120,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		newStatusCmd(r),
 		newTypesCmd(r),
 		newGenTypesCmd(r),
+		newPullSpecCmd(r),
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
