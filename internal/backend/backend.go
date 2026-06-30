@@ -292,6 +292,44 @@ func installNodeDeps(dir string) error {
 	return cmd.Run()
 }
 
+// devServerToolMissing reports whether `pkg` is absent from the project's
+// node_modules. Used for the dev-server's OWN runtime tools (not the user's
+// declared deps) that the deployed br-pod provides globally (Dockerfile) but a
+// local `palbase serve` must supply itself.
+func devServerToolMissing(projectDir, pkg string) bool {
+	_, err := os.Stat(filepath.Join(projectDir, "node_modules", pkg))
+	return os.IsNotExist(err)
+}
+
+// ensureDevServerTools guarantees the runtime packages the dev-server require()s
+// to behave like the deployed runtime are present in node_modules, WITHOUT
+// writing them into the user's package.json (--no-save) — they're the runtime's
+// dependencies, not the project's. Today that's zod-to-json-schema: the deployed
+// br-pod installs it globally (modules/backend/Dockerfile), but a local serve
+// resolves it from the project's node_modules, so when it's missing
+// /openapi.json silently omits every request/response schema and the typed pb.*
+// client comes out bodyless (Penny #2's local root cause). Best-effort: a failed
+// install only means OpenAPI schemas stay absent — the dev-server's own hint
+// fires — so we warn but never block serve.
+func ensureDevServerTools(dir string) {
+	const pkg = "zod-to-json-schema"
+	if !devServerToolMissing(dir, pkg) {
+		return
+	}
+	bin, err := exec.LookPath("npm")
+	if err != nil {
+		return // installNodeDeps already surfaced the npm-missing error path
+	}
+	fmt.Printf("→ installing %s (dev-server tool, --no-save) ...\n", pkg)
+	cmd := exec.Command(bin, "install", "--no-save", "--silent", "--no-audit", "--no-fund", pkg)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("  warning: could not install %s — /openapi.json will omit request/response schemas (run `npm i %s` manually)\n", pkg, pkg)
+	}
+}
+
 // resolveDevProjectRef picks the ref the dev server should build its
 // <ref>.<host> URL from. Kong only routes the branch endpoint_ref
 // subdomain, so prefer the endpoint_ref apikey.reveal returns. When
@@ -449,6 +487,13 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 					return fmt.Errorf("@palbase/backend is not installed and `npm install` failed: %w\nfix the error above (or run `npm install` manually) and re-run `palbase serve`", err)
 				}
 			}
+
+			// The dev-server require()s zod-to-json-schema to emit OpenAPI
+			// request/response schemas (the deployed br-pod installs it globally;
+			// a local serve must supply it). Ensure it's present so /openapi.json
+			// is populated and the typed pb.* client isn't bodyless — without
+			// adding it to the user's package.json.
+			ensureDevServerTools(cwd)
 
 			// Regenerate palbase-env.d.ts from db/schema.ts so the project's
 			// handlers get a typed `Database.tables.*`. No-op when the project

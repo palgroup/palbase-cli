@@ -41,6 +41,40 @@ func TestBackendDepMissing(t *testing.T) {
 	}
 }
 
+// devServerToolMissing decides whether `palbase serve` must install a
+// dev-server runtime tool (e.g. zod-to-json-schema) the deployed br-pod ships
+// globally. Missing → /openapi.json would omit request/response schemas, so
+// serve installs it (--no-save).
+func TestDevServerToolMissing(t *testing.T) {
+	const pkg = "zod-to-json-schema"
+	tests := []struct {
+		name      string
+		installed bool
+		want      bool
+	}{
+		{name: "absent → missing (openapi would be bodyless)", installed: false, want: true},
+		{name: "present → not missing", installed: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.installed {
+				pkgDir := filepath.Join(dir, "node_modules", pkg)
+				if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(pkgDir, "package.json"),
+					[]byte(`{"name":"`+pkg+`"}`), 0o644); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+			if got := devServerToolMissing(dir, pkg); got != tt.want {
+				t.Fatalf("devServerToolMissing(%q,%q) = %v, want %v", dir, pkg, got, tt.want)
+			}
+		})
+	}
+}
+
 // branchPreflightError is the pure status→guidance mapping that decides whether
 // `palbase serve` can back local dev with a branch's deployed stack.
 func TestBranchPreflightError(t *testing.T) {
