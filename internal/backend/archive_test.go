@@ -169,6 +169,44 @@ func TestBuildTarball_IncludesFilesExcludesIgnored(t *testing.T) {
 	}
 }
 
+// TestBuildTarball_ExcludesNestedIgnoredDirs locks the fix for the silent
+// deploy-hang: a nested web app's node_modules/.next (web/node_modules,
+// web/.next) MUST be excluded too, not just the top-level ones. Before the fix
+// the walk matched only the first path segment, so web/node_modules (357MB in a
+// real project) shipped → the base64 tarball blew past Temporal's 4MB gRPC arg
+// cap → opaque RESOURCE_EXHAUSTED deploy failure.
+func TestBuildTarball_ExcludesNestedIgnoredDirs(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("index.ts", "export const x = 1")
+	write("controllers/todo.controller.ts", "// ctrl")
+	write("node_modules/dep/index.js", "top-level")          // top-level (already excluded)
+	write("web/node_modules/react/index.js", "NESTED BLOAT") // nested — the bug
+	write("web/.next/build-manifest.json", "{}")             // nested build output
+	write("web/app/page.tsx", "export default () => null")   // a real nested file → kept
+
+	gz, err := BuildTarball(dir)
+	if err != nil {
+		t.Fatalf("BuildTarball: %v", err)
+	}
+	got := tarEntries(t, gz)
+	for _, n := range got {
+		if strings.Contains(n, "node_modules") || strings.Contains(n, "/.next/") || strings.HasPrefix(n, ".next/") {
+			t.Fatalf("ignored dir leaked into bundle: %q (all: %v)", n, got)
+		}
+	}
+	// The non-ignored nested file must still be packed.
+	if !contains(got, "web/app/page.tsx") {
+		t.Fatalf("expected web/app/page.tsx to be included; got %v", got)
+	}
+}
+
 func contains(names []string, name string) bool {
 	for _, n := range names {
 		if n == name {

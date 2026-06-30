@@ -16,6 +16,23 @@ var defaultIgnoreDirs = map[string]bool{
 	".git":         true,
 	".palbase":     true,
 	"node_modules": true,
+	".next":        true, // Next.js build output — bloat, never part of the backend bundle
+}
+
+// hasIgnoredSegment reports whether ANY path segment of rel is an ignored dir.
+// The walk must skip an ignored dir at EVERY depth, not just the top level: a
+// platform-mode project commonly nests a web app (e.g. `web/node_modules`,
+// `web/.next`) under the backend dir, and matching only the first segment let
+// those nested trees through — a real deploy shipped a 357MB `web/node_modules`,
+// the base64 tarball blew past Temporal's 4MB gRPC arg cap, and the deploy died
+// with an opaque RESOURCE_EXHAUSTED (the silent-deploy-hang outsiders hit).
+func hasIgnoredSegment(rel string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if defaultIgnoreDirs[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultIgnoreFiles are filename globs ALWAYS excluded from the deploy bundle,
@@ -53,9 +70,10 @@ func BuildTarball(dir string) ([]byte, error) {
 		if rel == "." {
 			return nil
 		}
-		top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
 		if info.IsDir() {
-			if defaultIgnoreDirs[top] {
+			// Skip an ignored dir at ANY depth (e.g. top-level node_modules AND a
+			// nested web/node_modules) — SkipDir prunes the whole subtree.
+			if hasIgnoredSegment(rel) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -68,7 +86,7 @@ func BuildTarball(dir string) ([]byte, error) {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil
 		}
-		if defaultIgnoreDirs[top] ||
+		if hasIgnoredSegment(rel) ||
 			matchesAny(filepath.ToSlash(rel), defaultIgnoreFiles) ||
 			matchesAny(filepath.ToSlash(rel), patterns) {
 			return nil
