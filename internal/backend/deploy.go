@@ -35,18 +35,26 @@ func execGit(name string, args ...string) error {
 }
 
 // resolveMode reads the linked project's deploy mode from .palbase/config.json
-// in the cwd. An explicit "platform" routes to the tarball-upload path; any
-// other value (including the empty/legacy default) routes to github (`git
-// push`), preserving back-compat for projects linked before the mode field.
+// in the cwd. github mode (deploy via `git push` → webhook) is OPT-IN and ALWAYS
+// written explicitly: `palbase clone` of a GitHub-backed project writes
+// `mode:"github"` + the repo URL (deploy.go runClone). Every other link path —
+// the `palbase link` / status picker, `palbase web link`, a hand-written config —
+// targets a PLATFORM-managed project (GitHub is optional; platform is the
+// documented default), and those writers do NOT set mode. So an ABSENT mode means
+// platform, not github: defaulting absent→github made a platform project's
+// `palbase push` shell out to `git push` and fail "not a git repository" / "no
+// configured push destination" with no way to reach the documented tarball path
+// (wave-4 w4budget hit exactly this). github mode is never implicit, so this is a
+// clean cutover — only an explicit "github" takes the git path.
 func resolveMode() (string, error) {
 	cfg, err := auth.LoadProjectConfig()
 	if err != nil {
 		return "", err
 	}
-	if cfg.Mode == "platform" {
-		return "platform", nil
+	if cfg.Mode == "github" {
+		return "github", nil
 	}
-	return "github", nil
+	return "platform", nil
 }
 
 // pushDeps are the injected collaborators for runPush — the git runner

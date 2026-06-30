@@ -38,7 +38,12 @@ func TestResolveMode(t *testing.T) {
 	}{
 		{"explicit platform", &auth.ProjectConfig{Ref: "r", Mode: "platform"}, "platform"},
 		{"explicit github", &auth.ProjectConfig{Ref: "r", Mode: "github"}, "github"},
-		{"empty defaults to github", &auth.ProjectConfig{Ref: "r", Mode: ""}, "github"},
+		// Absent mode defaults to PLATFORM: github is opt-in and always written
+		// explicitly by `palbase clone` of a GitHub project; every other link path
+		// (picker / web link / hand-written config) targets a platform project and
+		// omits mode. Defaulting absent→github made platform `push` run `git push`
+		// and fail (wave-4 w4budget). Only explicit "github" takes the git path.
+		{"empty defaults to platform", &auth.ProjectConfig{Ref: "r", Mode: ""}, "platform"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
