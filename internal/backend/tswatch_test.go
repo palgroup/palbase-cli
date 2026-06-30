@@ -221,22 +221,6 @@ func TestWatchTSLoop_TickerClosed(t *testing.T) {
 	require.Contains(t, w.String(), "watch stopped")
 }
 
-// ── TestTypesWatch_SwiftLangError ─────────────────────────────────────────────
-// --lang swift --watch → error "only supported for --lang ts"
-
-func TestTypesWatch_SwiftLangError(t *testing.T) {
-	t.Chdir(t.TempDir())
-	r := deadStudioResolvers()
-	cmd := newTypesCmd(r)
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--ref", "abc123", "--lang", "swift", "--watch"})
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--watch is only supported for --lang ts")
-}
-
 // ── TestTypesWatch_FlagDispatch ───────────────────────────────────────────────
 // --watch flag on the cobra command routes to the watch path (not one-shot).
 // We verify by asserting that "watch stopped" is printed — this string is

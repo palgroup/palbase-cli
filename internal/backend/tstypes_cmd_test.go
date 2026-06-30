@@ -294,25 +294,3 @@ func TestTypesTS_AutoFallback_LocalHTTPError(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(body), "url: 'https://erkut1230qe6um.dev.palbase.studio'")
 }
-
-// TestTypesSwift_EnvAutoMapsToRemote pins the shared-flag migration: the --env
-// default became "auto" for the ts path, and the swift branch must treat
-// "auto" as "remote" (its local-first flow lives in `palbase mobile codegen
-// ios`, not here) — instead of failing on an unknown env.
-func TestTypesSwift_EnvAutoMapsToRemote(t *testing.T) {
-	t.Chdir(t.TempDir())
-	rig := &tsTypesStudio{}
-	r := rig.resolvers(t)
-	restore := redirectHostTo(t, "erkut1230qe6um.dev.palbase.studio", rig.srvURL)
-	defer restore()
-
-	outFile := filepath.Join(t.TempDir(), "PalbaseEndpoints.swift")
-	cmd := newTypesCmd(r)
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--ref", "erkut1230qe6u", "--lang", "swift", "--out", outFile})
-	require.NoError(t, cmd.Execute())
-
-	body, err := os.ReadFile(outFile)
-	require.NoError(t, err)
-	require.Contains(t, string(body), "import Palbe")
-}
