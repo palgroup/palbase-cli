@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
@@ -46,15 +47,21 @@ func StoreDPoPKey(mode string, key *DPoPKey) error {
 // the file fallback. Returns ErrDPoPKeyMissing if neither has a key.
 func LoadDPoPKey(mode string) (*DPoPKey, error) {
 	if !useFileFallback() {
-		raw, err := keyring.Get(dpopKeyService, keyringAccount(mode))
+		// keyring.Get can BLOCK indefinitely when the OS keychain syscall is
+		// unavailable (a sandboxed/headless environment, e.g. the Claude Code
+		// sandbox, where the macOS Keychain access hangs instead of erroring).
+		// Bound it: if the keyring doesn't answer quickly, fall through to the
+		// file fallback rather than hanging the whole CLI. The Set path already
+		// degrades to the file fallback; this gives Get the same resilience.
+		raw, err := keyringGetWithTimeout(dpopKeyService, keyringAccount(mode), keyringTimeout)
 		if err == nil {
 			return loadPrivateJWK([]byte(raw))
 		}
 		if !errors.Is(err, keyring.ErrNotFound) {
-			// Keyring present but failed for another reason — try the file
-			// fallback rather than reporting an error that blocks login.
-			// We don't warn here because this branch also fires on locked
-			// keyrings during normal startup; the warning would be noisy.
+			// Keyring present but failed for another reason (locked keyring,
+			// timeout in a sandbox) — try the file fallback rather than
+			// reporting an error that blocks login. No warning: this branch
+			// also fires on locked keyrings during normal startup.
 			_ = err
 		}
 	}
@@ -121,4 +128,37 @@ func fileFallbackHint(mode string) string {
 		return "~/.palbase/dpop-key-" + mode + ".jwk"
 	}
 	return path
+}
+
+// keyringTimeout bounds a single keyring.Get. The keychain answers in
+// milliseconds when reachable; a multi-second wait means the syscall is wedged
+// (sandbox/headless), so we cut over to the file fallback instead of hanging.
+const keyringTimeout = 3 * time.Second
+
+// keyringGetWithTimeout runs keyring.Get on a goroutine and returns either its
+// result or a timeout error. The goroutine may outlive the timeout (a truly
+// stuck syscall can't be cancelled), but it's a single detached read that does
+// not block the caller — the CLI proceeds via the file fallback.
+func keyringGetWithTimeout(service, account string, timeout time.Duration) (string, error) {
+	return getWithTimeout(func() (string, error) { return keyring.Get(service, account) }, timeout)
+}
+
+// getWithTimeout is the testable core: run get() on a goroutine, return its
+// result or a timeout error if it doesn't answer within `timeout`.
+func getWithTimeout(get func() (string, error), timeout time.Duration) (string, error) {
+	type result struct {
+		val string
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		v, err := get()
+		ch <- result{v, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.val, r.err
+	case <-time.After(timeout):
+		return "", fmt.Errorf("keyring read timed out after %s (keychain unavailable?)", timeout)
+	}
 }
