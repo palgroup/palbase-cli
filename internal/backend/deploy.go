@@ -5,21 +5,27 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
-// deployClient is the multipart-POST surface the platform-mode deploy needs.
-// It is satisfied by *transport.Client (PostMultipart), so the real command
-// (Task 12) wires the authed mgmt client in directly; tests inject a fake.
+// deployClient is the Management-API surface the platform-mode deploy needs:
+// PostMultipart uploads the tarball, and Do polls the deployment-status-by-id
+// endpoint to terminal state. It is satisfied by *transport.Client (and the
+// backend.REST accessor), so the command wires the authed mgmt client in
+// directly; tests inject a fake.
 type deployClient interface {
 	PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error)
+	Do(ctx context.Context, method, path string, body, out any) error
 }
 
 // gitRunner runs an external command (default: git). Injected so the
@@ -60,11 +66,18 @@ func resolveMode() (string, error) {
 // pushDeps are the injected collaborators for runPush — the git runner
 // (github mode), the mgmt deploy client (platform mode), the target branch,
 // and the writer success output is reported to.
+//
+// ctx, pollInterval and pollTimeout drive the platform-mode wait-for-terminal
+// loop; when unset they default (background ctx, 1.5s, 5m) so tests can shrink
+// the interval/timeout and the command wires the real cobra context.
 type pushDeps struct {
-	git    gitRunner
-	rest   deployClient
-	branch string
-	out    io.Writer
+	git          gitRunner
+	rest         deployClient
+	branch       string
+	out          io.Writer
+	ctx          context.Context
+	pollInterval time.Duration
+	pollTimeout  time.Duration
 }
 
 // runPush routes `palbase push` by the linked project's mode:
@@ -113,11 +126,118 @@ func runPush(d pushDeps) error {
 	}
 
 	fmt.Fprintf(out, "✓ deploy started for %s (branch %s)\n", cfg.Ref, d.branch)
-	if id := deploymentIDFromResponse(body); id != "" {
-		fmt.Fprintf(out, "  deployment: %s\n", id)
+	id := deploymentIDFromResponse(body)
+	if id == "" {
+		// No deployment id in the response (older server): nothing to poll, keep
+		// the fire-and-forget behavior so we never hard-break.
+		fmt.Fprintf(out, "  track it:   palbase status\n")
+		return nil
 	}
-	fmt.Fprintf(out, "  track it:   palbase status\n")
-	return nil
+	fmt.Fprintf(out, "  deployment: %s\n", id)
+	return waitForDeploy(d, cfg.Ref, id, out)
+}
+
+// deploymentStatus mirrors the /api/v1/projects/:ref/deployments/:id `data`
+// payload: the terminal-progress fields the CLI polls to a decision.
+type deploymentStatus struct {
+	Status      string `json:"status"`
+	CurrentStep string `json:"currentStep"`
+	Error       string `json:"error"`
+	Version     string `json:"version"`
+}
+
+// waitForDeploy polls the deployment-status endpoint until the deploy reaches a
+// terminal state, then reports the outcome:
+//   - succeeded → "✓ deploy succeeded (version <v>)", exit 0.
+//   - failed    → "✗ deploy FAILED: <server error>" to stderr, non-zero exit
+//     (the exact server error — the migration SQLSTATE / drift text — so scripts
+//     and CI catch a silently-broken deploy).
+//   - timeout   → a note pointing at `palbase status`, exit 0 (don't falsely
+//     fail a slow-but-fine deploy; this is the exception, not the norm).
+//
+// Graceful degradation: if the status endpoint 404s (an un-upgraded server that
+// lacks the route, or the row not yet visible), fall back to the fire-and-forget
+// note and exit 0 — never hard-break against an old server.
+func waitForDeploy(d pushDeps, ref, id string, out io.Writer) error {
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	interval := d.pollInterval
+	if interval <= 0 {
+		interval = 1500 * time.Millisecond
+	}
+	timeout := d.pollTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+
+	path := fmt.Sprintf("/api/v1/projects/%s/deployments/%s", ref, id)
+	deadline := time.Now().Add(timeout)
+	// stderr is where the machine-readable failure and the periodic dots go, so a
+	// script capturing stdout for `--json`-style consumption isn't polluted.
+	progress := os.Stderr
+
+	fmt.Fprint(progress, "  deploying")
+	for {
+		var st deploymentStatus
+		err := d.rest.Do(ctx, http.MethodGet, path, nil, &st)
+		if err != nil {
+			// 404 = old server without the status route (or the row isn't
+			// queryable yet on the very first tick). Fall back to fire-and-forget
+			// so we don't punish an un-upgraded server or a benign race.
+			var apiErr *transport.APIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+				fmt.Fprintln(progress)
+				fmt.Fprintf(out, "  (deploy status unavailable on this server — track it: palbase status)\n")
+				return nil
+			}
+			// A transient network error shouldn't abort the whole wait; keep
+			// polling until the deadline, then surface it as a timeout note.
+			if time.Now().After(deadline) {
+				fmt.Fprintln(progress)
+				fmt.Fprintf(out, "  deploy still running after %s (last error polling status: %v); check `palbase status`\n", timeout, err)
+				return nil
+			}
+		} else {
+			switch st.Status {
+			case "succeeded":
+				fmt.Fprintln(progress)
+				version := st.Version
+				if version == "" {
+					version = "(unknown)"
+				}
+				fmt.Fprintf(out, "✓ deploy succeeded (version %s)\n", version)
+				return nil
+			case "failed":
+				fmt.Fprintln(progress)
+				msg := st.Error
+				if msg == "" {
+					msg = "deploy failed (no error detail from server)"
+				}
+				fmt.Fprintf(progress, "✗ deploy FAILED: %s\n", msg)
+				// Non-zero exit so scripts/CI catch it. cobra prints the returned
+				// error to stderr and exits 1; we've already printed the detailed
+				// line above, so keep the returned error short.
+				return fmt.Errorf("deploy failed")
+			default:
+				// still deploying (pending/deploying/…) — show progress.
+				fmt.Fprint(progress, ".")
+			}
+		}
+
+		if time.Now().After(deadline) {
+			fmt.Fprintln(progress)
+			fmt.Fprintf(out, "  deploy still running after %s; check `palbase status`\n", timeout)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(progress)
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 // deploymentIDFromResponse extracts the deploymentId from the deploy endpoint's
@@ -266,7 +386,13 @@ func newPushCmd(r Resolvers) *cobra.Command {
 		Use:   "push",
 		Short: "Deploy the current backend (github: git push; platform: tarball upload)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPush(pushDeps{git: execGit, rest: r.REST(), branch: branch, out: cmd.OutOrStdout()})
+			return runPush(pushDeps{
+				git:    execGit,
+				rest:   r.REST(),
+				branch: branch,
+				out:    cmd.OutOrStdout(),
+				ctx:    cmd.Context(),
+			})
 		},
 	}
 	cmd.Flags().StringVar(&branch, "branch", "main", "target branch")

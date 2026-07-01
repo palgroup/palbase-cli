@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/studio"
@@ -157,10 +158,136 @@ func TestPush_PrintsSuccess(t *testing.T) {
 
 type fakeDeployClient struct {
 	onPostMultipart func(path string, tarball []byte, fields map[string]string) ([]byte, error)
+	// onDo stubs the status-poll GET. When nil, Do returns a terminal
+	// "succeeded" status so the older push tests (which only assert the
+	// deploy-started lines) don't hang on the poll loop.
+	onDo func(ctx context.Context, method, path string, body, out any) error
 }
 
 func (f *fakeDeployClient) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
 	return f.onPostMultipart(path, tarball, fields)
+}
+
+func (f *fakeDeployClient) Do(ctx context.Context, method, path string, body, out any) error {
+	if f.onDo != nil {
+		return f.onDo(ctx, method, path, body, out)
+	}
+	// Default: report the deploy as already succeeded on the first poll.
+	if st, ok := out.(*deploymentStatus); ok {
+		*st = deploymentStatus{Status: "succeeded", Version: "sha-default"}
+	}
+	return nil
+}
+
+// deployStartedBody is the deploy POST's success envelope carrying a
+// deploymentId, so runPush proceeds into the poll loop.
+func deployStartedBody(id string) []byte {
+	return []byte(fmt.Sprintf(`{"data":{"workflowId":"wf1","runId":"r1","deploymentId":%q},"request_id":"req_x"}`, id))
+}
+
+// pushForPoll runs runPush in a temp platform-mode project with a fast poll
+// interval and the given status-poll stub, returning combined output. stderr is
+// redirected into the same buffer so the ✗/dots land where the test can read
+// them (waitForDeploy writes failures + progress to os.Stderr).
+func pushForPoll(t *testing.T, onDo func(ctx context.Context, method, path string, body, out any) error) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "todoapp", DefaultEnv: "main", Mode: "platform"})
+	_ = os.WriteFile(filepath.Join(dir, "index.ts"), []byte("export const x=1"), 0o644)
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	_ = os.Chdir(dir)
+
+	// Capture os.Stderr (waitForDeploy's failure/progress sink) via an OS pipe.
+	origStderr := os.Stderr
+	rPipe, wPipe, _ := os.Pipe()
+	os.Stderr = wPipe
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	rest := &fakeDeployClient{
+		onPostMultipart: func(string, []byte, map[string]string) ([]byte, error) {
+			return deployStartedBody("dep_42"), nil
+		},
+		onDo: onDo,
+	}
+	var stdout bytes.Buffer
+	err := runPush(pushDeps{
+		git:          func(string, ...string) error { return nil },
+		rest:         rest,
+		branch:       "main",
+		out:          &stdout,
+		pollInterval: time.Millisecond,
+		pollTimeout:  2 * time.Second,
+	})
+
+	_ = wPipe.Close()
+	os.Stderr = origStderr
+	var stderr bytes.Buffer
+	_, _ = stderr.ReadFrom(rPipe)
+	return stdout.String() + stderr.String(), err
+}
+
+func TestPush_Poll_SucceededExitsZeroWithVersion(t *testing.T) {
+	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, out any) error {
+		if st, ok := out.(*deploymentStatus); ok {
+			*st = deploymentStatus{Status: "succeeded", Version: "sha-deadbeef"}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on success, got: %v", err)
+	}
+	if !strings.Contains(out, "✓ deploy succeeded (version sha-deadbeef)") {
+		t.Fatalf("missing success line; got:\n%s", out)
+	}
+}
+
+func TestPush_Poll_FailedExitsNonZeroWithServerError(t *testing.T) {
+	const serverErr = `push to backend: migration failed: ERROR: column "id" cannot be cast automatically to type bigint (SQLSTATE 42804)`
+	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, out any) error {
+		if st, ok := out.(*deploymentStatus); ok {
+			*st = deploymentStatus{Status: "failed", CurrentStep: "Pushing to runtime", Error: serverErr}
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected a non-nil error (non-zero exit) on a failed deploy")
+	}
+	// The EXACT server error (SQLSTATE / drift text) must reach the user.
+	if !strings.Contains(out, "✗ deploy FAILED:") || !strings.Contains(out, "SQLSTATE 42804") {
+		t.Fatalf("failed deploy did not surface the server error; got:\n%s", out)
+	}
+}
+
+func TestPush_Poll_TimeoutExitsZeroWithNote(t *testing.T) {
+	// Never terminal: always "deploying" → the loop must hit the deadline and
+	// return nil (don't falsely fail a slow-but-fine deploy).
+	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, out any) error {
+		if st, ok := out.(*deploymentStatus); ok {
+			*st = deploymentStatus{Status: "deploying", CurrentStep: "Building"}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on timeout (slow-but-fine deploy), got: %v", err)
+	}
+	if !strings.Contains(out, "deploy still running after") || !strings.Contains(out, "palbase status") {
+		t.Fatalf("missing timeout note; got:\n%s", out)
+	}
+}
+
+func TestPush_Poll_404FallsBackToFireAndForget(t *testing.T) {
+	// An un-upgraded server without the status route 404s — fall back to the
+	// fire-and-forget note and exit 0, never hard-break.
+	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, _ any) error {
+		return &transport.APIError{Code: "not_found", Status: http.StatusNotFound}
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on 404 fallback, got: %v", err)
+	}
+	if !strings.Contains(out, "deploy status unavailable") || !strings.Contains(out, "palbase status") {
+		t.Fatalf("missing fallback note; got:\n%s", out)
+	}
 }
 
 // fakeStudioServer builds an httptest.Server that acts as a minimal tRPC
