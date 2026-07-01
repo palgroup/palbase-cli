@@ -64,6 +64,13 @@ type diffPlan struct {
 	EnableRLS      []string `json:"enableRLS"`
 	AddPolicies    []string `json:"addPolicies"`
 	ChangePolicies []string `json:"changePolicies"`
+	// AddForeignKeys — an FK-only diff (table already exists, the user just added
+	// a .references()/.referencesAuthUser()) is a real change. Without this field
+	// the JSON unmarshal silently DROPPED the server's addForeignKeys, so empty()
+	// returned true and `db diff` printed "schema in sync" even though the backend
+	// generated ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY SQL (the same class
+	// as the RLS-dropped-in-CLI regression). Tag must match the server DiffPlan.
+	AddForeignKeys []string `json:"addForeignKeys"`
 }
 
 // empty reports whether the live DB already matches the declared schema.
@@ -79,7 +86,8 @@ func (p diffPlan) empty() bool {
 		len(p.DropIndexes) == 0 &&
 		len(p.EnableRLS) == 0 &&
 		len(p.AddPolicies) == 0 &&
-		len(p.ChangePolicies) == 0
+		len(p.ChangePolicies) == 0 &&
+		len(p.AddForeignKeys) == 0
 }
 
 // hasDestructive reports whether applying the migration would drop data
@@ -335,10 +343,11 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 
 			destructive := len(resp.Plan.DropColumns) + len(resp.Plan.DropTables)
 			fmt.Fprintf(out, "✓ wrote %s\n", relPath)
-			fmt.Fprintf(out, "  %d table(s) +, %d column(s) +, %d constraint(s), %d index(es), %d destructive\n",
+			fmt.Fprintf(out, "  %d table(s) +, %d column(s) +, %d constraint(s), %d index(es), %d foreign key(s), %d destructive\n",
 				len(resp.Plan.AddTables), len(resp.Plan.AddColumns),
 				len(resp.Plan.AddConstraints)+len(resp.Plan.DropConstraints),
 				len(resp.Plan.AddIndexes)+len(resp.Plan.DropIndexes),
+				len(resp.Plan.AddForeignKeys),
 				destructive)
 			if resp.Plan.hasDestructive() {
 				fmt.Fprintln(out, "  WARNING: this migration DROPS data (columns/tables) — review the SQL before pushing.")
@@ -409,6 +418,7 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			report("- constraint ", resp.Plan.DropConstraints)
 			report("+ index      ", resp.Plan.AddIndexes)
 			report("- index      ", resp.Plan.DropIndexes)
+			report("+ foreign key", resp.Plan.AddForeignKeys)
 			fmt.Fprintln(errOut, "run `palbase db diff -f <name>` to generate a migration")
 			return fmt.Errorf("schema drift: migration needed")
 		},

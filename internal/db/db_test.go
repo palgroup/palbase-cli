@@ -87,6 +87,7 @@ func migSQLResponse(sql string, plan map[string][]string) map[string]any {
 			"enableRLS":       get("enableRLS"),
 			"addPolicies":     get("addPolicies"),
 			"changePolicies":  get("changePolicies"),
+			"addForeignKeys":  get("addForeignKeys"),
 		},
 	}
 }
@@ -273,6 +274,49 @@ func TestDiff_WritesMigrationFile_WhenOnlyPolicies(t *testing.T) {
 	require.Contains(t, string(body), "CREATE POLICY doc_owner_select")
 
 	require.NotContains(t, out.String(), "in sync")
+}
+
+// TestDiff_WritesMigrationFile_WhenOnlyForeignKeys verifies that a plan with
+// ONLY addForeignKeys populated is NOT treated as "in sync" — a .references()
+// added to a column of an EXISTING table (the live table exists, the user just
+// added the FK in schema.ts) is a real change. The backend emits the
+// ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY SQL and populates
+// plan.addForeignKeys; before the fix the CLI's diffPlan struct lacked
+// addForeignKeys, so JSON unmarshal dropped it and empty() wrongly returned true
+// → "schema in sync — no migration needed" (the Penny FK bug, same class as the
+// RLS-dropped-in-CLI regression). Mutation: drop the len(p.AddForeignKeys)==0
+// clause from empty() → this test goes RED (no migration written, "in sync").
+func TestDiff_WritesMigrationFile_WhenOnlyForeignKeys(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({ todos: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"ALTER TABLE todos ADD CONSTRAINT todos_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;",
+			// addForeignKeys ALONE — isolating it proves empty() checks THAT field.
+			map[string][]string{"addForeignKeys": {"todos.todos_user_id_fkey"}},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
+	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_fk"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	// Migration file MUST be written — an FK-only diff is NOT in sync.
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "fk-only diff must write a migration file")
+
+	body, _ := os.ReadFile(filepath.Join(dir, "db", "migrations", entries[0].Name()))
+	require.Contains(t, string(body), "ADD CONSTRAINT todos_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id)")
+
+	o := out.String()
+	require.NotContains(t, o, "in sync")
+	require.Contains(t, o, "1 foreign key(s)")
+	require.Contains(t, o, "0 destructive")
 }
 
 // TestDiff_WritesMigrationFile_WhenOnlyIndexes verifies that a plan with ONLY
