@@ -14,7 +14,57 @@ const assert = require('node:assert');
 
 // require()ing dev-server.js is side-effect-light because main() is guarded by
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
-const { makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv } = require('./dev-server.js');
+const {
+  makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv,
+  runInRequestContext, currentRequestUserId, currentRequestUserToken,
+} = require('./dev-server.js');
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Per-request identity isolation. THE platform bug this file's ALS switch fixed:
+// two concurrent requests (Node serves HTTP concurrently) sharing a module-global
+// `let currentRequestUserToken` cross RLS/auth context — a handler suspended at an
+// await has its identity clobbered by the next dispatching request, then reads the
+// OTHER user's token (cross-tenant rows), or the finally-cleared null (anon →
+// 403/404), or a wrong-user context with no matching rows (silent empty 200). The
+// getters must read an AsyncLocalStorage box scoped to each handler's async tree.
+test('concurrent requests do not cross user identity across an await (ALS isolation)', async () => {
+  const seen = {};
+  await Promise.all([
+    // Request A: signed in as A, then AWAITS (yields the event loop to B).
+    runInRequestContext({ userId: 'A', userToken: 'tok_A' }, async () => {
+      await sleep(20); // B dispatches during this suspension
+      seen.A = { id: currentRequestUserId(), token: currentRequestUserToken() };
+    }),
+    // Request B: signed in as B, resolves while A is still suspended.
+    runInRequestContext({ userId: 'B', userToken: 'tok_B' }, async () => {
+      await sleep(5);
+      seen.B = { id: currentRequestUserId(), token: currentRequestUserToken() };
+    }),
+  ]);
+  // A must STILL see A after resuming — not B, not null.
+  assert.deepStrictEqual(seen.A, { id: 'A', token: 'tok_A' },
+    'request A must keep its own identity across the await (no cross-context leak)');
+  assert.deepStrictEqual(seen.B, { id: 'B', token: 'tok_B' });
+});
+
+test('identity box does not leak outside a request (anonymous default)', async () => {
+  await runInRequestContext({ userId: 'X', userToken: 'tok_X' }, async () => {
+    assert.strictEqual(currentRequestUserId(), 'X');
+  });
+  // Outside any request context → null (anon → project defaults / anon edge).
+  assert.strictEqual(currentRequestUserId(), null);
+  assert.strictEqual(currentRequestUserToken(), null);
+});
+
+test('nested contexts restore the outer identity on exit', async () => {
+  await runInRequestContext({ userId: 'outer', userToken: 't_out' }, async () => {
+    await runInRequestContext({ userId: 'inner', userToken: 't_in' }, async () => {
+      assert.strictEqual(currentRequestUserId(), 'inner');
+    });
+    assert.strictEqual(currentRequestUserId(), 'outer', 'inner scope must not clobber outer');
+  });
+});
 
 test('parseDotenv: parses KEY=VALUE, skips comments/blanks, strips quotes', () => {
   const env = parseDotenv(

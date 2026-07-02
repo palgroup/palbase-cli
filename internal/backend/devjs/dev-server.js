@@ -595,26 +595,39 @@ function findRouteParam(params, kind) {
 // anymore; customers only add @palbase/backend.
 const { buildModuleClients, buildDbEdgeClient } = require('./module-clients.js');
 
-// Request-scoped user id for auto-binding flags resolution to the current
-// request's user — mirrors worker.js's `currentRequestUserId`. The dev-server
-// builds the module clients ONCE (singleton, below) rather than per-request, so
-// instead of a per-call closure we keep a module-scoped variable that the http
-// handler sets before each invocation and clears after. The getter passed into
-// buildModuleClients reads it lazily at flags-call time, so `flags.get('key')`
-// resolves user-override → project-default for the signed-in user (project
-// defaults when anonymous). Concurrency note: the dev-server handles requests
-// effectively serially for this purpose (a handler awaits its flags call within
-// the same turn before the next request mutates the variable); this is a local
-// one-developer dev tool, not the multi-tenant pod. Prod's per-subprocess model
-// gives the same guarantee structurally.
-let currentRequestUserId = null;
+// Per-request identity carried in an AsyncLocalStorage box — mirrors the
+// deployed executor.js (internal/runtime/executor.js: `requestALS.getStore()`).
+// The dev-server builds the module clients ONCE (singleton, below), so the
+// getters passed into buildModuleClients / buildDbEdgeClient read the CURRENT
+// request's box lazily at call time: `Flags.get('key')` resolves the signed-in
+// user's override → project default, and the Database edge forwards THIS
+// request's Bearer on the authenticated RLS path.
+//
+// Why ALS and not a module-scoped `let`: Node serves HTTP requests concurrently.
+// A `let currentRequestUserToken` set before `await handler()` is CLOBBERED the
+// moment a second request dispatches while the first is suspended at any await —
+// the resumed handler then reads the OTHER user's token (cross-tenant RLS) or a
+// null the finally-clear left behind (anon → 403/404), and a wrong-user context
+// with no matching rows returns a silent empty 200. ALS scopes the box to the
+// async call tree, so it survives awaits and never leaks across requests. This
+// makes serve match prod's per-request isolation exactly (dev = prod).
+const { AsyncLocalStorage } = require('node:async_hooks');
+const requestALS = new AsyncLocalStorage();
 
-// Request-scoped raw Bearer for the current request's verified user. The
-// Database edge client (buildDbEdgeClient) reads this lazily via getToken() to
-// forward the user's token on the authenticated RLS path — the same set/clear
-// lifecycle as currentRequestUserId (set before dispatch, cleared in finally).
-// NEVER logged. Null on anonymous requests (no Bearer → the edge runs anon).
-let currentRequestUserToken = null;
+/** Run `fn` with the request's identity box in scope for all its async descendants. */
+function runInRequestContext(box, fn) {
+  return requestALS.run(box, fn);
+}
+/** The in-flight request's user id, or null (anonymous / outside a request). */
+function currentRequestUserId() {
+  const box = requestALS.getStore();
+  return box ? box.userId : null;
+}
+/** The in-flight request's raw Bearer, or null. NEVER logged. */
+function currentRequestUserToken() {
+  const box = requestALS.getStore();
+  return box ? box.userToken : null;
+}
 
 let palbaseClientSingleton = null;
 function getPalbaseClients() {
@@ -628,9 +641,9 @@ function getPalbaseClients() {
     url: PALBASE_URL,
     apikey: TENANT_APIKEY,
   }, {
-    // Lazy getter — read at flags-call time so it sees whatever the http
-    // handler set for the in-flight request. Matches worker.js.
-    getCurrentUserId: () => currentRequestUserId,
+    // Lazy getter — reads the in-flight request's ALS box at flags-call time.
+    // Matches worker.js/executor.js (per-request isolation across awaits).
+    getCurrentUserId: currentRequestUserId,
   });
   return palbaseClientSingleton;
 }
@@ -706,9 +719,9 @@ function databaseClient() {
   return buildDbEdgeClient({
     baseUrl: PALBASE_URL,
     apiKey: TENANT_APIKEY,
-    // Lazy getter — read at DB-call time so it sees the in-flight request's
-    // verified user token (set by the http handler). Mirrors getCurrentUserId.
-    getUserToken: () => currentRequestUserToken,
+    // Lazy getter — reads the in-flight request's ALS box at DB-call time so it
+    // forwards THIS request's verified user token, never a concurrent request's.
+    getUserToken: currentRequestUserToken,
     // The OWNER's palauth session token (a normal user session, NOT a service-
     // role credential), set by `serve` only when logged in as the project owner.
     // asService() forwards it + a `service_role` intent hint; the edge grants
@@ -1990,23 +2003,26 @@ const server = http.createServer(async (req, res) => {
     args[p.index] = value;
   }
 
+  // This request's identity box, scoped to the handler's async call tree via
+  // ALS so it survives awaits and NEVER leaks into a concurrent request:
+  //   - userId  → the flags client's auto-bind getter (`Flags.get('key')`
+  //     resolves user-override → default without a manual { userId }).
+  //   - userToken → the Database edge forwards this Bearer on the authenticated
+  //     RLS path. Sourced from the verify-result `user` (which RETAINS the
+  //     token) — NOT pbReq.user, which is stripped of the token before handlers
+  //     see it. NEVER logged.
+  // Anonymous → both null → project defaults / anon edge.
+  const requestBox = {
+    userId: (pbReq.user && pbReq.user.id) || null,
+    userToken: (user && user.token) || null,
+  };
   let result;
   try {
-    // Make this request's user visible to the flags client's auto-bind getter
-    // (mirrors worker.js): `Flags.get('key')` resolves user-override → default
-    // without the handler passing { userId } manually. Anonymous → null →
-    // project defaults. Reset in finally so a later request never inherits it.
-    currentRequestUserId = (pbReq.user && pbReq.user.id) || null;
-    // Make the request's raw Bearer visible to the Database edge client so it
-    // forwards the user token on the authenticated RLS path (mirrors
-    // currentRequestUserId). Sourced from the verify-result `user` (which RETAINS
-    // the token) — NOT pbReq.user, which is stripped of the token before handlers
-    // see it. Anonymous → null → the edge runs anon. NEVER logged. Reset in
-    // finally so a later request never inherits it.
-    currentRequestUserToken = (user && user.token) || null;
     // Execute the controller method bound to the cached instance so `this`
-    // resolves the controller's fields/services.
-    result = await instance[liveRoute.fnName](...args);
+    // resolves the controller's fields/services — inside the ALS scope so every
+    // ctx.db / ctx.flags call the handler makes (across any await) reads THIS
+    // request's identity, not a concurrently-dispatched one.
+    result = await runInRequestContext(requestBox, () => instance[liveRoute.fnName](...args));
   } catch (err) {
     // The SDK's global throw classes (Conflict/NotFound/BadRequest/… and the
     // base PalError/HttpError) all extend HttpError and set `.status` (number)
@@ -2053,10 +2069,10 @@ const server = http.createServer(async (req, res) => {
     log(`[${req.method}] ${parsed.pathname}  500  ${Date.now() - start}ms  — ${err.message}`);
     if (err.stack) console.error(err.stack);
     return;
-  } finally {
-    currentRequestUserId = null;
-    currentRequestUserToken = null;
   }
+  // No finally-clear needed: the identity box lives in AsyncLocalStorage, scoped
+  // to this handler's async call tree — it evaporates when the tree settles and
+  // never bleeds into a concurrent request (the whole point of the ALS switch).
 
   // Output validation — mirror worker.js: a Zod @Returns schema validates the
   // result; a failure is a 500 internal_error (detail logged, never leaked).
@@ -2329,4 +2345,8 @@ if (require.main === module) {
 // Exported for unit tests (dev-server.test.js): the local Cache/Queue factories
 // and the worker registry. Not used by the running dev-server, which calls them
 // directly. Keeping the export minimal avoids leaking the whole internal surface.
-module.exports = { makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv };
+module.exports = {
+  makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv,
+  // Per-request identity isolation (exported for the concurrency test).
+  runInRequestContext, currentRequestUserId, currentRequestUserToken,
+};
