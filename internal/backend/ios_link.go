@@ -14,7 +14,7 @@ package backend
 //     --bundle-id <envRef>=<bundleId> flags, or a per-env prompt on a TTY.
 //     An env without a bundle id is skipped; at least one must be bound.
 //  6. Fetches the SPM codegen plugin's inputs into --out-dir via the same
-//     runPullSpec core `palbase pull-spec` uses (openapi.json +
+//     runPullSpec core `palbase spec` uses (openapi.json +
 //     palbase-config.json).
 //  7. Prints the manual Xcode wiring steps (SPM package + build plugin).
 
@@ -77,7 +77,7 @@ type iosLinkSummary struct {
 
 // iosLinkDeps carries the injectable seams so runIOSLink is testable without a
 // live Studio or tenant host: the tRPC transport (an httptest-backed
-// *studio.Client in tests) plus the same four runPullSpec seams pull-spec's
+// *studio.Client in tests) plus the same four runPullSpec seams `palbase spec`'s
 // tests stub.
 type iosLinkDeps struct {
 	studio      apps.Studio
@@ -156,7 +156,7 @@ environment without a bundle id is skipped; at least one must be bound.`,
 			if err != nil {
 				return err
 			}
-			// Branch = the linked branch, else main (same as pull-spec).
+			// Branch = the linked branch, else main (same as `palbase spec`).
 			branch := "main"
 			if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg.DefaultEnv != "" {
 				branch = cfg.DefaultEnv
@@ -262,7 +262,7 @@ func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Write
 		fmt.Fprintf(w, "✓ bound env %s as %s\n", b.Env, b.BundleID)
 	}
 
-	// Fetch openapi.json + palbase-config.json — the exact pull-spec core, so
+	// Fetch openapi.json + palbase-config.json — the exact `palbase spec` core, so
 	// the two commands can never drift on the artifact contents.
 	if err := runPullSpec(ctx, d.lookup, d.fetch, d.list, d.cfgFetch, opts.ref, opts.branch, opts.outDir, appID, w); err != nil {
 		return nil, err

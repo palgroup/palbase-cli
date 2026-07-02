@@ -111,6 +111,7 @@ type Resolvers struct {
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newWebCmd(r),
+		newIOSCmd(r),
 		newDevCmd(r),
 		newDeploysCmd(r),
 		newRollbackCmd(r),

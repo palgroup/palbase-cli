@@ -31,7 +31,7 @@ func TestCommands_FlatSurface(t *testing.T) {
 
 	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
 	// CLI keeps local dev + observation/control verbs only.
-	for _, want := range []string{"serve", "deploys", "rollback", "status", "spec"} {
+	for _, want := range []string{"serve", "deploys", "rollback", "status", "spec", "web", "ios"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
