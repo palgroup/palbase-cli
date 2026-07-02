@@ -115,3 +115,18 @@ func chdirLinked(t *testing.T, ref string) {
 	require.NoError(t, os.MkdirAll(".palbase", 0o755))
 	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}))
 }
+
+// TestIsInteractive_DevNullIsNotATTY pins the /dev/null trap: it IS a char
+// device, so the old ModeCharDevice check treated `palbase ios link
+// </dev/null` as interactive and opened a 66-line picker that died on EOF.
+// term.IsTerminal must say false for it. (Mutation-evident: revert
+// isInteractive to the ModeCharDevice check and this fails.)
+func TestIsInteractive_DevNullIsNotATTY(t *testing.T) {
+	devnull, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	defer devnull.Close()
+	orig := os.Stdin
+	os.Stdin = devnull
+	t.Cleanup(func() { os.Stdin = orig })
+	require.False(t, isInteractive(), "/dev/null stdin must NOT count as interactive")
+}

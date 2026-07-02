@@ -37,6 +37,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // defaultHTTPClient is reused by `palbase web gen` (and any
@@ -279,11 +280,11 @@ func pickProject(ctx context.Context, override string, c *studio.Client, out io.
 // resolveOrLinkRef to gate the picker — running under CI / piped input
 // shouldn't block waiting for `Enter number:`.
 func isInteractive() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	// term.IsTerminal, not a ModeCharDevice check: /dev/null IS a char
+	// device, so `palbase ios link </dev/null` used to open the interactive
+	// picker and die on EOF instead of returning the actionable
+	// "pass --group" error (found by the live non-TTY probe).
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // extractFS unpacks an embed.FS subtree into target on disk.
