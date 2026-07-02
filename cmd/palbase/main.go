@@ -15,7 +15,10 @@ import (
 	"github.com/palgroup/palbase-cli/internal/config"
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
 	"github.com/palgroup/palbase-cli/internal/flags"
+	"github.com/palgroup/palbase-cli/internal/github"
 	"github.com/palgroup/palbase-cli/internal/groups"
+	"github.com/palgroup/palbase-cli/internal/logs"
+	"github.com/palgroup/palbase-cli/internal/members"
 	"github.com/palgroup/palbase-cli/internal/notifications"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/scaffold"
@@ -126,6 +129,16 @@ func main() {
 		}),
 		groups.Cmd(groups.Resolvers{
 			Studio: func() groups.Studio { return studioClient },
+		}),
+		logs.Cmd(logs.Resolvers{
+			Studio: func() logs.Studio { return studioClient },
+		}),
+		members.Cmd(members.Resolvers{
+			Studio: func() members.Studio { return studioClient },
+		}),
+		github.Cmd(github.Resolvers{
+			Studio:    func() github.Studio { return studioClient },
+			StudioURL: func() string { return resolved.Endpoints.Studio },
 		}),
 		secret.Cmd(secret.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
