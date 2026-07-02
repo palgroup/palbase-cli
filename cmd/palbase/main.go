@@ -216,8 +216,9 @@ func whoamiCmd() *cobra.Command {
 		Use:   "whoami",
 		Short: "Show current logged-in user and mode",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stdout, "Mode:    %s (source=%s)\n", resolved.Mode, resolved.Source)
-			fmt.Fprintf(os.Stdout, "Studio:  %s\n", resolved.Endpoints.Studio)
+			// Whoami owns the whole block (user + mode + auth). The banner
+			// here used to ALSO print Mode:, so `whoami` showed two Mode
+			// lines — dropped.
 			return authClient.Whoami(cmd.Context())
 		},
 	}

@@ -171,7 +171,12 @@ func (c *Client) Login(ctx context.Context) error {
 		if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
 			return err
 		}
-		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", creds.User.Email, c.Cfg.Mode)
+		// Email may be empty (userinfo returns only sub) — fall back to the id.
+		who := creds.User.Email
+		if who == "" {
+			who = creds.User.ID
+		}
+		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", who, c.Cfg.Mode)
 
 		// The access token is now DPoP-bound to `key` (its jkt went into
 		// Surface the DPoP key thumbprint so the user can see what's been
@@ -389,9 +394,16 @@ func (c *Client) Whoami(ctx context.Context) error {
 		}
 	}
 
-	fmt.Fprintf(c.Output, "User:    %s (%s)\n", creds.User.Email, creds.User.ID)
-	fmt.Fprintf(c.Output, "Mode:    %s\n", c.Cfg.Mode)
-	fmt.Fprintf(c.Output, "Auth:    %s\n", c.Cfg.AuthURL)
+	// palauth's /oauth/userinfo currently returns only `sub` (no email claim
+	// on the CLI token), so creds.User.Email is usually empty. Print whatever
+	// we have without a dangling "  ()".
+	if creds.User.Email != "" {
+		fmt.Fprintf(c.Output, "User:   %s (%s)\n", creds.User.Email, creds.User.ID)
+	} else {
+		fmt.Fprintf(c.Output, "User:   %s\n", creds.User.ID)
+	}
+	fmt.Fprintf(c.Output, "Mode:   %s\n", c.Cfg.Mode)
+	fmt.Fprintf(c.Output, "Auth:   %s\n", c.Cfg.AuthURL)
 	return nil
 }
 

@@ -396,6 +396,26 @@ func TestWhoami(t *testing.T) {
 	assert.Contains(t, output.String(), "usr_xyz")
 }
 
+// TestWhoami_NoEmail pins the empty-email path: palauth's userinfo returns
+// only `sub`, so creds.User.Email is usually "". whoami must print just the
+// id, never a dangling "User:    (usr_...)" with a leading space. (Live-found.)
+func TestWhoami_NoEmail(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	SaveCredentials("prod", &Credentials{
+		AccessToken: "valid",
+		ExpiresAt:   time.Now().Add(10 * time.Minute),
+		User:        UserInfo{ID: "usr_noemail"},
+	})
+
+	var output bytes.Buffer
+	client := NewClient(Config{ClientID: "palbase-cli"}, &output)
+	require.NoError(t, client.Whoami(context.Background()))
+	assert.Contains(t, output.String(), "User:   usr_noemail\n")
+	assert.NotContains(t, output.String(), "(usr_noemail)", "no dangling empty-email parens")
+}
+
 // --- Link Tests ---
 
 func TestLink_DirectRef(t *testing.T) {
