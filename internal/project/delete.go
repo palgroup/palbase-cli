@@ -3,20 +3,22 @@ package project
 import (
 	"bufio"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
 
-// deleteCmd wires `palbase project delete <ref>`.
+// deleteCmd wires `palbase project delete <ref>` over the Management API
+// (DELETE /api/v1/projects/{ref}) — the same DPoP/PAT transport every other
+// project verb uses, so delete works headless too.
 //
 // Deletion is irreversible — it tears down the entire project stack. The
-// server's project.delete mutation requires confirmRef == ref (anti-accidental-
-// delete), and the CLI adds its own guard: an interactive prompt by default,
-// skippable with --yes for scripted use.
-func deleteCmd(studioFn func() *studio.Client) *cobra.Command {
+// server requires confirm_ref == ref (anti-accidental-delete), and the CLI
+// adds its own guard: an interactive prompt by default, skippable with --yes
+// for scripted use.
+func deleteCmd(rest func() REST) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "delete <ref>",
@@ -41,11 +43,8 @@ to confirm. Pass --yes to skip the prompt in non-interactive environments.`,
 				}
 			}
 
-			// ponytail: out is nil — project.delete returns void, nothing to decode
-			if err := studioFn().Mutation(cmd.Context(), "project.delete", map[string]any{
-				"ref":        ref,
-				"confirmRef": ref,
-			}, nil); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodDelete, "/api/v1/projects/"+ref,
+				map[string]any{"confirm_ref": ref}, nil); err != nil {
 				return err
 			}
 

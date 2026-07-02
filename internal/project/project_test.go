@@ -11,39 +11,9 @@ import (
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/stretchr/testify/require"
 )
-
-// studioAgainst spins an httptest server and returns a *studio.Client backed
-// by it (mirrors db_test.go's helper).
-func studioAgainst(t *testing.T, h http.HandlerFunc) *studio.Client {
-	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	return studio.New(srv.URL, func(_ context.Context) (string, error) {
-		return "test-token", nil
-	})
-}
-
-// trpcOK writes a tRPC success envelope (mirrors db_test.go).
-func trpcOK(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{"data": map[string]any{"json": data}},
-	})
-}
-
-// innerInput decodes the inner {"json":{...}} of a tRPC POST body.
-func innerInput(t *testing.T, r *http.Request) map[string]any {
-	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
-	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&outer))
-	return outer.JSON
-}
 
 // restAgainst spins an httptest server with the given handler and returns
 // a real REST transport pointed at it, signing with a real DPoP key.
@@ -287,33 +257,30 @@ func TestProjectStatus_404SurfacesAPIError(t *testing.T) {
 
 // --- project delete ----------------------------------------------------------
 
-// TestProjectDelete_Yes calls project.delete with --yes (no prompt) and
-// verifies the tRPC path + input shape and the success line.
+// TestProjectDelete_Yes calls DELETE /api/v1/projects/{ref} with --yes (no
+// prompt) and verifies the REST path + confirm_ref body and the success line.
 func TestProjectDelete_Yes(t *testing.T) {
-	var gotPath string
-	var gotInput map[string]any
+	var gotMethod, gotPath string
+	var gotBody map[string]any
 
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
 		gotPath = r.URL.Path
-		gotInput = innerInput(t, r)
-		// project.delete returns void — empty json null is fine.
-		trpcOK(w, nil)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"started":true}}`))
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{
-		REST:   func() REST { return nil }, // not called by delete
-		Studio: func() *studio.Client { return c },
-	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"delete", "myproj123", "--yes"})
 	cmd.SetOut(&out)
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
 
-	require.Equal(t, "/api/trpc/project.delete", gotPath)
-	require.Equal(t, "myproj123", gotInput["ref"])
-	require.Equal(t, "myproj123", gotInput["confirmRef"])
+	require.Equal(t, http.MethodDelete, gotMethod)
+	require.Equal(t, "/api/v1/projects/myproj123", gotPath)
+	require.Equal(t, "myproj123", gotBody["confirm_ref"])
 	require.Contains(t, out.String(), "✓ deleted project myproj123")
 }
 
@@ -321,9 +288,10 @@ func TestProjectDelete_Yes(t *testing.T) {
 // ref at the interactive prompt and verifies the delete proceeds.
 func TestProjectDelete_ConfirmPrompt_Correct(t *testing.T) {
 	called := false
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		trpcOK(w, nil)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"started":true}}`))
 	})
 
 	// Pipe the correct ref as stdin.
@@ -337,24 +305,21 @@ func TestProjectDelete_ConfirmPrompt_Correct(t *testing.T) {
 	t.Cleanup(func() { os.Stdin = origStdin; r.Close() })
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{
-		REST:   func() REST { return nil },
-		Studio: func() *studio.Client { return c },
-	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"delete", "myproj123"})
 	cmd.SetOut(&out)
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
 
-	require.True(t, called, "Studio must be called when confirmation matches")
+	require.True(t, called, "the API must be called when confirmation matches")
 	require.Contains(t, out.String(), "✓ deleted project myproj123")
 }
 
 // TestProjectDelete_ConfirmPrompt_Wrong verifies that a wrong confirmation
-// cancels the delete without calling Studio at all.
+// cancels the delete without calling the API at all.
 func TestProjectDelete_ConfirmPrompt_Wrong(t *testing.T) {
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("Studio must NOT be called when confirmation is wrong")
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("the API must NOT be called when confirmation is wrong")
 	})
 
 	r, w, err := os.Pipe()
@@ -366,10 +331,7 @@ func TestProjectDelete_ConfirmPrompt_Wrong(t *testing.T) {
 	os.Stdin = r
 	t.Cleanup(func() { os.Stdin = origStdin; r.Close() })
 
-	cmd := Cmd(Resolvers{
-		REST:   func() REST { return nil },
-		Studio: func() *studio.Client { return c },
-	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"delete", "myproj123"})
 	cmd.SetOut(&strings.Builder{})
 	cmd.SilenceUsage = true
@@ -379,32 +341,22 @@ func TestProjectDelete_ConfirmPrompt_Wrong(t *testing.T) {
 	require.Contains(t, err.Error(), "delete cancelled")
 }
 
-// TestProjectDelete_StudioError surfaces tRPC errors to the caller.
-func TestProjectDelete_StudioError(t *testing.T) {
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+// TestProjectDelete_APIError surfaces the REST error envelope to the caller.
+func TestProjectDelete_APIError(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]any{
-				"json": map[string]any{
-					"message": "FORBIDDEN",
-					"code":    -32001,
-					"data":    map[string]any{"code": "FORBIDDEN", "httpStatus": 403},
-				},
-			},
-		})
+		_, _ = w.Write([]byte(`{"error":"owner_required","error_description":"Only the project owner can delete it","status":403}`))
 	})
 
-	cmd := Cmd(Resolvers{
-		REST:   func() REST { return nil },
-		Studio: func() *studio.Client { return c },
-	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"delete", "myproj123", "--yes"})
 	cmd.SetOut(&strings.Builder{})
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "FORBIDDEN")
+	require.Contains(t, err.Error(), "owner_required")
 }
 
 var _ = context.Background

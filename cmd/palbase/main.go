@@ -115,8 +115,7 @@ func main() {
 		openCmd(),
 		scaffold.Cmd(),
 		project.Cmd(project.Resolvers{
-			REST:   func() project.REST { return managementREST() },
-			Studio: func() *studio.Client { return studioClient },
+			REST: func() project.REST { return managementREST() },
 		}),
 		branch.Cmd(branch.Resolvers{
 			REST: func() branch.REST { return managementREST() },
