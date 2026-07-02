@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/admin"
@@ -107,7 +105,7 @@ func main() {
 		loginCmd(),
 		logoutCmd(),
 		whoamiCmd(),
-		configCmd(),
+		modeCmd(),
 		project.Cmd(project.Resolvers{
 			REST:   func() project.REST { return managementREST() },
 			Studio: func() *studio.Client { return studioClient },
@@ -119,15 +117,12 @@ func main() {
 			REST: func() apikey.REST { return managementREST() },
 		}),
 		apps.Cmd(apps.Resolvers{
-			Studio:     func() apps.Studio { return studioClient },
-			OAuthFetch: backend.AppsOAuthFetcher(),
+			Studio: func() apps.Studio { return studioClient },
 		}),
 		secret.Cmd(secret.Resolvers{
 			Studio: func() *studio.Client { return studioClient },
 		}),
-		dbcmd.Cmd(dbcmd.Resolvers{
-			Studio: func() *studio.Client { return studioClient },
-		}),
+		dbCmdWithTypes(),
 		storage.Cmd(),
 		flags.Cmd(),
 		notifications.Cmd(notifications.Resolvers{
@@ -136,7 +131,10 @@ func main() {
 		admin.NewCommand(admin.Resolvers{
 			REST: func() admin.REST { return managementREST() },
 		}),
-		authCmd(),
+		testuser.Cmd(testuser.Resolvers{
+			// *studio.Client satisfies testuser.Studio (Query/Mutation).
+			Studio: func() testuser.Studio { return studioClient },
+		}),
 	)
 
 	// CLI-1 flat redesign: the backend lifecycle commands (pull/push/dev/
@@ -159,22 +157,15 @@ func main() {
 	}
 }
 
-// authCmd is the `palbase auth ...` command group. It hosts auth-related
-// developer tooling that talks to Studio's tRPC — today, `test-user` (mint
-// disposable is_test users, optionally populated from a saved scenario). The
-// top-level login/logout/whoami verbs stay where they are; this group is for
-// the per-environment auth admin actions exposed via the Studio tRPC surface.
-func authCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Authentication tooling (test users, …)",
-	}
-	cmd.AddCommand(
-		testuser.Cmd(testuser.Resolvers{
-			// *studio.Client satisfies testuser.Studio (Query/Mutation).
-			Studio: func() testuser.Studio { return studioClient },
-		}),
-	)
+// dbCmdWithTypes composes the db command group with `db types` (the
+// palbase-env.d.ts generator, owned by the backend package's local Node
+// tooling). Composition happens here in main — the db package stays free of a
+// backend import.
+func dbCmdWithTypes() *cobra.Command {
+	cmd := dbcmd.Cmd(dbcmd.Resolvers{
+		Studio: func() *studio.Client { return studioClient },
+	})
+	cmd.AddCommand(backend.EnvTypesCmd())
 	return cmd
 }
 
@@ -212,113 +203,41 @@ func whoamiCmd() *cobra.Command {
 	}
 }
 
-func configCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "config",
-		Short: "Manage CLI configuration",
-	}
-
-	cmd.AddCommand(
-		&cobra.Command{
-			Use:   "get <key>",
-			Short: "Get a config value (keys: mode)",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				switch args[0] {
-				case "mode":
-					fmt.Fprintf(os.Stdout, "%s\n", resolved.Mode)
-					return nil
-				default:
-					return fmt.Errorf("unknown key: %s (supported: mode)", args[0])
-				}
-			},
-		},
-		&cobra.Command{
-			Use:   "set <key> [value]",
-			Short: "Set a config value (keys: mode=prod|dev). Omit value for an interactive picker.",
-			Args:  cobra.RangeArgs(1, 2),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				key := args[0]
-				if key != "mode" {
-					return fmt.Errorf("unknown key: %s (supported: mode)", key)
-				}
-				var value string
-				if len(args) == 2 {
-					value = args[1]
-				} else {
-					v, err := promptMode(resolved.Mode)
-					if err != nil {
-						return err
-					}
-					value = v
-				}
-				m := config.Mode(value)
-				if !m.Valid() {
-					return fmt.Errorf("invalid mode %q — must be 'prod' or 'dev'", value)
-				}
-				f, err := config.Load()
-				if err != nil {
-					return err
-				}
-				f.Mode = m
-				if err := config.Save(f); err != nil {
-					return err
-				}
+// modeCmd is the single CLI-configuration verb: `palbase mode` shows the
+// resolved mode + endpoints, `palbase mode prod|dev` persists a new mode.
+// (It replaces the retired `config get/set/list` triple — mode is the only
+// config key, so one command owns it.)
+func modeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mode [prod|dev]",
+		Short: "Show or set the environment mode (prod | dev)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
 				path, _ := config.Path()
-				fmt.Fprintf(os.Stdout, "✓ mode=%s (saved to %s)\n", m, path)
-				return nil
-			},
-		},
-		&cobra.Command{
-			Use:   "list",
-			Short: "Show current resolved config",
-			RunE: func(cmd *cobra.Command, args []string) error {
-				path, _ := config.Path()
-				fmt.Fprintf(os.Stdout, "Config file: %s\n", path)
-				fmt.Fprintln(os.Stdout, "")
 				fmt.Fprintf(os.Stdout, "Mode:        %s (source=%s)\n", resolved.Mode, resolved.Source)
+				fmt.Fprintf(os.Stdout, "Config file: %s\n", path)
 				fmt.Fprintf(os.Stdout, "Studio:      %s\n", resolved.Endpoints.Studio)
 				fmt.Fprintf(os.Stdout, "Auth:        %s\n", resolved.Endpoints.Auth)
 				fmt.Fprintf(os.Stdout, "Platform:    %s\n", resolved.Endpoints.PlatformAPI)
 				return nil
-			},
+			}
+			m := config.Mode(args[0])
+			if !m.Valid() {
+				return fmt.Errorf("invalid mode %q — must be 'prod' or 'dev'", args[0])
+			}
+			f, err := config.Load()
+			if err != nil {
+				return err
+			}
+			f.Mode = m
+			if err := config.Save(f); err != nil {
+				return err
+			}
+			path, _ := config.Path()
+			fmt.Fprintf(os.Stdout, "✓ mode=%s (saved to %s)\n", m, path)
+			return nil
 		},
-	)
-
-	return cmd
-}
-
-// promptMode shows a numeric picker (1=prod, 2=dev) and returns the
-// chosen value. ENTER without typing keeps the current mode so a quick
-// `palbase config set mode` doubles as "show me the choices, leave it
-// alone if I press enter".
-func promptMode(current config.Mode) (string, error) {
-	options := []config.Mode{config.ModeProd, config.ModeDev}
-	fmt.Fprintln(os.Stdout, "Select environment mode:")
-	for i, m := range options {
-		marker := " "
-		if m == current {
-			marker = "*"
-		}
-		fmt.Fprintf(os.Stdout, "  %s %d) %s\n", marker, i+1, m)
-	}
-	fmt.Fprintf(os.Stdout, "Enter number [%s]: ", current)
-
-	in := bufio.NewReader(os.Stdin)
-	line, err := in.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("read selection: %w", err)
-	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return string(current), nil
-	}
-	switch line {
-	case "1":
-		return string(options[0]), nil
-	case "2":
-		return string(options[1]), nil
-	default:
-		return "", fmt.Errorf("invalid selection %q — enter 1 or 2", line)
 	}
 }
+

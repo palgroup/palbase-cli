@@ -2,23 +2,17 @@ package backend
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/palgroup/palbase-cli/internal/apps"
 )
 
-// Bundle-id-keyed Palbase-Info.plist resolvers.
+// Per-environment app-config resolvers for `palbase spec`.
 //
-// These resolve an app's per-environment config artifacts from Studio and emit
-// the bundle-id-keyed Palbase-Info.plist the iOS SDK reads at runtime. They are
-// shared by `palbase pull-spec` (palbase-config.json) and `palbase apps config`
-// (AppsOAuthFetcher); the iOS Swift codegen + Xcode-project wiring that used to
-// live here moved to the SPM build-tool plugin (palbase-swift-codegen).
-
-// --- Bundle-id-keyed Palbase-Info.plist ----------------------------------
+// These resolve an app's per-environment config artifacts + bindings from
+// Studio so `palbase spec` can emit the bundle-id-keyed palbase-config.json the
+// PalbaseCodegen SPM plugin turns into Palbase-Info.plist at build time. The
+// iOS Swift codegen + Xcode-project wiring (and every Go-side plist emitter)
+// that used to live here moved to that plugin.
 
 // configArtifactFetch fetches the per-(app × env) config artifact for one env.
 // It abstracts the Studio apps.configArtifact query so the codegen emit is
@@ -41,46 +35,6 @@ type AppBinding struct {
 // apps.listBindings query so the codegen emit is unit-testable without a live
 // tRPC server (tests inject a stub returning a fixed binding list).
 type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
-
-// emitIOSBundleKeyedPlist resolves EVERY environment the app is registered for
-// via listBindings(appId), fetches each binding's ConfigArtifact by its BARE
-// project_ref (no branch), and writes ONE Palbase-Info.plist keyed by binding
-// identifier (bundle id). A binding with an empty identifier is SKIPPED with a
-// warning (the env has not registered a bundle id yet); if NO binding carries an
-// identifier the emit errors (nothing to write).
-//
-// This REPLACES the old build-config-conditioned (Debug/Release) emit: the plist
-// is now keyed by bundle id, and the iOS SDK selects the env dict by matching
-// the running app's Bundle.main.bundleIdentifier at runtime. The actual plist
-// serialization is reused from the apps package (apps.EmitIOSPlistByBundle) so
-// the file format never drifts from `palbase apps config`.
-func emitIOSBundleKeyedPlist(ctx context.Context, list bindingLister, fetch configArtifactFetch, appID, outPath string, w io.Writer) error {
-	bindings, err := list(ctx, appID)
-	if err != nil {
-		return fmt.Errorf("list app %q bindings: %w", appID, err)
-	}
-	var arts []apps.ConfigArtifact
-	for _, bnd := range bindings {
-		if bnd.Identifier == "" {
-			fmt.Fprintf(w, "skipping env %s: no registered bundle id (configure it in Studio → apps → bindings)\n", bnd.ProjectRef)
-			continue
-		}
-		art, err := fetch(ctx, appID, bnd.ProjectRef) // BARE project ref, no branch
-		if err != nil {
-			return fmt.Errorf("fetch config artifact for env %s: %w", bnd.ProjectRef, err)
-		}
-		arts = append(arts, art)
-	}
-	if len(arts) == 0 {
-		return fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before codegen", appID)
-	}
-	if dir := filepath.Dir(outPath); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
-	}
-	return apps.EmitIOSPlistByBundle(arts, outPath)
-}
 
 // studioConfigArtifactFetch is the production configArtifactFetch the codegen
 // command supplies: it runs the apps.configArtifact tRPC query for the
@@ -158,15 +112,3 @@ func swiftOAuthToApps(in *swiftOAuthConfig) *apps.OAuthConfig {
 	return out
 }
 
-// AppsOAuthFetcher adapts the backend package's fetchOAuthProviders (the
-// owner of the palauth `/auth/oauth/providers` fetch + the JSON oauth shape)
-// into an apps.OAuthFetcher, so `palbase apps config` can embed the same
-// `oauth` block the codegen plist + the legacy JSON carry — without the apps
-// package importing backend (which would cycle). Wired in main. Best-effort:
-// a fetch error degrades to nil (the config writes without `oauth`).
-func AppsOAuthFetcher() apps.OAuthFetcher {
-	return func(ctx context.Context, baseURL, apiKey string) *apps.OAuthConfig {
-		oauth, _ := fetchOAuthProviders(ctx, baseURL, apiKey)
-		return swiftOAuthToApps(oauth)
-	}
-}

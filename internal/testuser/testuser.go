@@ -1,4 +1,4 @@
-// Package testuser wires the `palbase auth test-user ...` subcommand group.
+// Package testuser wires the `palbase test-user ...` subcommand group.
 //
 // Transport: Studio tRPC (`testData.*`), reached via the same user-JWT
 // `internal/studio` client the `apps`/`secret`/`db` commands use. We talk to
@@ -48,12 +48,12 @@ func Cmd(r Resolvers) *cobra.Command {
 		Short: "Mint disposable is_test users (optionally populated from a scenario)",
 		Long: `Mint disposable test users for an environment.
 
-  palbase auth test-user create <ref>                    Mint 1 plain test user.
-  palbase auth test-user create <ref> --count 5          Mint 5 plain test users.
-  palbase auth test-user create <ref> --scenario demo    Mint 1 user + populate
+  palbase test-user create <ref>                    Mint 1 plain test user.
+  palbase test-user create <ref> --count 5          Mint 5 plain test users.
+  palbase test-user create <ref> --scenario demo    Mint 1 user + populate
                                                           their data tree from a
                                                           saved scenario.
-  palbase auth test-user create <ref> --json             Emit creds+token as JSON.
+  palbase test-user create <ref> --json             Emit creds+token as JSON.
 
 The minted users are is_test; the server mints their passwords + access tokens.`,
 	}

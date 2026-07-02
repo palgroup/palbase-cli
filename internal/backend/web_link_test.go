@@ -65,7 +65,7 @@ func runWebLink(t *testing.T, args ...string) string {
 //   - || exit 0: covers command-not-found (exit 127) which --soft alone can't
 //     swallow (--soft handles CLI errors, not missing-binary errors).
 func TestWebLink_HookLiteral(t *testing.T) {
-	require.Equal(t, "palbase types --env remote --soft || exit 0", webTypesCmd)
+	require.Equal(t, "palbase web gen --env remote --soft || exit 0", webTypesCmd)
 }
 
 // TestWebLink_NoPkgJSON: errors when package.json is absent.
@@ -112,8 +112,8 @@ export default function Layout() {}
 	// scripts.predev + scripts.prebuild must be added with the exact hook value.
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
-	require.Contains(t, string(pkgBody), `"predev": "palbase types --env remote --soft || exit 0"`)
-	require.Contains(t, string(pkgBody), `"prebuild": "palbase types --env remote --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"predev": "palbase web gen --env remote --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"prebuild": "palbase web gen --env remote --soft || exit 0"`)
 
 	// import must be inserted into app/layout.tsx.
 	entryBody, err := os.ReadFile("app/layout.tsx")
@@ -287,14 +287,14 @@ func TestWebLink_ConflictingScript(t *testing.T) {
 
 	// Warning must be printed with the suggested value.
 	require.Contains(t, outStr, "predev")
-	require.Contains(t, outStr, "palbase types --env remote --soft || exit 0")
+	require.Contains(t, outStr, "palbase web gen --env remote --soft || exit 0")
 
 	// The existing script must NOT be clobbered.
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
 	require.Contains(t, string(pkgBody), `"predev": "my-custom-hook"`)
 	// prebuild (absent) should be added.
-	require.Contains(t, string(pkgBody), `"prebuild": "palbase types --env remote --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"prebuild": "palbase web gen --env remote --soft || exit 0"`)
 }
 
 // TestWebLink_KeyOrderPreserved: package.json key order is preserved, and keys
@@ -333,8 +333,8 @@ func TestWebLink_KeyOrderPreserved(t *testing.T) {
 	require.True(t, scriptsIdx < afterIdx, "scripts before after_scripts")
 
 	// The new script keys must be present.
-	require.Contains(t, content, `"predev": "palbase types --env remote --soft || exit 0"`)
-	require.Contains(t, content, `"prebuild": "palbase types --env remote --soft || exit 0"`)
+	require.Contains(t, content, `"predev": "palbase web gen --env remote --soft || exit 0"`)
+	require.Contains(t, content, `"prebuild": "palbase web gen --env remote --soft || exit 0"`)
 
 	// Original "dev" script must still be there.
 	require.Contains(t, content, `"dev": "vite"`)
@@ -383,8 +383,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
   "scripts": {
     "zzz": "echo z",
     "build": "tsc && vite build",
-    "predev": "palbase types --env remote --soft || exit 0",
-    "prebuild": "palbase types --env remote --soft || exit 0"
+    "predev": "palbase web gen --env remote --soft || exit 0",
+    "prebuild": "palbase web gen --env remote --soft || exit 0"
   },
   "version": "1.0.0"
 }
@@ -405,8 +405,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
       "name": "x",
   "scripts": {
         "dev":    "vite",
-        "predev": "palbase types --env remote --soft || exit 0",
-        "prebuild": "palbase types --env remote --soft || exit 0"
+        "predev": "palbase web gen --env remote --soft || exit 0",
+        "prebuild": "palbase web gen --env remote --soft || exit 0"
   },
    "odd":  true
 }
@@ -424,8 +424,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
   "name": "myapp",
   "version": "1.0.0",
   "scripts": {
-    "predev": "palbase types --env remote --soft || exit 0",
-    "prebuild": "palbase types --env remote --soft || exit 0"
+    "predev": "palbase web gen --env remote --soft || exit 0",
+    "prebuild": "palbase web gen --env remote --soft || exit 0"
   }
 }
 `
@@ -436,8 +436,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
 		input := `{
   "name": "myapp",
   "scripts": {
-    "predev": "palbase types --env remote --soft || exit 0",
-    "prebuild": "palbase types --env remote --soft || exit 0"
+    "predev": "palbase web gen --env remote --soft || exit 0",
+    "prebuild": "palbase web gen --env remote --soft || exit 0"
   }
 }
 `
@@ -594,8 +594,8 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 	writePkgJSON(t, `{
   "name": "myapp",
   "scripts": {
-    "predev": "palbase types --env remote --soft || exit 0",
-    "prebuild": "palbase types --env remote --soft || exit 0"
+    "predev": "palbase web gen --env remote --soft || exit 0",
+    "prebuild": "palbase web gen --env remote --soft || exit 0"
   }
 }`)
 

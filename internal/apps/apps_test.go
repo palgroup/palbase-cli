@@ -157,8 +157,7 @@ func TestAppsDelete_Mutation(t *testing.T) {
 
 // TestAppsConfig_WritesConfigFileToPath exercises apps.configArtifact and the
 // end-to-end config-emit path: the fetched (app × env) artifact is written as
-// the per-env config file the SDK reads (here an ios plist via --platform ios
-// and -o).
+// the per-env palbase-config.json the web SDK reads.
 func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 	var body map[string]any
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
@@ -172,31 +171,42 @@ func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 		trpcOK(w, map[string]any{
 			"app_id": "app_1", "project_ref": "abcd1234", "endpoint_ref": "abcd1234m",
 			"api_key": "pb_abcd1234m_c_x", "base_url": "https://abcd1234m.dev.palbase.studio",
-			"env_preset": "development", "platform": "ios", "identifier": "com.example.app",
+			"env_preset": "development", "platform": "web", "identifier": "https://app.example.com",
 		})
 	})
 	dir := t.TempDir()
-	outFile := filepath.Join(dir, "Palbase-Info.plist")
+	outFile := filepath.Join(dir, "palbase-config.json")
 	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"config", "--app", "app_1", "--env", "abcd1234", "--platform", "ios", "-o", outFile})
+	cmd.SetArgs([]string{"config", "--app", "app_1", "--env", "abcd1234", "-o", outFile})
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, "app_1", body["appId"])
 	require.Equal(t, "abcd1234", body["projectRef"])
 
 	raw, err := os.ReadFile(outFile)
 	require.NoError(t, err)
-	// The plist the SDK decodes is bundle-id-keyed; the single resolved env is
-	// filed under its own identifier (bundle id), and the SDK selects it by
-	// matching Bundle.main.bundleIdentifier.
-	envs := parseNestedPlist(t, raw)
-	require.Len(t, envs, 1, "single-env apps-config plist must carry exactly one bundle-id key")
-	require.Contains(t, envs, "com.example.app", "plist must be keyed by the env's bundle id")
-	got := envs["com.example.app"]
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
 	require.Equal(t, "app_1", got["app_id"])
-	require.Equal(t, "com.example.app", got["identifier"])
+	require.Equal(t, "https://app.example.com", got["identifier"])
 	require.Equal(t, "development", got["env_preset"])
 	require.Equal(t, "https://abcd1234m.dev.palbase.studio", got["base_url"])
 	require.Equal(t, "pb_abcd1234m_c_x", got["api_key"])
+}
+
+// TestAppsConfig_RefusesIOSAppID pins that the retired iOS plist emit path is
+// gone: an ios_-prefixed app id is rejected with a pointer at `palbase spec`
+// (the PalbaseCodegen SPM plugin owns Palbase-Info.plist now) and the API is
+// never called.
+func TestAppsConfig_RefusesIOSAppID(t *testing.T) {
+	cmd := Cmd(Resolvers{Studio: func() Studio {
+		t.Fatal("must not call the API for an ios app id")
+		return nil
+	}})
+	cmd.SetArgs([]string{"config", "--app", "ios_app_1", "--env", "abcd1234"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "palbase spec")
 }
 
 // TestAppsBind_RequiresAppEnvIdentifier proves cobra rejects `bind` when any of

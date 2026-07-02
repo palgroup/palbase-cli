@@ -121,7 +121,7 @@ func runTypesWatch(
 	return watchTSLoop(ctx, localSpecURL, cfg, outFile, fetchFn, tickCh, w)
 }
 
-// watchTSLoop implements the `palbase types --watch` inner loop.
+// watchTSLoop implements the `palbase web gen --watch` inner loop.
 //
 // It polls localSpecURL (always http://localhost:4003/openapi.json) using the
 // injected fetchFn. On each tick:

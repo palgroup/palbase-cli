@@ -25,8 +25,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -44,18 +42,7 @@ type Studio interface {
 // secret.Resolvers' pattern).
 type Resolvers struct {
 	Studio func() Studio
-	// OAuthFetch resolves the env's provider availability (palauth's public
-	// `/auth/oauth/providers`) so `apps config` can embed `oauth` in the
-	// per-env file — making it a true superset of the legacy
-	// PalbaseGenerated.json's config role. Injected by main (the `backend`
-	// package owns the fetch + JSON shape; `apps` cannot import it without a
-	// cycle). Nil → no oauth merge (the config still writes, sans `oauth`).
-	OAuthFetch OAuthFetcher
 }
-
-// OAuthFetcher returns the env's secret-free provider availability for the
-// given tenant base_url + api_key, or nil when none/unreachable (best-effort).
-type OAuthFetcher func(ctx context.Context, baseURL, apiKey string) *OAuthConfig
 
 // Cmd returns the `palbase apps` parent command.
 func Cmd(r Resolvers) *cobra.Command {
@@ -68,11 +55,14 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase apps create <groupRef> --platform ios --name "My App"
                                                         Register a new app.
   palbase apps delete <appId>                           Delete an app.
-  palbase apps config --app <appId> --env <ref>         Fetch an (app × env)
-                                                        config artifact.
+  palbase apps config --app <appId> --env <ref>         Write a web app's
+                                                        per-env config file.
   palbase apps bind --app <appId> --env <ref> --identifier <bundleId>
                                                         Set the (app × env)
                                                         binding's identifier.
+
+iOS config artifacts are fetched by 'palbase spec --app <appId>' and turned
+into Palbase-Info.plist by the PalbaseCodegen SPM plugin at build time.
 
 All operations go through Studio (membership/role-gated server-side).`,
 	}
@@ -80,7 +70,7 @@ All operations go through Studio (membership/role-gated server-side).`,
 		listCmd(r.Studio),
 		createCmd(r.Studio),
 		deleteCmd(r.Studio),
-		configCmd(r.Studio, r.OAuthFetch),
+		configCmd(r.Studio),
 		bindCmd(r.Studio),
 	)
 	return cmd
@@ -202,7 +192,7 @@ func deleteCmd(studioFn func() Studio) *cobra.Command {
 // endpoint ref: the binding row is keyed by project_ref = projects.ref (the
 // service resolves the env's branch endpoint_ref itself when it later mints
 // keys). This is exactly the ref `apps config --env` and listBindings already
-// use, so the binding round-trips with pull-spec.
+// use, so the binding round-trips with `palbase spec`.
 func bindCmd(studioFn func() Studio) *cobra.Command {
 	var (
 		appID      string
@@ -217,7 +207,7 @@ func bindCmd(studioFn func() Studio) *cobra.Command {
 		Short: "Set an (app × env) binding's identifier (bundle id / origin)",
 		Long: "Configure the (app × env) binding the SDK config-match enforces.\n" +
 			"Sets the env's --identifier (the app's bundle id / package name / web\n" +
-			"origin) so the env's config artifact resolves and pull-spec emits it.\n" +
+			"origin) so the env's config artifact resolves and `palbase spec` emits it.\n" +
 			"--env is the env's BARE project ref (the same ref `apps config --env`\n" +
 			"takes), never a branch endpoint ref.\n" +
 			"--team-id and --apns are optional iOS App Attest material.\n" +
@@ -264,8 +254,8 @@ func bindCmd(studioFn func() Studio) *cobra.Command {
 
 // ConfigArtifact mirrors the apps.configArtifact return shape — the
 // per-(app × env) config the SDKs consume. This REPLACES the old
-// PalbaseGenerated.json shape. Exported so the mobile codegen path
-// (Track A2) can reuse emitConfig with the same artifact.
+// PalbaseGenerated.json shape. Exported so `palbase spec` (backend
+// package) can resolve the same artifact per binding.
 type ConfigArtifact struct {
 	AppID       string `json:"app_id"`
 	ProjectRef  string `json:"project_ref"`
@@ -308,37 +298,29 @@ type OAuthGoogle struct {
 	RedirectURI string `json:"redirect_uri"`
 }
 
-func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
+func configCmd(studioFn func() Studio) *cobra.Command {
 	var (
-		appID    string
-		env      string
-		platform string
-		outPath  string
+		appID   string
+		env     string
+		outPath string
 	)
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Write the per-(app × env) config file the SDK reads",
-		Long: "Fetch the config artifact for an app in a given env and write the\n" +
-			"per-env config file the SDK loads to enforce config-match:\n" +
-			"  --platform ios → Palbase-Info.plist (an Apple plist whose top-level\n" +
-			"                   dict is keyed by the env's bundle id)\n" +
-			"  --platform web → palbase-config.json\n" +
-			"Both carry {app_id, identifier, env_preset, base_url, api_key}.\n" +
+		Short: "Write the per-(app × env) web config file the SDK reads",
+		Long: "Fetch the config artifact for a WEB app in a given env and write the\n" +
+			"per-env palbase-config.json the SDK loads to enforce config-match\n" +
+			"({app_id, identifier, env_preset, base_url, api_key}).\n" +
 			"--env is the env's BARE project ref; the server resolves the\n" +
 			"endpoint_ref from it (the env's main branch).\n" +
 			"An unconfigured binding (empty identifier — the app has not declared\n" +
-			"its bundle id / web origin yet) is REFUSED: no partial file is\n" +
-			"written, because a config without an identifier cannot enforce\n" +
-			"config-match.",
+			"its web origin yet) is REFUSED: no partial file is written, because a\n" +
+			"config without an identifier cannot enforce config-match.\n" +
+			"iOS config is NOT emitted here: the PalbaseCodegen SPM plugin\n" +
+			"generates Palbase-Info.plist on every Xcode build from the\n" +
+			"palbase-config.json fetched by 'palbase spec --app'.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if platform == "" {
-				platform = derivePlatform(appID)
-			}
-			if !isValidPlatform(platform) {
-				return fmt.Errorf("--platform must be one of: ios, web")
-			}
-			if platform == "android" {
-				return fmt.Errorf("--platform android is not yet supported by apps config")
+			if len(appID) >= 4 && appID[:4] == "ios_" {
+				return fmt.Errorf("apps config no longer emits iOS plists — run 'palbase spec --app %s' and let the PalbaseCodegen SPM plugin generate Palbase-Info.plist at build time", appID)
 			}
 			// --env is the env's BARE project ref. The server resolves the
 			// endpoint_ref from the bare ref (the env's main branch); there is
@@ -350,79 +332,38 @@ func configCmd(studioFn func() Studio, oauthFetch OAuthFetcher) *cobra.Command {
 			}, &art); err != nil {
 				return err
 			}
-			// apps.configArtifact does NOT return OAuth — fetch palauth's
-			// public providers separately (the SAME source the JSON path
-			// uses) and merge, so the emitted config is a superset of the
-			// legacy JSON's role. Best-effort: nil leaves the `oauth` block
-			// out, the rest of the config still writes.
-			if oauthFetch != nil {
-				art.OAuth = oauthFetch(cmd.Context(), art.BaseURL, art.APIKey)
-			}
 			out := outPath
 			if out == "" {
-				out = defaultConfigFilename(platform)
+				out = "palbase-config.json"
 			}
-			if err := emitConfig(art, platform, out); err != nil {
+			if err := emitConfig(art, out); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "✓ wrote %s config to %s\n", platform, out)
+			fmt.Fprintf(os.Stdout, "✓ wrote web config to %s\n", out)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
 	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
-	cmd.Flags().StringVar(&platform, "platform", "", "Target platform: ios | web (defaults from the app id prefix)")
-	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (defaults: Palbase-Info.plist | palbase-config.json)")
+	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: palbase-config.json)")
 	_ = cmd.MarkFlagRequired("app")
 	_ = cmd.MarkFlagRequired("env")
 	return cmd
 }
 
-// defaultConfigFilename is the conventional output name per platform when -o
-// is omitted.
-func defaultConfigFilename(platform string) string {
-	if platform == "ios" {
-		return "Palbase-Info.plist"
-	}
-	return "palbase-config.json"
-}
-
-// derivePlatform best-effort infers the platform from common app-id prefixes
-// so `--platform` can be omitted in the simple case. Empty when unknown; the
-// caller then surfaces the validation error.
-func derivePlatform(appID string) string {
-	switch {
-	case len(appID) >= 4 && appID[:4] == "ios_":
-		return "ios"
-	case len(appID) >= 4 && appID[:4] == "web_":
-		return "web"
-	default:
-		return ""
-	}
-}
-
-// emitConfig writes the per-env config file the SDK reads. platform "ios"
-// writes a minimal Apple plist (Palbase-Info.plist); "web" writes JSON
-// (palbase-config.json). Both carry exactly {app_id, identifier, env_preset,
-// base_url, api_key}.
+// emitConfig writes the per-env web config file (palbase-config.json) the SDK
+// reads — exactly {app_id, identifier, env_preset, base_url, api_key}.
 //
 // REFUSES (returns an error, writes NOTHING) when the artifact has no
 // identifier: an empty identifier means the binding is unconfigured (the app
-// has not declared its bundle id / web origin), and a config file without an
-// identifier cannot enforce config-match — writing it would be a footgun that
-// mirrors the orchestrator's unconfigured-binding rule.
-func emitConfig(art ConfigArtifact, platform, path string) error {
+// has not declared its web origin), and a config file without an identifier
+// cannot enforce config-match — writing it would be a footgun that mirrors
+// the orchestrator's unconfigured-binding rule.
+func emitConfig(art ConfigArtifact, path string) error {
 	if art.Identifier == "" {
-		return fmt.Errorf("refusing to write %s: app %q has an unconfigured binding (no identifier) — declare the bundle id (ios) / origin (web) before emitting a config", path, art.AppID)
+		return fmt.Errorf("refusing to write %s: app %q has an unconfigured binding (no identifier) — declare the web origin before emitting a config", path, art.AppID)
 	}
-	switch platform {
-	case "web":
-		return writeWebConfig(art, path)
-	case "ios":
-		return writeIOSPlist(art, path)
-	default:
-		return fmt.Errorf("emitConfig: unsupported platform %q", platform)
-	}
+	return writeWebConfig(art, path)
 }
 
 // writeWebConfig marshals the five config-match fields to JSON.
@@ -442,154 +383,6 @@ func writeWebConfig(art ConfigArtifact, path string) error {
 	}
 	return nil
 }
-
-// writeIOSPlist writes the bundle-id-keyed Palbase-Info.plist the iOS SDK
-// reads. The SDK (PalbaseAppConfig.load) decodes a `{ "<bundle-id>": {...}, ...
-// }` map and selects the env dict whose KEY equals the running app's
-// Bundle.main.bundleIdentifier — there is NO build-config axis. `apps config`
-// resolves ONE env's artifact, so it emits a one-key map keyed by that env's
-// `identifier` (its registered bundle id) via the SAME EmitIOSPlistByBundle
-// emitter `palbase mobile codegen ios --app` uses, so the two emit paths never
-// drift.
-//
-// (codegen --app resolves every registered env's artifact and emits one key per
-// env keyed by its bundle id; the single-env apps-config path has only one, so
-// the map has exactly one key.)
-func writeIOSPlist(art ConfigArtifact, path string) error {
-	return EmitIOSPlistByBundle([]ConfigArtifact{art}, path)
-}
-
-// writeIOSConfigDict appends a `<dict>` carrying the five config-match fields
-// (app_id, identifier, env_preset, base_url, api_key) to b, indented by
-// `indent`. Called once per bundle-id key by EmitIOSPlistByBundle (the sole
-// nested-plist emitter both `apps config` and `mobile codegen --app` funnel
-// through) so the per-env dict serialization is written in exactly ONE place.
-func writeIOSConfigDict(b *strings.Builder, art ConfigArtifact, indent string) {
-	b.WriteString(indent + "<dict>\n")
-	for _, kv := range []struct{ key, val string }{
-		{"app_id", art.AppID},
-		{"identifier", art.Identifier},
-		{"env_preset", art.EnvPreset},
-		{"base_url", art.BaseURL},
-		{"api_key", art.APIKey},
-	} {
-		b.WriteString(indent + "\t<key>" + plistEscape(kv.key) + "</key>\n")
-		b.WriteString(indent + "\t<string>" + plistEscape(kv.val) + "</string>\n")
-	}
-	writeIOSOAuthDict(b, art.OAuth, indent+"\t")
-	b.WriteString(indent + "</dict>\n")
-}
-
-// writeIOSOAuthDict appends an `oauth` nested <dict> to b when the artifact
-// carries provider availability, mirroring PalbaseGenerated.json's `oauth`
-// block so the plist is a true superset of the JSON's config role. Nil OAuth
-// (no enabled+configured providers) writes NOTHING — the SDK then falls back
-// to the explicit-parameter signInWithGoogle overload, exactly as the JSON
-// path does when it omits the block. apple → `{enabled}`; google →
-// `{enabled, client_id, redirect_uri}` (snake_case wire, matching the five
-// string fields above and the JSON shape the iOS decoder expects).
-func writeIOSOAuthDict(b *strings.Builder, oauth *OAuthConfig, indent string) {
-	if oauth == nil || (oauth.Apple == nil && oauth.Google == nil) {
-		return
-	}
-	b.WriteString(indent + "<key>oauth</key>\n")
-	b.WriteString(indent + "<dict>\n")
-	if oauth.Apple != nil {
-		b.WriteString(indent + "\t<key>apple</key>\n")
-		b.WriteString(indent + "\t<dict>\n")
-		b.WriteString(indent + "\t\t<key>enabled</key>\n")
-		b.WriteString(indent + "\t\t" + plistBool(oauth.Apple.Enabled) + "\n")
-		b.WriteString(indent + "\t</dict>\n")
-	}
-	if oauth.Google != nil {
-		b.WriteString(indent + "\t<key>google</key>\n")
-		b.WriteString(indent + "\t<dict>\n")
-		b.WriteString(indent + "\t\t<key>enabled</key>\n")
-		b.WriteString(indent + "\t\t" + plistBool(oauth.Google.Enabled) + "\n")
-		for _, kv := range []struct{ key, val string }{
-			{"client_id", oauth.Google.ClientID},
-			{"redirect_uri", oauth.Google.RedirectURI},
-		} {
-			b.WriteString(indent + "\t\t<key>" + plistEscape(kv.key) + "</key>\n")
-			b.WriteString(indent + "\t\t<string>" + plistEscape(kv.val) + "</string>\n")
-		}
-		b.WriteString(indent + "\t</dict>\n")
-	}
-	b.WriteString(indent + "</dict>\n")
-}
-
-// plistBool renders an Apple plist boolean node.
-func plistBool(v bool) string {
-	if v {
-		return "<true/>"
-	}
-	return "<false/>"
-}
-
-// EmitIOSPlistByBundle writes ONE Palbase-Info.plist whose TOP-LEVEL dict is
-// keyed by BUNDLE IDENTIFIER: one env config dict per registered environment,
-// filed under that env's `Identifier` (its registered bundle id). The iOS SDK
-// (PalbaseAppConfig.load) selects the env dict by matching the running app's
-// Bundle.main.bundleIdentifier against these keys at runtime — there is NO
-// build-config axis. N environments → N bundle-id keys.
-//
-// It reuses writeIOSConfigDict (the same per-env dict serialization
-// writeIOSPlist uses) so the two emitters never drift.
-//
-// REFUSES (returns an error, writes NOTHING) when: there are no artifacts to
-// emit; ANY artifact has an empty identifier (an unconfigured binding cannot
-// enforce config-match); or two artifacts collide on the same identifier key (a
-// duplicate bundle id would silently drop one env). Determinism: keys are
-// emitted in sorted order so the file is golden-stable regardless of input
-// order.
-func EmitIOSPlistByBundle(arts []ConfigArtifact, path string) error {
-	if len(arts) == 0 {
-		return fmt.Errorf("refusing to write %s: no registered environments to emit", path)
-	}
-	byKey := make(map[string]ConfigArtifact, len(arts))
-	for _, art := range arts {
-		if art.Identifier == "" {
-			return fmt.Errorf("refusing to write %s: env %q (app %q) has an unconfigured binding (no identifier / bundle id) — register the bundle id before emitting a config", path, art.ProjectRef, art.AppID)
-		}
-		if _, dup := byKey[art.Identifier]; dup {
-			return fmt.Errorf("refusing to write %s: two environments share the bundle id %q — each environment must register a distinct bundle id", path, art.Identifier)
-		}
-		byKey[art.Identifier] = art
-	}
-	keys := make([]string, 0, len(byKey))
-	for k := range byKey {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString(`<plist version="1.0">` + "\n")
-	b.WriteString("<dict>\n")
-	for _, k := range keys {
-		b.WriteString("\t<key>" + plistEscape(k) + "</key>\n")
-		writeIOSConfigDict(&b, byKey[k], "\t")
-	}
-	b.WriteString("</dict>\n")
-	b.WriteString("</plist>\n")
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
-}
-
-// plistEscape escapes the XML metacharacters that can appear in plist text
-// nodes so the emitted plist stays valid for arbitrary identifiers/URLs/keys.
-func plistEscape(s string) string {
-	return xmlReplacer.Replace(s)
-}
-
-var xmlReplacer = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-)
 
 func isValidPlatform(p string) bool {
 	switch p {

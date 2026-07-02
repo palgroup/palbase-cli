@@ -130,7 +130,7 @@ func generateConfig(buckets map[string]bucketDef) string {
 	sort.Strings(names)
 
 	var b strings.Builder
-	b.WriteString("// Generated + maintained by `palbase storage buckets`. Edit via the CLI,\n")
+	b.WriteString("// Generated + maintained by `palbase storage`. Edit via the CLI,\n")
 	b.WriteString("// or by hand keeping each entry's `bucket({ ... })` shape. Config-as-code:\n")
 	b.WriteString("// commit this file and `git push` — the deploy creates/updates the buckets.\n")
 	b.WriteString("import { defineStorage, bucket } from \"@palbase/backend\";\n\n")

@@ -5,7 +5,7 @@ import (
 )
 
 // This file holds the OpenAPI→identifier naming + OAuth-config helpers shared by
-// the TypeScript emitter (tsemit.go, `palbase types`). The iOS Swift emitter that
+// the TypeScript emitter (tsemit.go, `palbase web gen`). The iOS Swift emitter that
 // used to live here moved to the palbase-swift-codegen SPM build-tool plugin;
 // only the language-neutral helpers the TS path still calls remain.
 

@@ -39,11 +39,14 @@ type Resolvers struct {
 	REST func() REST
 }
 
-// NewCommand returns the `palbase admin` parent command.
+// NewCommand returns the `palbase admin` parent command. Hidden: it is
+// platform-admin only (the server 403s everyone else) — no reason to
+// advertise it in every customer's --help.
 func NewCommand(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "admin",
-		Short: "Platform administration commands (platform-admin only)",
+		Use:    "admin",
+		Short:  "Platform administration commands (platform-admin only)",
+		Hidden: true,
 	}
 	cmd.AddCommand(migrateAllTenantsCmd(r.REST))
 	cmd.AddCommand(setModuleImageCmd(r.REST))

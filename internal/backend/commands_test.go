@@ -31,18 +31,41 @@ func TestCommands_FlatSurface(t *testing.T) {
 
 	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
 	// CLI keeps local dev + observation/control verbs only.
-	for _, want := range []string{"serve", "list", "rollback", "status", "types"} {
+	for _, want := range []string{"serve", "deploys", "rollback", "status", "spec"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
-	// Removed: no init/enable/disable (backend is the default — the CLI never
+	// Removed: no enable/disable (backend is the default — the CLI never
 	// enables or tears down), no `dev` (→ serve), no `backend` parent. `merge`
 	// stays retired (the go-git merge verb is gone). push/pull are BACK as
 	// mode-aware verbs (github: git push/pull; platform: tarball/bundle) — see
-	// TestCommands_IncludesGitNativeVerbs.
-	for _, gone := range []string{"init", "deploy", "dev", "disable", "enable", "backend", "config", "merge"} {
+	// TestCommands_IncludesGitNativeVerbs. The CLI-audit renames retired
+	// `list` (→ deploys), `pull-spec` (→ spec), `gen-types` (→ db types) and
+	// `types` (→ web gen, interim until @palbase/web owns its codegen); there
+	// is NO top-level `gen` group — client codegen is the SDKs' job.
+	for _, gone := range []string{"deploy", "dev", "disable", "enable", "backend", "config", "merge", "list", "types", "gen-types", "pull-spec", "gen"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}
+}
+
+// TestCommands_WebGroup pins the `web` group's children: link/unlink (wiring)
+// plus `gen` — the INTERIM typed-client generator that moves into @palbase/web
+// once the SDK owns its codegen (the CLI's job is fetching artifacts, not
+// generating clients; iOS already works that way via `palbase spec` + the
+// PalbaseCodegen SPM plugin).
+func TestCommands_WebGroup(t *testing.T) {
+	for _, c := range Commands(noopResolvers()) {
+		if c.Name() != "web" {
+			continue
+		}
+		var names []string
+		for _, sub := range c.Commands() {
+			names = append(names, sub.Name())
+		}
+		require.ElementsMatch(t, []string{"link", "unlink", "gen"}, names)
+		return
+	}
+	t.Fatal("web group not found in flat surface")
 }
 
 // TestCommands_IncludesGitNativeVerbs pins that the mode-aware deploy verbs

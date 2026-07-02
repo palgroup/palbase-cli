@@ -36,8 +36,8 @@ func stubFetch(body string, capture *string) remoteSpecFetch {
 // TestPullSpec_FlagDefaults pins the command surface: the flags exist with the
 // documented defaults, so a stale wiring (renamed flag, dropped default) is RED.
 func TestPullSpec_FlagDefaults(t *testing.T) {
-	cmd := newPullSpecCmd(Resolvers{})
-	require.Equal(t, "pull-spec", cmd.Name())
+	cmd := newSpecCmd(Resolvers{})
+	require.Equal(t, "spec", cmd.Name())
 	for _, tc := range []struct{ name, def string }{
 		{"ref", ""},
 		{"branch", ""},

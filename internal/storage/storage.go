@@ -1,4 +1,4 @@
-// Package storage provides the `palbase storage buckets` subcommand group:
+// Package storage provides the `palbase storage` subcommand group:
 // list / add / remove. These commands are GUIDED authoring for the storage
 // config-as-code surface — they read/write config/storage.ts (the typed DSL
 // from @palbase/backend), so an author declares buckets without hand-writing
@@ -59,30 +59,23 @@ type bucketDef struct {
 }
 
 // Cmd returns the `palbase storage` parent command. It takes no resolvers:
-// bucket authoring is purely local file I/O (no Studio / network).
+// bucket authoring is purely local file I/O (no Studio / network). Buckets are
+// the only storage config, so the verbs hang directly off `storage` (no
+// intermediate `buckets` level — matches `flags add` / `notifications add`).
 func Cmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "storage",
 		Short: "Manage storage config-as-code (config/storage.ts buckets)",
 		Long: `Author the project's storage buckets declaratively in config/storage.ts.
 
-  palbase storage buckets list              Show the buckets declared in config/storage.ts.
-  palbase storage buckets add <name> ...    Add or update a bucket entry.
-  palbase storage buckets remove <name>     Remove a bucket entry.
+  palbase storage list              Show the buckets declared in config/storage.ts.
+  palbase storage add <name> ...    Add or update a bucket entry.
+  palbase storage remove <name>     Remove a bucket entry.
 
 config/storage.ts is git-authoritative: commit it and ` + "`git push`" + ` to deploy.
 The deploy creates missing buckets and updates changed ones; it never deletes a
 bucket dropped from the file (removing here leaves the live bucket + its files
 in place — see ` + "`remove`" + `).`,
-	}
-	cmd.AddCommand(bucketsCmd())
-	return cmd
-}
-
-func bucketsCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "buckets",
-		Short: "List, add, or remove storage buckets in config/storage.ts",
 	}
 	cmd.AddCommand(bucketsListCmd(), bucketsAddCmd(), bucketsRemoveCmd())
 	return cmd
@@ -128,7 +121,7 @@ func bucketsAddCmd() *cobra.Command {
 		Short: "Add or update a bucket in config/storage.ts",
 		Long: `Add a bucket entry to config/storage.ts (or update it if it already exists).
 
-  palbase storage buckets add avatars --public --max-size 5MB --mime image/png,image/jpeg
+  palbase storage add avatars --public --max-size 5MB --mime image/png,image/jpeg
 
 Idempotent: running it again with the same name updates the existing entry
 rather than duplicating it. Commit config/storage.ts and ` + "`git push`" + ` to apply.`,
@@ -229,7 +222,7 @@ func bucketsListCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			if len(buckets) == 0 {
 				fmt.Fprintf(out, "no buckets declared in %s\n", configPath)
-				fmt.Fprintln(out, "  add one: palbase storage buckets add <name> [--public] [--max-size 5MB] [--mime image/png]")
+				fmt.Fprintln(out, "  add one: palbase storage add <name> [--public] [--max-size 5MB] [--mime image/png]")
 				return nil
 			}
 			names := make([]string, 0, len(buckets))

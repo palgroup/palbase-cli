@@ -10,7 +10,7 @@ package backend
 //   3. Ensures .gitignore covers .palbase/ (the link file is per-machine).
 //   4. Runs TS codegen (via webLinkCodegen seam) → --out (default palbe.gen.ts).
 //   5. Patches package.json: adds scripts.predev / scripts.prebuild running
-//      `palbase types --soft || exit 0` via a BYTE-SPLICE editor — only the
+//      `palbase web gen --soft || exit 0` via a BYTE-SPLICE editor — only the
 //      inserted entries are new bytes, every other byte of the file (key
 //      order, nested objects, indentation, `&&` in script values) is left
 //      untouched. An existing script with a different value is warned about,
@@ -47,8 +47,8 @@ import (
 // localhost:4003 first and will emit whatever app happens to be at that port —
 // or an empty client — if no local `palbase serve` is running. A linked
 // project's source of truth is the deployed backend, not the local machine.
-// Users who want local-first iteration can run `palbase types --env local` or
-// keep `palbase serve` running separately; the prebuild hook also pins
+// Users who want local-first iteration can run `palbase web gen --env local`
+// or keep `palbase serve` running separately; the prebuild hook also pins
 // --env remote so CI/builds never regress to a localhost URL.
 const webLinkCodegenEnv = "remote"
 
@@ -73,16 +73,18 @@ type webCmd struct {
 // (the "auto" default tries localhost:4003 first and can pick up whatever
 // happens to be running there). `|| exit 0` covers a machine without the CLI
 // installed (command-not-found exits 127, which --soft alone cannot swallow).
-const webTypesCmd = "palbase types --env remote --soft || exit 0"
+const webTypesCmd = "palbase web gen --env remote --soft || exit 0"
 
-// newWebCmd builds the `palbase web` command group.
+// newWebCmd builds the `palbase web` command group: link/unlink wire the
+// project, `gen` (interim, until @palbase/web owns its generator) regenerates
+// the typed client.
 func newWebCmd(r Resolvers) *cobra.Command {
 	wc := &webCmd{r: r}
 	cmd := &cobra.Command{
 		Use:   "web",
 		Short: "Wire a web project to a Palbase project",
 	}
-	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd())
+	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd(), newTypesCmd(r))
 	return cmd
 }
 
@@ -207,7 +209,11 @@ func (wc *webCmd) newWebUnlinkCmd() *cobra.Command {
 
 			// unlink doesn't know the --out the link used, so speak generically.
 			fmt.Fprintln(out, "✓ unlinked — removed .palbase/config.json")
-			fmt.Fprintln(out, "  generated client file and package.json scripts left in place — re-link with `palbase web link`")
+			fmt.Fprintln(out, "  left in place (remove manually if you are dropping Palbase for good):")
+			fmt.Fprintln(out, "    - the generated client file and its entry-file import")
+			fmt.Fprintln(out, "    - the predev/prebuild scripts in package.json")
+			fmt.Fprintln(out, "    - app/providers.tsx (Next.js App Router only)")
+			fmt.Fprintln(out, "  re-link with `palbase web link`")
 			return nil
 		},
 	}

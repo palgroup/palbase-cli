@@ -14,9 +14,8 @@ import (
 )
 
 // pullSpecConfigEntry is the per-bundle-id config the Swift SPM plugin turns
-// into the per-env Palbase-Info.plist. It carries the SAME data
-// emitIOSBundleKeyedPlist puts in the plist (one dict per registered bundle id),
-// but as plain JSON so the plugin owns the plist serialization.
+// into the per-env Palbase-Info.plist (one dict per registered bundle id) —
+// plain JSON so the plugin owns the plist serialization.
 type pullSpecConfigEntry struct {
 	AppID      string           `json:"app_id"`
 	Identifier string           `json:"identifier"`
@@ -45,21 +44,21 @@ type oauthGoogleJSON struct {
 	RedirectURI string `json:"redirect_uri"`
 }
 
-// newPullSpecCmd is the codegen-split fetcher: it downloads ONLY the artifacts
-// the Swift SPM plugin needs (openapi.json, and with --app a bundle-id-keyed
-// palbase-config.json) — it does NOT generate Swift. Swift generation moved to
-// the SPM plugin. The legacy `palbase mobile codegen ios` still generates Swift;
-// this is the new path that splits fetch from generation.
+// newSpecCmd (`palbase spec`) is the codegen-split fetcher: it downloads ONLY
+// the artifacts SDK code generators consume (openapi.json, and with --app a
+// bundle-id-keyed palbase-config.json) — the CLI does NOT generate client
+// code; that is the SDKs' job. Today the PalbaseCodegen SPM build-tool plugin
+// generates Swift offline over these committed files on every Xcode build.
 //
-// Unlike `mobile codegen ios`, pull-spec NEVER probes a local `palbase serve` on
-// :4003 — it fetches the REMOTE spec for the resolved --ref via the wake-aware
-// fetch. (A future --local opt-in could add a serve probe; for now, remote only.)
-func newPullSpecCmd(r Resolvers) *cobra.Command {
+// spec NEVER probes a local `palbase serve` on :4003 — it fetches the
+// REMOTE spec for the resolved --ref via the wake-aware fetch. (A future
+// --local opt-in could add a serve probe; for now, remote only.)
+func newSpecCmd(r Resolvers) *cobra.Command {
 	var refFlag, branchFlag, outDir, appID string
 	cmd := &cobra.Command{
-		Use:   "pull-spec",
+		Use:   "spec",
 		Args:  cobra.NoArgs,
-		Short: "Download openapi.json (+ palbase-config.json with --app) for the iOS SPM codegen plugin",
+		Short: "Download openapi.json (+ palbase-config.json with --app) — the committed inputs SDK code generators consume",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
@@ -214,7 +213,7 @@ func buildPullSpecConfig(
 		out[art.Identifier] = entry
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before pull-spec", appID)
+		return nil, fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before `palbase spec`", appID)
 	}
 	return out, nil
 }

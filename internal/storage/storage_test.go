@@ -42,7 +42,7 @@ func readFile(t *testing.T) string {
 
 func TestAdd_WritesConfigFile(t *testing.T) {
 	chdirTemp(t)
-	out, err := run(t, "buckets", "add", "avatars", "--public", "--max-size", "5MB", "--mime", "image/png,image/jpeg")
+	out, err := run(t, "add", "avatars", "--public", "--max-size", "5MB", "--mime", "image/png,image/jpeg")
 	require.NoError(t, err)
 	assert.Contains(t, out, "added bucket \"avatars\"")
 
@@ -65,7 +65,7 @@ func TestAdd_WritesConfigFile(t *testing.T) {
 
 func TestAdd_BareBucketHasMinimalOpts(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "docs")
+	_, err := run(t, "add", "docs")
 	require.NoError(t, err)
 	src := readFile(t)
 	// All defaults → compact `bucket({})`.
@@ -74,9 +74,9 @@ func TestAdd_BareBucketHasMinimalOpts(t *testing.T) {
 
 func TestAdd_SecondAddUpdatesNotDuplicates(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "avatars", "--public")
+	_, err := run(t, "add", "avatars", "--public")
 	require.NoError(t, err)
-	out, err := run(t, "buckets", "add", "avatars", "--max-size", "10MB")
+	out, err := run(t, "add", "avatars", "--max-size", "10MB")
 	require.NoError(t, err)
 	assert.Contains(t, out, "updated bucket \"avatars\"")
 
@@ -94,9 +94,9 @@ func TestAdd_SecondAddUpdatesNotDuplicates(t *testing.T) {
 
 func TestAdd_MultipleBucketsCoexist(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "avatars", "--public")
+	_, err := run(t, "add", "avatars", "--public")
 	require.NoError(t, err)
-	_, err = run(t, "buckets", "add", "invoices", "--max-size", "20MB", "--mime", "application/pdf")
+	_, err = run(t, "add", "invoices", "--max-size", "20MB", "--mime", "application/pdf")
 	require.NoError(t, err)
 
 	buckets, err := readConfig()
@@ -108,12 +108,12 @@ func TestAdd_MultipleBucketsCoexist(t *testing.T) {
 
 func TestRemove_DropsEntry(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "avatars", "--public")
+	_, err := run(t, "add", "avatars", "--public")
 	require.NoError(t, err)
-	_, err = run(t, "buckets", "add", "invoices")
+	_, err = run(t, "add", "invoices")
 	require.NoError(t, err)
 
-	out, err := run(t, "buckets", "remove", "avatars")
+	out, err := run(t, "remove", "avatars")
 	require.NoError(t, err)
 	assert.Contains(t, out, "removed bucket \"avatars\"")
 	assert.Contains(t, out, "NOT deleted")
@@ -127,7 +127,7 @@ func TestRemove_DropsEntry(t *testing.T) {
 
 func TestRemove_UnknownBucketErrors(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "remove", "nope")
+	_, err := run(t, "remove", "nope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no bucket")
 }
@@ -135,13 +135,13 @@ func TestRemove_UnknownBucketErrors(t *testing.T) {
 func TestList_EmptyAndPopulated(t *testing.T) {
 	chdirTemp(t)
 	// No file yet.
-	out, err := run(t, "buckets", "list")
+	out, err := run(t, "list")
 	require.NoError(t, err)
 	assert.Contains(t, out, "no buckets declared")
 
-	_, err = run(t, "buckets", "add", "avatars", "--public", "--max-size", "5MB")
+	_, err = run(t, "add", "avatars", "--public", "--max-size", "5MB")
 	require.NoError(t, err)
-	out, err = run(t, "buckets", "list")
+	out, err = run(t, "list")
 	require.NoError(t, err)
 	assert.Contains(t, out, "avatars")
 	assert.Contains(t, out, "public")
@@ -150,21 +150,21 @@ func TestList_EmptyAndPopulated(t *testing.T) {
 
 func TestAdd_RejectsBadName(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "Bad Name!")
+	_, err := run(t, "add", "Bad Name!")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid bucket name")
 }
 
 func TestAdd_RejectsBadMime(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "x", "--mime", "notamime")
+	_, err := run(t, "add", "x", "--mime", "notamime")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid MIME type")
 }
 
 func TestAdd_RejectsBadSize(t *testing.T) {
 	chdirTemp(t)
-	_, err := run(t, "buckets", "add", "x", "--max-size", "5PB")
+	_, err := run(t, "add", "x", "--max-size", "5PB")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown --max-size unit")
 }
@@ -187,7 +187,7 @@ func TestParseSize_BinaryUnits(t *testing.T) {
 func TestRoundTrip_QuotedKeyName(t *testing.T) {
 	chdirTemp(t)
 	// A name needing quoting as an object key (contains a dash).
-	_, err := run(t, "buckets", "add", "user-uploads", "--public")
+	_, err := run(t, "add", "user-uploads", "--public")
 	require.NoError(t, err)
 	src := readFile(t)
 	assert.Contains(t, src, `"user-uploads": bucket({ public: true }),`)

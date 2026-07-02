@@ -39,7 +39,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// defaultHTTPClient is reused by `palbase types` (and any
+// defaultHTTPClient is reused by `palbase web gen` (and any
 // future direct HTTP we add). 30s read timeout matches the SDK side
 // so a slow Kong response surfaces consistently.
 var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -105,27 +105,35 @@ type Resolvers struct {
 // shell out to git (push/pull/clone → webhook → orchestrator deploys); for a
 // platform-mode project they upload/fetch a tarball bundle via the Management
 // API. `merge` stays retired (the old go-git merge verb is gone). Alongside
-// them the CLI keeps local dev (`serve`) and the observation/control verbs
-// (list, rollback, status, types, mobile).
+// them the CLI keeps local dev (`serve`), the observation/control verbs
+// (deploys, rollback, status) and the artifact fetcher (`spec`) — client
+// codegen itself is the SDKs' job, not the CLI's.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newWebCmd(r),
 		newDevCmd(r),
-		newListCmd(r),
+		newDeploysCmd(r),
 		newRollbackCmd(r),
 		newStatusCmd(r),
-		newTypesCmd(r),
-		newGenTypesCmd(r),
-		newPullSpecCmd(r),
+		newSpecCmd(r),
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
 	}
 }
 
+// EnvTypesCmd exposes the palbase-env.d.ts generator (db/schema.ts → typed
+// Database.tables.*) so main can register it under `palbase db types` — it
+// types the author's OWN handlers from the local schema source, which is db
+// tooling, not client codegen. (Client codegen is the SDKs' job: the CLI only
+// fetches the artifacts — see `palbase spec`.)
+func EnvTypesCmd() *cobra.Command {
+	return newGenTypesCmd(Resolvers{})
+}
+
 // backendTarget is the resolved (URL + publishable key) for a project's
-// backend at a given branch. Used by lookupBackendTarget (which pull-spec and
-// `palbase types` share) to address the deployed tenant host.
+// backend at a given branch. Used by lookupBackendTarget (which `palbase spec` and
+// `palbase web gen` share) to address the deployed tenant host.
 type backendTarget struct {
 	URL    string
 	APIKey string
@@ -667,7 +675,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 		},
 	}
 	// 4003 is the single canonical local port: the codegen consumers
-	// (`palbase types` local/auto probe, the SPM plugin's pull-spec local
+	// (`palbase web gen` local/auto probe, the SPM plugin's spec-fetch local
 	// probe) all hit localhost:4003 for the local /openapi.json, so a plain
 	// `palbase serve` must land there. --port still overrides for the rare conflict.
 	cmd.Flags().IntVar(&port, "port", 4003, "Local port for the dev server")
@@ -781,10 +789,10 @@ type changes).
 `, branch)
 }
 
-func newListCmd(r Resolvers) *cobra.Command {
+func newDeploysCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "deploys",
 		Short: "Show deploy history (newest first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
@@ -973,12 +981,17 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// `palbase types`
+// `palbase web gen`
 //
-// Fetches the backend's `/openapi.json` and generates a typed client
-// module: `palbe.gen.ts` for the palbe web SDK (default) or a Swift
-// file for the Palbe iOS SDK. Output is auto-generated and overwritten
-// on every run; users edit their controllers instead.
+// Fetches the backend's `/openapi.json` and generates the typed
+// palbe.gen.ts client module for the palbe web SDK. Output is
+// auto-generated and overwritten on every run; users edit their
+// controllers instead.
+//
+// INTERIM: client codegen is the SDKs' job (the iOS split already works
+// that way — `palbase spec` fetches, the SPM plugin generates). This
+// command moves into @palbase/web once it grows its own generator; until
+// then it lives under the `web` wiring group, not as a top-level verb.
 // ─────────────────────────────────────────────────────────────────────
 
 func newTypesCmd(r Resolvers) *cobra.Command {
@@ -988,15 +1001,15 @@ func newTypesCmd(r Resolvers) *cobra.Command {
 	var softFlag bool
 	var watchFlag bool
 	cmd := &cobra.Command{
-		Use:   "types",
-		Short: "Generate a typed client from your backend's OpenAPI spec",
+		Use:   "gen",
+		Short: "Generate the typed palbe.gen.ts web client from your backend's OpenAPI spec",
 		Long: `Fetch the OpenAPI document from your backend and generate the typed
 palbe.gen.ts client — typed namespaced calls (pb.rooms.create(...)) plus the
 embedded runtime config for the palbe web SDK. Commit the file and re-run after
 every deploy (a predev/prebuild script keeps it fresh).
 
-(iOS Swift generation lives in the palbase-swift-codegen SPM build-tool plugin,
-which consumes the openapi.json fetched by 'palbase pull-spec' — not this command.)
+(iOS Swift generation lives in the PalbaseCodegen SPM build-tool plugin,
+which consumes the openapi.json fetched by 'palbase spec' — not this command.)
 
 Spec source (--env):
   auto    (default) probe a local 'palbase serve' on localhost:4003 first;
@@ -1069,13 +1082,13 @@ hook — --watch is for local development only.`,
 // exposed on its own so it can run from a build/CI step or after editing the
 // schema without booting the dev server.
 //
-// Distinct from `palbase types`: that pulls the DEPLOYED OpenAPI spec to type
+// Distinct from `palbase web gen`: that pulls the DEPLOYED OpenAPI spec to type
 // the client SDK's `pb.backend.call(...)`; this types the project's OWN handlers
 // (`Database.tables.*`) from the local schema source. No project link, no
 // network — purely local.
 func newGenTypesCmd(_ Resolvers) *cobra.Command {
 	return &cobra.Command{
-		Use:   "gen-types",
+		Use:   "types",
 		Short: "Generate palbase-env.d.ts from db/schema.ts (typed Database.tables.*)",
 		Long: `Generate the project's palbase-env.d.ts from its db/schema.ts so handlers
 get a typed Database.tables.* with no import and no generic.
@@ -1108,7 +1121,7 @@ No-op when the project has no db/schema.ts.`,
 	}
 }
 
-// pullTSTypes implements `palbase types --lang ts`: resolve the spec source
+// pullTSTypes implements `palbase web gen`: resolve the spec source
 // per --env, parse the OpenAPI document, and write the palbe.gen.ts module
 // (typed namespaced calls + embedded __configure runtime config) for the
 // palbe web SDK. The file is meant to be COMMITTED — unlike the retired
