@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,40 +18,14 @@ import (
 	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
-// local4003Server binds the fixed local-codegen port (4003) with the given
-// handler, standing in for a local `palbase serve`. Skips the test when a
-// real serve already holds the port. Base for the local-path rigs below.
-func local4003Server(t *testing.T, handler http.Handler) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:4003")
-	if err != nil {
-		t.Skipf("localhost:4003 unavailable (%v) — skipping local-spec path test", err)
-	}
-	srv := &http.Server{Handler: handler}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-}
-
-// localTSSpecServer serves the shared TS OpenAPI fixture on 4003, so the
-// `--env auto` probe takes the LOCAL path.
+// localTSSpecServer serves the shared TS OpenAPI fixture as the local serve
+// stand-in (see localServeStub), so the `--env auto` probe takes the LOCAL path.
 func localTSSpecServer(t *testing.T) {
 	t.Helper()
-	local4003Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	localServeStub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(tsFixtureOpenAPI))
 	}))
-}
-
-// require4003Free skips the test when something already listens on the fixed
-// local-codegen port — the remote-fallback / serve-down scenarios need the
-// local probe to connection-refuse.
-func require4003Free(t *testing.T) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:4003")
-	if err != nil {
-		t.Skip("4003 is held by a real serve — cannot test the serve-down path")
-	}
-	_ = ln.Close()
 }
 
 // tsTypesStudio is the remote-side rig for the ts codegen tests: one httptest
@@ -130,7 +103,7 @@ func TestTypesTS_DefaultOut_LocalPath(t *testing.T) {
 // the deployed spec wake-aware, embeds the remote tenant URL + publishable
 // key, and fetches the oauth providers best-effort.
 func TestTypesTS_AutoRemoteFallback(t *testing.T) {
-	require4003Free(t)
+	localServeDown(t)
 	rig := &tsTypesStudio{}
 	r := rig.resolvers(t)
 	restore := redirectHostTo(t, "erkut1230qe6um.dev.palbase.studio", rig.srvURL)
@@ -156,7 +129,7 @@ func TestTypesTS_AutoRemoteFallback(t *testing.T) {
 // TestTypesTS_LocalForced_ServeDown pins --env local strictness: when serve is
 // down the command errors (no silent remote fallback).
 func TestTypesTS_LocalForced_ServeDown(t *testing.T) {
-	require4003Free(t)
+	localServeDown(t)
 	rig := &tsTypesStudio{}
 	r := rig.resolvers(t)
 
@@ -176,7 +149,7 @@ func TestTypesTS_LocalForced_ServeDown(t *testing.T) {
 // a `warning: codegen skipped (...)` line + exit 0; without --soft the same
 // scenario stays a hard error.
 func TestTypesTS_SoftFlag(t *testing.T) {
-	require4003Free(t)
+	localServeDown(t)
 
 	dead := studio.New("http://127.0.0.1:1", func(_ context.Context) (string, error) { return "tok", nil })
 	r := Resolvers{
@@ -271,7 +244,7 @@ func TestTypesTS_ZeroOps_NoExistingFile_WritesWithWarning(t *testing.T) {
 // nothing listening — the auto-fallback print must say "responded with an
 // error (HTTP <code>)" instead of the misleading "not found".
 func TestTypesTS_AutoFallback_LocalHTTPError(t *testing.T) {
-	local4003Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	localServeStub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
 	rig := &tsTypesStudio{}

@@ -258,7 +258,7 @@ func TestTypesWatch_FlagDispatch(t *testing.T) {
 // we cancel immediately).
 
 func TestTypesWatch_SoftInitialFailure(t *testing.T) {
-	require4003Free(t) // local serve is down → initial pullTSTypes fails
+	localServeDown(t) // local serve is down → initial pullTSTypes fails
 	t.Chdir(t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -462,7 +462,7 @@ func TestTypesWatch_SignalContextWiring(t *testing.T) {
 // treated as soft (no --soft needed) — the loop exists to wait for serve.
 
 func TestTypesWatch_LocalEnvServeDownEntersLoop(t *testing.T) {
-	require4003Free(t)
+	localServeDown(t)
 	t.Chdir(t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
