@@ -129,12 +129,54 @@ func Commands(r Resolvers) []*cobra.Command {
 // tooling, not client codegen. (Client codegen is the SDKs' job: the CLI only
 // fetches the artifacts — see `palbase spec`.)
 func EnvTypesCmd() *cobra.Command {
-	return newGenTypesCmd(Resolvers{})
+	return newGenTypesCmd()
+}
+
+// newGenTypesCmd is the standalone regeneration of palbase-env.d.ts from the
+// project's db/schema.ts — the same step `palbase serve` runs on startup,
+// exposed on its own so it can run from a build/CI step or after editing the
+// schema without booting the dev server. It types the project's OWN handlers
+// (`Database.tables.*`) from the local schema source. No project link, no
+// network — purely local. (NOT client codegen — that is the SDKs' job.)
+func newGenTypesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "types",
+		Short: "Generate palbase-env.d.ts from db/schema.ts (typed Database.tables.*)",
+		Long: `Generate the project's palbase-env.d.ts from its db/schema.ts so handlers
+get a typed Database.tables.* with no import and no generic.
+
+esbuild-bundles db/schema.ts (with @palbase/* external), evaluates the
+defineSchema() result, and writes palbase-env.d.ts to the project root.
+Requires Node.js + npx. ` + "`palbase serve`" + ` runs this automatically on startup;
+run it standalone after editing db/schema.ts or from a build step.
+
+No-op when the project has no db/schema.ts.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			schemaPath := filepath.Join(cwd, "db", "schema.ts")
+			if _, err := os.Stat(schemaPath); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					fmt.Fprintln(os.Stdout, "no db/schema.ts — nothing to generate")
+					return nil
+				}
+				return err
+			}
+			if err := generateEnvTypes(cmd.Context(), cwd); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "✓ wrote %s\n", filepath.Join(cwd, "palbase-env.d.ts"))
+			return nil
+		},
+	}
 }
 
 // backendTarget is the resolved (URL + publishable key) for a project's
-// backend at a given branch. Used by lookupBackendTarget (which `palbase spec` and
-// `palbase web gen` share) to address the deployed tenant host.
+// backend at a given branch. Used by lookupBackendTarget (which `palbase spec`
+// and `palbase web link`'s artifact fetch share) to address the deployed
+// tenant host.
 type backendTarget struct {
 	URL    string
 	APIKey string
@@ -988,242 +1030,6 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 	}, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// `palbase web gen`
-//
-// Fetches the backend's `/openapi.json` and generates the typed
-// palbe.gen.ts client module for the palbe web SDK. Output is
-// auto-generated and overwritten on every run; users edit their
-// controllers instead.
-//
-// INTERIM: client codegen is the SDKs' job (the iOS split already works
-// that way — `palbase spec` fetches, the SPM plugin generates). This
-// command moves into @palbase/web once it grows its own generator; until
-// then it lives under the `web` wiring group, not as a top-level verb.
-// ─────────────────────────────────────────────────────────────────────
-
-func newTypesCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	var envFlag string
-	var outFlag string
-	var softFlag bool
-	var watchFlag bool
-	cmd := &cobra.Command{
-		Use:   "gen",
-		Short: "Generate the typed palbe.gen.ts web client from your backend's OpenAPI spec",
-		Long: `Fetch the OpenAPI document from your backend and generate the typed
-palbe.gen.ts client — typed namespaced calls (pb.rooms.create(...)) plus the
-embedded runtime config for the palbe web SDK. Commit the file and re-run after
-every deploy (a predev/prebuild script keeps it fresh).
-
-(iOS Swift generation lives in the PalbaseCodegen SPM build-tool plugin,
-which consumes the openapi.json fetched by 'palbase spec' — not this command.)
-
-Spec source (--env):
-  auto    (default) probe a local 'palbase serve' on localhost:4003 first;
-          when it is up, the generated config points at the local server and
-          OAuth discovery is skipped (works without login/network). When it
-          is down, fall back to the deployed backend.
-  local   require the local 'palbase serve' (error when it is down)
-  remote  always use the deployed backend (wake-aware fetch through Kong)
-
-The committed file embeds the spec source URL — if you develop against a
-local serve, regenerate with --env remote before a release build.
-
---soft turns ANY failure into a 'warning: codegen skipped (...)' line and
-exit 0, so a predev/prebuild hook never blocks a machine without login or
-network access.
-
---watch keeps running, polling the local 'palbase serve' on :4003 every second
-and rewriting palbe.gen.ts whenever the spec changes. Start 'palbase serve'
-first; --watch handles the case where serve is not yet up (useful in
-split-terminal dev). Remote sync (release / CI) happens via the predev/prebuild
-hook — --watch is for local development only.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			out := cmd.OutOrStdout()
-			run := func() error {
-				ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), out)
-				if err != nil {
-					return err
-				}
-				// Branch = the linked .palbase/config.json DefaultEnv. --ref makes
-				// resolveOrLinkRef return without writing the config, so a fresh
-				// cwd falls back to main.
-				branch := "main"
-				if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg.DefaultEnv != "" {
-					branch = cfg.DefaultEnv
-				}
-				outFile := outFlag
-				if outFile == "" {
-					outFile = "palbe.gen.ts"
-				}
-				if watchFlag {
-					// SIGINT/SIGTERM cancel the watch ctx (serve's pattern)
-					// so Ctrl-C exits the loop cleanly — "watch stopped",
-					// exit 0, no mid-write truncation of palbe.gen.ts.
-					wctx, stop := watchSignalContext(cmd.Context())
-					defer stop()
-					return runTypesWatch(wctx, r, ref, branch, envFlag, outFile, softFlag, out)
-				}
-				return pullTSTypes(cmd.Context(), r.Studio(), r.Endpoints(), ref, branch, envFlag, outFile, out)
-			}
-			if err := run(); err != nil {
-				if softFlag {
-					fmt.Fprintf(out, "warning: codegen skipped (%v)\n", err)
-					return nil
-				}
-				return err
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&envFlag, "env", "auto", "Spec source: auto (local serve when up, else deployed) | local | remote")
-	cmd.Flags().StringVar(&outFlag, "out", "", "Output file (default: palbe.gen.ts)")
-	cmd.Flags().BoolVar(&softFlag, "soft", false, "Never fail: print a warning and exit 0 on any error (for predev/prebuild hooks)")
-	cmd.Flags().BoolVar(&watchFlag, "watch", false, "Watch mode: poll local serve on :4003 and regenerate on spec changes")
-	return cmd
-}
-
-// newGenTypesCmd is the standalone regeneration of palbase-env.d.ts from the
-// project's db/schema.ts — the same step `palbase serve` runs on startup,
-// exposed on its own so it can run from a build/CI step or after editing the
-// schema without booting the dev server.
-//
-// Distinct from `palbase web gen`: that pulls the DEPLOYED OpenAPI spec to type
-// the client SDK's `pb.backend.call(...)`; this types the project's OWN handlers
-// (`Database.tables.*`) from the local schema source. No project link, no
-// network — purely local.
-func newGenTypesCmd(_ Resolvers) *cobra.Command {
-	return &cobra.Command{
-		Use:   "types",
-		Short: "Generate palbase-env.d.ts from db/schema.ts (typed Database.tables.*)",
-		Long: `Generate the project's palbase-env.d.ts from its db/schema.ts so handlers
-get a typed Database.tables.* with no import and no generic.
-
-esbuild-bundles db/schema.ts (with @palbase/* external), evaluates the
-defineSchema() result, and writes palbase-env.d.ts to the project root.
-Requires Node.js + npx. ` + "`palbase serve`" + ` runs this automatically on startup;
-run it standalone after editing db/schema.ts or from a build step.
-
-No-op when the project has no db/schema.ts.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			schemaPath := filepath.Join(cwd, "db", "schema.ts")
-			if _, err := os.Stat(schemaPath); err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					fmt.Fprintln(os.Stdout, "no db/schema.ts — nothing to generate")
-					return nil
-				}
-				return err
-			}
-			if err := generateEnvTypes(cmd.Context(), cwd); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stdout, "✓ wrote %s\n", filepath.Join(cwd, "palbase-env.d.ts"))
-			return nil
-		},
-	}
-}
-
-// pullTSTypes implements `palbase web gen`: resolve the spec source
-// per --env, parse the OpenAPI document, and write the palbe.gen.ts module
-// (typed namespaced calls + embedded __configure runtime config) for the
-// palbe web SDK. The file is meant to be COMMITTED — unlike the retired
-// .palbase/openapi.json + types.d.ts pair, it is the app's typed client.
-//
-// env routing:
-//   - "auto" (default): probe the local `palbase serve` (localhost:4003,
-//     single 3s fast-fail attempt). Serve up → the config points at the
-//     local server (apiKey empty — serve's spec is unauthenticated) and
-//     OAuth discovery is SKIPPED, so a logged-out / offline machine still
-//     regenerates against serve. Serve down → remote.
-//   - "local": like the auto local path, but serve-down is a hard error.
-//   - "remote": resolve the branch target (apikey.reveal), wake-aware fetch
-//     of the deployed spec, best-effort OAuth discovery.
-func pullTSTypes(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref, branch, env, outFile string, w io.Writer) error {
-	if env == "" {
-		env = "auto"
-	}
-	cfg := tsGeneratedConfig{Branch: branch}
-	var specBytes []byte
-
-	const localURL = "http://localhost:4003"
-	useRemote := false
-	switch env {
-	case "auto", "local":
-		b, localErr := fetchLocalOpenAPISpec(ctx, localURL+"/openapi.json")
-		switch {
-		case localErr == nil:
-			specBytes = b
-			cfg.URL = localURL
-		case env == "local":
-			return fmt.Errorf("no local `palbase serve` at %s (%w) — start `palbase serve` or use --env remote", localURL, localErr)
-		default:
-			// Distinguish "serve ANSWERED with an error" (it is up — fix it,
-			// don't start it) from "nothing listening" before falling back to
-			// the deployed spec.
-			var hs httpStatusError
-			if errors.As(localErr, &hs) {
-				fmt.Fprintf(w, "local serve responded with an error (HTTP %d) at %s/openapi.json; using the deployed spec — fix `palbase serve` for local dev\n", hs.status, localURL)
-			} else {
-				fmt.Fprintf(w, "local spec not found at %s/openapi.json (%v); using the deployed spec — run `palbase serve` for local dev\n", localURL, localErr)
-			}
-			useRemote = true
-		}
-	case "remote":
-		useRemote = true
-	default:
-		return fmt.Errorf("unknown --env %q (expected auto|local|remote)", env)
-	}
-
-	if useRemote {
-		target, err := lookupBackendTarget(ctx, sc, endpoints, ref, branch)
-		if err != nil {
-			return err
-		}
-		specBytes, err = fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
-		if err != nil {
-			return err
-		}
-		cfg.URL = target.URL
-		cfg.APIKey = target.APIKey
-		oauth, oauthErr := fetchOAuthProviders(ctx, target.URL, target.APIKey)
-		if oauthErr != nil {
-			fmt.Fprintf(w, "  (oauth providers not fetched: %v)\n", oauthErr)
-		}
-		cfg.OAuth = oauth
-	}
-
-	ops, err := parseOpenAPIForSwift(specBytes)
-	if err != nil {
-		return err
-	}
-	// Zero-op overwrite guard. A live spec with 0 operations almost always
-	// means the backend's controller metadata extraction broke (the "zero
-	// endpoints collected" failure class — deploy reports success anyway),
-	// not that the app has no endpoints. Never clobber a previously good
-	// palbe.gen.ts with an empty client; warn and exit 0 so a predev hook
-	// doesn't fail the build. With nothing to protect, write the (empty)
-	// module anyway — a fresh project still gets a compilable file — but
-	// warn loudly.
-	if len(ops) == 0 {
-		if existing, readErr := os.ReadFile(outFile); readErr == nil && len(existing) > 0 {
-			fmt.Fprintf(w, "warning: live spec has 0 operations — keeping existing %s (fix your controllers and rerun)\n", outFile)
-			return nil
-		}
-		fmt.Fprintf(w, "warning: live spec has 0 operations — %s registers no calls (fix your controllers and rerun)\n", outFile)
-	}
-	nOps, writeErr := emitAndWriteTS(ops, cfg, outFile)
-	if writeErr != nil {
-		return writeErr
-	}
-	fmt.Fprintf(w, "✓ wrote %s (%d operations)\n", outFile, nOps)
-	return nil
-}
 
 // fetchOAuthProviders calls palauth's public `/auth/oauth/providers`
 // endpoint (anon-key authed, secret-free) and lowers the response into a
@@ -1352,17 +1158,6 @@ func fetchRemoteOpenAPISpec(ctx context.Context, specURL, apiKey string, w io.Wr
 	opts := defaultFetchOpts
 	opts.progress = w
 	return fetchOpenAPISpecOpts(ctx, specURL, apiKey, opts)
-}
-
-// fetchLocalOpenAPISpec probes a local `palbase serve` with a single short
-// attempt and NO wake retries — when serve is down the connection refuses
-// instantly and the caller falls back to the remote host without delay.
-func fetchLocalOpenAPISpec(ctx context.Context, specURL string) ([]byte, error) {
-	return fetchOpenAPISpecOpts(ctx, specURL, "", fetchOpts{
-		attemptTimeout: 3 * time.Second,
-		totalBudget:    3 * time.Second,
-		minBackoff:     time.Second,
-	})
 }
 
 // fetchOpenAPISpecOpts is the wake-aware core. It retries ONLY on signals that

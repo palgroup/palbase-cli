@@ -48,11 +48,11 @@ func TestCommands_FlatSurface(t *testing.T) {
 	}
 }
 
-// TestCommands_WebGroup pins the `web` group's children: link/unlink (wiring)
-// plus `gen` — the INTERIM typed-client generator that moves into @palbase/web
-// once the SDK owns its codegen (the CLI's job is fetching artifacts, not
-// generating clients; iOS already works that way via `palbase spec` + the
-// PalbaseCodegen SPM plugin).
+// TestCommands_WebGroup pins the `web` group's children: link/unlink ONLY —
+// the CLI wires and fetches artifacts, it does NOT generate the client.
+// Client codegen is the SDKs' job: @palbase/web's `palbe-gen` for web (from
+// the committed Palbase/ inputs), the PalbaseCodegen SPM plugin for iOS
+// (from `palbase spec` output).
 func TestCommands_WebGroup(t *testing.T) {
 	for _, c := range Commands(noopResolvers()) {
 		if c.Name() != "web" {
@@ -62,7 +62,7 @@ func TestCommands_WebGroup(t *testing.T) {
 		for _, sub := range c.Commands() {
 			names = append(names, sub.Name())
 		}
-		require.ElementsMatch(t, []string{"link", "unlink", "gen"}, names)
+		require.ElementsMatch(t, []string{"link", "unlink"}, names)
 		return
 	}
 	t.Fatal("web group not found in flat surface")

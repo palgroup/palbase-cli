@@ -13,21 +13,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubCodegenFunc replaces webLinkCodegen for tests — writes a sentinel file
-// so we can verify the seam was called without a real network.
-func stubCodegenFunc(sentinelContent string) func(context.Context, Resolvers, string, string, io.Writer) error {
-	return func(_ context.Context, _ Resolvers, _ string, outFile string, _ io.Writer) error {
-		return os.WriteFile(outFile, []byte(sentinelContent), 0o644)
+// stubArtifactsFunc replaces webLinkArtifacts for tests — writes minimal
+// committed artifacts (openapi.json + palbase-config.json) with no network.
+func stubArtifactsFunc() func(context.Context, Resolvers, string, io.Writer) error {
+	return func(_ context.Context, _ Resolvers, _ string, _ io.Writer) error {
+		if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"), []byte(`{"openapi":"3.1.0","paths":{}}`), 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"),
+			[]byte("{\"url\":\"https://stub\",\"api_key\":\"pb_stub\",\"branch\":\"main\"}\n"), 0o600)
 	}
 }
 
-// installStubCodegen replaces the package-level codegen var and restores it on
-// test cleanup.
+// installStubCodegen wires the link pipeline's test doubles: the artifact
+// seam (no network) plus a fake node_modules/.bin/palbe-gen that writes
+// `content` to its --out argument — standing in for @palbase/web's generator,
+// so tests verify the whole "fetch artifacts → run the SDK generator" chain
+// without npm or a real network.
 func installStubCodegen(t *testing.T, content string) {
 	t.Helper()
-	orig := webLinkCodegen
-	webLinkCodegen = stubCodegenFunc(content)
-	t.Cleanup(func() { webLinkCodegen = orig })
+	orig := webLinkArtifacts
+	webLinkArtifacts = stubArtifactsFunc()
+	t.Cleanup(func() { webLinkArtifacts = orig })
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(palbeGenBin), 0o755))
+	script := "#!/bin/sh\nout=palbe.gen.ts\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift; fi\n  shift\ndone\ncat > \"$out\" <<'PALBE_EOF'\n" + content + "\nPALBE_EOF\n"
+	require.NoError(t, os.WriteFile(palbeGenBin, []byte(script), 0o755))
 }
 
 // minimalPkgJSON returns the smallest valid package.json (no scripts section).
@@ -65,7 +79,7 @@ func runWebLink(t *testing.T, args ...string) string {
 //   - || exit 0: covers command-not-found (exit 127) which --soft alone can't
 //     swallow (--soft handles CLI errors, not missing-binary errors).
 func TestWebLink_HookLiteral(t *testing.T) {
-	require.Equal(t, "palbase web gen --env remote --soft || exit 0", webTypesCmd)
+	require.Equal(t, "palbe-gen --soft || exit 0", webTypesCmd)
 }
 
 // TestWebLink_NoPkgJSON: errors when package.json is absent.
@@ -112,8 +126,8 @@ export default function Layout() {}
 	// scripts.predev + scripts.prebuild must be added with the exact hook value.
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
-	require.Contains(t, string(pkgBody), `"predev": "palbase web gen --env remote --soft || exit 0"`)
-	require.Contains(t, string(pkgBody), `"prebuild": "palbase web gen --env remote --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"predev": "palbe-gen --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"prebuild": "palbe-gen --soft || exit 0"`)
 
 	// import must be inserted into app/layout.tsx.
 	entryBody, err := os.ReadFile("app/layout.tsx")
@@ -287,14 +301,14 @@ func TestWebLink_ConflictingScript(t *testing.T) {
 
 	// Warning must be printed with the suggested value.
 	require.Contains(t, outStr, "predev")
-	require.Contains(t, outStr, "palbase web gen --env remote --soft || exit 0")
+	require.Contains(t, outStr, "palbe-gen --soft || exit 0")
 
 	// The existing script must NOT be clobbered.
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
 	require.Contains(t, string(pkgBody), `"predev": "my-custom-hook"`)
 	// prebuild (absent) should be added.
-	require.Contains(t, string(pkgBody), `"prebuild": "palbase web gen --env remote --soft || exit 0"`)
+	require.Contains(t, string(pkgBody), `"prebuild": "palbe-gen --soft || exit 0"`)
 }
 
 // TestWebLink_KeyOrderPreserved: package.json key order is preserved, and keys
@@ -333,8 +347,8 @@ func TestWebLink_KeyOrderPreserved(t *testing.T) {
 	require.True(t, scriptsIdx < afterIdx, "scripts before after_scripts")
 
 	// The new script keys must be present.
-	require.Contains(t, content, `"predev": "palbase web gen --env remote --soft || exit 0"`)
-	require.Contains(t, content, `"prebuild": "palbase web gen --env remote --soft || exit 0"`)
+	require.Contains(t, content, `"predev": "palbe-gen --soft || exit 0"`)
+	require.Contains(t, content, `"prebuild": "palbe-gen --soft || exit 0"`)
 
 	// Original "dev" script must still be there.
 	require.Contains(t, content, `"dev": "vite"`)
@@ -383,8 +397,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
   "scripts": {
     "zzz": "echo z",
     "build": "tsc && vite build",
-    "predev": "palbase web gen --env remote --soft || exit 0",
-    "prebuild": "palbase web gen --env remote --soft || exit 0"
+    "predev": "palbe-gen --soft || exit 0",
+    "prebuild": "palbe-gen --soft || exit 0"
   },
   "version": "1.0.0"
 }
@@ -405,8 +419,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
       "name": "x",
   "scripts": {
         "dev":    "vite",
-        "predev": "palbase web gen --env remote --soft || exit 0",
-        "prebuild": "palbase web gen --env remote --soft || exit 0"
+        "predev": "palbe-gen --soft || exit 0",
+        "prebuild": "palbe-gen --soft || exit 0"
   },
    "odd":  true
 }
@@ -424,8 +438,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
   "name": "myapp",
   "version": "1.0.0",
   "scripts": {
-    "predev": "palbase web gen --env remote --soft || exit 0",
-    "prebuild": "palbase web gen --env remote --soft || exit 0"
+    "predev": "palbe-gen --soft || exit 0",
+    "prebuild": "palbe-gen --soft || exit 0"
   }
 }
 `
@@ -436,8 +450,8 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
 		input := `{
   "name": "myapp",
   "scripts": {
-    "predev": "palbase web gen --env remote --soft || exit 0",
-    "prebuild": "palbase web gen --env remote --soft || exit 0"
+    "predev": "palbe-gen --soft || exit 0",
+    "prebuild": "palbe-gen --soft || exit 0"
   }
 }
 `
@@ -473,16 +487,17 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 
 // TestWebLink_RefRelinkUpdatesConfig (I3): `web link --ref B` in a cwd linked
 // to A must update the config's Ref to B (keeping DefaultEnv — the active
-// branch is a local choice) and regenerate via the seam with B.
+// branch is a local choice) and fetch artifacts via the seam with B.
 func TestWebLink_RefRelinkUpdatesConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
 	var gotRef string
-	orig := webLinkCodegen
-	webLinkCodegen = func(_ context.Context, _ Resolvers, ref, outFile string, _ io.Writer) error {
+	orig := webLinkArtifacts
+	webLinkArtifacts = func(ctx context.Context, r Resolvers, ref string, w io.Writer) error {
 		gotRef = ref
-		return os.WriteFile(outFile, []byte("// gen"), 0o644)
+		return stubArtifactsFunc()(ctx, r, ref, w)
 	}
-	t.Cleanup(func() { webLinkCodegen = orig })
+	t.Cleanup(func() { webLinkArtifacts = orig })
 
 	writePkgJSON(t, minimalPkgJSON())
 	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: "projA", DefaultEnv: "staging"}))
@@ -493,7 +508,7 @@ func TestWebLink_RefRelinkUpdatesConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "projB", cfg.Ref, "config must be re-linked to the new ref")
 	require.Equal(t, "staging", cfg.DefaultEnv, "re-link must keep the active branch")
-	require.Equal(t, "projB", gotRef, "codegen must run against the new ref")
+	require.Equal(t, "projB", gotRef, "the artifact fetch must run against the new ref")
 	require.Contains(t, outStr, "projB")
 }
 
@@ -594,8 +609,8 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 	writePkgJSON(t, `{
   "name": "myapp",
   "scripts": {
-    "predev": "palbase web gen --env remote --soft || exit 0",
-    "prebuild": "palbase web gen --env remote --soft || exit 0"
+    "predev": "palbe-gen --soft || exit 0",
+    "prebuild": "palbe-gen --soft || exit 0"
   }
 }`)
 
@@ -659,25 +674,36 @@ func TestWebLink_CustomOut(t *testing.T) {
 
 // ── Bug-fix regression tests ──────────────────────────────────────────────────
 
-// TestWebLink_CodegenEnvIsRemote (Bug-1): the production webLinkCodegen seam
-// must use "remote" — never "auto" or "local" — so a linked platform project
-// always generates against the deployed backend, not whatever happens to be
-// at localhost:4003.
-func TestWebLink_CodegenEnvIsRemote(t *testing.T) {
-	require.Equal(t, "remote", webLinkCodegenEnv,
-		"codegen env must be remote: auto/localhost emits wrong or empty clients for platform-linked projects")
+// TestWebLink_ArtifactsWritten (Bug-1 successor): link must leave the two
+// COMMITTED SDK-generator inputs in Palbase/ — palbe-gen (in @palbase/web)
+// generates offline from these, so a missing artifact means every later
+// build regenerates from nothing.
+func TestWebLink_ArtifactsWritten(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+
+	runWebLink(t, "--ref", "ref1")
+
+	for _, f := range []string{"openapi.json", "palbase-config.json"} {
+		_, err := os.Stat(filepath.Join(webArtifactsDir, f))
+		require.NoError(t, err, "web link must write Palbase/%s", f)
+	}
 }
 
-// TestWebLink_HookContainsEnvRemote (Bug-2): the injected predev/prebuild hook
-// must pin --env remote so that repeated `npm run build` / `npm run dev` runs
-// do not regress the generated client back to a localhost URL.
-func TestWebLink_HookContainsEnvRemote(t *testing.T) {
-	require.Contains(t, webTypesCmd, "--env remote",
-		"hook must pin --env remote so builds never regress to localhost")
+// TestWebLink_HookIsSDKGenerator (Bug-2 successor): the injected predev/
+// prebuild hook must run the SDK's OWN generator (palbe-gen) — never a
+// palbase CLI codegen verb (client codegen is the SDKs' job) — and stay
+// build-safe on machines without the SDK installed.
+func TestWebLink_HookIsSDKGenerator(t *testing.T) {
+	require.Contains(t, webTypesCmd, "palbe-gen",
+		"hook must run @palbase/web's generator, not a CLI codegen verb")
+	require.NotContains(t, webTypesCmd, "palbase ",
+		"the hook must not depend on the palbase CLI being installed")
 	require.Contains(t, webTypesCmd, "--soft",
-		"hook must be --soft so offline/no-CLI machines don't break the build")
+		"hook must be --soft so a broken spec doesn't break the build")
 	require.Contains(t, webTypesCmd, "|| exit 0",
-		"|| exit 0 is required: --soft swallows CLI errors but not command-not-found (exit 127)")
+		"|| exit 0 is required: --soft swallows generator errors but not command-not-found (exit 127)")
 }
 
 // TestWebLink_ProvidersCreatedForNextAppRouter (Bug-3): for an App Router

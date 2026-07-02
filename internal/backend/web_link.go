@@ -8,9 +8,11 @@ package backend
 //   2. resolveOrLinkRef — writes/updates .palbase/config.json (a --ref that
 //      differs from the existing link re-links, keeping the active branch).
 //   3. Ensures .gitignore covers .palbase/ (the link file is per-machine).
-//   4. Runs TS codegen (via webLinkCodegen seam) → --out (default palbe.gen.ts).
+//   4. Fetches the SDK generator's committed inputs (Palbase/openapi.json +
+//      Palbase/palbase-config.json via the webLinkArtifacts seam), then runs
+//      @palbase/web's palbe-gen for the first palbe.gen.ts when installed.
 //   5. Patches package.json: adds scripts.predev / scripts.prebuild running
-//      `palbase web gen --soft || exit 0` via a BYTE-SPLICE editor — only the
+//      `palbe-gen --soft || exit 0` via a BYTE-SPLICE editor — only the
 //      inserted entries are new bytes, every other byte of the file (key
 //      order, nested objects, indentation, `&&` in script values) is left
 //      untouched. An existing script with a different value is warned about,
@@ -31,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -39,28 +42,56 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// webLinkCodegenEnv is the env value passed to pullTSTypes by the production
-// webLinkCodegen closure. Exposed as a constant so tests can assert the env
-// without stubbing the entire seam or requiring a real network.
-//
-// "remote" is the correct default for a linked platform project: "auto" tries
-// localhost:4003 first and will emit whatever app happens to be at that port —
-// or an empty client — if no local `palbase serve` is running. A linked
-// project's source of truth is the deployed backend, not the local machine.
-// Users who want local-first iteration can run `palbase web gen --env local`
-// or keep `palbase serve` running separately; the prebuild hook also pins
-// --env remote so CI/builds never regress to a localhost URL.
-const webLinkCodegenEnv = "remote"
+// webArtifactsDir is the committed directory the SDK generators read — the
+// SAME convention `palbase spec` uses for iOS (openapi.json +
+// palbase-config.json under ./Palbase).
+const webArtifactsDir = "Palbase"
 
-// webLinkCodegen is the codegen seam. Tests replace it with a stub; production
-// calls pullTSTypes via the real ts codegen pipeline (env webLinkCodegenEnv).
-var webLinkCodegen = func(ctx context.Context, r Resolvers, ref, outFile string, w io.Writer) error {
+// webLinkArtifacts is the artifact-fetch seam: it resolves the deployed
+// branch target (apikey.reveal), downloads openapi.json wake-aware, fetches
+// the oauth provider availability best-effort, and writes the two committed
+// files @palbase/web's `palbe-gen` consumes offline:
+//
+//	Palbase/openapi.json          the API contract
+//	Palbase/palbase-config.json   {url, api_key, branch, oauth?} (flat, web)
+//
+// The CLI does NOT generate the client — client codegen is the SDKs' job
+// (`palbe-gen`, shipped in @palbase/web), exactly as the iOS split works
+// (`palbase spec` fetches, the PalbaseCodegen SPM plugin generates). Tests
+// replace the seam with a stub.
+var webLinkArtifacts = func(ctx context.Context, r Resolvers, ref string, w io.Writer) error {
 	// branch: load from .palbase/config.json DefaultEnv, or default to "main".
 	branch := "main"
 	if cfg, err := auth.LoadProjectConfig(); err == nil && cfg.DefaultEnv != "" {
 		branch = cfg.DefaultEnv
 	}
-	return pullTSTypes(ctx, r.Studio(), r.Endpoints(), ref, branch, webLinkCodegenEnv, outFile, w)
+	target, err := lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref, branch)
+	if err != nil {
+		return err
+	}
+	spec, err := fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"), spec, 0o644); err != nil {
+		return err
+	}
+	cfg := map[string]any{"url": target.URL, "api_key": target.APIKey, "branch": branch}
+	if oauth, _ := fetchOAuthProviders(ctx, target.URL, target.APIKey); oauth != nil {
+		cfg["oauth"] = oauth
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"), append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "✓ wrote %s/openapi.json + %s/palbase-config.json (commit them)\n", webArtifactsDir, webArtifactsDir)
+	return nil
 }
 
 // webCmd holds the resolvers for the web command group.
@@ -68,23 +99,23 @@ type webCmd struct {
 	r Resolvers
 }
 
-// webTypesCmd is the predev/prebuild hook value. --env remote pins codegen to
-// the deployed backend so repeated builds never regress to a localhost URL
-// (the "auto" default tries localhost:4003 first and can pick up whatever
-// happens to be running there). `|| exit 0` covers a machine without the CLI
-// installed (command-not-found exits 127, which --soft alone cannot swallow).
-const webTypesCmd = "palbase web gen --env remote --soft || exit 0"
+// webTypesCmd is the predev/prebuild hook value: the SDK's own generator
+// (`palbe-gen`, shipped in @palbase/web's bin) regenerates palbe.gen.ts from
+// the COMMITTED Palbase/ artifacts — offline, no CLI, no login. `--soft`
+// swallows generator errors; `|| exit 0` covers a machine where @palbase/web
+// isn't installed yet (command-not-found exits 127, which --soft alone
+// cannot swallow).
+const webTypesCmd = "palbe-gen --soft || exit 0"
 
 // newWebCmd builds the `palbase web` command group: link/unlink wire the
-// project, `gen` (interim, until @palbase/web owns its generator) regenerates
-// the typed client.
+// project. Client generation lives in @palbase/web (`palbe-gen`), not here.
 func newWebCmd(r Resolvers) *cobra.Command {
 	wc := &webCmd{r: r}
 	cmd := &cobra.Command{
 		Use:   "web",
 		Short: "Wire a web project to a Palbase project",
 	}
-	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd(), newTypesCmd(r))
+	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd())
 	return cmd
 }
 
@@ -152,9 +183,18 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				return fmt.Errorf("update .gitignore: %w", err)
 			}
 
-			// 4. First codegen.
-			if err := webLinkCodegen(ctx, wc.r, ref, outFile, out); err != nil {
-				return fmt.Errorf("codegen: %w", err)
+			// 4. Fetch the committed SDK-generator inputs (openapi.json +
+			// palbase-config.json under Palbase/). The CLI stops here —
+			// generating palbe.gen.ts is @palbase/web's job (palbe-gen).
+			if err := webLinkArtifacts(ctx, wc.r, ref, out); err != nil {
+				return fmt.Errorf("fetch artifacts: %w", err)
+			}
+
+			// 4b. First generation via the SDK's generator when it is
+			// installed; otherwise leave the instruction (predev/prebuild
+			// hooks regenerate on every build once @palbase/web is in).
+			if err := runPalbeGen(ctx, outFile, out); err != nil {
+				return err
 			}
 
 			// 5. Patch package.json scripts.
@@ -187,6 +227,28 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 	cmd.Flags().StringVar(&entryFlag, "entry", "", "Entry file to wire the import into (auto-detected when absent)")
 	cmd.Flags().StringVar(&outFlag, "out", "", "Gen file name (default: palbe.gen.ts)")
 	return cmd
+}
+
+// palbeGenBin locates the project-local palbe-gen binary @palbase/web ships.
+// A var so tests can point it at a stub.
+var palbeGenBin = filepath.Join("node_modules", ".bin", "palbe-gen")
+
+// runPalbeGen runs the SDK's generator for the first palbe.gen.ts when
+// @palbase/web is already installed; when it isn't, it prints the follow-up
+// instead of failing the link (npm install → the predev/prebuild hook takes
+// over from there).
+func runPalbeGen(ctx context.Context, outFile string, w io.Writer) error {
+	if _, err := os.Stat(palbeGenBin); err != nil {
+		fmt.Fprintln(w, "  @palbase/web not installed yet — run `npm install @palbase/web` then `npx palbe-gen` to generate the typed client")
+		return nil
+	}
+	c := exec.CommandContext(ctx, palbeGenBin, "--out", outFile)
+	c.Stdout = w
+	c.Stderr = w
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("palbe-gen: %w", err)
+	}
+	return nil
 }
 
 // newWebUnlinkCmd builds `palbase web unlink`.
