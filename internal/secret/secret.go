@@ -5,6 +5,7 @@
 package secret
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -154,6 +155,7 @@ type envVar struct {
 
 func listCmd(studioFn func() *studio.Client) *cobra.Command {
 	var refFlag string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all env vars for the branch (secrets shown masked)",
@@ -163,12 +165,17 @@ func listCmd(studioFn func() *studio.Client) *cobra.Command {
 				return err
 			}
 
-			var rows []envVar
+			rows := []envVar{}
 			if err := studioFn().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &rows); err != nil {
 				return fmt.Errorf("env.list: %w", err)
 			}
 
 			out := cmd.OutOrStdout()
+			if jsonOut {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(rows)
+			}
 			if len(rows) == 0 {
 				fmt.Fprintln(out, "(no env vars)")
 				return nil
@@ -177,6 +184,7 @@ func listCmd(studioFn func() *studio.Client) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/flags"
 	"github.com/palgroup/palbase-cli/internal/notifications"
 	"github.com/palgroup/palbase-cli/internal/project"
+	"github.com/palgroup/palbase-cli/internal/scaffold"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/storage"
 	"github.com/palgroup/palbase-cli/internal/studio"
@@ -106,6 +107,9 @@ func main() {
 		logoutCmd(),
 		whoamiCmd(),
 		modeCmd(),
+		doctorCmd(),
+		openCmd(),
+		scaffold.Cmd(),
 		project.Cmd(project.Resolvers{
 			REST:   func() project.REST { return managementREST() },
 			Studio: func() *studio.Client { return studioClient },

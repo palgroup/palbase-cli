@@ -19,6 +19,7 @@
 package flags
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -42,11 +43,11 @@ var flagKeyRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 // generated file is lossless; ParsedDefault is the decoded value used for
 // validation + display.
 type flagDef struct {
-	Key            string
-	Type           string // "boolean" | "number" | "string"
-	DefaultLiteral string // raw TS literal, e.g. `false`, `10`, `"light"`
-	Variants       []string
-	Description    string
+	Key            string   `json:"key"`
+	Type           string   `json:"type"` // "boolean" | "number" | "string"
+	DefaultLiteral string   `json:"default"` // raw TS literal, e.g. `false`, `10`, `"light"`
+	Variants       []string `json:"variants,omitempty"`
+	Description    string   `json:"description,omitempty"`
 }
 
 // Cmd returns the `palbase flags` parent command. It takes no resolvers: flag
@@ -175,6 +176,7 @@ To actually delete it, remove it from the Studio Feature Flags page after pushin
 }
 
 func listCmd() *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List the flags declared in config/flags.ts",
@@ -185,16 +187,25 @@ func listCmd() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if len(declared) == 0 {
-				fmt.Fprintf(out, "no flags declared in %s\n", configPath)
-				fmt.Fprintln(out, "  add one: palbase flags add <key> --type boolean --default false")
-				return nil
-			}
 			keys := make([]string, 0, len(declared))
 			for k := range declared {
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
+			if jsonOut {
+				defs := []flagDef{}
+				for _, k := range keys {
+					defs = append(defs, declared[k])
+				}
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(defs)
+			}
+			if len(declared) == 0 {
+				fmt.Fprintf(out, "no flags declared in %s\n", configPath)
+				fmt.Fprintln(out, "  add one: palbase flags add <key> --type boolean --default false")
+				return nil
+			}
 			fmt.Fprintf(out, "flags declared in %s:\n", configPath)
 			for _, k := range keys {
 				fmt.Fprintf(out, "  %-24s %s\n", k, describe(declared[k]))
@@ -202,6 +213,7 @@ func listCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 

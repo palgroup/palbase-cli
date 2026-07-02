@@ -16,6 +16,7 @@
 package notifications
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -58,7 +59,8 @@ encrypted env vars — they never enter git.`,
 
 // providersCmd lists the catalog + which providers are configured in config.
 func providersCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "providers",
 		Short: "List the known providers and which are configured in config/notifications.ts",
 		Args:  cobra.NoArgs,
@@ -68,6 +70,29 @@ func providersCmd() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			status := func(name string) string {
+				if entry, ok := cfg[name]; ok {
+					if entry.enabled {
+						return "configured (enabled)"
+					}
+					return "configured (disabled)"
+				}
+				return "available"
+			}
+			if jsonOut {
+				type row struct {
+					Name    string `json:"name"`
+					Channel string `json:"channel"`
+					Status  string `json:"status"`
+				}
+				rows := []row{}
+				for _, spec := range catalog {
+					rows = append(rows, row{Name: spec.name, Channel: spec.channel, Status: status(spec.name)})
+				}
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(rows)
+			}
 			fmt.Fprintf(out, "Notification providers (configured in %s marked):\n\n", configPath)
 			for _, ch := range []string{"push", "email", "sms"} {
 				fmt.Fprintf(out, "  %s:\n", ch)
@@ -75,21 +100,15 @@ func providersCmd() *cobra.Command {
 					if spec.channel != ch {
 						continue
 					}
-					status := "available"
-					if entry, ok := cfg[spec.name]; ok {
-						if entry.enabled {
-							status = "configured (enabled)"
-						} else {
-							status = "configured (disabled)"
-						}
-					}
-					fmt.Fprintf(out, "    %-10s %s\n", spec.name, status)
+					fmt.Fprintf(out, "    %-10s %s\n", spec.name, status(spec.name))
 				}
 			}
 			fmt.Fprintf(out, "\nConfigure one: palbase notifications add <provider> [flags]\n")
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	return cmd
 }
 
 // addCmd configures a single provider: it (1) uploads the provider's secret(s)

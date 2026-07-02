@@ -101,17 +101,31 @@ export default defineSchema({
 });
 `
 
+// helloModelTS names the response schema in a model file: the runtime's
+// metadata extraction REQUIRES a NAMED zod schema as the return type (inline
+// object types are rejected with "return type must be a NAMED zod schema" and
+// the endpoint silently registers 0 routes).
+const helloModelTS = `import { z } from "@palbase/backend";
+
+// GET /hello response → operationId getHello → pb.getHello().
+export const HelloSchema = z.object({
+  message: z.string(),
+});
+export type HelloSchema = z.infer<typeof HelloSchema>;
+`
+
 const helloControllerTS = `import { Controller, Get } from "@palbase/backend";
+import { HelloSchema } from "../models/hello/shared";
 
 // Controllers live in controllers/*.controller.ts and MUST be the file's
 // default export. Endpoints are secure by default (a signed-in user is
 // required); { auth: false } opts this one out so a plain anon-key request
-// works right after deploy. The response schema is inferred from the
-// method's return type.
+// works right after deploy. The response schema comes from the method's
+// return type — it must be a NAMED zod schema (see models/hello/shared.ts).
 @Controller("/hello", { auth: false })
 export default class HelloController {
   @Get("")
-  async hello(): Promise<{ message: string }> {
+  hello(): HelloSchema {
     return { message: "Hello from Palbase!" };
   }
 }
@@ -135,6 +149,7 @@ Writes a minimal working skeleton:
   package.json                      @palbase/backend dependency + scripts
   tsconfig.json                     experimentalDecorators enabled
   db/schema.ts                      config-as-code Postgres schema
+  models/hello/shared.ts            named zod response schema
   controllers/hello.controller.ts   example class controller
   .gitignore
 
@@ -161,6 +176,7 @@ Refuses to run in a directory that already contains a package.json.`,
 				{"package.json", fmt.Sprintf(packageJSON, name)},
 				{"tsconfig.json", tsconfigJSON},
 				{filepath.Join("db", "schema.ts"), schemaTS},
+				{filepath.Join("models", "hello", "shared.ts"), helloModelTS},
 				{filepath.Join("controllers", "hello.controller.ts"), helloControllerTS},
 				{".gitignore", gitignore},
 			}

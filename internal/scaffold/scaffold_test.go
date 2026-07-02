@@ -38,6 +38,7 @@ var scaffoldFiles = []string{
 	"package.json",
 	"tsconfig.json",
 	filepath.Join("db", "schema.ts"),
+	filepath.Join("models", "hello", "shared.ts"),
 	filepath.Join("controllers", "hello.controller.ts"),
 	".gitignore",
 }
@@ -68,8 +69,16 @@ func TestInit_EmptyDir(t *testing.T) {
 	ctrl := read(filepath.Join("controllers", "hello.controller.ts"))
 	assert.Contains(t, ctrl, "export default class HelloController")
 	assert.Contains(t, ctrl, `@Controller("/hello"`)
-	assert.Contains(t, ctrl, "Promise<{ message: string }>")
+	// The runtime REQUIRES a NAMED zod schema as the return type — an inline
+	// object type is rejected and the endpoint registers 0 routes (found by
+	// the live `palbase serve` smoke). Lock the named-schema shape.
+	assert.Contains(t, ctrl, "hello(): HelloSchema")
+	assert.Contains(t, ctrl, `import { HelloSchema } from "../models/hello/shared"`)
+	assert.NotContains(t, ctrl, "Promise<{")
 	assert.NotContains(t, ctrl, "@Returns")
+	model := read(filepath.Join("models", "hello", "shared.ts"))
+	assert.Contains(t, model, "export const HelloSchema = z.object({")
+	assert.Contains(t, model, "export type HelloSchema = z.infer<typeof HelloSchema>")
 	assert.Contains(t, read(".gitignore"), "node_modules/")
 }
 

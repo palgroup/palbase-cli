@@ -54,7 +54,7 @@ func NewClient(cfg Config, output io.Writer) *Client {
 		Cfg:         cfg,
 		HttpClient:  &http.Client{Timeout: 30 * time.Second},
 		Output:      output,
-		OpenBrowser: openURL,
+		OpenBrowser: OpenURL,
 	}
 }
 
@@ -440,7 +440,8 @@ func (c *Client) GetFreshToken(ctx context.Context, minRemaining time.Duration) 
 	return creds.AccessToken, nil
 }
 
-func openURL(u string) error {
+// OpenURL opens u in the platform browser (exported for `palbase open`).
+func OpenURL(u string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", u).Start()

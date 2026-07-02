@@ -17,6 +17,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -52,10 +53,10 @@ var unitBytes = map[string]int64{
 // shape the SDK's BucketDef serializes (public, fileSizeLimit bytes-or-nil,
 // allowedMimeTypes list-or-nil).
 type bucketDef struct {
-	Name             string
-	Public           bool
-	FileSizeLimit    *int64
-	AllowedMimeTypes []string
+	Name             string   `json:"name"`
+	Public           bool     `json:"public"`
+	FileSizeLimit    *int64   `json:"file_size_limit,omitempty"`
+	AllowedMimeTypes []string `json:"allowed_mime_types,omitempty"`
 }
 
 // Cmd returns the `palbase storage` parent command. It takes no resolvers:
@@ -210,6 +211,7 @@ it from the Studio Storage page after pushing.`,
 }
 
 func bucketsListCmd() *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List the buckets declared in config/storage.ts",
@@ -220,16 +222,25 @@ func bucketsListCmd() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if len(buckets) == 0 {
-				fmt.Fprintf(out, "no buckets declared in %s\n", configPath)
-				fmt.Fprintln(out, "  add one: palbase storage add <name> [--public] [--max-size 5MB] [--mime image/png]")
-				return nil
-			}
 			names := make([]string, 0, len(buckets))
 			for n := range buckets {
 				names = append(names, n)
 			}
 			sort.Strings(names)
+			if jsonOut {
+				defs := []bucketDef{}
+				for _, n := range names {
+					defs = append(defs, buckets[n])
+				}
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(defs)
+			}
+			if len(buckets) == 0 {
+				fmt.Fprintf(out, "no buckets declared in %s\n", configPath)
+				fmt.Fprintln(out, "  add one: palbase storage add <name> [--public] [--max-size 5MB] [--mime image/png]")
+				return nil
+			}
 			fmt.Fprintf(out, "buckets declared in %s:\n", configPath)
 			for _, n := range names {
 				fmt.Fprintf(out, "  %-20s %s\n", n, describe(buckets[n]))
@@ -237,6 +248,7 @@ func bucketsListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 

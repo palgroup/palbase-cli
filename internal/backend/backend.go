@@ -791,6 +791,7 @@ type changes).
 
 func newDeploysCmd(r Resolvers) *cobra.Command {
 	var refFlag string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "deploys",
 		Short: "Show deploy history (newest first)",
@@ -799,7 +800,7 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var resp struct {
+			resp := struct {
 				Versions []struct {
 					Version   string    `json:"version"`
 					Files     int       `json:"files"`
@@ -807,9 +808,14 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 					Message   string    `json:"message"`
 				} `json:"versions"`
 				ActiveVersion string `json:"active_version"`
-			}
+			}{}
 			if err := r.Studio().Query(cmd.Context(), "backend.versions", map[string]any{"ref": ref}, &resp); err != nil {
 				return fmt.Errorf("backend.versions: %w", err)
+			}
+			if jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(resp)
 			}
 			if len(resp.Versions) == 0 {
 				fmt.Println("(no versions)")
@@ -833,6 +839,7 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 
