@@ -20,8 +20,10 @@ type ProjectConfig struct {
 	Ref        string `json:"ref"`
 	DefaultEnv string `json:"default_env"`
 	// Mode is "platform" (GitHub-free, deploy via tarball) or "github"
-	// (deploy via git push → webhook). Empty defaults to "github" for
-	// backward compatibility with pre-existing linked projects.
+	// (deploy via git push → webhook). Empty means PLATFORM: github is never
+	// implicit — only an explicit "github" takes the git path (see
+	// backend.resolveMode). `project create` leaves this unset unless both
+	// --github-account and --repo are given.
 	Mode       string `json:"mode,omitempty"`
 	GithubRepo string `json:"github_repo,omitempty"`
 	// IOSAppID is the registered ios app `palbase ios link` bound this project
