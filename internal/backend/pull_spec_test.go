@@ -74,7 +74,8 @@ func TestRunPullSpec_EmptyAppNeverWritesConfig(t *testing.T) {
 			t.Error("spec must not fetch config with empty appID")
 			return apps.ConfigArtifact{}, errors.New("unreachable")
 		},
-		"abc1", "main", dir, "", io.Discard,
+		"abc1", "main", dir, "",
+		false, io.Discard,
 	)
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(dir, "openapi.json"))
@@ -98,7 +99,8 @@ func TestPullSpec_WritesSpecOnly(t *testing.T) {
 		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{}, errors.New("must not fetch config without --app")
 		},
-		"abc1", "main", dir, "", io.Discard,
+		"abc1", "main", dir, "",
+		false, io.Discard,
 	)
 	require.NoError(t, err)
 
@@ -153,7 +155,8 @@ func TestPullSpec_ConfigShape(t *testing.T) {
 			require.Truef(t, ok, "unexpected envRef %q", envRef)
 			return art, nil
 		},
-		"prod", "main", dir, "app_1", io.Discard,
+		"prod", "main", dir, "app_1",
+		false, io.Discard,
 	)
 	require.NoError(t, err)
 
@@ -206,7 +209,8 @@ func TestPullSpec_NoBundleIDErrors(t *testing.T) {
 		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{}, errors.New("should not be reached: binding has no bundle id")
 		},
-		"x", "main", dir, "app_x", io.Discard,
+		"x", "main", dir, "app_x",
+		false, io.Discard,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no environment with a registered bundle id")
@@ -233,7 +237,8 @@ func TestPullSpec_DuplicateBundleIDErrors(t *testing.T) {
 		func(_ context.Context, _, envRef, _ string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{AppID: "app_d", Identifier: "com.dup", ProjectRef: envRef}, nil
 		},
-		"x", "main", dir, "app_d", io.Discard,
+		"x", "main", dir, "app_d",
+		false, io.Discard,
 	)
 	require.Error(t, err)
 	require.Contains(t, strings.ToLower(err.Error()), "share the bundle id")

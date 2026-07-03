@@ -89,7 +89,9 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 			if err := runPullSpec(ctx,
 				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
 				studioBindingLister(sc), studioConfigArtifactFetch(sc),
-				ref, branch, outDir, appID, out); err != nil {
+				ref, branch, outDir, appID,
+				true, // ios use is an EXPLICIT re-target: error if the branch reached no env
+				out); err != nil {
 				return err
 			}
 

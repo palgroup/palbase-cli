@@ -186,3 +186,94 @@ func TestIOSUse_BranchAppliesOnlyToRefBinding(t *testing.T) {
 	require.Equal(t, "", branchByRef["dev0bvec"],
 		"a DIFFERENT project's binding must NOT get the branch (it has no such branch) — resolves at its own default")
 }
+
+// TestIOSUse_ErrorsWhenBranchAppliesToNothing locks the OPPOSITE edge of the
+// branch-scoping fix: `ios use <branch>` is an EXPLICIT re-target, so if the
+// linked ref matches NO binding (or the ref's binding has an empty identifier),
+// the branch reaches no config entry — openapi.json would point at <branch> while
+// palbase-config.json points every env at main, a mismatched pair. That MUST error
+// loudly, not print "✓ targets branch" and save DefaultEnv. (ios link / spec take
+// requireBranchApplied=false, so their default-branch flow is unaffected — locked
+// by TestIOSLink*/TestPullSpec*.)
+func TestIOSUse_ErrorsWhenBranchAppliesToNothing(t *testing.T) {
+	cases := []struct {
+		name     string
+		bindings []map[string]any // apps.listBindings response
+	}{
+		{
+			// (b) the ref (todoappm8p6z) is NOT among the app's bindings at all.
+			name: "ref matches no binding",
+			bindings: []map[string]any{
+				{"project_ref": "other0ref", "identifier": "com.demo.other", "env_preset": "production"},
+			},
+		},
+		{
+			// (a) the ref binding EXISTS but its identifier is empty → skipped
+			// before the branch-scoping block, so the branch is applied to nothing.
+			name: "ref binding has empty identifier",
+			bindings: []map[string]any{
+				{"project_ref": "todoappm8p6z", "identifier": "", "env_preset": "production"},
+				{"project_ref": "other0ref", "identifier": "com.demo.other", "env_preset": "dev"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{
+				Ref: "todoappm8p6z", DefaultEnv: "main", IOSAppID: "app_ios1",
+			}))
+			rig := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/trpc/apikey.reveal":
+					iosTRPCOK(w, map[string]any{
+						"endpointRef":    "todoappm8p6zd",
+						"publishableKey": "pb_todoappm8p6zd_ckey",
+					})
+				case "/api/trpc/apps.listBindings":
+					iosTRPCOK(w, tc.bindings)
+				case "/api/trpc/apps.configArtifact":
+					// Any binding that resolves does so at its own default (main).
+					in := iosQueryInput(t, r)
+					ref, _ := in["projectRef"].(string)
+					iosTRPCOK(w, map[string]any{
+						"app_id": "app_ios1", "project_ref": ref, "endpoint_ref": ref + "m",
+						"api_key": "pb_" + ref + "m_ckey", "base_url": "https://" + ref + "m.dev.palbase.studio",
+						"env_preset": "production", "platform": "ios", "identifier": "com.demo.other",
+					})
+				case "/openapi.json":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"openapi":"3.1.0","paths":{}}`))
+				case "/auth/oauth/providers":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					t.Errorf("unexpected call %s", r.URL.Path)
+					http.Error(w, "unexpected", http.StatusInternalServerError)
+				}
+			})
+			restore := redirectHostTo(t, "todoappm8p6zd.dev.palbase.studio", rig.BaseURL)
+			defer restore()
+
+			cmd := newIOSUseCmd(Resolvers{
+				Studio:    func() *studio.Client { return rig },
+				Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
+			})
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetArgs([]string{"dev"})
+			err := cmd.Execute()
+
+			require.Error(t, err, "use must fail when the branch re-targets nothing")
+			require.Contains(t, err.Error(), "nothing to re-target")
+			require.NotContains(t, out.String(), "now targets branch",
+				"must NOT report success when it retargeted nothing")
+
+			// And DefaultEnv must NOT be advanced to the branch on failure.
+			cfg, cfgErr := auth.LoadProjectConfig()
+			require.NoError(t, cfgErr)
+			require.Equal(t, "main", cfg.DefaultEnv,
+				"a failed re-target must not leave the project pointing at the branch")
+		})
+	}
+}

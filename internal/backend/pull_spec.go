@@ -89,7 +89,9 @@ link' to refresh it, not spec.`,
 				fetchRemoteOpenAPISpec,
 				studioBindingLister(r.Studio()),
 				studioConfigArtifactFetch(r.Studio()),
-				ref, branch, outDir, "", os.Stdout,
+				ref, branch, outDir, "",
+				false, // spec: appID=="" so config isn't built; branch is a default, not a re-target demand
+				os.Stdout,
 			)
 		},
 	}
@@ -125,6 +127,7 @@ func runPullSpec(
 	list bindingLister,
 	cfgFetch configArtifactFetch,
 	ref, branch, outDir, appID string,
+	requireBranchApplied bool,
 	w io.Writer,
 ) error {
 	target, err := lookup(ctx, ref, branch)
@@ -158,9 +161,19 @@ func runPullSpec(
 	// The branch is a branch of THIS project (ref) only — other env-bindings live
 	// in their own projects with their own branch namespaces, so branch is applied
 	// solely to the ref binding and left at each other binding's default (main).
-	configByBundle, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch, w)
+	configByBundle, branchApplied, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch, w)
 	if err != nil {
 		return err
+	}
+	// `ios use <branch>` is an EXPLICIT re-target: if the branch reached no env
+	// (ref matches no binding, or the ref binding has no registered bundle id),
+	// the config would silently point every env at main while openapi.json points
+	// at <branch> — a mismatched pair reported as success. Fail loudly instead.
+	// `ios link`/`spec` pass requireBranchApplied=false: their branch is a silent
+	// default (main), not a user demand, and their ref routinely differs from the
+	// app's env-project refs, so the branch legitimately applies to nothing.
+	if requireBranchApplied && branch != "" && !branchApplied {
+		return fmt.Errorf("branch %q requested but app %q has no environment bound to project ref %q (its binding is missing or has no registered bundle id) — nothing to re-target", branch, appID, ref)
 	}
 	data, err := json.MarshalIndent(configByBundle, "", "  ")
 	if err != nil {
@@ -179,18 +192,24 @@ func runPullSpec(
 // emitIOSBundleKeyedPlist uses, including the merged OAuth block), and keys the
 // result by bundle id. A binding with no registered bundle id is skipped with a
 // warning; if none has one the call errors (nothing to write).
+// buildPullSpecConfig returns (config-by-bundle, branchApplied, error). branchApplied
+// is true iff a NON-empty branchName was actually stamped onto a written entry — i.e.
+// a binding whose project_ref == ref survived the empty-identifier skip AND landed in
+// the output. The caller uses it to fail loudly when a user EXPLICITLY asked to
+// re-target a branch (`ios use`) but the branch reached no env (see runPullSpec).
 func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
 	fetch configArtifactFetch,
 	appID, ref, branchName string,
 	w io.Writer,
-) (map[string]pullSpecConfigEntry, error) {
+) (map[string]pullSpecConfigEntry, bool, error) {
 	bindings, err := list(ctx, appID)
 	if err != nil {
-		return nil, fmt.Errorf("list app %q bindings: %w", appID, err)
+		return nil, false, fmt.Errorf("list app %q bindings: %w", appID, err)
 	}
 	out := make(map[string]pullSpecConfigEntry)
+	branchApplied := false
 	for _, bnd := range bindings {
 		if bnd.Identifier == "" {
 			fmt.Fprintf(w, "skipping env %s: no registered bundle id (configure it in Studio → apps → bindings)\n", bnd.ProjectRef)
@@ -201,15 +220,16 @@ func buildPullSpecConfig(
 		// every other env-binding is a separate project with its own branch
 		// namespace, so it resolves at its own default (main) branch.
 		bndBranch := ""
-		if bnd.ProjectRef == ref {
+		isRefBinding := bnd.ProjectRef == ref
+		if isRefBinding {
 			bndBranch = branchName
 		}
 		art, err := fetch(ctx, appID, bnd.ProjectRef, bndBranch)
 		if err != nil {
-			return nil, fmt.Errorf("fetch config artifact for env %s: %w", bnd.ProjectRef, err)
+			return nil, false, fmt.Errorf("fetch config artifact for env %s: %w", bnd.ProjectRef, err)
 		}
 		if _, dup := out[art.Identifier]; dup {
-			return nil, fmt.Errorf("two environments share the bundle id %q — each environment must register a distinct bundle id", art.Identifier)
+			return nil, false, fmt.Errorf("two environments share the bundle id %q — each environment must register a distinct bundle id", art.Identifier)
 		}
 		entry := pullSpecConfigEntry{
 			AppID:      art.AppID,
@@ -235,9 +255,12 @@ func buildPullSpecConfig(
 			}
 		}
 		out[art.Identifier] = entry
+		if isRefBinding && branchName != "" {
+			branchApplied = true
+		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before `palbase spec`", appID)
+		return nil, false, fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before `palbase spec`", appID)
 	}
-	return out, nil
+	return out, branchApplied, nil
 }

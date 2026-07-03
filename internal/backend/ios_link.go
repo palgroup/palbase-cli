@@ -270,7 +270,10 @@ func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Write
 
 	// Fetch openapi.json + palbase-config.json — the exact `palbase spec` core, so
 	// the two commands can never drift on the artifact contents.
-	if err := runPullSpec(ctx, d.lookup, d.fetch, d.list, d.cfgFetch, opts.ref, opts.branch, opts.outDir, appID, w); err != nil {
+	// requireBranchApplied=false: link's branch is a silent default (main), and it
+	// binds the GROUP's environments — its ref need not be one of them, so the
+	// branch legitimately applies to nothing. Only `ios use` demands the branch land.
+	if err := runPullSpec(ctx, d.lookup, d.fetch, d.list, d.cfgFetch, opts.ref, opts.branch, opts.outDir, appID, false, w); err != nil {
 		return nil, err
 	}
 
