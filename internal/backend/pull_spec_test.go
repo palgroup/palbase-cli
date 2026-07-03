@@ -70,7 +70,7 @@ func TestRunPullSpec_EmptyAppNeverWritesConfig(t *testing.T) {
 			t.Error("spec must not list bindings with empty appID")
 			return nil, errors.New("unreachable")
 		},
-		func(context.Context, string, string) (apps.ConfigArtifact, error) {
+		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			t.Error("spec must not fetch config with empty appID")
 			return apps.ConfigArtifact{}, errors.New("unreachable")
 		},
@@ -95,7 +95,7 @@ func TestPullSpec_WritesSpecOnly(t *testing.T) {
 		stubTarget("https://abc1m.dev.palbase.studio", "pb_abc1m_ckey"),
 		stubFetch(spec, &fetchedURL),
 		func(context.Context, string) ([]AppBinding, error) { return nil, errors.New("must not list without --app") },
-		func(context.Context, string, string) (apps.ConfigArtifact, error) {
+		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{}, errors.New("must not fetch config without --app")
 		},
 		"abc1", "main", dir, "", io.Discard,
@@ -147,7 +147,7 @@ func TestPullSpec_ConfigShape(t *testing.T) {
 			require.Equal(t, "app_1", appID)
 			return bindings, nil
 		},
-		func(_ context.Context, appID, envRef string) (apps.ConfigArtifact, error) {
+		func(_ context.Context, appID, envRef, _ string) (apps.ConfigArtifact, error) {
 			require.Equal(t, "app_1", appID)
 			art, ok := arts[envRef]
 			require.Truef(t, ok, "unexpected envRef %q", envRef)
@@ -203,7 +203,7 @@ func TestPullSpec_NoBundleIDErrors(t *testing.T) {
 		func(context.Context, string) ([]AppBinding, error) {
 			return []AppBinding{{ProjectRef: "r1", Identifier: ""}}, nil
 		},
-		func(context.Context, string, string) (apps.ConfigArtifact, error) {
+		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{}, errors.New("should not be reached: binding has no bundle id")
 		},
 		"x", "main", dir, "app_x", io.Discard,
@@ -230,7 +230,7 @@ func TestPullSpec_DuplicateBundleIDErrors(t *testing.T) {
 				{ProjectRef: "r2", Identifier: "com.dup"},
 			}, nil
 		},
-		func(_ context.Context, _, envRef string) (apps.ConfigArtifact, error) {
+		func(_ context.Context, _, envRef, _ string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{AppID: "app_d", Identifier: "com.dup", ProjectRef: envRef}, nil
 		},
 		"x", "main", dir, "app_d", io.Discard,

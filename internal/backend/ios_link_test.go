@@ -73,7 +73,7 @@ func iosStubPullSeams(t *testing.T, wantApp string) (specTargetLookup, remoteSpe
 				{ProjectRef: "stgref", Identifier: "com.x.app.stg", EnvPreset: "staging"},
 			}, nil
 		},
-		func(_ context.Context, appID, envRef string) (apps.ConfigArtifact, error) {
+		func(_ context.Context, appID, envRef, _ string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{
 				AppID: appID, ProjectRef: envRef, Identifier: ids[envRef],
 				EnvPreset: "production", BaseURL: "https://x", APIKey: "pb_x",
@@ -97,7 +97,7 @@ func mustNotPull(t *testing.T) (specTargetLookup, remoteSpecFetch, bindingLister
 			t.Error("binding list must not run")
 			return nil, errors.New("unreachable")
 		},
-		func(context.Context, string, string) (apps.ConfigArtifact, error) {
+		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			t.Error("config fetch must not run")
 			return apps.ConfigArtifact{}, errors.New("unreachable")
 		}
@@ -217,6 +217,18 @@ func TestIOSCmd_Tree(t *testing.T) {
 		require.Equalf(t, tc.def, f.DefValue, "--%s default", tc.name)
 	}
 	require.NotNil(t, link.Flags().Lookup("bundle-id"), "missing repeatable --bundle-id flag")
+
+	// ios also has a `use <branch>` child (re-target an existing wiring).
+	var use *cobra.Command
+	for _, c := range cmd.Commands() {
+		if c.Name() == "use" {
+			use = c
+		}
+	}
+	require.NotNil(t, use, "ios must have a `use` subcommand")
+	require.NotNil(t, use.Flags().Lookup("ref"))
+	require.NotNil(t, use.Flags().Lookup("app"))
+	require.NotNil(t, use.Flags().Lookup("out-dir"))
 }
 
 // ── happy path ───────────────────────────────────────────────────────────────

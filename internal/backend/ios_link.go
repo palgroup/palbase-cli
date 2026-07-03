@@ -107,7 +107,7 @@ func newIOSCmd(r Resolvers) *cobra.Command {
 		Use:   "ios",
 		Short: "Wire an iOS app to a Palbase project",
 	}
-	cmd.AddCommand(newIOSLinkCmd(r))
+	cmd.AddCommand(newIOSLinkCmd(r), newIOSUseCmd(r))
 	return cmd
 }
 
@@ -183,6 +183,12 @@ environment without a bundle id is skipped; at least one must be bound.`,
 			}, human)
 			if err != nil {
 				return err
+			}
+			// Persist the resolved ios app id so `palbase ios use <branch>` can
+			// re-target without re-resolving the group's app every time.
+			if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg != nil && cfg.IOSAppID != summary.AppID {
+				cfg.IOSAppID = summary.AppID
+				_ = auth.SaveProjectConfig(cfg)
 			}
 			if jsonOut {
 				fmt.Fprintln(stdout, renderJSON(summary))

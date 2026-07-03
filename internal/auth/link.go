@@ -24,6 +24,11 @@ type ProjectConfig struct {
 	// backward compatibility with pre-existing linked projects.
 	Mode       string `json:"mode,omitempty"`
 	GithubRepo string `json:"github_repo,omitempty"`
+	// IOSAppID is the registered ios app `palbase ios link` bound this project
+	// to. `palbase ios use <branch>` reads it so it can refresh the config
+	// without re-resolving the group's ios app every time. Empty until an
+	// ios app is linked.
+	IOSAppID string `json:"ios_app_id,omitempty"`
 }
 
 // Project represents a project as the Studio tRPC layer returns it.

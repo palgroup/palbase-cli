@@ -14,12 +14,14 @@ import (
 // iOS Swift codegen + Xcode-project wiring (and every Go-side plist emitter)
 // that used to live here moved to that plugin.
 
-// configArtifactFetch fetches the per-(app × env) config artifact for one env.
-// It abstracts the Studio apps.configArtifact query so the codegen emit is
-// unit-testable without a live tRPC server (tests inject a stub that returns
-// the per-env artifacts directly). The envRef is always a BARE project ref (the
-// binding's project_ref); there is no branch-composed ref.
-type configArtifactFetch func(ctx context.Context, appID, envRef string) (apps.ConfigArtifact, error)
+// configArtifactFetch fetches the per-(app × env) config artifact for one env,
+// optionally targeting a specific BRANCH of that env (branchName ""→ the env's
+// main branch). It abstracts the Studio apps.configArtifact query so the codegen
+// emit is unit-testable without a live tRPC server (tests inject a stub that
+// returns the per-env artifacts directly). envRef is the BARE project ref (the
+// binding's project_ref); branchName selects which of that env's branches the
+// base_url + key resolve to (`palbase ios use <branch>`).
+type configArtifactFetch func(ctx context.Context, appID, envRef, branchName string) (apps.ConfigArtifact, error)
 
 // AppBinding is the subset of an apps.listBindings row the codegen emit needs:
 // the env's bare project ref, its registered bundle id (identifier — ” when the
@@ -53,12 +55,16 @@ type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
 func studioConfigArtifactFetch(q interface {
 	Query(ctx context.Context, path string, input any, out any) error
 }) configArtifactFetch {
-	return func(ctx context.Context, appID, envRef string) (apps.ConfigArtifact, error) {
+	return func(ctx context.Context, appID, envRef, branchName string) (apps.ConfigArtifact, error) {
 		var art apps.ConfigArtifact
-		if err := q.Query(ctx, "apps.configArtifact", map[string]any{
+		input := map[string]any{
 			"appId":      appID,
 			"projectRef": envRef,
-		}, &art); err != nil {
+		}
+		if branchName != "" {
+			input["branchName"] = branchName
+		}
+		if err := q.Query(ctx, "apps.configArtifact", input, &art); err != nil {
 			return apps.ConfigArtifact{}, err
 		}
 		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)
