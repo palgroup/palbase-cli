@@ -155,7 +155,10 @@ func runPullSpec(
 	// The config artifacts resolve to the SAME branch the openapi came from, so
 	// `palbase ios use <branch>` produces an openapi + config pair that both point
 	// at that branch's pod. `spec` (config-less, appID=="") never reaches here.
-	configByBundle, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, branch, w)
+	// The branch is a branch of THIS project (ref) only — other env-bindings live
+	// in their own projects with their own branch namespaces, so branch is applied
+	// solely to the ref binding and left at each other binding's default (main).
+	configByBundle, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch, w)
 	if err != nil {
 		return err
 	}
@@ -180,7 +183,7 @@ func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
 	fetch configArtifactFetch,
-	appID, branchName string,
+	appID, ref, branchName string,
 	w io.Writer,
 ) (map[string]pullSpecConfigEntry, error) {
 	bindings, err := list(ctx, appID)
@@ -193,9 +196,15 @@ func buildPullSpecConfig(
 			fmt.Fprintf(w, "skipping env %s: no registered bundle id (configure it in Studio → apps → bindings)\n", bnd.ProjectRef)
 			continue
 		}
-		// branchName ""→ the env's main branch; `palbase ios use <branch>` passes
-		// a branch so base_url + key resolve to that branch's endpoint_ref.
-		art, err := fetch(ctx, appID, bnd.ProjectRef, branchName)
+		// The branch belongs to THIS project (ref) only. Apply it to the ref
+		// binding so its base_url + key resolve to that branch's endpoint_ref;
+		// every other env-binding is a separate project with its own branch
+		// namespace, so it resolves at its own default (main) branch.
+		bndBranch := ""
+		if bnd.ProjectRef == ref {
+			bndBranch = branchName
+		}
+		art, err := fetch(ctx, appID, bnd.ProjectRef, bndBranch)
 		if err != nil {
 			return nil, fmt.Errorf("fetch config artifact for env %s: %w", bnd.ProjectRef, err)
 		}
