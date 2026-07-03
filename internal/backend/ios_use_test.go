@@ -94,14 +94,14 @@ func TestIOSUse_TargetsBranch(t *testing.T) {
 		"use must record the branch as the active target so `spec` follows it")
 	require.Equal(t, "app_ios1", cfg.IOSAppID, "app id must be preserved")
 
-	// The config points at the branch host.
+	// The config is a FLAT single-env object pointing at the branch host.
 	raw, err := os.ReadFile(filepath.Join("Palbase", "palbase-config.json"))
 	require.NoError(t, err)
-	var byBundle map[string]map[string]any
-	require.NoError(t, json.Unmarshal(raw, &byBundle))
-	require.Contains(t, byBundle, "com.demo.palbase")
+	var cfgFile map[string]any
+	require.NoError(t, json.Unmarshal(raw, &cfgFile))
+	require.Equal(t, "com.demo.palbase", cfgFile["identifier"], "config is the flat ref-binding entry")
 	require.Equal(t, "https://todoappm8p6zd.dev.palbase.studio",
-		byBundle["com.demo.palbase"]["base_url"], "config base_url must be the branch host")
+		cfgFile["base_url"], "config base_url must be the branch host")
 
 	require.Contains(t, out.String(), `targets branch "mybranch"`)
 	require.Contains(t, out.String(), "archive") // the stale-target warning
@@ -185,34 +185,35 @@ func TestIOSUse_BranchAppliesOnlyToRefBinding(t *testing.T) {
 		"a DIFFERENT project's binding must NOT get the branch (it has no such branch) — resolves at its own default")
 }
 
-// TestIOSUse_ErrorsWhenBranchAppliesToNothing locks the OPPOSITE edge of the
-// branch-scoping fix: `ios use <branch>` is an EXPLICIT re-target, so if the
-// linked ref matches NO binding (or the ref's binding has an empty identifier),
-// the branch reaches no config entry — openapi.json would point at <branch> while
-// palbase-config.json points every env at main, a mismatched pair. That MUST error
-// loudly, not print "✓ targets branch" and save DefaultEnv. (ios link / spec take
-// requireBranchApplied=false, so their default-branch flow is unaffected — locked
-// by TestIOSLink*/TestPullSpec*.)
+// TestIOSUse_ErrorsWhenBranchAppliesToNothing locks the branch-scoping fix, now
+// enforced by the SINGLE-env buildPullSpecConfig: `ios use <branch>` re-targets
+// the ONE binding whose project_ref == the linked ref. If the ref matches NO
+// binding, or the ref binding has an empty identifier, there is nothing to
+// re-target — buildPullSpecConfig errors ("not bound to project ref" /
+// "no registered bundle id"), so `use` must fail loudly, NOT print success and
+// save DefaultEnv.
 func TestIOSUse_ErrorsWhenBranchAppliesToNothing(t *testing.T) {
 	cases := []struct {
 		name     string
 		bindings []map[string]any // apps.listBindings response
+		wantErr  string
 	}{
 		{
-			// (b) the ref (todoappm8p6z) is NOT among the app's bindings at all.
+			// the ref (todoappm8p6z) is NOT among the app's bindings at all.
 			name: "ref matches no binding",
 			bindings: []map[string]any{
 				{"project_ref": "other0ref", "identifier": "com.demo.other", "env_preset": "production"},
 			},
+			wantErr: "not bound to project ref",
 		},
 		{
-			// (a) the ref binding EXISTS but its identifier is empty → skipped
-			// before the branch-scoping block, so the branch is applied to nothing.
+			// the ref binding EXISTS but its identifier is empty → can't config-match.
 			name: "ref binding has empty identifier",
 			bindings: []map[string]any{
 				{"project_ref": "todoappm8p6z", "identifier": "", "env_preset": "production"},
 				{"project_ref": "other0ref", "identifier": "com.demo.other", "env_preset": "dev"},
 			},
+			wantErr: "no registered bundle id",
 		},
 	}
 	for _, tc := range cases {
@@ -263,7 +264,7 @@ func TestIOSUse_ErrorsWhenBranchAppliesToNothing(t *testing.T) {
 			err := cmd.Execute()
 
 			require.Error(t, err, "use must fail when the branch re-targets nothing")
-			require.Contains(t, err.Error(), "nothing to re-target")
+			require.Contains(t, err.Error(), tc.wantErr)
 			require.NotContains(t, out.String(), "now targets branch",
 				"must NOT report success when it retargeted nothing")
 

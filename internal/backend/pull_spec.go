@@ -95,7 +95,6 @@ link' to refresh it, not spec.`,
 				studioBindingLister(r.REST()),
 				studioConfigArtifactFetch(r.REST()),
 				ref, branch, outDir, "",
-				false, // spec: appID=="" so config isn't built; branch is a default, not a re-target demand
 				os.Stdout,
 			)
 		},
@@ -132,7 +131,6 @@ func runPullSpec(
 	list bindingLister,
 	cfgFetch configArtifactFetch,
 	ref, branch, outDir, appID string,
-	requireBranchApplied bool,
 	w io.Writer,
 ) error {
 	target, err := lookup(ctx, ref, branch)
@@ -160,27 +158,20 @@ func runPullSpec(
 		return nil
 	}
 
-	// The config artifacts resolve to the SAME branch the openapi came from, so
-	// `palbase ios use <branch>` produces an openapi + config pair that both point
-	// at that branch's pod. `spec` (config-less, appID=="") never reaches here.
-	// The branch is a branch of THIS project (ref) only — other env-bindings live
-	// in their own projects with their own branch namespaces, so branch is applied
-	// solely to the ref binding and left at each other binding's default (main).
-	configByBundle, branchApplied, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch, w)
+	// SINGLE-env config: the config is for the ONE active target — the linked
+	// env-project (ref) at the requested branch. `ios link` sets it to production;
+	// `ios use <branch>` re-fetches it for that branch. There is no bundle-id→env
+	// map: the CLI already picked the one active env, so the SDK reads a flat
+	// {base_url, api_key, identifier} — no runtime bundle-id selection.
+	// `spec` (config-less, appID=="") never reaches here.
+	entry, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch)
 	if err != nil {
+		// With a single active env, an unresolvable/unbound ref is always a
+		// failure — `ios link` (production), `ios use <branch>`, and `spec` all
+		// surface it (spec never reaches here: appID=="").
 		return err
 	}
-	// `ios use <branch>` is an EXPLICIT re-target: if the branch reached no env
-	// (ref matches no binding, or the ref binding has no registered bundle id),
-	// the config would silently point every env at main while openapi.json points
-	// at <branch> — a mismatched pair reported as success. Fail loudly instead.
-	// `ios link`/`spec` pass requireBranchApplied=false: their branch is a silent
-	// default (main), not a user demand, and their ref routinely differs from the
-	// app's env-project refs, so the branch legitimately applies to nothing.
-	if requireBranchApplied && branch != "" && !branchApplied {
-		return fmt.Errorf("branch %q requested but app %q has no environment bound to project ref %q (its binding is missing or has no registered bundle id) — nothing to re-target", branch, appID, ref)
-	}
-	data, err := json.MarshalIndent(configByBundle, "", "  ")
+	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal palbase-config.json: %w", err)
 	}
@@ -188,84 +179,65 @@ func runPullSpec(
 	if err := os.WriteFile(cfgPath, append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
-	fmt.Fprintf(w, "✓ wrote %s (%d bundle id(s))\n", cfgPath, len(configByBundle))
+	fmt.Fprintf(w, "✓ wrote %s (%s → %s)\n", cfgPath, entry.Identifier, entry.BaseURL)
 	return nil
 }
 
-// buildPullSpecConfig resolves EVERY env the app is registered for (listBindings),
-// fetches each binding's config artifact by its BARE project_ref (the SAME path
-// emitIOSBundleKeyedPlist uses, including the merged OAuth block), and keys the
-// result by bundle id. A binding with no registered bundle id is skipped with a
-// warning; if none has one the call errors (nothing to write).
-// buildPullSpecConfig returns (config-by-bundle, branchApplied, error). branchApplied
-// is true iff a NON-empty branchName was actually stamped onto a written entry — i.e.
-// a binding whose project_ref == ref survived the empty-identifier skip AND landed in
-// the output. The caller uses it to fail loudly when a user EXPLICITLY asked to
-// re-target a branch (`ios use`) but the branch reached no env (see runPullSpec).
+// buildPullSpecConfig fetches the config artifact for the ONE active env — the
+// binding whose project_ref == ref, at branchName — and returns it as a single
+// flat entry. The active target is what the CLI already selected (`ios link` →
+// production, `ios use` → the branch); there is no per-bundle map. Errors when the
+// app has no binding for ref, or that binding has no registered bundle id
+// (identifier) — a config without an identifier can't config-match.
 func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
 	fetch configArtifactFetch,
 	appID, ref, branchName string,
-	w io.Writer,
-) (map[string]pullSpecConfigEntry, bool, error) {
+) (*pullSpecConfigEntry, error) {
 	bindings, err := list(ctx, appID)
 	if err != nil {
-		return nil, false, fmt.Errorf("list app %q bindings: %w", appID, err)
+		return nil, fmt.Errorf("list app %q bindings: %w", appID, err)
 	}
-	out := make(map[string]pullSpecConfigEntry)
-	branchApplied := false
-	for _, bnd := range bindings {
-		if bnd.Identifier == "" {
-			fmt.Fprintf(w, "skipping env %s: no registered bundle id (configure it in Studio → apps → bindings)\n", bnd.ProjectRef)
-			continue
-		}
-		// The branch belongs to THIS project (ref) only. Apply it to the ref
-		// binding so its base_url + key resolve to that branch's endpoint_ref;
-		// every other env-binding is a separate project with its own branch
-		// namespace, so it resolves at its own default (main) branch.
-		bndBranch := ""
-		isRefBinding := bnd.ProjectRef == ref
-		if isRefBinding {
-			bndBranch = branchName
-		}
-		art, err := fetch(ctx, appID, bnd.ProjectRef, bndBranch)
-		if err != nil {
-			return nil, false, fmt.Errorf("fetch config artifact for env %s: %w", bnd.ProjectRef, err)
-		}
-		if _, dup := out[art.Identifier]; dup {
-			return nil, false, fmt.Errorf("two environments share the bundle id %q — each environment must register a distinct bundle id", art.Identifier)
-		}
-		entry := pullSpecConfigEntry{
-			AppID:      art.AppID,
-			Identifier: art.Identifier,
-			EnvPreset:  art.EnvPreset,
-			BaseURL:    art.BaseURL,
-			APIKey:     art.APIKey,
-		}
-		if art.OAuth != nil {
-			oc := &oauthConfigJSON{}
-			if art.OAuth.Apple != nil {
-				oc.Apple = &oauthAppleJSON{Enabled: art.OAuth.Apple.Enabled}
-			}
-			if art.OAuth.Google != nil {
-				oc.Google = &oauthGoogleJSON{
-					Enabled:     art.OAuth.Google.Enabled,
-					ClientID:    art.OAuth.Google.ClientID,
-					RedirectURI: art.OAuth.Google.RedirectURI,
-				}
-			}
-			if oc.Apple != nil || oc.Google != nil {
-				entry.OAuth = oc
-			}
-		}
-		out[art.Identifier] = entry
-		if isRefBinding && branchName != "" {
-			branchApplied = true
+	var refBinding *AppBinding
+	for i := range bindings {
+		if bindings[i].ProjectRef == ref {
+			refBinding = &bindings[i]
+			break
 		}
 	}
-	if len(out) == 0 {
-		return nil, false, fmt.Errorf("app %q has no environment with a registered bundle id — register at least one bundle id in Studio (apps → bindings) before `palbase spec`", appID)
+	if refBinding == nil {
+		return nil, fmt.Errorf("app %q is not bound to project ref %q — run `palbase ios link` to bind it", appID, ref)
 	}
-	return out, branchApplied, nil
+	if refBinding.Identifier == "" {
+		return nil, fmt.Errorf("the %q binding has no registered bundle id — run `palbase ios link` (or `palbase apps bind`) first", ref)
+	}
+	art, err := fetch(ctx, appID, ref, branchName)
+	if err != nil {
+		return nil, fmt.Errorf("fetch config artifact for %s: %w", ref, err)
+	}
+	entry := &pullSpecConfigEntry{
+		AppID:      art.AppID,
+		Identifier: art.Identifier,
+		EnvPreset:  art.EnvPreset,
+		BaseURL:    art.BaseURL,
+		APIKey:     art.APIKey,
+	}
+	if art.OAuth != nil {
+		oc := &oauthConfigJSON{}
+		if art.OAuth.Apple != nil {
+			oc.Apple = &oauthAppleJSON{Enabled: art.OAuth.Apple.Enabled}
+		}
+		if art.OAuth.Google != nil {
+			oc.Google = &oauthGoogleJSON{
+				Enabled:     art.OAuth.Google.Enabled,
+				ClientID:    art.OAuth.Google.ClientID,
+				RedirectURI: art.OAuth.Google.RedirectURI,
+			}
+		}
+		if oc.Apple != nil || oc.Google != nil {
+			entry.OAuth = oc
+		}
+	}
+	return entry, nil
 }

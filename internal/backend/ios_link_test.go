@@ -92,16 +92,21 @@ func iosPostBody(t *testing.T, r *http.Request) map[string]any {
 }
 
 // iosStubPullSeams returns lookup/fetch/list/cfgFetch seams that satisfy
-// runPullSpec without a network: two bound envs whose artifacts key the
-// palbase-config.json.
+// runPullSpec without a network. The app is bound to several envs, but the
+// single-env config resolves the ONE whose project_ref == the linked ref
+// (production, "prodref") — the others are ignored by the config step.
 func iosStubPullSeams(t *testing.T, wantApp string) (specTargetLookup, remoteSpecFetch, bindingLister, configArtifactFetch) {
 	t.Helper()
-	ids := map[string]string{"prodref": "com.x.app", "stgref": "com.x.app.stg"}
+	// The linked ref (abc1) is itself one of the app's bindings — single-env
+	// buildPullSpecConfig writes the config for THAT binding. prodref/stgref are
+	// other envs the app is also bound to; they're ignored by the config step.
+	ids := map[string]string{"abc1": "com.x.app", "prodref": "com.x.app", "stgref": "com.x.app.stg"}
 	return stubTarget("https://abc1m.dev.palbase.studio", "pb_abc1m_ckey"),
 		stubFetch(`{"openapi":"3.1.0","paths":{}}`, nil),
 		func(_ context.Context, appID string) ([]AppBinding, error) {
 			require.Equal(t, wantApp, appID)
 			return []AppBinding{
+				{ProjectRef: "abc1", Identifier: "com.x.app", EnvPreset: "production"},
 				{ProjectRef: "prodref", Identifier: "com.x.app", EnvPreset: "production"},
 				{ProjectRef: "stgref", Identifier: "com.x.app.stg", EnvPreset: "staging"},
 			}, nil
@@ -191,25 +196,30 @@ func TestDetectXcodeBundleIDs(t *testing.T) {
 	require.Equal(t, []string{"com.acme.Todo"}, detectXcodeBundleIDs(dir))
 }
 
-// ── flag parsing ─────────────────────────────────────────────────────────────
+// ── bundle-id auto-selection (no prompt) ─────────────────────────────────────
 
-func TestParseBundleIDFlags(t *testing.T) {
+// TestPickAppBundleID: the app bundle id is chosen WITHOUT prompting — an
+// explicit --bundle-id wins; otherwise the MAIN app target is picked from the
+// pbxproj-detected ids (drop *Tests/*UITests, then shortest remaining).
+func TestPickAppBundleID(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		in      []string
-		want    map[string]string
-		wantErr string
+		name      string
+		flag      []string
+		suggested []string
+		want      string
+		wantErr   string
 	}{
-		{"empty", nil, map[string]string{}, ""},
-		{"two envs", []string{"prod=com.a", "stg=com.a.stg"}, map[string]string{"prod": "com.a", "stg": "com.a.stg"}, ""},
-		{"missing =", []string{"prodcom.a"}, nil, "expected <envRef>=<bundleId>"},
-		{"empty env", []string{"=com.a"}, nil, "expected <envRef>=<bundleId>"},
-		{"empty id", []string{"prod="}, nil, "expected <envRef>=<bundleId>"},
-		{"conflicting duplicate", []string{"prod=com.a", "prod=com.b"}, nil, "twice"},
-		{"agreeing duplicate ok", []string{"prod=com.a", "prod=com.a"}, map[string]string{"prod": "com.a"}, ""},
+		{"explicit flag wins", []string{"com.flag.app"}, []string{"com.detected.app"}, "com.flag.app", ""},
+		{"single detected", nil, []string{"com.acme.Todo"}, "com.acme.Todo", ""},
+		{"tests excluded, app kept", nil, []string{"com.acme.Todo", "com.acme.TodoTests"}, "com.acme.Todo", ""},
+		{"uitests excluded (case-insensitive)", nil, []string{"com.acme.Todo", "com.acme.TodoUITests"}, "com.acme.Todo", ""},
+		{"multiple non-test → shortest", nil, []string{"com.acme.Todo.widget", "com.acme.Todo"}, "com.acme.Todo", ""},
+		{"nothing detected → error", nil, nil, "", "could not detect the app bundle id"},
+		{"only test targets → error", nil, []string{"com.acme.TodoTests"}, "", "could not detect the app bundle id"},
+		{"two --bundle-id → error", []string{"com.a", "com.b"}, nil, "", "pass a single --bundle-id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseBundleIDFlags(tc.in)
+			got, err := pickAppBundleID(tc.flag, tc.suggested)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
@@ -238,7 +248,6 @@ func TestIOSCmd_Tree(t *testing.T) {
 	require.NotNil(t, link, "ios must have a `link` subcommand")
 
 	for _, tc := range []struct{ name, def string }{
-		{"ref", ""},
 		{"group", ""},
 		{"app", ""},
 		{"name", ""},
@@ -249,7 +258,10 @@ func TestIOSCmd_Tree(t *testing.T) {
 		require.NotNilf(t, f, "missing --%s flag", tc.name)
 		require.Equalf(t, tc.def, f.DefValue, "--%s default", tc.name)
 	}
-	require.NotNil(t, link.Flags().Lookup("bundle-id"), "missing repeatable --bundle-id flag")
+	require.NotNil(t, link.Flags().Lookup("bundle-id"), "missing --bundle-id override flag")
+	// `ios link` no longer takes --ref: it asks for the PRODUCT (group), not an
+	// env-project ref. The production env is resolved automatically.
+	require.Nil(t, link.Flags().Lookup("ref"), "ios link must NOT have a --ref flag (product-first)")
 
 	// ios also has a `use <branch>` child (re-target an existing wiring).
 	var use *cobra.Command
@@ -264,13 +276,14 @@ func TestIOSCmd_Tree(t *testing.T) {
 	require.NotNil(t, use.Flags().Lookup("out-dir"))
 }
 
-// ── happy path ───────────────────────────────────────────────────────────────
+// ── happy path (product → production → auto-bundle) ──────────────────────────
 
-// TestIOSLink_HappyPath: one group (auto-selected), no ios app (created), two
-// envs bound via --bundle-id flags, artifacts fetched into out-dir. Locks the
-// exact tRPC input field names (groupId/platform/displayName and
-// appId/projectRef/identifier — the same input bindCmd sends).
-func TestIOSLink_HappyPath(t *testing.T) {
+// TestIOSLink_ProductToProductionBundle: one product (auto-selected), no ios
+// app (created), bundle auto-detected from the pbxproj suggestions, bound to
+// PRODUCTION only, artifacts fetched into out-dir. This is the whole
+// product-first flow: the user picks ZERO things (one product, auto prod, auto
+// bundle) and gets a single production binding.
+func TestIOSLink_ProductToProductionBundle(t *testing.T) {
 	var createBody map[string]any
 	var createPath string
 	type bindCall struct {
@@ -291,8 +304,9 @@ func TestIOSLink_HappyPath(t *testing.T) {
 			iosRESTOK(w, http.StatusCreated, map[string]any{"id": "app_ios1", "platform": "ios", "display_name": "My App"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups/grp_1/environments":
 			iosRESTOK(w, http.StatusOK, []map[string]any{
-				{"ref": "prodref", "env_preset": "production", "env_display_name": "Production", "status": "active"},
+				// staging listed FIRST — production must still be the one picked.
 				{"ref": "stgref", "env_preset": "staging", "env_display_name": nil, "status": "active"},
+				{"ref": "prodref", "env_preset": "production", "env_display_name": "Production", "status": "active"},
 			})
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/apps/app_ios1/bindings/"):
 			binds = append(binds, bindCall{path: r.URL.Path, body: iosPostBody(t, r)})
@@ -303,6 +317,8 @@ func TestIOSLink_HappyPath(t *testing.T) {
 		}
 	})
 
+	// The stub pull seams key their production binding on "prodref" — the
+	// resolved production ref — so the single-env config resolves.
 	lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "app_ios1")
 	outDir := filepath.Join(t.TempDir(), "Palbase")
 	var buf bytes.Buffer
@@ -310,8 +326,10 @@ func TestIOSLink_HappyPath(t *testing.T) {
 		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{
-		ref: "abc1", branch: "main", name: "My App",
-		bundleIDs: []string{"prodref=com.x.app", "stgref=com.x.app.stg"},
+		branch: "main", name: "My App",
+		// no --bundle-id: auto-detected. The *Tests target must be dropped and
+		// the shorter app id chosen.
+		suggested: []string{"com.x.app", "com.x.appTests"},
 		outDir:    outDir,
 	}, &buf)
 	require.NoError(t, err)
@@ -320,37 +338,31 @@ func TestIOSLink_HappyPath(t *testing.T) {
 	require.Equal(t, "/api/v1/groups/grp_1/apps", createPath)
 	require.Equal(t, "ios", createBody["platform"])
 	require.Equal(t, "My App", createBody["name"])
-	require.NotContains(t, createBody, "groupId", "group id rides in the PATH")
-	require.NotContains(t, createBody, "displayName", "the field is `name`")
 
-	// bind calls, in env order: appId + projectRef in the PATH, {identifier} body.
-	require.Len(t, binds, 2)
+	// ONE bind — to production only. appId + projectRef in the PATH, {identifier} body.
+	require.Len(t, binds, 1, "ios link binds PRODUCTION only, not every env")
 	require.Equal(t, "/api/v1/apps/app_ios1/bindings/prodref", binds[0].path)
-	require.Equal(t, "com.x.app", binds[0].body["identifier"])
-	require.Equal(t, "/api/v1/apps/app_ios1/bindings/stgref", binds[1].path)
-	require.Equal(t, "com.x.app.stg", binds[1].body["identifier"])
+	require.Equal(t, "com.x.app", binds[0].body["identifier"], "the main app id (Tests dropped)")
 
-	// Artifacts landed in out-dir (spec + bundle-id-keyed config).
+	// Artifacts landed in out-dir (spec + single-env flat config).
 	for _, f := range []string{"openapi.json", "palbase-config.json"} {
 		_, statErr := os.Stat(filepath.Join(outDir, f))
 		require.NoErrorf(t, statErr, "%s must be written to out-dir", f)
 	}
 
-	// Summary (the --json shape).
+	// Summary (the --json shape): production ref + single binding.
 	require.Equal(t, "grp_1", summary.Group)
+	require.Equal(t, "prodref", summary.Ref)
 	require.Equal(t, "app_ios1", summary.AppID)
 	require.Equal(t, outDir, summary.OutDir)
-	require.Equal(t, []iosLinkBinding{
-		{Env: "prodref", BundleID: "com.x.app"},
-		{Env: "stgref", BundleID: "com.x.app.stg"},
-	}, summary.Bindings)
+	require.Equal(t, []iosLinkBinding{{Env: "prodref", BundleID: "com.x.app"}}, summary.Bindings)
 }
 
 // ── idempotent second run ────────────────────────────────────────────────────
 
 // TestIOSLink_SecondRunReusesExistingApp: apps.list already returns an ios app
-// → apps.create must NOT be called; the existing app id is reused for binding
-// and fetch.
+// → apps.create must NOT be called; the existing app id is reused for the
+// production binding and fetch.
 func TestIOSLink_SecondRunReusesExistingApp(t *testing.T) {
 	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -382,19 +394,20 @@ func TestIOSLink_SecondRunReusesExistingApp(t *testing.T) {
 		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{
-		ref: "abc1", branch: "main",
-		bundleIDs: []string{"prodref=com.x.app", "stgref=com.x.app.stg"},
+		branch:    "main",
+		suggested: []string{"com.x.app"},
 		outDir:    filepath.Join(t.TempDir(), "Palbase"),
 	}, io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, "ios_1", summary.AppID, "the existing ios app must be reused")
+	require.Equal(t, "prodref", summary.Ref)
 }
 
-// ── non-interactive missing info ─────────────────────────────────────────────
+// ── product selection ────────────────────────────────────────────────────────
 
-// TestIOSLink_MultipleGroupsNonInteractive: >1 group, no --group, no TTY →
-// actionable error listing the groups.
-func TestIOSLink_MultipleGroupsNonInteractive(t *testing.T) {
+// TestIOSLink_MultipleProductsNonInteractiveErrors: >1 product, no --group, no
+// TTY → actionable error listing the products (the ONLY thing the user picks).
+func TestIOSLink_MultipleProductsNonInteractiveErrors(t *testing.T) {
 	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
 		require.Equal(t, "/api/v1/groups", r.URL.Path)
@@ -407,26 +420,58 @@ func TestIOSLink_MultipleGroupsNonInteractive(t *testing.T) {
 	_, err := runIOSLink(context.Background(), iosLinkDeps{
 		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
-	}, iosLinkOpts{ref: "abc1", branch: "main", outDir: t.TempDir()}, io.Discard)
+	}, iosLinkOpts{branch: "main", suggested: []string{"com.x.app"}, outDir: t.TempDir()}, io.Discard)
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "multiple products")
 	require.Contains(t, err.Error(), "pass --group")
 	require.Contains(t, err.Error(), "grp_a")
 	require.Contains(t, err.Error(), "grp_b")
 }
 
-// TestIOSLink_NoBindingsNonInteractive: envs exist but no --bundle-id flags on
-// a non-TTY → every env is skipped and the run fails with actionable guidance
-// (before any bind or fetch).
-func TestIOSLink_NoBindingsNonInteractive(t *testing.T) {
+// TestIOSLink_AutoSelectsSingleProduct: exactly one product → no picker, it's
+// used automatically and the run proceeds to production.
+func TestIOSLink_AutoSelectsSingleProduct(t *testing.T) {
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/groups":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_solo", "name": "Solo", "plan": "free"}})
+		case r.URL.Path == "/api/v1/groups/grp_solo/apps":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "ios_solo", "platform": "ios", "display_name": "Solo App"}})
+		case r.URL.Path == "/api/v1/groups/grp_solo/environments":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
+				{"ref": "prodref", "env_preset": "production", "env_display_name": nil, "status": "active"},
+			})
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/apps/ios_solo/bindings/"):
+			iosRESTOK(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	})
+	lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "ios_solo")
+	var buf bytes.Buffer
+	summary, err := runIOSLink(context.Background(), iosLinkDeps{
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		stdin: strings.NewReader(""), interactive: false,
+	}, iosLinkOpts{
+		branch: "main", suggested: []string{"com.x.app"},
+		outDir: filepath.Join(t.TempDir(), "Palbase"),
+	}, &buf)
+	require.NoError(t, err)
+	require.Equal(t, "grp_solo", summary.Group)
+	require.Contains(t, buf.String(), "linking to Solo", "the single product is auto-selected, no picker")
+}
+
+// TestIOSLink_NoProductionEnvErrors: a product whose group has no production
+// env-project → the run fails with actionable guidance (before any bind/fetch).
+func TestIOSLink_NoProductionEnvErrors(t *testing.T) {
 	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/groups":
 			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
-		case r.URL.Path == "/api/v1/groups/grp_1/apps":
-			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "ios_1", "platform": "ios", "display_name": "My App"}})
 		case r.URL.Path == "/api/v1/groups/grp_1/environments":
 			iosRESTOK(w, http.StatusOK, []map[string]any{
-				{"ref": "prodref", "env_preset": "production", "env_display_name": nil, "status": "active"},
+				{"ref": "stgref", "env_preset": "staging", "env_display_name": nil, "status": "active"},
 			})
 		default:
 			t.Errorf("unexpected call %s %s (bind/fetch must not run)", r.Method, r.URL.Path)
@@ -434,58 +479,17 @@ func TestIOSLink_NoBindingsNonInteractive(t *testing.T) {
 		}
 	})
 	lookup, fetch, list, cfgFetch := mustNotPull(t)
-	var buf bytes.Buffer
 	_, err := runIOSLink(context.Background(), iosLinkDeps{
 		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
-	}, iosLinkOpts{ref: "abc1", branch: "main", outDir: t.TempDir()}, &buf)
+	}, iosLinkOpts{branch: "main", suggested: []string{"com.x.app"}, outDir: t.TempDir()}, io.Discard)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--bundle-id")
-	require.Contains(t, buf.String(), "skipping env prodref", "the skipped env must be surfaced")
+	require.Contains(t, err.Error(), "no production environment")
 }
 
-// TestIOSLink_UnknownEnvFlag: a --bundle-id naming a non-existent env is a
-// typo guard error, not a silent skip.
-func TestIOSLink_UnknownEnvFlag(t *testing.T) {
-	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/groups":
-			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
-		case "/api/v1/groups/grp_1/apps":
-			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "ios_1", "platform": "ios", "display_name": "My App"}})
-		case "/api/v1/groups/grp_1/environments":
-			iosRESTOK(w, http.StatusOK, []map[string]any{
-				{"ref": "prodref", "env_preset": "production", "env_display_name": nil, "status": "active"},
-			})
-		default:
-			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected", http.StatusInternalServerError)
-		}
-	})
-	lookup, fetch, list, cfgFetch := mustNotPull(t)
-	_, err := runIOSLink(context.Background(), iosLinkDeps{
-		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
-		stdin: strings.NewReader(""), interactive: false,
-	}, iosLinkOpts{
-		ref: "abc1", branch: "main", outDir: t.TempDir(),
-		bundleIDs: []string{"tpyoref=com.x.app"},
-	}, io.Discard)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), `unknown environment "tpyoref"`)
-	require.Contains(t, err.Error(), "prodref", "the error must list the real environments")
-}
-
-// ── interactive path ─────────────────────────────────────────────────────────
-
-// TestIOSLink_InteractivePickerAndPrompts: two groups → numbered picker
-// (choice 2); two envs → first gets a typed bundle id, second skipped by empty
-// input. The prompt shows the pbxproj-detected suggestions.
-func TestIOSLink_InteractivePickerAndPrompts(t *testing.T) {
-	type bindCall struct {
-		path string
-		body map[string]any
-	}
-	var binds []bindCall
+// TestIOSLink_InteractiveProductPicker: >1 product on a TTY → numbered picker
+// over PRODUCT names (not environments); choosing 2 links to that product.
+func TestIOSLink_InteractiveProductPicker(t *testing.T) {
 	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/groups":
@@ -498,10 +502,8 @@ func TestIOSLink_InteractivePickerAndPrompts(t *testing.T) {
 		case r.URL.Path == "/api/v1/groups/grp_b/environments":
 			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"ref": "prodref", "env_preset": "production", "env_display_name": "Production", "status": "active"},
-				{"ref": "stgref", "env_preset": "staging", "env_display_name": nil, "status": "active"},
 			})
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/apps/ios_b/bindings/"):
-			binds = append(binds, bindCall{path: r.URL.Path, body: iosPostBody(t, r)})
 			iosRESTOK(w, http.StatusOK, map[string]any{"ok": true})
 		default:
 			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
@@ -510,24 +512,21 @@ func TestIOSLink_InteractivePickerAndPrompts(t *testing.T) {
 	})
 
 	lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "ios_b")
-	// stdin: group choice "2", then bundle id for env 1, then empty (skip env 2).
-	stdin := strings.NewReader("2\ncom.typed.app\n\n")
+	stdin := strings.NewReader("2\n") // pick the second PRODUCT
 	var buf bytes.Buffer
 	summary, err := runIOSLink(context.Background(), iosLinkDeps{
 		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: stdin, interactive: true,
 	}, iosLinkOpts{
-		ref: "abc1", branch: "main",
+		branch:    "main",
 		outDir:    filepath.Join(t.TempDir(), "Palbase"),
 		suggested: []string{"com.acme.Todo"},
 	}, &buf)
 	require.NoError(t, err)
 
 	require.Equal(t, "grp_b", summary.Group)
-	require.Equal(t, []iosLinkBinding{{Env: "prodref", BundleID: "com.typed.app"}}, summary.Bindings)
-	require.Len(t, binds, 1)
-	require.Equal(t, "/api/v1/apps/ios_b/bindings/prodref", binds[0].path)
-	require.Equal(t, "com.typed.app", binds[0].body["identifier"])
-	require.Contains(t, buf.String(), "com.acme.Todo", "the prompt must surface the detected bundle ids")
-	require.Contains(t, buf.String(), "skipping env stgref")
+	require.Equal(t, "prodref", summary.Ref)
+	require.Equal(t, []iosLinkBinding{{Env: "prodref", BundleID: "com.acme.Todo"}}, summary.Bindings)
+	require.Contains(t, buf.String(), "Select a project:", "the picker is over products, not environments")
+	require.Contains(t, buf.String(), "Beta")
 }

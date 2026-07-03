@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -75,7 +74,7 @@ func TestRunPullSpec_EmptyAppNeverWritesConfig(t *testing.T) {
 			return apps.ConfigArtifact{}, errors.New("unreachable")
 		},
 		"abc1", "main", dir, "",
-		false, io.Discard,
+		io.Discard,
 	)
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(dir, "openapi.json"))
@@ -100,7 +99,7 @@ func TestPullSpec_WritesSpecOnly(t *testing.T) {
 			return apps.ConfigArtifact{}, errors.New("must not fetch config without --app")
 		},
 		"abc1", "main", dir, "",
-		false, io.Discard,
+		io.Discard,
 	)
 	require.NoError(t, err)
 
@@ -115,17 +114,18 @@ func TestPullSpec_WritesSpecOnly(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "no --app → palbase-config.json must NOT be written")
 }
 
-// TestPullSpec_ConfigShape is the table-driven lock on the palbase-config.json
-// shape (bundle-id-keyed entry: app_id/identifier/env_preset/base_url/api_key +
-// optional oauth) produced from the binding list + per-env config artifacts.
+// TestPullSpec_ConfigShape locks the palbase-config.json shape: a SINGLE FLAT
+// object (app_id/identifier/env_preset/base_url/api_key + optional oauth) for
+// the ONE binding whose project_ref == ref — NOT a bundle-id-keyed map. Other
+// bindings (different projects) are ignored; the CLI already picked the one
+// active env.
 func TestPullSpec_ConfigShape(t *testing.T) {
 	bindings := []AppBinding{
-		{ProjectRef: "prodref", Identifier: "com.x.app", EnvPreset: "production"},
-		{ProjectRef: "stgref", Identifier: "com.x.app.staging", EnvPreset: "staging"},
-		{ProjectRef: "noidref", Identifier: "", EnvPreset: "development"}, // skipped: no bundle id
+		{ProjectRef: "prod", Identifier: "com.x.app", EnvPreset: "production"},
+		{ProjectRef: "stgref", Identifier: "com.x.app.staging", EnvPreset: "staging"}, // different project, ignored
 	}
 	arts := map[string]apps.ConfigArtifact{
-		"prodref": {
+		"prod": {
 			AppID: "app_1", Identifier: "com.x.app", EnvPreset: "production",
 			BaseURL: "https://prodm.palbase.studio", APIKey: "pb_prodm_ckey",
 			OAuth: &apps.OAuthConfig{
@@ -133,14 +133,10 @@ func TestPullSpec_ConfigShape(t *testing.T) {
 				Google: &apps.OAuthGoogle{Enabled: true, ClientID: "123.apps.googleusercontent.com", RedirectURI: "com.googleusercontent.apps.123:/oauthredirect"},
 			},
 		},
-		"stgref": {
-			AppID: "app_1", Identifier: "com.x.app.staging", EnvPreset: "staging",
-			BaseURL: "https://stgs.palbase.studio", APIKey: "pb_stgs_ckey",
-			// no oauth on this env → entry.oauth omitted
-		},
 	}
 
 	dir := t.TempDir()
+	var fetchedRef string
 	err := runPullSpec(
 		context.Background(),
 		stubTarget("https://prodm.palbase.studio", "pb_prodm_ckey"),
@@ -151,95 +147,140 @@ func TestPullSpec_ConfigShape(t *testing.T) {
 		},
 		func(_ context.Context, appID, envRef, _ string) (apps.ConfigArtifact, error) {
 			require.Equal(t, "app_1", appID)
+			fetchedRef = envRef
 			art, ok := arts[envRef]
-			require.Truef(t, ok, "unexpected envRef %q", envRef)
+			require.Truef(t, ok, "config artifact fetched for the wrong env %q — must be the ref binding", envRef)
 			return art, nil
 		},
 		"prod", "main", dir, "app_1",
-		false, io.Discard,
+		io.Discard,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "prod", fetchedRef, "config artifact must be fetched for the REF binding's env")
+
+	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
+	require.NoError(t, err)
+
+	// FLAT object — not a map. Decoding into pullSpecConfigEntry directly must
+	// succeed with populated fields (mutation guard: if buildPullSpecConfig
+	// regressed to a bundle-id-keyed map, this flat decode sees no fields and the
+	// identifier assertion goes RED).
+	var got pullSpecConfigEntry
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, "app_1", got.AppID)
+	require.Equal(t, "com.x.app", got.Identifier)
+	require.Equal(t, "production", got.EnvPreset)
+	require.Equal(t, "https://prodm.palbase.studio", got.BaseURL)
+	require.Equal(t, "pb_prodm_ckey", got.APIKey)
+	require.NotNil(t, got.OAuth)
+	require.NotNil(t, got.OAuth.Apple)
+	require.True(t, got.OAuth.Apple.Enabled)
+	require.NotNil(t, got.OAuth.Google)
+	require.Equal(t, "123.apps.googleusercontent.com", got.OAuth.Google.ClientID)
+
+	// The top-level JSON keys are the flat fields (identifier, base_url, …), NOT a
+	// bundle id — locks that the file is not a bundle-id-keyed map.
+	var rawKeys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &rawKeys))
+	require.Contains(t, rawKeys, "identifier")
+	require.Contains(t, rawKeys, "base_url")
+	require.NotContains(t, rawKeys, "com.x.app", "config must be flat, not keyed by bundle id")
+	_, hasOAuth := rawKeys["oauth"]
+	require.True(t, hasOAuth, "provider env must include the oauth key")
+}
+
+// TestPullSpec_ConfigShape_OmitsOAuthWhenNoProviders: an env with no OAuth
+// providers must omit the `oauth` key entirely (omitempty) so the SPM plugin's
+// plist doesn't get an empty oauth dict.
+func TestPullSpec_ConfigShape_OmitsOAuthWhenNoProviders(t *testing.T) {
+	dir := t.TempDir()
+	err := runPullSpec(
+		context.Background(),
+		stubTarget("https://stgs.palbase.studio", "pb_stgs_ckey"),
+		stubFetch(`{"openapi":"3.1.0"}`, nil),
+		func(context.Context, string) ([]AppBinding, error) {
+			return []AppBinding{{ProjectRef: "stg", Identifier: "com.x.app.staging", EnvPreset: "staging"}}, nil
+		},
+		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
+			return apps.ConfigArtifact{
+				AppID: "app_1", Identifier: "com.x.app.staging", EnvPreset: "staging",
+				BaseURL: "https://stgs.palbase.studio", APIKey: "pb_stgs_ckey",
+				// no oauth
+			}, nil
+		},
+		"stg", "main", dir, "app_1",
+		io.Discard,
 	)
 	require.NoError(t, err)
 
 	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
 	require.NoError(t, err)
-	var got map[string]pullSpecConfigEntry
+	var got pullSpecConfigEntry
 	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Nil(t, got.OAuth, "env with no providers must omit the oauth block")
 
-	// Keyed by bundle id; the no-bundle-id binding is dropped.
-	require.Len(t, got, 2)
-	require.NotContains(t, got, "")
-
-	prod := got["com.x.app"]
-	require.Equal(t, "app_1", prod.AppID)
-	require.Equal(t, "com.x.app", prod.Identifier)
-	require.Equal(t, "production", prod.EnvPreset)
-	require.Equal(t, "https://prodm.palbase.studio", prod.BaseURL)
-	require.Equal(t, "pb_prodm_ckey", prod.APIKey)
-	require.NotNil(t, prod.OAuth)
-	require.NotNil(t, prod.OAuth.Apple)
-	require.True(t, prod.OAuth.Apple.Enabled)
-	require.NotNil(t, prod.OAuth.Google)
-	require.Equal(t, "123.apps.googleusercontent.com", prod.OAuth.Google.ClientID)
-
-	stg := got["com.x.app.staging"]
-	require.Equal(t, "staging", stg.EnvPreset)
-	require.Nil(t, stg.OAuth, "env with no providers must omit the oauth block")
-
-	// omitempty: the staging entry's serialized form carries NO oauth key, so the
-	// SPM plugin's plist doesn't get an empty oauth dict.
-	var rawByKey map[string]map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(raw, &rawByKey))
-	_, hasOAuth := rawByKey["com.x.app.staging"]["oauth"]
+	var rawKeys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &rawKeys))
+	_, hasOAuth := rawKeys["oauth"]
 	require.False(t, hasOAuth, "no-provider env must omit the oauth key from JSON")
-	_, prodHasOAuth := rawByKey["com.x.app"]["oauth"]
-	require.True(t, prodHasOAuth, "provider env must include the oauth key")
 }
 
-// TestPullSpec_NoBundleIDErrors: --app given but NO env has a registered bundle
-// id → error (nothing to write), matching the plist path's behavior.
-func TestPullSpec_NoBundleIDErrors(t *testing.T) {
+// TestPullSpec_ErrorsWhenRefBindingHasNoIdentifier: the ref binding EXISTS but
+// its identifier is empty → error (a config without a bundle id can't
+// config-match). openapi.json is still written first.
+func TestPullSpec_ErrorsWhenRefBindingHasNoIdentifier(t *testing.T) {
 	dir := t.TempDir()
 	err := runPullSpec(
 		context.Background(),
 		stubTarget("https://x.dev.palbase.studio", "pb_x_ckey"),
 		stubFetch(`{}`, nil),
 		func(context.Context, string) ([]AppBinding, error) {
-			return []AppBinding{{ProjectRef: "r1", Identifier: ""}}, nil
+			return []AppBinding{{ProjectRef: "x", Identifier: ""}}, nil
 		},
 		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
-			return apps.ConfigArtifact{}, errors.New("should not be reached: binding has no bundle id")
+			return apps.ConfigArtifact{}, errors.New("should not be reached: ref binding has no bundle id")
 		},
 		"x", "main", dir, "app_x",
-		false, io.Discard,
+		io.Discard,
 	)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no environment with a registered bundle id")
+	require.Contains(t, err.Error(), "no registered bundle id")
 
 	// openapi.json is still written before the config step fails.
 	_, statErr := os.Stat(filepath.Join(dir, "openapi.json"))
 	require.NoError(t, statErr)
+
+	// config was NOT written (the config step failed).
+	_, cfgErr := os.Stat(filepath.Join(dir, "palbase-config.json"))
+	require.True(t, os.IsNotExist(cfgErr), "no config must be written when the ref binding has no bundle id")
 }
 
-// TestPullSpec_DuplicateBundleIDErrors: two envs sharing one bundle id is a
-// config error (the plist path refuses the same collision).
-func TestPullSpec_DuplicateBundleIDErrors(t *testing.T) {
+// TestPullSpec_ErrorsWhenRefNotBound: --app given but NONE of its bindings match
+// the ref → error (the app isn't bound to this project). The config artifact is
+// never fetched.
+func TestPullSpec_ErrorsWhenRefNotBound(t *testing.T) {
 	dir := t.TempDir()
 	err := runPullSpec(
 		context.Background(),
 		stubTarget("https://x.dev.palbase.studio", "pb_x_ckey"),
 		stubFetch(`{}`, nil),
 		func(context.Context, string) ([]AppBinding, error) {
-			return []AppBinding{
-				{ProjectRef: "r1", Identifier: "com.dup"},
-				{ProjectRef: "r2", Identifier: "com.dup"},
-			}, nil
+			// Bindings exist, but for OTHER projects — none is the ref "x".
+			return []AppBinding{{ProjectRef: "other", Identifier: "com.other.app"}}, nil
 		},
-		func(_ context.Context, _, envRef, _ string) (apps.ConfigArtifact, error) {
-			return apps.ConfigArtifact{AppID: "app_d", Identifier: "com.dup", ProjectRef: envRef}, nil
+		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
+			return apps.ConfigArtifact{}, errors.New("should not be reached: ref not bound")
 		},
-		"x", "main", dir, "app_d",
-		false, io.Discard,
+		"x", "main", dir, "app_x",
+		io.Discard,
 	)
 	require.Error(t, err)
-	require.Contains(t, strings.ToLower(err.Error()), "share the bundle id")
+	require.Contains(t, err.Error(), "not bound to project ref")
+
+	// openapi.json is still written before the config step fails.
+	_, statErr := os.Stat(filepath.Join(dir, "openapi.json"))
+	require.NoError(t, statErr)
+
+	_, cfgErr := os.Stat(filepath.Join(dir, "palbase-config.json"))
+	require.True(t, os.IsNotExist(cfgErr), "no config must be written when the ref isn't bound")
 }

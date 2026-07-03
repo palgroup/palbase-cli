@@ -3,20 +3,24 @@ package backend
 // ios_link.go — `palbase ios link`
 //
 // The iOS symmetry of `palbase web link`: run in an Xcode project directory,
-// ONE command wires the app to a Palbase project without a Studio visit:
+// ONE command wires the app to a Palbase PRODUCT without a Studio visit. The
+// user answers ONE thing — which product (and only when they have several):
 //
-//  1. Best-effort detects candidate bundle ids from ./*.xcodeproj (used as
-//     prompt suggestions — a missing pbxproj is fine, flags/prompt cover it).
-//  2. resolveOrLinkRef — --ref / .palbase/config.json / interactive picker.
-//  3. Resolves the group (--group, the account's only group, or a picker).
-//  4. Reuses the group's first ios app, or registers one (POST group apps).
-//  5. Binds a bundle id per environment (PUT app binding) — from
-//     --bundle-id <envRef>=<bundleId> flags, or a per-env prompt on a TTY.
-//     An env without a bundle id is skipped; at least one must be bound.
-//  6. Fetches the SPM codegen plugin's inputs into --out-dir via the same
-//     runPullSpec core `palbase spec` uses (openapi.json +
-//     palbase-config.json).
-//  7. Prints the manual Xcode wiring steps (SPM package + build plugin).
+//  1. Pick the PRODUCT (a group). --group / your only product / a picker over
+//     product names. The user never sees or picks an "environment" or a ref.
+//  2. Resolve the product's PRODUCTION env-project (schema: exactly one per
+//     group). That becomes the linked project ref (written to .palbase/config).
+//  3. Auto-detect the app bundle id from ./*.xcodeproj (the MAIN app target —
+//     *Tests/*UITests excluded; --bundle-id overrides). NEVER prompted — the
+//     bundle id is the app's own identity, sent by the SDK at runtime.
+//  4. Reuse the product's ios app, or register one (POST group apps).
+//  5. Bind the bundle to PRODUCTION (PUT app binding).
+//  6. Fetch the SPM codegen plugin's inputs (openapi.json + palbase-config.json)
+//     into --out-dir via the same runPullSpec core `palbase spec` uses.
+//  7. Print the manual Xcode wiring steps (SPM package + build plugin).
+//
+// `palbase ios use <branch>` then switches BRANCHES within that production
+// project — the branch axis, orthogonal to the (hidden) env-project axis.
 
 import (
 	"bufio"
@@ -32,16 +36,8 @@ import (
 	"strings"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
-
-// iosGroupRow mirrors the groups.mine tRPC row shape.
-type iosGroupRow struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Plan string `json:"plan"`
-}
 
 // iosGroupEnvRow mirrors the groups.environments tRPC row shape (env_preset /
 // env_display_name may be JSON null — a null leaves the string field empty).
@@ -70,6 +66,7 @@ type iosLinkBinding struct {
 // iosLinkSummary is the --json output shape.
 type iosLinkSummary struct {
 	Group    string           `json:"group"`
+	Ref      string           `json:"ref"` // the linked production env-project ref
 	AppID    string           `json:"app_id"`
 	Bindings []iosLinkBinding `json:"bindings"`
 	OutDir   string           `json:"out_dir"`
@@ -96,7 +93,7 @@ type iosLinkOpts struct {
 	group     string
 	app       string
 	name      string
-	bundleIDs []string // raw --bundle-id values, <envRef>=<bundleId>
+	bundleIDs []string // --bundle-id override (else auto-detected from ./*.xcodeproj)
 	outDir    string
 	suggested []string // bundle ids detected from ./*.xcodeproj
 }
@@ -113,24 +110,23 @@ func newIOSCmd(r Resolvers) *cobra.Command {
 
 // newIOSLinkCmd builds `palbase ios link`.
 func newIOSLinkCmd(r Resolvers) *cobra.Command {
-	var refFlag, groupFlag, appFlag, nameFlag, outDir string
+	var groupFlag, appFlag, nameFlag, outDir string
 	var bundleIDs []string
 	var jsonOut bool
 
 	cmd := &cobra.Command{
 		Use:   "link",
-		Short: "Register this Xcode project's app, bind bundle ids and fetch SDK config",
-		Long: `Wire the iOS app in the current directory to a Palbase project in one
-command — no Studio visit needed:
+		Short: "Link this Xcode project to a Palbase product and fetch its SDK config",
+		Long: `Wire the iOS app in the current directory to a Palbase product in one
+command — no Studio visit needed. You pick ONE thing: your product.
 
-  1. registers an ios app under your group when none exists
-  2. binds a bundle id per environment
-  3. downloads the SPM codegen plugin's inputs into --out-dir
-     (openapi.json + palbase-config.json)
+  1. pick your product (or --group; auto-selected if you have only one)
+  2. its production environment is resolved automatically
+  3. the app bundle id is auto-detected from ./*.xcodeproj (--bundle-id overrides)
+  4. registers the ios app, binds the bundle, and downloads the codegen plugin's
+     inputs into --out-dir (openapi.json + palbase-config.json)
 
-Bundle ids come from --bundle-id <envRef>=<bundleId> flags (repeatable), or an
-interactive per-env prompt seeded with the ids detected in ./*.xcodeproj. An
-environment without a bundle id is skipped; at least one must be bound.`,
+Switch branches later with 'palbase ios use <branch>'.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			stdout := cmd.OutOrStdout()
@@ -146,20 +142,13 @@ environment without a bundle id is skipped; at least one must be bound.`,
 				fmt.Fprintf(human, "detected bundle id(s) in Xcode project: %s\n", strings.Join(suggested, ", "))
 			}
 
-			// Guard the Studio()/REST() calls like web link: constructing the tree
-			// with zero-value Resolvers must not panic. resolveOrLinkRef rides the
-			// tRPC studio client (project.list); apps + groups ride REST.
-			var sc *studio.Client
-			if r.Studio != nil {
-				sc = r.Studio()
-			}
+			// Guard the REST() call like web link: constructing the tree with
+			// zero-value Resolvers must not panic. `ios link` is REST-only now —
+			// it picks the PRODUCT (group) and binds/fetches over the Management
+			// API; no project.list (env-project) picker.
 			var rest restDoer
 			if r.REST != nil {
 				rest = r.REST()
-			}
-			ref, err := resolveOrLinkRef(ctx, refFlag, sc, human)
-			if err != nil {
-				return err
 			}
 			// Branch = the linked branch, else main (same as `palbase spec`).
 			branch := "main"
@@ -177,7 +166,6 @@ environment without a bundle id is skipped; at least one must be bound.`,
 				interactive: isInteractive(),
 			}
 			summary, err := runIOSLink(ctx, deps, iosLinkOpts{
-				ref:       ref,
 				branch:    branch,
 				group:     groupFlag,
 				app:       appFlag,
@@ -189,12 +177,16 @@ environment without a bundle id is skipped; at least one must be bound.`,
 			if err != nil {
 				return err
 			}
-			// Persist the resolved ios app id so `palbase ios use <branch>` can
-			// re-target without re-resolving the group's app every time.
-			if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg != nil && cfg.IOSAppID != summary.AppID {
-				cfg.IOSAppID = summary.AppID
-				_ = auth.SaveProjectConfig(cfg)
+			// Persist the linked production ref + ios app id so `palbase ios use
+			// <branch>` and `palbase spec` know which project/app to act on without
+			// re-resolving. This is what makes the product the "linked project".
+			cfg, _ := auth.LoadProjectConfig()
+			if cfg == nil {
+				cfg = &auth.ProjectConfig{}
 			}
+			cfg.Ref = summary.Ref
+			cfg.IOSAppID = summary.AppID
+			_ = auth.SaveProjectConfig(cfg)
 			if jsonOut {
 				fmt.Fprintln(stdout, renderJSON(summary))
 				return nil
@@ -203,126 +195,211 @@ environment without a bundle id is skipped; at least one must be bound.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json; required in non-interactive shells)")
 	cmd.Flags().StringVar(&groupFlag, "group", "", "Group id (defaults to your only group, or an interactive picker)")
 	cmd.Flags().StringVar(&appFlag, "app", "", "App id (defaults to the group's first ios app; created when absent)")
-	cmd.Flags().StringArrayVar(&bundleIDs, "bundle-id", nil, "Per-env bundle id as <envRef>=<bundleId> (repeatable)")
+	cmd.Flags().StringArrayVar(&bundleIDs, "bundle-id", nil, "App bundle id (overrides auto-detection from ./*.xcodeproj)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "Display name for a newly registered app (default: current directory name)")
 	cmd.Flags().StringVar(&outDir, "out-dir", "./Palbase", "Directory to write openapi.json + palbase-config.json")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit a JSON summary instead of human output")
 	return cmd
 }
 
-// runIOSLink is the testable core: resolve group → app → per-env bundle ids,
-// bind each, then fetch the plugin artifacts via runPullSpec. Returns the
-// summary the --json path serializes.
+// runIOSLink is the testable core: pick the PRODUCT (group) → resolve its
+// production env-project → auto-detect the bundle → register/bind → fetch the
+// plugin artifacts. Returns the summary the --json path serializes. The user is
+// asked for ONE thing: which product (and only when they have more than one).
 func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Writer) (*iosLinkSummary, error) {
 	if opts.outDir == "" {
 		opts.outDir = "./Palbase"
 	}
-	// ONE buffered reader for every interactive read — mixing per-prompt
-	// readers over the same stdin would swallow buffered lines between them.
-	reader := bufio.NewReader(d.stdin)
-
-	grpID, err := resolveIOSGroup(ctx, d, opts.group, reader, w)
+	// `ios link` binds an app to a PRODUCT. A product is a group (the umbrella
+	// that owns the product's environments) — so we pick the group, never an
+	// environment. The user sees products, not the internal env-project split.
+	grpID, err := pickIOSProduct(ctx, d, opts.group, w)
 	if err != nil {
 		return nil, err
 	}
+
+	// PRODUCTION is the target: a product's canonical environment is its
+	// production env-project (schema guarantees exactly one per group). The user
+	// never picks an environment — `ios use <branch>` switches within it later.
+	prodRef, err := resolveProductionRef(ctx, d, grpID)
+	if err != nil {
+		return nil, err
+	}
+
+	// The app's bundle id is NOT prompted — it's the app's own identity, read
+	// from ./*.xcodeproj (opts.suggested), and the SDK sends it on every request
+	// (X-Palbase-Bundle) at runtime. Pick the MAIN app target's id: the shortest
+	// non-test candidate (test/extension targets append a suffix to the app id).
+	bundleID, err := pickAppBundleID(opts.bundleIDs, opts.suggested)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(w, "using bundle id %s (production %s)\n", bundleID, prodRef)
+
 	appID, err := resolveIOSApp(ctx, d, grpID, opts.app, opts.name, w)
 	if err != nil {
 		return nil, err
 	}
 
-	var envs []iosGroupEnvRow
-	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups/"+grpID+"/environments", nil, &envs); err != nil {
-		return nil, fmt.Errorf("list group environments: %w", err)
+	// Bind the detected bundle to PRODUCTION only. Idempotent server-side for an
+	// unchanged value; appID + projectRef ride in the PATH, identifier in the body.
+	var res struct {
+		OK bool `json:"ok"`
 	}
-	if len(envs) == 0 {
-		return nil, fmt.Errorf("group %s has no environments — create one at the Palbase Studio dashboard first", grpID)
+	if err := d.rest.Do(ctx, http.MethodPut,
+		"/api/v1/apps/"+appID+"/bindings/"+prodRef,
+		map[string]any{"identifier": bundleID}, &res); err != nil {
+		return nil, fmt.Errorf("bind production %s as %s: %w", prodRef, bundleID, err)
 	}
-	flagIDs, err := parseBundleIDFlags(opts.bundleIDs)
-	if err != nil {
-		return nil, err
-	}
-	// Typo guard: a --bundle-id for an env that doesn't exist would otherwise
-	// be silently ignored (the loop below only visits real envs).
-	for env := range flagIDs {
-		if !envKnown(envs, env) {
-			return nil, fmt.Errorf("--bundle-id: unknown environment %q (environments: %s)", env, envRefList(envs))
-		}
-	}
+	fmt.Fprintf(w, "✓ bound production %s as %s\n", prodRef, bundleID)
 
-	bindings := resolveIOSBindings(d, envs, flagIDs, opts.suggested, reader, w)
-	if len(bindings) == 0 {
-		return nil, fmt.Errorf("no environments bound — pass --bundle-id <envRef>=<bundleId> (environments: %s)", envRefList(envs))
-	}
-
-	// Bind each (env × bundle id). The PUT bindings route is idempotent
-	// server-side for an unchanged value; a real conflict surfaces as the
-	// server's error. appID + projectRef ride in the PATH; only the identifier
-	// is in the body.
-	for _, b := range bindings {
-		var res struct {
-			OK bool `json:"ok"`
-		}
-		if err := d.rest.Do(ctx, http.MethodPut,
-			"/api/v1/apps/"+appID+"/bindings/"+b.Env,
-			map[string]any{"identifier": b.BundleID}, &res); err != nil {
-			return nil, fmt.Errorf("bind env %s as %s: %w", b.Env, b.BundleID, err)
-		}
-		fmt.Fprintf(w, "✓ bound env %s as %s\n", b.Env, b.BundleID)
-	}
-
-	// Fetch openapi.json + palbase-config.json — the exact `palbase spec` core, so
-	// the two commands can never drift on the artifact contents.
-	// requireBranchApplied=false: link's branch is a silent default (main), and it
-	// binds the GROUP's environments — its ref need not be one of them, so the
-	// branch legitimately applies to nothing. Only `ios use` demands the branch land.
-	if err := runPullSpec(ctx, d.lookup, d.fetch, d.list, d.cfgFetch, opts.ref, opts.branch, opts.outDir, appID, false, w); err != nil {
+	// Fetch openapi.json + palbase-config.json for production — the exact
+	// `palbase spec` core, so the two commands never drift on the artifacts.
+	if err := runPullSpec(ctx, d.lookup, d.fetch, d.list, d.cfgFetch, prodRef, opts.branch, opts.outDir, appID, w); err != nil {
 		return nil, err
 	}
 
-	return &iosLinkSummary{Group: grpID, AppID: appID, Bindings: bindings, OutDir: opts.outDir}, nil
+	return &iosLinkSummary{
+		Group:    grpID,
+		Ref:      prodRef,
+		AppID:    appID,
+		Bindings: []iosLinkBinding{{Env: prodRef, BundleID: bundleID}},
+		OutDir:   opts.outDir,
+	}, nil
 }
 
-// resolveIOSGroup picks the group: --group verbatim, the account's only group,
-// an interactive picker (pickProject's pattern), or an actionable error listing
-// the choices for non-interactive callers.
-func resolveIOSGroup(ctx context.Context, d iosLinkDeps, flag string, reader *bufio.Reader, w io.Writer) (string, error) {
+// iosProjectRow is the GET /api/v1/projects/{ref} shape — we only need group_id.
+type iosProjectRow struct {
+	GroupID string `json:"group_id"`
+}
+
+// resolveProductionRef returns the group's production env-project ref (the schema
+// guarantees exactly one env_preset='production' project per group). This is the
+// ref an iOS app links to — the user never selects an environment.
+func resolveProductionRef(ctx context.Context, d iosLinkDeps, grpID string) (string, error) {
+	var envs []iosGroupEnvRow
+	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups/"+grpID+"/environments", nil, &envs); err != nil {
+		return "", fmt.Errorf("list environments: %w", err)
+	}
+	for _, e := range envs {
+		if e.EnvPreset == "production" {
+			return e.Ref, nil
+		}
+	}
+	return "", fmt.Errorf("no production environment in this group — create the project's production environment in Studio first")
+}
+
+// pickAppBundleID chooses the app's bundle id WITHOUT prompting. An explicit
+// --bundle-id flag wins. Otherwise it picks the MAIN app target from the ids
+// detected in ./*.xcodeproj (opts.suggested): drop *Tests / *UITests targets,
+// then take the SHORTEST remaining id (test/extension targets append a suffix to
+// the app's own id, e.g. com.acme.app vs com.acme.app.widget). Only when nothing
+// is detected does it error asking for --bundle-id.
+func pickAppBundleID(flag []string, suggested []string) (string, error) {
+	if len(flag) == 1 && flag[0] != "" {
+		return flag[0], nil
+	}
+	if len(flag) > 1 {
+		return "", fmt.Errorf("pass a single --bundle-id (the app's bundle id), not %d", len(flag))
+	}
+	var candidates []string
+	for _, id := range suggested {
+		low := strings.ToLower(id)
+		if strings.HasSuffix(low, "tests") || strings.HasSuffix(low, "uitests") {
+			continue // test/UITest targets are not the app
+		}
+		candidates = append(candidates, id)
+	}
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("could not detect the app bundle id from ./*.xcodeproj — pass --bundle-id <bundleId>")
+	case 1:
+		return candidates[0], nil
+	default:
+		// Multiple non-test targets → the main app is the shortest (others are
+		// extensions/watch apps that suffix the app id).
+		best := candidates[0]
+		for _, c := range candidates[1:] {
+			if len(c) < len(best) {
+				best = c
+			}
+		}
+		return best, nil
+	}
+}
+
+// resolveIOSGroup derives the group from the ALREADY-SELECTED project ref — a
+// project belongs to exactly one group (projects.group_id), so the user never
+// picks a group: choosing the project IS choosing the group. `--group` stays as
+// an explicit override for the rare case the ref lookup can't resolve it.
+//
+// The group is an internal umbrella (it owns a product's per-environment projects
+// + the registered apps that bind across them); it is NOT a concept the user
+// should navigate. `ios link` asks only for the project; `ios use` asks only for
+// the branch.
+func resolveIOSGroup(ctx context.Context, d iosLinkDeps, flag, ref string, w io.Writer) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
-	var groups []iosGroupRow
-	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups", nil, &groups); err != nil {
-		return "", fmt.Errorf("list groups: %w", err)
+	if ref == "" {
+		return "", fmt.Errorf("no project ref to resolve the group from — pass --ref <project> or --group <id>")
+	}
+	var proj iosProjectRow
+	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &proj); err != nil {
+		return "", fmt.Errorf("resolve group for project %q: %w", ref, err)
+	}
+	if proj.GroupID == "" {
+		return "", fmt.Errorf("project %q has no group — pass --group <id>", ref)
+	}
+	return proj.GroupID, nil
+}
+
+// iosProductRow mirrors the GET /api/v1/groups row shape (id/name/plan).
+type iosProductRow struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Plan string `json:"plan"`
+}
+
+// pickIOSProduct resolves WHICH product to link to. A product is a group. With
+// --group, that. With one product, auto-select it (no prompt). With several, an
+// interactive picker over PRODUCT names — never over environments or refs. The
+// user picks one thing: their app's product.
+func pickIOSProduct(ctx context.Context, d iosLinkDeps, flag string, w io.Writer) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	var products []iosProductRow
+	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups", nil, &products); err != nil {
+		return "", fmt.Errorf("list your products: %w", err)
 	}
 	switch {
-	case len(groups) == 0:
-		return "", fmt.Errorf("no groups in your account — create a project at the Palbase Studio dashboard first")
-	case len(groups) == 1:
-		fmt.Fprintf(w, "using group %s (%s)\n", groups[0].Name, groups[0].ID)
-		return groups[0].ID, nil
+	case len(products) == 0:
+		return "", fmt.Errorf("no products in your account — create a project at the Palbase Studio dashboard first")
+	case len(products) == 1:
+		fmt.Fprintf(w, "linking to %s\n", products[0].Name)
+		return products[0].ID, nil
 	case !d.interactive:
 		var b strings.Builder
-		for _, g := range groups {
-			fmt.Fprintf(&b, "\n  %s  %s", g.ID, g.Name)
+		for _, p := range products {
+			fmt.Fprintf(&b, "\n  %s  %s", p.ID, p.Name)
 		}
-		return "", fmt.Errorf("multiple groups in your account — pass --group <id>:%s", b.String())
+		return "", fmt.Errorf("multiple products — pass --group <id>:%s", b.String())
 	}
-	fmt.Fprintln(w, "Select a group:")
-	for i, g := range groups {
-		fmt.Fprintf(w, "  %d) %s (%s)\n", i+1, g.Name, g.ID)
+	fmt.Fprintln(w, "Select a project:")
+	for i, p := range products {
+		fmt.Fprintf(w, "  %d) %s\n", i+1, p.Name)
 	}
 	fmt.Fprint(w, "Enter number: ")
-	line, readErr := readTrimmedLine(reader)
-	if readErr != nil && line == "" {
-		return "", fmt.Errorf("invalid selection: %w", readErr)
+	line, _ := bufio.NewReader(d.stdin).ReadString('\n')
+	choice, convErr := strconv.Atoi(strings.TrimSpace(line))
+	if convErr != nil || choice < 1 || choice > len(products) {
+		return "", fmt.Errorf("invalid selection: %q", strings.TrimSpace(line))
 	}
-	choice, convErr := strconv.Atoi(line)
-	if convErr != nil || choice < 1 || choice > len(groups) {
-		return "", fmt.Errorf("invalid selection: %q", line)
-	}
-	return groups[choice-1].ID, nil
+	fmt.Fprintf(w, "linking to %s\n", products[choice-1].Name)
+	return products[choice-1].ID, nil
 }
 
 // resolveIOSApp picks the app: --app verbatim, the group's first (live) ios
@@ -374,90 +451,6 @@ func resolveExistingIOSApp(ctx context.Context, rest restDoer, grpID string, w i
 		}
 	}
 	return "", nil
-}
-
-// resolveIOSBindings decides each env's bundle id: the --bundle-id flag wins;
-// otherwise a TTY prompts (empty input skips the env) and a non-TTY skips with
-// a warning. The caller enforces "at least one bound".
-func resolveIOSBindings(d iosLinkDeps, envs []iosGroupEnvRow, flagIDs map[string]string, suggested []string, reader *bufio.Reader, w io.Writer) []iosLinkBinding {
-	var out []iosLinkBinding
-	for _, e := range envs {
-		id := flagIDs[e.Ref]
-		switch {
-		case id != "":
-		case d.interactive:
-			id = promptBundleID(reader, e, suggested, w)
-			if id == "" {
-				fmt.Fprintf(w, "skipping env %s (no bundle id entered)\n", e.Ref)
-				continue
-			}
-		default:
-			fmt.Fprintf(w, "warning: skipping env %s — no --bundle-id %s=<bundleId> given\n", e.Ref, e.Ref)
-			continue
-		}
-		out = append(out, iosLinkBinding{Env: e.Ref, BundleID: id})
-	}
-	return out
-}
-
-// promptBundleID asks for one env's bundle id on a TTY, showing the
-// pbxproj-detected ids as suggestions. Empty input means "skip this env".
-func promptBundleID(reader *bufio.Reader, e iosGroupEnvRow, suggested []string, w io.Writer) string {
-	label := e.Ref
-	switch {
-	case e.EnvDisplayName != "":
-		label = fmt.Sprintf("%s (%s)", e.EnvDisplayName, e.Ref)
-	case e.EnvPreset != "":
-		label = fmt.Sprintf("%s (%s)", e.Ref, e.EnvPreset)
-	}
-	if len(suggested) > 0 {
-		fmt.Fprintf(w, "bundle id for %s [detected: %s] (empty to skip): ", label, strings.Join(suggested, ", "))
-	} else {
-		fmt.Fprintf(w, "bundle id for %s (empty to skip): ", label)
-	}
-	line, _ := readTrimmedLine(reader)
-	return line
-}
-
-// readTrimmedLine reads one line (trimmed) from the shared interactive reader.
-// EOF with partial content still returns the content.
-func readTrimmedLine(r *bufio.Reader) (string, error) {
-	line, err := r.ReadString('\n')
-	return strings.TrimSpace(line), err
-}
-
-// parseBundleIDFlags parses repeated --bundle-id <envRef>=<bundleId> values.
-func parseBundleIDFlags(vals []string) (map[string]string, error) {
-	out := make(map[string]string, len(vals))
-	for _, v := range vals {
-		env, id, ok := strings.Cut(v, "=")
-		env, id = strings.TrimSpace(env), strings.TrimSpace(id)
-		if !ok || env == "" || id == "" {
-			return nil, fmt.Errorf("--bundle-id %q: expected <envRef>=<bundleId>", v)
-		}
-		if prev, dup := out[env]; dup && prev != id {
-			return nil, fmt.Errorf("--bundle-id: environment %q given twice with different bundle ids (%q, %q)", env, prev, id)
-		}
-		out[env] = id
-	}
-	return out, nil
-}
-
-func envKnown(envs []iosGroupEnvRow, ref string) bool {
-	for _, e := range envs {
-		if e.Ref == ref {
-			return true
-		}
-	}
-	return false
-}
-
-func envRefList(envs []iosGroupEnvRow) string {
-	refs := make([]string, len(envs))
-	for i, e := range envs {
-		refs[i] = e.Ref
-	}
-	return strings.Join(refs, ", ")
 }
 
 // printIOSNextSteps prints the manual Xcode wiring the CLI cannot do itself

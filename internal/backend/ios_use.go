@@ -15,7 +15,6 @@ package backend
 // binds — that is link's job; it only re-targets an existing wiring.
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 
@@ -72,7 +71,8 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 				if rest == nil {
 					return fmt.Errorf("no ios app linked — run `palbase ios link` first, or pass --app <appId>")
 				}
-				grpID, gerr := resolveIOSGroup(ctx, iosLinkDeps{rest: rest, stdin: os.Stdin, interactive: isInteractive()}, groupFlag, bufio.NewReader(os.Stdin), out)
+				// Group derives from the resolved project ref — no group prompt.
+				grpID, gerr := resolveIOSGroup(ctx, iosLinkDeps{rest: rest, stdin: os.Stdin, interactive: isInteractive()}, groupFlag, ref, out)
 				if gerr != nil {
 					return gerr
 				}
@@ -96,7 +96,6 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
 				studioBindingLister(rest), studioConfigArtifactFetch(rest),
 				ref, branch, outDir, appID,
-				true, // ios use is an EXPLICIT re-target: error if the branch reached no env
 				out); err != nil {
 				return err
 			}
