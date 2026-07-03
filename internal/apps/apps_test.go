@@ -9,43 +9,43 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
-// trpcOK writes a tRPC success envelope ({result:{data:{json:...}}}).
-func trpcOK(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{"data": map[string]any{"json": data}},
-	})
-}
-
-// studioAgainst spins an httptest server and returns a *studio.Client
-// backed by it (mirrors secret_test.go).
-func studioAgainst(t *testing.T, h http.HandlerFunc) Studio {
+// restAgainst spins an httptest server and returns a REST client (a real
+// *transport.Client) backed by it — so the DPoP-bound Do + {data,request_id}
+// envelope unwrap are the SAME as production (mirrors apikey_test.go).
+func restAgainst(t *testing.T, h http.HandlerFunc) REST {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return studio.New(srv.URL, func(_ context.Context) (string, error) {
-		return "test-token", nil
-	})
+	key, err := auth.NewDPoPKey()
+	require.NoError(t, err)
+	return transport.New(srv.URL, key, "pat_test")
 }
 
-// innerInput decodes the inner {"json":{...}} payload from a tRPC POST body.
-func innerInput(t *testing.T, r *http.Request) map[string]any {
-	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
-	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&outer))
-	return outer.JSON
+// okData writes the /api/v1 success envelope ({data, request_id}).
+func okData(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "request_id": "req_x"})
+}
+
+// fatalREST is a REST that fails the test if any request is made — used by the
+// client-side-validation tests that must reject before touching the API.
+type fatalREST struct{ t *testing.T }
+
+func (f fatalREST) Do(_ context.Context, _, _ string, _, _ any) error {
+	f.t.Fatal("must not call the API")
+	return nil
 }
 
 // TestAppsCmd_HasSubcommands asserts the command tree is wired:
 // list / create / delete / config / bind all present.
 func TestAppsCmd_HasSubcommands(t *testing.T) {
-	cmd := Cmd(Resolvers{Studio: func() Studio { return nil }})
+	cmd := Cmd(Resolvers{REST: func() REST { return nil }})
 	got := map[string]bool{}
 	for _, c := range cmd.Commands() {
 		got[c.Name()] = true
@@ -59,10 +59,7 @@ func TestAppsCmd_HasSubcommands(t *testing.T) {
 // required --app / --env flags are missing (no API call happens).
 func TestAppsConfig_RequiresAppAndEnv(t *testing.T) {
 	t.Run("missing both", func(t *testing.T) {
-		cmd := Cmd(Resolvers{Studio: func() Studio {
-			t.Fatal("must not call the API when required flags are missing")
-			return nil
-		}})
+		cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 		cmd.SetArgs([]string{"config"})
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		err := cmd.Execute()
@@ -70,10 +67,7 @@ func TestAppsConfig_RequiresAppAndEnv(t *testing.T) {
 		require.Contains(t, err.Error(), "required flag")
 	})
 	t.Run("missing env", func(t *testing.T) {
-		cmd := Cmd(Resolvers{Studio: func() Studio {
-			t.Fatal("must not call the API when --env is missing")
-			return nil
-		}})
+		cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 		cmd.SetArgs([]string{"config", "--app", "app_1"})
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		err := cmd.Execute()
@@ -86,10 +80,7 @@ func TestAppsConfig_RequiresAppAndEnv(t *testing.T) {
 // and --name, and that an invalid platform is rejected client-side.
 func TestAppsCreate_RequiresPlatformAndName(t *testing.T) {
 	t.Run("missing platform", func(t *testing.T) {
-		cmd := Cmd(Resolvers{Studio: func() Studio {
-			t.Fatal("must not call the API when --platform is missing")
-			return nil
-		}})
+		cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 		cmd.SetArgs([]string{"create", "grp_1", "--name", "X"})
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		err := cmd.Execute()
@@ -97,10 +88,7 @@ func TestAppsCreate_RequiresPlatformAndName(t *testing.T) {
 		require.Contains(t, err.Error(), "platform")
 	})
 	t.Run("invalid platform rejected client-side", func(t *testing.T) {
-		cmd := Cmd(Resolvers{Studio: func() Studio {
-			t.Fatal("must not call the API for an invalid platform")
-			return nil
-		}})
+		cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 		cmd.SetArgs([]string{"create", "grp_1", "--platform", "bogus", "--name", "X"})
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		err := cmd.Execute()
@@ -109,66 +97,63 @@ func TestAppsCreate_RequiresPlatformAndName(t *testing.T) {
 	})
 }
 
-// TestAppsList_Query exercises the apps.list tRPC path + table/json output.
-func TestAppsList_Query(t *testing.T) {
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+// TestAppsList_REST exercises the GET /api/v1/groups/{groupRef}/apps path +
+// table/json output.
+func TestAppsList_REST(t *testing.T) {
+	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/api/trpc/apps.list", r.URL.Path)
-		trpcOK(w, []map[string]any{
+		require.Equal(t, "/api/v1/groups/grp_1/apps", r.URL.Path)
+		okData(w, http.StatusOK, []map[string]any{
 			{"id": "app_1", "platform": "ios", "display_name": "My App", "deleted_at": nil},
 		})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"list", "grp_1", "--json"})
 	require.NoError(t, cmd.Execute())
 }
 
-// TestAppsCreate_Mutation exercises apps.create + that displayName is sent.
-func TestAppsCreate_Mutation(t *testing.T) {
+// TestAppsCreate_REST exercises POST /api/v1/groups/{groupRef}/apps + the
+// {platform,name} body.
+func TestAppsCreate_REST(t *testing.T) {
 	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/trpc/apps.create", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{"id": "app_2", "platform": "web", "display_name": "Web"})
+		require.Equal(t, "/api/v1/groups/grp_1/apps", r.URL.Path)
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		okData(w, http.StatusCreated, map[string]any{"id": "app_2", "platform": "web", "display_name": "Web"})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"create", "grp_1", "--platform", "web", "--name", "Web", "--json"})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "grp_1", body["groupId"])
 	require.Equal(t, "web", body["platform"])
-	require.Equal(t, "Web", body["displayName"])
+	require.Equal(t, "Web", body["name"])
+	require.NotContains(t, body, "groupId", "the group id rides in the PATH, not the body")
+	require.NotContains(t, body, "displayName", "the field is `name`, not `displayName`")
 }
 
-// TestAppsDelete_Mutation exercises apps.delete with the app id.
-func TestAppsDelete_Mutation(t *testing.T) {
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/trpc/apps.delete", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{"ok": true})
+// TestAppsDelete_REST exercises DELETE /api/v1/apps/{appId}.
+func TestAppsDelete_REST(t *testing.T) {
+	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodDelete, r.Method)
+		require.Equal(t, "/api/v1/apps/app_9", r.URL.Path)
+		okData(w, http.StatusOK, map[string]any{"ok": true})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"delete", "app_9", "--json"})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "app_9", body["appId"])
 }
 
-// TestAppsConfig_WritesConfigFileToPath exercises apps.configArtifact and the
-// end-to-end config-emit path: the fetched (app × env) artifact is written as
-// the per-env palbase-config.json the web SDK reads.
+// TestAppsConfig_WritesConfigFileToPath exercises the config-artifact route and
+// the end-to-end config-emit path: the fetched (app × env) artifact is written
+// as the per-env palbase-config.json the web SDK reads. --env rides the `env`
+// query param.
 func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+	var gotEnv string
+	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/api/trpc/apps.configArtifact", r.URL.Path)
-		var outer struct {
-			JSON map[string]any `json:"json"`
-		}
-		require.NoError(t, json.Unmarshal([]byte(r.URL.Query().Get("input")), &outer))
-		body = outer.JSON
-		trpcOK(w, map[string]any{
+		require.Equal(t, "/api/v1/apps/app_1/config-artifact", r.URL.Path)
+		gotEnv = r.URL.Query().Get("env")
+		okData(w, http.StatusOK, map[string]any{
 			"app_id": "app_1", "project_ref": "abcd1234", "endpoint_ref": "abcd1234m",
 			"api_key": "pb_abcd1234m_c_x", "base_url": "https://abcd1234m.dev.palbase.studio",
 			"env_preset": "development", "platform": "web", "identifier": "https://app.example.com",
@@ -176,11 +161,10 @@ func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 	})
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "palbase-config.json")
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"config", "--app", "app_1", "--env", "abcd1234", "-o", outFile})
 	require.NoError(t, cmd.Execute())
-	require.Equal(t, "app_1", body["appId"])
-	require.Equal(t, "abcd1234", body["projectRef"])
+	require.Equal(t, "abcd1234", gotEnv)
 
 	raw, err := os.ReadFile(outFile)
 	require.NoError(t, err)
@@ -198,10 +182,7 @@ func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 // (the PalbaseCodegen SPM plugin owns Palbase-Info.plist now) and the API is
 // never called.
 func TestAppsConfig_RefusesIOSAppID(t *testing.T) {
-	cmd := Cmd(Resolvers{Studio: func() Studio {
-		t.Fatal("must not call the API for an ios app id")
-		return nil
-	}})
+	cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 	cmd.SetArgs([]string{"config", "--app", "ios_app_1", "--env", "abcd1234"})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	err := cmd.Execute()
@@ -221,10 +202,7 @@ func TestAppsBind_RequiresAppEnvIdentifier(t *testing.T) {
 		{"missing identifier", "identifier", []string{"bind", "--app", "app_1", "--env", "abc1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := Cmd(Resolvers{Studio: func() Studio {
-				t.Fatal("must not call the API when required flags are missing")
-				return nil
-			}})
+			cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 			cmd.SetArgs(tc.args)
 			cmd.SilenceUsage, cmd.SilenceErrors = true, true
 			err := cmd.Execute()
@@ -237,10 +215,7 @@ func TestAppsBind_RequiresAppEnvIdentifier(t *testing.T) {
 // TestAppsBind_RejectsBadApns proves an invalid --apns value is rejected
 // client-side, before any API call (matches the server's enum).
 func TestAppsBind_RejectsBadApns(t *testing.T) {
-	cmd := Cmd(Resolvers{Studio: func() Studio {
-		t.Fatal("must not call the API for an invalid --apns")
-		return nil
-	}})
+	cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
 	cmd.SetArgs([]string{"bind", "--app", "app_1", "--env", "abc1", "--identifier", "com.x", "--apns", "bogus"})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	err := cmd.Execute()
@@ -248,77 +223,76 @@ func TestAppsBind_RejectsBadApns(t *testing.T) {
 	require.Contains(t, err.Error(), "apns")
 }
 
-// TestAppsBind_Mutation is the table-driven lock on the apps.configureBinding
-// payload shape: required fields are always sent; optional teamId/apnsEnvironment
-// are present only when their flags are given (and omitted otherwise, so the
-// server never sees an empty-string optional). projectRef is sent VERBATIM — the
-// command does NOT rewrite the env's bare ref into a branch endpoint ref.
-func TestAppsBind_Mutation(t *testing.T) {
+// TestAppsBind_REST is the table-driven lock on the PUT bindings route: appId +
+// projectRef ride the PATH; the body carries identifier + optional teamId/apns
+// (present only when their flags are given, so the server never sees an empty
+// optional). --env is sent VERBATIM in the path — the command does NOT rewrite
+// the env's bare ref into a branch endpoint ref.
+func TestAppsBind_REST(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		args     []string
+		wantPath string
 		wantBody map[string]any
-		wantOmit []string // keys that must NOT be present
+		wantOmit []string // keys that must NOT be present in the body
 	}{
 		{
-			name: "required only",
-			args: []string{"bind", "--app", "app_1", "--env", "todoappm8p6z", "--identifier", "com.demo.palbase.dev"},
-			wantBody: map[string]any{
-				"appId":      "app_1",
-				"projectRef": "todoappm8p6z",
-				"identifier": "com.demo.palbase.dev",
-			},
-			wantOmit: []string{"teamId", "apnsEnvironment"},
+			name:     "required only",
+			args:     []string{"bind", "--app", "app_1", "--env", "todoappm8p6z", "--identifier", "com.demo.palbase.dev"},
+			wantPath: "/api/v1/apps/app_1/bindings/todoappm8p6z",
+			wantBody: map[string]any{"identifier": "com.demo.palbase.dev"},
+			wantOmit: []string{"teamId", "apns", "appId", "projectRef"},
 		},
 		{
-			name: "with team and apns",
-			args: []string{"bind", "--app", "app_2", "--env", "abc1", "--identifier", "com.x", "--team-id", "TEAM123", "--apns", "production"},
+			name:     "with team and apns",
+			args:     []string{"bind", "--app", "app_2", "--env", "abc1", "--identifier", "com.x", "--team-id", "TEAM123", "--apns", "production"},
+			wantPath: "/api/v1/apps/app_2/bindings/abc1",
 			wantBody: map[string]any{
-				"appId":           "app_2",
-				"projectRef":      "abc1",
-				"identifier":      "com.x",
-				"teamId":          "TEAM123",
-				"apnsEnvironment": "production",
+				"identifier": "com.x",
+				"teamId":     "TEAM123",
+				"apns":       "production",
 			},
+			wantOmit: []string{"appId", "projectRef", "apnsEnvironment"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
 			var body map[string]any
-			c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, http.MethodPost, r.Method)
-				require.Equal(t, "/api/trpc/apps.configureBinding", r.URL.Path)
-				body = innerInput(t, r)
-				trpcOK(w, map[string]any{"ok": true})
+			c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPut, r.Method)
+				gotPath = r.URL.Path
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				okData(w, http.StatusOK, map[string]any{"ok": true})
 			})
-			cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+			cmd := Cmd(Resolvers{REST: func() REST { return c }})
 			cmd.SetArgs(append(tc.args, "--json"))
 			require.NoError(t, cmd.Execute())
+			require.Equal(t, tc.wantPath, gotPath)
 			for k, v := range tc.wantBody {
 				require.Equalf(t, v, body[k], "payload field %q", k)
 			}
 			for _, k := range tc.wantOmit {
 				_, present := body[k]
-				require.Falsef(t, present, "optional field %q must be omitted when its flag is unset", k)
+				require.Falsef(t, present, "field %q must be omitted from the body", k)
 			}
 		})
 	}
 }
 
-// TestAppsBind_SurfacesTRPCError proves a server-side FORBIDDEN (below admin
+// TestAppsBind_SurfacesRESTError proves a server-side FORBIDDEN (below admin
 // role) surfaces cleanly as a command error rather than a silent success.
-func TestAppsBind_SurfacesTRPCError(t *testing.T) {
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+func TestAppsBind_SurfacesRESTError(t *testing.T) {
+	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"error": map[string]any{"json": map[string]any{
-				"message": "admin role required",
-				"code":    -32003,
-				"data":    map[string]any{"code": "FORBIDDEN", "httpStatus": 403},
-			}}},
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":             "forbidden",
+			"error_description": "admin role required",
+			"status":            403,
+			"request_id":        "req_x",
 		})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"bind", "--app", "app_1", "--env", "abc1", "--identifier", "com.x"})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	err := cmd.Execute()

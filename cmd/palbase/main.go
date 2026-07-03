@@ -124,10 +124,10 @@ func main() {
 			REST: func() apikey.REST { return managementREST() },
 		}),
 		apps.Cmd(apps.Resolvers{
-			Studio: func() apps.Studio { return studioClient },
+			REST: func() apps.REST { return managementREST() },
 		}),
 		groups.Cmd(groups.Resolvers{
-			Studio: func() groups.Studio { return studioClient },
+			REST: func() groups.REST { return managementREST() },
 		}),
 		logs.Cmd(logs.Resolvers{
 			Studio: func() logs.Studio { return studioClient },

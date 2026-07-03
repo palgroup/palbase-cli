@@ -4,30 +4,32 @@
 // registered apps — `palbase apps ...` and `palbase ios link` need its id,
 // and before this command the ONLY place to discover it was the Studio UI.
 //
-// Transport: Studio tRPC (`groups.*`), same user-JWT client as `apps`.
-// groups.mine resolves off the session user id server-side (a user can only
-// ever see their own groups); the detail reads are membership-gated with
-// NOT_FOUND collapsing (no existing-vs-missing oracle).
+// Transport: Management-API REST (`/api/v1/groups...`), the same DPoP-bound
+// client the `apikey`/`project` commands use. GET /api/v1/groups resolves off
+// the caller's PAT server-side (a user can only ever see their own groups);
+// the detail reads are membership-gated with NOT_FOUND collapsing (no
+// existing-vs-missing oracle).
 package groups
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
 
-// Studio is the tRPC transport subset the groups commands need.
-type Studio interface {
-	Query(ctx context.Context, path string, input any, out any) error
+// REST is the Management-API transport subset the groups commands need.
+type REST interface {
+	Do(ctx context.Context, method, path string, body, out any) error
 }
 
-// Resolvers carries the lazily-built Studio client (apps.Resolvers pattern).
+// Resolvers carries the lazily-built REST client (apikey.Resolvers pattern).
 type Resolvers struct {
-	Studio func() Studio
+	REST func() REST
 }
 
 type groupRow struct {
@@ -56,11 +58,11 @@ its registered apps (ios/android/web).
 
 The group id is what 'palbase apps ...' and 'palbase ios link --group' take.`,
 	}
-	cmd.AddCommand(listCmd(r.Studio), envsCmd(r.Studio))
+	cmd.AddCommand(listCmd(r.REST), envsCmd(r.REST))
 	return cmd
 }
 
-func listCmd(studioFn func() Studio) *cobra.Command {
+func listCmd(rest func() REST) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -68,7 +70,7 @@ func listCmd(studioFn func() Studio) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rows := []groupRow{}
-			if err := studioFn().Query(cmd.Context(), "groups.mine", nil, &rows); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodGet, "/api/v1/groups", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -90,7 +92,7 @@ func listCmd(studioFn func() Studio) *cobra.Command {
 	return cmd
 }
 
-func envsCmd(studioFn func() Studio) *cobra.Command {
+func envsCmd(rest func() REST) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "envs <groupId>",
@@ -98,8 +100,8 @@ func envsCmd(studioFn func() Studio) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rows := []envRow{}
-			if err := studioFn().Query(cmd.Context(), "groups.environments",
-				map[string]any{"grpId": args[0]}, &rows); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodGet,
+				"/api/v1/groups/"+args[0]+"/environments", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {

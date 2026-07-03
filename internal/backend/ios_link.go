@@ -9,8 +9,8 @@ package backend
 //     prompt suggestions — a missing pbxproj is fine, flags/prompt cover it).
 //  2. resolveOrLinkRef — --ref / .palbase/config.json / interactive picker.
 //  3. Resolves the group (--group, the account's only group, or a picker).
-//  4. Reuses the group's first ios app, or registers one (apps.create).
-//  5. Binds a bundle id per environment (apps.configureBinding) — from
+//  4. Reuses the group's first ios app, or registers one (POST group apps).
+//  5. Binds a bundle id per environment (PUT app binding) — from
 //     --bundle-id <envRef>=<bundleId> flags, or a per-env prompt on a TTY.
 //     An env without a bundle id is skipped; at least one must be bound.
 //  6. Fetches the SPM codegen plugin's inputs into --out-dir via the same
@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,7 +31,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/palgroup/palbase-cli/internal/apps"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
@@ -76,11 +76,11 @@ type iosLinkSummary struct {
 }
 
 // iosLinkDeps carries the injectable seams so runIOSLink is testable without a
-// live Studio or tenant host: the tRPC transport (an httptest-backed
-// *studio.Client in tests) plus the same four runPullSpec seams `palbase spec`'s
+// live Management API or tenant host: the REST transport (an httptest-backed
+// *transport.Client in tests) plus the same four runPullSpec seams `palbase spec`'s
 // tests stub.
 type iosLinkDeps struct {
-	studio      apps.Studio
+	rest        restDoer
 	lookup      specTargetLookup
 	fetch       remoteSpecFetch
 	list        bindingLister
@@ -146,11 +146,16 @@ environment without a bundle id is skipped; at least one must be bound.`,
 				fmt.Fprintf(human, "detected bundle id(s) in Xcode project: %s\n", strings.Join(suggested, ", "))
 			}
 
-			// Guard the Studio() call like web link: constructing the tree with
-			// zero-value Resolvers must not panic.
+			// Guard the Studio()/REST() calls like web link: constructing the tree
+			// with zero-value Resolvers must not panic. resolveOrLinkRef rides the
+			// tRPC studio client (project.list); apps + groups ride REST.
 			var sc *studio.Client
 			if r.Studio != nil {
 				sc = r.Studio()
+			}
+			var rest restDoer
+			if r.REST != nil {
+				rest = r.REST()
 			}
 			ref, err := resolveOrLinkRef(ctx, refFlag, sc, human)
 			if err != nil {
@@ -163,11 +168,11 @@ environment without a bundle id is skipped; at least one must be bound.`,
 			}
 
 			deps := iosLinkDeps{
-				studio:      sc,
+				rest:        rest,
 				lookup:      lookupSpecTarget(r),
 				fetch:       fetchRemoteOpenAPISpec,
-				list:        studioBindingLister(sc),
-				cfgFetch:    studioConfigArtifactFetch(sc),
+				list:        studioBindingLister(rest),
+				cfgFetch:    studioConfigArtifactFetch(rest),
 				stdin:       os.Stdin,
 				interactive: isInteractive(),
 			}
@@ -229,8 +234,8 @@ func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Write
 	}
 
 	var envs []iosGroupEnvRow
-	if err := d.studio.Query(ctx, "groups.environments", map[string]any{"grpId": grpID}, &envs); err != nil {
-		return nil, fmt.Errorf("groups.environments: %w", err)
+	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups/"+grpID+"/environments", nil, &envs); err != nil {
+		return nil, fmt.Errorf("list group environments: %w", err)
 	}
 	if len(envs) == 0 {
 		return nil, fmt.Errorf("group %s has no environments — create one at the Palbase Studio dashboard first", grpID)
@@ -252,17 +257,17 @@ func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Write
 		return nil, fmt.Errorf("no environments bound — pass --bundle-id <envRef>=<bundleId> (environments: %s)", envRefList(envs))
 	}
 
-	// Bind each (env × bundle id). configureBinding is idempotent server-side
-	// for an unchanged value; a real conflict surfaces as the server's error.
+	// Bind each (env × bundle id). The PUT bindings route is idempotent
+	// server-side for an unchanged value; a real conflict surfaces as the
+	// server's error. appID + projectRef ride in the PATH; only the identifier
+	// is in the body.
 	for _, b := range bindings {
 		var res struct {
 			OK bool `json:"ok"`
 		}
-		if err := d.studio.Mutation(ctx, "apps.configureBinding", map[string]any{
-			"appId":      appID,
-			"projectRef": b.Env,
-			"identifier": b.BundleID,
-		}, &res); err != nil {
+		if err := d.rest.Do(ctx, http.MethodPut,
+			"/api/v1/apps/"+appID+"/bindings/"+b.Env,
+			map[string]any{"identifier": b.BundleID}, &res); err != nil {
 			return nil, fmt.Errorf("bind env %s as %s: %w", b.Env, b.BundleID, err)
 		}
 		fmt.Fprintf(w, "✓ bound env %s as %s\n", b.Env, b.BundleID)
@@ -288,8 +293,8 @@ func resolveIOSGroup(ctx context.Context, d iosLinkDeps, flag string, reader *bu
 		return flag, nil
 	}
 	var groups []iosGroupRow
-	if err := d.studio.Query(ctx, "groups.mine", nil, &groups); err != nil {
-		return "", fmt.Errorf("groups.mine: %w", err)
+	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups", nil, &groups); err != nil {
+		return "", fmt.Errorf("list groups: %w", err)
 	}
 	switch {
 	case len(groups) == 0:
@@ -326,7 +331,7 @@ func resolveIOSApp(ctx context.Context, d iosLinkDeps, grpID, appFlag, nameFlag 
 	if appFlag != "" {
 		return appFlag, nil
 	}
-	existing, err := resolveExistingIOSApp(ctx, d.studio, grpID, w)
+	existing, err := resolveExistingIOSApp(ctx, d.rest, grpID, w)
 	if err != nil {
 		return "", err
 	}
@@ -342,12 +347,11 @@ func resolveIOSApp(ctx context.Context, d iosLinkDeps, grpID, appFlag, nameFlag 
 		name = filepath.Base(cwd)
 	}
 	var created iosAppRow
-	if err := d.studio.Mutation(ctx, "apps.create", map[string]any{
-		"groupId":     grpID,
-		"platform":    "ios",
-		"displayName": name,
+	if err := d.rest.Do(ctx, http.MethodPost, "/api/v1/groups/"+grpID+"/apps", map[string]any{
+		"platform": "ios",
+		"name":     name,
 	}, &created); err != nil {
-		return "", fmt.Errorf("apps.create: %w", err)
+		return "", fmt.Errorf("create app: %w", err)
 	}
 	fmt.Fprintf(w, "✓ registered ios app %q (%s)\n", name, created.ID)
 	return created.ID, nil
@@ -358,10 +362,10 @@ func resolveIOSApp(ctx context.Context, d iosLinkDeps, grpID, appFlag, nameFlag 
 // auto-resolve --app (it fetches artifacts, it must NOT register apps — that's
 // `ios link`'s job). Returns "" (not an error) when the group has no ios app,
 // so spec can fall back to the openapi-only path.
-func resolveExistingIOSApp(ctx context.Context, studio apps.Studio, grpID string, w io.Writer) (string, error) {
+func resolveExistingIOSApp(ctx context.Context, rest restDoer, grpID string, w io.Writer) (string, error) {
 	var rows []iosAppRow
-	if err := studio.Query(ctx, "apps.list", map[string]any{"groupId": grpID}, &rows); err != nil {
-		return "", fmt.Errorf("apps.list: %w", err)
+	if err := rest.Do(ctx, http.MethodGet, "/api/v1/groups/"+grpID+"/apps", nil, &rows); err != nil {
+		return "", fmt.Errorf("list apps: %w", err)
 	}
 	for _, a := range rows {
 		if a.Platform == "ios" && a.DeletedAt == nil {

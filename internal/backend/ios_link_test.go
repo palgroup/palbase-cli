@@ -17,10 +17,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/palgroup/palbase-cli/internal/apps"
+	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
-// ── tRPC rig (mirrors apps_test.go's studioAgainst, adapted to this package) ──
+// ── tRPC rig (apikey.reveal is still tRPC; apps/groups moved to REST) ──
 
 // iosTRPCOK writes a tRPC success envelope ({result:{data:{json:...}}}).
 func iosTRPCOK(w http.ResponseWriter, data any) {
@@ -38,24 +40,55 @@ func iosStudio(t *testing.T, h http.HandlerFunc) *studio.Client {
 	return studio.New(srv.URL, func(context.Context) (string, error) { return "tok", nil })
 }
 
-// iosPostInput decodes the inner {"json":{...}} payload of a mutation POST.
-func iosPostInput(t *testing.T, r *http.Request) map[string]any {
-	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
-	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&outer))
-	return outer.JSON
+// ── REST rig (mirrors apikey_test.go's restAgainst) — apps + groups ──
+
+// iosRESTOK writes the /api/v1 success envelope ({data, request_id}).
+func iosRESTOK(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "request_id": "req_x"})
 }
 
-// iosQueryInput decodes the ?input={"json":{...}} payload of a query GET.
-func iosQueryInput(t *testing.T, r *http.Request) map[string]any {
+// iosREST spins an httptest server and returns a real *transport.Client backed
+// by it — so the DPoP Do + {data,request_id} envelope unwrap match production.
+func iosREST(t *testing.T, h http.HandlerFunc) *transport.Client {
 	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(r.URL.Query().Get("input")), &outer))
-	return outer.JSON
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	key, err := auth.NewDPoPKey()
+	require.NoError(t, err)
+	return transport.New(srv.URL, key, "pat_test")
+}
+
+// iosRESTClientOn returns a *transport.Client pointed at an ALREADY-running
+// server URL (used by ios_use_test.go where one server serves both the tRPC
+// reveal and the REST apps routes).
+func iosRESTClientOn(t *testing.T, baseURL string) *transport.Client {
+	t.Helper()
+	key, err := auth.NewDPoPKey()
+	require.NoError(t, err)
+	return transport.New(baseURL, key, "pat_test")
+}
+
+// iosUseRig spins ONE httptest server that serves BOTH the tRPC surface
+// (apikey.reveal) and the REST surface (apps bindings + config-artifact), and
+// returns a *studio.Client bound to it plus its base URL (for a transport.Client
+// pointed at the same server). `palbase ios use` mixes both transports —
+// reveal is tRPC, apps are REST — so both clients must reach the same handler.
+func iosUseRig(t *testing.T, h http.HandlerFunc) (*studio.Client, string) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	sc := studio.New(srv.URL, func(context.Context) (string, error) { return "tok", nil })
+	return sc, srv.URL
+}
+
+// iosPostBody decodes the JSON request body of a REST POST/PUT.
+func iosPostBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+	return body
 }
 
 // iosStubPullSeams returns lookup/fetch/list/cfgFetch seams that satisfy
@@ -238,30 +271,34 @@ func TestIOSCmd_Tree(t *testing.T) {
 // exact tRPC input field names (groupId/platform/displayName and
 // appId/projectRef/identifier — the same input bindCmd sends).
 func TestIOSLink_HappyPath(t *testing.T) {
-	var createInput map[string]any
-	var bindInputs []map[string]any
+	var createBody map[string]any
+	var createPath string
+	type bindCall struct {
+		path string
+		body map[string]any
+	}
+	var binds []bindCall
 
-	sc := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/trpc/groups.mine":
-			iosTRPCOK(w, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
-		case "/api/trpc/apps.list":
-			require.Equal(t, "grp_1", iosQueryInput(t, r)["groupId"])
-			iosTRPCOK(w, []map[string]any{})
-		case "/api/trpc/apps.create":
-			createInput = iosPostInput(t, r)
-			iosTRPCOK(w, map[string]any{"id": "app_ios1", "platform": "ios", "display_name": "My App"})
-		case "/api/trpc/groups.environments":
-			require.Equal(t, "grp_1", iosQueryInput(t, r)["grpId"])
-			iosTRPCOK(w, []map[string]any{
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups/grp_1/apps":
+			iosRESTOK(w, http.StatusOK, []map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groups/grp_1/apps":
+			createPath = r.URL.Path
+			createBody = iosPostBody(t, r)
+			iosRESTOK(w, http.StatusCreated, map[string]any{"id": "app_ios1", "platform": "ios", "display_name": "My App"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups/grp_1/environments":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"ref": "prodref", "env_preset": "production", "env_display_name": "Production", "status": "active"},
 				{"ref": "stgref", "env_preset": "staging", "env_display_name": nil, "status": "active"},
 			})
-		case "/api/trpc/apps.configureBinding":
-			bindInputs = append(bindInputs, iosPostInput(t, r))
-			iosTRPCOK(w, map[string]any{"ok": true})
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/apps/app_ios1/bindings/"):
+			binds = append(binds, bindCall{path: r.URL.Path, body: iosPostBody(t, r)})
+			iosRESTOK(w, http.StatusOK, map[string]any{"ok": true})
 		default:
-			t.Errorf("unexpected tRPC call %s", r.URL.Path)
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
@@ -270,7 +307,7 @@ func TestIOSLink_HappyPath(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "Palbase")
 	var buf bytes.Buffer
 	summary, err := runIOSLink(context.Background(), iosLinkDeps{
-		studio: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{
 		ref: "abc1", branch: "main", name: "My App",
@@ -279,19 +316,19 @@ func TestIOSLink_HappyPath(t *testing.T) {
 	}, &buf)
 	require.NoError(t, err)
 
-	// apps.create input.
-	require.Equal(t, "grp_1", createInput["groupId"])
-	require.Equal(t, "ios", createInput["platform"])
-	require.Equal(t, "My App", createInput["displayName"])
+	// create app: POST to the group's apps route, {platform,name} body.
+	require.Equal(t, "/api/v1/groups/grp_1/apps", createPath)
+	require.Equal(t, "ios", createBody["platform"])
+	require.Equal(t, "My App", createBody["name"])
+	require.NotContains(t, createBody, "groupId", "group id rides in the PATH")
+	require.NotContains(t, createBody, "displayName", "the field is `name`")
 
-	// configureBinding inputs, in env order.
-	require.Len(t, bindInputs, 2)
-	require.Equal(t, "app_ios1", bindInputs[0]["appId"])
-	require.Equal(t, "prodref", bindInputs[0]["projectRef"])
-	require.Equal(t, "com.x.app", bindInputs[0]["identifier"])
-	require.Equal(t, "app_ios1", bindInputs[1]["appId"])
-	require.Equal(t, "stgref", bindInputs[1]["projectRef"])
-	require.Equal(t, "com.x.app.stg", bindInputs[1]["identifier"])
+	// bind calls, in env order: appId + projectRef in the PATH, {identifier} body.
+	require.Len(t, binds, 2)
+	require.Equal(t, "/api/v1/apps/app_ios1/bindings/prodref", binds[0].path)
+	require.Equal(t, "com.x.app", binds[0].body["identifier"])
+	require.Equal(t, "/api/v1/apps/app_ios1/bindings/stgref", binds[1].path)
+	require.Equal(t, "com.x.app.stg", binds[1].body["identifier"])
 
 	// Artifacts landed in out-dir (spec + bundle-id-keyed config).
 	for _, f := range []string{"openapi.json", "palbase-config.json"} {
@@ -315,34 +352,34 @@ func TestIOSLink_HappyPath(t *testing.T) {
 // → apps.create must NOT be called; the existing app id is reused for binding
 // and fetch.
 func TestIOSLink_SecondRunReusesExistingApp(t *testing.T) {
-	sc := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/trpc/groups.mine":
-			iosTRPCOK(w, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
-		case "/api/trpc/apps.list":
-			iosTRPCOK(w, []map[string]any{
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups/grp_1/apps":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"id": "web_1", "platform": "web", "display_name": "Site"},
 				{"id": "ios_1", "platform": "ios", "display_name": "My App"},
 			})
-		case "/api/trpc/apps.create":
-			t.Error("apps.create must NOT be called when the group already has an ios app")
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groups/grp_1/apps":
+			t.Error("create app must NOT be called when the group already has an ios app")
 			http.Error(w, "unexpected create", http.StatusInternalServerError)
-		case "/api/trpc/groups.environments":
-			iosTRPCOK(w, []map[string]any{
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups/grp_1/environments":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"ref": "prodref", "env_preset": "production", "env_display_name": nil, "status": "active"},
 				{"ref": "stgref", "env_preset": "staging", "env_display_name": nil, "status": "active"},
 			})
-		case "/api/trpc/apps.configureBinding":
-			iosTRPCOK(w, map[string]any{"ok": true})
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/apps/ios_1/bindings/"):
+			iosRESTOK(w, http.StatusOK, map[string]any{"ok": true})
 		default:
-			t.Errorf("unexpected tRPC call %s", r.URL.Path)
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
 
 	lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "ios_1")
 	summary, err := runIOSLink(context.Background(), iosLinkDeps{
-		studio: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{
 		ref: "abc1", branch: "main",
@@ -358,16 +395,17 @@ func TestIOSLink_SecondRunReusesExistingApp(t *testing.T) {
 // TestIOSLink_MultipleGroupsNonInteractive: >1 group, no --group, no TTY →
 // actionable error listing the groups.
 func TestIOSLink_MultipleGroupsNonInteractive(t *testing.T) {
-	sc := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/groups.mine", r.URL.Path)
-		iosTRPCOK(w, []map[string]any{
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v1/groups", r.URL.Path)
+		iosRESTOK(w, http.StatusOK, []map[string]any{
 			{"id": "grp_a", "name": "Acme", "plan": "free"},
 			{"id": "grp_b", "name": "Beta", "plan": "pro"},
 		})
 	})
 	lookup, fetch, list, cfgFetch := mustNotPull(t)
 	_, err := runIOSLink(context.Background(), iosLinkDeps{
-		studio: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{ref: "abc1", branch: "main", outDir: t.TempDir()}, io.Discard)
 	require.Error(t, err)
@@ -380,25 +418,25 @@ func TestIOSLink_MultipleGroupsNonInteractive(t *testing.T) {
 // a non-TTY → every env is skipped and the run fails with actionable guidance
 // (before any bind or fetch).
 func TestIOSLink_NoBindingsNonInteractive(t *testing.T) {
-	sc := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/trpc/groups.mine":
-			iosTRPCOK(w, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
-		case "/api/trpc/apps.list":
-			iosTRPCOK(w, []map[string]any{{"id": "ios_1", "platform": "ios", "display_name": "My App"}})
-		case "/api/trpc/groups.environments":
-			iosTRPCOK(w, []map[string]any{
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/groups":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
+		case r.URL.Path == "/api/v1/groups/grp_1/apps":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "ios_1", "platform": "ios", "display_name": "My App"}})
+		case r.URL.Path == "/api/v1/groups/grp_1/environments":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"ref": "prodref", "env_preset": "production", "env_display_name": nil, "status": "active"},
 			})
 		default:
-			t.Errorf("unexpected tRPC call %s (bind/fetch must not run)", r.URL.Path)
+			t.Errorf("unexpected call %s %s (bind/fetch must not run)", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
 	lookup, fetch, list, cfgFetch := mustNotPull(t)
 	var buf bytes.Buffer
 	_, err := runIOSLink(context.Background(), iosLinkDeps{
-		studio: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{ref: "abc1", branch: "main", outDir: t.TempDir()}, &buf)
 	require.Error(t, err)
@@ -409,24 +447,24 @@ func TestIOSLink_NoBindingsNonInteractive(t *testing.T) {
 // TestIOSLink_UnknownEnvFlag: a --bundle-id naming a non-existent env is a
 // typo guard error, not a silent skip.
 func TestIOSLink_UnknownEnvFlag(t *testing.T) {
-	sc := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/trpc/groups.mine":
-			iosTRPCOK(w, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
-		case "/api/trpc/apps.list":
-			iosTRPCOK(w, []map[string]any{{"id": "ios_1", "platform": "ios", "display_name": "My App"}})
-		case "/api/trpc/groups.environments":
-			iosTRPCOK(w, []map[string]any{
+		case "/api/v1/groups":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "grp_1", "name": "Acme", "plan": "free"}})
+		case "/api/v1/groups/grp_1/apps":
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "ios_1", "platform": "ios", "display_name": "My App"}})
+		case "/api/v1/groups/grp_1/environments":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"ref": "prodref", "env_preset": "production", "env_display_name": nil, "status": "active"},
 			})
 		default:
-			t.Errorf("unexpected tRPC call %s", r.URL.Path)
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
 	lookup, fetch, list, cfgFetch := mustNotPull(t)
 	_, err := runIOSLink(context.Background(), iosLinkDeps{
-		studio: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
 	}, iosLinkOpts{
 		ref: "abc1", branch: "main", outDir: t.TempDir(),
@@ -443,27 +481,30 @@ func TestIOSLink_UnknownEnvFlag(t *testing.T) {
 // (choice 2); two envs → first gets a typed bundle id, second skipped by empty
 // input. The prompt shows the pbxproj-detected suggestions.
 func TestIOSLink_InteractivePickerAndPrompts(t *testing.T) {
-	var bindInputs []map[string]any
-	sc := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/trpc/groups.mine":
-			iosTRPCOK(w, []map[string]any{
+	type bindCall struct {
+		path string
+		body map[string]any
+	}
+	var binds []bindCall
+	sc := iosREST(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/groups":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"id": "grp_a", "name": "Acme", "plan": "free"},
 				{"id": "grp_b", "name": "Beta", "plan": "pro"},
 			})
-		case "/api/trpc/apps.list":
-			require.Equal(t, "grp_b", iosQueryInput(t, r)["groupId"], "the picked group must be used")
-			iosTRPCOK(w, []map[string]any{{"id": "ios_b", "platform": "ios", "display_name": "Beta App"}})
-		case "/api/trpc/groups.environments":
-			iosTRPCOK(w, []map[string]any{
+		case r.URL.Path == "/api/v1/groups/grp_b/apps" && r.Method == http.MethodGet:
+			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "ios_b", "platform": "ios", "display_name": "Beta App"}})
+		case r.URL.Path == "/api/v1/groups/grp_b/environments":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"ref": "prodref", "env_preset": "production", "env_display_name": "Production", "status": "active"},
 				{"ref": "stgref", "env_preset": "staging", "env_display_name": nil, "status": "active"},
 			})
-		case "/api/trpc/apps.configureBinding":
-			bindInputs = append(bindInputs, iosPostInput(t, r))
-			iosTRPCOK(w, map[string]any{"ok": true})
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/apps/ios_b/bindings/"):
+			binds = append(binds, bindCall{path: r.URL.Path, body: iosPostBody(t, r)})
+			iosRESTOK(w, http.StatusOK, map[string]any{"ok": true})
 		default:
-			t.Errorf("unexpected tRPC call %s", r.URL.Path)
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
@@ -473,7 +514,7 @@ func TestIOSLink_InteractivePickerAndPrompts(t *testing.T) {
 	stdin := strings.NewReader("2\ncom.typed.app\n\n")
 	var buf bytes.Buffer
 	summary, err := runIOSLink(context.Background(), iosLinkDeps{
-		studio: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
+		rest: sc, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: stdin, interactive: true,
 	}, iosLinkOpts{
 		ref: "abc1", branch: "main",
@@ -484,8 +525,9 @@ func TestIOSLink_InteractivePickerAndPrompts(t *testing.T) {
 
 	require.Equal(t, "grp_b", summary.Group)
 	require.Equal(t, []iosLinkBinding{{Env: "prodref", BundleID: "com.typed.app"}}, summary.Bindings)
-	require.Len(t, bindInputs, 1)
-	require.Equal(t, "com.typed.app", bindInputs[0]["identifier"])
+	require.Len(t, binds, 1)
+	require.Equal(t, "/api/v1/apps/ios_b/bindings/prodref", binds[0].path)
+	require.Equal(t, "com.typed.app", binds[0].body["identifier"])
 	require.Contains(t, buf.String(), "com.acme.Todo", "the prompt must surface the detected bundle ids")
 	require.Contains(t, buf.String(), "skipping env stgref")
 }

@@ -3,45 +3,44 @@
 // (one per platform: ios/android/web) that bind to an env (project ref)
 // and yield a per-(app × env) config artifact for the SDKs.
 //
-// Transport: Studio tRPC (`apps.*`), reached via the same user-JWT
-// `internal/studio` client the `secret`/`db`/`notifications` commands use.
-// We talk to tRPC directly because the apps feature (Task C4) is exposed
-// ONLY as a tRPC router today — there are no `/api/v1/...` REST routes for
-// apps, so the Management-API REST transport (used by `apikey`/`project`)
-// cannot reach it. The tRPC procedures are already directly reachable:
+// Transport: Management-API REST (`/api/v1/groups/...`, `/api/v1/apps/...`),
+// the same DPoP-bound client the `apikey`/`project`/`groups` commands use.
+// Routes:
 //
-//	apps.list           query    {groupId}                -> AppRow[]
-//	apps.create         mutation {groupId,platform,displayName} -> AppRow
-//	apps.delete         mutation {appId}                  -> {ok:true}
-//	apps.configArtifact query    {appId,projectRef}       -> ConfigArtifact
+//	GET    /api/v1/groups/{groupRef}/apps                        list
+//	POST   /api/v1/groups/{groupRef}/apps  {platform,name}       create
+//	DELETE /api/v1/apps/{appId}                                  delete
+//	PUT    /api/v1/apps/{appId}/bindings/{projectRef} {identifier,teamId?,apns?}  bind
+//	GET    /api/v1/apps/{appId}/config-artifact?env={ref}&branch={name}           config
 //
-// Studio runs membership/role authorization inside the tRPC service
-// (member+ for list/config, admin+ for create/delete); a below-role or
-// non-member caller surfaces as a FORBIDDEN error here.
+// Studio runs membership/role authorization inside the service (member+ for
+// list/config, admin+ for create/delete/bind); a below-role or non-member
+// caller surfaces as a FORBIDDEN *transport.APIError here.
 package apps
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
 
-// Studio is the tRPC transport subset the apps commands need.
-// *studio.Client satisfies it; tests substitute a server-backed client.
-type Studio interface {
-	Query(ctx context.Context, path string, input any, out any) error
-	Mutation(ctx context.Context, path string, input any, out any) error
+// REST is the Management-API transport subset the apps commands need.
+// *transport.Client satisfies it; tests substitute a stub.
+type REST interface {
+	Do(ctx context.Context, method, path string, body, out any) error
 }
 
-// Resolvers carries the lazily-built Studio client, populated by the root
+// Resolvers carries the lazily-built REST client, populated by the root
 // command's PersistentPreRunE before any subcommand fires (mirrors
-// secret.Resolvers' pattern).
+// apikey.Resolvers' pattern).
 type Resolvers struct {
-	Studio func() Studio
+	REST func() REST
 }
 
 // Cmd returns the `palbase apps` parent command.
@@ -64,19 +63,19 @@ func Cmd(r Resolvers) *cobra.Command {
 iOS config artifacts are fetched by 'palbase spec --app <appId>' and turned
 into Palbase-Info.plist by the PalbaseCodegen SPM plugin at build time.
 
-All operations go through Studio (membership/role-gated server-side).`,
+All operations go through the Management API (membership/role-gated server-side).`,
 	}
 	cmd.AddCommand(
-		listCmd(r.Studio),
-		createCmd(r.Studio),
-		deleteCmd(r.Studio),
-		configCmd(r.Studio),
-		bindCmd(r.Studio),
+		listCmd(r.REST),
+		createCmd(r.REST),
+		deleteCmd(r.REST),
+		configCmd(r.REST),
+		bindCmd(r.REST),
 	)
 	return cmd
 }
 
-// appRow mirrors the apps.list / apps.create row shape.
+// appRow mirrors the apps list / create row shape.
 type appRow struct {
 	ID          string  `json:"id"`
 	Platform    string  `json:"platform"`
@@ -84,7 +83,7 @@ type appRow struct {
 	DeletedAt   *string `json:"deleted_at"`
 }
 
-func listCmd(studioFn func() Studio) *cobra.Command {
+func listCmd(rest func() REST) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list <groupRef>",
@@ -93,8 +92,8 @@ func listCmd(studioFn func() Studio) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			groupRef := args[0]
 			var rows []appRow
-			if err := studioFn().Query(cmd.Context(), "apps.list",
-				map[string]any{"groupId": groupRef}, &rows); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodGet,
+				"/api/v1/groups/"+groupRef+"/apps", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -116,7 +115,7 @@ func listCmd(studioFn func() Studio) *cobra.Command {
 	return cmd
 }
 
-func createCmd(studioFn func() Studio) *cobra.Command {
+func createCmd(rest func() REST) *cobra.Command {
 	var (
 		platform string
 		name     string
@@ -135,11 +134,11 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 				return fmt.Errorf("--name is required")
 			}
 			var created appRow
-			if err := studioFn().Mutation(cmd.Context(), "apps.create", map[string]any{
-				"groupId":     groupRef,
-				"platform":    platform,
-				"displayName": name,
-			}, &created); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodPost,
+				"/api/v1/groups/"+groupRef+"/apps", map[string]any{
+					"platform": platform,
+					"name":     name,
+				}, &created); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -157,7 +156,7 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 	return cmd
 }
 
-func deleteCmd(studioFn func() Studio) *cobra.Command {
+func deleteCmd(rest func() REST) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "delete <appId>",
@@ -168,8 +167,8 @@ func deleteCmd(studioFn func() Studio) *cobra.Command {
 			var out struct {
 				OK bool `json:"ok"`
 			}
-			if err := studioFn().Mutation(cmd.Context(), "apps.delete",
-				map[string]any{"appId": appID}, &out); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodDelete,
+				"/api/v1/apps/"+appID, nil, &out); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -185,15 +184,15 @@ func deleteCmd(studioFn func() Studio) *cobra.Command {
 
 // bindCmd wires `palbase apps bind`: it sets the (app × env) binding's
 // identifier (bundle id / package name / web origin) plus optional iOS
-// attestation material, by calling the apps.configureBinding tRPC mutation —
-// the SAME UPDATE Studio's binding-matrix UI runs (admin+ gated server-side).
+// attestation material, by calling the PUT bindings route — the SAME UPDATE
+// Studio's binding-matrix UI runs (admin+ gated server-side).
 //
 // --env is the env's BARE project ref (control-pg projects.ref), NOT a branch
 // endpoint ref: the binding row is keyed by project_ref = projects.ref (the
 // service resolves the env's branch endpoint_ref itself when it later mints
 // keys). This is exactly the ref `apps config --env` and listBindings already
 // use, so the binding round-trips with `palbase spec`.
-func bindCmd(studioFn func() Studio) *cobra.Command {
+func bindCmd(rest func() REST) *cobra.Command {
 	var (
 		appID      string
 		env        string
@@ -211,26 +210,25 @@ func bindCmd(studioFn func() Studio) *cobra.Command {
 			"--env is the env's BARE project ref (the same ref `apps config --env`\n" +
 			"takes), never a branch endpoint ref.\n" +
 			"--team-id and --apns are optional iOS App Attest material.\n" +
-			"Runs through Studio (admin+ on the app's group, server-side).",
+			"Runs through the Management API (admin+ on the app's group, server-side).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if apns != "" && apns != "sandbox" && apns != "production" {
 				return fmt.Errorf("--apns must be one of: sandbox, production")
 			}
-			input := map[string]any{
-				"appId":      appID,
-				"projectRef": env,
-				"identifier": identifier,
-			}
+			// appId + projectRef ride in the PATH; the body is just the binding
+			// attributes (identifier + optional iOS App Attest material).
+			body := map[string]any{"identifier": identifier}
 			if teamID != "" {
-				input["teamId"] = teamID
+				body["teamId"] = teamID
 			}
 			if apns != "" {
-				input["apnsEnvironment"] = apns
+				body["apns"] = apns
 			}
 			var out struct {
 				OK bool `json:"ok"`
 			}
-			if err := studioFn().Mutation(cmd.Context(), "apps.configureBinding", input, &out); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodPut,
+				"/api/v1/apps/"+appID+"/bindings/"+env, body, &out); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -252,7 +250,7 @@ func bindCmd(studioFn func() Studio) *cobra.Command {
 	return cmd
 }
 
-// ConfigArtifact mirrors the apps.configArtifact return shape — the
+// ConfigArtifact mirrors the config-artifact return shape — the
 // per-(app × env) config the SDKs consume. This REPLACES the old
 // PalbaseGenerated.json shape. Exported so `palbase spec` (backend
 // package) can resolve the same artifact per binding.
@@ -272,8 +270,8 @@ type ConfigArtifact struct {
 	// `oauth` sub-dict and the iOS SDK's zero-arg
 	// `pb.auth.signInWithGoogle()` overload throws. Making the plist a
 	// true SUPERSET of the JSON's config role closes the OAuth regression
-	// the config cutover would otherwise open. The tRPC apps.configArtifact
-	// query does NOT return this — the CLI fetches providers separately and
+	// the config cutover would otherwise open. The config-artifact route
+	// does NOT return this — the CLI fetches providers separately and
 	// merges it in (see backend.withOAuth), exactly as the JSON path does.
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
 }
@@ -298,7 +296,7 @@ type OAuthGoogle struct {
 	RedirectURI string `json:"redirect_uri"`
 }
 
-func configCmd(studioFn func() Studio) *cobra.Command {
+func configCmd(rest func() REST) *cobra.Command {
 	var (
 		appID   string
 		env     string
@@ -322,14 +320,12 @@ func configCmd(studioFn func() Studio) *cobra.Command {
 			if len(appID) >= 4 && appID[:4] == "ios_" {
 				return fmt.Errorf("apps config no longer emits iOS plists — run 'palbase spec --app %s' and let the PalbaseCodegen SPM plugin generate Palbase-Info.plist at build time", appID)
 			}
-			// --env is the env's BARE project ref. The server resolves the
-			// endpoint_ref from the bare ref (the env's main branch); there is
-			// no branch-composed ref.
+			// --env is the env's BARE project ref, passed as the `env` query
+			// param. The server resolves the endpoint_ref from it (the env's main
+			// branch); there is no branch-composed ref.
 			var art ConfigArtifact
-			if err := studioFn().Query(cmd.Context(), "apps.configArtifact", map[string]any{
-				"appId":      appID,
-				"projectRef": env,
-			}, &art); err != nil {
+			if err := rest().Do(cmd.Context(), http.MethodGet,
+				"/api/v1/apps/"+appID+"/config-artifact?env="+url.QueryEscape(env), nil, &art); err != nil {
 				return err
 			}
 			out := outPath

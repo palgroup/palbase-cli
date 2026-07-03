@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
@@ -32,51 +33,49 @@ func TestIOSUse_TargetsBranch(t *testing.T) {
 
 	var configArtifactBranch string
 	appListCalled := false
-	rig := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/trpc/apikey.reveal":
+	rig, restBase := iosUseRig(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/trpc/apikey.reveal":
 			// runPullSpec's lookupBackendTarget → the branch's tenant host + key.
 			iosTRPCOK(w, map[string]any{
 				"endpointRef":    "todoappm8p6zd",
 				"publishableKey": "pb_todoappm8p6zd_ckey",
 			})
-		case "/api/trpc/apps.listBindings":
-			iosTRPCOK(w, []map[string]any{
+		case r.URL.Path == "/api/v1/apps/app_ios1/bindings":
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"project_ref": "todoappm8p6z", "identifier": "com.demo.palbase", "env_preset": "production"},
 			})
-		case "/api/trpc/apps.configArtifact":
-			in := iosQueryInput(t, r)
-			if b, ok := in["branchName"].(string); ok {
-				configArtifactBranch = b
-			}
-			iosTRPCOK(w, map[string]any{
+		case r.URL.Path == "/api/v1/apps/app_ios1/config-artifact":
+			configArtifactBranch = r.URL.Query().Get("branch")
+			iosRESTOK(w, http.StatusOK, map[string]any{
 				"app_id": "app_ios1", "project_ref": "todoappm8p6z", "endpoint_ref": "todoappm8p6zd",
 				"api_key": "pb_todoappm8p6zd_ckey", "base_url": "https://todoappm8p6zd.dev.palbase.studio",
 				"env_preset": "production", "platform": "ios", "identifier": "com.demo.palbase",
 			})
-		case "/api/trpc/apps.list":
+		case strings.HasSuffix(r.URL.Path, "/apps"):
 			appListCalled = true
-			iosTRPCOK(w, []map[string]any{})
-		case "/openapi.json":
+			iosRESTOK(w, http.StatusOK, []map[string]any{})
+		case r.URL.Path == "/openapi.json":
 			// The branch tenant host's spec (redirectHostTo routes it here).
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"openapi":"3.1.0","paths":{}}`))
-		case "/auth/oauth/providers":
+		case r.URL.Path == "/auth/oauth/providers":
 			// Best-effort oauth fetch inside studioConfigArtifactFetch.
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 		default:
-			t.Errorf("unexpected call %s", r.URL.Path)
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
 	// The branch's tenant host (openapi.json) + palauth oauth providers route to
-	// the same httptest server as the tRPC rig.
+	// the same httptest server as the rig.
 	restore := redirectHostTo(t, "todoappm8p6zd.dev.palbase.studio", rig.BaseURL)
 	defer restore()
 
 	cmd := newIOSUseCmd(Resolvers{
 		Studio:    func() *studio.Client { return rig },
+		REST:      func() REST { return iosRESTClientOn(t, restBase) },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
 	})
 	var out bytes.Buffer
@@ -123,36 +122,34 @@ func TestIOSUse_BranchAppliesOnlyToRefBinding(t *testing.T) {
 		Ref: "todoappm8p6z", DefaultEnv: "main", IOSAppID: "app_ios1",
 	}))
 
-	// project_ref → branchName seen at apps.configArtifact.
+	// project_ref → branch seen at the config-artifact route.
 	branchByRef := map[string]string{}
-	rig := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
+	rig, restBase := iosUseRig(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/trpc/apikey.reveal":
 			iosTRPCOK(w, map[string]any{
 				"endpointRef":    "todoappm8p6zd",
 				"publishableKey": "pb_todoappm8p6zd_ckey",
 			})
-		case "/api/trpc/apps.listBindings":
+		case "/api/v1/apps/app_ios1/bindings":
 			// Two env-bindings in TWO different projects.
-			iosTRPCOK(w, []map[string]any{
+			iosRESTOK(w, http.StatusOK, []map[string]any{
 				{"project_ref": "todoappm8p6z", "identifier": "com.demo.palbase", "env_preset": "production"},
 				{"project_ref": "dev0bvec", "identifier": "com.demo.palbase.dev", "env_preset": "dev"},
 			})
-		case "/api/trpc/apps.configArtifact":
-			in := iosQueryInput(t, r)
-			ref, _ := in["projectRef"].(string)
-			branch, _ := in["branchName"].(string)
-			branchByRef[ref] = branch
+		case "/api/v1/apps/app_ios1/config-artifact":
+			ref := r.URL.Query().Get("env")
+			branchByRef[ref] = r.URL.Query().Get("branch")
 			// Reflect the ref back so the two bundles don't collide.
 			switch ref {
 			case "todoappm8p6z":
-				iosTRPCOK(w, map[string]any{
+				iosRESTOK(w, http.StatusOK, map[string]any{
 					"app_id": "app_ios1", "project_ref": "todoappm8p6z", "endpoint_ref": "todoappm8p6zd",
 					"api_key": "pb_todoappm8p6zd_ckey", "base_url": "https://todoappm8p6zd.dev.palbase.studio",
 					"env_preset": "production", "platform": "ios", "identifier": "com.demo.palbase",
 				})
 			default:
-				iosTRPCOK(w, map[string]any{
+				iosRESTOK(w, http.StatusOK, map[string]any{
 					"app_id": "app_ios1", "project_ref": "dev0bvec", "endpoint_ref": "dev0bvecm",
 					"api_key": "pb_dev0bvecm_ckey", "base_url": "https://dev0bvecm.dev.palbase.studio",
 					"env_preset": "dev", "platform": "ios", "identifier": "com.demo.palbase.dev",
@@ -165,7 +162,7 @@ func TestIOSUse_BranchAppliesOnlyToRefBinding(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 		default:
-			t.Errorf("unexpected call %s", r.URL.Path)
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	})
@@ -174,6 +171,7 @@ func TestIOSUse_BranchAppliesOnlyToRefBinding(t *testing.T) {
 
 	cmd := newIOSUseCmd(Resolvers{
 		Studio:    func() *studio.Client { return rig },
+		REST:      func() REST { return iosRESTClientOn(t, restBase) },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
 	})
 	var out bytes.Buffer
@@ -223,20 +221,19 @@ func TestIOSUse_ErrorsWhenBranchAppliesToNothing(t *testing.T) {
 			require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{
 				Ref: "todoappm8p6z", DefaultEnv: "main", IOSAppID: "app_ios1",
 			}))
-			rig := iosStudio(t, func(w http.ResponseWriter, r *http.Request) {
+			rig, restBase := iosUseRig(t, func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/api/trpc/apikey.reveal":
 					iosTRPCOK(w, map[string]any{
 						"endpointRef":    "todoappm8p6zd",
 						"publishableKey": "pb_todoappm8p6zd_ckey",
 					})
-				case "/api/trpc/apps.listBindings":
-					iosTRPCOK(w, tc.bindings)
-				case "/api/trpc/apps.configArtifact":
+				case "/api/v1/apps/app_ios1/bindings":
+					iosRESTOK(w, http.StatusOK, tc.bindings)
+				case "/api/v1/apps/app_ios1/config-artifact":
 					// Any binding that resolves does so at its own default (main).
-					in := iosQueryInput(t, r)
-					ref, _ := in["projectRef"].(string)
-					iosTRPCOK(w, map[string]any{
+					ref := r.URL.Query().Get("env")
+					iosRESTOK(w, http.StatusOK, map[string]any{
 						"app_id": "app_ios1", "project_ref": ref, "endpoint_ref": ref + "m",
 						"api_key": "pb_" + ref + "m_ckey", "base_url": "https://" + ref + "m.dev.palbase.studio",
 						"env_preset": "production", "platform": "ios", "identifier": "com.demo.other",
@@ -248,7 +245,7 @@ func TestIOSUse_ErrorsWhenBranchAppliesToNothing(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(`{}`))
 				default:
-					t.Errorf("unexpected call %s", r.URL.Path)
+					t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 					http.Error(w, "unexpected", http.StatusInternalServerError)
 				}
 			})
@@ -257,6 +254,7 @@ func TestIOSUse_ErrorsWhenBranchAppliesToNothing(t *testing.T) {
 
 			cmd := newIOSUseCmd(Resolvers{
 				Studio:    func() *studio.Client { return rig },
+				REST:      func() REST { return iosRESTClientOn(t, restBase) },
 				Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
 			})
 			var out bytes.Buffer

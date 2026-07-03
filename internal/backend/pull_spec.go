@@ -83,12 +83,17 @@ link' to refresh it, not spec.`,
 			}
 			// spec fetches the API contract ONLY (empty appID → no config).
 			// palbase-config.json is `ios link`'s responsibility.
+			// resolveOrLinkRef + lookupSpecTarget ride the tRPC studio client
+			// (project.list / apikey.reveal); the app bindings + config artifact
+			// ride the Management-API REST client. spec passes appID="", so the
+			// binding/config seams are never actually reached — but they still
+			// construct here.
 			return runPullSpec(
 				cmd.Context(),
 				lookupSpecTarget(r),
 				fetchRemoteOpenAPISpec,
-				studioBindingLister(r.Studio()),
-				studioConfigArtifactFetch(r.Studio()),
+				studioBindingLister(r.REST()),
+				studioConfigArtifactFetch(r.REST()),
 				ref, branch, outDir, "",
 				false, // spec: appID=="" so config isn't built; branch is a default, not a re-target demand
 				os.Stdout,

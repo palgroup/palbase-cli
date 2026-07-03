@@ -45,9 +45,15 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
+			// resolveOrLinkRef rides the tRPC studio client (project.list); apps +
+			// groups ride the Management-API REST client.
 			var sc *studio.Client
 			if r.Studio != nil {
 				sc = r.Studio()
+			}
+			var rest restDoer
+			if r.REST != nil {
+				rest = r.REST()
 			}
 			ref, err := resolveOrLinkRef(ctx, refFlag, sc, out)
 			if err != nil {
@@ -63,14 +69,14 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 				}
 			}
 			if appID == "" {
-				if sc == nil {
+				if rest == nil {
 					return fmt.Errorf("no ios app linked — run `palbase ios link` first, or pass --app <appId>")
 				}
-				grpID, gerr := resolveIOSGroup(ctx, iosLinkDeps{studio: sc, stdin: os.Stdin, interactive: isInteractive()}, groupFlag, bufio.NewReader(os.Stdin), out)
+				grpID, gerr := resolveIOSGroup(ctx, iosLinkDeps{rest: rest, stdin: os.Stdin, interactive: isInteractive()}, groupFlag, bufio.NewReader(os.Stdin), out)
 				if gerr != nil {
 					return gerr
 				}
-				appID, err = resolveExistingIOSApp(ctx, sc, grpID, out)
+				appID, err = resolveExistingIOSApp(ctx, rest, grpID, out)
 				if err != nil {
 					return err
 				}
@@ -88,7 +94,7 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 			// key, so the whole ./Palbase pair points at <branch>.
 			if err := runPullSpec(ctx,
 				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
-				studioBindingLister(sc), studioConfigArtifactFetch(sc),
+				studioBindingLister(rest), studioConfigArtifactFetch(rest),
 				ref, branch, outDir, appID,
 				true, // ios use is an EXPLICIT re-target: error if the branch reached no env
 				out); err != nil {
