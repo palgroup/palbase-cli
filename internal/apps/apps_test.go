@@ -1,6 +1,7 @@
 package apps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -141,6 +142,59 @@ func TestAppsDelete_REST(t *testing.T) {
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
 	cmd.SetArgs([]string{"delete", "app_9", "--json"})
 	require.NoError(t, cmd.Execute())
+}
+
+// TestAppsEnforce_REST locks the config-match toggle: `apps enforce <grp>` PATCHes
+// the group with apps_required=true; --disable sends false.
+func TestAppsEnforce_REST(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantOn  bool
+	}{
+		{"on (default)", []string{"enforce", "grp_1", "--json"}, true},
+		{"off (--disable)", []string{"enforce", "grp_1", "--disable", "--json"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPatch, r.Method)
+				require.Equal(t, "/api/v1/groups/grp_1", r.URL.Path)
+				var body map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, tc.wantOn, body["apps_required"], "apps_required must reflect --disable")
+				okData(w, http.StatusOK, map[string]any{"ok": true})
+			})
+			cmd := Cmd(Resolvers{REST: func() REST { return c }})
+			cmd.SetArgs(tc.args)
+			require.NoError(t, cmd.Execute())
+		})
+	}
+}
+
+// TestAppsAttest_REST locks the App-Attest toggle: `apps attest --app --env`
+// PATCHes the (app × env) binding with attest_enforce; --disable sends false.
+func TestAppsAttest_REST(t *testing.T) {
+	c := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPatch, r.Method)
+		require.Equal(t, "/api/v1/apps/app_1/bindings/todoappm8p6z", r.URL.Path)
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, true, body["attest_enforce"])
+		okData(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	cmd := Cmd(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"attest", "--app", "app_1", "--env", "todoappm8p6z", "--json"})
+	require.NoError(t, cmd.Execute())
+}
+
+// TestAppsAttest_RequiresAppEnv asserts the client-side required-flag gate fires
+// before any API call.
+func TestAppsAttest_RequiresAppEnv(t *testing.T) {
+	cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
+	cmd.SetArgs([]string{"attest", "--app", "app_1"}) // missing --env
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	require.Error(t, cmd.Execute())
 }
 
 // TestAppsConfig_WritesConfigFileToPath exercises the config-artifact route and

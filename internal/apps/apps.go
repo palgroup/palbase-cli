@@ -59,6 +59,10 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase apps bind --app <appId> --env <ref> --identifier <bundleId>
                                                         Set the (app × env)
                                                         binding's identifier.
+  palbase apps enforce <groupRef>                       Require registered apps
+                                                        (config-match on).
+  palbase apps attest --app <appId> --env <ref>         Require App Attest on
+                                                        the binding.
 
 iOS config artifacts are fetched by 'palbase spec --app <appId>' and turned
 into Palbase-Info.plist by the PalbaseCodegen SPM plugin at build time.
@@ -71,6 +75,8 @@ All operations go through the Management API (membership/role-gated server-side)
 		deleteCmd(r.REST),
 		configCmd(r.REST),
 		bindCmd(r.REST),
+		enforceCmd(r.REST),
+		attestCmd(r.REST),
 	)
 	return cmd
 }
@@ -247,6 +253,103 @@ func bindCmd(rest func() REST) *cobra.Command {
 	_ = cmd.MarkFlagRequired("app")
 	_ = cmd.MarkFlagRequired("env")
 	_ = cmd.MarkFlagRequired("identifier")
+	return cmd
+}
+
+// enforceCmd wires `palbase apps enforce <groupRef>`: the umbrella-wide
+// App-Registration switch (project_groups.apps_required). When ON, the gateway
+// 403s any request whose key doesn't config-match its registered bundle id /
+// origin — a leaked key is useless from an unregistered app. Flipping it also
+// fleet-backfills every already-minted app-bound key blob so the change takes
+// effect on existing keys. --disable turns it off. admin+ on the group.
+func enforceCmd(rest func() REST) *cobra.Command {
+	var (
+		disable bool
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "enforce <groupRef>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Require registered apps for the group (config-match enforcement)",
+		Long: "Toggle the group's App-Registration enforcement (config-match).\n" +
+			"ON (default): the gateway rejects any key that doesn't match its\n" +
+			"registered bundle id / web origin, so a leaked key can't be used from\n" +
+			"an unregistered app. --disable turns it off. Flipping it fleet-backfills\n" +
+			"existing key blobs so the change applies to already-minted keys.\n" +
+			"Runs through the Management API (admin+ on the group, server-side).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			groupID := args[0]
+			on := !disable
+			var out struct {
+				OK bool `json:"ok"`
+			}
+			if err := rest().Do(cmd.Context(), http.MethodPatch,
+				"/api/v1/groups/"+groupID, map[string]any{"apps_required": on}, &out); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(map[string]any{"ok": out.OK, "groupId": groupID, "apps_required": on})
+			}
+			state := "enabled"
+			if !on {
+				state = "disabled"
+			}
+			fmt.Fprintf(os.Stdout, "✓ config-match enforcement %s for group %s\n", state, groupID)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&disable, "disable", false, "turn enforcement OFF (default: turn it ON)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	return cmd
+}
+
+// attestCmd wires `palbase apps attest --app <appId> --env <ref>`: the
+// per-binding App-Attest switch (app_env_bindings.attest_enforce). When ON, the
+// backend additionally requires a valid App Attest assertion on that env's
+// requests (hardware attestation — layer 2, above config-match). --disable turns
+// it off. admin+ on the app's group.
+func attestCmd(rest func() REST) *cobra.Command {
+	var (
+		appID   string
+		env     string
+		disable bool
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "attest",
+		Short: "Require App Attest on an (app × env) binding (hardware attestation)",
+		Long: "Toggle the (app × env) binding's App-Attest enforcement.\n" +
+			"ON (default): requests to that env must carry a valid App Attest\n" +
+			"assertion (a real, unmodified app on Apple hardware) — layer 2, above\n" +
+			"config-match. --disable turns it off. --env is the env's BARE project\n" +
+			"ref (the same ref `apps bind --env` takes).\n" +
+			"Runs through the Management API (admin+ on the app's group, server-side).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			on := !disable
+			var out struct {
+				OK bool `json:"ok"`
+			}
+			if err := rest().Do(cmd.Context(), http.MethodPatch,
+				"/api/v1/apps/"+appID+"/bindings/"+env, map[string]any{"attest_enforce": on}, &out); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(map[string]any{"ok": out.OK, "appId": appID, "projectRef": env, "attest_enforce": on})
+			}
+			state := "enabled"
+			if !on {
+				state = "disabled"
+			}
+			fmt.Fprintf(os.Stdout, "✓ App Attest %s for app %s on env %s\n", state, appID, env)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
+	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
+	cmd.Flags().BoolVar(&disable, "disable", false, "turn App Attest OFF (default: turn it ON)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	_ = cmd.MarkFlagRequired("app")
+	_ = cmd.MarkFlagRequired("env")
 	return cmd
 }
 
