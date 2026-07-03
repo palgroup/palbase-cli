@@ -42,12 +42,45 @@ func TestPullSpec_FlagDefaults(t *testing.T) {
 		{"ref", ""},
 		{"branch", ""},
 		{"out-dir", "./Palbase"},
-		{"app", ""},
 	} {
 		f := cmd.Flags().Lookup(tc.name)
 		require.NotNilf(t, f, "missing --%s flag", tc.name)
 		require.Equalf(t, tc.def, f.DefValue, "--%s default", tc.name)
 	}
+	// spec refreshes the API contract ONLY — config (and thus app selection)
+	// is `ios link`'s job. These flags must NOT exist on spec.
+	require.Nil(t, cmd.Flags().Lookup("app"), "spec must not take --app (config is ios link's job)")
+	require.Nil(t, cmd.Flags().Lookup("group"), "spec must not take --group")
+	require.Nil(t, cmd.Flags().Lookup("no-config"), "spec must not take --no-config")
+}
+
+// TestRunPullSpec_EmptyAppNeverWritesConfig locks the role split at the core
+// newSpecCmd relies on: runPullSpec with an EMPTY appID never touches the
+// binding-list / config-artifact seams and never writes palbase-config.json —
+// even though the project has an ios app registered. spec passes "" (config is
+// ios link's job); this pins that "" means openapi-only. The seams t.Error if
+// reached.
+func TestRunPullSpec_EmptyAppNeverWritesConfig(t *testing.T) {
+	dir := t.TempDir()
+	err := runPullSpec(
+		context.Background(),
+		stubTarget("https://abc1m.dev.palbase.studio", "pb_abc1m_ckey"),
+		stubFetch(`{"openapi":"3.1.0","paths":{}}`, nil),
+		func(context.Context, string) ([]AppBinding, error) {
+			t.Error("spec must not list bindings with empty appID")
+			return nil, errors.New("unreachable")
+		},
+		func(context.Context, string, string) (apps.ConfigArtifact, error) {
+			t.Error("spec must not fetch config with empty appID")
+			return apps.ConfigArtifact{}, errors.New("unreachable")
+		},
+		"abc1", "main", dir, "", io.Discard,
+	)
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dir, "openapi.json"))
+	require.NoError(t, err, "spec must write openapi.json")
+	_, statErr := os.Stat(filepath.Join(dir, "palbase-config.json"))
+	require.True(t, os.IsNotExist(statErr), "spec must NEVER write palbase-config.json — that is ios link's job")
 }
 
 // TestPullSpec_WritesSpecOnly: no --app → ONLY openapi.json is written, fetched

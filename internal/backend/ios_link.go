@@ -363,32 +363,6 @@ func resolveExistingIOSApp(ctx context.Context, studio apps.Studio, grpID string
 	return "", nil
 }
 
-// autoResolveSpecApp resolves the ios app for `palbase spec` when --app was not
-// passed: pick the group (single/flag/picker), then the group's existing ios
-// app (read-only — no create). Any miss (multiple groups non-interactively, no
-// ios app) returns "" so spec writes openapi.json alone instead of failing —
-// the config artifact is a best-effort add-on, not a hard requirement.
-func autoResolveSpecApp(ctx context.Context, d iosLinkDeps, groupFlag string, w io.Writer) string {
-	if d.studio == nil {
-		return ""
-	}
-	reader := bufio.NewReader(d.stdin)
-	grpID, err := resolveIOSGroup(ctx, d, groupFlag, reader, w)
-	if err != nil {
-		fmt.Fprintf(w, "(skipping palbase-config.json: %v — pass --app to force it)\n", err)
-		return ""
-	}
-	appID, err := resolveExistingIOSApp(ctx, d.studio, grpID, w)
-	if err != nil {
-		fmt.Fprintf(w, "(skipping palbase-config.json: %v)\n", err)
-		return ""
-	}
-	if appID == "" {
-		fmt.Fprintln(w, "(no ios app registered in this group — run `palbase ios link` to register one; writing openapi.json only)")
-	}
-	return appID
-}
-
 // resolveIOSBindings decides each env's bundle id: the --bundle-id flag wins;
 // otherwise a TTY prompts (empty input skips the env) and a non-TTY skips with
 // a warning. The caller enforces "at least one bound".
