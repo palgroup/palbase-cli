@@ -317,15 +317,12 @@ func resolveIOSApp(ctx context.Context, d iosLinkDeps, grpID, appFlag, nameFlag 
 	if appFlag != "" {
 		return appFlag, nil
 	}
-	var rows []iosAppRow
-	if err := d.studio.Query(ctx, "apps.list", map[string]any{"groupId": grpID}, &rows); err != nil {
-		return "", fmt.Errorf("apps.list: %w", err)
+	existing, err := resolveExistingIOSApp(ctx, d.studio, grpID, w)
+	if err != nil {
+		return "", err
 	}
-	for _, a := range rows {
-		if a.Platform == "ios" && a.DeletedAt == nil {
-			fmt.Fprintf(w, "using existing ios app %s (%s)\n", a.DisplayName, a.ID)
-			return a.ID, nil
-		}
+	if existing != "" {
+		return existing, nil
 	}
 	name := nameFlag
 	if name == "" {
@@ -345,6 +342,51 @@ func resolveIOSApp(ctx context.Context, d iosLinkDeps, grpID, appFlag, nameFlag 
 	}
 	fmt.Fprintf(w, "✓ registered ios app %q (%s)\n", name, created.ID)
 	return created.ID, nil
+}
+
+// resolveExistingIOSApp finds the group's first live ios app WITHOUT creating
+// one — the read-only half of resolveIOSApp. `palbase spec` uses it to
+// auto-resolve --app (it fetches artifacts, it must NOT register apps — that's
+// `ios link`'s job). Returns "" (not an error) when the group has no ios app,
+// so spec can fall back to the openapi-only path.
+func resolveExistingIOSApp(ctx context.Context, studio apps.Studio, grpID string, w io.Writer) (string, error) {
+	var rows []iosAppRow
+	if err := studio.Query(ctx, "apps.list", map[string]any{"groupId": grpID}, &rows); err != nil {
+		return "", fmt.Errorf("apps.list: %w", err)
+	}
+	for _, a := range rows {
+		if a.Platform == "ios" && a.DeletedAt == nil {
+			fmt.Fprintf(w, "using ios app %s (%s)\n", a.DisplayName, a.ID)
+			return a.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// autoResolveSpecApp resolves the ios app for `palbase spec` when --app was not
+// passed: pick the group (single/flag/picker), then the group's existing ios
+// app (read-only — no create). Any miss (multiple groups non-interactively, no
+// ios app) returns "" so spec writes openapi.json alone instead of failing —
+// the config artifact is a best-effort add-on, not a hard requirement.
+func autoResolveSpecApp(ctx context.Context, d iosLinkDeps, groupFlag string, w io.Writer) string {
+	if d.studio == nil {
+		return ""
+	}
+	reader := bufio.NewReader(d.stdin)
+	grpID, err := resolveIOSGroup(ctx, d, groupFlag, reader, w)
+	if err != nil {
+		fmt.Fprintf(w, "(skipping palbase-config.json: %v — pass --app to force it)\n", err)
+		return ""
+	}
+	appID, err := resolveExistingIOSApp(ctx, d.studio, grpID, w)
+	if err != nil {
+		fmt.Fprintf(w, "(skipping palbase-config.json: %v)\n", err)
+		return ""
+	}
+	if appID == "" {
+		fmt.Fprintln(w, "(no ios app registered in this group — run `palbase ios link` to register one; writing openapi.json only)")
+	}
+	return appID
 }
 
 // resolveIOSBindings decides each env's bundle id: the --bundle-id flag wins;

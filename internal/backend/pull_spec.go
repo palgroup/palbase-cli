@@ -54,11 +54,21 @@ type oauthGoogleJSON struct {
 // REMOTE spec for the resolved --ref via the wake-aware fetch. (A future
 // --local opt-in could add a serve probe; for now, remote only.)
 func newSpecCmd(r Resolvers) *cobra.Command {
-	var refFlag, branchFlag, outDir, appID string
+	var refFlag, branchFlag, groupFlag, outDir, appID string
+	var noConfig bool
 	cmd := &cobra.Command{
 		Use:   "spec",
 		Args:  cobra.NoArgs,
-		Short: "Download openapi.json (+ palbase-config.json with --app) — the committed inputs SDK code generators consume",
+		Short: "Download openapi.json + palbase-config.json — the committed inputs SDK code generators consume",
+		Long: `Fetch the deployed backend's openapi.json into --out-dir (default ./Palbase)
+plus, for a project that has an ios app registered, the bundle-id-keyed
+palbase-config.json the SDK codegen consumes.
+
+The ios app is resolved automatically — you do NOT pass an app id: spec picks
+your group (single, --group, or an interactive picker) and its registered ios
+app. Pass --app <id> to force a specific one, or --no-config to fetch only
+openapi.json. When no ios app is registered, spec writes openapi.json alone and
+points you at 'palbase ios link'.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
@@ -72,6 +82,16 @@ func newSpecCmd(r Resolvers) *cobra.Command {
 					branch = "main"
 				}
 			}
+			// Resolve --app automatically (symmetry with `ios link`): unless the
+			// user forced --app or opted out with --no-config, pick the group's
+			// registered ios app read-only. A miss degrades to openapi-only.
+			if appID == "" && !noConfig {
+				appID = autoResolveSpecApp(cmd.Context(), iosLinkDeps{
+					studio:      r.Studio(),
+					stdin:       os.Stdin,
+					interactive: isInteractive(),
+				}, groupFlag, os.Stdout)
+			}
 			return runPullSpec(
 				cmd.Context(),
 				lookupSpecTarget(r),
@@ -82,10 +102,12 @@ func newSpecCmd(r Resolvers) *cobra.Command {
 			)
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to the linked .palbase/config.json; required in non-interactive shells)")
+	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to the linked .palbase/config.json; auto-picker in an interactive shell)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to fetch the spec from (defaults to the linked branch, else main)")
-	cmd.Flags().StringVar(&outDir, "out-dir", "./Palbase", "Directory to write openapi.json (and palbase-config.json with --app)")
-	cmd.Flags().StringVar(&appID, "app", "", "App id — also emit palbase-config.json (one config entry per registered bundle id)")
+	cmd.Flags().StringVar(&groupFlag, "group", "", "Group id for the ios-app lookup (defaults to your only group, or a picker)")
+	cmd.Flags().StringVar(&outDir, "out-dir", "./Palbase", "Directory to write openapi.json (and palbase-config.json)")
+	cmd.Flags().StringVar(&appID, "app", "", "App id to emit config for (default: auto-resolved from your group's ios app)")
+	cmd.Flags().BoolVar(&noConfig, "no-config", false, "Fetch openapi.json only — skip palbase-config.json")
 	return cmd
 }
 
