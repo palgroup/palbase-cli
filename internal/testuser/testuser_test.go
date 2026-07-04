@@ -82,6 +82,8 @@ func TestTestUserCreate_PlainJSON(t *testing.T) {
 	// The plain path sends count (default 1) + withTokens.
 	require.EqualValues(t, 1, body["count"])
 	require.Equal(t, true, body["withTokens"])
+	// Without --branch, no branch key is sent (server defaults to main).
+	require.NotContains(t, body, "branch", "no --branch → payload must omit branch (server defaults to main)")
 
 	// --json emits the creds+token verbatim (scriptable).
 	var got struct {
@@ -98,6 +100,27 @@ func TestTestUserCreate_PlainJSON(t *testing.T) {
 	require.Equal(t, "t1@x.dev", got.Users[0].Email)
 	require.Equal(t, "pw1", got.Users[0].Password)
 	require.Equal(t, "tok1", got.Users[0].AccessToken)
+}
+
+// TestTestUserCreate_BranchFlag proves --branch is forwarded so the users are
+// minted against THAT branch's palauth (a token minted on dev only authenticates
+// on dev — branch-isolated auth). Mutation check: drop the `if branch != ""`
+// forward and this assertion goes RED.
+func TestTestUserCreate_BranchFlag(t *testing.T) {
+	var body map[string]any
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/trpc/testData.testUserCreate", r.URL.Path)
+		body = innerInput(t, r)
+		trpcOK(w, map[string]any{"users": []map[string]any{
+			{"id": "usr_1", "email": "t1@x.dev", "password": "pw1", "accessToken": "tok1"},
+		}})
+	})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd.SetArgs([]string{"create", "abcd1234", "--branch", "dev", "--json"})
+	cmd.SetOut(&bytes.Buffer{})
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, "dev", body["branch"], "--branch dev must ride in the mint payload")
 }
 
 // TestTestUserCreate_PlainCountFlag proves --count is forwarded to the mint.

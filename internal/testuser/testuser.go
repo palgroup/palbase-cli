@@ -88,6 +88,7 @@ type scenarioResult struct {
 func createCmd(studioFn func() Studio) *cobra.Command {
 	var (
 		scenario string
+		branch   string
 		count    int
 		jsonOut  bool
 	)
@@ -108,10 +109,14 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 					return fmt.Errorf("--count cannot be combined with --scenario (a scenario mints exactly one user)")
 				}
 				var res scenarioResult
-				if err := studioFn().Mutation(cmd.Context(), "testData.runScenario", map[string]any{
+				scenarioPayload := map[string]any{
 					"ref":  ref,
 					"name": scenario,
-				}, &res); err != nil {
+				}
+				if branch != "" {
+					scenarioPayload["branch"] = branch
+				}
+				if err := studioFn().Mutation(cmd.Context(), "testData.runScenario", scenarioPayload, &res); err != nil {
 					return err
 				}
 				if jsonOut {
@@ -141,11 +146,18 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 				return fmt.Errorf("--count must be at least 1")
 			}
 			var res plainResult
-			if err := studioFn().Mutation(cmd.Context(), "testData.testUserCreate", map[string]any{
+			payload := map[string]any{
 				"ref":        ref,
 				"count":      count,
 				"withTokens": true,
-			}, &res); err != nil {
+			}
+			// --branch mints the users against THAT branch's palauth (each branch
+			// verifies tokens against its own auth, so a token is only valid on the
+			// branch that minted it). Omit → the project's default branch (main).
+			if branch != "" {
+				payload["branch"] = branch
+			}
+			if err := studioFn().Mutation(cmd.Context(), "testData.testUserCreate", payload, &res); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -167,6 +179,7 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&scenario, "scenario", "", "Populate the minted user's data tree from a saved scenario")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch to mint the user(s) against (defaults to the project's main branch)")
 	cmd.Flags().IntVar(&count, "count", 1, "Number of plain test users to mint (ignored with --scenario)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit creds+token as JSON (for scripting)")
 	return cmd
