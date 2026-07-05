@@ -225,7 +225,7 @@ func TestAppsConfig_WritesConfigFileToPath(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
 	require.Equal(t, "app_1", got["app_id"])
-	require.Equal(t, "https://app.example.com", got["identifier"])
+	require.NotContains(t, got, "identifier", "emitted config no longer carries a bundle identifier")
 	require.Equal(t, "development", got["env_preset"])
 	require.Equal(t, "https://abcd1234m.dev.palbase.studio", got["base_url"])
 	require.Equal(t, "pb_abcd1234m_c_x", got["api_key"])

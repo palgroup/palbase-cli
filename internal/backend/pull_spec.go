@@ -13,16 +13,18 @@ import (
 	"github.com/palgroup/palbase-cli/internal/auth"
 )
 
-// pullSpecConfigEntry is the per-bundle-id config the Swift SPM plugin turns
-// into the per-env Palbase-Info.plist (one dict per registered bundle id) —
-// plain JSON so the plugin owns the plist serialization.
+// pullSpecConfigEntry is the single active-env config the Swift SPM plugin turns
+// into the flat Palbase-Info.plist — plain JSON so the plugin owns the plist
+// serialization. It carries NO bundle identifier: the SDK sends X-Palbase-Bundle
+// from Bundle.main at request time, so the client config has no bundle identity
+// to store (config-match is enforced server-side against the key's backend-bound
+// identifier).
 type pullSpecConfigEntry struct {
-	AppID      string           `json:"app_id"`
-	Identifier string           `json:"identifier"`
-	EnvPreset  string           `json:"env_preset"`
-	BaseURL    string           `json:"base_url"`
-	APIKey     string           `json:"api_key"`
-	OAuth      *oauthConfigJSON `json:"oauth,omitempty"`
+	AppID     string           `json:"app_id"`
+	EnvPreset string           `json:"env_preset"`
+	BaseURL   string           `json:"base_url"`
+	APIKey    string           `json:"api_key"`
+	OAuth     *oauthConfigJSON `json:"oauth,omitempty"`
 }
 
 // oauthConfigJSON mirrors apps.OAuthConfig field-for-field so the emitted JSON's
@@ -179,16 +181,18 @@ func runPullSpec(
 	if err := os.WriteFile(cfgPath, append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
-	fmt.Fprintf(w, "✓ wrote %s (%s → %s)\n", cfgPath, entry.Identifier, entry.BaseURL)
+	fmt.Fprintf(w, "✓ wrote %s (%s)\n", cfgPath, entry.BaseURL)
 	return nil
 }
 
 // buildPullSpecConfig fetches the config artifact for the ONE active env — the
 // binding whose project_ref == ref, at branchName — and returns it as a single
-// flat entry. The active target is what the CLI already selected (`ios link` →
+// flat entry (no bundle identifier: the SDK sends X-Palbase-Bundle from
+// Bundle.main). The active target is what the CLI already selected (`ios link` →
 // production, `ios use` → the branch); there is no per-bundle map. Errors when the
-// app has no binding for ref, or that binding has no registered bundle id
-// (identifier) — a config without an identifier can't config-match.
+// app has no binding for ref, or that binding has no registered bundle id on the
+// BACKEND — an app that isn't registered server-side has nothing for the Kong
+// config-match gate to compare the header against, so we refuse to emit a config.
 func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
@@ -217,11 +221,10 @@ func buildPullSpecConfig(
 		return nil, fmt.Errorf("fetch config artifact for %s: %w", ref, err)
 	}
 	entry := &pullSpecConfigEntry{
-		AppID:      art.AppID,
-		Identifier: art.Identifier,
-		EnvPreset:  art.EnvPreset,
-		BaseURL:    art.BaseURL,
-		APIKey:     art.APIKey,
+		AppID:     art.AppID,
+		EnvPreset: art.EnvPreset,
+		BaseURL:   art.BaseURL,
+		APIKey:    art.APIKey,
 	}
 	if art.OAuth != nil {
 		oc := &oauthConfigJSON{}

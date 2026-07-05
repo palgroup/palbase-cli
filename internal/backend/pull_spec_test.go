@@ -168,7 +168,6 @@ func TestPullSpec_ConfigShape(t *testing.T) {
 	var got pullSpecConfigEntry
 	require.NoError(t, json.Unmarshal(raw, &got))
 	require.Equal(t, "app_1", got.AppID)
-	require.Equal(t, "com.x.app", got.Identifier)
 	require.Equal(t, "production", got.EnvPreset)
 	require.Equal(t, "https://prodm.palbase.studio", got.BaseURL)
 	require.Equal(t, "pb_prodm_ckey", got.APIKey)
@@ -178,11 +177,12 @@ func TestPullSpec_ConfigShape(t *testing.T) {
 	require.NotNil(t, got.OAuth.Google)
 	require.Equal(t, "123.apps.googleusercontent.com", got.OAuth.Google.ClientID)
 
-	// The top-level JSON keys are the flat fields (identifier, base_url, …), NOT a
-	// bundle id — locks that the file is not a bundle-id-keyed map.
+	// The top-level JSON keys are the flat fields (base_url, api_key, …), NOT a
+	// bundle id — locks that the file is not a bundle-id-keyed map. And it carries
+	// NO identifier: the SDK sends X-Palbase-Bundle from Bundle.main.
 	var rawKeys map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(raw, &rawKeys))
-	require.Contains(t, rawKeys, "identifier")
+	require.NotContains(t, rawKeys, "identifier", "config no longer carries a bundle identifier")
 	require.Contains(t, rawKeys, "base_url")
 	require.NotContains(t, rawKeys, "com.x.app", "config must be flat, not keyed by bundle id")
 	_, hasOAuth := rawKeys["oauth"]

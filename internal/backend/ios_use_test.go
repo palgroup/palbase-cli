@@ -99,7 +99,7 @@ func TestIOSUse_TargetsBranch(t *testing.T) {
 	require.NoError(t, err)
 	var cfgFile map[string]any
 	require.NoError(t, json.Unmarshal(raw, &cfgFile))
-	require.Equal(t, "com.demo.palbase", cfgFile["identifier"], "config is the flat ref-binding entry")
+	require.NotContains(t, cfgFile, "identifier", "config no longer carries a bundle identifier (SDK sends it from Bundle.main)")
 	require.Equal(t, "https://todoappm8p6zd.dev.palbase.studio",
 		cfgFile["base_url"], "config base_url must be the branch host")
 

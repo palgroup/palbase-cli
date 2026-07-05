@@ -451,13 +451,16 @@ func configCmd(rest func() REST) *cobra.Command {
 }
 
 // emitConfig writes the per-env web config file (palbase-config.json) the SDK
-// reads — exactly {app_id, identifier, env_preset, base_url, api_key}.
+// reads — exactly {app_id, env_preset, base_url, api_key}. The config carries no
+// identifier: the SDK sends the config-match origin/bundle from the runtime (the
+// browser origin / Bundle.main), not from a committed config field.
 //
-// REFUSES (returns an error, writes NOTHING) when the artifact has no
-// identifier: an empty identifier means the binding is unconfigured (the app
-// has not declared its web origin), and a config file without an identifier
-// cannot enforce config-match — writing it would be a footgun that mirrors
-// the orchestrator's unconfigured-binding rule.
+// REFUSES (returns an error, writes NOTHING) when the BACKEND binding has no
+// registered identifier: an unconfigured binding (the app hasn't declared its
+// web origin server-side) gives the Kong config-match gate nothing to compare
+// against, so we refuse to emit a config — mirroring the orchestrator's
+// unconfigured-binding rule. (The refusal reads the BACKEND artifact's
+// identifier; the emitted client file does not carry it.)
 func emitConfig(art ConfigArtifact, path string) error {
 	if art.Identifier == "" {
 		return fmt.Errorf("refusing to write %s: app %q has an unconfigured binding (no identifier) — declare the web origin before emitting a config", path, art.AppID)
@@ -465,11 +468,11 @@ func emitConfig(art ConfigArtifact, path string) error {
 	return writeWebConfig(art, path)
 }
 
-// writeWebConfig marshals the five config-match fields to JSON.
+// writeWebConfig marshals the client config fields to JSON (no identifier — the
+// SDK sources X-Palbase-Bundle from the runtime origin/bundle).
 func writeWebConfig(art ConfigArtifact, path string) error {
 	raw, err := json.MarshalIndent(map[string]string{
 		"app_id":     art.AppID,
-		"identifier": art.Identifier,
 		"env_preset": art.EnvPreset,
 		"base_url":   art.BaseURL,
 		"api_key":    art.APIKey,
