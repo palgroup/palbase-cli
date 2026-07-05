@@ -199,7 +199,7 @@ Switch branches later with 'palbase ios use <branch>'.`,
 	cmd.Flags().StringVar(&appFlag, "app", "", "App id (defaults to the group's first ios app; created when absent)")
 	cmd.Flags().StringArrayVar(&bundleIDs, "bundle-id", nil, "App bundle id (overrides auto-detection from ./*.xcodeproj)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "Display name for a newly registered app (default: current directory name)")
-	cmd.Flags().StringVar(&outDir, "out-dir", "./Palbase", "Directory to write openapi.json + palbase-config.json")
+	cmd.Flags().StringVar(&outDir, "out-dir", "./.palbase", "Directory to write openapi.json + palbase-config.json")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit a JSON summary instead of human output")
 	return cmd
 }
@@ -210,7 +210,7 @@ Switch branches later with 'palbase ios use <branch>'.`,
 // asked for ONE thing: which product (and only when they have more than one).
 func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Writer) (*iosLinkSummary, error) {
 	if opts.outDir == "" {
-		opts.outDir = "./Palbase"
+		opts.outDir = "./.palbase"
 	}
 	// `ios link` binds an app to a PRODUCT. A product is a group (the umbrella
 	// that owns the product's environments) — so we pick the group, never an

@@ -251,7 +251,7 @@ func TestIOSCmd_Tree(t *testing.T) {
 		{"group", ""},
 		{"app", ""},
 		{"name", ""},
-		{"out-dir", "./Palbase"},
+		{"out-dir", "./.palbase"},
 		{"json", "false"},
 	} {
 		f := link.Flags().Lookup(tc.name)

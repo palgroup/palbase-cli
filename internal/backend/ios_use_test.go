@@ -94,8 +94,9 @@ func TestIOSUse_TargetsBranch(t *testing.T) {
 		"use must record the branch as the active target so `spec` follows it")
 	require.Equal(t, "app_ios1", cfg.IOSAppID, "app id must be preserved")
 
-	// The config is a FLAT single-env object pointing at the branch host.
-	raw, err := os.ReadFile(filepath.Join("Palbase", "palbase-config.json"))
+	// The config is a FLAT single-env object pointing at the branch host,
+	// written into the hidden .palbase/ dir (the plugin reads it from there).
+	raw, err := os.ReadFile(filepath.Join(".palbase", "palbase-config.json"))
 	require.NoError(t, err)
 	var cfgFile map[string]any
 	require.NoError(t, json.Unmarshal(raw, &cfgFile))

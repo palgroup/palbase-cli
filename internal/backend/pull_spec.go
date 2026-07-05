@@ -61,7 +61,7 @@ func newSpecCmd(r Resolvers) *cobra.Command {
 		Use:   "spec",
 		Args:  cobra.NoArgs,
 		Short: "Refresh openapi.json — the API contract the SDK code generators consume",
-		Long: `Fetch the deployed backend's openapi.json into --out-dir (default ./Palbase).
+		Long: `Fetch the deployed backend's openapi.json into --out-dir (default ./.palbase).
 Run it after every deploy so the committed API contract stays current; the SDK
 code generators (the iOS PalbaseCodegen plugin, @palbase/web's palbe-gen)
 regenerate from it.
@@ -103,7 +103,7 @@ link' to refresh it, not spec.`,
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to the linked .palbase/config.json; auto-picker in an interactive shell)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to fetch the spec from (defaults to the linked branch, else main)")
-	cmd.Flags().StringVar(&outDir, "out-dir", "./Palbase", "Directory to write openapi.json")
+	cmd.Flags().StringVar(&outDir, "out-dir", "./.palbase", "Directory to write openapi.json")
 	return cmd
 }
 
@@ -145,7 +145,7 @@ func runPullSpec(
 		return err
 	}
 	if outDir == "" {
-		outDir = "./Palbase"
+		outDir = "./.palbase"
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", outDir, err)

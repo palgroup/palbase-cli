@@ -40,7 +40,7 @@ func TestPullSpec_FlagDefaults(t *testing.T) {
 	for _, tc := range []struct{ name, def string }{
 		{"ref", ""},
 		{"branch", ""},
-		{"out-dir", "./Palbase"},
+		{"out-dir", "./.palbase"},
 	} {
 		f := cmd.Flags().Lookup(tc.name)
 		require.NotNilf(t, f, "missing --%s flag", tc.name)

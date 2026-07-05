@@ -32,7 +32,7 @@ func newIOSUseCmd(r Resolvers) *cobra.Command {
 		Short: "Point the iOS project at a branch — refresh openapi + config for it",
 		Long: `Re-target the linked iOS project at <branch> of its environment.
 
-Fetches openapi.json + palbase-config.json for that branch into ./Palbase and
+Fetches openapi.json + palbase-config.json for that branch into ./.palbase and
 records it as the active target in .palbase/config.json, so a later
 'palbase spec' refreshes from the same branch. Rebuild in Xcode — the codegen
 plugin regenerates from the new config; there is one scheme and no Xcode edit.
@@ -86,12 +86,12 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 			}
 
 			if outDir == "" {
-				outDir = "./Palbase"
+				outDir = "./.palbase"
 			}
 			// Fetch openapi + config FOR THE BRANCH. runPullSpec resolves the
 			// branch's endpoint_ref for both the spec host and (via the
 			// branch-threaded config artifact) every bundle-id entry's base_url +
-			// key, so the whole ./Palbase pair points at <branch>.
+			// key, so the whole ./.palbase pair points at <branch>.
 			if err := runPullSpec(ctx,
 				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
 				studioBindingLister(rest), studioConfigArtifactFetch(rest),
@@ -123,6 +123,6 @@ read from .palbase/config.json). Run 'palbase ios link' first if it is not.`,
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to the linked .palbase/config.json)")
 	cmd.Flags().StringVar(&groupFlag, "group", "", "Group id (only used if no ios app id is linked yet)")
 	cmd.Flags().StringVar(&appFlag, "app", "", "App id (defaults to the linked project's ios app)")
-	cmd.Flags().StringVar(&outDir, "out-dir", "./Palbase", "Directory to write openapi.json + palbase-config.json")
+	cmd.Flags().StringVar(&outDir, "out-dir", "./.palbase", "Directory to write openapi.json + palbase-config.json")
 	return cmd
 }
