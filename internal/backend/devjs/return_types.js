@@ -190,7 +190,7 @@ function readReturnTypes(sourceText, fileLabel) {
         const ex = d.expression;
         const callee = tsapi.isCallExpression(ex) ? ex.expression : ex;
         const n = callee && callee.getText(sf);
-        return n === 'Get' || n === 'Post' || n === 'Put' || n === 'Patch' || n === 'Delete';
+        return n === 'Get' || n === 'Post' || n === 'Put' || n === 'Patch' || n === 'Delete' || n === 'Query';
       });
       if (!isRoute) continue;
 

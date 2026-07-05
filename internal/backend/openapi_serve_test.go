@@ -66,7 +66,7 @@ const fakeZod = `{ _def: { typeName: 'ZodObject' }, safeParse: (v) => ({ success
 //     security [{}] and NO 401
 //   - a rateLimit route has x-rate-limit
 //   - a @Body route has requestBody.content.application/json.schema
-//   - a @Query route emits in:query parameters; a @Param route emits in:path
+//   - a @QueryParams route emits in:query parameters; a @Param route emits in:path
 //   - the full route path is basePath + subpath (controller composition)
 //   - a route without throws meta → NO x-palbase-errors / declared statuses
 //   - operationIds are DOTTED `<controllerName>.<fnName>` (TodosController →
@@ -114,7 +114,7 @@ func TestServeOpenAPISpec(t *testing.T) {
 
 	// public controller: basePath "" + @Controller defaultAuth:false → full path
 	// "/public". Explicit opt-out cascades to the route → optional auth, no 401.
-	// The route also declares a @Query so the spec carries in:query parameters.
+	// The route also declares a @QueryParams so the spec carries in:query parameters.
 	mustWrite(t, root, "controllers/public.controller.js", controllerFixture(
 		"PublicController",
 		`{ __palbase: 'controller', basePath: '', defaultAuth: false }`,
@@ -270,9 +270,9 @@ func TestServeOpenAPISpec(t *testing.T) {
 	if pubResps["401"] != nil {
 		t.Fatalf("auth:false op must NOT have 401: %v", pubResps)
 	}
-	// @Query → an in:query parameter (the stub schema exposes a `title` prop).
+	// @QueryParams → an in:query parameter (the stub schema exposes a `title` prop).
 	if !hasParameterIn(publicOp, "query") {
-		t.Fatalf("@Query route missing in:query parameters: %v", publicOp["parameters"])
+		t.Fatalf("@QueryParams route missing in:query parameters: %v", publicOp["parameters"])
 	}
 
 	// {id} → {id} path key + dotted operationId; secure-by-default (auth
@@ -418,8 +418,8 @@ func freeTCPPort(t *testing.T) int {
 }
 
 // TestServeQueryAndParamDispatch verifies the class-controller positional param
-// injection end-to-end: a @Query param receives the parsed URL query and a
-// @Param param receives the matched path segment, both injected by index. The
+// injection end-to-end: a @QueryParams param receives the parsed URL query and
+// a @Param param receives the matched path segment, both injected by index. The
 // fixture stamps the registry symbols on a class (the real load path) and the
 // methods echo back what they received so the test asserts the injected values.
 //
@@ -431,8 +431,8 @@ func TestServeQueryAndParamDispatch(t *testing.T) {
 
 	root := t.TempDir()
 
-	// A controller whose method declares @Query (index 0) + @Param("id") (index
-	// 1). The fakeZod query schema passes the raw query through. basePath "/echo",
+	// A controller whose method declares @QueryParams (index 0) + @Param("id")
+	// (index 1). The fakeZod query schema passes the raw query through. basePath "/echo",
 	// subpath "/{id}" → full path /echo/{id}; auth:false via defaultAuth. Path
 	// params use the canonical BRACE form ({id}) the dev-server matches — the
 	// dispatcher's urlToRegex turns a wholly-{name} segment into a capture group
@@ -462,7 +462,7 @@ func TestServeQueryAndParamDispatch(t *testing.T) {
 
 	body := getJSONUntilReady(t, ctx, port, "/echo/abc?name=joe")
 	if body["name"] != "joe" {
-		t.Fatalf("@Query injection: name = %v, want joe (body %v)", body["name"], body)
+		t.Fatalf("@QueryParams injection: name = %v, want joe (body %v)", body["name"], body)
 	}
 	if body["id"] != "abc" {
 		t.Fatalf("@Param injection: id = %v, want abc (body %v)", body["id"], body)
@@ -648,6 +648,118 @@ export default class HealthController {
 	health := getJSONUntilReady(t, ctx, port, "/health")
 	if health["status"] != "ok" {
 		t.Fatalf("GET /health = %v, want {status:ok}", health)
+	}
+}
+
+// TestServeQueryMethodRoute locks the QUERY method (RFC 10008, @Query method
+// decorator) through the serve path end-to-end:
+//   - return_types.js + throw_analysis.js (devjs twins of the deploy copies)
+//     must recognize @Query as a route decorator — dropping 'Query' from their
+//     method-name lists SILENTLY loses the 200 response schema and the inferred
+//     error set for QUERY routes (the spec op still appears, just hollow)
+//   - the dispatcher routes a REAL QUERY request and carries its JSON body into
+//     @Body (QUERY is body-carrying like POST, safe+idempotent like GET)
+//   - the CORS preflight offers QUERY (a browser fetch always preflights a
+//     custom method, so a missing entry kills QUERY from web apps before dispatch)
+func TestServeQueryMethodRoute(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+
+	root := t.TempDir()
+	mustWrite(t, root, "tsconfig.json", `{ "compilerOptions": { "experimentalDecorators": true, "target": "es2022", "module": "esnext" } }`)
+
+	mustWrite(t, root, "models/todos/search.ts", `
+import { z } from "@palbase/backend";
+
+export const TodosSearchResponse = z.object({
+  items: z.array(z.object({ id: z.string(), title: z.string() })),
+  filter: z.string(),
+});
+export type TodosSearchResponse = z.infer<typeof TodosSearchResponse>;
+`)
+
+	// The QUERY route: input arrives in the BODY (@Body — the RFC rule), the
+	// return type is a named zod schema (return_types.js must treat @Query as a
+	// route to bind it), and the body throws a built-in on missing input
+	// (throw_analysis.js must treat @Query as a route to record it).
+	mustWrite(t, root, "controllers/search.controller.ts", `
+import { Controller, Query, Body, NotFound } from "@palbase/backend";
+import { TodosSearchResponse } from "../models/todos/search";
+
+@Controller("/todos", { auth: false })
+export default class SearchController {
+  @Query("/search")
+  search(@Body() input: any): Promise<TodosSearchResponse> {
+    if (!input) throw new NotFound();
+    return Promise.resolve({ items: [{ id: "t1", title: "first" }], filter: input.q });
+  }
+}
+`)
+
+	writeZodToJSONStub(t, root)
+	writeBackendStub(t, root)
+
+	port := startDevServer(t, root)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Spec: the op sits under the lowercased method key ("query") and carries
+	// BOTH analyzer outputs — the return-type-bound 200 schema and the inferred
+	// 404 + x-palbase-errors.
+	spec := fetchSpecUntilReady(t, ctx, port)
+	paths, _ := spec["paths"].(map[string]any)
+	op := operationAt(t, paths, "/todos/search", "query")
+	ok200, _ := op["responses"].(map[string]any)["200"].(map[string]any)
+	content, _ := ok200["content"].(map[string]any)
+	if content["application/json"] == nil {
+		t.Fatalf("QUERY op lost its return-type 200 schema (return_types.js @Query recognition): %v", op["responses"])
+	}
+	resps, _ := op["responses"].(map[string]any)
+	if resps["404"] == nil || op["x-palbase-errors"] == nil {
+		t.Fatalf("QUERY op lost its inferred NotFound (throw_analysis.js @Query recognition): %v", op)
+	}
+
+	// Dispatch: a real QUERY request with a JSON body → 200, the body flows
+	// through @Body into the method.
+	qURL := fmt.Sprintf("http://127.0.0.1:%d/todos/search", port)
+	req, err := http.NewRequestWithContext(ctx, "QUERY", qURL, strings.NewReader(`{"q":"milk"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("content-type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("QUERY dispatch: %v", err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("QUERY /todos/search = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("decode QUERY response: %v\nbody: %s", err, data)
+	}
+	if out["filter"] != "milk" {
+		t.Fatalf("@Body did not flow into the QUERY method: filter = %v (body %s)", out["filter"], data)
+	}
+
+	// Preflight: Access-Control-Allow-Methods must offer QUERY.
+	pre, err := http.NewRequestWithContext(ctx, http.MethodOptions, qURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre.Header.Set("Origin", "http://localhost:3000")
+	pre.Header.Set("Access-Control-Request-Method", "QUERY")
+	preResp, err := http.DefaultClient.Do(pre)
+	if err != nil {
+		t.Fatalf("OPTIONS preflight: %v", err)
+	}
+	preResp.Body.Close()
+	if allow := preResp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(allow, "QUERY") {
+		t.Fatalf("preflight Access-Control-Allow-Methods = %q, must offer QUERY", allow)
 	}
 }
 
@@ -934,8 +1046,8 @@ func getJSONUntilReady(t *testing.T, ctx context.Context, port int, path string)
 // writeBackendStub installs a minimal but FAITHFUL @palbase/backend on the
 // fixture's node_modules. It is kept external by the dev-server's esbuild
 // bundling (just like the real package), so a fixture controller can `import
-// { Controller, Get, Post, Body, Query, Param, User, Req, Returns } from
-// "@palbase/backend"` exactly as real class-controller code does. The decorators
+// { Controller, Get, Post, Query, Body, QueryParams, Param, User, Req, Returns }
+// from "@palbase/backend"` exactly as real class-controller code does. The decorators
 // stamp the SAME runtime registry symbols the compiled SDK produces
 // (Symbol.for("palbase.backend.routes") array, controllerMeta, returnBuffer),
 // so the dev-server's symbol-fallback load path is exercised end-to-end. The
@@ -976,7 +1088,7 @@ const Param = (name) => (proto, propertyKey, index) => {
   buf[propertyKey].push({ index, kind: 'param', name });
 };
 const Body = paramDecorator('body');
-const Query = paramDecorator('query');
+const QueryParams = paramDecorator('query');
 const Headers = paramDecorator('headers');
 const User = () => paramDecorator('user')();
 const OptionalUser = () => paramDecorator('optionalUser')();
@@ -1002,6 +1114,7 @@ const Post = methodDecorator('POST');
 const Put = methodDecorator('PUT');
 const Patch = methodDecorator('PATCH');
 const Delete = methodDecorator('DELETE');
+const Query = methodDecorator('QUERY');
 
 // @Returns(schema) buffers the return schema by fnName.
 const Returns = (schema) => (proto, propertyKey) => {
@@ -1043,11 +1156,33 @@ const z = {
   array: () => makeSchema('ZodArray'),
 };
 
+// recordThrows is the stager-injected carrier for inferred throw descriptors
+// (the appended IIFE calls require("@palbase/backend").recordThrows(...)). The
+// IIFE always runs AFTER the decorators, so the route entry already exists —
+// no buffered-ordering fallback needed here, unlike the real SDK.
+const recordThrows = (proto, fnName, throwsArr) => {
+  const Ctrl = proto.constructor;
+  const route = (Ctrl[ROUTES] || []).find((r) => r.fnName === fnName);
+  if (route) route.throws = throwsArr;
+};
+
+// The SDK's named throw classes — one built-in is enough for fixtures. The
+// error registry mirrors the real getErrorRegistry surface so throw-inferred
+// codes join to spec responses exactly as on deploy.
+class NotFound extends Error {
+  constructor(message) { super(message || 'not found'); this.status = 404; this.error = 'not_found'; }
+}
+const errorRegistry = new Map([
+  ['not_found', { code: 'not_found', status: 404, className: 'NotFound', builtin: true }],
+]);
+
 class Resource {}
 const registry = [];
 module.exports = {
-  Controller, Get, Post, Put, Patch, Delete,
-  Body, Query, Headers, Param, User, OptionalUser, Client, RequestId, TraceId, Req, Returns,
+  Controller, Get, Post, Put, Patch, Delete, Query,
+  Body, QueryParams, Headers, Param, User, OptionalUser, Client, RequestId, TraceId, Req, Returns,
+  NotFound, recordThrows,
+  getErrorRegistry: () => errorRegistry,
   z, Resource,
   // Runtime seam: record the installed services (fixtures return literals, so a
   // no-op store is enough).

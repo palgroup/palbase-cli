@@ -1762,7 +1762,7 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
   if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,QUERY,OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
       req.headers['access-control-request-headers'] || 'authorization,apikey,content-type',
@@ -1821,10 +1821,10 @@ const server = http.createServer(async (req, res) => {
   const params = {};
   route.paramNames.forEach((name, i) => { params[name] = match[i + 1]; });
 
-  // Split request sources: body (POST/PUT/PATCH/DELETE JSON) → pbReq.input,
+  // Split request sources: body (POST/PUT/PATCH/DELETE/QUERY JSON) → pbReq.input,
   // URL query → pbReq.query. NOT folded together: the class controller injects
-  // @Body and @Query separately (worker.js keeps context.input vs context.query
-  // distinct), so a GET with `?name=x` must land in query, never input.
+  // @Body and @QueryParams separately (worker.js keeps context.input vs
+  // context.query distinct), so a GET with `?name=x` must land in query, never input.
   let body = null;
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     body = await readJsonBody(req);
@@ -1916,7 +1916,7 @@ const server = http.createServer(async (req, res) => {
   const pbReq = makeRequest(req, params, query, body, user);
 
   // --- Validate present source schemas off the LIVE registry ---------------
-  // Each @Body/@Query/@Headers ParamMeta carries its live zod schema; @Param
+  // Each @Body/@QueryParams/@Headers ParamMeta carries its live zod schema; @Param
   // synthesizes required string path params. A failure → 400 with zod issues.
   // Parsed/stripped values replace the raw source. Mirrors worker.js exactly.
 
@@ -1931,7 +1931,7 @@ const server = http.createServer(async (req, res) => {
     pbReq.input = parsedBody.data;
   }
 
-  // Query (from @Query(zod)).
+  // Query (from @QueryParams(zod)).
   const queryParam = findRouteParam(routeParams, 'query');
   if (queryParam && queryParam.schema && typeof queryParam.schema.safeParse === 'function') {
     const parsedQuery = queryParam.schema.safeParse(pbReq.query);
