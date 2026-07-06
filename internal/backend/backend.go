@@ -833,58 +833,123 @@ type changes).
 `, branch)
 }
 
+// deployRow mirrors one control-pg `deployments` attempt as the deployments REST
+// route returns it. This is the canonical attempt log — a FAILED attempt (or a
+// pod that never went Ready) has no git commit but does have a row here, so
+// unlike the old Store A `backend.versions` read it never hides a failure behind
+// "(no versions)". succeeded + a non-empty Error = "deployed with warnings".
+type deployRow struct {
+	Status        string  `json:"status"`
+	Version       *string `json:"version"`
+	Branch        string  `json:"branch"`
+	Trigger       string  `json:"trigger"`
+	Error         *string `json:"error"`
+	CommitMessage *string `json:"commitMessage"`
+	CreatedAt     string  `json:"createdAt"`
+}
+
 func newDeploysCmd(r Resolvers) *cobra.Command {
 	var refFlag string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "deploys",
-		Short: "Show deploy history (newest first)",
+		Short: "Show deploy history (newest first, all branches)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
 				return err
 			}
-			resp := struct {
-				Versions []struct {
-					Version   string    `json:"version"`
-					Files     int       `json:"files"`
-					CreatedAt time.Time `json:"created_at"`
-					Message   string    `json:"message"`
-				} `json:"versions"`
-				ActiveVersion string `json:"active_version"`
-			}{}
-			if err := r.Studio().Query(cmd.Context(), "backend.versions", map[string]any{"ref": ref}, &resp); err != nil {
-				return fmt.Errorf("backend.versions: %w", err)
+			var resp struct {
+				Deployments []deployRow `json:"deployments"`
+			}
+			if err := r.REST().Do(cmd.Context(), http.MethodGet,
+				"/api/v1/projects/"+ref+"/deployments?limit=20", nil, &resp); err != nil {
+				return fmt.Errorf("list deployments: %w", err)
 			}
 			if jsonOut {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(resp)
+				return json.NewEncoder(os.Stdout).Encode(resp.Deployments)
 			}
-			if len(resp.Versions) == 0 {
-				fmt.Println("(no versions)")
+			if len(resp.Deployments) == 0 {
+				fmt.Println("(no deploy attempts yet — push with 'palbase push' or git push)")
 				return nil
 			}
-			fmt.Printf("%-10s %-7s %-20s %s\n", "VERSION", "FILES", "WHEN", "MESSAGE")
-			for _, v := range resp.Versions {
-				marker := ""
-				if v.Version == resp.ActiveVersion {
-					marker = "*"
-				}
-				fmt.Printf("%-1s %-8s %-7d %-20s %s\n",
-					marker,
-					v.Version,
-					v.Files,
-					v.CreatedAt.Local().Format("2006-01-02 15:04:05"),
-					v.Message,
+			fmt.Printf("%-11s %-8s %-10s %-20s %-12s %s\n",
+				"STATUS", "VERSION", "BRANCH", "WHEN", "TRIGGER", "NOTE")
+			for _, d := range resp.Deployments {
+				fmt.Printf("%-11s %-8s %-10s %-20s %-12s %s\n",
+					deployStatusLabel(d),
+					deployVersion(d.Version),
+					d.Branch,
+					deployWhen(d.CreatedAt),
+					d.Trigger,
+					deployNote(d),
 				)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON (full untruncated notes/errors)")
 	return cmd
+}
+
+// deployStatusLabel uppercases the status; a succeeded row that still carries an
+// error is "WARN" — the deploy landed but the runtime flagged something (e.g.
+// zero endpoints collected), which must not read as a clean success.
+func deployStatusLabel(d deployRow) string {
+	if d.Status == "succeeded" && d.Error != nil && *d.Error != "" {
+		return "WARN"
+	}
+	if d.Status == "" {
+		return "UNKNOWN"
+	}
+	return strings.ToUpper(d.Status)
+}
+
+func deployVersion(v *string) string {
+	if v == nil || *v == "" {
+		return "-"
+	}
+	return *v
+}
+
+// deployWhen renders the createdAt (RFC3339 from the JSON API) as a local
+// timestamp; an unparseable value falls back to the raw string rather than a
+// bogus zero-time.
+func deployWhen(ts string) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+// deployNote is the last column: the FIRST line of the deploy error (the
+// server-side failure reason — the whole reason this reads control-pg and not
+// Store A), truncated to ~100 chars for the table. `--json` carries the full
+// text. A clean success with no error falls back to the commit message.
+func deployNote(d deployRow) string {
+	if d.Error != nil && *d.Error != "" {
+		return truncateNote(firstLine(*d.Error), 100)
+	}
+	if d.CommitMessage != nil {
+		return truncateNote(firstLine(*d.CommitMessage), 100)
+	}
+	return ""
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func truncateNote(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 func newRollbackCmd(r Resolvers) *cobra.Command {
