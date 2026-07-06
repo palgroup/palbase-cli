@@ -35,6 +35,7 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/config"
+	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -526,6 +527,14 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			controllersDir := filepath.Join(cwd, "controllers")
 			if _, err := os.Stat(controllersDir); err != nil {
 				return fmt.Errorf("no controllers/ directory in cwd — run from your project root (clone it with `git clone`)")
+			}
+
+			// github-mode: wire (or self-heal to v2) the pre-push deploy-validation
+			// hook. serve is a fresh clone's first command, so this is the CLI
+			// touchpoint that reaches a dev who pushes with plain `git push`.
+			// Best-effort — never blocks local dev.
+			if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg != nil && cfg.Mode == "github" {
+				hook.Ensure(cwd, os.Stderr)
 			}
 
 			// Controllers import @palbase/backend (Controller/Get/Body decorators)

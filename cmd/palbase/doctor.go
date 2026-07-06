@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/hook"
 )
 
 // doctorCmd is the environment triage verb: one command that answers "why is
@@ -50,6 +51,21 @@ func doctorCmd() *cobra.Command {
 				ok("link", fmt.Sprintf("%s (branch %s) via .palbase/config.json", cfg.Ref, cfg.DefaultEnv))
 			} else {
 				ok("link", "cwd not linked to a project (project commands need --ref or a linked dir)")
+			}
+
+			// pre-push deploy-validation hook (report-only). Meaningful only in a
+			// github-mode checkout; elsewhere there's nothing to wire.
+			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+				switch state, detail := hook.Status(cwd); state {
+				case "wired-v2":
+					ok("hook", fmt.Sprintf("hooks/pre-push v2 wired (%s)", detail))
+				case "outdated":
+					ok("hook", fmt.Sprintf("hooks/pre-push %s", detail))
+				case "foreign":
+					ok("hook", fmt.Sprintf("hooks/pre-push %s", detail))
+				default: // missing
+					bad("hook", "hooks/pre-push missing — run 'palbase push' or 'palbase serve' once to install it")
+				}
 			}
 
 			if node, err := exec.LookPath("node"); err != nil {

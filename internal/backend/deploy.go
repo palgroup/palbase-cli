@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
@@ -97,6 +98,12 @@ func runPush(d pushDeps) error {
 		return err
 	}
 	if mode == "github" {
+		// Wire (or self-heal to v2) the pre-push hook before pushing so the
+		// deploy-validation gate runs on THIS push. Best-effort — never blocks
+		// the push. Only github mode has a git checkout to hook.
+		if cwd, err := os.Getwd(); err == nil {
+			hook.Ensure(cwd, out)
+		}
 		if err := d.git("git", "push"); err != nil {
 			return err
 		}
@@ -293,6 +300,10 @@ func runClone(d cloneDeps) error {
 		if err := d.git("git", "clone", d.repoURL, d.ref); err != nil {
 			return err
 		}
+		// Wire core.hooksPath now rather than waiting for the first `npm install`
+		// (prepare) — a fresh clone should push through the gate immediately.
+		// Best-effort; the clone already succeeded so never fail on hook wiring.
+		hook.Ensure(d.ref, os.Stdout)
 		return d.writeCfg(d.ref, &auth.ProjectConfig{
 			Ref: d.ref, DefaultEnv: d.branch, Mode: "github", GithubRepo: d.repoURL,
 		})

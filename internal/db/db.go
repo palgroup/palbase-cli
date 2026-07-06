@@ -113,8 +113,6 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase db diff -f <name>   Generate a migration from db/schema.ts vs the live DB.
   palbase db check            Fail (non-zero) if the schema has drifted but no
                               migration was generated yet (pre-push gate).
-  palbase db install-hook     Install the git pre-push hook (db check gate) into
-                              an existing project that predates the scaffolded hook.
 
 The diff is computed server-side: db/schema.ts is sent to Palbase, which diffs
 it against the deployed branch's database and returns the migration SQL.`,
@@ -122,64 +120,8 @@ it against the deployed branch's database and returns the migration SQL.`,
 	cmd.AddCommand(
 		diffCmd(r.Studio),
 		checkCmd(r.Studio),
-		installHookCmd(),
 	)
 	return cmd
-}
-
-// prePushHook is the git pre-push hook body — IDENTICAL to the one the scaffold
-// ships (modules/orchestrator/internal/activities/backend_template/hooks/pre-push).
-// Keep the two in sync: both run `palbase db check` and abort the push on drift.
-const prePushHook = `#!/bin/sh
-# palbase pre-push: block a push when db/schema.ts has changes not yet captured
-# in a migration. Bypass with ` + "`git push --no-verify`" + ` (the deploy-time
-# drift gate is the backstop). Requires the palbase CLI on PATH.
-if [ -f db/schema.ts ]; then
-  if command -v palbase >/dev/null 2>&1; then
-    palbase db check || {
-      echo "" >&2
-      echo "✗ db/schema.ts has changes not covered by a migration." >&2
-      echo "  Run: palbase db diff -f <name>   (generates db/migrations/<ts>_<name>.sql)" >&2
-      echo "  Then: git add db/migrations && git commit && git push" >&2
-      echo "  (bypass: git push --no-verify — the deploy will still gate it)" >&2
-      exit 1
-    }
-  fi
-fi
-exit 0
-`
-
-// installHookCmd writes hooks/pre-push + points git's core.hooksPath at hooks/,
-// exactly as the scaffold's package.json "prepare" script does for new projects.
-// For projects created before the hook shipped (no hooks/ dir), this is how a
-// developer opts into the client-side drift gate.
-func installHookCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "install-hook",
-		Short: "Install the git pre-push drift gate into an existing project",
-		Long: `Write hooks/pre-push (runs ` + "`palbase db check`" + `) and set git's
-core.hooksPath to hooks/, so a push with un-migrated schema changes is blocked
-client-side. New projects get this automatically; this is for existing ones.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := os.Stat(".git"); err != nil {
-				return fmt.Errorf("not a git repository (run from the project root)")
-			}
-			if err := os.MkdirAll("hooks", 0o755); err != nil {
-				return fmt.Errorf("create hooks/: %w", err)
-			}
-			hookPath := filepath.Join("hooks", "pre-push")
-			if err := os.WriteFile(hookPath, []byte(prePushHook), 0o755); err != nil {
-				return fmt.Errorf("write %s: %w", hookPath, err)
-			}
-			if out, err := exec.Command("git", "config", "core.hooksPath", "hooks").CombinedOutput(); err != nil {
-				return fmt.Errorf("git config core.hooksPath: %w (%s)", err, strings.TrimSpace(string(out)))
-			}
-			w := cmd.OutOrStdout()
-			fmt.Fprintf(w, "✓ installed %s + set core.hooksPath=hooks\n", hookPath)
-			fmt.Fprintln(w, "  a push with un-migrated schema changes is now blocked (bypass: git push --no-verify)")
-			return nil
-		},
-	}
 }
 
 // schemaPath is the project-relative path to the declared schema source.

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/spf13/cobra"
 )
 
@@ -41,7 +42,8 @@ const packageJSON = `{
   "scripts": {
     "dev": "palbase serve",
     "deploy": "palbase push",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "git config core.hooksPath hooks 2>/dev/null && chmod +x hooks/* 2>/dev/null || true"
   },
   "dependencies": {
     "@palbase/backend": "^9.0.0"
@@ -151,6 +153,7 @@ Writes a minimal working skeleton:
   db/schema.ts                      config-as-code Postgres schema
   models/hello/shared.ts            named zod response schema
   controllers/hello.controller.ts   example class controller
+  hooks/pre-push                    deploy-validation gate (wired on npm install)
   .gitignore
 
 Refuses to run in a directory that already contains a package.json.`,
@@ -172,13 +175,17 @@ Refuses to run in a directory that already contains a package.json.`,
 			files := []struct {
 				path    string
 				content string
+				mode    os.FileMode
 			}{
-				{"package.json", fmt.Sprintf(packageJSON, name)},
-				{"tsconfig.json", tsconfigJSON},
-				{filepath.Join("db", "schema.ts"), schemaTS},
-				{filepath.Join("models", "hello", "shared.ts"), helloModelTS},
-				{filepath.Join("controllers", "hello.controller.ts"), helloControllerTS},
-				{".gitignore", gitignore},
+				{"package.json", fmt.Sprintf(packageJSON, name), 0o644},
+				{"tsconfig.json", tsconfigJSON, 0o644},
+				{filepath.Join("db", "schema.ts"), schemaTS, 0o644},
+				{filepath.Join("models", "hello", "shared.ts"), helloModelTS, 0o644},
+				{filepath.Join("controllers", "hello.controller.ts"), helloControllerTS, 0o644},
+				{".gitignore", gitignore, 0o644},
+				// The pre-push deploy-validation hook, wired by package.json's
+				// "prepare" (core.hooksPath=hooks) on `npm install`. Executable.
+				{filepath.Join("hooks", "pre-push"), hook.Body, 0o755},
 			}
 
 			out := cmd.OutOrStdout()
@@ -188,7 +195,7 @@ Refuses to run in a directory that already contains a package.json.`,
 				if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 					return err
 				}
-				if err := os.WriteFile(abs, []byte(f.content), 0o644); err != nil {
+				if err := os.WriteFile(abs, []byte(f.content), f.mode); err != nil {
 					return err
 				}
 				fmt.Fprintf(out, "  created %s\n", f.path)
