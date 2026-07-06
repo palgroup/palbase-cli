@@ -104,6 +104,10 @@ function parseDotenv(text) {
 
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
+// PALBASE_CHECK=1 => one-shot pre-deploy validation (`palbase build`): stage +
+// bundle + run the deploy's extract_meta.js over every controller, then exit
+// 0=PASS / 1=would-fail. No watch, no resources, no listen. Empty otherwise.
+const CHECK_MODE = process.env.PALBASE_CHECK === '1';
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
 const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
 const WORKERS_DIR = path.join(PROJECT_ROOT, 'workers');
@@ -429,9 +433,10 @@ function joinPath(basePath, subPath) {
 
 function registerControllers() {
   routes.clear();
+  const skipped = []; // {file, error} — a controller that failed to load (check mode fails on any)
   if (!fs.existsSync(CONTROLLERS_DIR)) {
     log(`controllers/ not found at ${CONTROLLERS_DIR}`);
-    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped };
   }
 
   // esbuild-bundle controllers/*.ts (+ their transitively-imported handlers/
@@ -451,12 +456,12 @@ function registerControllers() {
     const msg = err instanceof returnTypes.ReturnTypeError ? err.message : esbuildErr(err);
     log(`controllers/ build failed — ${msg}`);
     log('registered 0 route(s) (fix the error above and save to retry)');
-    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: msg };
   }
 
   if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) {
     log('registered 0 route(s) (no controllers/*.ts found)');
-    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0 };
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped };
   }
 
   let sawControllerFiles = false;
@@ -473,6 +478,7 @@ function registerControllers() {
       // guard can give an actionable message instead of a silent 0-route start.
       if (/is not a function/.test(err.message)) staleSDKSignature = true;
       log(`skipping ${bundledToSrcRel(file)} — ${err.message}`);
+      skipped.push({ file: bundledToSrcRel(file), error: err.message });
       continue;
     }
     const meta = readControllerMeta(Ctrl);
@@ -503,7 +509,47 @@ function registerControllers() {
   for (const route of routes.values()) {
     log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${bundledToSrcRel(route.controllerPath)} [${route.routeKey}]`);
   }
-  return { sawControllerFiles, staleSDKSignature, routeCount: routes.size };
+  return { sawControllerFiles, staleSDKSignature, routeCount: routes.size, skipped };
+}
+
+// deployExtractErrors runs the deploy's extract_meta.js over every BUNDLED
+// controller — the SAME script + stdin/stdout contract the pod's MetaExtractor
+// uses (meta_extractor.go). It catches exactly the deploy-fatal extraction
+// failures serve's route-register does NOT (assertZodSchema for @Body/@Query/
+// @Headers given a non-zod arg — the centauri `@Query("field")` class — plus
+// reserved/non-string @Headers and Express-style :param). Returns [{file,
+// error}]; empty when every controller extracts clean. Best-effort: a spawn
+// failure (node/extractor missing) is reported as its own entry so check mode
+// fails loud rather than passing blind.
+function deployExtractErrors() {
+  const out = [];
+  if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) return out;
+  const extractor = path.join(__dirname, 'extract_meta.js');
+  for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
+    if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    const srcRel = bundledToSrcRel(file);
+    let stdout;
+    try {
+      stdout = execFileSync('node', [extractor], {
+        input: JSON.stringify({ bundle_path: file }),
+        env: Object.assign({}, process.env, { NODE_PATH: path.join(PROJECT_ROOT, 'node_modules') }),
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      out.push({ file: srcRel, error: `extractor failed to run: ${err.message}` });
+      continue;
+    }
+    let res;
+    try {
+      res = JSON.parse(stdout);
+    } catch {
+      out.push({ file: srcRel, error: `extractor produced no JSON: ${String(stdout).slice(0, 200)}` });
+      continue;
+    }
+    if (res && res.error) out.push({ file: srcRel, error: res.error });
+  }
+  return out;
 }
 
 // bundledToSrcRel maps a bundled controller path back to the project-relative
@@ -2267,6 +2313,32 @@ async function shutdownResources() {
 
 async function main() {
   const reg = registerControllers();
+
+  // PALBASE_CHECK: one-shot pre-deploy validation (`palbase build`). Any
+  // stage/bundle failure, any skipped controller, or any extract_meta.js error
+  // means a deploy of this tree would be REJECTED — exit 1. No watch, no
+  // resources, no listen.
+  if (CHECK_MODE) {
+    const failures = [];
+    if (reg.buildError) failures.push({ file: 'controllers/', error: reg.buildError });
+    for (const s of reg.skipped || []) failures.push(s);
+    for (const e of deployExtractErrors()) failures.push(e);
+    if (failures.length === 0) {
+      log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly`);
+      process.exit(0);
+    }
+    for (const f of failures) log(`✗ DEPLOY WOULD FAIL: ${f.file} — ${f.error}`);
+    log(`build FAILED (${failures.length} error${failures.length === 1 ? '' : 's'}) — a deploy of this tree would be rejected`);
+    process.exit(1);
+  }
+
+  // Serve mode: surface the SAME deploy-fatal extraction failures serve's
+  // route-register swallows as a silent `skipping` — a loud banner so a broken
+  // controller can't hide behind a running dev server (it still keeps serving).
+  for (const e of deployExtractErrors()) {
+    log(`✗ DEPLOY WOULD FAIL: ${e.file} — ${e.error}`);
+  }
+
   if (reg.sawControllerFiles && reg.routeCount === 0) {
     if (reg.staleSDKSignature) {
       log('FATAL: @palbase/backend is stale or missing — your controllers use');

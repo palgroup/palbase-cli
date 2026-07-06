@@ -112,6 +112,19 @@ func runPush(d pushDeps) error {
 	if err != nil {
 		return err
 	}
+	// Gate the upload on a local pre-deploy validation (the github arm leaves
+	// this to the pre-push hook — Wave 3). A user-code error (bad decorator,
+	// return-type, major skew) fails here so nothing broken is pushed;
+	// environment problems (no node, registry down) warn inside runBuild and
+	// return nil, so the server still gates the real deploy.
+	buildCtx := d.ctx
+	if buildCtx == nil {
+		buildCtx = context.Background()
+	}
+	if err := runBuild(buildCtx, cwd, out); err != nil {
+		fmt.Fprintln(out, "✗ build failed — nothing was pushed (fix the errors above)")
+		return err
+	}
 	tarball, err := BuildTarball(cwd)
 	if err != nil {
 		return fmt.Errorf("package backend: %w", err)

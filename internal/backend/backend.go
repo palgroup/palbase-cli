@@ -65,7 +65,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // internal/runtime/module-clients.js). Both files must land in the temp
 // dir so the relative resolve works.
 //
-//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js
+//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/extract_meta.js
 var devServerFS embed.FS
 
 // REST is the subset of the Management-API transport the mode-aware deploy
@@ -114,6 +114,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		newWebCmd(r),
 		newIOSCmd(r),
 		newDevCmd(r),
+		newBuildCmd(r),
 		newDeploysCmd(r),
 		newRollbackCmd(r),
 		newStatusCmd(r),
@@ -546,6 +547,12 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			// is populated and the typed pb.* client isn't bodyless — without
 			// adding it to the user's package.json.
 			ensureDevServerTools(cwd)
+
+			// serve deliberately runs the LOCAL SDK, so a major behind the
+			// deploy runtime PASSES here but FAILS on deploy (the centauri
+			// direction). Warn — never block — so `palbase serve` no longer
+			// silently promises deploy parity it can't keep.
+			warnBackendSkew(cmd.Context(), cwd, os.Stderr)
 
 			// Regenerate palbase-env.d.ts from db/schema.ts so the project's
 			// handlers get a typed `Database.tables.*`. No-op when the project
