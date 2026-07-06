@@ -1,6 +1,6 @@
 // Package scaffold provides `palbase init` — it writes a minimal, working
 // Palbase backend project skeleton (class-controller model, @palbase/backend
-// ^8.0.0) into a directory: package.json, tsconfig.json, db/schema.ts,
+// ^9.0.0) into a directory: package.json, tsconfig.json, db/schema.ts,
 // controllers/hello.controller.ts, and .gitignore. Purely local file
 // authoring — no Studio / network, mirroring internal/storage's local-only
 // command style. The generated contents are verified against the live
@@ -33,7 +33,7 @@ func sanitizeName(base string) string {
 }
 
 // packageJSON matches todoapp's minimum field set; the dependency major must
-// track the backend-runtime's @palbase/backend major (8.x today).
+// track the backend-runtime's @palbase/backend major (9.x today).
 const packageJSON = `{
   "name": "%s",
   "version": "0.1.0",
@@ -44,7 +44,7 @@ const packageJSON = `{
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@palbase/backend": "^8.0.0"
+    "@palbase/backend": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

@@ -948,8 +948,21 @@ func resolveActiveBranch(flag string) string {
 	return cfg.DefaultEnv
 }
 
+// lastDeploy mirrors backend.status's `lastDeploy` field: the newest deploy row
+// for the active branch (from control-pg.deployments). Nil when the branch has
+// never been deployed. This is the visibility surface — a server-side deploy
+// failure that only lived in logs now shows up in `palbase status`.
+type lastDeploy struct {
+	Status    string  `json:"status"`
+	Error     *string `json:"error"`
+	Version   *string `json:"version"`
+	Branch    *string `json:"branch"`
+	UpdatedAt *string `json:"updatedAt"`
+}
+
 func newStatusCmd(r Resolvers) *cobra.Command {
 	var refFlag string
+	var branchFlag string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
@@ -964,11 +977,19 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			// is a backend), so there's no enable state for a user to act on.
 			// We show the version/deploy info, which is what `status` is for.
 			var resp struct {
-				Ref           string  `json:"ref"`
-				Head          *string `json:"head"`
-				ActiveVersion *string `json:"activeVersion"`
+				Ref           string      `json:"ref"`
+				Head          *string     `json:"head"`
+				ActiveVersion *string     `json:"activeVersion"`
+				LastDeploy    *lastDeploy `json:"lastDeploy"`
 			}
-			if err := r.Studio().Query(cmd.Context(), "backend.status", map[string]any{"ref": ref}, &resp); err != nil {
+			// Send the active branch so status reflects the branch the user is
+			// on (--branch wins, else ProjectConfig.DefaultEnv; "main"/empty is
+			// omitted so the server resolves the default branch — F14 fix).
+			payload := map[string]any{"ref": ref}
+			if branch := resolveActiveBranch(branchFlag); branch != "" {
+				payload["branch"] = branch
+			}
+			if err := r.Studio().Query(cmd.Context(), "backend.status", payload, &resp); err != nil {
 				return fmt.Errorf("backend.status: %w", err)
 			}
 			// --json: emit the raw status so a script/CI can poll deploy state
@@ -986,12 +1007,76 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			if resp.ActiveVersion != nil {
 				fmt.Printf("active: %s\n", *resp.ActiveVersion)
 			}
+			if line := formatLastDeploy(resp.LastDeploy, time.Now()); line != "" {
+				fmt.Print(line)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to report (defaults to the active branch; omit for main)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
 	return cmd
+}
+
+// formatLastDeploy renders the human "last deploy" block for `palbase status`.
+// Returns "" when there is no deploy to report (nil), so the caller prints
+// nothing for a never-deployed branch. This is the centauri surface: a FAILED
+// (or succeeded-with-warnings) deploy carries the server-side error to the
+// user's terminal instead of it dying in the logs.
+func formatLastDeploy(d *lastDeploy, now time.Time) string {
+	if d == nil {
+		return ""
+	}
+	// succeeded + a non-null error means the deploy landed but the runtime
+	// flagged something (e.g. zero endpoints collected) — call that out so a
+	// green-looking deploy that silently produced no routes doesn't read as fine.
+	label := d.Status
+	if label == "" {
+		label = "unknown"
+	}
+	if d.Status == "succeeded" && d.Error != nil && *d.Error != "" {
+		label = "succeeded with warnings"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("last deploy: %s%s\n", strings.ToUpper(label), deployMeta(d, now)))
+	if d.Error != nil && *d.Error != "" {
+		b.WriteString(fmt.Sprintf("  error: %s\n", *d.Error))
+	}
+	return b.String()
+}
+
+// deployMeta formats the " (branch, 3m ago)" suffix. Branch defaults to "main"
+// when the server omitted it (default branch), and the age is dropped when the
+// timestamp is missing or unparseable rather than printing a bogus duration.
+func deployMeta(d *lastDeploy, now time.Time) string {
+	branch := "main"
+	if d.Branch != nil && *d.Branch != "" {
+		branch = *d.Branch
+	}
+	if d.UpdatedAt == nil {
+		return fmt.Sprintf(" (%s)", branch)
+	}
+	t, err := time.Parse(time.RFC3339, *d.UpdatedAt)
+	if err != nil {
+		return fmt.Sprintf(" (%s)", branch)
+	}
+	return fmt.Sprintf(" (%s, %s)", branch, humanizeAgo(now.Sub(t)))
+}
+
+// humanizeAgo renders a coarse "3m ago" / "2h ago" / "5d ago" relative age.
+// ponytail: coarse buckets, no library — a deploy age never needs seconds.
+func humanizeAgo(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 // renderJSON pretty-prints a value for `--json` output paths if a

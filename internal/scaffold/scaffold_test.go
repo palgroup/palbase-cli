@@ -63,7 +63,7 @@ func TestInit_EmptyDir(t *testing.T) {
 		return string(data)
 	}
 	assert.Contains(t, read("package.json"), `"name": "myapp"`)
-	assert.Contains(t, read("package.json"), `"@palbase/backend": "^8.0.0"`)
+	assert.Contains(t, read("package.json"), `"@palbase/backend": "^9.0.0"`)
 	assert.Contains(t, read("tsconfig.json"), `"experimentalDecorators": true`)
 	assert.Contains(t, read(filepath.Join("db", "schema.ts")), "export default defineSchema({")
 	ctrl := read(filepath.Join("controllers", "hello.controller.ts"))
