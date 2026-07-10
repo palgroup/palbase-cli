@@ -479,7 +479,10 @@ var LoopbackCallbackPorts = []int{54321, 54322, 54323, 54324, 54325}
 func bindLoopback(ports []int) (net.Listener, int, error) {
 	var lastErr error
 	for _, p := range ports {
-		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		// Bind the same host name advertised in redirect_uri. Binding only
+		// 127.0.0.1 while advertising localhost lets a browser resolve the
+		// callback to ::1, where another local service may receive it instead.
+		l, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", p))
 		if err == nil {
 			return l, p, nil
 		}
