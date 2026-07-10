@@ -26,11 +26,17 @@ type ProjectConfig struct {
 	// --github-account and --repo are given.
 	Mode       string `json:"mode,omitempty"`
 	GithubRepo string `json:"github_repo,omitempty"`
-	// IOSAppID is the registered ios app `palbase ios link` bound this project
-	// to. `palbase ios use <branch>` reads it so it can refresh the config
+	// IOSAppID is the ios app registered by `palbase ios link` for this project.
+	// `palbase ios use <branch>` reads it so it can refresh the config
 	// without re-resolving the group's ios app every time. Empty until an
 	// ios app is linked.
 	IOSAppID string `json:"ios_app_id,omitempty"`
+	// MacOSAppID is the independent macOS registration selected by
+	// `palbase macos link`. It deliberately does not reuse IOSAppID: iOS and
+	// macOS have separate app ids and publishable keys.
+	MacOSAppID string `json:"macos_app_id,omitempty"`
+	// WebAppID is the web registration selected by `palbase web link`.
+	WebAppID string `json:"web_app_id,omitempty"`
 }
 
 // Project represents a project as the Studio tRPC layer returns it.
@@ -211,37 +217,54 @@ func ResolveProjectRef(override string) (string, error) {
 }
 
 func ensureGitignore() error {
-	content, err := os.ReadFile(".gitignore")
+	return EnsureProjectConfigGitignored(".gitignore")
+}
+
+// EnsureProjectConfigGitignored keeps only the per-machine project selection
+// out of git. Generated OpenAPI and platform config files under .palbase stay
+// trackable. An existing directory-wide rule is narrowed in place.
+func EnsureProjectConfigGitignored(path string) error {
+	const entry = ".palbase/config.json"
+
+	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read .gitignore: %w", err)
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	if containsLine(string(content), ".palbase/") {
+	lines := strings.Split(string(content), "\n")
+	normalized := make([]string, 0, len(lines)+1)
+	found := false
+	for _, line := range lines {
+		switch strings.TrimSpace(line) {
+		case entry, ".palbase", ".palbase/":
+			if !found {
+				normalized = append(normalized, entry)
+				found = true
+			}
+		default:
+			normalized = append(normalized, line)
+		}
+	}
+
+	updated := strings.Join(normalized, "\n")
+	if !found {
+		if updated != "" && !strings.HasSuffix(updated, "\n") {
+			updated += "\n"
+		}
+		updated += entry + "\n"
+	}
+	if updated == string(content) {
 		return nil
 	}
 
-	f, err := os.OpenFile(".gitignore", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open .gitignore: %w", err)
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat %s: %w", path, statErr)
 	}
-	defer f.Close()
-
-	if len(content) > 0 && content[len(content)-1] != '\n' {
-		fmt.Fprintln(f)
+	if err := os.WriteFile(path, []byte(updated), mode); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
-	fmt.Fprintln(f, ".palbase/")
 	return nil
-}
-
-func containsLine(s, line string) bool {
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i == len(s) || s[i] == '\n' {
-			if s[start:i] == line {
-				return true
-			}
-			start = i + 1
-		}
-	}
-	return false
 }

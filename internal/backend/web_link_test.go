@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,7 +25,7 @@ func stubArtifactsFunc() func(context.Context, Resolvers, string, io.Writer) err
 			return err
 		}
 		return os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"),
-			[]byte("{\"url\":\"https://stub\",\"api_key\":\"pb_stub\",\"branch\":\"main\"}\n"), 0o600)
+			[]byte("{\"base_url\":\"https://stub\",\"api_key\":\"pb_stub\",\"branch\":\"main\"}\n"), 0o600)
 	}
 }
 
@@ -50,6 +51,17 @@ func minimalPkgJSON() string {
   "name": "myapp",
   "version": "1.0.0"
 }`
+}
+
+func TestWebLinkCommandFlags(t *testing.T) {
+	cmd := newWebCmd(noopResolvers())
+	var linkFlags []string
+	for _, child := range cmd.Commands() {
+		if child.Name() == "link" {
+			child.Flags().VisitAll(func(flag *pflag.Flag) { linkFlags = append(linkFlags, flag.Name) })
+		}
+	}
+	require.Equal(t, []string{"entry", "out", "ref"}, linkFlags)
 }
 
 // writePkgJSON writes content to package.json in the current directory.
@@ -512,8 +524,8 @@ func TestWebLink_RefRelinkUpdatesConfig(t *testing.T) {
 	require.Contains(t, outStr, "projB")
 }
 
-// TestWebLink_EnsuresPalbaseGitignored (I4): link keeps the per-machine
-// .palbase/ link dir out of git, like mobile link does.
+// TestWebLink_EnsuresProjectConfigGitignored: link keeps the per-machine
+// project selection out of git while generated .palbase inputs stay trackable.
 func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 	t.Run("creates .gitignore when absent", func(t *testing.T) {
 		t.Chdir(t.TempDir())
@@ -524,7 +536,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Contains(t, string(body), ".palbase/")
+		require.Equal(t, ".palbase/config.json\n", string(body))
 	})
 
 	t.Run("appends to an existing .gitignore", func(t *testing.T) {
@@ -537,7 +549,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, "node_modules/\n.palbase/\n", string(body))
+		require.Equal(t, "node_modules/\n.palbase/config.json\n", string(body))
 	})
 
 	t.Run("does not duplicate on re-link", func(t *testing.T) {
@@ -550,13 +562,26 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, 1, strings.Count(string(body), ".palbase/"))
+		require.Equal(t, 1, strings.Count(string(body), ".palbase/config.json"))
+	})
+
+	t.Run("narrows an existing directory rule", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		installStubCodegen(t, "// gen")
+		writePkgJSON(t, minimalPkgJSON())
+		require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n.palbase/\n"), 0o644))
+
+		runWebLink(t, "--ref", "ref1")
+
+		body, err := os.ReadFile(".gitignore")
+		require.NoError(t, err)
+		require.Equal(t, "node_modules/\n.palbase/config.json\n", string(body))
 	})
 }
 
 // TestWebLink_GitignoreWarning: prints a loud warning when .gitignore ignores
 // the gen file. The offending rule is reported, never edited (the only write
-// is the appended .palbase/ link-dir entry).
+// is the appended .palbase/config.json entry).
 func TestWebLink_GitignoreWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -578,12 +603,12 @@ func TestWebLink_GitignoreWarning(t *testing.T) {
 			require.Contains(t, outStr, "palbe.gen.ts", "warning should mention the gen file")
 
 			// The offending rule must NOT be rewritten/removed; the only
-			// change is the appended .palbase/ entry.
+			// change is the appended .palbase/config.json entry.
 			body, err := os.ReadFile(".gitignore")
 			require.NoError(t, err)
 			require.True(t, strings.HasPrefix(string(body), tc.content),
 				"existing rules must stay byte-identical, got: %q", string(body))
-			require.Contains(t, string(body), ".palbase/")
+			require.Contains(t, string(body), ".palbase/config.json")
 		})
 	}
 }

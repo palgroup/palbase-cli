@@ -31,7 +31,7 @@ func TestCommands_FlatSurface(t *testing.T) {
 
 	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
 	// CLI keeps local dev + observation/control verbs only.
-	for _, want := range []string{"serve", "deploys", "rollback", "status", "spec", "web", "ios"} {
+	for _, want := range []string{"serve", "deploys", "rollback", "status", "spec", "web", "ios", "macos"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
@@ -46,6 +46,18 @@ func TestCommands_FlatSurface(t *testing.T) {
 	for _, gone := range []string{"deploy", "dev", "disable", "enable", "backend", "config", "merge", "list", "types", "gen-types", "pull-spec", "gen"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}
+}
+
+func TestCommands_MacOSGroup(t *testing.T) {
+	for _, c := range Commands(noopResolvers()) {
+		if c.Name() != "macos" {
+			continue
+		}
+		require.Len(t, c.Commands(), 1)
+		require.Equal(t, "link", c.Commands()[0].Name())
+		return
+	}
+	t.Fatal("macos group not found in flat surface")
 }
 
 // TestCommands_WebGroup pins the `web` group's children: link/unlink ONLY —

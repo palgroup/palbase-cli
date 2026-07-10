@@ -113,6 +113,9 @@ func TestProjectConfig_ModeRoundTrips(t *testing.T) {
 		DefaultEnv: "main",
 		Mode:       "platform",
 		GithubRepo: "",
+		IOSAppID:   "app_ios",
+		MacOSAppID: "app_macos",
+		WebAppID:   "app_web",
 	}
 	if err := SaveProjectConfigIn(dir, want); err != nil {
 		t.Fatalf("save: %v", err)
@@ -127,5 +130,11 @@ func TestProjectConfig_ModeRoundTrips(t *testing.T) {
 	}
 	if got.Mode != "platform" {
 		t.Fatalf("mode = %q, want platform", got.Mode)
+	}
+	if got.IOSAppID != "app_ios" || got.MacOSAppID != "app_macos" {
+		t.Fatalf("native app ids = (%q, %q), want (app_ios, app_macos)", got.IOSAppID, got.MacOSAppID)
+	}
+	if got.WebAppID != "app_web" {
+		t.Fatalf("web app id = %q, want app_web", got.WebAppID)
 	}
 }

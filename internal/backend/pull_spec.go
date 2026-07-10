@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -14,11 +15,7 @@ import (
 )
 
 // pullSpecConfigEntry is the single active-env config the Swift SPM plugin turns
-// into the flat Palbase-Info.plist — plain JSON so the plugin owns the plist
-// serialization. It carries NO bundle identifier: the SDK sends X-Palbase-Bundle
-// from Bundle.main at request time, so the client config has no bundle identity
-// to store (config-match is enforced server-side against the key's backend-bound
-// identifier).
+// into Palbase-Info.plist — plain JSON so the plugin owns serialization.
 type pullSpecConfigEntry struct {
 	AppID     string           `json:"app_id"`
 	EnvPreset string           `json:"env_preset"`
@@ -47,8 +44,8 @@ type oauthGoogleJSON struct {
 }
 
 // newSpecCmd (`palbase spec`) is the codegen-split fetcher: it downloads ONLY
-// the artifacts SDK code generators consume (openapi.json, and with --app a
-// bundle-id-keyed palbase-config.json) — the CLI does NOT generate client
+// the artifacts SDK code generators consume (openapi.json and platform config)
+// — the CLI does NOT generate client
 // code; that is the SDKs' job. Today the PalbaseCodegen SPM build-tool plugin
 // generates Swift offline over these committed files on every Xcode build.
 //
@@ -69,7 +66,8 @@ regenerate from it.
 spec ONLY refreshes the API contract. The per-env runtime config
 (palbase-config.json — base URLs + keys) is written once by 'palbase ios link'
 at setup time and changes only when your app bindings do; re-run 'palbase ios
-link' to refresh it, not spec.`,
+link' to refresh it, not spec. Native runtime config lives in fixed
+.palbase/ios and .palbase/macos slots.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
 			if err != nil {
@@ -96,7 +94,7 @@ link' to refresh it, not spec.`,
 				fetchRemoteOpenAPISpec,
 				studioBindingLister(r.REST()),
 				studioConfigArtifactFetch(r.REST()),
-				ref, branch, outDir, "",
+				ref, branch, outDir, "", "",
 				os.Stdout,
 			)
 		},
@@ -125,14 +123,15 @@ func lookupSpecTarget(r Resolvers) specTargetLookup {
 
 // runPullSpec is the testable core: resolve the remote target, fetch
 // openapi.json (wake-aware, REMOTE only — no :4003 probe), write it, and with a
-// non-empty appID also emit the bundle-id-keyed palbase-config.json.
+// non-empty appID also emit its flat app-bound palbase-config.json. App-bound
+// fetches use the artifact key; runtime bundle/origin headers are metadata.
 func runPullSpec(
 	ctx context.Context,
 	lookup specTargetLookup,
 	fetch remoteSpecFetch,
 	list bindingLister,
 	cfgFetch configArtifactFetch,
-	ref, branch, outDir, appID string,
+	ref, branch, specOutDir, configOutDir, appID string,
 	w io.Writer,
 ) error {
 	target, err := lookup(ctx, ref, branch)
@@ -140,17 +139,31 @@ func runPullSpec(
 		return err
 	}
 
-	specBytes, err := fetch(ctx, target.URL+"/openapi.json", target.APIKey, w)
+	specURL := target.URL + "/openapi.json"
+	specKey := target.APIKey
+	var entry *pullSpecConfigEntry
+	if appID != "" {
+		entry, err = buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch)
+		if err != nil {
+			return err
+		}
+		// App links fetch with their app-bound key. Runtime bundle/origin
+		// metadata is intentionally absent from CLI artifact requests.
+		specURL = strings.TrimRight(entry.BaseURL, "/") + "/openapi.json"
+		specKey = entry.APIKey
+	}
+
+	specBytes, err := fetch(ctx, specURL, specKey, w)
 	if err != nil {
 		return err
 	}
-	if outDir == "" {
-		outDir = "./.palbase"
+	if specOutDir == "" {
+		specOutDir = "./.palbase"
 	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", outDir, err)
+	if err := os.MkdirAll(specOutDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", specOutDir, err)
 	}
-	specPath := filepath.Join(outDir, "openapi.json")
+	specPath := filepath.Join(specOutDir, "openapi.json")
 	if err := os.WriteFile(specPath, specBytes, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", specPath, err)
 	}
@@ -159,25 +172,23 @@ func runPullSpec(
 	if appID == "" {
 		return nil
 	}
+	if configOutDir == "" {
+		configOutDir = specOutDir
+	}
+	if err := os.MkdirAll(configOutDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", configOutDir, err)
+	}
 
 	// SINGLE-env config: the config is for the ONE active target — the linked
 	// env-project (ref) at the requested branch. `ios link` sets it to production;
-	// `ios use <branch>` re-fetches it for that branch. There is no bundle-id→env
-	// map: the CLI already picked the one active env, so the SDK reads a flat
-	// {base_url, api_key, identifier} — no runtime bundle-id selection.
+	// `ios use <branch>` re-fetches it for that branch. The SDK reads a flat
+	// {base_url, api_key, ...} object for the platform slot.
 	// `spec` (config-less, appID=="") never reaches here.
-	entry, err := buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch)
-	if err != nil {
-		// With a single active env, an unresolvable/unbound ref is always a
-		// failure — `ios link` (production), `ios use <branch>`, and `spec` all
-		// surface it (spec never reaches here: appID=="").
-		return err
-	}
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal palbase-config.json: %w", err)
 	}
-	cfgPath := filepath.Join(outDir, "palbase-config.json")
+	cfgPath := filepath.Join(configOutDir, "palbase-config.json")
 	if err := os.WriteFile(cfgPath, append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
@@ -187,12 +198,8 @@ func runPullSpec(
 
 // buildPullSpecConfig fetches the config artifact for the ONE active env — the
 // binding whose project_ref == ref, at branchName — and returns it as a single
-// flat entry (no bundle identifier: the SDK sends X-Palbase-Bundle from
-// Bundle.main). The active target is what the CLI already selected (`ios link` →
-// production, `ios use` → the branch); there is no per-bundle map. Errors when the
-// app has no binding for ref, or that binding has no registered bundle id on the
-// BACKEND — an app that isn't registered server-side has nothing for the Kong
-// config-match gate to compare the header against, so we refuse to emit a config.
+// flat entry. The active target is what the CLI already selected (`ios link` →
+// production, `ios use` → the branch).
 func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
@@ -211,10 +218,7 @@ func buildPullSpecConfig(
 		}
 	}
 	if refBinding == nil {
-		return nil, fmt.Errorf("app %q is not bound to project ref %q — run `palbase ios link` to bind it", appID, ref)
-	}
-	if refBinding.Identifier == "" {
-		return nil, fmt.Errorf("the %q binding has no registered bundle id — run `palbase ios link` (or `palbase apps bind`) first", ref)
+		return nil, fmt.Errorf("app %q is not bound to project ref %q — run the platform link command again", appID, ref)
 	}
 	art, err := fetch(ctx, appID, ref, branchName)
 	if err != nil {

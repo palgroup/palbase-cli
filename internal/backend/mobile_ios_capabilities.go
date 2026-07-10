@@ -8,16 +8,10 @@ import (
 	"github.com/palgroup/palbase-cli/internal/apps"
 )
 
-// Per-environment app-config resolvers for `palbase spec`.
-//
-// These resolve an app's per-environment config artifacts + bindings from the
-// Management API so `palbase spec` can emit the bundle-id-keyed palbase-config.json
-// the PalbaseCodegen SPM plugin turns into Palbase-Info.plist at build time. The
-// iOS Swift codegen + Xcode-project wiring (and every Go-side plist emitter)
-// that used to live here moved to that plugin.
+// Per-environment app-config resolvers for platform link commands.
 
 // restDoer is the Management-API transport subset the mobile/ios internals need
-// (apps bindings + config-artifact). *transport.Client satisfies it; tests
+// (app environments + config-artifact). *transport.Client satisfies it; tests
 // inject a stub. Kept narrow so the backend package doesn't depend on
 // internal/transport and stays testable.
 type restDoer interface {
@@ -33,19 +27,15 @@ type restDoer interface {
 // key resolve to (`palbase ios use <branch>`).
 type configArtifactFetch func(ctx context.Context, appID, envRef, branchName string) (apps.ConfigArtifact, error)
 
-// AppBinding is the subset of an app-bindings row the codegen emit needs:
-// the env's bare project ref, its registered bundle id (identifier — ” when the
-// binding has not declared one yet), and its preset. Field tags match the
-// snake_case bindings row shape (project_ref, env_preset, identifier).
+// AppBinding is the subset of an app-bindings row needed to verify that an app
+// belongs to the selected environment.
 type AppBinding struct {
 	ProjectRef string `json:"project_ref"`
 	EnvPreset  string `json:"env_preset"`
-	Identifier string `json:"identifier"`
 }
 
 // bindingLister lists an app's (app × env) bindings. Abstracts the bindings
-// REST route so the codegen emit is unit-testable without a live server
-// (tests inject a stub returning a fixed binding list).
+// REST route so artifact generation is testable without a live server.
 type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
 
 // studioConfigArtifactFetch is the production configArtifactFetch the codegen
@@ -55,13 +45,9 @@ type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
 // mints/looks up the env-main key. A non-empty branchName is appended as
 // `&branch=...` (mirroring the "only send branch when non-empty" tRPC logic).
 //
-// The config-artifact route does NOT carry OAuth, so this wrapper ALSO fetches
-// palauth's public `/auth/oauth/providers` (the SAME source the legacy
-// PalbaseGenerated.json path uses) against the artifact's base_url + api_key and
-// merges the result into ConfigArtifact.OAuth — making the per-env plist a true
-// superset of the JSON's config role (closes the OAuth regression the config
-// cutover would otherwise open). The fetch is best-effort: a blip leaves OAuth
-// nil and the plist omits the block, exactly as the JSON path degrades.
+// The config-artifact route does not carry OAuth, so this wrapper also fetches
+// palauth's public `/auth/oauth/providers` against the artifact's base_url and
+// api_key. The fetch is best-effort: a blip leaves OAuth nil.
 func studioConfigArtifactFetch(rest restDoer) configArtifactFetch {
 	return func(ctx context.Context, appID, envRef, branchName string) (apps.ConfigArtifact, error) {
 		var art apps.ConfigArtifact
@@ -79,10 +65,7 @@ func studioConfigArtifactFetch(rest restDoer) configArtifactFetch {
 }
 
 // studioBindingLister is the production bindingLister the codegen command
-// supplies: it runs the bindings REST route (the SAME route Studio's
-// binding-matrix UI uses) for the app and returns every (app × env) binding's
-// bare project_ref + registered identifier + preset. The codegen emit then
-// fetches each binding's config artifact and keys the plist by identifier.
+// supplies: it runs the bindings REST route and returns the app's environments.
 func studioBindingLister(rest restDoer) bindingLister {
 	return func(ctx context.Context, appID string) ([]AppBinding, error) {
 		var bindings []AppBinding
@@ -93,11 +76,7 @@ func studioBindingLister(rest restDoer) bindingLister {
 	}
 }
 
-// swiftOAuthToApps maps the backend package's swiftOAuthConfig (the shape
-// fetchOAuthProviders returns, also embedded in PalbaseGenerated.json) onto
-// the apps package's OAuthConfig (embedded in the per-env plist). The two
-// shapes are field-identical by design so the iOS SDK decodes the plist's
-// `oauth` block the same way it decodes the JSON's. Nil in → nil out.
+// swiftOAuthToApps maps the provider response onto the config artifact shape.
 func swiftOAuthToApps(in *swiftOAuthConfig) *apps.OAuthConfig {
 	if in == nil {
 		return nil

@@ -422,7 +422,7 @@ func TestLink_DirectRef(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	// Need to be in a directory where we can write .palbase/
+	// Need to be in a directory where we can write .palbase/config.json.
 	origDir, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(origDir)
@@ -456,7 +456,23 @@ func TestLink_DirectRef(t *testing.T) {
 
 	gitignore, err := os.ReadFile(".gitignore")
 	require.NoError(t, err)
-	assert.Contains(t, string(gitignore), ".palbase/")
+	assert.Contains(t, string(gitignore), ".palbase/config.json")
+	assert.NotContains(t, string(gitignore), ".palbase/\n")
+}
+
+func TestEnsureProjectConfigGitignored_NarrowsDirectoryRule(t *testing.T) {
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n.palbase/\n.env.local\n"), 0o640))
+
+	require.NoError(t, EnsureProjectConfigGitignored(".gitignore"))
+	require.NoError(t, EnsureProjectConfigGitignored(".gitignore"))
+
+	body, err := os.ReadFile(".gitignore")
+	require.NoError(t, err)
+	assert.Equal(t, "node_modules/\n.palbase/config.json\n.env.local\n", string(body))
+	info, err := os.Stat(".gitignore")
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
 }
 
 func TestLink_InteractiveSelection(t *testing.T) {

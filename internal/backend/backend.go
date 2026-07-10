@@ -114,6 +114,7 @@ func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newWebCmd(r),
 		newIOSCmd(r),
+		newMacOSCmd(r),
 		newDevCmd(r),
 		newBuildCmd(r),
 		newDeploysCmd(r),
@@ -1197,7 +1198,6 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 	}, nil
 }
 
-
 // fetchOAuthProviders calls palauth's public `/auth/oauth/providers`
 // endpoint (anon-key authed, secret-free) and lowers the response into a
 // swiftOAuthConfig. After the config cutover this is mapped onto the per-env
@@ -1581,27 +1581,4 @@ func runEnvGenBridge(ctx context.Context, projectDir, scriptPath, bundlePath, ou
 		return fmt.Errorf("env-gen: %s", env.Error)
 	}
 	return nil
-}
-
-// ensureGitignored appends `entry` to the .gitignore at gitignorePath
-// if neither it nor its trailing-slash variant is already listed.
-// Creates the file when missing. Whitespace-trimmed comparisons keep
-// this idempotent across editor quirks.
-func ensureGitignored(gitignorePath, entry string) error {
-	current, err := os.ReadFile(gitignorePath)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	want := strings.TrimSuffix(entry, "/")
-	for _, line := range strings.Split(string(current), "\n") {
-		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "/"))
-		if trimmed == want {
-			return nil
-		}
-	}
-	suffix := entry + "\n"
-	if len(current) > 0 && !strings.HasSuffix(string(current), "\n") {
-		suffix = "\n" + suffix
-	}
-	return os.WriteFile(gitignorePath, append(current, []byte(suffix)...), 0o644)
 }

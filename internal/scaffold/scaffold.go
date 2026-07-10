@@ -134,7 +134,7 @@ export default class HelloController {
 `
 
 const gitignore = `node_modules/
-.palbase/
+.palbase/config.json
 .env.local
 `
 

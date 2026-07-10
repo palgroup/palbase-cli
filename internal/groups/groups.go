@@ -51,12 +51,12 @@ func Cmd(r Resolvers) *cobra.Command {
 		Use:   "groups",
 		Short: "List your groups (umbrellas) and their environments",
 		Long: `A group is the umbrella that owns a product's per-environment projects and
-its registered apps (ios/android/web).
+its registered apps (ios/macos/tvos/watchos/android/web).
 
   palbase groups list             List the groups you belong to.
   palbase groups envs <groupId>   List a group's environments (project refs).
 
-The group id is what 'palbase apps ...' and 'palbase ios link --group' take.`,
+The group id is what 'palbase apps ...' and the native link commands take.`,
 	}
 	cmd.AddCommand(listCmd(r.REST), envsCmd(r.REST))
 	return cmd

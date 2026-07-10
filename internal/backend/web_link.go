@@ -7,7 +7,8 @@ package backend
 //   1. Verifies package.json exists in the cwd.
 //   2. resolveOrLinkRef — writes/updates .palbase/config.json (a --ref that
 //      differs from the existing link re-links, keeping the active branch).
-//   3. Ensures .gitignore covers .palbase/ (the link file is per-machine).
+//   3. Ensures .gitignore covers .palbase/config.json (the project selection
+//      is per-machine; generated inputs under .palbase remain trackable).
 //   4. Fetches the SDK generator's committed inputs (Palbase/openapi.json +
 //      Palbase/palbase-config.json via the webLinkArtifacts seam), then runs
 //      @palbase/web's palbe-gen for the first palbe.gen.ts when installed.
@@ -32,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,29 +49,48 @@ import (
 // palbase-config.json under ./Palbase).
 const webArtifactsDir = "Palbase"
 
-// webLinkArtifacts is the artifact-fetch seam: it resolves the deployed
-// branch target (apikey.reveal), downloads openapi.json wake-aware, fetches
-// the oauth provider availability best-effort, and writes the two committed
+// webLinkArtifacts is the artifact-fetch seam. It resolves (or creates) the
+// concrete web app registration, fetches its app-bound config/key, then writes
+// the two committed
 // files @palbase/web's `palbe-gen` consumes offline:
 //
 //	Palbase/openapi.json          the API contract
-//	Palbase/palbase-config.json   {url, api_key, branch, oauth?} (flat, web)
+//	Palbase/palbase-config.json   {app_id,base_url,api_key,branch,...}
 //
 // The CLI does NOT generate the client — client codegen is the SDKs' job
-// (`palbe-gen`, shipped in @palbase/web), exactly as the iOS split works
-// (`palbase spec` fetches, the PalbaseCodegen SPM plugin generates). Tests
+// (`palbe-gen`, shipped in @palbase/web), exactly as the native split works
+// (the platform link fetches, the PalbaseCodegen SPM plugin generates). Tests
 // replace the seam with a stub.
 var webLinkArtifacts = func(ctx context.Context, r Resolvers, ref string, w io.Writer) error {
-	// branch: load from .palbase/config.json DefaultEnv, or default to "main".
-	branch := "main"
-	if cfg, err := auth.LoadProjectConfig(); err == nil && cfg.DefaultEnv != "" {
-		branch = cfg.DefaultEnv
+	if r.REST == nil {
+		return fmt.Errorf("management API is unavailable")
 	}
-	target, err := lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref, branch)
+	rest := r.REST()
+	linkedCfg, _ := auth.LoadProjectConfig()
+	persistedAppID := ""
+	if linkedCfg != nil {
+		persistedAppID = linkedCfg.WebAppID
+	}
+	appID, err := resolveWebApp(ctx, rest, ref, persistedAppID, w)
 	if err != nil {
 		return err
 	}
-	spec, err := fetchRemoteOpenAPISpec(ctx, target.URL+"/openapi.json", target.APIKey, w)
+	if err := persistProjectAppSlot(ref, "web", appID); err != nil {
+		return err
+	}
+
+	branch := "main"
+	if linkedCfg != nil && linkedCfg.DefaultEnv != "" {
+		branch = linkedCfg.DefaultEnv
+	}
+	art, err := studioConfigArtifactFetch(rest)(ctx, appID, ref, branch)
+	if err != nil {
+		return fmt.Errorf("fetch app config: %w", err)
+	}
+	if art.Platform != "web" {
+		return fmt.Errorf("app %s is %s, not web", appID, art.Platform)
+	}
+	spec, err := fetchRemoteOpenAPISpec(ctx, art.BaseURL+"/openapi.json", art.APIKey, w)
 	if err != nil {
 		return err
 	}
@@ -79,9 +100,16 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, ref string, w io.W
 	if err := os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"), spec, 0o644); err != nil {
 		return err
 	}
-	cfg := map[string]any{"url": target.URL, "api_key": target.APIKey, "branch": branch}
-	if oauth, _ := fetchOAuthProviders(ctx, target.URL, target.APIKey); oauth != nil {
-		cfg["oauth"] = oauth
+	cfg := map[string]any{
+		"app_id":      art.AppID,
+		"project_ref": art.ProjectRef,
+		"base_url":    art.BaseURL,
+		"api_key":     art.APIKey,
+		"branch":      branch,
+		"env_preset":  art.EnvPreset,
+	}
+	if art.OAuth != nil {
+		cfg["oauth"] = art.OAuth
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -92,6 +120,57 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, ref string, w io.W
 	}
 	fmt.Fprintf(w, "✓ wrote %s/openapi.json + %s/palbase-config.json (commit them)\n", webArtifactsDir, webArtifactsDir)
 	return nil
+}
+
+// resolveWebApp reuses the local web app id only when it still belongs to the
+// selected product as a web app. Otherwise it registers a replacement instead
+// of guessing another remote app.
+func resolveWebApp(
+	ctx context.Context,
+	rest restDoer,
+	ref, persistedAppID string,
+	w io.Writer,
+) (string, error) {
+	var project iosProjectRow
+	if err := rest.Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &project); err != nil {
+		return "", fmt.Errorf("resolve project group: %w", err)
+	}
+	if project.GroupID == "" {
+		return "", fmt.Errorf("project %s has no app group", ref)
+	}
+	var rows []iosAppRow
+	if err := rest.Do(ctx, http.MethodGet,
+		"/api/v1/groups/"+project.GroupID+"/apps", nil, &rows); err != nil {
+		return "", fmt.Errorf("list web apps: %w", err)
+	}
+	if persistedAppID != "" {
+		for _, app := range rows {
+			if app.ID != persistedAppID || app.DeletedAt != nil {
+				continue
+			}
+			if app.Platform == "web" {
+				fmt.Fprintf(w, "using linked web app %s (%s)\n", app.DisplayName, app.ID)
+				return persistedAppID, nil
+			}
+		}
+		fmt.Fprintf(w, "linked web app %s does not match the selected product and platform; registering a new one\n", persistedAppID)
+	}
+
+	name := "Web app"
+	if cwd, err := os.Getwd(); err == nil && filepath.Base(cwd) != "." {
+		name = filepath.Base(cwd)
+	}
+	var created iosAppRow
+	if err := rest.Do(ctx, http.MethodPost,
+		"/api/v1/groups/"+project.GroupID+"/apps",
+		map[string]any{
+			"platform": "web",
+			"name":     name,
+		}, &created); err != nil {
+		return "", fmt.Errorf("create web app: %w", err)
+	}
+	fmt.Fprintf(w, "✓ registered web app %q (%s)\n", name, created.ID)
+	return created.ID, nil
 }
 
 // webCmd holds the resolvers for the web command group.
@@ -136,7 +215,6 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 			if outFile == "" {
 				outFile = "palbe.gen.ts"
 			}
-
 			// 1. Must run where package.json exists.
 			if _, err := os.Stat("package.json"); err != nil {
 				if os.IsNotExist(err) {
@@ -178,8 +256,9 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				fmt.Fprintf(out, "✓ Re-linked to %s (was %s)\n", ref, prev)
 			}
 
-			// 3. Keep the per-machine link file out of git (same as mobile link).
-			if err := ensureGitignored(".gitignore", ".palbase/"); err != nil {
+			// 3. Keep the per-machine project selection out of git while leaving
+			// generated SDK inputs under .palbase trackable.
+			if err := auth.EnsureProjectConfigGitignored(".gitignore"); err != nil {
 				return fmt.Errorf("update .gitignore: %w", err)
 			}
 
@@ -280,9 +359,6 @@ func (wc *webCmd) newWebUnlinkCmd() *cobra.Command {
 		},
 	}
 }
-
-// The .palbase/ gitignore append reuses ensureGitignored (backend.go) — the
-// shared idempotent helper that creates/appends the entry when missing.
 
 // ── package.json byte-splice editing ─────────────────────────────────────────
 //

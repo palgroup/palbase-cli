@@ -1,7 +1,7 @@
 // Package apps wires the `palbase apps ...` subcommand group:
-// list / create / delete / config. Apps are GROUP-scoped registrations
-// (one per platform: ios/android/web) that bind to an env (project ref)
-// and yield a per-(app × env) config artifact for the SDKs.
+// list / create / delete / config. Apps are GROUP-scoped registrations; a
+// group may own any number per platform, and each app
+// receives a per-environment config artifact for the SDKs.
 //
 // Transport: Management-API REST (`/api/v1/groups/...`, `/api/v1/apps/...`),
 // the same DPoP-bound client the `apikey`/`project`/`groups` commands use.
@@ -10,11 +10,10 @@
 //	GET    /api/v1/groups/{groupRef}/apps                        list
 //	POST   /api/v1/groups/{groupRef}/apps  {platform,name}       create
 //	DELETE /api/v1/apps/{appId}                                  delete
-//	PUT    /api/v1/apps/{appId}/bindings/{projectRef} {identifier,teamId?,apns?}  bind
 //	GET    /api/v1/apps/{appId}/config-artifact?env={ref}&branch={name}           config
 //
 // Studio runs membership/role authorization inside the service (member+ for
-// list/config, admin+ for create/delete/bind); a below-role or non-member
+// list/config, admin+ for create/delete); a below-role or non-member
 // caller surfaces as a FORBIDDEN *transport.APIError here.
 package apps
 
@@ -47,7 +46,7 @@ type Resolvers struct {
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "apps",
-		Short: "Manage a group's apps (ios/android/web) and their per-env config",
+		Short: "Manage a group's apps and their per-environment config",
 		Long: `Register and configure the apps under a group.
 
   palbase apps list <groupRef>                          List a group's apps.
@@ -56,16 +55,13 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase apps delete <appId>                           Delete an app.
   palbase apps config --app <appId> --env <ref>         Write a web app's
                                                         per-env config file.
-  palbase apps bind --app <appId> --env <ref> --identifier <bundleId>
-                                                        Set the (app × env)
-                                                        binding's identifier.
   palbase apps enforce <groupRef>                       Require registered apps
-                                                        (config-match on).
+                                                        for the group.
   palbase apps attest --app <appId> --env <ref>         Require App Attest on
                                                         the binding.
 
-iOS config artifacts are fetched by 'palbase spec --app <appId>' and turned
-into Palbase-Info.plist by the PalbaseCodegen SPM plugin at build time.
+iOS and macOS config artifacts are fetched by their platform link commands and
+turned into Palbase-Info.plist by the PalbaseCodegen SPM plugin at build time.
 
 All operations go through the Management API (membership/role-gated server-side).`,
 	}
@@ -74,7 +70,6 @@ All operations go through the Management API (membership/role-gated server-side)
 		createCmd(r.REST),
 		deleteCmd(r.REST),
 		configCmd(r.REST),
-		bindCmd(r.REST),
 		enforceCmd(r.REST),
 		attestCmd(r.REST),
 	)
@@ -134,17 +129,18 @@ func createCmd(rest func() REST) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			groupRef := args[0]
 			if !isValidPlatform(platform) {
-				return fmt.Errorf("--platform must be one of: ios, android, web")
+				return fmt.Errorf("--platform must be one of: ios, macos, tvos, watchos, android, web")
 			}
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
+			body := map[string]any{
+				"platform": platform,
+				"name":     name,
+			}
 			var created appRow
 			if err := rest().Do(cmd.Context(), http.MethodPost,
-				"/api/v1/groups/"+groupRef+"/apps", map[string]any{
-					"platform": platform,
-					"name":     name,
-				}, &created); err != nil {
+				"/api/v1/groups/"+groupRef+"/apps", body, &created); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -154,7 +150,7 @@ func createCmd(rest func() REST) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&platform, "platform", "", "App platform: ios | android | web (required)")
+	cmd.Flags().StringVar(&platform, "platform", "", "App platform: ios | macos | tvos | watchos | android | web (required)")
 	cmd.Flags().StringVar(&name, "name", "", "Display name (required)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	_ = cmd.MarkFlagRequired("platform")
@@ -188,80 +184,10 @@ func deleteCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
-// bindCmd wires `palbase apps bind`: it sets the (app × env) binding's
-// identifier (bundle id / package name / web origin) plus optional iOS
-// attestation material, by calling the PUT bindings route — the SAME UPDATE
-// Studio's binding-matrix UI runs (admin+ gated server-side).
-//
-// --env is the env's BARE project ref (control-pg projects.ref), NOT a branch
-// endpoint ref: the binding row is keyed by project_ref = projects.ref (the
-// service resolves the env's branch endpoint_ref itself when it later mints
-// keys). This is exactly the ref `apps config --env` and listBindings already
-// use, so the binding round-trips with `palbase spec`.
-func bindCmd(rest func() REST) *cobra.Command {
-	var (
-		appID      string
-		env        string
-		identifier string
-		teamID     string
-		apns       string
-		jsonOut    bool
-	)
-	cmd := &cobra.Command{
-		Use:   "bind",
-		Short: "Set an (app × env) binding's identifier (bundle id / origin)",
-		Long: "Configure the (app × env) binding the SDK config-match enforces.\n" +
-			"Sets the env's --identifier (the app's bundle id / package name / web\n" +
-			"origin) so the env's config artifact resolves and `palbase spec` emits it.\n" +
-			"--env is the env's BARE project ref (the same ref `apps config --env`\n" +
-			"takes), never a branch endpoint ref.\n" +
-			"--team-id and --apns are optional iOS App Attest material.\n" +
-			"Runs through the Management API (admin+ on the app's group, server-side).",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if apns != "" && apns != "sandbox" && apns != "production" {
-				return fmt.Errorf("--apns must be one of: sandbox, production")
-			}
-			// appId + projectRef ride in the PATH; the body is just the binding
-			// attributes (identifier + optional iOS App Attest material).
-			body := map[string]any{"identifier": identifier}
-			if teamID != "" {
-				body["teamId"] = teamID
-			}
-			if apns != "" {
-				body["apns"] = apns
-			}
-			var out struct {
-				OK bool `json:"ok"`
-			}
-			if err := rest().Do(cmd.Context(), http.MethodPut,
-				"/api/v1/apps/"+appID+"/bindings/"+env, body, &out); err != nil {
-				return err
-			}
-			if jsonOut {
-				return encodeJSON(map[string]any{"ok": out.OK, "appId": appID, "projectRef": env, "identifier": identifier})
-			}
-			fmt.Fprintf(os.Stdout, "✓ bound app %s to env %s as %s\n", appID, env, identifier)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
-	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
-	cmd.Flags().StringVar(&identifier, "identifier", "", "Bundle id / package name / web origin (required)")
-	cmd.Flags().StringVar(&teamID, "team-id", "", "Apple Developer Team id (iOS App Attest, optional)")
-	cmd.Flags().StringVar(&apns, "apns", "", "APNs environment: sandbox | production (optional)")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	_ = cmd.MarkFlagRequired("app")
-	_ = cmd.MarkFlagRequired("env")
-	_ = cmd.MarkFlagRequired("identifier")
-	return cmd
-}
-
 // enforceCmd wires `palbase apps enforce <groupRef>`: the umbrella-wide
-// App-Registration switch (project_groups.apps_required). When ON, the gateway
-// 403s any request whose key doesn't config-match its registered bundle id /
-// origin — a leaked key is useless from an unregistered app. Flipping it also
-// fleet-backfills every already-minted app-bound key blob so the change takes
-// effect on existing keys. --disable turns it off. admin+ on the group.
+// App-Registration switch (project_groups.apps_required). Flipping it updates
+// already-minted app-bound key blobs. --disable turns it off. admin+ on the
+// group.
 func enforceCmd(rest func() REST) *cobra.Command {
 	var (
 		disable bool
@@ -270,11 +196,10 @@ func enforceCmd(rest func() REST) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "enforce <groupRef>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Require registered apps for the group (config-match enforcement)",
-		Long: "Toggle the group's App-Registration enforcement (config-match).\n" +
-			"ON (default): the gateway rejects any key that doesn't match its\n" +
-			"registered bundle id / web origin, so a leaked key can't be used from\n" +
-			"an unregistered app. --disable turns it off. Flipping it fleet-backfills\n" +
+		Short: "Require registered apps for the group",
+		Long: "Toggle the group's App-Registration enforcement.\n" +
+			"ON (default): runtime requests must use an app-bound key.\n" +
+			"--disable turns it off. Flipping it fleet-backfills\n" +
 			"existing key blobs so the change applies to already-minted keys.\n" +
 			"Runs through the Management API (admin+ on the group, server-side).",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -294,7 +219,7 @@ func enforceCmd(rest func() REST) *cobra.Command {
 			if !on {
 				state = "disabled"
 			}
-			fmt.Fprintf(os.Stdout, "✓ config-match enforcement %s for group %s\n", state, groupID)
+			fmt.Fprintf(os.Stdout, "✓ app registration enforcement %s for group %s\n", state, groupID)
 			return nil
 		},
 	}
@@ -305,9 +230,9 @@ func enforceCmd(rest func() REST) *cobra.Command {
 
 // attestCmd wires `palbase apps attest --app <appId> --env <ref>`: the
 // per-binding App-Attest switch (app_env_bindings.attest_enforce). When ON, the
-// backend additionally requires a valid App Attest assertion on that env's
-// requests (hardware attestation — layer 2, above config-match). --disable turns
-// it off. admin+ on the app's group.
+// user backend additionally requires a valid App Attest assertion. The binding
+// is environment-level and branch-invariant; non-backend routes stay exempt.
+// --disable turns it off. admin+ on the app's group.
 func attestCmd(rest func() REST) *cobra.Command {
 	var (
 		appID   string
@@ -319,10 +244,11 @@ func attestCmd(rest func() REST) *cobra.Command {
 		Use:   "attest",
 		Short: "Require App Attest on an (app × env) binding (hardware attestation)",
 		Long: "Toggle the (app × env) binding's App-Attest enforcement.\n" +
-			"ON (default): requests to that env must carry a valid App Attest\n" +
-			"assertion (a real, unmodified app on Apple hardware) — layer 2, above\n" +
-			"config-match. --disable turns it off. --env is the env's BARE project\n" +
-			"ref (the same ref `apps bind --env` takes).\n" +
+			"ON (default): user-backend calls must carry a valid App Attest assertion\n" +
+			"from a real, unmodified app on Apple hardware. The environment-level\n" +
+			"setting applies to all branches. Auth/enrollment, Storage uploads, and\n" +
+			"module routes remain exempt. --disable turns it off. --env is the env's\n" +
+			"BARE project ref.\n" +
 			"Runs through the Management API (admin+ on the app's group, server-side).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			on := !disable
@@ -353,10 +279,8 @@ func attestCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
-// ConfigArtifact mirrors the config-artifact return shape — the
-// per-(app × env) config the SDKs consume. This REPLACES the old
-// PalbaseGenerated.json shape. Exported so `palbase spec` (backend
-// package) can resolve the same artifact per binding.
+// ConfigArtifact mirrors the per-(app × env) config returned by the
+// Management API. Exported so the platform link commands can write SDK input.
 type ConfigArtifact struct {
 	AppID       string `json:"app_id"`
 	ProjectRef  string `json:"project_ref"`
@@ -365,25 +289,16 @@ type ConfigArtifact struct {
 	BaseURL     string `json:"base_url"`
 	EnvPreset   string `json:"env_preset"`
 	Platform    string `json:"platform"`
-	Identifier  string `json:"identifier"`
 	// OAuth carries the provider-availability map fetched from palauth's
-	// public `/auth/oauth/providers` endpoint, mirroring the field the
-	// legacy PalbaseGenerated.json path embeds. Nil means the env has no
-	// enabled+configured providers; the per-env plist then omits the
-	// `oauth` sub-dict and the iOS SDK's zero-arg
-	// `pb.auth.signInWithGoogle()` overload throws. Making the plist a
-	// true SUPERSET of the JSON's config role closes the OAuth regression
-	// the config cutover would otherwise open. The config-artifact route
-	// does NOT return this — the CLI fetches providers separately and
-	// merges it in (see backend.withOAuth), exactly as the JSON path does.
+	// public `/auth/oauth/providers` endpoint. Nil means the environment has no
+	// enabled providers. The Management API artifact does not return this field;
+	// the CLI fetches and merges it.
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
 }
 
 // OAuthConfig is the secret-free provider-availability map embedded in the
-// per-env config artifact (plist). Shape mirrors PalbaseGenerated.json's
-// `oauth` block so the iOS SDK decodes it identically. palauth's public
-// `/auth/oauth/providers` endpoint never returns secrets, so there is
-// nothing to filter here.
+// per-environment config artifact. The public provider endpoint returns no
+// secrets.
 type OAuthConfig struct {
 	Apple  *OAuthApple  `json:"apple,omitempty"`
 	Google *OAuthGoogle `json:"google,omitempty"`
@@ -408,21 +323,12 @@ func configCmd(rest func() REST) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Write the per-(app × env) web config file the SDK reads",
-		Long: "Fetch the config artifact for a WEB app in a given env and write the\n" +
-			"per-env palbase-config.json the SDK loads to enforce config-match\n" +
-			"({app_id, identifier, env_preset, base_url, api_key}).\n" +
+		Long: "Fetch the config artifact for a web app in a given env and write\n" +
+			"palbase-config.json ({app_id, env_preset, base_url, api_key}).\n" +
 			"--env is the env's BARE project ref; the server resolves the\n" +
-			"endpoint_ref from it (the env's main branch).\n" +
-			"An unconfigured binding (empty identifier — the app has not declared\n" +
-			"its web origin yet) is REFUSED: no partial file is written, because a\n" +
-			"config without an identifier cannot enforce config-match.\n" +
-			"iOS config is NOT emitted here: the PalbaseCodegen SPM plugin\n" +
-			"generates Palbase-Info.plist on every Xcode build from the\n" +
-			"palbase-config.json fetched by 'palbase spec --app'.",
+			"endpoint_ref from it (the env's main branch). Native configs are\n" +
+			"written by `palbase ios link` and `palbase macos link`.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(appID) >= 4 && appID[:4] == "ios_" {
-				return fmt.Errorf("apps config no longer emits iOS plists — run 'palbase spec --app %s' and let the PalbaseCodegen SPM plugin generate Palbase-Info.plist at build time", appID)
-			}
 			// --env is the env's BARE project ref, passed as the `env` query
 			// param. The server resolves the endpoint_ref from it (the env's main
 			// branch); there is no branch-composed ref.
@@ -430,6 +336,9 @@ func configCmd(rest func() REST) *cobra.Command {
 			if err := rest().Do(cmd.Context(), http.MethodGet,
 				"/api/v1/apps/"+appID+"/config-artifact?env="+url.QueryEscape(env), nil, &art); err != nil {
 				return err
+			}
+			if art.Platform != "web" {
+				return fmt.Errorf("apps config writes web config only; app %s is %s — use the native codegen flow", appID, art.Platform)
 			}
 			out := outPath
 			if out == "" {
@@ -451,25 +360,12 @@ func configCmd(rest func() REST) *cobra.Command {
 }
 
 // emitConfig writes the per-env web config file (palbase-config.json) the SDK
-// reads — exactly {app_id, env_preset, base_url, api_key}. The config carries no
-// identifier: the SDK sends the config-match origin/bundle from the runtime (the
-// browser origin / Bundle.main), not from a committed config field.
-//
-// REFUSES (returns an error, writes NOTHING) when the BACKEND binding has no
-// registered identifier: an unconfigured binding (the app hasn't declared its
-// web origin server-side) gives the Kong config-match gate nothing to compare
-// against, so we refuse to emit a config — mirroring the orchestrator's
-// unconfigured-binding rule. (The refusal reads the BACKEND artifact's
-// identifier; the emitted client file does not carry it.)
+// reads — exactly {app_id, env_preset, base_url, api_key}.
 func emitConfig(art ConfigArtifact, path string) error {
-	if art.Identifier == "" {
-		return fmt.Errorf("refusing to write %s: app %q has an unconfigured binding (no identifier) — declare the web origin before emitting a config", path, art.AppID)
-	}
 	return writeWebConfig(art, path)
 }
 
-// writeWebConfig marshals the client config fields to JSON (no identifier — the
-// SDK sources X-Palbase-Bundle from the runtime origin/bundle).
+// writeWebConfig marshals the canonical client config fields to JSON.
 func writeWebConfig(art ConfigArtifact, path string) error {
 	raw, err := json.MarshalIndent(map[string]string{
 		"app_id":     art.AppID,
@@ -488,7 +384,7 @@ func writeWebConfig(art ConfigArtifact, path string) error {
 
 func isValidPlatform(p string) bool {
 	switch p {
-	case "ios", "android", "web":
+	case "ios", "macos", "tvos", "watchos", "android", "web":
 		return true
 	default:
 		return false
