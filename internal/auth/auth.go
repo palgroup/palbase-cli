@@ -88,11 +88,15 @@ func (c *Client) Login(ctx context.Context) error {
 	// Palauth's palbase-cli client is seeded with 54321..54325; try them
 	// in order and fail the login if all five are in use (which realistically
 	// means five concurrent login flows on one machine — rare).
-	listener, port, err := bindLoopback(LoopbackCallbackPorts)
+	listeners, port, err := bindLoopback(LoopbackCallbackPorts)
 	if err != nil {
 		return fmt.Errorf("start callback server: %w", err)
 	}
-	defer listener.Close()
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
 
 	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
 
@@ -150,7 +154,9 @@ func (c *Client) Login(ctx context.Context) error {
 	})
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go srv.Serve(listener)
+	for _, listener := range listeners {
+		go srv.Serve(listener)
+	}
 	defer srv.Close()
 
 	fmt.Fprintln(c.Output, "Opening browser for login...")
@@ -476,17 +482,44 @@ var LoopbackCallbackPorts = []int{54321, 54322, 54323, 54324, 54325}
 // bindLoopback tries each port in turn and returns the first listener it
 // can open. When every port is busy — e.g. five parallel login flows on
 // the same machine — the error surfaces so the user can retry.
-func bindLoopback(ports []int) (net.Listener, int, error) {
+func bindLoopback(ports []int) ([]net.Listener, int, error) {
+	loopbackIPs, err := net.LookupIP("localhost")
+	if err != nil {
+		return nil, 0, fmt.Errorf("resolve localhost: %w", err)
+	}
+
 	var lastErr error
 	for _, p := range ports {
-		// Bind the same host name advertised in redirect_uri. Binding only
-		// 127.0.0.1 while advertising localhost lets a browser resolve the
-		// callback to ::1, where another local service may receive it instead.
-		l, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", p))
-		if err == nil {
-			return l, p, nil
+		listeners := make([]net.Listener, 0, len(loopbackIPs))
+		seen := make(map[string]struct{}, len(loopbackIPs))
+		for _, ip := range loopbackIPs {
+			if !ip.IsLoopback() {
+				continue
+			}
+			address := ip.String()
+			if _, ok := seen[address]; ok {
+				continue
+			}
+			seen[address] = struct{}{}
+
+			network := "tcp6"
+			if ip.To4() != nil {
+				network = "tcp4"
+			}
+			listener, listenErr := net.Listen(network, net.JoinHostPort(address, fmt.Sprint(p)))
+			if listenErr != nil {
+				lastErr = listenErr
+				for _, opened := range listeners {
+					_ = opened.Close()
+				}
+				listeners = nil
+				break
+			}
+			listeners = append(listeners, listener)
 		}
-		lastErr = err
+		if len(listeners) > 0 {
+			return listeners, p, nil
+		}
 	}
 	return nil, 0, fmt.Errorf("no free loopback port in %v: %w", ports, lastErr)
 }

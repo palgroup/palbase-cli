@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -250,6 +251,43 @@ func TestLogin_Timeout(t *testing.T) {
 	defer cancel()
 
 	err := client.Login(ctx)
+	require.Error(t, err)
+}
+
+func TestBindLoopbackSkipsPortOccupiedOnIPv6(t *testing.T) {
+	ips, err := net.LookupIP("localhost")
+	require.NoError(t, err)
+	hasIPv6 := false
+	for _, ip := range ips {
+		if ip.Equal(net.IPv6loopback) {
+			hasIPv6 = true
+			break
+		}
+	}
+	if !hasIPv6 {
+		t.Skip("localhost has no IPv6 loopback address")
+	}
+
+	occupied, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback is unavailable: %v", err)
+	}
+	defer occupied.Close()
+	port := occupied.Addr().(*net.TCPAddr).Port
+
+	// The IPv4 side is deliberately free. A callback server that binds only
+	// 127.0.0.1 would accept this port even though a browser may resolve
+	// localhost to the occupied IPv6 side.
+	probe, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Skipf("matching IPv4 loopback port is unavailable: %v", err)
+	}
+	_ = probe.Close()
+
+	listeners, _, err := bindLoopback([]int{port})
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
 	require.Error(t, err)
 }
 
