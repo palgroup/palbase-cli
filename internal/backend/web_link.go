@@ -186,6 +186,18 @@ type webCmd struct {
 // cannot swallow).
 const webTypesCmd = "palbe-gen --soft || exit 0"
 
+// webTypesCmdFor keeps the automatic predev/prebuild regeneration pointed at
+// the same file the one-shot link generation wrote. The default stays byte-for-
+// byte compatible; a custom --out is single-quoted because package scripts run
+// through a shell and the path is user-controlled.
+func webTypesCmdFor(outFile string) string {
+	if filepath.Clean(outFile) == "palbe.gen.ts" {
+		return webTypesCmd
+	}
+	quoted := "'" + strings.ReplaceAll(outFile, "'", "'\"'\"'") + "'"
+	return "palbe-gen --out " + quoted + " --soft || exit 0"
+}
+
 // newWebCmd builds the `palbase web` command group: link/unlink wire the
 // project. Client generation lives in @palbase/web (`palbe-gen`), not here.
 func newWebCmd(r Resolvers) *cobra.Command {
@@ -277,7 +289,9 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 			}
 
 			// 5. Patch package.json scripts.
-			if err := patchPackageJSONScripts("package.json", out); err != nil {
+			if err := patchPackageJSONScriptsWithCommand(
+				"package.json", webTypesCmdFor(outFile), out,
+			); err != nil {
 				return fmt.Errorf("patch package.json: %w", err)
 			}
 
@@ -472,6 +486,10 @@ func locatePackageJSONScripts(data []byte) (scriptsLocation, error) {
 // splice. Hooks already set to a different value are warned about and left
 // untouched; when nothing is missing the file is not rewritten at all.
 func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
+	return patchPackageJSONScriptsWithCommand(pkgPath, webTypesCmd, w)
+}
+
+func patchPackageJSONScriptsWithCommand(pkgPath, typesCmd string, w io.Writer) error {
 	data, err := os.ReadFile(pkgPath)
 	if err != nil {
 		return err
@@ -483,7 +501,7 @@ func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
 	}
 
 	if !loc.found {
-		return os.WriteFile(pkgPath, spliceNewScriptsObject(data, loc.topEnd), 0o644)
+		return os.WriteFile(pkgPath, spliceNewScriptsObject(data, loc.topEnd, typesCmd), 0o644)
 	}
 
 	pairs, err := parseOrderedObject(data[loc.valStart:loc.valEnd])
@@ -501,8 +519,8 @@ func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
 			present = true
 			var existing string
 			_ = json.Unmarshal(kv.raw, &existing)
-			if existing != webTypesCmd {
-				fmt.Fprintf(w, "warning: scripts.%s is already set to %q — skipping (suggested value: %q)\n", hook, existing, webTypesCmd)
+			if existing != typesCmd {
+				fmt.Fprintf(w, "warning: scripts.%s is already set to %q — skipping (suggested value: %q)\n", hook, existing, typesCmd)
 			}
 			break
 		}
@@ -514,13 +532,13 @@ func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
 		return nil // byte-identical: don't touch the file
 	}
 
-	return os.WriteFile(pkgPath, spliceScriptEntries(data, loc, missing), 0o644)
+	return os.WriteFile(pkgPath, spliceScriptEntries(data, loc, missing, typesCmd), 0o644)
 }
 
 // spliceScriptEntries inserts the missing hook entries at the END of the
 // existing scripts object (right after its last entry), leaving every other
 // byte alone.
-func spliceScriptEntries(data []byte, loc scriptsLocation, hooks []string) []byte {
+func spliceScriptEntries(data []byte, loc scriptsLocation, hooks []string, typesCmd string) []byte {
 	keyIndent := indentOfLineAt(data, loc.valStart)
 	entryIndent := scriptsEntryIndent(data, loc, keyIndent)
 
@@ -532,13 +550,13 @@ func spliceScriptEntries(data []byte, loc scriptsLocation, hooks []string) []byt
 			if i > 0 {
 				b.WriteString(",")
 			}
-			b.WriteString("\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(webTypesCmd))
+			b.WriteString("\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(typesCmd))
 		}
 		b.WriteString("\n" + keyIndent)
 		return splice(data, loc.valStart+1, b.String())
 	}
 	for _, h := range hooks {
-		b.WriteString(",\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(webTypesCmd))
+		b.WriteString(",\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(typesCmd))
 	}
 	return splice(data, last+1, b.String())
 }
@@ -546,7 +564,7 @@ func spliceScriptEntries(data []byte, loc scriptsLocation, hooks []string) []byt
 // spliceNewScriptsObject inserts a whole `"scripts": {...}` block before the
 // top-level closing brace (stable choice: scripts lands last, like the
 // previous appended-at-end behaviour).
-func spliceNewScriptsObject(data []byte, topEnd int) []byte {
+func spliceNewScriptsObject(data []byte, topEnd int, typesCmd string) []byte {
 	unit := topUnitIndent(data)
 	entryIndent := unit + unit
 
@@ -555,7 +573,7 @@ func spliceNewScriptsObject(data []byte, topEnd int) []byte {
 		if i > 0 {
 			inner.WriteString(",")
 		}
-		inner.WriteString("\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(webTypesCmd))
+		inner.WriteString("\n" + entryIndent + encodeJSONString(h) + ": " + encodeJSONString(typesCmd))
 	}
 	block := `"scripts": {` + inner.String() + "\n" + unit + "}"
 

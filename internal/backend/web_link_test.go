@@ -695,6 +695,15 @@ func TestWebLink_CustomOut(t *testing.T) {
 	entryBody, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
 	require.Contains(t, string(entryBody), "my.custom.gen")
+
+	pkgBody, err := os.ReadFile("package.json")
+	require.NoError(t, err)
+	require.Contains(t, string(pkgBody),
+		`"predev": "palbe-gen --out 'my.custom.gen.ts' --soft || exit 0"`,
+		"automatic regeneration must preserve the custom output path")
+	require.Contains(t, string(pkgBody),
+		`"prebuild": "palbe-gen --out 'my.custom.gen.ts' --soft || exit 0"`,
+		"automatic regeneration must preserve the custom output path")
 }
 
 // ── Bug-fix regression tests ──────────────────────────────────────────────────
