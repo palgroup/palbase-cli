@@ -157,7 +157,7 @@ func npmInstallBackend(t *testing.T, dir string) bool {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
 		[]byte(`{"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true,"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","strict":false}}`), 0o644))
 	cmd := exec.Command(npm, "install", "--silent", "--no-audit", "--no-fund",
-		"@palbase/backend", "typescript", "zod-to-json-schema")
+		"@palbase/backend", "typescript@^5", "zod-to-json-schema")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Logf("npm install failed (skipping cross-boundary extraction test): %v\n%s", err, out)

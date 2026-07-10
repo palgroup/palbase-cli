@@ -941,11 +941,16 @@ catch {
   while (!fs.existsSync(path.join(d, 'package.json'))) d = path.dirname(d);
 }
 process.stdout.write(d);`, name)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "node", "-e", resolve).Output(); err == nil && len(out) > 0 {
-		testDepDirs[name] = string(out)
-		return testDepDirs[name]
+	// TypeScript's unversioned package is now 7.x, while generated Palbase
+	// backends intentionally support ^5. Always seed that dependency from the
+	// pinned-major cache; a host-global 7.x install must not make tests drift.
+	if name != "typescript" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "node", "-e", resolve).Output(); err == nil && len(out) > 0 {
+			testDepDirs[name] = string(out)
+			return testDepDirs[name]
+		}
 	}
 	// 2) Cached prefix install — downloads once per machine, reused across runs.
 	if _, err := exec.LookPath("npm"); err != nil {
@@ -956,7 +961,16 @@ process.stdout.write(d);`, name)
 	if _, err := os.Stat(filepath.Join(pkgDir, "package.json")); err != nil {
 		ictx, icancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer icancel()
-		cmd := exec.CommandContext(ictx, "npm", "i", "--no-save", "--prefix", prefix, name)
+		installSpec := name
+		if name == "typescript" {
+			// The generated backend template supports TypeScript 5 (`^5`). The
+			// unversioned npm tag now resolves to TypeScript 7, whose package root
+			// intentionally exposes only version metadata instead of the parser API
+			// used by return_types.js and throw_analysis.js. Keep this hermetic
+			// fixture on the same supported major as real Palbase projects.
+			installSpec = "typescript@^5"
+		}
+		cmd := exec.CommandContext(ictx, "npm", "i", "--no-save", "--prefix", prefix, installSpec)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("npm i %s into test-dep cache %s: %v\n%s", name, prefix, err, out)
 		}
