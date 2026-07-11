@@ -115,6 +115,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		newWebCmd(r),
 		newIOSCmd(r),
 		newMacOSCmd(r),
+		newAndroidCmd(r),
 		newDevCmd(r),
 		newBuildCmd(r),
 		newDeploysCmd(r),

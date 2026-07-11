@@ -1,9 +1,9 @@
 package backend
 
-// ios_link.go — `palbase ios link`
+// native_link.go — shared `palbase ios|macos|android link` core.
 //
 // Native link wires a platform slot to a Palbase PRODUCT without inspecting or
-// modifying Xcode. The user answers ONE thing — which product (and only when
+// modifying platform project files. The user answers ONE thing — which product (and only when
 // they have several):
 //
 //  1. Pick the PRODUCT (a group). --group / your only product / a picker over
@@ -12,10 +12,10 @@ package backend
 //     group). That becomes the linked project ref (written to .palbase/config).
 //  3. Reuse the locally persisted platform app id, or register a new app.
 //  4. Fetch the shared `.palbase/openapi.json` plus the platform config at
-//     `.palbase/ios/palbase-config.json` or `.palbase/macos/...`.
-//  5. Print the manual Xcode wiring steps (SPM package + build plugin).
+//     `.palbase/<platform>/palbase-config.json`.
+//  5. Print the platform-specific SDK wiring steps.
 //
-// `palbase ios use <branch>` then switches BRANCHES within that production
+// `palbase <platform> use <branch>` then switches BRANCHES within that production
 // project — the branch axis, orthogonal to the (hidden) env-project axis.
 
 import (
@@ -33,36 +33,36 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// iosGroupEnvRow mirrors the groups.environments tRPC row shape (env_preset /
+// nativeGroupEnvRow mirrors the groups.environments tRPC row shape (env_preset /
 // env_display_name may be JSON null — a null leaves the string field empty).
-type iosGroupEnvRow struct {
+type nativeGroupEnvRow struct {
 	Ref            string `json:"ref"`
 	EnvPreset      string `json:"env_preset"`
 	EnvDisplayName string `json:"env_display_name"`
 	Status         string `json:"status"`
 }
 
-// iosAppRow mirrors the apps.list / apps.create row shape.
-type iosAppRow struct {
+// nativeAppRow mirrors the apps.list / apps.create row shape.
+type nativeAppRow struct {
 	ID          string  `json:"id"`
 	Platform    string  `json:"platform"`
 	DisplayName string  `json:"display_name"`
 	DeletedAt   *string `json:"deleted_at"`
 }
 
-// iosLinkSummary is the --json output shape.
-type iosLinkSummary struct {
+// nativeLinkSummary is the --json output shape.
+type nativeLinkSummary struct {
 	Group     string `json:"group"`
 	Ref       string `json:"ref"` // the linked production env-project ref
 	AppID     string `json:"app_id"`
 	ConfigDir string `json:"config_dir"`
 }
 
-// iosLinkDeps carries the injectable seams so runIOSLink is testable without a
+// nativeLinkDeps carries the injectable seams so runNativeLink is testable without a
 // live Management API or tenant host: the REST transport (an httptest-backed
 // *transport.Client in tests) plus the same four runPullSpec seams `palbase spec`'s
 // tests stub.
-type iosLinkDeps struct {
+type nativeLinkDeps struct {
 	rest        restDoer
 	lookup      specTargetLookup
 	fetch       remoteSpecFetch
@@ -72,9 +72,9 @@ type iosLinkDeps struct {
 	interactive bool
 }
 
-// iosLinkOpts is the resolved flag set runIOSLink acts on.
-type iosLinkOpts struct {
-	platform string // ios or macos; supplied by the command
+// nativeLinkOpts is the resolved flag set runNativeLink acts on.
+type nativeLinkOpts struct {
+	platform string // ios, macos, or android; supplied by the command
 	branch   string
 	group    string
 	appID    string // locally persisted platform app id; empty on first link
@@ -97,26 +97,36 @@ func newMacOSCmd(r Resolvers) *cobra.Command {
 		Use:   "macos",
 		Short: "Wire a macOS app to a Palbase project",
 	}
-	cmd.AddCommand(newAppleLinkCmd(r, "macos"))
+	cmd.AddCommand(newNativeLinkCmd(r, "macos"))
 	return cmd
 }
 
 // newIOSLinkCmd builds `palbase ios link`.
 func newIOSLinkCmd(r Resolvers) *cobra.Command {
-	return newAppleLinkCmd(r, "ios")
+	return newNativeLinkCmd(r, "ios")
 }
 
-func newAppleLinkCmd(r Resolvers, platform string) *cobra.Command {
+func newNativeLinkCmd(r Resolvers, platform string) *cobra.Command {
 	var groupFlag string
 	var jsonOut bool
 	next := "Run link again to refresh the macOS production config."
 	if platform == "ios" {
 		next = "Switch branches later with 'palbase ios use <branch>'."
+	} else if platform == "android" {
+		next = "Switch branches later with 'palbase android use <branch>'."
+	}
+	projectKind := "Xcode"
+	if platform == "android" {
+		projectKind = "Android"
+	}
+	short := fmt.Sprintf("Link this %s %s project to a Palbase product and fetch its SDK config", platform, projectKind)
+	if platform == "android" {
+		short = "Link this Android project to a Palbase product and fetch its SDK config"
 	}
 
 	cmd := &cobra.Command{
 		Use:   "link",
-		Short: fmt.Sprintf("Link this %s Xcode project to a Palbase product and fetch its SDK config", platform),
+		Short: short,
 		Long: fmt.Sprintf(`Wire a %s app slot to a Palbase product in one command.
 You pick ONE thing: your product. Local project files are left untouched.
 
@@ -155,14 +165,10 @@ You pick ONE thing: your product. Local project files are left untouched.
 				if cfg.DefaultEnv != "" {
 					branch = cfg.DefaultEnv
 				}
-				if platform == "ios" {
-					persistedAppID = cfg.IOSAppID
-				} else {
-					persistedAppID = cfg.MacOSAppID
-				}
+				persistedAppID = projectAppID(cfg, platform)
 			}
 
-			deps := iosLinkDeps{
+			deps := nativeLinkDeps{
 				rest:        rest,
 				lookup:      lookupSpecTarget(r),
 				fetch:       fetchRemoteOpenAPISpec,
@@ -171,7 +177,7 @@ You pick ONE thing: your product. Local project files are left untouched.
 				stdin:       os.Stdin,
 				interactive: isInteractive(),
 			}
-			summary, err := runIOSLink(ctx, deps, iosLinkOpts{
+			summary, err := runNativeLink(ctx, deps, nativeLinkOpts{
 				platform: platform,
 				branch:   branch,
 				group:    groupFlag,
@@ -189,8 +195,10 @@ You pick ONE thing: your product. Local project files are left untouched.
 			cfg.Ref = summary.Ref
 			if platform == "ios" {
 				cfg.IOSAppID = summary.AppID
-			} else {
+			} else if platform == "macos" {
 				cfg.MacOSAppID = summary.AppID
+			} else {
+				cfg.AndroidAppID = summary.AppID
 			}
 			if err := auth.SaveProjectConfig(cfg); err != nil {
 				return fmt.Errorf("save .palbase/config.json: %w", err)
@@ -199,7 +207,7 @@ You pick ONE thing: your product. Local project files are left untouched.
 				fmt.Fprintln(stdout, renderJSON(summary))
 				return nil
 			}
-			printAppleNextSteps(stdout, platform, summary.ConfigDir)
+			printNativeNextSteps(stdout, platform, summary.ConfigDir)
 			return nil
 		},
 	}
@@ -208,17 +216,17 @@ You pick ONE thing: your product. Local project files are left untouched.
 	return cmd
 }
 
-// runIOSLink is the testable core: pick the PRODUCT (group) → resolve its
+// runNativeLink is the testable core: pick the PRODUCT (group) → resolve its
 // production env-project → reuse/create the platform app → fetch the shared
 // spec and platform config. It never reads Xcode files or mutates bindings.
-func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Writer) (*iosLinkSummary, error) {
-	if opts.platform != "ios" && opts.platform != "macos" {
-		return nil, fmt.Errorf("native link platform must be ios or macos")
+func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w io.Writer) (*nativeLinkSummary, error) {
+	if opts.platform != "ios" && opts.platform != "macos" && opts.platform != "android" {
+		return nil, fmt.Errorf("native link platform must be ios, macos, or android")
 	}
 	// `ios link` binds an app to a PRODUCT. A product is a group (the umbrella
 	// that owns the product's environments) — so we pick the group, never an
 	// environment. The user sees products, not the internal env-project split.
-	grpID, err := pickIOSProduct(ctx, d, opts.group, w)
+	grpID, err := pickNativeProduct(ctx, d, opts.group, w)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +239,7 @@ func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Write
 		return nil, err
 	}
 
-	appID, err := resolveAppleApp(ctx, d, grpID, opts.platform, opts.appID, w)
+	appID, err := resolveNativeApp(ctx, d, grpID, opts.platform, opts.appID, w)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +257,7 @@ func runIOSLink(ctx context.Context, d iosLinkDeps, opts iosLinkOpts, w io.Write
 		return nil, err
 	}
 
-	return &iosLinkSummary{
+	return &nativeLinkSummary{
 		Group:     grpID,
 		Ref:       prodRef,
 		AppID:     appID,
@@ -273,6 +281,8 @@ func persistProjectAppSlot(ref, platform, appID string) error {
 		cfg.MacOSAppID = appID
 	case "web":
 		cfg.WebAppID = appID
+	case "android":
+		cfg.AndroidAppID = appID
 	default:
 		return fmt.Errorf("unsupported app slot %q", platform)
 	}
@@ -282,16 +292,16 @@ func persistProjectAppSlot(ref, platform, appID string) error {
 	return nil
 }
 
-// iosProjectRow is the GET /api/v1/projects/{ref} shape — we only need group_id.
-type iosProjectRow struct {
+// nativeProjectRow is the GET /api/v1/projects/{ref} shape — we only need group_id.
+type nativeProjectRow struct {
 	GroupID string `json:"group_id"`
 }
 
 // resolveProductionRef returns the group's production env-project ref (the schema
 // guarantees exactly one env_preset='production' project per group). This is the
-// ref an iOS app links to — the user never selects an environment.
-func resolveProductionRef(ctx context.Context, d iosLinkDeps, grpID string) (string, error) {
-	var envs []iosGroupEnvRow
+// ref a native app links to — the user never selects an environment.
+func resolveProductionRef(ctx context.Context, d nativeLinkDeps, grpID string) (string, error) {
+	var envs []nativeGroupEnvRow
 	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups/"+grpID+"/environments", nil, &envs); err != nil {
 		return "", fmt.Errorf("list environments: %w", err)
 	}
@@ -303,18 +313,18 @@ func resolveProductionRef(ctx context.Context, d iosLinkDeps, grpID string) (str
 	return "", fmt.Errorf("no production environment in this group — create the project's production environment in Studio first")
 }
 
-// resolveIOSGroup derives the product group from an already linked project ref.
+// resolveNativeGroup derives the product group from an already linked project ref.
 // `ios link` selects the product directly; `ios use` supplies its stored ref and
 // asks the user only for the branch. The optional flag remains an internal seam
 // for callers that already know the group id.
-func resolveIOSGroup(ctx context.Context, d iosLinkDeps, flag, ref string, w io.Writer) (string, error) {
+func resolveNativeGroup(ctx context.Context, d nativeLinkDeps, flag, ref string, w io.Writer) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
 	if ref == "" {
 		return "", fmt.Errorf("no project ref to resolve the group from — pass --ref <project> or --group <id>")
 	}
-	var proj iosProjectRow
+	var proj nativeProjectRow
 	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &proj); err != nil {
 		return "", fmt.Errorf("resolve group for project %q: %w", ref, err)
 	}
@@ -324,22 +334,22 @@ func resolveIOSGroup(ctx context.Context, d iosLinkDeps, flag, ref string, w io.
 	return proj.GroupID, nil
 }
 
-// iosProductRow mirrors the GET /api/v1/groups row shape (id/name/plan).
-type iosProductRow struct {
+// nativeProductRow mirrors the GET /api/v1/groups row shape (id/name/plan).
+type nativeProductRow struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Plan string `json:"plan"`
 }
 
-// pickIOSProduct resolves WHICH product to link to. A product is a group. With
+// pickNativeProduct resolves WHICH product to link to. A product is a group. With
 // --group, that. With one product, auto-select it (no prompt). With several, an
 // interactive picker over PRODUCT names — never over environments or refs. The
 // user picks one thing: their app's product.
-func pickIOSProduct(ctx context.Context, d iosLinkDeps, flag string, w io.Writer) (string, error) {
+func pickNativeProduct(ctx context.Context, d nativeLinkDeps, flag string, w io.Writer) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
-	var products []iosProductRow
+	var products []nativeProductRow
 	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups", nil, &products); err != nil {
 		return "", fmt.Errorf("list your products: %w", err)
 	}
@@ -370,16 +380,16 @@ func pickIOSProduct(ctx context.Context, d iosLinkDeps, flag string, w io.Writer
 	return products[choice-1].ID, nil
 }
 
-// resolveAppleApp reuses the locally persisted app id only when it still belongs
+// resolveNativeApp reuses the locally persisted app id only when it still belongs
 // to the selected product and platform. A missing, deleted, or mismatched id is
 // replaced with a fresh platform app; remote apps are never guessed or mutated.
-func resolveAppleApp(
+func resolveNativeApp(
 	ctx context.Context,
-	d iosLinkDeps,
+	d nativeLinkDeps,
 	grpID, platform, persistedAppID string,
 	w io.Writer,
 ) (string, error) {
-	var rows []iosAppRow
+	var rows []nativeAppRow
 	if err := d.rest.Do(ctx, http.MethodGet, "/api/v1/groups/"+grpID+"/apps", nil, &rows); err != nil {
 		return "", fmt.Errorf("list apps: %w", err)
 	}
@@ -400,7 +410,7 @@ func resolveAppleApp(
 		return "", err
 	}
 	name := filepath.Base(cwd)
-	var created iosAppRow
+	var created nativeAppRow
 	if err := d.rest.Do(ctx, http.MethodPost, "/api/v1/groups/"+grpID+"/apps", map[string]any{
 		"platform": platform,
 		"name":     name,
@@ -411,9 +421,18 @@ func resolveAppleApp(
 	return created.ID, nil
 }
 
-// printIOSNextSteps prints the manual Xcode wiring the CLI cannot do itself
-// (SPM package + build-tool plugin; Apple exposes no CLI for either).
-func printAppleNextSteps(w io.Writer, platform, outDir string) {
+// printNativeNextSteps prints the platform-specific package/plugin wiring.
+func printNativeNextSteps(w io.Writer, platform, outDir string) {
+	if platform == "android" {
+		fmt.Fprintf(w, `
+next steps (Android app):
+  1. add implementation("io.palbase:palbe:<version>")
+  2. apply plugin id("io.palbase.codegen")
+  3. commit .palbase/openapi.json and %s/palbase-config.json
+  4. call Palbase.initialize(this), then import io.palbase.pb
+`, outDir)
+		return
+	}
 	fmt.Fprintf(w, `
 next steps (%s Xcode target):
   1. File ▸ Add Package Dependencies… → https://github.com/palgroup/palbackend-ios
@@ -422,4 +441,17 @@ next steps (%s Xcode target):
   4. Commit .palbase/openapi.json and %s/palbase-config.json
 Build the app — the plugin generates PalbaseGenerated.swift + Palbase-Info.plist; then `+"`import Palbe`"+` and use `+"`pb`"+`.
 `, platform, outDir)
+}
+
+func projectAppID(cfg *auth.ProjectConfig, platform string) string {
+	switch platform {
+	case "ios":
+		return cfg.IOSAppID
+	case "macos":
+		return cfg.MacOSAppID
+	case "android":
+		return cfg.AndroidAppID
+	default:
+		return ""
+	}
 }
