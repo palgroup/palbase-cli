@@ -126,7 +126,11 @@ func TestNativeLinkCommandsExposeOnlyProductSelection(t *testing.T) {
 			require.NotNil(t, link)
 			var flags []string
 			link.Flags().VisitAll(func(flag *pflag.Flag) { flags = append(flags, flag.Name) })
-			require.Equal(t, []string{"group", "json"}, flags)
+			want := []string{"group", "json"}
+			if tc.name == "android" {
+				want = append(want, "package-name")
+			}
+			require.Equal(t, want, flags)
 		})
 	}
 }

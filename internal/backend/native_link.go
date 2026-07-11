@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -47,6 +48,7 @@ type nativeAppRow struct {
 	ID          string  `json:"id"`
 	Platform    string  `json:"platform"`
 	DisplayName string  `json:"display_name"`
+	Identifier  string  `json:"identifier"`
 	DeletedAt   *string `json:"deleted_at"`
 }
 
@@ -74,10 +76,11 @@ type nativeLinkDeps struct {
 
 // nativeLinkOpts is the resolved flag set runNativeLink acts on.
 type nativeLinkOpts struct {
-	platform string // ios, macos, or android; supplied by the command
-	branch   string
-	group    string
-	appID    string // locally persisted platform app id; empty on first link
+	platform   string // ios, macos, or android; supplied by the command
+	branch     string
+	group      string
+	appID      string // locally persisted platform app id; empty on first link
+	identifier string // Android applicationId; empty for platforms without one
 }
 
 // newIOSCmd builds the `palbase ios` command group.
@@ -109,6 +112,7 @@ func newIOSLinkCmd(r Resolvers) *cobra.Command {
 func newNativeLinkCmd(r Resolvers, platform string) *cobra.Command {
 	var groupFlag string
 	var jsonOut bool
+	var packageName string
 	next := "Run link again to refresh the macOS production config."
 	if platform == "ios" {
 		next = "Switch branches later with 'palbase ios use <branch>'."
@@ -139,6 +143,13 @@ You pick ONE thing: your product. Local project files are left untouched.
 %s`, platform, platform, platform, next),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
+			if platform == "android" && packageName == "" {
+				var err error
+				packageName, err = detectAndroidApplicationID(".")
+				if err != nil {
+					return err
+				}
+			}
 			stdout := cmd.OutOrStdout()
 			// --json: the summary is the ONLY stdout so a script can parse it;
 			// the human progress lines are suppressed.
@@ -178,10 +189,11 @@ You pick ONE thing: your product. Local project files are left untouched.
 				interactive: isInteractive(),
 			}
 			summary, err := runNativeLink(ctx, deps, nativeLinkOpts{
-				platform: platform,
-				branch:   branch,
-				group:    groupFlag,
-				appID:    persistedAppID,
+				platform:   platform,
+				branch:     branch,
+				group:      groupFlag,
+				appID:      persistedAppID,
+				identifier: packageName,
 			}, human)
 			if err != nil {
 				return err
@@ -213,6 +225,9 @@ You pick ONE thing: your product. Local project files are left untouched.
 	}
 	cmd.Flags().StringVar(&groupFlag, "group", "", "Group id (defaults to your only group, or an interactive picker)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit a JSON summary instead of human output")
+	if platform == "android" {
+		cmd.Flags().StringVar(&packageName, "package-name", "", "Android applicationId (auto-detected from app/build.gradle[.kts])")
+	}
 	return cmd
 }
 
@@ -222,6 +237,9 @@ You pick ONE thing: your product. Local project files are left untouched.
 func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w io.Writer) (*nativeLinkSummary, error) {
 	if opts.platform != "ios" && opts.platform != "macos" && opts.platform != "android" {
 		return nil, fmt.Errorf("native link platform must be ios, macos, or android")
+	}
+	if opts.platform == "android" && opts.identifier == "" {
+		return nil, fmt.Errorf("Android applicationId is required; pass --package-name")
 	}
 	// `ios link` binds an app to a PRODUCT. A product is a group (the umbrella
 	// that owns the product's environments) — so we pick the group, never an
@@ -239,7 +257,7 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 		return nil, err
 	}
 
-	appID, err := resolveNativeApp(ctx, d, grpID, opts.platform, opts.appID, w)
+	appID, err := resolveNativeApp(ctx, d, grpID, opts.platform, opts.appID, opts.identifier, w)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +404,7 @@ func pickNativeProduct(ctx context.Context, d nativeLinkDeps, flag string, w io.
 func resolveNativeApp(
 	ctx context.Context,
 	d nativeLinkDeps,
-	grpID, platform, persistedAppID string,
+	grpID, platform, persistedAppID, identifier string,
 	w io.Writer,
 ) (string, error) {
 	var rows []nativeAppRow
@@ -398,7 +416,7 @@ func resolveNativeApp(
 			if app.ID != persistedAppID || app.DeletedAt != nil {
 				continue
 			}
-			if app.Platform == platform {
+			if app.Platform == platform && (identifier == "" || app.Identifier == identifier) {
 				fmt.Fprintf(w, "using linked %s app %s (%s)\n", platform, app.DisplayName, app.ID)
 				return persistedAppID, nil
 			}
@@ -411,14 +429,40 @@ func resolveNativeApp(
 	}
 	name := filepath.Base(cwd)
 	var created nativeAppRow
-	if err := d.rest.Do(ctx, http.MethodPost, "/api/v1/groups/"+grpID+"/apps", map[string]any{
+	body := map[string]any{
 		"platform": platform,
 		"name":     name,
-	}, &created); err != nil {
+	}
+	if identifier != "" {
+		body["package_name"] = identifier
+	}
+	if err := d.rest.Do(ctx, http.MethodPost, "/api/v1/groups/"+grpID+"/apps", body, &created); err != nil {
 		return "", fmt.Errorf("create app: %w", err)
 	}
 	fmt.Fprintf(w, "✓ registered %s app %q (%s)\n", platform, name, created.ID)
 	return created.ID, nil
+}
+
+var androidApplicationIDPattern = regexp.MustCompile(`(?m)applicationId\s*(?:=\s*)?["']([^"']+)["']`)
+
+func detectAndroidApplicationID(root string) (string, error) {
+	candidates := []string{
+		filepath.Join(root, "app", "build.gradle.kts"),
+		filepath.Join(root, "app", "build.gradle"),
+		filepath.Join(root, "build.gradle.kts"),
+		filepath.Join(root, "build.gradle"),
+	}
+	for _, candidate := range candidates {
+		contents, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		match := androidApplicationIDPattern.FindSubmatch(contents)
+		if len(match) == 2 {
+			return string(match[1]), nil
+		}
+	}
+	return "", fmt.Errorf("Android applicationId not found; pass --package-name")
 }
 
 // printNativeNextSteps prints the platform-specific package/plugin wiring.

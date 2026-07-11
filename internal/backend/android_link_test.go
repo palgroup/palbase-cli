@@ -44,7 +44,9 @@ func TestAndroidLink_WritesFixedSlotAndPersistsOnlyAndroidApp(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groups/grp_1/apps":
 			iosRESTOK(w, http.StatusOK, []map[string]any{{"id": "app_ios", "platform": "ios"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groups/grp_1/apps":
-			require.Equal(t, "android", iosPostBody(t, r)["platform"])
+			body := iosPostBody(t, r)
+			require.Equal(t, "android", body["platform"])
+			require.Equal(t, "com.example.todo", body["package_name"])
 			iosRESTOK(w, http.StatusCreated, map[string]any{"id": "app_android", "platform": "android"})
 		default:
 			t.Fatalf("unexpected call %s %s", r.Method, r.URL.Path)
@@ -54,7 +56,9 @@ func TestAndroidLink_WritesFixedSlotAndPersistsOnlyAndroidApp(t *testing.T) {
 
 	summary, err := runNativeLink(context.Background(), nativeLinkDeps{
 		rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
-	}, nativeLinkOpts{platform: "android", group: "grp_1", branch: "main"}, io.Discard)
+	}, nativeLinkOpts{
+		platform: "android", group: "grp_1", branch: "main", identifier: "com.example.todo",
+	}, io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(".palbase", "android"), summary.ConfigDir)
 	require.FileExists(t, filepath.Join(".palbase", "openapi.json"))
@@ -68,6 +72,35 @@ func TestAndroidLink_WritesFixedSlotAndPersistsOnlyAndroidApp(t *testing.T) {
 	require.Equal(t, "app_ios", cfg.IOSAppID)
 	require.Equal(t, "app_macos", cfg.MacOSAppID)
 	require.Equal(t, "app_web", cfg.WebAppID)
+}
+
+func TestDetectAndroidApplicationID_KotlinAndGroovy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		filename string
+		contents string
+	}{
+		{"kotlin", "build.gradle.kts", `android { defaultConfig { applicationId = "com.example.kotlin" } }`},
+		{"groovy", "build.gradle", `android { defaultConfig { applicationId 'com.example.groovy' } }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			appDir := filepath.Join(root, "app")
+			require.NoError(t, os.MkdirAll(appDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(appDir, tc.filename), []byte(tc.contents), 0o644))
+
+			got, err := detectAndroidApplicationID(root)
+			require.NoError(t, err)
+			require.Contains(t, tc.contents, got)
+		})
+	}
+}
+
+func TestAndroidLink_RequiresApplicationID(t *testing.T) {
+	_, err := runNativeLink(context.Background(), nativeLinkDeps{}, nativeLinkOpts{
+		platform: "android", branch: "main",
+	}, io.Discard)
+	require.ErrorContains(t, err, "applicationId is required")
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

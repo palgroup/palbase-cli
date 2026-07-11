@@ -87,7 +87,7 @@ read from .palbase/config.json). Run 'palbase android link' first if it is not.`
 			if err != nil {
 				return err
 			}
-			appID, err = resolveNativeApp(ctx, nativeLinkDeps{rest: rest}, grpID, platform, appID, out)
+			appID, err = resolveNativeApp(ctx, nativeLinkDeps{rest: rest}, grpID, platform, appID, "", out)
 			if err != nil {
 				return err
 			}
