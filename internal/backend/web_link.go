@@ -131,14 +131,14 @@ func resolveWebApp(
 	ref, persistedAppID string,
 	w io.Writer,
 ) (string, error) {
-	var project iosProjectRow
+	var project nativeProjectRow
 	if err := rest.Do(ctx, http.MethodGet, "/api/v1/projects/"+ref, nil, &project); err != nil {
 		return "", fmt.Errorf("resolve project group: %w", err)
 	}
 	if project.GroupID == "" {
 		return "", fmt.Errorf("project %s has no app group", ref)
 	}
-	var rows []iosAppRow
+	var rows []nativeAppRow
 	if err := rest.Do(ctx, http.MethodGet,
 		"/api/v1/groups/"+project.GroupID+"/apps", nil, &rows); err != nil {
 		return "", fmt.Errorf("list web apps: %w", err)
@@ -160,7 +160,7 @@ func resolveWebApp(
 	if cwd, err := os.Getwd(); err == nil && filepath.Base(cwd) != "." {
 		name = filepath.Base(cwd)
 	}
-	var created iosAppRow
+	var created nativeAppRow
 	if err := rest.Do(ctx, http.MethodPost,
 		"/api/v1/groups/"+project.GroupID+"/apps",
 		map[string]any{

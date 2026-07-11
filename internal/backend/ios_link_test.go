@@ -113,6 +113,7 @@ func TestNativeLinkCommandsExposeOnlyProductSelection(t *testing.T) {
 	}{
 		{"ios", newIOSCmd},
 		{"macos", newMacOSCmd},
+		{"android", newAndroidCmd},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parent := tc.cmd(noopResolvers())
@@ -125,17 +126,21 @@ func TestNativeLinkCommandsExposeOnlyProductSelection(t *testing.T) {
 			require.NotNil(t, link)
 			var flags []string
 			link.Flags().VisitAll(func(flag *pflag.Flag) { flags = append(flags, flag.Name) })
-			require.Equal(t, []string{"group", "json"}, flags)
+			want := []string{"group", "json"}
+			if tc.name == "android" {
+				want = append(want, "package-name")
+			}
+			require.Equal(t, want, flags)
 		})
 	}
 }
 
 func TestNativeLink_RequiresCommandPlatform(t *testing.T) {
 	lookup, fetch, list, cfgFetch := mustNotPull(t)
-	_, err := runIOSLink(context.Background(), iosLinkDeps{
+	_, err := runNativeLink(context.Background(), nativeLinkDeps{
 		rest: fatalRESTDoer{t: t}, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
-	}, iosLinkOpts{branch: "main"}, io.Discard)
-	require.ErrorContains(t, err, "must be ios or macos")
+	}, nativeLinkOpts{branch: "main"}, io.Discard)
+	require.ErrorContains(t, err, "must be ios, macos, or android")
 }
 
 type fatalRESTDoer struct{ t *testing.T }
@@ -179,9 +184,9 @@ func TestNativeLink_FirstRunCreatesAppAndUsesFixedSlot(t *testing.T) {
 				}
 			})
 			lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "app_new", platform)
-			summary, err := runIOSLink(context.Background(), iosLinkDeps{
+			summary, err := runNativeLink(context.Background(), nativeLinkDeps{
 				rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
-			}, iosLinkOpts{platform: platform, branch: "main"}, io.Discard)
+			}, nativeLinkOpts{platform: platform, branch: "main"}, io.Discard)
 			require.NoError(t, err)
 			require.Equal(t, 1, mutations, "the only mutation is creating this checkout's app")
 			require.Equal(t, map[string]any{
@@ -220,9 +225,9 @@ func TestNativeLink_RerunReusesPersistedAppWithoutMutation(t *testing.T) {
 		}
 	})
 	lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "app_saved", "ios")
-	summary, err := runIOSLink(context.Background(), iosLinkDeps{
+	summary, err := runNativeLink(context.Background(), nativeLinkDeps{
 		rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
-	}, iosLinkOpts{platform: "ios", group: "grp_1", branch: "main", appID: "app_saved"}, io.Discard)
+	}, nativeLinkOpts{platform: "ios", group: "grp_1", branch: "main", appID: "app_saved"}, io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, "app_saved", summary.AppID)
 	require.Zero(t, mutations)
@@ -398,9 +403,9 @@ func TestNativeLink_StaleOrMismatchedPersistedAppRegistersReplacement(t *testing
 			})
 			lookup, fetch, list, cfgFetch := iosStubPullSeams(t, "app_new", "macos")
 			var out strings.Builder
-			summary, err := runIOSLink(context.Background(), iosLinkDeps{
+			summary, err := runNativeLink(context.Background(), nativeLinkDeps{
 				rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
-			}, iosLinkOpts{
+			}, nativeLinkOpts{
 				platform: "macos", group: "grp_1", branch: "main", appID: "app_saved",
 			}, &out)
 			require.NoError(t, err)
@@ -469,9 +474,9 @@ func TestNativeLink_PersistsCreatedAppBeforeArtifactFetchAndRetryReuses(t *testi
 			BaseURL: "https://app-bound.example", APIKey: "pb_app",
 		}, nil
 	}
-	deps := iosLinkDeps{rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch}
+	deps := nativeLinkDeps{rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch}
 
-	_, err := runIOSLink(context.Background(), deps, iosLinkOpts{
+	_, err := runNativeLink(context.Background(), deps, nativeLinkOpts{
 		platform: "ios", group: "grp_1", branch: "main", appID: "app_stale",
 	}, io.Discard)
 	require.ErrorContains(t, err, "temporary config-artifact failure")
@@ -483,7 +488,7 @@ func TestNativeLink_PersistsCreatedAppBeforeArtifactFetchAndRetryReuses(t *testi
 	require.Equal(t, "app_macos", linked.MacOSAppID)
 	require.Equal(t, "app_web", linked.WebAppID)
 
-	_, err = runIOSLink(context.Background(), deps, iosLinkOpts{
+	_, err = runNativeLink(context.Background(), deps, nativeLinkOpts{
 		platform: "ios", group: "grp_1", branch: "main", appID: linked.IOSAppID,
 	}, io.Discard)
 	require.NoError(t, err)
@@ -498,9 +503,9 @@ func TestNativeLink_MultipleProductsRequiresSelection(t *testing.T) {
 		})
 	})
 	lookup, fetch, list, cfgFetch := mustNotPull(t)
-	_, err := runIOSLink(context.Background(), iosLinkDeps{
+	_, err := runNativeLink(context.Background(), nativeLinkDeps{
 		rest: rest, lookup: lookup, fetch: fetch, list: list, cfgFetch: cfgFetch,
 		stdin: strings.NewReader(""), interactive: false,
-	}, iosLinkOpts{platform: "ios", branch: "main"}, io.Discard)
+	}, nativeLinkOpts{platform: "ios", branch: "main"}, io.Discard)
 	require.ErrorContains(t, err, "pass --group")
 }

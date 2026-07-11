@@ -60,6 +60,21 @@ func TestCommands_MacOSGroup(t *testing.T) {
 	t.Fatal("macos group not found in flat surface")
 }
 
+func TestCommands_AndroidGroup(t *testing.T) {
+	for _, c := range Commands(noopResolvers()) {
+		if c.Name() != "android" {
+			continue
+		}
+		var names []string
+		for _, child := range c.Commands() {
+			names = append(names, child.Name())
+		}
+		require.Equal(t, []string{"link", "use"}, names)
+		return
+	}
+	t.Fatal("android group not found in flat surface")
+}
+
 // TestCommands_WebGroup pins the `web` group's children: link/unlink ONLY —
 // the CLI wires and fetches artifacts, it does NOT generate the client.
 // Client codegen is the SDKs' job: @palbase/web's `palbe-gen` for web (from

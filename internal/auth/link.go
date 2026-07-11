@@ -37,6 +37,9 @@ type ProjectConfig struct {
 	MacOSAppID string `json:"macos_app_id,omitempty"`
 	// WebAppID is the web registration selected by `palbase web link`.
 	WebAppID string `json:"web_app_id,omitempty"`
+	// AndroidAppID is the Android registration selected by
+	// `palbase android link`. Android keeps an independent app/key slot.
+	AndroidAppID string `json:"android_app_id,omitempty"`
 }
 
 // Project represents a project as the Studio tRPC layer returns it.

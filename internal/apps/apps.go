@@ -282,18 +282,40 @@ func attestCmd(rest func() REST) *cobra.Command {
 // ConfigArtifact mirrors the per-(app × env) config returned by the
 // Management API. Exported so the platform link commands can write SDK input.
 type ConfigArtifact struct {
-	AppID       string `json:"app_id"`
-	ProjectRef  string `json:"project_ref"`
-	EndpointRef string `json:"endpoint_ref"`
-	APIKey      string `json:"api_key"`
-	BaseURL     string `json:"base_url"`
-	EnvPreset   string `json:"env_preset"`
-	Platform    string `json:"platform"`
+	AppID         string               `json:"app_id"`
+	ProjectRef    string               `json:"project_ref"`
+	EndpointRef   string               `json:"endpoint_ref"`
+	APIKey        string               `json:"api_key"`
+	BaseURL       string               `json:"base_url"`
+	EnvPreset     string               `json:"env_preset"`
+	Platform      string               `json:"platform"`
+	Integrity     *IntegrityConfig     `json:"integrity,omitempty"`
+	Notifications *NotificationsConfig `json:"notifications,omitempty"`
 	// OAuth carries the provider-availability map fetched from palauth's
 	// public `/auth/oauth/providers` endpoint. Nil means the environment has no
 	// enabled providers. The Management API artifact does not return this field;
 	// the CLI fetches and merges it.
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
+}
+
+// IntegrityConfig carries the Palbase-managed Google Cloud project number
+// used by Android Play Integrity. It contains no credential.
+type IntegrityConfig struct {
+	CloudProjectNumber int64 `json:"cloud_project_number"`
+}
+
+// NotificationsConfig contains the public Android client options provisioned
+// by Palbase. Customers do not create, connect, or upload a Firebase project.
+type NotificationsConfig struct {
+	FCM FCMConfig `json:"fcm"`
+}
+
+type FCMConfig struct {
+	ProjectID     string `json:"project_id"`
+	ApplicationID string `json:"application_id"`
+	APIKey        string `json:"api_key"`
+	SenderID      string `json:"sender_id"`
+	PackageName   string `json:"package_name"`
 }
 
 // OAuthConfig is the secret-free provider-availability map embedded in the

@@ -84,12 +84,18 @@ func TestRunPullSpec_AppConfigSeparatesOutputs(t *testing.T) {
 		},
 		func(context.Context, string, string, string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{
-				AppID: "app_ios", ProjectRef: "prodref", Platform: "ios",
+				AppID: "app_android", ProjectRef: "prodref", Platform: "android",
 				EnvPreset: "production", BaseURL: "https://app-bound.example", APIKey: "pb_app",
-				OAuth: &apps.OAuthConfig{Apple: &apps.OAuthApple{Enabled: true}},
+				OAuth:     &apps.OAuthConfig{Apple: &apps.OAuthApple{Enabled: true}},
+				Integrity: &apps.IntegrityConfig{CloudProjectNumber: 123456789},
+				Notifications: &apps.NotificationsConfig{FCM: apps.FCMConfig{
+					ProjectID: "pb-prodref", ApplicationID: "1:123456789:android:abc",
+					APIKey: "public-firebase-key", SenderID: "123456789",
+					PackageName: "io.palbase.todo",
+				}},
 			}, nil
 		},
-		"prodref", "main", root, configDir, "app_ios", io.Discard,
+		"prodref", "main", root, configDir, "app_android", io.Discard,
 	)
 	require.NoError(t, err)
 	require.Equal(t, "https://app-bound.example/openapi.json", gotURL)
@@ -100,10 +106,15 @@ func TestRunPullSpec_AppConfigSeparatesOutputs(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
-	require.Equal(t, "app_ios", got["app_id"])
+	require.Equal(t, "app_android", got["app_id"])
 	require.Equal(t, "https://app-bound.example", got["base_url"])
 	require.Equal(t, "pb_app", got["api_key"])
-	require.ElementsMatch(t, []string{"api_key", "app_id", "base_url", "env_preset", "oauth"}, mapKeys(got))
+	require.Equal(t, float64(123456789), got["integrity"].(map[string]any)["cloud_project_number"])
+	fcm := got["notifications"].(map[string]any)["fcm"].(map[string]any)
+	require.Equal(t, "io.palbase.todo", fcm["package_name"])
+	require.ElementsMatch(t, []string{
+		"api_key", "app_id", "base_url", "env_preset", "oauth", "integrity", "notifications",
+	}, mapKeys(got))
 	_, err = os.Stat(filepath.Join(root, "palbase-config.json"))
 	require.True(t, os.IsNotExist(err), "native config must exist only in its platform slot")
 }
