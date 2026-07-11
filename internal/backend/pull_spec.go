@@ -11,17 +11,20 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/palgroup/palbase-cli/internal/apps"
 	"github.com/palgroup/palbase-cli/internal/auth"
 )
 
 // pullSpecConfigEntry is the single active-env config the Swift SPM plugin turns
 // into Palbase-Info.plist — plain JSON so the plugin owns serialization.
 type pullSpecConfigEntry struct {
-	AppID     string           `json:"app_id"`
-	EnvPreset string           `json:"env_preset"`
-	BaseURL   string           `json:"base_url"`
-	APIKey    string           `json:"api_key"`
-	OAuth     *oauthConfigJSON `json:"oauth,omitempty"`
+	AppID         string                    `json:"app_id"`
+	EnvPreset     string                    `json:"env_preset"`
+	BaseURL       string                    `json:"base_url"`
+	APIKey        string                    `json:"api_key"`
+	OAuth         *oauthConfigJSON          `json:"oauth,omitempty"`
+	Integrity     *apps.IntegrityConfig     `json:"integrity,omitempty"`
+	Notifications *apps.NotificationsConfig `json:"notifications,omitempty"`
 }
 
 // oauthConfigJSON mirrors apps.OAuthConfig field-for-field so the emitted JSON's
@@ -225,10 +228,12 @@ func buildPullSpecConfig(
 		return nil, fmt.Errorf("fetch config artifact for %s: %w", ref, err)
 	}
 	entry := &pullSpecConfigEntry{
-		AppID:     art.AppID,
-		EnvPreset: art.EnvPreset,
-		BaseURL:   art.BaseURL,
-		APIKey:    art.APIKey,
+		AppID:         art.AppID,
+		EnvPreset:     art.EnvPreset,
+		BaseURL:       art.BaseURL,
+		APIKey:        art.APIKey,
+		Integrity:     art.Integrity,
+		Notifications: art.Notifications,
 	}
 	if art.OAuth != nil {
 		oc := &oauthConfigJSON{}
