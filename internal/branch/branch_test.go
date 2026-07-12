@@ -162,14 +162,17 @@ func TestBranchDelete_403DefaultBranchSurfacesAPIError(t *testing.T) {
 	require.Equal(t, "forbidden", apiErr.Code)
 }
 
-func TestBranchHibernate_REST(t *testing.T) {
+// TestBranchArchive_REST locks the verb↔wire split: the user types `archive`,
+// the wire path stays /hibernate (server route + 'hibernated' status are API
+// surface — renamed only in UI/CLI copy).
+func TestBranchArchive_REST(t *testing.T) {
 	var gotMethod, gotPath string
 	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
 		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-h", "runId": "run-h"})
 	})
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"hibernate", "staging", "--ref", "acme1234", "--json"})
+	cmd.SetArgs([]string{"archive", "staging", "--ref", "acme1234", "--json"})
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, http.MethodPost, gotMethod)
 	require.Equal(t, "/api/v1/projects/acme1234/branches/staging/hibernate", gotPath)
@@ -187,16 +190,16 @@ func TestBranchWake_REST(t *testing.T) {
 	require.Equal(t, "/api/v1/projects/acme1234/branches/staging/wake", gotPath)
 }
 
-func TestBranchHibernate_RefusesMainClientSide(t *testing.T) {
+func TestBranchArchive_RefusesMainClientSide(t *testing.T) {
 	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API to hibernate main")
+		t.Fatal("must not call the API to archive main")
 	})
 	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"hibernate", "main", "--ref", "acme1234"})
+	cmd.SetArgs([]string{"archive", "main", "--ref", "acme1234"})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot hibernate the main branch")
+	require.Contains(t, err.Error(), "cannot archive the main branch")
 }
 
 func TestBranchCreate_404SurfacesAPIError(t *testing.T) {

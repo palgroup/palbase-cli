@@ -805,7 +805,7 @@ then re-run `+"`palbase serve --branch %s`"+`.`, branch, branch, branch, branch)
 	case "creating":
 		return fmt.Errorf("branch %q is still provisioning — check `palbase branch list` and re-run once it's active", branch)
 	case "hibernated", "paused", "stopped", "idle":
-		return fmt.Errorf("branch %q is hibernated — wake it first:\n\n  palbase branch wake %s", branch, branch)
+		return fmt.Errorf("branch %q is not awake (archived or sleeping) — wake it first:\n\n  palbase branch wake %s", branch, branch)
 	case "deleted":
 		return fmt.Errorf("branch %q was deleted — recreate it:\n\n  palbase branch create %s", branch, branch)
 	default:
