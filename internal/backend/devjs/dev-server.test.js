@@ -57,6 +57,31 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.js'), [
   '',
 ].join('\n'));
 
+// Remote-env load-order fixture. `palbase serve` auto-fetches the branch's
+// remote env vars (Studio env.pull) into a JSON file and passes its path as
+// PALBASE_REMOTE_ENV_FILE; dev-server.js must load it AFTER .env.local with
+// only-if-unset semantics, so precedence stays shell env > .env.local > remote.
+// Prepared BEFORE the require() below because both loaders run at module load —
+// this drives the REAL production load path, not a reimplementation.
+//   X: .env.local + remote, absent in shell → .env.local wins → 'local'
+//   Y: remote only                          → remote fills the gap → 'remote'
+//   Z: shell + .env.local + remote          → shell wins → 'shell'
+fs.writeFileSync(path.join(FIXTURE_ROOT, '.env.local'), [
+  'REMOTE_ENV_TEST_X=local',
+  'REMOTE_ENV_TEST_Z=local',
+  '',
+].join('\n'));
+const REMOTE_ENV_FILE = path.join(FIXTURE_ROOT, 'remote-env.json');
+fs.writeFileSync(REMOTE_ENV_FILE, JSON.stringify({
+  REMOTE_ENV_TEST_X: 'remote',
+  REMOTE_ENV_TEST_Y: 'remote',
+  REMOTE_ENV_TEST_Z: 'remote',
+}));
+process.env.PALBASE_REMOTE_ENV_FILE = REMOTE_ENV_FILE;
+delete process.env.REMOTE_ENV_TEST_X;
+delete process.env.REMOTE_ENV_TEST_Y;
+process.env.REMOTE_ENV_TEST_Z = 'shell';
+
 // require()ing dev-server.js is side-effect-light because main() is guarded by
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
 const {
@@ -186,6 +211,20 @@ test('parseDotenv: parses KEY=VALUE, skips comments/blanks, strips quotes', () =
   assert.ok(!('NO_EQUALS_LINE' in env), 'a line without = is dropped');
   // A comment/blank produces no keys.
   assert.deepStrictEqual(parseDotenv('# only a comment\n\n'), {});
+});
+
+// Cross-boundary lock for serve's auto-fetched remote env (fixture written
+// before the require() at the top of this file). Mutations that turn this RED:
+// loading PALBASE_REMOTE_ENV_FILE before .env.local (or assigning
+// unconditionally) → X becomes 'remote'; dropping the remote loader → Y
+// undefined; losing the already-set-wins guard → Z loses 'shell'.
+test('remote env file loads AFTER .env.local: shell > .env.local > remote', () => {
+  assert.strictEqual(process.env.REMOTE_ENV_TEST_X, 'local',
+    'a .env.local key must beat the remote-fetched value');
+  assert.strictEqual(process.env.REMOTE_ENV_TEST_Y, 'remote',
+    'a key only present remotely must be filled from PALBASE_REMOTE_ENV_FILE');
+  assert.strictEqual(process.env.REMOTE_ENV_TEST_Z, 'shell',
+    'a real shell env var must beat both .env.local and remote');
 });
 
 test('Cache: set then get round-trips JSON values', async () => {

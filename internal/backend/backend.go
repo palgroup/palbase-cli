@@ -36,6 +36,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/hook"
+	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -685,6 +686,15 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 					node.Env = append(node.Env, fmt.Sprintf("PALBASE_OWNER_TOKEN_FILE=%s", ownerTokenFile))
 				}
 			}
+			// Auto-fetch the branch's remote env vars (the same Studio env.pull
+			// `palbase secret pull` uses) so local dev sees platform-configured
+			// vars WITHOUT the user knowing `secret pull` exists. Delivered via
+			// a 0600 JSON file in tmpDir — NOT node.Env — because dev-server's
+			// loadDotEnvLocal treats already-set process.env as highest
+			// priority, so a node.Env value would BEAT .env.local and invert
+			// the intended precedence (shell env > .env.local > remote).
+			// Best-effort: any failure warns once and serve continues.
+			node.Env = appendRemoteEnv(ctx, r.Studio(), ref, resolveActiveBranch(branchFlag), tmpDir, node.Env, os.Stdout, os.Stderr)
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr
 			// Best-effort: free the port if a stale dev-server is still holding
@@ -754,6 +764,48 @@ func devBranchValue(flag string) string {
 		return b
 	}
 	return "main"
+}
+
+// appendRemoteEnv fetches the branch's remote env vars (Studio env.pull, via
+// secret.Pull — the exact fetch `palbase secret pull` uses), writes them as a
+// {KEY: value} JSON object to <dir>/remote-env.json (0600, wiped with serve's
+// tmpDir on exit) and returns env with PALBASE_REMOTE_ENV_FILE appended.
+// dev-server.js loads that file AFTER .env.local with only-if-unset semantics,
+// keeping the precedence: real shell env > .env.local > remote.
+//
+// Never blocks serve: an unlinked project, an insufficient role (env.pull
+// needs project admin), or an offline Studio prints ONE warning line to errW
+// and returns env unchanged. branch "" means the default branch (main).
+func appendRemoteEnv(ctx context.Context, sc *studio.Client, ref, branch, dir string, env []string, out, errW io.Writer) []string {
+	warn := func(reason string) []string {
+		fmt.Fprintf(errW, "warning: could not fetch remote env vars (%s) — using local env only\n", reason)
+		return env
+	}
+	if ref == "" || ref == "local" {
+		return warn("project not linked")
+	}
+	vars, err := secret.Pull(ctx, sc, ref, branch)
+	if err != nil {
+		return warn(err.Error())
+	}
+	m := make(map[string]string, len(vars))
+	for _, v := range vars {
+		m[v.Key] = v.Value
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return warn(err.Error())
+	}
+	file := filepath.Join(dir, "remote-env.json")
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		return warn(err.Error())
+	}
+	displayBranch := branch
+	if displayBranch == "" {
+		displayBranch = "main"
+	}
+	fmt.Fprintf(out, "loaded %d remote env var(s) for branch %s\n", len(vars), displayBranch)
+	return append(env, "PALBASE_REMOTE_ENV_FILE="+file)
 }
 
 // servedBranch is the subset of a `project.listBranches` row the serve

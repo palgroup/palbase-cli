@@ -5,6 +5,7 @@
 package secret
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -188,10 +189,27 @@ func listCmd(studioFn func() *studio.Client) *cobra.Command {
 	return cmd
 }
 
-// pulledVar is one decrypted env var returned by Studio's env.pull.
-type pulledVar struct {
+// PulledVar is one decrypted env var returned by Studio's env.pull.
+type PulledVar struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+}
+
+// Pull fetches every env var for the branch (plain + decrypted secrets) via
+// Studio's env.pull — the single fetch used by both `palbase secret pull` and
+// `palbase serve`'s automatic remote-env load. branch "" targets the project's
+// default branch (env.* accepts a bare ref or an endpoint_ref; the optional
+// branch parameter selects a non-default branch).
+func Pull(ctx context.Context, sc *studio.Client, ref, branch string) ([]PulledVar, error) {
+	payload := map[string]any{"ref": ref}
+	if branch != "" {
+		payload["branch"] = branch
+	}
+	var vars []PulledVar
+	if err := sc.Query(ctx, "env.pull", payload, &vars); err != nil {
+		return nil, fmt.Errorf("env.pull: %w", err)
+	}
+	return vars, nil
 }
 
 func pullCmd(studioFn func() *studio.Client) *cobra.Command {
@@ -221,9 +239,9 @@ The file is gitignored by the scaffold — secrets never enter git.`,
 				outPath = ".env.local"
 			}
 
-			var remote []pulledVar
-			if err := studioFn().Query(cmd.Context(), "env.pull", map[string]any{"ref": ref}, &remote); err != nil {
-				return fmt.Errorf("env.pull: %w", err)
+			remote, err := Pull(cmd.Context(), studioFn(), ref, "")
+			if err != nil {
+				return err
 			}
 
 			// Merge into the existing file unless --force. Remote wins on shared

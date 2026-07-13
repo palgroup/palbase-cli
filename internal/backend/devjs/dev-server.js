@@ -102,6 +102,28 @@ function parseDotenv(text) {
   }
 })();
 
+// Remote env vars auto-fetched by `palbase serve` (Studio env.pull — the same
+// data `palbase secret pull` writes to .env.local, no pull needed). The Go side
+// passes them via a temp JSON FILE, not the spawn env, precisely so this loader
+// can run AFTER loadDotEnvLocal: an already-set key (real shell env or a
+// .env.local/.env line) WINS; remote only fills the gaps. Precedence:
+// shell env > .env.local > .env > remote.
+(function loadRemoteEnvFile() {
+  const file = process.env.PALBASE_REMOTE_ENV_FILE;
+  if (!file) return;
+  let vars;
+  try {
+    vars = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return; // absent/corrupt — the Go side already warned; local env stands
+  }
+  if (!vars || typeof vars !== 'object') return;
+  for (const [key, val] of Object.entries(vars)) {
+    if (typeof val !== 'string') continue;
+    if (!Object.prototype.hasOwnProperty.call(process.env, key)) process.env[key] = val;
+  }
+})();
+
 const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 // PALBASE_CHECK=1 => one-shot pre-deploy validation (`palbase build`): stage +
