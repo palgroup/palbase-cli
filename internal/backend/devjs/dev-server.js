@@ -106,7 +106,9 @@ const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 // PALBASE_CHECK=1 => one-shot pre-deploy validation (`palbase build`): stage +
 // bundle + run the deploy's extract_meta.js over every controller, then exit
-// 0=PASS / 1=would-fail. No watch, no resources, no listen. Empty otherwise.
+// 0=PASS / 1=would-fail. No watch, no resource BOOT, no listen (resources are
+// still BUNDLED so a controller's external `../resources/*` require resolves
+// when the bundle is loaded). Empty otherwise.
 const CHECK_MODE = process.env.PALBASE_CHECK === '1';
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
 const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
@@ -152,6 +154,21 @@ fs.writeFileSync(path.join(BUNDLE_ROOT, 'package.json'), '{"type":"commonjs"}\n'
 // source (the TS-idiomatic ESM form) still resolves.
 const ESBUILD_EXTERNAL = '@palbase/backend';
 const ESBUILD_RESOLVE_EXTENSIONS = '.ts,.tsx,.js,.jsx,.json';
+
+// Extra externals for the CONTROLLERS bundle ONLY — the project's OWN
+// resources/* relative imports stay external, mirroring the deploy bundler's
+// ExternalResourceImports (modules/backend internal/deploy/bundler.go +
+// bundler_config.go). A bundled controller then emits
+// require("../resources/x") which resolves at runtime to the SHARED
+// BUNDLE_ROOT/resources/x.js — the ONE module instance bootResources registers
+// + init(env)s — instead of inlining a second, never-booted Resource twin
+// (serve said "booted 1 resource(s)" while the controller read its own empty
+// copy). esbuild matches a `*`-external against the import specifier AS
+// WRITTEN and permits exactly ONE `*`, so one glob per relative depth a
+// controller can sit at (same fixed 3-deep set as the pod). resources/ and
+// workers/ bundles do NOT get these (a resource is never externalised against
+// its own tree — pod parity).
+const CONTROLLER_RESOURCE_EXTERNALS = ['../resources/*', '../../resources/*', '../../../resources/*'];
 
 // Return-type → response-schema binder (shared VERBATIM with the deploy
 // extractor: modules/backend/internal/runtime/return_types.js). Reads each
@@ -211,10 +228,13 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
 // bundleSrcDir esbuild-bundles every entry file under srcDir into outDir,
 // preserving the relative tree (--outbase=srcDir). One esbuild invocation for
 // the whole dir, exactly like the deploy bundler's per-entry-dir Bundle().
-// Returns true when at least one entry file was bundled; false when srcDir is
-// absent or empty (a clean no-op). Throws on an esbuild error so a syntax error
-// surfaces loudly rather than silently registering 0 routes.
-function bundleSrcDir(srcDir, outDir) {
+// `externals` appends extra --external globs on top of the always-external
+// @palbase/backend (the controllers call passes CONTROLLER_RESOURCE_EXTERNALS;
+// resources/ and workers/ pass nothing). Returns true when at least one entry
+// file was bundled; false when srcDir is absent or empty (a clean no-op).
+// Throws on an esbuild error so a syntax error surfaces loudly rather than
+// silently registering 0 routes.
+function bundleSrcDir(srcDir, outDir, externals = []) {
   if (!fs.existsSync(srcDir)) return false;
   const entries = walk(srcDir).filter((f) => /\.(c?js|mjs|tsx?|jsx)$/i.test(path.basename(f)));
   if (entries.length === 0) return false;
@@ -239,6 +259,7 @@ function bundleSrcDir(srcDir, outDir) {
     `--outbase=${srcDir}`,
     `--resolve-extensions=${ESBUILD_RESOLVE_EXTENSIONS}`,
     `--external:${ESBUILD_EXTERNAL}`,
+    ...externals.map((e) => `--external:${e}`),
     ...entries,
   ];
   // Run from PROJECT_ROOT so node_modules resolution (for any non-external dep
@@ -448,7 +469,11 @@ function registerControllers() {
     // bundle THAT. A return-type violation (missing annotation, inline/union
     // type, unimported schema) throws here and is surfaced loudly below.
     const staged = stageControllersWithReturnBindings(CONTROLLERS_DIR, STAGED_CONTROLLERS_DIR);
-    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR);
+    // Controllers keep their `../resources/*` imports EXTERNAL so they share
+    // the booted resource singletons in BUNDLE_ROOT/resources/ (bundled by
+    // bundleResources BEFORE this runs — main() ordering). Deploy parity:
+    // bundler.go sets ExternalResourceImports only for the controllers bundle.
+    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR, CONTROLLER_RESOURCE_EXTERNALS);
   } catch (err) {
     // A bundle error (syntax error, unresolved import) OR a return-type
     // violation must be LOUD — otherwise the dir scan below finds nothing and
@@ -2229,25 +2254,40 @@ function missingDeclaredSecrets(resource, envMap) {
 
 let resourcesBooted = false;
 
+// bundleResources esbuild-bundles resources/*.ts the same way controllers/ are
+// bundled (CJS, @palbase/backend external, extensionless-import resolution) so
+// a resource that imports `../services/foo` loads under serve exactly as on
+// deploy. MUST run BEFORE controllers are bundled + require()d (serve AND
+// check mode): the controllers bundle keeps `../resources/*` imports EXTERNAL
+// (CONTROLLER_RESOURCE_EXTERNALS), so a bundled controller's
+// require("../resources/x") resolves to BUNDLE_ROOT/resources/x.js — the ONE
+// shared module instance bootResources registers + init(env)s. Same order as
+// the deploy extractor (resources bundled before controllers). Fail-open on an
+// esbuild error: serve continues, and a controller that imports a resource
+// then fails LOUDLY at require (an explicit load error beats the old silent
+// never-booted inlined twin).
+function bundleResources() {
+  if (!fs.existsSync(RESOURCES_DIR)) return false;
+  rmBundledTree(BUNDLED_RESOURCES_DIR);
+  try {
+    return bundleSrcDir(RESOURCES_DIR, BUNDLED_RESOURCES_DIR);
+  } catch (err) {
+    log(`⚠ esbuild failed for resources/ — ${esbuildErr(err)} — continuing without resources ` +
+      '(controllers importing them will fail to load)');
+    return false;
+  }
+}
+
 async function bootResources() {
-  if (!fs.existsSync(RESOURCES_DIR)) return 0;
+  // Absent when the project has no resources/ or bundleResources failed/was
+  // empty (already warned there) — nothing to register.
+  if (!fs.existsSync(BUNDLED_RESOURCES_DIR)) return 0;
   const runtime = require('@palbase/backend');
   if (typeof runtime.__registerResource !== 'function' ||
       typeof runtime.__runResourceBoot !== 'function' ||
       typeof runtime.Resource !== 'function') {
     log('hint: installed @palbase/backend has no Resource API — resources/ skipped. ' +
       'Upgrade @palbase/backend for local resource support.');
-    return 0;
-  }
-
-  // esbuild-bundle resources/*.ts the same way controllers/ are bundled (CJS,
-  // @palbase/backend external, extensionless-import resolution) so a resource
-  // that imports `../services/foo` loads under serve exactly as on deploy.
-  rmBundledTree(BUNDLED_RESOURCES_DIR);
-  try {
-    if (!bundleSrcDir(RESOURCES_DIR, BUNDLED_RESOURCES_DIR)) return 0;
-  } catch (err) {
-    log(`⚠ esbuild failed for resources/ — ${esbuildErr(err)} — serving without resources`);
     return 0;
   }
 
@@ -2312,6 +2352,10 @@ async function shutdownResources() {
 // ── boot ────────────────────────────────────────────────────────────────
 
 async function main() {
+  // Resources bundle FIRST: registerControllers require()s the bundled
+  // controllers (and check mode runs extract_meta over them), and their
+  // external `../resources/*` requires must resolve to BUNDLE_ROOT/resources/.
+  bundleResources();
   const reg = registerControllers();
 
   // PALBASE_CHECK: one-shot pre-deploy validation (`palbase build`). Any
@@ -2421,4 +2465,8 @@ module.exports = {
   makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv,
   // Per-request identity isolation (exported for the concurrency test).
   runInRequestContext, currentRequestUserId, currentRequestUserToken,
+  // Bundle flow (exported for the resource-externals cross-boundary test):
+  // the REAL stage+bundle path must keep controller `../resources/*` imports
+  // external — never a re-implementation of it in the test.
+  registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
 };

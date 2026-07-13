@@ -11,13 +11,110 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+// Fixture project for the bundle-flow test below. PROJECT_ROOT is bound when
+// dev-server.js is require()d, so PALBASE_DEV_ROOT must point at the fixture
+// BEFORE the require. The other suites in this file never touch PROJECT_ROOT.
+const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-devsrv-test-'));
+process.env.PALBASE_DEV_ROOT = FIXTURE_ROOT;
+
+// RESOURCE_INLINE_CANARY marks the resource IMPLEMENTATION: it must appear in
+// the shared resources bundle and must NOT appear in the controller bundle —
+// if it does, the controller inlined its own never-booted Resource twin (the
+// exact serve bug the deploy bundler's ExternalResourceImports prevents).
+fs.mkdirSync(path.join(FIXTURE_ROOT, 'resources'), { recursive: true });
+fs.mkdirSync(path.join(FIXTURE_ROOT, 'controllers'), { recursive: true });
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'tsconfig.json'),
+  '{"compilerOptions":{"experimentalDecorators":true}}\n');
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'resources', 'env.ts'), [
+  'import { Resource } from "@palbase/backend";',
+  '',
+  'export class EnvDiag extends Resource {',
+  '  value = "";',
+  '  async init(env: Record<string, string>): Promise<void> {',
+  '    this.value = "RESOURCE_INLINE_CANARY";',
+  '  }',
+  '}',
+  '',
+  'export const envDiag = new EnvDiag();',
+  '',
+].join('\n'));
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.ts'), [
+  'import { Controller, Get } from "@palbase/backend";',
+  'import { envDiag } from "../resources/env";',
+  '',
+  '@Controller("/diag")',
+  'export default class DiagController {',
+  '  @Get("/")',
+  '  async read(): Promise<void> {',
+  '    void envDiag.value;',
+  '  }',
+  '}',
+  '',
+].join('\n'));
 
 // require()ing dev-server.js is side-effect-light because main() is guarded by
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
 const {
   makeLocalCache, makeLocalQueue, workerRegistry, parseDotenv,
   runInRequestContext, currentRequestUserId, currentRequestUserToken,
+  registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
 } = require('./dev-server.js');
+
+test.after(() => {
+  // The fixture + the dev-server's bundle temp tree (main()'s exit cleanup is
+  // not installed when required as a module).
+  fs.rmSync(FIXTURE_ROOT, { recursive: true, force: true });
+  fs.rmSync(path.dirname(BUNDLED_CONTROLLERS_DIR), { recursive: true, force: true });
+});
+
+// esbuildAvailable probes `npx esbuild` the same way bundleSrcDir invokes it.
+// Absent/offline npx (no cached esbuild) → the bundle-flow test skips, matching
+// the Go check-mode tests' skip-when-offline behavior.
+function esbuildAvailable() {
+  try {
+    execFileSync('npx', ['--yes', 'esbuild', '--version'], { stdio: 'ignore', cwd: FIXTURE_ROOT });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Cross-boundary lock: the CONTROLLERS bundle must keep the project's OWN
+// `../resources/*` imports EXTERNAL (deploy bundler ExternalResourceImports
+// parity) so a controller shares the ONE booted resource singleton in
+// BUNDLE_ROOT/resources/ instead of inlining a never-booted copy. This drives
+// the REAL production flow (bundleResources → registerControllers, main()'s
+// order) — not a reimplementation — so dropping CONTROLLER_RESOURCE_EXTERNALS
+// at the registerControllers call site, emptying the constant, or removing the
+// externals emission in bundleSrcDir all turn this RED (mutation-verified).
+test('controllers bundle keeps ../resources/* external (shared booted singleton)', (t) => {
+  if (!esbuildAvailable()) return t.skip('npx esbuild unavailable (offline?)');
+
+  // Resources bundle FIRST — main()'s order (and the deploy extractor's).
+  assert.strictEqual(bundleResources(), true, 'fixture resources/ must bundle');
+  const resourceBundle = path.join(BUNDLED_RESOURCES_DIR, 'env.js');
+  assert.ok(fs.existsSync(resourceBundle),
+    'BUNDLE_ROOT/resources/env.js must exist (the controller require()s it at runtime)');
+  assert.match(fs.readFileSync(resourceBundle, 'utf8'), /RESOURCE_INLINE_CANARY/,
+    'the resource implementation must live in the shared resources bundle');
+
+  // The REAL controllers flow: stage + bundle with the production externals.
+  // (The controller is later skipped at require — no @palbase/backend in the
+  // fixture — but the bundled .js this test inspects is already emitted.)
+  registerControllers();
+  const controllerBundle = path.join(BUNDLED_CONTROLLERS_DIR, 'diag.controller.js');
+  assert.ok(fs.existsSync(controllerBundle), 'bundled controller must exist');
+  const bundled = fs.readFileSync(controllerBundle, 'utf8');
+  assert.match(bundled, /require\("\.\.\/resources\/env"\)/,
+    'controller bundle must require("../resources/env") — external, resolved to the shared instance');
+  assert.doesNotMatch(bundled, /RESOURCE_INLINE_CANARY/,
+    'resource code must NOT be inlined into the controller bundle (a second never-booted instance)');
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
