@@ -26,16 +26,19 @@ process.env.PALBASE_DEV_ROOT = FIXTURE_ROOT;
 // the shared resources bundle and must NOT appear in the controller bundle —
 // if it does, the controller inlined its own never-booted Resource twin (the
 // exact serve bug the deploy bundler's ExternalResourceImports prevents).
+// Plain-JS fixture ON PURPOSE: a `.controller.ts` takes the staging
+// return-bindings path (return_types.js), which needs the `typescript` package
+// — absent in the CI unit env. A `.controller.js` is copied VERBATIM by
+// stageControllersWithReturnBindings, so the bundle flow under test (the
+// externals) runs identically with zero extra deps.
 fs.mkdirSync(path.join(FIXTURE_ROOT, 'resources'), { recursive: true });
 fs.mkdirSync(path.join(FIXTURE_ROOT, 'controllers'), { recursive: true });
-fs.writeFileSync(path.join(FIXTURE_ROOT, 'tsconfig.json'),
-  '{"compilerOptions":{"experimentalDecorators":true}}\n');
-fs.writeFileSync(path.join(FIXTURE_ROOT, 'resources', 'env.ts'), [
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'resources', 'env.js'), [
   'import { Resource } from "@palbase/backend";',
   '',
   'export class EnvDiag extends Resource {',
   '  value = "";',
-  '  async init(env: Record<string, string>): Promise<void> {',
+  '  async init(env) {',
   '    this.value = "RESOURCE_INLINE_CANARY";',
   '  }',
   '}',
@@ -43,15 +46,12 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'resources', 'env.ts'), [
   'export const envDiag = new EnvDiag();',
   '',
 ].join('\n'));
-fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.ts'), [
-  'import { Controller, Get } from "@palbase/backend";',
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.js'), [
   'import { envDiag } from "../resources/env";',
   '',
-  '@Controller("/diag")',
   'export default class DiagController {',
-  '  @Get("/")',
-  '  async read(): Promise<void> {',
-  '    void envDiag.value;',
+  '  async read() {',
+  '    return { value: envDiag.value };',
   '  }',
   '}',
   '',
