@@ -367,3 +367,87 @@ test('Queue: jobIds are unique across pushes', async () => {
   const b = await q.push('w', {});
   assert.notStrictEqual(a.jobId, b.jobId);
 });
+
+// ── TypeScript parser guard (return_types.js / throw_analysis.js loadTS) ──────
+//
+// The controller parser needs the TS 5 compiler API (createSourceFile /
+// ScriptTarget). npm's `latest` typescript is now 7.x — the Go-native compiler,
+// whose CommonJS entry exports ONLY { version, versionMajorMinor }. When the CLI's
+// own pinned parser can't be provisioned and the fallback (the project's
+// typescript) is a 7.x or missing, the user must be TOLD that — the old code read
+// `ts.ScriptTarget.ES2022` off it and died with "Cannot read properties of
+// undefined (reading 'ES2022')", which says nothing.
+//
+// Both suites fake the `typescript` resolution, so they run with no npm deps.
+
+const CtrlSrc = [
+  'import { Controller, Get } from "@palbase/backend";',
+  '@Controller("/t")',
+  'export default class T {',
+  '  @Get("/") list(): void {}',
+  '}',
+].join('\n');
+
+function withFakeTypescript(fake, fn) {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  Module._load = function (request, ...rest) {
+    if (request === 'typescript') return fake();
+    return origLoad.call(this, request, ...rest);
+  };
+  try {
+    fn();
+  } finally {
+    Module._load = origLoad;
+  }
+}
+
+test('parser guard: a TypeScript 7 surface produces an actionable error, not a TypeError', () => {
+  const returnTypes = require('./return_types.js');
+  withFakeTypescript(() => ({ version: '7.0.2', versionMajorMinor: '7.0' }), () => {
+    assert.throws(
+      () => returnTypes.readReturnTypes(CtrlSrc, 'todos.controller.ts'),
+      (err) => {
+        assert.doesNotMatch(err.message, /Cannot read properties of undefined/,
+          'the raw TypeError must never reach the user');
+        assert.match(err.message, /TypeScript 5 compiler API/);
+        assert.match(err.message, /v7\.0\.2/, 'name the version that was resolved');
+        assert.match(err.message, /npm install --save-dev typescript@5/, 'tell them what to do');
+        return true;
+      },
+    );
+  });
+});
+
+test('parser guard: a missing typescript produces the same actionable error', () => {
+  const returnTypes = require('./return_types.js');
+  const throwAnalysis = require('./throw_analysis.js');
+  withFakeTypescript(
+    () => {
+      const e = new Error("Cannot find module 'typescript'");
+      e.code = 'MODULE_NOT_FOUND';
+      throw e;
+    },
+    () => {
+      assert.throws(
+        () => returnTypes.readReturnTypes(CtrlSrc, 'todos.controller.ts'),
+        (err) => {
+          assert.match(err.message, /TypeScript 5 compiler API/);
+          assert.match(err.message, /npm install --save-dev typescript@5/);
+          return true;
+        },
+      );
+      // The throw analyzer is best-effort at the inject level (a parser problem
+      // must not fail the stage on its own — return_types already did, loudly),
+      // but its own loadTS carries the same actionable message.
+      assert.throws(
+        () => throwAnalysis.analyzeThrows(CtrlSrc, '/tmp/todos.controller.ts', {
+          readFile: () => null,
+          fileExists: () => false,
+          projectRoot: '/tmp',
+        }),
+        /TypeScript 5 compiler API/,
+      );
+    },
+  );
+});

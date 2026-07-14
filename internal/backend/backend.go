@@ -576,7 +576,10 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				fmt.Sprintf("PALBASE_ENVIRONMENT_ID=%s", devIdentity(sel.Environment.ID)),
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.PublishableKey),
-				fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
+				// The CLI's pinned TypeScript parser first, then the project's
+				// deps — the user's typescript may be 7.x (whose CJS build has no
+				// compiler API) or absent; ours is not their business.
+				fmt.Sprintf("NODE_PATH=%s", devNodePath(cwd, os.Stderr)),
 			)
 			// The owner's palauth session token — enables local asService() KEYLESSLY:
 			// dev-server.js forwards it to the Database edge, which verifies project
