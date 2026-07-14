@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,10 +49,15 @@ func doctorCmd() *cobra.Command {
 				ok("pat", "not set (fine for interactive use; CI needs a Dashboard-issued PAT)")
 			}
 
-			if cfg, err := auth.LoadProjectConfig(); err == nil && cfg.Ref != "" {
-				ok("link", fmt.Sprintf("%s (branch %s) via .palbase/config.json", cfg.Ref, cfg.DefaultEnv))
-			} else {
-				ok("link", "cwd not linked to a project (project commands need --ref or a linked dir)")
+			cfg, cfgErr := selection.Load(".")
+			var legacy *selection.ErrLegacyConfig
+			switch {
+			case cfgErr == nil:
+				ok("link", fmt.Sprintf("project %s / environment %s via .palbase/config.json", cfg.ProjectID, cfg.EnvironmentID))
+			case errors.As(cfgErr, &legacy):
+				ok("link", fmt.Sprintf("legacy v1 config (ref %q) — migrates to v2 on the next project command", legacy.Ref))
+			default:
+				ok("link", "cwd not linked to a project — run `palbase project use <projectId>` here (or pass --project)")
 			}
 
 			// pre-push deploy-validation hook (report-only). Meaningful only in a
