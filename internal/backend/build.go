@@ -118,7 +118,9 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	node.Env = append(os.Environ(),
 		"PALBASE_CHECK=1",
 		fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
-		fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
+		// The CLI's pinned TypeScript parser first, then the project's deps —
+		// the user's typescript may be 7.x (no compiler API) or absent.
+		fmt.Sprintf("NODE_PATH=%s", devNodePath(cwd, out)),
 	)
 	node.Stdout = out
 	node.Stderr = out

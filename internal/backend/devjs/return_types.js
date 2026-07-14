@@ -31,8 +31,36 @@
 let ts = null;
 function loadTS() {
   if (ts) return ts;
-  ts = require('typescript');
+  let mod;
+  try {
+    mod = require('typescript');
+  } catch (e) {
+    throw new Error(TS_PARSER_HELP('the `typescript` package could not be loaded (' + e.message + ')'));
+  }
+  // TypeScript 7 is the Go-native compiler: its CommonJS entry exports only
+  // { version, versionMajorMinor } — no createSourceFile, no ScriptTarget. Reading
+  // `ts.ScriptTarget.ES2022` off it threw "Cannot read properties of undefined",
+  // which told the user nothing. Check the surface we need and SAY what's wrong.
+  if (typeof mod.createSourceFile !== 'function' || !mod.ScriptTarget) {
+    throw new Error(TS_PARSER_HELP(
+      'the resolved `typescript` (v' + (mod.version || 'unknown') + ') has no compiler API — ' +
+        'TypeScript 7 ships the Go-native compiler, whose CommonJS build exposes version metadata only',
+    ));
+  }
+  ts = mod;
   return ts;
+}
+
+// One actionable message for both parser-load failures. The CLI/pod normally puts
+// its OWN pinned TypeScript 5 ahead of the project on NODE_PATH, so reaching this
+// means that provisioning was skipped (offline first run) and the fallback — the
+// project's typescript — is unusable.
+function TS_PARSER_HELP(reason) {
+  return (
+    'palbase needs the TypeScript 5 compiler API to read controller return types, but ' +
+    reason +
+    '.\n  fix: npm install --save-dev typescript@5   (or re-run once online: the CLI installs its own pinned parser)'
+  );
 }
 
 class ReturnTypeError extends Error {}

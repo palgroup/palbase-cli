@@ -47,8 +47,35 @@ const path = require('path');
 let ts = null;
 function loadTS() {
   if (ts) return ts;
-  ts = require('typescript');
+  let mod;
+  try {
+    mod = require('typescript');
+  } catch (e) {
+    throw new Error(TS_PARSER_HELP('the `typescript` package could not be loaded (' + e.message + ')'));
+  }
+  // TypeScript 7 (Go-native compiler) exports only { version, versionMajorMinor }
+  // from its CommonJS entry — no createSourceFile, no ScriptTarget. Say so instead
+  // of dying on "Cannot read properties of undefined". Twin of return_types.js.
+  if (typeof mod.createSourceFile !== 'function' || !mod.ScriptTarget) {
+    throw new Error(TS_PARSER_HELP(
+      'the resolved `typescript` (v' + (mod.version || 'unknown') + ') has no compiler API — ' +
+        'TypeScript 7 ships the Go-native compiler, whose CommonJS build exposes version metadata only',
+    ));
+  }
+  ts = mod;
   return ts;
+}
+
+// One actionable message for both parser-load failures (verbatim twin of the
+// return_types.js copy). The CLI/pod normally puts its OWN pinned TypeScript 5
+// ahead of the project on NODE_PATH; reaching this means that provisioning was
+// skipped (offline first run) and the project's typescript is unusable as a parser.
+function TS_PARSER_HELP(reason) {
+  return (
+    'palbase needs the TypeScript 5 compiler API to analyze controller throw sites, but ' +
+    reason +
+    '.\n  fix: npm install --save-dev typescript@5   (or re-run once online: the CLI installs its own pinned parser)'
+  );
 }
 
 class ThrowAnalysisError extends Error {}

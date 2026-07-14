@@ -3,6 +3,8 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -140,10 +142,10 @@ func TestRunBuild_NoControllersPasses(t *testing.T) {
 // extractor (no synthetic body). Skips when node/npm are unavailable or the
 // install fails (offline CI); the skew tests above always run.
 
-// npmInstallBackend installs @palbase/backend + the extractor's transitive dep
-// into dir/node_modules. Returns false (skip) when node/npm absent or install
-// fails.
-func npmInstallBackend(t *testing.T, dir string) bool {
+// npmInstallProject installs the fixture's deps into dir/node_modules. `deps` is
+// the exact spec list (so a test can pick the project's typescript — or omit it
+// entirely). Returns false (skip) when node/npm absent or the install fails.
+func npmInstallProject(t *testing.T, dir string, deps ...string) bool {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
 		return false
@@ -156,8 +158,8 @@ func npmInstallBackend(t *testing.T, dir string) bool {
 		[]byte(`{"name":"buildfix","version":"1.0.0"}`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
 		[]byte(`{"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true,"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","strict":false}}`), 0o644))
-	cmd := exec.Command(npm, "install", "--silent", "--no-audit", "--no-fund",
-		"@palbase/backend", "typescript@^5", "zod-to-json-schema")
+	args := append([]string{"install", "--silent", "--no-audit", "--no-fund"}, deps...)
+	cmd := exec.Command(npm, args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Logf("npm install failed (skipping cross-boundary extraction test): %v\n%s", err, out)
@@ -166,11 +168,32 @@ func npmInstallBackend(t *testing.T, dir string) bool {
 	return true
 }
 
+// npmInstallBackend installs @palbase/backend + the extractor's transitive dep
+// into dir/node_modules, with the typescript a well-behaved project has today.
+func npmInstallBackend(t *testing.T, dir string) bool {
+	t.Helper()
+	return npmInstallProject(t, dir, "@palbase/backend", "typescript@^5", "zod-to-json-schema")
+}
+
+// useTestParserCache points the CLI's tool cache (where ensureParserTS installs
+// the pinned TypeScript) at a shared temp prefix instead of the developer's
+// ~/.palbase — same code path, downloaded once per machine, reused across runs.
+func useTestParserCache(t *testing.T) {
+	t.Helper()
+	home := filepath.Join(os.TempDir(), "palbase-cli-testdeps", "parser-home")
+	prev := parserTSHome
+	parserTSHome = func() (string, error) { return home, nil }
+	t.Cleanup(func() { parserTSHome = prev })
+}
+
 // runCheckMode extracts the embedded devjs and runs PALBASE_CHECK=1 dev-server.js
 // against dir, returning (combined output, exitOK). Mirrors runBuild's node
-// invocation exactly.
+// invocation exactly — including devNodePath, so the shipped parser resolution
+// (CLI's pinned typescript first, project's node_modules second) is what the
+// tests exercise, not a test-local reimplementation of it.
 func runCheckMode(t *testing.T, dir string) (string, bool) {
 	t.Helper()
+	useTestParserCache(t)
 	tmp := t.TempDir()
 	require.NoError(t, extractFS(devServerFS, "devjs", tmp))
 	cmd := exec.Command("node", filepath.Join(tmp, "dev-server.js"))
@@ -178,7 +201,7 @@ func runCheckMode(t *testing.T, dir string) (string, bool) {
 	cmd.Env = append(os.Environ(),
 		"PALBASE_CHECK=1",
 		"PALBASE_DEV_ROOT="+dir,
-		"NODE_PATH="+filepath.Join(dir, "node_modules"),
+		"NODE_PATH="+devNodePath(dir, io.Discard),
 	)
 	out, err := cmd.CombinedOutput()
 	return string(out), err == nil
@@ -248,6 +271,66 @@ func TestCheckMode_CentauriClassIsCaught(t *testing.T) {
 	out, ok = runCheckMode(t, dir)
 	require.True(t, ok, "valid @QueryParams(zod) must pass check mode:\n%s", out)
 	require.Contains(t, out, "build OK")
+}
+
+// TestCheckMode_UserTypeScript7StillBuilds is the regression lock for the day
+// `npm view typescript version` became 7.x: a brand-new project that ran
+// `npm install typescript @palbase/backend` got the REAL TypeScript 7 package —
+// the Go-native compiler, whose CommonJS entry exports { version,
+// versionMajorMinor } and nothing else — and every `palbase push` died with
+// "Cannot read properties of undefined (reading 'ES2022')" because the harness
+// borrowed the project's typescript as its parser.
+//
+// Real byte surface, no stub: typescript@7 is installed from npm into the
+// fixture. The build must PASS — the CLI resolves its OWN pinned TypeScript 5
+// ahead of the project on NODE_PATH (devNodePath), and the user's 7.x stays
+// theirs (their `tsc` keeps working).
+//
+// Mutation (M5): make devNodePath return only the project's node_modules and
+// this goes RED with the parser error.
+func TestCheckMode_UserTypeScript7StillBuilds(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallProject(t, dir, "@palbase/backend", "typescript@7", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or install failed")
+	}
+	// Guard the guard: if npm ever stops serving a 7.x here, the test would
+	// silently degrade into "project had a usable TS all along" and prove nothing.
+	requireProjectTSMajor(t, dir, "7")
+
+	writeFixture(t, dir, goodControllerTS)
+	out, ok := runCheckMode(t, dir)
+	require.True(t, ok, "a project whose own typescript is 7.x must still build:\n%s", out)
+	require.Contains(t, out, "build OK")
+}
+
+// TestCheckMode_NoTypeScriptInProjectStillBuilds: the parser is the CLI's tool,
+// not a project dependency — a project that never installs typescript at all
+// (nothing forces them to) must still build.
+func TestCheckMode_NoTypeScriptInProjectStillBuilds(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallProject(t, dir, "@palbase/backend", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or install failed")
+	}
+	_, err := os.Stat(filepath.Join(dir, "node_modules", "typescript"))
+	require.True(t, os.IsNotExist(err), "fixture must have NO project typescript")
+
+	writeFixture(t, dir, goodControllerTS)
+	out, ok := runCheckMode(t, dir)
+	require.True(t, ok, "a project with no typescript at all must still build:\n%s", out)
+	require.Contains(t, out, "build OK")
+}
+
+// requireProjectTSMajor asserts the fixture's project-local typescript is the
+// major the test means to simulate (npm resolved it for real).
+func requireProjectTSMajor(t *testing.T, dir, major string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "node_modules", "typescript", "package.json"))
+	require.NoError(t, err, "fixture must have a project-local typescript")
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(data, &pkg))
+	require.Equalf(t, major, string(pkg.Version[0]), "fixture typescript must be %s.x, got %s", major, pkg.Version)
 }
 
 // TestCheckMode_BrokenReturnTypeFails locks the return-type gate through check
