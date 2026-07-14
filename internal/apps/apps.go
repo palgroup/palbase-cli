@@ -1,77 +1,77 @@
-// Package apps wires the `palbase apps ...` subcommand group:
-// list / create / delete / config. Apps are GROUP-scoped registrations; a
-// group may own any number per platform, and each app
-// receives a per-environment config artifact for the SDKs.
+// Package apps wires `palbase apps ...`: list / create / delete / config /
+// enforce / attest.
 //
-// Transport: Management-API REST (`/api/v1/groups/...`, `/api/v1/apps/...`),
-// the same DPoP-bound client the `apikey`/`project`/`groups` commands use.
-// Routes:
+// An app is registered on the PROJECT (the product boundary — `apps.project_id`
+// is singular) and BOUND to each Environment: one (app × Environment) binding
+// per active Environment, each with its own credentials and config artifact.
+// So registration is Project-scoped and configuration is Environment-scoped.
 //
-//	GET    /api/v1/groups/{groupRef}/apps                        list
-//	POST   /api/v1/groups/{groupRef}/apps  {platform,name}       create
-//	DELETE /api/v1/apps/{appId}                                  delete
-//	GET    /api/v1/apps/{appId}/config-artifact?env={ref}&branch={name}           config
+// Routes (Management API v2):
 //
-// Studio runs membership/role authorization inside the service (member+ for
-// list/config, admin+ for create/delete); a below-role or non-member
-// caller surfaces as a FORBIDDEN *transport.APIError here.
+//	GET    /api/v2/projects/{projectId}/apps                            list
+//	POST   /api/v2/projects/{projectId}/apps                            create
+//	DELETE /api/v2/apps/{appId}                                         delete
+//	GET    /api/v2/apps/{appId}/bindings                                bindings
+//	PATCH  /api/v2/apps/{appId}/bindings/{environmentRef}               attest
+//	GET    /api/v2/apps/{appId}/config-artifact?environmentRef={ref}    config
+//	PATCH  /api/v2/projects/{projectId}       {appsRequired}            enforce
+//
+// Studio authorizes server-side (member+ to read, Project admin+ to mutate); a
+// below-role caller surfaces as a FORBIDDEN *transport.APIError here.
 package apps
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"text/tabwriter"
 
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
 // REST is the Management-API transport subset the apps commands need.
-// *transport.Client satisfies it; tests substitute a stub.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
 }
 
-// Resolvers carries the lazily-built REST client, populated by the root
-// command's PersistentPreRunE before any subcommand fires (mirrors
-// apikey.Resolvers' pattern).
+// Resolvers carries the lazily-built REST client + the shared selection resolver.
 type Resolvers struct {
-	REST func() REST
+	REST      func() REST
+	Selection func() *selection.Resolver
 }
 
 // Cmd returns the `palbase apps` parent command.
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "apps",
-		Short: "Manage a group's apps and their per-environment config",
-		Long: `Register and configure the apps under a group.
+		Short: "Manage the project's apps and their per-environment config",
+		Long: `Register and configure the apps of the SELECTED project.
 
-  palbase apps list <groupRef>                          List a group's apps.
-  palbase apps create <groupRef> --platform ios --name "My App"
-                                                        Register a new app.
-  palbase apps delete <appId>                           Delete an app.
-  palbase apps config --app <appId> --env <ref>         Write a web app's
-                                                        per-env config file.
-  palbase apps enforce <groupRef>                       Require registered apps
-                                                        for the group.
-  palbase apps attest --app <appId> --env <ref>         Require App Attest on
-                                                        the binding.
+  palbase apps list                             List the project's apps.
+  palbase apps create --platform ios --name "My App"
+                                                Register a new app.
+  palbase apps delete <appId>                   Delete an app.
+  palbase apps config --app <appId>             Write a web app's config for the
+                                                selected environment.
+  palbase apps enforce                          Require registered apps.
+  palbase apps attest --app <appId>             Require App Attest on the
+                                                selected environment's binding.
 
-iOS and macOS config artifacts are fetched by their platform link commands and
-turned into Palbase-Info.plist by the PalbaseCodegen SPM plugin at build time.
-
-All operations go through the Management API (membership/role-gated server-side).`,
+iOS/macOS/Android config artifacts are fetched by their platform link commands.
+All operations go through the Management API (role-gated server-side).`,
 	}
 	cmd.AddCommand(
-		listCmd(r.REST),
-		createCmd(r.REST),
-		deleteCmd(r.REST),
-		configCmd(r.REST),
-		enforceCmd(r.REST),
-		attestCmd(r.REST),
+		listCmd(r),
+		createCmd(r),
+		deleteCmd(r),
+		configCmd(r),
+		enforceCmd(r),
+		attestCmd(r),
 	)
 	return cmd
 }
@@ -81,30 +81,34 @@ type appRow struct {
 	ID          string  `json:"id"`
 	Platform    string  `json:"platform"`
 	DisplayName string  `json:"display_name"`
+	Identifier  *string `json:"identifier"`
 	DeletedAt   *string `json:"deleted_at"`
 }
 
-func listCmd(rest func() REST) *cobra.Command {
+func listCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "list <groupRef>",
-		Args:  cobra.ExactArgs(1),
-		Short: "List a group's apps",
+		Use:   "list",
+		Args:  cobra.NoArgs,
+		Short: "List the project's apps",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			groupRef := args[0]
+			projectID, err := r.Selection().ProjectID(cmd.Context())
+			if err != nil {
+				return err
+			}
 			var rows []appRow
-			if err := rest().Do(cmd.Context(), http.MethodGet,
-				"/api/v1/groups/"+groupRef+"/apps", nil, &rows); err != nil {
+			if err := r.REST().Do(cmd.Context(), http.MethodGet,
+				"/api/v2/projects/"+projectID+"/apps", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
-				return encodeJSON(rows)
+				return encodeJSON(cmd.OutOrStdout(), rows)
 			}
 			if len(rows) == 0 {
-				fmt.Fprintln(os.Stdout, "No apps.")
+				fmt.Fprintln(cmd.OutOrStdout(), "No apps.")
 				return nil
 			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "ID\tPLATFORM\tNAME")
 			for _, a := range rows {
 				fmt.Fprintf(tw, "%s\t%s\t%s\n", a.ID, a.Platform, a.DisplayName)
@@ -116,67 +120,72 @@ func listCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
-func createCmd(rest func() REST) *cobra.Command {
+func createCmd(r Resolvers) *cobra.Command {
 	var (
-		platform string
-		name     string
-		jsonOut  bool
+		platform   string
+		name       string
+		identifier string
+		jsonOut    bool
 	)
 	cmd := &cobra.Command{
-		Use:   "create <groupRef>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Register a new app under a group",
+		Use:   "create",
+		Args:  cobra.NoArgs,
+		Short: "Register a new app under the project",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			groupRef := args[0]
-			if !isValidPlatform(platform) {
+			if !IsValidPlatform(platform) {
 				return fmt.Errorf("--platform must be one of: ios, macos, tvos, watchos, android, web")
 			}
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
-			body := map[string]any{
-				"platform": platform,
-				"name":     name,
+			projectID, err := r.Selection().ProjectID(cmd.Context())
+			if err != nil {
+				return err
+			}
+			body := map[string]any{"platform": platform, "displayName": name}
+			if identifier != "" {
+				body["identifier"] = identifier
 			}
 			var created appRow
-			if err := rest().Do(cmd.Context(), http.MethodPost,
-				"/api/v1/groups/"+groupRef+"/apps", body, &created); err != nil {
+			if err := r.REST().Do(cmd.Context(), http.MethodPost,
+				"/api/v2/projects/"+projectID+"/apps", body, &created); err != nil {
 				return err
 			}
 			if jsonOut {
-				return encodeJSON(created)
+				return encodeJSON(cmd.OutOrStdout(), created)
 			}
-			fmt.Fprintf(os.Stdout, "✓ created %s app %s\n", created.Platform, created.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ created %s app %s\n", created.Platform, created.ID)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&platform, "platform", "", "App platform: ios | macos | tvos | watchos | android | web (required)")
 	cmd.Flags().StringVar(&name, "name", "", "Display name (required)")
+	cmd.Flags().StringVar(&identifier, "identifier", "", "Bundle id / applicationId")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	_ = cmd.MarkFlagRequired("platform")
 	_ = cmd.MarkFlagRequired("name")
 	return cmd
 }
 
-func deleteCmd(rest func() REST) *cobra.Command {
+func deleteCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "delete <appId>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Delete an app (starts the server-side DeleteAppWorkflow)",
+		Short: "Delete an app (revokes its keys and bindings)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			appID := args[0]
 			var out struct {
-				OK bool `json:"ok"`
+				ProjectID string `json:"projectId"`
 			}
-			if err := rest().Do(cmd.Context(), http.MethodDelete,
-				"/api/v1/apps/"+appID, nil, &out); err != nil {
+			if err := r.REST().Do(cmd.Context(), http.MethodDelete,
+				"/api/v2/apps/"+appID, nil, &out); err != nil {
 				return err
 			}
 			if jsonOut {
-				return encodeJSON(map[string]any{"ok": out.OK, "appId": appID})
+				return encodeJSON(cmd.OutOrStdout(), map[string]any{"appId": appID, "projectId": out.ProjectID})
 			}
-			fmt.Fprintf(os.Stdout, "✓ deleted app %s\n", appID)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ deleted app %s\n", appID)
 			return nil
 		},
 	}
@@ -184,42 +193,44 @@ func deleteCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
-// enforceCmd wires `palbase apps enforce <groupRef>`: the umbrella-wide
-// App-Registration switch (project_groups.apps_required). Flipping it updates
-// already-minted app-bound key blobs. --disable turns it off. admin+ on the
-// group.
-func enforceCmd(rest func() REST) *cobra.Command {
+// enforceCmd wires `palbase apps enforce`: the PROJECT-wide App-Registration
+// switch (`projects.apps_required`). Flipping it updates already-minted
+// app-bound key blobs. --disable turns it off. Project admin+.
+func enforceCmd(r Resolvers) *cobra.Command {
 	var (
 		disable bool
 		jsonOut bool
 	)
 	cmd := &cobra.Command{
-		Use:   "enforce <groupRef>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Require registered apps for the group",
-		Long: "Toggle the group's App-Registration enforcement.\n" +
+		Use:   "enforce",
+		Args:  cobra.NoArgs,
+		Short: "Require registered apps for the project",
+		Long: "Toggle the project's App-Registration enforcement.\n" +
 			"ON (default): runtime requests must use an app-bound key.\n" +
-			"--disable turns it off. Flipping it fleet-backfills\n" +
-			"existing key blobs so the change applies to already-minted keys.\n" +
-			"Runs through the Management API (admin+ on the group, server-side).",
+			"--disable turns it off. Flipping it backfills existing key blobs so the\n" +
+			"change applies to already-minted keys. Project admin+, server-side.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			groupID := args[0]
 			on := !disable
-			var out struct {
-				OK bool `json:"ok"`
+			projectID, err := r.Selection().ProjectID(cmd.Context())
+			if err != nil {
+				return err
 			}
-			if err := rest().Do(cmd.Context(), http.MethodPatch,
-				"/api/v1/groups/"+groupID, map[string]any{"apps_required": on}, &out); err != nil {
+			var out struct {
+				ID           string `json:"id"`
+				AppsRequired bool   `json:"apps_required"`
+			}
+			if err := r.REST().Do(cmd.Context(), http.MethodPatch,
+				"/api/v2/projects/"+projectID, map[string]any{"appsRequired": on}, &out); err != nil {
 				return err
 			}
 			if jsonOut {
-				return encodeJSON(map[string]any{"ok": out.OK, "groupId": groupID, "apps_required": on})
+				return encodeJSON(cmd.OutOrStdout(), map[string]any{"projectId": projectID, "apps_required": out.AppsRequired})
 			}
 			state := "enabled"
 			if !on {
 				state = "disabled"
 			}
-			fmt.Fprintf(os.Stdout, "✓ app registration enforcement %s for group %s\n", state, groupID)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ app registration enforcement %s for project %s\n", state, projectID)
 			return nil
 		},
 	}
@@ -228,84 +239,86 @@ func enforceCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
-// attestCmd wires `palbase apps attest --app <appId> --env <ref>`: the
-// per-binding App-Attest switch (app_env_bindings.attest_enforce). When ON, the
-// user backend additionally requires a valid App Attest assertion. The binding
-// is environment-level and branch-invariant; non-backend routes stay exempt.
-// --disable turns it off. admin+ on the app's group.
-func attestCmd(rest func() REST) *cobra.Command {
+// attestCmd wires `palbase apps attest --app <appId>`: the per-binding
+// App-Attest switch. The binding is (app × ENVIRONMENT), so it targets the
+// SELECTED environment (or --environment). --disable turns it off.
+func attestCmd(r Resolvers) *cobra.Command {
 	var (
 		appID   string
-		env     string
 		disable bool
 		jsonOut bool
 	)
 	cmd := &cobra.Command{
 		Use:   "attest",
-		Short: "Require App Attest on an (app × env) binding (hardware attestation)",
-		Long: "Toggle the (app × env) binding's App-Attest enforcement.\n" +
+		Args:  cobra.NoArgs,
+		Short: "Require App Attest on the (app × environment) binding",
+		Long: "Toggle the (app × environment) binding's App-Attest enforcement.\n" +
 			"ON (default): user-backend calls must carry a valid App Attest assertion\n" +
-			"from a real, unmodified app on Apple hardware. The environment-level\n" +
-			"setting applies to all branches. Auth/enrollment, Storage uploads, and\n" +
-			"module routes remain exempt. --disable turns it off. --env is the env's\n" +
-			"BARE project ref.\n" +
-			"Runs through the Management API (admin+ on the app's group, server-side).",
+			"from a real, unmodified app on Apple hardware. Auth/enrollment, Storage\n" +
+			"uploads, and module routes remain exempt. --disable turns it off.\n" +
+			"It acts on the SELECTED environment (override with --environment).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			on := !disable
-			var out struct {
-				OK bool `json:"ok"`
+			sel, err := r.Selection().Resolve(cmd.Context())
+			if err != nil {
+				return err
 			}
-			if err := rest().Do(cmd.Context(), http.MethodPatch,
-				"/api/v1/apps/"+appID+"/bindings/"+env, map[string]any{"attest_enforce": on}, &out); err != nil {
+			var out struct {
+				ProjectID string `json:"projectId"`
+			}
+			if err := r.REST().Do(cmd.Context(), http.MethodPatch,
+				"/api/v2/apps/"+appID+"/bindings/"+sel.Ref(),
+				map[string]any{"attestEnforce": on}, &out); err != nil {
 				return err
 			}
 			if jsonOut {
-				return encodeJSON(map[string]any{"ok": out.OK, "appId": appID, "projectRef": env, "attest_enforce": on})
+				return encodeJSON(cmd.OutOrStdout(), map[string]any{
+					"appId": appID, "environmentRef": sel.Ref(), "attest_enforce": on,
+				})
 			}
 			state := "enabled"
 			if !on {
 				state = "disabled"
 			}
-			fmt.Fprintf(os.Stdout, "✓ App Attest %s for app %s on env %s\n", state, appID, env)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ App Attest %s for app %s on environment %s\n", state, appID, sel.Ref())
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
-	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
 	cmd.Flags().BoolVar(&disable, "disable", false, "turn App Attest OFF (default: turn it ON)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	_ = cmd.MarkFlagRequired("app")
-	_ = cmd.MarkFlagRequired("env")
 	return cmd
 }
 
-// ConfigArtifact mirrors the per-(app × env) config returned by the
-// Management API. Exported so the platform link commands can write SDK input.
+// ConfigArtifact mirrors the per-(app × Environment) config the Management API
+// returns. Exported so the platform link commands can write SDK input.
+//
+// It is keyed by `environment_ref` — there is no project_ref, no endpoint_ref
+// and no branch: the Environment IS the deployment target.
 type ConfigArtifact struct {
-	AppID         string               `json:"app_id"`
-	ProjectRef    string               `json:"project_ref"`
-	EndpointRef   string               `json:"endpoint_ref"`
-	APIKey        string               `json:"api_key"`
-	BaseURL       string               `json:"base_url"`
-	EnvPreset     string               `json:"env_preset"`
-	Platform      string               `json:"platform"`
-	Integrity     *IntegrityConfig     `json:"integrity,omitempty"`
-	Notifications *NotificationsConfig `json:"notifications,omitempty"`
-	// OAuth carries the provider-availability map fetched from palauth's
-	// public `/auth/oauth/providers` endpoint. Nil means the environment has no
-	// enabled providers. The Management API artifact does not return this field;
-	// the CLI fetches and merges it.
+	AppID          string               `json:"app_id"`
+	EnvironmentRef string               `json:"environment_ref"`
+	APIKey         string               `json:"api_key"`
+	BaseURL        string               `json:"base_url"`
+	Kind           string               `json:"kind"`
+	Platform       string               `json:"platform"`
+	Integrity      *IntegrityConfig     `json:"integrity,omitempty"`
+	Notifications  *NotificationsConfig `json:"notifications,omitempty"`
+	// OAuth carries the provider-availability map fetched from palauth's public
+	// `/auth/oauth/providers` endpoint. Nil means no enabled providers. The
+	// Management API artifact does not return this field; the CLI merges it.
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
 }
 
-// IntegrityConfig carries the Palbase-managed Google Cloud project number
-// used by Android Play Integrity. It contains no credential.
+// IntegrityConfig carries the Palbase-managed Google Cloud project number used
+// by Android Play Integrity. It contains no credential.
 type IntegrityConfig struct {
 	CloudProjectNumber int64 `json:"cloud_project_number"`
 }
 
-// NotificationsConfig contains the public Android client options provisioned
-// by Palbase. Customers do not create, connect, or upload a Firebase project.
+// NotificationsConfig contains the public Android client options provisioned by
+// Palbase. Customers do not create, connect, or upload a Firebase project.
 type NotificationsConfig struct {
 	FCM FCMConfig `json:"fcm"`
 }
@@ -319,7 +332,7 @@ type FCMConfig struct {
 }
 
 // OAuthConfig is the secret-free provider-availability map embedded in the
-// per-environment config artifact. The public provider endpoint returns no
+// per-Environment config artifact. The public provider endpoint returns no
 // secrets.
 type OAuthConfig struct {
 	Apple  *OAuthApple  `json:"apple,omitempty"`
@@ -336,64 +349,68 @@ type OAuthGoogle struct {
 	RedirectURI string `json:"redirect_uri"`
 }
 
-func configCmd(rest func() REST) *cobra.Command {
+// ConfigArtifactPath is the v2 route for one (app × Environment) artifact. The
+// Environment is a QUERY parameter (`environmentRef`), not a path segment: the
+// artifact hangs off the app, and the Environment selects which binding.
+func ConfigArtifactPath(appID, environmentRef string) string {
+	return "/api/v2/apps/" + appID + "/config-artifact?environmentRef=" + url.QueryEscape(environmentRef)
+}
+
+func configCmd(r Resolvers) *cobra.Command {
 	var (
 		appID   string
-		env     string
 		outPath string
 	)
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Write the per-(app × env) web config file the SDK reads",
-		Long: "Fetch the config artifact for a web app in a given env and write\n" +
-			"palbase-config.json ({app_id, env_preset, base_url, api_key}).\n" +
-			"--env is the env's BARE project ref; the server resolves the\n" +
-			"endpoint_ref from it (the env's main branch). Native configs are\n" +
-			"written by `palbase ios link` and `palbase macos link`.",
+		Args:  cobra.NoArgs,
+		Short: "Write the web app's config file for the selected environment",
+		Long: "Fetch the config artifact for a web app in the SELECTED environment and\n" +
+			"write palbase-config.json ({app_id, kind, base_url, api_key}).\n" +
+			"Override the environment with the global --environment flag.\n" +
+			"Native configs are written by `palbase ios|macos|android link`.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// --env is the env's BARE project ref, passed as the `env` query
-			// param. The server resolves the endpoint_ref from it (the env's main
-			// branch); there is no branch-composed ref.
+			sel, err := r.Selection().Resolve(cmd.Context())
+			if err != nil {
+				return err
+			}
 			var art ConfigArtifact
-			if err := rest().Do(cmd.Context(), http.MethodGet,
-				"/api/v1/apps/"+appID+"/config-artifact?env="+url.QueryEscape(env), nil, &art); err != nil {
+			if err := r.REST().Do(cmd.Context(), http.MethodGet,
+				ConfigArtifactPath(appID, sel.Ref()), nil, &art); err != nil {
 				return err
 			}
 			if art.Platform != "web" {
-				return fmt.Errorf("apps config writes web config only; app %s is %s — use the native codegen flow", appID, art.Platform)
+				return fmt.Errorf("apps config writes web config only; app %s is %s — use the native link flow", appID, art.Platform)
 			}
 			out := outPath
 			if out == "" {
 				out = "palbase-config.json"
 			}
-			if err := emitConfig(art, out); err != nil {
+			if err := WriteWebConfig(art, out); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "✓ wrote web config to %s\n", out)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ wrote web config to %s (environment %s)\n", out, sel.Ref())
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
-	cmd.Flags().StringVar(&env, "env", "", "Env project ref (required)")
 	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: palbase-config.json)")
 	_ = cmd.MarkFlagRequired("app")
-	_ = cmd.MarkFlagRequired("env")
 	return cmd
 }
 
-// emitConfig writes the per-env web config file (palbase-config.json) the SDK
-// reads — exactly {app_id, env_preset, base_url, api_key}.
-func emitConfig(art ConfigArtifact, path string) error {
-	return writeWebConfig(art, path)
-}
-
-// writeWebConfig marshals the canonical client config fields to JSON.
-func writeWebConfig(art ConfigArtifact, path string) error {
+// WriteWebConfig writes the per-Environment web config file the SDK reads.
+//
+// It carries `environment_ref` and NO `branch`: the URL and the API key already
+// identify the Environment, so a branch field would be a second, drift-prone
+// name for the same thing.
+func WriteWebConfig(art ConfigArtifact, path string) error {
 	raw, err := json.MarshalIndent(map[string]string{
-		"app_id":     art.AppID,
-		"env_preset": art.EnvPreset,
-		"base_url":   art.BaseURL,
-		"api_key":    art.APIKey,
+		"app_id":          art.AppID,
+		"environment_ref": art.EnvironmentRef,
+		"kind":            art.Kind,
+		"base_url":        art.BaseURL,
+		"api_key":         art.APIKey,
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode web config: %w", err)
@@ -404,7 +421,8 @@ func writeWebConfig(art ConfigArtifact, path string) error {
 	return nil
 }
 
-func isValidPlatform(p string) bool {
+// IsValidPlatform reports whether p is a registrable app platform.
+func IsValidPlatform(p string) bool {
 	switch p {
 	case "ios", "macos", "tvos", "watchos", "android", "web":
 		return true
@@ -413,8 +431,8 @@ func isValidPlatform(p string) bool {
 	}
 }
 
-func encodeJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+func encodeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }

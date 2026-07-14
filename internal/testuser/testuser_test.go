@@ -10,6 +10,8 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
 // trpcOK writes a tRPC success envelope ({result:{data:{json:...}}}).
@@ -44,6 +46,7 @@ func innerInput(t *testing.T, r *http.Request) map[string]any {
 // TestTestUserCreate_HasFlags asserts the `test-user create` command exists
 // under `test-user` with --scenario / --count / --json flags.
 func TestTestUserCreate_HasFlags(t *testing.T) {
+	t.Chdir(t.TempDir())
 	parent := Cmd(Resolvers{Studio: func() Studio { return nil }})
 	require.Equal(t, "test-user", parent.Name())
 
@@ -62,6 +65,7 @@ func TestTestUserCreate_HasFlags(t *testing.T) {
 // TestTestUserCreate_PlainJSON proves the no-scenario path calls
 // testData.testUserCreate and that --json emits the creds+token.
 func TestTestUserCreate_PlainJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
 	var body map[string]any
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
@@ -73,8 +77,8 @@ func TestTestUserCreate_PlainJSON(t *testing.T) {
 			},
 		})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--json"})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"create", "--json"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	require.NoError(t, cmd.Execute())
@@ -82,8 +86,11 @@ func TestTestUserCreate_PlainJSON(t *testing.T) {
 	// The plain path sends count (default 1) + withTokens.
 	require.EqualValues(t, 1, body["count"])
 	require.Equal(t, true, body["withTokens"])
-	// Without --branch, no branch key is sent (server defaults to main).
-	require.NotContains(t, body, "branch", "no --branch → payload must omit branch (server defaults to main)")
+	// The mint targets the SELECTED ENVIRONMENT by ref, and carries no branch:
+	// each environment verifies tokens against its OWN auth, so the environment
+	// IS the isolation boundary a minted token is scoped to.
+	require.Equal(t, "app1prod", body["ref"])
+	require.NotContains(t, body, "branch", "the Palbase branch is gone — the environment is the target")
 
 	// --json emits the creds+token verbatim (scriptable).
 	var got struct {
@@ -102,29 +109,9 @@ func TestTestUserCreate_PlainJSON(t *testing.T) {
 	require.Equal(t, "tok1", got.Users[0].AccessToken)
 }
 
-// TestTestUserCreate_BranchFlag proves --branch is forwarded so the users are
-// minted against THAT branch's palauth (a token minted on dev only authenticates
-// on dev — branch-isolated auth). Mutation check: drop the `if branch != ""`
-// forward and this assertion goes RED.
-func TestTestUserCreate_BranchFlag(t *testing.T) {
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/testData.testUserCreate", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{"users": []map[string]any{
-			{"id": "usr_1", "email": "t1@x.dev", "password": "pw1", "accessToken": "tok1"},
-		}})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--branch", "dev", "--json"})
-	cmd.SetOut(&bytes.Buffer{})
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "dev", body["branch"], "--branch dev must ride in the mint payload")
-}
-
 // TestTestUserCreate_PlainCountFlag proves --count is forwarded to the mint.
 func TestTestUserCreate_PlainCountFlag(t *testing.T) {
+	t.Chdir(t.TempDir())
 	var body map[string]any
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/trpc/testData.testUserCreate", r.URL.Path)
@@ -135,8 +122,8 @@ func TestTestUserCreate_PlainCountFlag(t *testing.T) {
 			{"id": "usr_3", "email": "c@x.dev", "password": "pw", "accessToken": ""},
 		}})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--count", "3"})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"create", "--count", "3"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	require.NoError(t, cmd.Execute())
@@ -146,13 +133,14 @@ func TestTestUserCreate_PlainCountFlag(t *testing.T) {
 // TestTestUserCreate_CountAndScenarioMutuallyExclusive asserts that combining
 // --count with --scenario is rejected before any network call is made.
 func TestTestUserCreate_CountAndScenarioMutuallyExclusive(t *testing.T) {
+	t.Chdir(t.TempDir())
 	called := false
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		trpcOK(w, map[string]any{})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--scenario", "demo", "--count", "2"})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"create", "--scenario", "demo", "--count", "2"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	err := cmd.Execute()
@@ -165,6 +153,7 @@ func TestTestUserCreate_CountAndScenarioMutuallyExclusive(t *testing.T) {
 // testData.runScenario with the scenario name and emits the minted user's
 // creds+token (with inserted summary) as JSON.
 func TestTestUserCreate_ScenarioJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
 	var body map[string]any
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
@@ -177,15 +166,15 @@ func TestTestUserCreate_ScenarioJSON(t *testing.T) {
 			"inserted": map[string]any{"todos": 2, "comments": 4},
 		})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--scenario", "demo", "--json"})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"create", "--scenario", "demo", "--json"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	require.NoError(t, cmd.Execute())
 
 	// The scenario path sends the scenario name + ref.
 	require.Equal(t, "demo", body["name"])
-	require.Equal(t, "abcd1234", body["ref"])
+	require.Equal(t, "app1prod", body["ref"])
 
 	// --json emits the minted user's creds+token + the inserted summary.
 	var got struct {

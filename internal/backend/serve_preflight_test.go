@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
 // backendDepMissing decides whether `palbase serve` must run `npm install`
@@ -75,90 +77,75 @@ func TestDevServerToolMissing(t *testing.T) {
 	}
 }
 
-// branchPreflightError is the pure status→guidance mapping that decides whether
-// `palbase serve` can back local dev with a branch's deployed stack.
-func TestBranchPreflightError(t *testing.T) {
+// preflightServeEnvironment is the pure status→guidance mapping that decides
+// whether `palbase serve` can back local dev with the selected environment's
+// deployed stack. It names ENVIRONMENTS — a status that used to suggest
+// `palbase branch wake` now suggests `palbase env wake`, because the branch
+// command no longer exists and the old copy would be a dead end.
+func TestPreflightServeEnvironment(t *testing.T) {
 	tests := []struct {
 		name      string
-		branch    string
-		found     *servedBranch
+		env       selection.Environment
 		wantErr   bool
-		wantPhras string // substring the message must contain (when wantErr)
+		wantPhras string
 	}{
 		{
-			name:      "missing branch → push first",
-			branch:    "qa",
-			found:     nil,
-			wantErr:   true,
-			wantPhras: "git push origin qa",
+			name: "active → ok",
+			env:  selection.Environment{Slug: "production", Status: "active"},
 		},
 		{
-			name:      "missing branch suggests create",
-			branch:    "qa",
-			found:     nil,
-			wantErr:   true,
-			wantPhras: "palbase branch create qa",
-		},
-		{
-			name:    "active → ok",
-			branch:  "main",
-			found:   &servedBranch{Name: "main", Status: "active"},
-			wantErr: false,
-		},
-		{
-			name:    "empty status → ok (tolerant)",
-			branch:  "main",
-			found:   &servedBranch{Name: "main", Status: ""},
-			wantErr: false,
+			name: "empty status → ok (tolerant)",
+			env:  selection.Environment{Slug: "production", Status: ""},
 		},
 		{
 			name:      "creating → wait",
-			branch:    "qa",
-			found:     &servedBranch{Name: "qa", Status: "creating"},
+			env:       selection.Environment{Slug: "staging", Status: "creating"},
 			wantErr:   true,
 			wantPhras: "still provisioning",
 		},
 		{
-			name:      "hibernated → wake",
-			branch:    "qa",
-			found:     &servedBranch{Name: "qa", Status: "hibernated"},
+			name:      "archived → wake",
+			env:       selection.Environment{Slug: "staging", Status: "archived"},
 			wantErr:   true,
-			wantPhras: "palbase branch wake qa",
+			wantPhras: "palbase env wake staging",
 		},
 		{
-			name:      "paused → wake",
-			branch:    "qa",
-			found:     &servedBranch{Name: "qa", Status: "paused"},
+			name:      "asleep → wake",
+			env:       selection.Environment{Slug: "staging", Status: "asleep"},
 			wantErr:   true,
-			wantPhras: "wake",
+			wantPhras: "palbase env wake staging",
 		},
 		{
-			name:      "deleted → recreate",
-			branch:    "qa",
-			found:     &servedBranch{Name: "qa", Status: "deleted"},
+			name:      "deleted → recreate from a SOURCE ENVIRONMENT",
+			env:       selection.Environment{Slug: "staging", Status: "deleted"},
 			wantErr:   true,
-			wantPhras: "palbase branch create qa",
+			wantPhras: "palbase env create staging --from production",
 		},
 		{
-			name:    "unknown status → serve anyway (no error)",
-			branch:  "qa",
-			found:   &servedBranch{Name: "qa", Status: "weird"},
-			wantErr: false,
+			name: "unknown status → serve anyway (visible, not blocking)",
+			env:  selection.Environment{Slug: "staging", Status: "weird"},
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := branchPreflightError(tt.branch, tt.found)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected an error, got nil")
+			err := preflightServeEnvironment(tt.env)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("preflightServeEnvironment(%+v) = %v, want nil", tt.env, err)
 				}
-				if tt.wantPhras != "" && !strings.Contains(err.Error(), tt.wantPhras) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tt.wantPhras)
+				return
+			}
+			if err == nil {
+				t.Fatalf("preflightServeEnvironment(%+v) = nil, want an error", tt.env)
+			}
+			if !strings.Contains(err.Error(), tt.wantPhras) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantPhras)
+			}
+			// The retired command names must never come back in guidance copy.
+			for _, dead := range []string{"palbase branch", "git push origin"} {
+				if strings.Contains(err.Error(), dead) {
+					t.Fatalf("preflight guidance still references the retired %q: %s", dead, err.Error())
 				}
-			} else if err != nil {
-				t.Fatalf("expected nil error, got %v", err)
 			}
 		})
 	}

@@ -10,6 +10,8 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
 func studioAgainst(t *testing.T, h http.HandlerFunc) Studio {
@@ -31,6 +33,7 @@ func trpcOK(w http.ResponseWriter, data any) {
 // TestLogs_SearchWire pins the one-shot path: input carries ref/level-array/
 // q/limit + BACKWARD, and the BACKWARD result is printed oldest-first.
 func TestLogs_SearchWire(t *testing.T) {
+	t.Chdir(t.TempDir())
 	var gotInput string
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/trpc/logs.entries.search", r.URL.Path)
@@ -43,13 +46,13 @@ func TestLogs_SearchWire(t *testing.T) {
 			"next_cursor": nil,
 		})
 	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }})
+	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"--ref", "todoappm8p6z", "--level", "error,warn", "-q", "timeout", "--limit", "50"})
+	cmd.SetArgs([]string{"--level", "error,warn", "-q", "timeout", "--limit", "50"})
 	require.NoError(t, cmd.Execute())
 
-	require.Contains(t, gotInput, `"ref":"todoappm8p6z"`)
+	require.Contains(t, gotInput, `"ref":"app1prod"`)
 	require.Contains(t, gotInput, `"level":["error","warn"]`)
 	require.Contains(t, gotInput, `"q":"timeout"`)
 	require.Contains(t, gotInput, `"limit":50`)
@@ -63,6 +66,7 @@ func TestLogs_SearchWire(t *testing.T) {
 // TestFollowCursor_Dedup pins the poll-boundary invariant: lines sharing the
 // last timestamp are neither re-printed nor dropped across polls.
 func TestFollowCursor_Dedup(t *testing.T) {
+	t.Chdir(t.TempDir())
 	l := func(ts, msg string) logLine { return logLine{Timestamp: ts, Message: msg} }
 
 	c := newFollowCursor([]logLine{l("t1", "a"), l("t2", "b")})

@@ -3,59 +3,48 @@ package backend
 import (
 	"context"
 	"net/http"
-	"net/url"
 
 	"github.com/palgroup/palbase-cli/internal/apps"
 )
 
-// Per-environment app-config resolvers for platform link commands.
+// Per-ENVIRONMENT app-config resolvers for the platform link commands.
 
-// restDoer is the Management-API transport subset the mobile/ios internals need
-// (app environments + config-artifact). *transport.Client satisfies it; tests
+// restDoer is the Management-API transport subset the link internals need
+// (app bindings + config-artifact). *transport.Client satisfies it; tests
 // inject a stub. Kept narrow so the backend package doesn't depend on
 // internal/transport and stays testable.
 type restDoer interface {
 	Do(ctx context.Context, method, path string, body, out any) error
 }
 
-// configArtifactFetch fetches the per-(app × env) config artifact for one env,
-// optionally targeting a specific BRANCH of that env (branchName ""→ the env's
-// main branch). It abstracts the config-artifact REST route so the codegen emit
-// is unit-testable without a live server (tests inject a stub that returns the
-// per-env artifacts directly). envRef is the BARE project ref (the binding's
-// project_ref); branchName selects which of that env's branches the base_url +
-// key resolve to (`palbase ios use <branch>`).
-type configArtifactFetch func(ctx context.Context, appID, envRef, branchName string) (apps.ConfigArtifact, error)
+// configArtifactFetch fetches the per-(app × Environment) config artifact.
+// environmentRef is the Environment's ref — the ONE selector. There is no
+// branch: the ref already names the endpoint, the database and the keys.
+type configArtifactFetch func(ctx context.Context, appID, environmentRef string) (apps.ConfigArtifact, error)
 
-// AppBinding is the subset of an app-bindings row needed to verify that an app
-// belongs to the selected environment.
+// AppBinding is the subset of an app-bindings row the link commands need to
+// verify that an app is bound to the selected Environment.
 type AppBinding struct {
-	ProjectRef string `json:"project_ref"`
-	EnvPreset  string `json:"env_preset"`
+	EnvironmentRef  string `json:"environment_ref"`
+	EnvironmentName string `json:"environment_name"`
+	Kind            string `json:"kind"`
+	AttestEnforce   bool   `json:"attest_enforce"`
 }
 
-// bindingLister lists an app's (app × env) bindings. Abstracts the bindings
-// REST route so artifact generation is testable without a live server.
+// bindingLister lists an app's (app × Environment) bindings.
 type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
 
-// studioConfigArtifactFetch is the production configArtifactFetch the codegen
-// command supplies: it runs the config-artifact REST route for the (app × env)
-// pair (the SAME route `palbase apps config` uses). The env's project ref is
-// passed as the `env` query param; the server resolves the endpoint_ref +
-// mints/looks up the env-main key. A non-empty branchName is appended as
-// `&branch=...` (mirroring the "only send branch when non-empty" tRPC logic).
+// studioConfigArtifactFetch is the production configArtifactFetch: the v2
+// config-artifact route for the (app × Environment) pair — the SAME route
+// `palbase apps config` uses.
 //
-// The config-artifact route does not carry OAuth, so this wrapper also fetches
-// palauth's public `/auth/oauth/providers` against the artifact's base_url and
-// api_key. The fetch is best-effort: a blip leaves OAuth nil.
+// The artifact does not carry OAuth, so this wrapper also fetches palauth's
+// public `/auth/oauth/providers` against the artifact's base_url and api_key.
+// Best-effort: a blip leaves OAuth nil.
 func studioConfigArtifactFetch(rest restDoer) configArtifactFetch {
-	return func(ctx context.Context, appID, envRef, branchName string) (apps.ConfigArtifact, error) {
+	return func(ctx context.Context, appID, environmentRef string) (apps.ConfigArtifact, error) {
 		var art apps.ConfigArtifact
-		path := "/api/v1/apps/" + appID + "/config-artifact?env=" + url.QueryEscape(envRef)
-		if branchName != "" {
-			path += "&branch=" + url.QueryEscape(branchName)
-		}
-		if err := rest.Do(ctx, http.MethodGet, path, nil, &art); err != nil {
+		if err := rest.Do(ctx, http.MethodGet, apps.ConfigArtifactPath(appID, environmentRef), nil, &art); err != nil {
 			return apps.ConfigArtifact{}, err
 		}
 		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)
@@ -64,12 +53,11 @@ func studioConfigArtifactFetch(rest restDoer) configArtifactFetch {
 	}
 }
 
-// studioBindingLister is the production bindingLister the codegen command
-// supplies: it runs the bindings REST route and returns the app's environments.
+// studioBindingLister is the production bindingLister: the v2 bindings route.
 func studioBindingLister(rest restDoer) bindingLister {
 	return func(ctx context.Context, appID string) ([]AppBinding, error) {
 		var bindings []AppBinding
-		if err := rest.Do(ctx, http.MethodGet, "/api/v1/apps/"+appID+"/bindings", nil, &bindings); err != nil {
+		if err := rest.Do(ctx, http.MethodGet, "/api/v2/apps/"+appID+"/bindings", nil, &bindings); err != nil {
 			return nil, err
 		}
 		return bindings, nil

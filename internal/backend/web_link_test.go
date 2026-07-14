@@ -9,15 +9,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selection"
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
 // stubArtifactsFunc replaces webLinkArtifacts for tests — writes minimal
-// committed artifacts (openapi.json + palbase-config.json) with no network.
-func stubArtifactsFunc() func(context.Context, Resolvers, string, io.Writer) error {
-	return func(_ context.Context, _ Resolvers, _ string, _ io.Writer) error {
+// committed artifacts (openapi.json + palbase-config.json) with no network. The
+// emitted config names the ENVIRONMENT and carries no branch.
+func stubArtifactsFunc() func(context.Context, Resolvers, selection.Selection, io.Writer) error {
+	return func(_ context.Context, _ Resolvers, sel selection.Selection, _ io.Writer) error {
 		if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
 			return err
 		}
@@ -25,7 +28,7 @@ func stubArtifactsFunc() func(context.Context, Resolvers, string, io.Writer) err
 			return err
 		}
 		return os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"),
-			[]byte("{\"base_url\":\"https://stub\",\"api_key\":\"pb_stub\",\"branch\":\"main\"}\n"), 0o600)
+			[]byte(`{"environment_ref":"`+sel.Ref()+`","base_url":"https://stub","api_key":"pb_stub"}`+"\n"), 0o600)
 	}
 }
 
@@ -53,6 +56,8 @@ func minimalPkgJSON() string {
 }`
 }
 
+// `web link` exposes NO --ref: the project + environment come from the selection
+// (or the global --project / --environment).
 func TestWebLinkCommandFlags(t *testing.T) {
 	cmd := newWebCmd(noopResolvers())
 	var linkFlags []string
@@ -61,7 +66,22 @@ func TestWebLinkCommandFlags(t *testing.T) {
 			child.Flags().VisitAll(func(flag *pflag.Flag) { linkFlags = append(linkFlags, flag.Name) })
 		}
 	}
-	require.Equal(t, []string{"entry", "out", "ref"}, linkFlags)
+	require.Equal(t, []string{"entry", "out"}, linkFlags)
+}
+
+// webRig selects proj_1 / production IN THE CURRENT DIRECTORY (the callers have
+// already chdir'd into their own temp dir and seeded package.json there) and
+// returns Resolvers backed by the fake v2 API.
+func webRig(t *testing.T) Resolvers {
+	t.Helper()
+	selectiontest.WriteConfig(t, ".", nil)
+	f := selectiontest.New(t)
+	rest := f.REST()
+	resolver := f.Resolver(&bytes.Buffer{})
+	return Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return resolver },
+	}
 }
 
 // writePkgJSON writes content to package.json in the current directory.
@@ -73,7 +93,7 @@ func writePkgJSON(t *testing.T, content string) {
 // runWebLink executes `web link` with the given extra args and returns stdout.
 func runWebLink(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := newWebCmd(noopResolvers())
+	cmd := newWebCmd(webRig(t))
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -98,13 +118,12 @@ func TestWebLink_HookLiteral(t *testing.T) {
 func TestWebLink_NoPkgJSON(t *testing.T) {
 	t.Chdir(t.TempDir())
 	installStubCodegen(t, "// gen")
-	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: "ref1", DefaultEnv: "main"}))
 
-	cmd := newWebCmd(noopResolvers())
+	cmd := newWebCmd(webRig(t))
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link", "--ref", "ref1"})
+	cmd.SetArgs([]string{"link"})
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "package.json not found")
@@ -123,12 +142,13 @@ func TestWebLink_HappyPath(t *testing.T) {
 export default function Layout() {}
 `), 0o644))
 
-	runWebLink(t, "--ref", "testref1")
+	runWebLink(t)
 
-	// .palbase/config.json must be written.
-	cfg, err := auth.LoadProjectConfig()
+	// The selection is left intact — `web link` reads it, it does not re-target it.
+	cfg, err := selection.Load("")
 	require.NoError(t, err)
-	require.Equal(t, "testref1", cfg.Ref)
+	require.Equal(t, "proj_1", cfg.ProjectID)
+	require.Equal(t, "env_prod", cfg.EnvironmentID)
 
 	// gen file must exist (stubbed).
 	genContent, err := os.ReadFile("palbe.gen.ts")
@@ -169,7 +189,7 @@ func TestWebLink_EntryVariants(t *testing.T) {
 			require.NoError(t, os.MkdirAll(tc.dir, 0o755))
 			require.NoError(t, os.WriteFile(tc.path, []byte("// entry\n"), 0o644))
 
-			runWebLink(t, "--ref", "ref1")
+			runWebLink(t)
 
 			body, err := os.ReadFile(tc.path)
 			require.NoError(t, err)
@@ -188,7 +208,7 @@ func TestWebLink_EntryFlagOverride(t *testing.T) {
 	require.NoError(t, os.MkdirAll("src", 0o755))
 	require.NoError(t, os.WriteFile("src/custom-entry.tsx", []byte("// custom\n"), 0o644))
 
-	runWebLink(t, "--ref", "ref1", "--entry", "src/custom-entry.tsx")
+	runWebLink(t, "--entry", "src/custom-entry.tsx")
 
 	body, err := os.ReadFile("src/custom-entry.tsx")
 	require.NoError(t, err)
@@ -209,7 +229,7 @@ export default function Layout() {}
 `
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte(input), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	body, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
@@ -240,7 +260,7 @@ export default function App() {}
 `
 	require.NoError(t, os.WriteFile("src/main.tsx", []byte(input), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	body, err := os.ReadFile("src/main.tsx")
 	require.NoError(t, err)
@@ -268,7 +288,7 @@ func TestWebLink_ImportIdempotencyExactMatch(t *testing.T) {
 export const x = 1;
 `), 0o644))
 
-		runWebLink(t, "--ref", "ref1")
+		runWebLink(t)
 
 		body, err := os.ReadFile("src/main.tsx")
 		require.NoError(t, err)
@@ -288,7 +308,7 @@ export const x = 1;
 `
 		require.NoError(t, os.WriteFile("src/main.tsx", []byte(input), 0o644))
 
-		runWebLink(t, "--ref", "ref1")
+		runWebLink(t)
 
 		body, err := os.ReadFile("src/main.tsx")
 		require.NoError(t, err)
@@ -309,7 +329,7 @@ func TestWebLink_ConflictingScript(t *testing.T) {
   }
 }`)
 
-	outStr := runWebLink(t, "--ref", "ref1")
+	outStr := runWebLink(t)
 
 	// Warning must be printed with the suggested value.
 	require.Contains(t, outStr, "predev")
@@ -341,7 +361,7 @@ func TestWebLink_KeyOrderPreserved(t *testing.T) {
 }`
 	writePkgJSON(t, original)
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
@@ -481,8 +501,8 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte(`import React from 'react';
 `), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
-	runWebLink(t, "--ref", "ref1") // second run
+	runWebLink(t)
+	runWebLink(t) // second run
 
 	// Only ONE import line referencing palbe.gen.
 	entryBody, err := os.ReadFile("app/layout.tsx")
@@ -497,31 +517,48 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 	require.Equal(t, 1, strings.Count(string(pkgBody), `"prebuild"`))
 }
 
-// TestWebLink_RefRelinkUpdatesConfig (I3): `web link --ref B` in a cwd linked
-// to A must update the config's Ref to B (keeping DefaultEnv — the active
-// branch is a local choice) and fetch artifacts via the seam with B.
-func TestWebLink_RefRelinkUpdatesConfig(t *testing.T) {
-	t.Chdir(t.TempDir())
-	installStubCodegen(t, "// gen")
-	var gotRef string
+// `web link` fetches artifacts for the SELECTED environment, and re-running it
+// after `palbase env use staging` re-targets them — there is no --ref to pass
+// and no branch to keep.
+func TestWebLink_FetchesForTheSelectedEnvironment(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_stg"})
+
+	f := selectiontest.New(t)
+	f.Environments["proj_1"] = append(f.Environments["proj_1"],
+		selectiontest.Env("env_stg", "proj_1", "app1stg", "staging", "staging", false))
+	rest := f.REST()
+	resolver := f.Resolver(&bytes.Buffer{})
+	r := Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return resolver },
+	}
+
+	var gotSel selection.Selection
 	orig := webLinkArtifacts
-	webLinkArtifacts = func(ctx context.Context, r Resolvers, ref string, w io.Writer) error {
-		gotRef = ref
-		return stubArtifactsFunc()(ctx, r, ref, w)
+	webLinkArtifacts = func(ctx context.Context, res Resolvers, sel selection.Selection, w io.Writer) error {
+		gotSel = sel
+		return stubArtifactsFunc()(ctx, res, sel, w)
 	}
 	t.Cleanup(func() { webLinkArtifacts = orig })
 
+	require.NoError(t, os.MkdirAll(filepath.Dir(palbeGenBin), 0o755))
+	require.NoError(t, os.WriteFile(palbeGenBin, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	writePkgJSON(t, minimalPkgJSON())
-	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: "projA", DefaultEnv: "staging"}))
 
-	outStr := runWebLink(t, "--ref", "projB")
+	cmd := newWebCmd(r)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"link"})
+	require.NoError(t, cmd.Execute())
 
-	cfg, err := auth.LoadProjectConfig()
+	require.Equal(t, "proj_1", gotSel.ProjectID)
+	require.Equal(t, "app1stg", gotSel.Ref(), "artifacts must be fetched for the SELECTED environment")
+
+	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
 	require.NoError(t, err)
-	require.Equal(t, "projB", cfg.Ref, "config must be re-linked to the new ref")
-	require.Equal(t, "staging", cfg.DefaultEnv, "re-link must keep the active branch")
-	require.Equal(t, "projB", gotRef, "the artifact fetch must run against the new ref")
-	require.Contains(t, outStr, "projB")
+	require.Contains(t, string(raw), `"environment_ref":"app1stg"`)
+	require.NotContains(t, string(raw), "branch")
 }
 
 // TestWebLink_EnsuresProjectConfigGitignored: link keeps the per-machine
@@ -532,7 +569,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
 
-		runWebLink(t, "--ref", "ref1")
+		runWebLink(t)
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
@@ -545,7 +582,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 		writePkgJSON(t, minimalPkgJSON())
 		require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n"), 0o644))
 
-		runWebLink(t, "--ref", "ref1")
+		runWebLink(t)
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
@@ -557,8 +594,8 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
 
-		runWebLink(t, "--ref", "ref1")
-		runWebLink(t, "--ref", "ref1")
+		runWebLink(t)
+		runWebLink(t)
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
@@ -571,7 +608,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 		writePkgJSON(t, minimalPkgJSON())
 		require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n.palbase/\n"), 0o644))
 
-		runWebLink(t, "--ref", "ref1")
+		runWebLink(t)
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
@@ -597,7 +634,7 @@ func TestWebLink_GitignoreWarning(t *testing.T) {
 			writePkgJSON(t, minimalPkgJSON())
 			require.NoError(t, os.WriteFile(".gitignore", []byte(tc.content), 0o644))
 
-			outStr := runWebLink(t, "--ref", "ref1")
+			outStr := runWebLink(t)
 
 			require.Contains(t, outStr, "WARNING", "should print a loud warning about .gitignore")
 			require.Contains(t, outStr, "palbe.gen.ts", "warning should mention the gen file")
@@ -621,7 +658,7 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 	writePkgJSON(t, minimalPkgJSON())
 	// No entry file created.
 
-	outStr := runWebLink(t, "--ref", "ref1")
+	outStr := runWebLink(t)
 	require.Contains(t, outStr, "palbe.gen", "manual instruction should mention gen file")
 }
 
@@ -629,7 +666,6 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 // the .palbase/ dir (when empty), leaves gen file and scripts.
 func TestWebUnlink_RemovesConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
-	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: "ref1", DefaultEnv: "main"}))
 	require.NoError(t, os.WriteFile("palbe.gen.ts", []byte("// gen"), 0o644))
 	writePkgJSON(t, `{
   "name": "myapp",
@@ -686,7 +722,7 @@ func TestWebLink_CustomOut(t *testing.T) {
 	require.NoError(t, os.MkdirAll("app", 0o755))
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
 
-	runWebLink(t, "--ref", "ref1", "--out", "my.custom.gen.ts")
+	runWebLink(t, "--out", "my.custom.gen.ts")
 
 	_, err := os.Stat("my.custom.gen.ts")
 	require.NoError(t, err, "custom out file should exist")
@@ -717,7 +753,7 @@ func TestWebLink_ArtifactsWritten(t *testing.T) {
 	installStubCodegen(t, "// gen")
 	writePkgJSON(t, minimalPkgJSON())
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	for _, f := range []string{"openapi.json", "palbase-config.json"} {
 		_, err := os.Stat(filepath.Join(webArtifactsDir, f))
@@ -753,7 +789,7 @@ func TestWebLink_ProvidersCreatedForNextAppRouter(t *testing.T) {
 export default function Layout() {}
 `), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	body, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err, "app/providers.tsx must be created")
@@ -776,7 +812,7 @@ func TestWebLink_ProvidersCreatedForSrcAppRouter(t *testing.T) {
 export default function Layout() {}
 `), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	body, err := os.ReadFile("src/app/providers.tsx")
 	require.NoError(t, err, "src/app/providers.tsx must be created")
@@ -797,11 +833,11 @@ func TestWebLink_ProvidersIdempotent(t *testing.T) {
 export default function Layout() {}
 `), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 	first, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)
 
-	runWebLink(t, "--ref", "ref1") // second run
+	runWebLink(t) // second run
 	second, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)
 
@@ -818,7 +854,7 @@ func TestWebLink_ProvidersNotCreatedForNonNextLayouts(t *testing.T) {
 	require.NoError(t, os.MkdirAll("src", 0o755))
 	require.NoError(t, os.WriteFile("src/main.tsx", []byte("// entry\n"), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	// No providers.tsx should be created for non-Next layouts.
 	_, err := os.Stat("src/providers.tsx")
@@ -834,7 +870,7 @@ func TestWebLink_ProvidersGenRelPath(t *testing.T) {
 	require.NoError(t, os.MkdirAll("app", 0o755))
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
 
-	runWebLink(t, "--ref", "ref1")
+	runWebLink(t)
 
 	body, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)

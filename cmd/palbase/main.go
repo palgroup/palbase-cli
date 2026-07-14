@@ -11,18 +11,18 @@ import (
 	"github.com/palgroup/palbase-cli/internal/apps"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
-	"github.com/palgroup/palbase-cli/internal/branch"
 	"github.com/palgroup/palbase-cli/internal/config"
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
+	envcmd "github.com/palgroup/palbase-cli/internal/env"
 	"github.com/palgroup/palbase-cli/internal/flags"
 	"github.com/palgroup/palbase-cli/internal/github"
-	"github.com/palgroup/palbase-cli/internal/groups"
 	"github.com/palgroup/palbase-cli/internal/logs"
 	"github.com/palgroup/palbase-cli/internal/members"
 	"github.com/palgroup/palbase-cli/internal/notifications"
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/scaffold"
 	"github.com/palgroup/palbase-cli/internal/secret"
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/storage"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/testuser"
@@ -34,6 +34,17 @@ var Version = "dev"
 
 // modeFlag is bound to the persistent --mode flag on the root command.
 var modeFlag string
+
+// projectFlag / environmentFlag are the GLOBAL headless overrides (spec §7.3).
+// They are the ONLY context flags: Organization is not a CLI context, and the
+// Palbase branch no longer exists, so there is no --organization and no
+// --branch. An unset flag falls back to `.palbase/config.json`.
+var projectFlag, environmentFlag string
+
+// sel is the shared selection resolver every context-bound command reads. Built
+// once per invocation in PersistentPreRunE so a command that needs both the
+// Project and the Environment pays for ONE environments listing.
+var sel *selection.Resolver
 
 // resolved is populated in PersistentPreRunE and consumed by subcommands.
 var resolved config.Resolved
@@ -72,7 +83,23 @@ func managementREST() *transport.Client {
 	return transport.New(resolved.Endpoints.PlatformAPI, key, pat)
 }
 
+// selectionResolver hands every command package the ONE resolver built in
+// PersistentPreRunE. It is a func (not the value) because the command tree is
+// constructed BEFORE PersistentPreRunE runs.
+func selectionResolver() *selection.Resolver { return sel }
+
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the whole command tree. Extracted from main() so the
+// canonical surface (spec §7.3) can be golden-tested: `palbase --help` IS the
+// contract, and a resurrected `branch` / `groups` command must fail the build,
+// not a live smoke run.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:     "palbase",
 		Short:   "Palbase CLI — Backend-as-a-Service platform",
@@ -99,12 +126,24 @@ func main() {
 			studioClient = studio.New(r.Endpoints.Studio, func(ctx context.Context) (string, error) {
 				return authClient.GetValidToken(ctx)
 			})
+			sel = &selection.Resolver{
+				REST:            func() selection.REST { return managementREST() },
+				ProjectFlag:     projectFlag,
+				EnvironmentFlag: environmentFlag,
+				// Migration notices and progress go to STDERR: stdout is the stable,
+				// parseable command output (--json).
+				Warn: os.Stderr,
+			}
 			return nil
 		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&modeFlag, "mode", "",
 		"environment mode: prod or dev (overrides config + PALBASE_MODE)")
+	rootCmd.PersistentFlags().StringVar(&projectFlag, "project", "",
+		"Project id to act on (overrides .palbase/config.json)")
+	rootCmd.PersistentFlags().StringVar(&environmentFlag, "environment", "",
+		"Environment slug or ref to act on (overrides .palbase/config.json)")
 
 	rootCmd.AddCommand(
 		loginCmd(),
@@ -115,45 +154,53 @@ func main() {
 		openCmd(),
 		scaffold.Cmd(),
 		project.Cmd(project.Resolvers{
-			REST: func() project.REST { return managementREST() },
+			REST:      func() project.REST { return managementREST() },
+			Selection: selectionResolver,
 		}),
-		branch.Cmd(branch.Resolvers{
-			REST: func() branch.REST { return managementREST() },
+		envcmd.Cmd(envcmd.Resolvers{
+			REST:      func() envcmd.REST { return managementREST() },
+			Selection: selectionResolver,
 		}),
 		apikey.Cmd(apikey.Resolvers{
-			REST: func() apikey.REST { return managementREST() },
+			REST:      func() apikey.REST { return managementREST() },
+			Selection: selectionResolver,
 		}),
 		apps.Cmd(apps.Resolvers{
-			REST: func() apps.REST { return managementREST() },
-		}),
-		groups.Cmd(groups.Resolvers{
-			REST: func() groups.REST { return managementREST() },
+			REST:      func() apps.REST { return managementREST() },
+			Selection: selectionResolver,
 		}),
 		logs.Cmd(logs.Resolvers{
-			Studio: func() logs.Studio { return studioClient },
+			Studio:    func() logs.Studio { return studioClient },
+			Selection: selectionResolver,
 		}),
 		members.Cmd(members.Resolvers{
-			Studio: func() members.Studio { return studioClient },
+			Studio:    func() members.Studio { return studioClient },
+			Selection: selectionResolver,
 		}),
 		github.Cmd(github.Resolvers{
 			Studio:    func() github.Studio { return studioClient },
 			StudioURL: func() string { return resolved.Endpoints.Studio },
 		}),
 		secret.Cmd(secret.Resolvers{
-			Studio: func() *studio.Client { return studioClient },
+			Studio:    func() *studio.Client { return studioClient },
+			Selection: selectionResolver,
 		}),
 		dbCmdWithTypes(),
 		storage.Cmd(),
 		flags.Cmd(),
 		notifications.Cmd(notifications.Resolvers{
-			Studio: func() *studio.Client { return studioClient },
+			Studio:    func() *studio.Client { return studioClient },
+			Selection: selectionResolver,
 		}),
+		// admin deliberately stays on /api/v1: the fleet-operator routes are not
+		// part of the Project/Environment surface and were not cut over.
 		admin.NewCommand(admin.Resolvers{
 			REST: func() admin.REST { return managementREST() },
 		}),
 		testuser.Cmd(testuser.Resolvers{
 			// *studio.Client satisfies testuser.Studio (Query/Mutation).
-			Studio: func() testuser.Studio { return studioClient },
+			Studio:    func() testuser.Studio { return studioClient },
+			Selection: selectionResolver,
 		}),
 	)
 
@@ -167,14 +214,12 @@ func main() {
 		Studio:    func() *studio.Client { return studioClient },
 		Endpoints: func() config.Endpoints { return resolved.Endpoints },
 		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
-		// project/apikey) for the mode-aware push/pull/clone verbs.
-		REST: func() backend.REST { return managementREST() },
+		// project/apikey) for the provider-aware push/pull/clone verbs.
+		REST:      func() backend.REST { return managementREST() },
+		Selection: selectionResolver,
 	})...)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
 // dbCmdWithTypes composes the db command group with `db types` (the
@@ -183,7 +228,8 @@ func main() {
 // backend import.
 func dbCmdWithTypes() *cobra.Command {
 	cmd := dbcmd.Cmd(dbcmd.Resolvers{
-		Studio: func() *studio.Client { return studioClient },
+		Studio:    func() *studio.Client { return studioClient },
+		Selection: selectionResolver,
 	})
 	cmd.AddCommand(backend.EnvTypesCmd())
 	return cmd
@@ -261,4 +307,3 @@ func modeCmd() *cobra.Command {
 		},
 	}
 }
-

@@ -2,361 +2,314 @@ package project
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"strings"
+	"sort"
 	"testing"
+	"time"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selection"
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
-// restAgainst spins an httptest server with the given handler and returns
-// a real REST transport pointed at it, signing with a real DPoP key.
-func restAgainst(t *testing.T, h http.HandlerFunc) (REST, *httptest.Server) {
+func newCmd(t *testing.T, fake *selectiontest.Fake) (*bytes.Buffer, *bytes.Buffer, func(...string) error) {
 	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	key, err := auth.NewDPoPKey()
-	require.NoError(t, err)
-	return transport.New(srv.URL, key, "pat_test"), srv
-}
-
-func okData(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "request_id": "req_x"})
-}
-
-func TestProjectList_REST(t *testing.T) {
-	var gotMethod, gotPath, gotAuth string
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
-		okData(w, 200, []map[string]any{
-			{"ref": "abcd1234", "name": "Demo", "tier": "free", "region": "northeurope", "status": "ready"},
-		})
+	rest := fake.REST()
+	resolver := fake.Resolver(&bytes.Buffer{})
+	cmd := Cmd(Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return resolver },
 	})
-
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"list", "--json"})
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, http.MethodGet, gotMethod)
-	require.Equal(t, "/api/v1/projects", gotPath)
-	require.Equal(t, "DPoP pat_test", gotAuth)
+	cmd.SetErr(&errOut)
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	return &out, &errOut, func(args ...string) error {
+		cmd.SetArgs(args)
+		return cmd.Execute()
+	}
 }
 
-func TestProjectCreate_REST_202Handle(t *testing.T) {
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/v1/projects", r.URL.Path)
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
-	})
-
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	require.NoError(t, os.Chdir(dir))
-
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--github-account", "personal", "--repo", "demo-repo", "--tier", "pro", "--json", "--yes"})
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "abcd1234", gotBody["ref"])
-	require.Equal(t, "Demo", gotBody["name"])
-	require.Equal(t, "personal", gotBody["githubAccount"])
-	require.Equal(t, "demo-repo", gotBody["repoName"])
-	require.Equal(t, "pro", gotBody["tier"])
-	// No org layer: the owner is the authenticated user, server-derived.
-	_, hasOrg := gotBody["orgId"]
-	require.False(t, hasOrg, "create body must not carry orgId (org layer removed)")
+func TestProjectCmd_CanonicalSurface(t *testing.T) {
+	cmd := Cmd(Resolvers{})
+	var got []string
+	for _, c := range cmd.Commands() {
+		got = append(got, c.Name())
+	}
+	sort.Strings(got)
+	// spec §7.3: create|list|use|status|delete. Nothing else.
+	require.Equal(t, []string{"create", "delete", "list", "status", "use"}, got)
 }
 
-func TestCreate_NoGithub_SendsPlatformBodyAndWritesMode(t *testing.T) {
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/v1/projects", r.URL.Path)
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
-	})
-
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	require.NoError(t, os.Chdir(dir))
-
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "todoapp", "--name", "Todo App", "--yes"})
-	require.NoError(t, cmd.Execute())
-
-	// No github flags → the keys must be ABSENT from the payload entirely
-	// (the server contract treats "both absent" as platform mode; an empty
-	// string would trip its exactly-one/shape validation).
-	_, hasAccount := gotBody["githubAccount"]
-	require.False(t, hasAccount, "platform-mode body must omit githubAccount entirely, got %v", gotBody["githubAccount"])
-	_, hasRepo := gotBody["repoName"]
-	require.False(t, hasRepo, "platform-mode body must omit repoName entirely, got %v", gotBody["repoName"])
-
-	cfg, err := auth.LoadProjectConfig()
-	require.NoError(t, err)
-	require.Equal(t, "todoapp", cfg.Ref)
-	require.Equal(t, "main", cfg.DefaultEnv)
-	require.Equal(t, "platform", cfg.Mode)
-	require.Equal(t, "", cfg.GithubRepo)
-}
-
-func TestCreate_WithGithub_SendsGithubBodyAndWritesMode(t *testing.T) {
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
-	})
-
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	require.NoError(t, os.Chdir(dir))
-
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"create", "abcd1234", "--name", "Demo", "--github-account", "personal", "--repo", "demo-repo", "--yes"})
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "personal", gotBody["githubAccount"])
-	require.Equal(t, "demo-repo", gotBody["repoName"])
-
-	cfg, err := auth.LoadProjectConfig()
-	require.NoError(t, err)
-	require.Equal(t, "abcd1234", cfg.Ref)
-	require.Equal(t, "github", cfg.Mode)
-	require.Equal(t, "demo-repo", cfg.GithubRepo)
-}
-
-// TestCreate_GithubFlagMatrix locks the flag-combination contract:
-//   - neither flag  → platform mode, github keys ABSENT from the payload
-//   - both flags    → github mode, both keys present
-//   - exactly one   → client-side validation error, no request sent
-//
-// This mirrors the server contract (send NEITHER for platform mode, BOTH
-// for github mode, exactly one = validation error).
-func TestCreate_GithubFlagMatrix(t *testing.T) {
+func TestProject_HitsTheV2Paths(t *testing.T) {
 	tests := []struct {
-		name        string
-		extraArgs   []string
-		wantErr     string // "" = expect success
-		wantAccount string // expected githubAccount value; "" = key must be absent
-		wantRepo    string // expected repoName value; "" = key must be absent
+		name  string
+		args  []string
+		route string
+		reply func(f *selectiontest.Fake)
 	}{
 		{
-			name:      "neither flag → platform mode, keys omitted",
-			extraArgs: nil,
+			name: "list", args: []string{"list", "--json"},
+			route: "GET /api/v2/projects",
 		},
 		{
-			name:        "both flags → github mode, keys present",
-			extraArgs:   []string{"--github-account", "personal", "--repo", "demo-repo"},
-			wantAccount: "personal",
-			wantRepo:    "demo-repo",
+			name: "status", args: []string{"status", "--json"},
+			route: "GET /api/v2/projects/proj_1",
 		},
 		{
-			name:      "only --github-account → error, no request",
-			extraArgs: []string{"--github-account", "personal"},
-			wantErr:   "use both --github-account and --repo for GitHub mode, or neither for platform mode",
+			name: "use", args: []string{"use", "proj_1"},
+			route: "GET /api/v2/projects/proj_1/environments",
 		},
 		{
-			name:      "only --repo → error, no request",
-			extraArgs: []string{"--repo", "demo-repo"},
-			wantErr:   "use both --github-account and --repo for GitHub mode, or neither for platform mode",
+			name: "delete", args: []string{"delete", "proj_1", "--yes"},
+			route: "DELETE /api/v2/projects/proj_1",
+			reply: func(f *selectiontest.Fake) {
+				f.Handle("DELETE /api/v2/projects/proj_1", func(w http.ResponseWriter, _ *http.Request) {
+					selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "wf_1", "runId": "run_1"})
+				})
+			},
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var gotBody map[string]any
-			requestSent := false
-			c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-				requestSent = true
-				_ = json.NewDecoder(r.Body).Decode(&gotBody)
-				okData(w, http.StatusAccepted, map[string]any{"workflowId": "wf-1", "runId": "run-1"})
-			})
-
-			dir := t.TempDir()
-			wd, _ := os.Getwd()
-			t.Cleanup(func() { _ = os.Chdir(wd) })
-			require.NoError(t, os.Chdir(dir))
-
-			cmd := Cmd(Resolvers{REST: func() REST { return c }})
-			args := append([]string{"create", "abcd1234", "--name", "Demo", "--yes"}, tt.extraArgs...)
-			cmd.SetArgs(args)
-			cmd.SilenceUsage = true
-			cmd.SilenceErrors = true
-			err := cmd.Execute()
-
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				require.Contains(t, err.Error(), tt.wantErr)
-				require.False(t, requestSent, "half-specified github flags must fail before any request is sent")
-				return
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := selectiontest.Chdir(t)
+			selectiontest.WriteConfig(t, dir, nil)
+			fake := selectiontest.New(t)
+			if tc.reply != nil {
+				tc.reply(fake)
 			}
-			require.NoError(t, err)
-			require.True(t, requestSent)
-
-			gotAccount, hasAccount := gotBody["githubAccount"]
-			gotRepo, hasRepo := gotBody["repoName"]
-			if tt.wantAccount == "" {
-				require.False(t, hasAccount, "payload must omit githubAccount entirely, got %v", gotAccount)
-			} else {
-				require.Equal(t, tt.wantAccount, gotAccount)
-			}
-			if tt.wantRepo == "" {
-				require.False(t, hasRepo, "payload must omit repoName entirely, got %v", gotRepo)
-			} else {
-				require.Equal(t, tt.wantRepo, gotRepo)
+			_, _, exec := newCmd(t, fake)
+			require.NoError(t, exec(tc.args...))
+			_, ok := fake.Find(tc.route)
+			require.True(t, ok, "expected %s, got %v", tc.route, fake.Routes())
+			for _, route := range fake.Routes() {
+				require.NotContains(t, route, "/api/v1/")
 			}
 		})
 	}
 }
 
-func TestProjectStatus_REST(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/projects/abcd1234", r.URL.Path)
-		okData(w, 200, map[string]any{
-			"ref": "abcd1234", "name": "Demo", "tier": "free",
-			"region": "northeurope", "status": "provisioning",
-		})
+// POST /api/v2/projects takes NO organizationId — the server uses the caller's
+// default Organization (spec §7.3). Sending one would be a 400 on the STRICT
+// body, and it would put Organization back into the CLI, which is the whole
+// thing the cutover removed.
+func TestProjectCreate_SendsNoOrganizationId(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Projects = nil
+	fake.Environments = map[string][]selection.Environment{}
+	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+		// The saga "completes": the project + its production environment appear.
+		fake.Projects = []selectiontest.Project{{ID: "proj_new", Name: "newapp", Mode: "platform"}}
+		fake.Environments["proj_new"] = []selection.Environment{
+			selectiontest.Env("env_new", "proj_new", "newappprod", "production", "production", true),
+		}
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "create-project-newapp-1", "runId": "r"})
 	})
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"status", "abcd1234", "--json"})
-	require.NoError(t, cmd.Execute())
+
+	projectPollInterval = time.Millisecond
+	gitRun = noopGit
+	out, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("create", "newapp", "--name", "newapp", "--json"))
+
+	req, ok := fake.Find("POST /api/v2/projects")
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"ref": "newapp", "name": "newapp"}, req.Body)
+	require.NotContains(t, req.Body, "organizationId")
+	require.NotContains(t, req.Body, "tier")
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Equal(t, "proj_new", got["project_id"])
+	require.Equal(t, "env_new", got["environment_id"])
+	require.Equal(t, "newappprod", got["environment_ref"])
+	require.Equal(t, "palbase", got["repository_provider"])
 }
 
-func TestProjectStatus_404SurfacesAPIError(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": "project_not_found", "error_description": "no such project",
-			"status": 404, "request_id": "req_e",
-		})
+// create SELECTS what it built: config v2 lands in the directory (UAT CLI-001).
+func TestProjectCreate_WritesConfigV2(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "wf", "runId": "r"})
 	})
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"status", "zzzz"})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	err := cmd.Execute()
-	require.Error(t, err)
-	var apiErr *transport.APIError
-	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, "project_not_found", apiErr.Code)
+	projectPollInterval = time.Millisecond
+	gitRun = noopGit
+
+	_, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("create", "app1", "--name", "todoapp",
+		"--github-account", "personal", "--repo", "todoapp"))
+
+	require.Equal(t, `{
+  "version": 2,
+  "project_id": "proj_1",
+  "environment_id": "env_prod",
+  "repository_provider": "github"
+}
+`, selectiontest.ReadConfig(t, dir))
 }
 
-// --- project delete ----------------------------------------------------------
-
-// TestProjectDelete_Yes calls DELETE /api/v1/projects/{ref} with --yes (no
-// prompt) and verifies the REST path + confirm_ref body and the success line.
-func TestProjectDelete_Yes(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"started":true}}`))
-	})
-
-	var out strings.Builder
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"delete", "myproj123", "--yes"})
-	cmd.SetOut(&out)
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, http.MethodDelete, gotMethod)
-	require.Equal(t, "/api/v1/projects/myproj123", gotPath)
-	require.Equal(t, "myproj123", gotBody["confirm_ref"])
-	require.Contains(t, out.String(), "✓ deleted project myproj123")
+func TestProjectCreate_RejectsHalfGitHubMode(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	_, _, exec := newCmd(t, fake)
+	require.ErrorContains(t, exec("create", "app1", "--name", "x", "--repo", "r"), "both --github-account and --repo")
+	require.Empty(t, fake.Routes(), "a half-formed GitHub config must never reach the server")
 }
 
-// TestProjectDelete_ConfirmPrompt_Correct simulates a user typing the correct
-// ref at the interactive prompt and verifies the delete proceeds.
-func TestProjectDelete_ConfirmPrompt_Correct(t *testing.T) {
-	called := false
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"started":true}}`))
+// DELETE takes `confirm_name` — the project's NAME, not its id. The CLI reads
+// the name itself so a script only has to know the id.
+func TestProjectDelete_SendsConfirmName(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Handle("DELETE /api/v2/projects/proj_1", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "wf", "runId": "r"})
 	})
+	_, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("delete", "proj_1", "--yes"))
 
-	// Pipe the correct ref as stdin.
-	r, w, err := os.Pipe()
+	req, ok := fake.Find("DELETE /api/v2/projects/proj_1")
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"confirm_name": "todoapp"}, req.Body)
+}
+
+// Deleting the SELECTED project drops the selection: leaving it behind would
+// make every later command 404 against a project that no longer exists.
+func TestProjectDelete_DropsTheSelection(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+	fake := selectiontest.New(t)
+	fake.Handle("DELETE /api/v2/projects/proj_1", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "wf", "runId": "r"})
+	})
+	_, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("delete", "proj_1", "--yes"))
+
+	_, err := selection.Load(dir)
+	require.ErrorAs(t, err, &selection.ErrNotSelected{})
+}
+
+// The interactive prompt compares against the NAME. A mismatch cancels, and
+// nothing is sent.
+func TestProjectDelete_PromptMismatchCancels(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+
+	rest := fake.REST()
+	resolver := fake.Resolver(&bytes.Buffer{})
+	cmd := Cmd(Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return resolver },
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetIn(bytes.NewBufferString("wrongname\n"))
+	cmd.SetArgs([]string{"delete", "proj_1"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	require.ErrorContains(t, cmd.Execute(), "confirmation mismatch")
+	_, sent := fake.Find("DELETE /api/v2/projects/proj_1")
+	require.False(t, sent)
+}
+
+// `use` selects the project AND its production environment, and records the
+// repository provider the server reports.
+func TestProjectUse_SelectsProductionAndProvider(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Projects[0].Mode = "github"
+	fake.Projects[0].GithubRepo = "pal-salih/todoapp"
+
+	_, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("use", "proj_1"))
+
+	cfg, err := selection.Load(dir)
 	require.NoError(t, err)
-	_, _ = w.WriteString("myproj123\n")
-	w.Close()
-
-	origStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = origStdin; r.Close() })
-
-	var out strings.Builder
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"delete", "myproj123"})
-	cmd.SetOut(&out)
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.True(t, called, "the API must be called when confirmation matches")
-	require.Contains(t, out.String(), "✓ deleted project myproj123")
+	require.Equal(t, "proj_1", cfg.ProjectID)
+	require.Equal(t, "env_prod", cfg.EnvironmentID)
+	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
 }
 
-// TestProjectDelete_ConfirmPrompt_Wrong verifies that a wrong confirmation
-// cancels the delete without calling the API at all.
-func TestProjectDelete_ConfirmPrompt_Wrong(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("the API must NOT be called when confirmation is wrong")
+// Switching to a DIFFERENT project drops the old project's app registrations:
+// an app id belongs to one product, and carrying it over would point `ios use`
+// at an app in someone else's project.
+func TestProjectUse_ClearsAppSlotsOnProjectSwitch(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_old", EnvironmentID: "env_old", IOSAppID: "app_old",
 	})
+	fake := selectiontest.New(t)
 
-	r, w, err := os.Pipe()
+	_, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("use", "proj_1"))
+
+	cfg, err := selection.Load(dir)
 	require.NoError(t, err)
-	_, _ = w.WriteString("WRONGREF\n")
-	w.Close()
-
-	origStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = origStdin; r.Close() })
-
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"delete", "myproj123"})
-	cmd.SetOut(&strings.Builder{})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	err = cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "delete cancelled")
+	require.Empty(t, cfg.IOSAppID)
 }
 
-// TestProjectDelete_APIError surfaces the REST error envelope to the caller.
-func TestProjectDelete_APIError(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"error":"owner_required","error_description":"Only the project owner can delete it","status":403}`))
-	})
+// noopGit stands in for a directory that is already inside a git repository, so
+// a create test never forks a real git.
+func noopGit(string, ...string) (string, error) { return "/repo", nil }
 
-	cmd := Cmd(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"delete", "myproj123", "--yes"})
-	cmd.SetOut(&strings.Builder{})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "owner_required")
+// ── the local Git invariant (spec §4) ───────────────────────────────────────
+
+// Inside a monorepo the ancestor Git root is REUSED. A nested .git would take
+// the backend subtree out of the monorepo's history — the deploy webhook then
+// filters against a root the developer never commits to.
+func TestEnsureGitRepo_ReusesTheAncestorRoot(t *testing.T) {
+	var calls [][]string
+	git := func(dir string, args ...string) (string, error) {
+		calls = append(calls, args)
+		if args[0] == "rev-parse" {
+			return "/repo/monorepo", nil
+		}
+		t.Fatalf("must not run git %v inside an existing repository", args)
+		return "", nil
+	}
+	var w bytes.Buffer
+	root, err := ensureGitRepo(git, "/repo/monorepo/services/backend", &w)
+	require.NoError(t, err)
+	require.Equal(t, "/repo/monorepo", root)
+	require.Len(t, calls, 1, "an existing repository must be reused, not re-initialized")
+	require.Contains(t, w.String(), "no nested .git created")
 }
 
-var _ = context.Background
+// A standalone directory gets `git init -b main` — `main` because that is the
+// branch production maps to; a repo whose first branch is `master` maps to
+// nothing.
+func TestEnsureGitRepo_InitializesMainWhenStandalone(t *testing.T) {
+	var calls [][]string
+	git := func(_ string, args ...string) (string, error) {
+		calls = append(calls, args)
+		if args[0] == "rev-parse" {
+			return "", errors.New("not a git repository")
+		}
+		return "", nil
+	}
+	var w bytes.Buffer
+	root, err := ensureGitRepo(git, "/tmp/app", &w)
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/app", root)
+	require.Equal(t, [][]string{
+		{"rev-parse", "--show-toplevel"},
+		{"init", "-b", "main"},
+	}, calls)
+	require.Contains(t, w.String(), "branch main")
+}
+
+// git being unavailable must not lose the project: it is already provisioned
+// server-side, so we warn and finish writing the selection.
+func TestEnsureGitRepo_MissingGitWarnsButDoesNotFail(t *testing.T) {
+	git := func(_ string, args ...string) (string, error) {
+		return "", errors.New(`exec: "git": executable file not found in $PATH`)
+	}
+	var w bytes.Buffer
+	root, err := ensureGitRepo(git, "/tmp/app", &w)
+	require.NoError(t, err)
+	require.Empty(t, root)
+	require.Contains(t, w.String(), "warning")
+	require.Contains(t, w.String(), "git init -b main")
+}

@@ -24,6 +24,7 @@ import (
 	"io"
 	"text/tabwriter"
 
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
@@ -34,11 +35,11 @@ type Studio interface {
 	Mutation(ctx context.Context, path string, input any, out any) error
 }
 
-// Resolvers carries the lazily-built Studio client, populated by the root
-// command's PersistentPreRunE before any subcommand fires (mirrors
-// apps.Resolvers' pattern).
+// Resolvers carries the lazily-built Studio client + the shared selection
+// resolver, populated by PersistentPreRunE before any subcommand fires.
 type Resolvers struct {
-	Studio func() Studio
+	Studio    func() Studio
+	Selection func() *selection.Resolver
 }
 
 // Cmd returns the `test-user` parent command (registered under `auth`).
@@ -46,18 +47,20 @@ func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "test-user",
 		Short: "Mint disposable is_test users (optionally populated from a scenario)",
-		Long: `Mint disposable test users for an environment.
+		Long: `Mint disposable test users for the SELECTED environment.
 
-  palbase test-user create <ref>                    Mint 1 plain test user.
-  palbase test-user create <ref> --count 5          Mint 5 plain test users.
-  palbase test-user create <ref> --scenario demo    Mint 1 user + populate
-                                                          their data tree from a
-                                                          saved scenario.
-  palbase test-user create <ref> --json             Emit creds+token as JSON.
+  palbase test-user create                    Mint 1 plain test user.
+  palbase test-user create --count 5          Mint 5 plain test users.
+  palbase test-user create --scenario demo    Mint 1 user + populate their data
+                                              tree from a saved scenario.
+  palbase test-user create --json             Emit creds+token as JSON.
+
+Each environment verifies tokens against its OWN auth, so a minted token is only
+valid on the environment that minted it. Override the target with --environment.
 
 The minted users are is_test; the server mints their passwords + access tokens.`,
 	}
-	cmd.AddCommand(createCmd(r.Studio))
+	cmd.AddCommand(createCmd(r))
 	return cmd
 }
 
@@ -85,19 +88,22 @@ type scenarioResult struct {
 	Inserted map[string]int `json:"inserted"`
 }
 
-func createCmd(studioFn func() Studio) *cobra.Command {
+func createCmd(r Resolvers) *cobra.Command {
 	var (
 		scenario string
-		branch   string
 		count    int
 		jsonOut  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "create <ref>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Mint test user(s) for an environment",
+		Use:   "create",
+		Args:  cobra.NoArgs,
+		Short: "Mint test user(s) for the selected environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref := args[0]
+			sel, err := r.Selection().Resolve(cmd.Context())
+			if err != nil {
+				return err
+			}
+			ref := sel.Ref()
 			out := cmd.OutOrStdout()
 
 			// --scenario: mint ONE user + populate their data tree from the
@@ -113,10 +119,7 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 					"ref":  ref,
 					"name": scenario,
 				}
-				if branch != "" {
-					scenarioPayload["branch"] = branch
-				}
-				if err := studioFn().Mutation(cmd.Context(), "testData.runScenario", scenarioPayload, &res); err != nil {
+				if err := r.Studio().Mutation(cmd.Context(), "testData.runScenario", scenarioPayload, &res); err != nil {
 					return err
 				}
 				if jsonOut {
@@ -151,13 +154,7 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 				"count":      count,
 				"withTokens": true,
 			}
-			// --branch mints the users against THAT branch's palauth (each branch
-			// verifies tokens against its own auth, so a token is only valid on the
-			// branch that minted it). Omit → the project's default branch (main).
-			if branch != "" {
-				payload["branch"] = branch
-			}
-			if err := studioFn().Mutation(cmd.Context(), "testData.testUserCreate", payload, &res); err != nil {
+			if err := r.Studio().Mutation(cmd.Context(), "testData.testUserCreate", payload, &res); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -179,7 +176,6 @@ func createCmd(studioFn func() Studio) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&scenario, "scenario", "", "Populate the minted user's data tree from a saved scenario")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch to mint the user(s) against (defaults to the project's main branch)")
 	cmd.Flags().IntVar(&count, "count", 1, "Number of plain test users to mint (ignored with --scenario)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit creds+token as JSON (for scripting)")
 	return cmd

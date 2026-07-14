@@ -1,7 +1,11 @@
 // Package secret provides the `palbase secret` subcommand group:
-// set / list / remove. These commands manage a branch's remote env vars
-// via Studio tRPC (user JWT → Studio env.* → control-pg). NOT
+// set / list / remove / pull / push. They manage the SELECTED ENVIRONMENT's
+// remote env vars via Studio tRPC (user JWT → Studio env.* → control-pg). NOT
 // dev-server-local.
+//
+// Env vars belong to an Environment, not a Project: staging's DATABASE_URL is
+// not production's. Override the target with the global --project /
+// --environment flags.
 package secret
 
 import (
@@ -14,39 +18,49 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
 
-// Resolvers carries the lazily-built Studio client, populated by
-// PersistentPreRunE on the root command before any subcommand fires.
+// Resolvers carries the lazily-built Studio client and the shared selection
+// resolver, populated by PersistentPreRunE before any subcommand fires.
 type Resolvers struct {
-	Studio func() *studio.Client
+	Studio    func() *studio.Client
+	Selection func() *selection.Resolver
+}
+
+// envRef resolves the ENVIRONMENT every secret command acts on.
+func (r Resolvers) envRef(ctx context.Context) (string, error) {
+	sel, err := r.Selection().Resolve(ctx)
+	if err != nil {
+		return "", err
+	}
+	return sel.Ref(), nil
 }
 
 // Cmd returns the `palbase secret` parent command.
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "secret",
-		Short: "Manage a branch's remote env vars and secrets",
-		Long: `Commands to manage environment variables for a Palbase project branch.
+		Short: "Manage the selected environment's remote env vars and secrets",
+		Long: `Commands to manage environment variables for the SELECTED environment.
 
   palbase secret set KEY=value          Set a plain env var.
   palbase secret set KEY=value --secret Mark as encrypted secret (value masked in list).
   palbase secret list                   List all env vars (secrets shown masked).
   palbase secret remove KEY             Delete an env var.
-  palbase secret pull                   Write the branch's env vars (decrypted) to .env.local.
-  palbase secret push                   Push local .env.local changes back to the branch.
+  palbase secret pull                   Write the environment's env vars (decrypted) to .env.local.
+  palbase secret push                   Push local .env.local changes back to the environment.
 
-All changes are applied to the branch's remote configuration via Studio tRPC.`,
+Every change applies to the SELECTED environment (override with --environment).`,
 	}
 	cmd.AddCommand(
-		setCmd(r.Studio),
-		listCmd(r.Studio),
-		removeCmd(r.Studio),
-		pullCmd(r.Studio),
-		pushCmd(r.Studio),
+		setCmd(r),
+		listCmd(r),
+		removeCmd(r),
+		pullCmd(r),
+		pushCmd(r),
 	)
 	return cmd
 }
@@ -67,9 +81,8 @@ func guardReservedKey(key string) error {
 	return nil
 }
 
-func setCmd(studioFn func() *studio.Client) *cobra.Command {
+func setCmd(r Resolvers) *cobra.Command {
 	var (
-		refFlag  string
 		isSecret bool
 		fileFlag string
 		plain    bool
@@ -77,7 +90,7 @@ func setCmd(studioFn func() *studio.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <KEY=value> | set <KEY> --file <path>",
 		Short: "Set an env var (use --secret to mark encrypted; --file for a multi-line cert/key)",
-		Long: `Set an env var on the branch. Two forms:
+		Long: `Set an env var on the selected environment. Two forms:
 
   palbase secret set API_URL=https://...           inline value (plain by default)
   palbase secret set API_URL=https://... --secret  inline value, marked encrypted
@@ -122,12 +135,12 @@ file itself stays local (gitignored); only its encrypted value is uploaded.`,
 				return err
 			}
 
-			ref, err := auth.ResolveProjectRef(refFlag)
+			ref, err := r.envRef(cmd.Context())
 			if err != nil {
 				return err
 			}
 
-			if err := studioFn().Mutation(cmd.Context(), "env.set", map[string]any{
+			if err := r.Studio().Mutation(cmd.Context(), "env.set", map[string]any{
 				"ref":      ref,
 				"key":      key,
 				"value":    value,
@@ -139,7 +152,6 @@ file itself stays local (gitignored); only its encrypted value is uploaded.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().BoolVar(&isSecret, "secret", false, "Mark value as encrypted secret (masked in list)")
 	cmd.Flags().StringVar(&fileFlag, "file", "", "Read the value from a file (multi-line certs/keys/JSON); encrypted by default")
 	cmd.Flags().BoolVar(&plain, "plain", false, "With --file, store the value as a plain (non-secret) env var")
@@ -154,20 +166,19 @@ type envVar struct {
 	UpdatedAt string  `json:"updatedAt"`
 }
 
-func listCmd(studioFn func() *studio.Client) *cobra.Command {
-	var refFlag string
+func listCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all env vars for the branch (secrets shown masked)",
+		Short: "List all env vars for the selected environment (secrets shown masked)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := auth.ResolveProjectRef(refFlag)
+			ref, err := r.envRef(cmd.Context())
 			if err != nil {
 				return err
 			}
 
 			rows := []envVar{}
-			if err := studioFn().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &rows); err != nil {
+			if err := r.Studio().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &rows); err != nil {
 				return fmt.Errorf("env.list: %w", err)
 			}
 
@@ -184,7 +195,6 @@ func listCmd(studioFn func() *studio.Client) *cobra.Command {
 			return printEnvTable(out, rows)
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
@@ -195,33 +205,27 @@ type PulledVar struct {
 	Value string `json:"value"`
 }
 
-// Pull fetches every env var for the branch (plain + decrypted secrets) via
+// Pull fetches every env var of ONE ENVIRONMENT (plain + decrypted secrets) via
 // Studio's env.pull — the single fetch used by both `palbase secret pull` and
-// `palbase serve`'s automatic remote-env load. branch "" targets the project's
-// default branch (env.* accepts a bare ref or an endpoint_ref; the optional
-// branch parameter selects a non-default branch).
-func Pull(ctx context.Context, sc *studio.Client, ref, branch string) ([]PulledVar, error) {
-	payload := map[string]any{"ref": ref}
-	if branch != "" {
-		payload["branch"] = branch
-	}
+// `palbase serve`'s automatic remote-env load. ref is the Environment's ref;
+// there is no branch parameter.
+func Pull(ctx context.Context, sc *studio.Client, ref string) ([]PulledVar, error) {
 	var vars []PulledVar
-	if err := sc.Query(ctx, "env.pull", payload, &vars); err != nil {
+	if err := sc.Query(ctx, "env.pull", map[string]any{"ref": ref}, &vars); err != nil {
 		return nil, fmt.Errorf("env.pull: %w", err)
 	}
 	return vars, nil
 }
 
-func pullCmd(studioFn func() *studio.Client) *cobra.Command {
+func pullCmd(r Resolvers) *cobra.Command {
 	var (
-		refFlag string
 		outFlag string
 		force   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Write the branch's env vars (decrypted) to .env.local",
-		Long: `Fetch every env var for the branch (plain + decrypted secrets) and write
+		Short: "Write the environment's env vars (decrypted) to .env.local",
+		Long: `Fetch every env var of the selected environment (plain + decrypted secrets) and write
 them to a local dotenv file (default .env.local) for local development.
 
 Existing keys in the file are UPDATED from remote; keys present only locally are
@@ -230,7 +234,7 @@ with exactly the remote set instead of merging.
 
 The file is gitignored by the scaffold — secrets never enter git.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := auth.ResolveProjectRef(refFlag)
+			ref, err := r.envRef(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -239,7 +243,7 @@ The file is gitignored by the scaffold — secrets never enter git.`,
 				outPath = ".env.local"
 			}
 
-			remote, err := Pull(cmd.Context(), studioFn(), ref, "")
+			remote, err := Pull(cmd.Context(), r.Studio(), ref)
 			if err != nil {
 				return err
 			}
@@ -262,15 +266,13 @@ The file is gitignored by the scaffold — secrets never enter git.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVarP(&outFlag, "out", "o", "", "Output dotenv file (default .env.local)")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite the file with exactly the remote set (no merge)")
 	return cmd
 }
 
-func pushCmd(studioFn func() *studio.Client) *cobra.Command {
+func pushCmd(r Resolvers) *cobra.Command {
 	var (
-		refFlag      string
 		inFlag       string
 		secretKeys   []string
 		plainKeys    []string
@@ -280,16 +282,16 @@ func pushCmd(studioFn func() *studio.Client) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "push",
-		Short: "Push local .env.local changes back to the branch",
+		Short: "Push local .env.local changes back to the selected environment",
 		Long: `Read a local dotenv file (default .env.local) and upsert every var to the
-branch's remote config — the inverse of ` + "`secret pull`" + `.
+environment's remote config — the inverse of ` + "`secret pull`" + `.
 
 Only keys whose value DIFFERS from remote (or are new) are written, so a push
 after a pull is a no-op. A key's secret-ness is preserved from remote; mark NEW
 keys as secret with --secret KEY1,KEY2. Push never DELETES remote keys that are
 absent locally (use ` + "`secret remove`" + ` for that).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := auth.ResolveProjectRef(refFlag)
+			ref, err := r.envRef(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -306,7 +308,7 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 			// secret-ness. Secret values come back MASKED (value nil), so we
 			// can't diff them — they are NOT re-pushed unless --force-secrets.
 			var remote []envVar
-			if err := studioFn().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &remote); err != nil {
+			if err := r.Studio().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &remote); err != nil {
 				return fmt.Errorf("env.list: %w", err)
 			}
 			remotePlain := map[string]string{}
@@ -422,7 +424,7 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 					pushed++
 					continue
 				}
-				if err := studioFn().Mutation(cmd.Context(), "env.set", map[string]any{
+				if err := r.Studio().Mutation(cmd.Context(), "env.set", map[string]any{
 					"ref": ref, "key": p.key, "value": local[p.key], "isSecret": p.isSecret,
 				}, nil); err != nil {
 					return fmt.Errorf("env.set %s: %w", p.key, err)
@@ -437,7 +439,6 @@ absent locally (use ` + "`secret remove`" + ` for that).`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().StringVarP(&inFlag, "in", "i", "", "Input dotenv file (default .env.local)")
 	cmd.Flags().StringSliceVar(&secretKeys, "secret", nil, "NEW keys to encrypt (comma-separated)")
 	cmd.Flags().StringSliceVar(&plainKeys, "plain", nil, "NEW keys to store in plaintext (comma-separated)")
@@ -545,20 +546,19 @@ func printEnvTable(w io.Writer, rows []envVar) error {
 	return tw.Flush()
 }
 
-func removeCmd(studioFn func() *studio.Client) *cobra.Command {
-	var refFlag string
+func removeCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <KEY>",
 		Short: "Delete an env var",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
-			ref, err := auth.ResolveProjectRef(refFlag)
+			ref, err := r.envRef(cmd.Context())
 			if err != nil {
 				return err
 			}
 
-			if err := studioFn().Mutation(cmd.Context(), "env.delete", map[string]any{
+			if err := r.Studio().Mutation(cmd.Context(), "env.delete", map[string]any{
 				"ref": ref,
 				"key": key,
 			}, nil); err != nil {
@@ -568,6 +568,5 @@ func removeCmd(studioFn func() *studio.Client) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	return cmd
 }
