@@ -330,18 +330,18 @@ func TestEnsureGitRepo_MissingGitWarnsButDoesNotFail(t *testing.T) {
 // that is 78 requests per poll tick, and slow enough that the access token expired
 // mid-wait — `create` died with a 401 while its project provisioned fine.
 //
-// The 202 now NAMES the project, so the wait is ONE request per tick against ONE
-// project — whatever the account holds. The counts below are the lock: they must not
-// move when the account grows.
+// The 202 now NAMES the project and the wait polls the SAGA — ONE request per tick,
+// whatever the account holds. The counts below are the lock: they must not move when
+// the account grows.
 func TestProjectCreate_PollsOnlyTheReturnedProject_OneRequestPerTick(t *testing.T) {
 	tests := []struct {
-		name           string
-		otherProjects  int
-		ticksUntilLive int
+		name          string
+		otherProjects int
+		ticksUntilWon int
 	}{
-		{name: "empty account, ready on the first tick", otherProjects: 0, ticksUntilLive: 1},
-		{name: "3 other projects, ready on the third tick", otherProjects: 3, ticksUntilLive: 3},
-		{name: "77 other projects (the live account)", otherProjects: 77, ticksUntilLive: 2},
+		{name: "empty account, ready on the first tick", otherProjects: 0, ticksUntilWon: 1},
+		{name: "3 other projects, ready on the third tick", otherProjects: 3, ticksUntilWon: 3},
+		{name: "77 other projects (the live account)", otherProjects: 77, ticksUntilWon: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,18 +365,23 @@ func TestProjectCreate_PollsOnlyTheReturnedProject_OneRequestPerTick(t *testing.
 					"organizationId": "org_1",
 				})
 			})
-			// The environment exists from the first tick but only goes `active` on the
-			// tick'th one — the saga is still provisioning until then.
+			// The saga runs, then completes on the tick'th poll.
 			polls := 0
-			fake.Handle("GET /api/v2/projects/proj_new/environments", func(w http.ResponseWriter, _ *http.Request) {
+			fake.Handle("GET /api/v2/projects/create-status", func(w http.ResponseWriter, _ *http.Request) {
 				polls++
-				status := "creating"
-				if polls >= tc.ticksUntilLive {
-					status = "active"
+				status := "RUNNING"
+				if polls >= tc.ticksUntilWon {
+					status = "COMPLETED"
 				}
-				env := selectiontest.Env("env_new", "proj_new", "newappm", "production", "production", true)
-				env.Status = status
-				selectiontest.WriteOK(w, http.StatusOK, []selection.Environment{env})
+				selectiontest.WriteOK(w, http.StatusOK, map[string]any{
+					"workflowId": "create-project-newapp-1", "status": status,
+					"currentActivity": "ProvisionDatabase", "failure": nil,
+				})
+			})
+			fake.Handle("GET /api/v2/projects/proj_new/environments", func(w http.ResponseWriter, _ *http.Request) {
+				selectiontest.WriteOK(w, http.StatusOK, []selection.Environment{
+					selectiontest.Env("env_new", "proj_new", "newappm", "production", "production", true),
+				})
 			})
 
 			projectPollInterval = time.Millisecond
@@ -389,16 +394,26 @@ func TestProjectCreate_PollsOnlyTheReturnedProject_OneRequestPerTick(t *testing.
 			require.Equal(t, "proj_new", got["project_id"], "the id comes from the 202, not from a search")
 			require.Equal(t, "env_new", got["environment_id"])
 
-			// The COUNT is the guard: POST + exactly one environments call per tick.
+			// The COUNT is the guard: POST + one status call per tick + ONE environments
+			// read once the saga is done. Nothing here scales with the account.
 			counts := map[string]int{}
 			for _, route := range fake.Routes() {
 				counts[route]++
 			}
 			require.Equal(t, 1, counts["POST /api/v2/projects"])
-			require.Equal(t, tc.ticksUntilLive, counts["GET /api/v2/projects/proj_new/environments"],
-				"exactly ONE environments call per poll tick")
-			require.Len(t, fake.Routes(), 1+tc.ticksUntilLive,
+			require.Equal(t, tc.ticksUntilWon, counts["GET /api/v2/projects/create-status"],
+				"exactly ONE status call per poll tick")
+			require.Equal(t, 1, counts["GET /api/v2/projects/proj_new/environments"],
+				"the environments read happens ONCE, after the saga completes")
+			require.Len(t, fake.Routes(), 2+tc.ticksUntilWon,
 				"the wait must make NO other request — its cost cannot depend on how many projects the account holds")
+
+			// The status poll is bound to THIS create: the ref seed and the workflow id
+			// from the 202, nothing derived from a search.
+			req, ok := fake.Find("GET /api/v2/projects/create-status")
+			require.True(t, ok)
+			require.Contains(t, req.Query, "ref=newapp")
+			require.Contains(t, req.Query, "workflowId=create-project-newapp-1")
 
 			// And it NEVER lists the account's projects: that listing (and the
 			// per-project environments fan-out behind it) IS the O(projects) bug.
@@ -410,22 +425,103 @@ func TestProjectCreate_PollsOnlyTheReturnedProject_OneRequestPerTick(t *testing.
 	}
 }
 
-// The Project row is written BY THE SAGA (AllocateRef), so for the first seconds of
-// provisioning the id from the 202 names a row that does not exist yet: the poll must
-// wait through the 404 instead of failing the create.
+// THE bug this fix exists for.
+//
+// The create saga can die NON-RETRYABLY in its first second — AllocateRef refusing a
+// quota ("project quota exceeded: 77/20") — and it SAYS so. `create` used to watch the
+// environments list, where a dead saga and a slow one look identical (an empty list),
+// so it sat there for the full 10-minute timeout and then blamed the wait. It must stop
+// on the FIRST failing tick and print the saga's own reason.
+func TestProjectCreate_StopsAtOnceAndPrintsWhyTheSagaDied(t *testing.T) {
+	for _, state := range []string{"FAILED", "TERMINATED", "TIMED_OUT", "CANCELED"} {
+		t.Run(state, func(t *testing.T) {
+			selectiontest.Chdir(t)
+			fake := selectiontest.New(t)
+			fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+				selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+					"projectId": "proj_new", "workflowId": "create-project-newapp-1", "runId": "r",
+				})
+			})
+			fake.Handle("GET /api/v2/projects/create-status", func(w http.ResponseWriter, _ *http.Request) {
+				selectiontest.WriteOK(w, http.StatusOK, map[string]any{
+					"workflowId": "create-project-newapp-1", "status": state,
+					"currentActivity": nil, "failure": "project quota exceeded: 77/20",
+				})
+			})
+
+			projectPollInterval = time.Millisecond
+			projectPollTimeout = 10 * time.Minute // the real one: the fix is NOT a shorter wait
+			gitRun = noopGit
+			_, _, exec := newCmd(t, fake)
+
+			start := time.Now()
+			err := exec("create", "newapp", "--name", "newapp")
+
+			require.ErrorContains(t, err, "project quota exceeded: 77/20")
+			require.Less(t, time.Since(start), 5*time.Second, "it must not wait out the timeout on a DEAD saga")
+			// One status call: it stopped on the first failing tick, and it never
+			// went looking for environments of a project that was never created.
+			require.Equal(t, []string{
+				"POST /api/v2/projects",
+				"GET /api/v2/projects/create-status",
+			}, fake.Routes())
+		})
+	}
+}
+
+// "Still provisioning" and "dead" are DIFFERENT statements. A wait that runs out
+// while the saga is genuinely still running must say so — and must not claim a
+// failure that did not happen.
+func TestProjectCreate_TimeoutSaysStillProvisioning_NotFailed(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+			"projectId": "proj_new", "workflowId": "create-project-newapp-1", "runId": "r",
+		})
+	})
+	fake.Handle("GET /api/v2/projects/create-status", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, map[string]any{
+			"workflowId": "create-project-newapp-1", "status": "RUNNING",
+			"currentActivity": "ProvisionDatabase", "failure": nil,
+		})
+	})
+
+	projectPollInterval = time.Millisecond
+	projectPollTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { projectPollTimeout = 10 * time.Minute })
+	gitRun = noopGit
+	_, _, exec := newCmd(t, fake)
+
+	err := exec("create", "newapp", "--name", "newapp")
+
+	require.ErrorContains(t, err, "STILL provisioning")
+	require.ErrorContains(t, err, "ProvisionDatabase") // where it actually is
+	require.ErrorContains(t, err, "proj_new")          // how to pick it up again
+	require.NotContains(t, err.Error(), "failed", "a running saga must never be reported as a failure")
+}
+
+// The saga's last step is MarkActive, so a COMPLETED workflow means the rows are
+// there — but a read that lands before they are visible must be retried, not turned
+// into a failed create.
 func TestProjectCreate_WaitsThroughTheNotFoundWindow(t *testing.T) {
 	selectiontest.Chdir(t)
 	fake := selectiontest.New(t)
 	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
 		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
-			"projectId": "proj_new", "workflowId": "wf", "runId": "r",
+			"projectId": "proj_new", "workflowId": "create-project-newapp-1", "runId": "r",
+		})
+	})
+	fake.Handle("GET /api/v2/projects/create-status", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, map[string]any{
+			"workflowId": "create-project-newapp-1", "status": "COMPLETED",
+			"currentActivity": nil, "failure": nil,
 		})
 	})
 	polls := 0
 	fake.Handle("GET /api/v2/projects/proj_new/environments", func(w http.ResponseWriter, _ *http.Request) {
 		polls++
 		if polls < 3 {
-			// The saga has not committed the Project row yet.
 			selectiontest.WriteError(w, http.StatusNotFound, "not_found", "Project not found")
 			return
 		}
