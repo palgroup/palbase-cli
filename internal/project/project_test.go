@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"testing"
@@ -107,7 +108,9 @@ func TestProjectCreate_SendsNoOrganizationId(t *testing.T) {
 		fake.Environments["proj_new"] = []selection.Environment{
 			selectiontest.Env("env_new", "proj_new", "newappprod", "production", "production", true),
 		}
-		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "create-project-newapp-1", "runId": "r"})
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+			"projectId": "proj_new", "workflowId": "create-project-newapp-1", "runId": "r",
+		})
 	})
 
 	projectPollInterval = time.Millisecond
@@ -134,7 +137,10 @@ func TestProjectCreate_WritesConfigV2(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	fake := selectiontest.New(t)
 	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
-		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "wf", "runId": "r"})
+		// The 202 names the Project it is creating; the fake's seeded proj_1 IS it.
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+			"projectId": "proj_1", "workflowId": "wf", "runId": "r",
+		})
 	})
 	projectPollInterval = time.Millisecond
 	gitRun = noopGit
@@ -312,4 +318,162 @@ func TestEnsureGitRepo_MissingGitWarnsButDoesNotFail(t *testing.T) {
 	require.Empty(t, root)
 	require.Contains(t, w.String(), "warning")
 	require.Contains(t, w.String(), "git init -b main")
+}
+
+// ── the poll is O(1), not O(projects) ───────────────────────────────────────
+
+// THE regression this fix exists to prevent.
+//
+// `create` used to be handed a 202 with no project id, so it SEARCHED for what it
+// had just built: list every Project on the account, then fetch the environments of
+// EACH, looking for a ref that starts with the seed. On a real account (77 projects)
+// that is 78 requests per poll tick, and slow enough that the access token expired
+// mid-wait — `create` died with a 401 while its project provisioned fine.
+//
+// The 202 now NAMES the project, so the wait is ONE request per tick against ONE
+// project — whatever the account holds. The counts below are the lock: they must not
+// move when the account grows.
+func TestProjectCreate_PollsOnlyTheReturnedProject_OneRequestPerTick(t *testing.T) {
+	tests := []struct {
+		name           string
+		otherProjects  int
+		ticksUntilLive int
+	}{
+		{name: "empty account, ready on the first tick", otherProjects: 0, ticksUntilLive: 1},
+		{name: "3 other projects, ready on the third tick", otherProjects: 3, ticksUntilLive: 3},
+		{name: "77 other projects (the live account)", otherProjects: 77, ticksUntilLive: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			selectiontest.Chdir(t)
+			fake := selectiontest.New(t)
+			fake.Projects = nil
+			fake.Environments = map[string][]selection.Environment{}
+			for i := range tc.otherProjects {
+				id := fmt.Sprintf("proj_other%d", i)
+				fake.Projects = append(fake.Projects, selectiontest.Project{ID: id, Name: id, Mode: "platform"})
+				fake.Environments[id] = []selection.Environment{
+					selectiontest.Env("env_"+id, id, fmt.Sprintf("other%dm", i), "production", "production", true),
+				}
+			}
+
+			fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+				selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+					"projectId":      "proj_new",
+					"workflowId":     "create-project-newapp-1",
+					"runId":          "r",
+					"organizationId": "org_1",
+				})
+			})
+			// The environment exists from the first tick but only goes `active` on the
+			// tick'th one — the saga is still provisioning until then.
+			polls := 0
+			fake.Handle("GET /api/v2/projects/proj_new/environments", func(w http.ResponseWriter, _ *http.Request) {
+				polls++
+				status := "creating"
+				if polls >= tc.ticksUntilLive {
+					status = "active"
+				}
+				env := selectiontest.Env("env_new", "proj_new", "newappm", "production", "production", true)
+				env.Status = status
+				selectiontest.WriteOK(w, http.StatusOK, []selection.Environment{env})
+			})
+
+			projectPollInterval = time.Millisecond
+			gitRun = noopGit
+			out, _, exec := newCmd(t, fake)
+			require.NoError(t, exec("create", "newapp", "--name", "newapp", "--json"))
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+			require.Equal(t, "proj_new", got["project_id"], "the id comes from the 202, not from a search")
+			require.Equal(t, "env_new", got["environment_id"])
+
+			// The COUNT is the guard: POST + exactly one environments call per tick.
+			counts := map[string]int{}
+			for _, route := range fake.Routes() {
+				counts[route]++
+			}
+			require.Equal(t, 1, counts["POST /api/v2/projects"])
+			require.Equal(t, tc.ticksUntilLive, counts["GET /api/v2/projects/proj_new/environments"],
+				"exactly ONE environments call per poll tick")
+			require.Len(t, fake.Routes(), 1+tc.ticksUntilLive,
+				"the wait must make NO other request — its cost cannot depend on how many projects the account holds")
+
+			// And it NEVER lists the account's projects: that listing (and the
+			// per-project environments fan-out behind it) IS the O(projects) bug.
+			require.NotContains(t, fake.Routes(), "GET /api/v2/projects")
+			for _, route := range fake.Routes() {
+				require.NotContains(t, route, "proj_other", "no other project may be touched")
+			}
+		})
+	}
+}
+
+// The Project row is written BY THE SAGA (AllocateRef), so for the first seconds of
+// provisioning the id from the 202 names a row that does not exist yet: the poll must
+// wait through the 404 instead of failing the create.
+func TestProjectCreate_WaitsThroughTheNotFoundWindow(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+			"projectId": "proj_new", "workflowId": "wf", "runId": "r",
+		})
+	})
+	polls := 0
+	fake.Handle("GET /api/v2/projects/proj_new/environments", func(w http.ResponseWriter, _ *http.Request) {
+		polls++
+		if polls < 3 {
+			// The saga has not committed the Project row yet.
+			selectiontest.WriteError(w, http.StatusNotFound, "not_found", "Project not found")
+			return
+		}
+		selectiontest.WriteOK(w, http.StatusOK, []selection.Environment{
+			selectiontest.Env("env_new", "proj_new", "newappm", "production", "production", true),
+		})
+	})
+
+	projectPollInterval = time.Millisecond
+	gitRun = noopGit
+	out, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("create", "newapp", "--name", "newapp", "--json"))
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Equal(t, "env_new", got["environment_id"])
+	require.Equal(t, 3, polls)
+}
+
+// --async returns the handle without waiting — and now it can NAME what it started.
+func TestProjectCreate_AsyncPrintsTheProjectId(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{
+			"projectId": "proj_new", "workflowId": "wf_1", "runId": "r",
+		})
+	})
+
+	out, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("create", "newapp", "--name", "newapp", "--async"))
+
+	require.Contains(t, out.String(), "proj_new")
+	require.Contains(t, out.String(), "wf_1")
+	require.Equal(t, []string{"POST /api/v2/projects"}, fake.Routes(), "--async must not poll at all")
+}
+
+// A 202 with no project id is a broken contract, not a cue to go hunting for the
+// project: the search is what this command stopped doing.
+func TestProjectCreate_FailsLoudlyWhenTheServerReturnsNoProjectId(t *testing.T) {
+	selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "wf", "runId": "r"})
+	})
+
+	gitRun = noopGit
+	_, _, exec := newCmd(t, fake)
+	require.ErrorContains(t, exec("create", "newapp", "--name", "newapp"), "returned no project id")
+	require.Equal(t, []string{"POST /api/v2/projects"}, fake.Routes())
 }
