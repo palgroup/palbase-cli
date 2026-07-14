@@ -714,7 +714,7 @@ func preflightServeEnvironment(env selection.Environment) error {
 		return nil
 	case "creating", "provisioning", "migrating":
 		return fmt.Errorf("environment %q is still provisioning — re-run once `palbase env list` shows it active", env.Slug)
-	case "archived", "hibernated", "asleep", "paused", "stopped", "idle":
+	case "archived", "asleep", "paused", "stopped", "idle":
 		return fmt.Errorf("environment %q is not awake — wake it first:\n\n  palbase env wake %s", env.Slug, env.Slug)
 	case "deleted":
 		return fmt.Errorf("environment %q was deleted — recreate it:\n\n  palbase env create %s --from production", env.Slug, env.Slug)
