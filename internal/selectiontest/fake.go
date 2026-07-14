@@ -201,6 +201,17 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v2/projects":
 		WriteOK(w, http.StatusOK, f.Projects)
 		return
+	// The create-saga poll. The default is a saga that ALREADY finished — a test
+	// about something else should not have to model provisioning. Tests that care
+	// (still running / died) register their own handler.
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v2/projects/create-status":
+		WriteOK(w, http.StatusOK, map[string]any{
+			"workflowId":      r.URL.Query().Get("workflowId"),
+			"status":          "COMPLETED",
+			"currentActivity": nil,
+			"failure":         nil,
+		})
+		return
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/environments"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/projects/"), "/environments")
 		if envs, ok := f.Environments[id]; ok {

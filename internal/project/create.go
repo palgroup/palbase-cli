@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/selection"
@@ -108,9 +110,9 @@ Pass both GitHub flags or neither — exactly one is an error.`,
 				return nil
 			}
 
-			// Wait for the production Environment of THAT project — one call per tick.
+			// Wait on the SAGA — one call per tick — so a create that dies says why.
 			fmt.Fprintf(progress, "→ provisioning %s (project + production environment) ...\n", name)
-			created, err := waitForProject(ctx, r.REST, handle.ProjectID)
+			created, err := waitForProject(ctx, r.REST, handle.ProjectID, refSeed, handle.WorkflowID)
 			if err != nil {
 				return err
 			}
@@ -185,50 +187,71 @@ var (
 	projectPollTimeout  = 10 * time.Minute
 )
 
-// waitForProject polls ONE project's environments until its production
-// Environment is active: exactly ONE request per tick.
+// createStatus is `GET /api/v2/projects/create-status` — the provisioning saga's
+// own state. `Failure` is the reason it DIED (empty while it runs).
+type createStatus struct {
+	Status          string `json:"status"`
+	CurrentActivity string `json:"currentActivity"`
+	Failure         string `json:"failure"`
+}
+
+// waitForProject waits on the SAGA, not on a list that may never fill: exactly
+// ONE request per tick, whatever the account holds.
 //
-// It can do that because the 202 already named the project. It used to have to
-// SEARCH for it — list every project on the account, then fetch the environments
-// of each, hunting for a ref that starts with the seed. That is O(projects) per
-// tick (77 requests per tick on a real account), and it was slow enough that the
-// access token expired mid-wait and the create died with a 401 while the project
-// it had just made was provisioning perfectly well.
+// It polls the saga because the saga is the only thing that knows the create
+// FAILED. Watching the project's environments cannot tell "still provisioning"
+// apart from "died in the first second" — both are an empty list — so a create
+// killed non-retryably by a quota ("project quota exceeded: 77/20") used to sit
+// here silently for the full ten-minute timeout and then blame the wait.
 //
 // `rest` is the FACTORY, not a client: each tick re-resolves the credential, so a
 // wait that outlives the current access token refreshes it instead of 401ing.
-//
-// A 404 is "not yet": the saga writes the Project row (AllocateRef), so for the
-// first seconds of provisioning the id we hold names a row that does not exist.
-func waitForProject(ctx context.Context, rest func() REST, projectID string) (createdProject, error) {
+func waitForProject(ctx context.Context, rest func() REST, projectID, refSeed, workflowID string) (createdProject, error) {
 	deadline := time.Now().Add(projectPollTimeout)
 	ticker := time.NewTicker(projectPollInterval)
 	defer ticker.Stop()
 
+	path := fmt.Sprintf("/api/v2/projects/create-status?ref=%s&workflowId=%s",
+		url.QueryEscape(refSeed), url.QueryEscape(workflowID))
+
+	var last createStatus
 	for {
-		envs, err := selection.ListEnvironments(ctx, rest(), projectID)
-		if err != nil && !isNotFound(err) {
+		if err := rest().Do(ctx, http.MethodGet, path, nil, &last); err != nil {
 			return createdProject{}, err
 		}
-		for _, e := range envs {
-			if !e.IsProduction {
-				continue
+
+		switch last.Status {
+		case "COMPLETED":
+			// The saga is done (its last step is MarkActive), so the Project and
+			// its production Environment exist. Read them — and if the row is not
+			// visible for a beat, poll again rather than fail a create that worked.
+			created, err := productionEnvironment(ctx, rest(), projectID)
+			if err == nil {
+				return created, nil
 			}
-			if e.Status != "active" {
-				break // it exists but is still provisioning — wait for it
+			if !errors.Is(err, errEnvNotYetVisible) {
+				return createdProject{}, err
 			}
-			return createdProject{
-				ProjectID:       projectID,
-				EnvironmentID:   e.ID,
-				EnvironmentRef:  e.Ref,
-				EnvironmentSlug: e.Slug,
-			}, nil
+		case "FAILED", "TERMINATED", "CANCELED", "TIMED_OUT":
+			// It is dead, and it said why. Nothing to wait for.
+			reason := last.Failure
+			if reason == "" {
+				reason = fmt.Sprintf("provisioning %s (workflow %s)", strings.ToLower(last.Status), workflowID)
+			}
+			return createdProject{}, fmt.Errorf("project create failed: %s", reason)
 		}
 
 		if time.Now().After(deadline) {
+			// Honest: the saga was STILL RUNNING when we stopped looking. That is
+			// a different statement from "it failed", and it must not be dressed
+			// up as one.
+			step := last.CurrentActivity
+			if step == "" {
+				step = last.Status
+			}
 			return createdProject{}, fmt.Errorf(
-				"project %s is still provisioning after %s — check `palbase project status --project %s`",
-				projectID, projectPollTimeout, projectID)
+				"gave up waiting after %s — the project is STILL provisioning (workflow %s, at %s). It is not lost: run `palbase project use %s` once it finishes",
+				projectPollTimeout, workflowID, step, projectID)
 		}
 		select {
 		case <-ctx.Done():
@@ -238,8 +261,33 @@ func waitForProject(ctx context.Context, rest func() REST, projectID string) (cr
 	}
 }
 
-// isNotFound reports whether err is the API's 404. During a create it means the
-// saga has not committed the Project row yet — a state to wait through, not fail on.
+// productionEnvironment reads the Environment the finished saga created. A 404 is
+// still possible for a beat (the workflow closes before its last write is visible
+// to a fresh read), so it is retried on the same tick, never treated as failure.
+func productionEnvironment(ctx context.Context, rest REST, projectID string) (createdProject, error) {
+	envs, err := selection.ListEnvironments(ctx, rest, projectID)
+	if err != nil && !isNotFound(err) {
+		return createdProject{}, err
+	}
+	for _, e := range envs {
+		if !e.IsProduction {
+			continue
+		}
+		return createdProject{
+			ProjectID:       projectID,
+			EnvironmentID:   e.ID,
+			EnvironmentRef:  e.Ref,
+			EnvironmentSlug: e.Slug,
+		}, nil
+	}
+	return createdProject{}, errEnvNotYetVisible
+}
+
+// errEnvNotYetVisible: the saga completed but its production Environment is not
+// readable yet — poll again rather than fail a create that succeeded.
+var errEnvNotYetVisible = errors.New("production environment not visible yet")
+
+// isNotFound reports whether err is the API's 404.
 func isNotFound(err error) bool {
 	var apiErr *transport.APIError
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
