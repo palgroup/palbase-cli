@@ -9,8 +9,8 @@
 //
 // `env create staging --from production` is the SAFE COPY: the new Environment
 // starts from the source's schema and non-secret config. It copies NO production
-// rows and NO secret plaintext (--with-data and --include-secret opt into each,
-// explicitly), and it maps no Git branch unless --git-branch says so.
+// rows or secret plaintext and maps no Git branch. Row-data copy is unavailable
+// here; secret assignment, Git mapping, and test users use explicit surfaces.
 package env
 
 import (
@@ -221,44 +221,37 @@ func statusCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-// createCmd wires `palbase env create <slug> --from <source>`.
+// createCmd wires `palbase env create <name> --from <source>`.
 //
 // --from names the SOURCE ENVIRONMENT (spec §3.2). It never names a Git branch.
-// The copy is safe by default: schema + non-secret config only. Production rows
-// (--with-data) and individual secret values (--include-secret KEY) are opt-in,
-// one explicit flag at a time, because a staging environment that silently
-// carries production PII or a live payment key is the failure this contract
-// exists to prevent.
+// The copy is unconditionally safe: schema + non-secret config only. Data copy,
+// secret assignment, Git mapping and test-user creation deliberately are not
+// flags on this command (locked spec §3.2).
 func createCmd(r Resolvers) *cobra.Command {
 	var (
-		from       string
-		kind       string
-		name       string
-		gitBranch  string
-		withData   bool
-		secretKeys []string
-		seedUsers  int
-		async      bool
-		jsonOut    bool
+		from    string
+		async   bool
+		jsonOut bool
 	)
 	cmd := &cobra.Command{
-		Use:   "create <slug> --from <environment>",
+		Use:   "create <name> --from <environment>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Create an environment from a source environment (schema + non-secret config)",
 		Long: `Create a new environment in the selected project, copied from --from.
 
-SAFE COPY (the default): the new environment gets the source's SCHEMA and its
+SAFE COPY: the new environment gets the source's SCHEMA and its
 NON-SECRET config. It gets NO production rows, NO secret plaintext, and no Git
 branch mapping.
 
-  --with-data           also copy the source's table data (opt-in)
-  --include-secret KEY  also copy ONE secret's value (repeatable, opt-in)
-  --git-branch NAME     map a Git branch to auto-deploy into this environment
-
---from is a source ENVIRONMENT (slug or ref), never a Git branch.`,
+Data copy is not available through this command. Secret assignment, Git mapping,
+and test-user creation use their own explicit surfaces. --from is a source
+ENVIRONMENT (slug or ref), never a Git branch.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			slug := args[0]
+			name := args[0]
 			ctx := cmd.Context()
+			if name != "staging" && name != "dev" && name != "preprod" {
+				return fmt.Errorf("environment must be staging, dev, or preprod; got %q", name)
+			}
 			if from == "" {
 				return fmt.Errorf("--from is required: name the source environment to copy schema + non-secret config from (e.g. --from production)")
 			}
@@ -266,35 +259,12 @@ branch mapping.
 			if err != nil {
 				return err
 			}
-			envs, err := selection.ListEnvironments(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			source := findEnv(envs, from)
-			if source == nil {
-				return fmt.Errorf("no source environment %q in this project — have: %s", from, slugsOf(envs))
-			}
-			if name == "" {
-				name = slug
-			}
-
-			// The ref is ALLOCATED BY THE SERVER from the Project's seed. The CLI names a
-			// SLUG and never computes a ref: the old deriveRef tried to strip the source's
-			// SLUG WORD ("production") off its ref ("e2e140357m"), found nothing to strip,
-			// and appended — asking to provision `e2e140357msta`. The slug word and the ref
-			// suffix are different things; only the server, which holds the seed, maps one
-			// to the other.
+			// The locked API body has exactly these two snake_case fields. The source is
+			// a Project-scoped slug or ref; resolving it on the server avoids a TOCTOU
+			// lookup and keeps cross-Project identifiers non-enumerating.
 			body := map[string]any{
-				"sourceEnvironmentRef": source.Ref,
-				"name":                 name,
-				"slug":                 slug,
-				"kind":                 kind,
-				"withData":             withData,
-				"includeSecretKeys":    orEmpty(secretKeys),
-				"testUserSeedCount":    seedUsers,
-			}
-			if gitBranch != "" {
-				body["sourceGitBranch"] = gitBranch
+				"source_environment_ref": from,
+				"name":                   name,
 			}
 
 			var handle struct {
@@ -310,13 +280,13 @@ branch mapping.
 				if jsonOut {
 					return encodeJSON(out, handle)
 				}
-				fmt.Fprintf(out, "✓ provisioning started for environment %s\n", slug)
+				fmt.Fprintf(out, "✓ provisioning started for environment %s\n", name)
 				fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
 				return nil
 			}
 
-			fmt.Fprintf(progress, "→ provisioning %s from %s (schema + non-secret config) ...\n", slug, source.Slug)
-			created, err := waitForEnvironmentCreate(ctx, r.REST, projectID, slug, handle.WorkflowID)
+			fmt.Fprintf(progress, "→ provisioning %s from %s (schema + non-secret config) ...\n", name, from)
+			created, err := waitForEnvironmentCreate(ctx, r.REST, projectID, name, handle.WorkflowID)
 			if err != nil {
 				return err
 			}
@@ -329,12 +299,6 @@ branch mapping.
 		},
 	}
 	cmd.Flags().StringVar(&from, "from", "", "Source ENVIRONMENT to copy schema + non-secret config from (required)")
-	cmd.Flags().StringVar(&kind, "kind", "staging", "Environment kind: staging | dev | preprod")
-	cmd.Flags().StringVar(&name, "name", "", "Display name (default: the slug)")
-	cmd.Flags().StringVar(&gitBranch, "git-branch", "", "Git branch that auto-deploys into this environment (never a runtime selector)")
-	cmd.Flags().BoolVar(&withData, "with-data", false, "Also copy the source's table DATA (default: schema only — no production rows)")
-	cmd.Flags().StringSliceVar(&secretKeys, "include-secret", nil, "Also copy this secret's value (repeatable; default: no secret plaintext is copied)")
-	cmd.Flags().IntVar(&seedUsers, "seed-users", 0, "Seed N test users into the new environment")
 	cmd.Flags().BoolVar(&async, "async", false, "Return the workflow handle immediately instead of waiting")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
@@ -568,15 +532,6 @@ func str(p *string) string {
 		return "-"
 	}
 	return *p
-}
-
-// orEmpty keeps a nil slice out of the JSON body: `includeSecretKeys` is a
-// strict array on the server and `null` is not one.
-func orEmpty(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }
 
 func encodeJSON(w io.Writer, v any) error {

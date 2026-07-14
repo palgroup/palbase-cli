@@ -124,8 +124,8 @@ func TestEnv_HitsTheV2Paths(t *testing.T) {
 }
 
 // `env create staging --from production` is the SAFE COPY. The body must carry
-// the SOURCE ENVIRONMENT ref, and it must NOT opt into production rows or secret
-// plaintext by default — that default is the whole security property.
+// the SOURCE ENVIRONMENT ref, with no hidden create-time opt-in for production
+// rows, secret plaintext, Git mapping, or fake test-user seeding.
 func TestEnvCreate_SafeCopyByDefault(t *testing.T) {
 	const base = "/api/v2/projects/proj_1/environments"
 	dir := selectiontest.Chdir(t)
@@ -145,23 +145,20 @@ func TestEnvCreate_SafeCopyByDefault(t *testing.T) {
 	// client names a SLUG. Sending a ref is the deriveRef bug that minted
 	// `e2e140357msta`.
 	require.Equal(t, map[string]any{
-		"sourceEnvironmentRef": "app1prod",
-		"name":                 "staging",
-		"slug":                 "staging",
-		"kind":                 "staging",
-		"withData":             false,
-		"includeSecretKeys":    []any{},
-		"testUserSeedCount":    float64(0),
+		"source_environment_ref": "production",
+		"name":                   "staging",
 	}, req.Body)
 	require.NotContains(t, req.Body, "ref", "the client must not compute or send a ref — the server allocates it")
-	// No git branch is mapped unless asked for: a Git branch is never a selector.
-	require.NotContains(t, req.Body, "sourceGitBranch")
+	require.NotContains(t, req.Body, "source_git_branch")
+	require.NotContains(t, req.Body, "with_data")
+	require.NotContains(t, req.Body, "include_secret_keys")
+	require.NotContains(t, req.Body, "test_user_seed_count")
 
 	// The created env is found by the SLUG the client chose; its ref is whatever the
-	// server minted (the fake mints app1+slug[:3]).
+	// server minted (the fake mirrors the canonical staging suffix).
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
-	require.Equal(t, "app1sta", got["ref"])
+	require.Equal(t, "app1s", got["ref"])
 	require.Equal(t, "staging", got["slug"])
 }
 
@@ -173,40 +170,33 @@ func TestEnvCreate_SafeCopyByDefault(t *testing.T) {
 func provisions(f *selectiontest.Fake) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Slug string `json:"slug"`
-			Kind string `json:"kind"`
+			Name string `json:"name"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		suffix := body.Slug
-		if len(suffix) > 3 {
-			suffix = suffix[:3]
-		}
+		suffixes := map[string]string{"staging": "s", "dev": "d", "preprod": "pp"}
+		suffix := suffixes[body.Name]
 		ref := "app1" + suffix
 		f.Environments["proj_1"] = append(f.Environments["proj_1"],
-			selectiontest.Env("env_"+body.Slug, "proj_1", ref, body.Slug, body.Kind, false))
+			selectiontest.Env("env_"+body.Name, "proj_1", ref, body.Name, body.Name, false))
 		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "create-environment-" + ref})
 	}
 }
 
-func TestEnvCreate_OptInsAreExplicit(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments"
-	dir := selectiontest.Chdir(t)
-	selectiontest.WriteConfig(t, dir, nil)
-
-	fake := selectiontest.New(t)
-	fake.Handle("POST "+base, provisions(fake))
-	envPollInterval, envPollTimeout = time.Millisecond, 5*time.Second
-
-	_, exec := newCmd(t, fake)
-	require.NoError(t, exec("create", "staging", "--from", "production",
-		"--with-data", "--include-secret", "STRIPE_KEY",
-		"--git-branch", "staging", "--json"))
-
-	req, _ := fake.Find("POST " + base)
-	require.Equal(t, true, req.Body["withData"])
-	require.Equal(t, []any{"STRIPE_KEY"}, req.Body["includeSecretKeys"])
-	require.Equal(t, "staging", req.Body["sourceGitBranch"])
-	require.NotContains(t, req.Body, "ref", "there is no --ref: the server allocates the ref")
+func TestEnvCreate_RejectsUnsafeLegacyFlags(t *testing.T) {
+	for _, flag := range []string{
+		"--with-data", "--include-secret", "--git-branch", "--seed-users",
+		"--kind", "--name", "--ref",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			dir := selectiontest.Chdir(t)
+			selectiontest.WriteConfig(t, dir, nil)
+			fake := selectiontest.New(t)
+			_, exec := newCmd(t, fake)
+			err := exec("create", "staging", "--from", "production", flag)
+			require.ErrorContains(t, err, "unknown flag")
+			require.Empty(t, fake.Routes(), "a rejected flag must send no API request")
+		})
+	}
 }
 
 func TestEnvCreate_RequiresFrom(t *testing.T) {
@@ -217,14 +207,33 @@ func TestEnvCreate_RequiresFrom(t *testing.T) {
 	require.ErrorContains(t, exec("create", "staging"), "--from is required")
 }
 
-func TestEnvCreate_UnknownSourceNamesTheRealOnes(t *testing.T) {
+func TestEnvCreate_RejectsUnsupportedDestinationNames(t *testing.T) {
+	for _, name := range []string{"production", "preview", "qa"} {
+		t.Run(name, func(t *testing.T) {
+			dir := selectiontest.Chdir(t)
+			selectiontest.WriteConfig(t, dir, nil)
+			fake := selectiontest.New(t)
+			_, exec := newCmd(t, fake)
+			err := exec("create", name, "--from", "production")
+			require.ErrorContains(t, err, "must be staging, dev, or preprod")
+			require.Empty(t, fake.Routes())
+		})
+	}
+}
+
+func TestEnvCreate_UnknownSourceIsResolvedByServer(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	selectiontest.WriteConfig(t, dir, nil)
 	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects/proj_1/environments", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteError(w, http.StatusNotFound, "not_found", "Source environment not found")
+	})
 	_, exec := newCmd(t, fake)
 	err := exec("create", "staging", "--from", "prod")
-	require.ErrorContains(t, err, `no source environment "prod"`)
-	require.ErrorContains(t, err, "production")
+	require.ErrorContains(t, err, "Source environment not found")
+	req, ok := fake.Find("POST /api/v2/projects/proj_1/environments")
+	require.True(t, ok)
+	require.Equal(t, "prod", req.Body["source_environment_ref"])
 }
 
 func TestEnvUse_RewritesOnlyTheEnvironmentId(t *testing.T) {
