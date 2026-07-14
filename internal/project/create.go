@@ -2,12 +2,13 @@ package project
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/selection"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -76,6 +77,7 @@ Pass both GitHub flags or neither — exactly one is an error.`,
 			}
 
 			var handle struct {
+				ProjectID      string `json:"projectId"`
 				WorkflowID     string `json:"workflowId"`
 				RunID          string `json:"runId"`
 				OrganizationID string `json:"organizationId"`
@@ -83,6 +85,13 @@ Pass both GitHub flags or neither — exactly one is an error.`,
 			ctx := cmd.Context()
 			if err := r.REST().Do(ctx, http.MethodPost, "/api/v2/projects", body, &handle); err != nil {
 				return err
+			}
+			// The 202 NAMES the Project it is creating: the server mints the id before
+			// it starts the saga. Everything after this addresses that one id. An empty
+			// one is a server/contract break, not something to paper over by searching
+			// for the project — that search is exactly what this command stopped doing.
+			if handle.ProjectID == "" {
+				return fmt.Errorf("server accepted the create but returned no project id — upgrade the CLI or report this (workflow %s)", handle.WorkflowID)
 			}
 
 			out := cmd.OutOrStdout()
@@ -93,18 +102,15 @@ Pass both GitHub flags or neither — exactly one is an error.`,
 					return encodeJSON(out, handle)
 				}
 				fmt.Fprintf(out, "✓ provisioning started (%s, seed %s, repository %s)\n", name, refSeed, provider)
+				fmt.Fprintf(out, "  project:  %s\n", handle.ProjectID)
 				fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
-				fmt.Fprintln(out, "  next:     palbase project list   # then: palbase project use <projectId>")
+				fmt.Fprintf(out, "  next:     palbase project use %s   # once provisioning finishes\n", handle.ProjectID)
 				return nil
 			}
 
-			// The 202 carries NO project id: the saga writes the row. So we wait for
-			// the production Environment the saga provisions — its ref starts with
-			// the seed we chose, which is what makes it identifiable — and that
-			// resolves the project id. Without this, `create` would hand the user a
-			// workflow id and no way to name what it built.
+			// Wait for the production Environment of THAT project — one call per tick.
 			fmt.Fprintf(progress, "→ provisioning %s (project + production environment) ...\n", name)
-			created, err := waitForProject(ctx, r.REST(), refSeed)
+			created, err := waitForProject(ctx, r.REST, handle.ProjectID)
 			if err != nil {
 				return err
 			}
@@ -179,52 +185,50 @@ var (
 	projectPollTimeout  = 10 * time.Minute
 )
 
-// waitForProject polls until the saga's production Environment is active, and
-// returns the project it hangs under.
+// waitForProject polls ONE project's environments until its production
+// Environment is active: exactly ONE request per tick.
 //
-// The seed is the handle: `environments.ref` keeps the `<seed><envSlug>` wire
-// format, so the Environment this create provisions is the one whose ref starts
-// with the seed we passed. (This is exactly how the server authorizes its own
-// create-status poll.) The Project row does not exist for the first part of the
-// saga, so polling the project list alone would race.
-func waitForProject(ctx context.Context, rest REST, refSeed string) (createdProject, error) {
+// It can do that because the 202 already named the project. It used to have to
+// SEARCH for it — list every project on the account, then fetch the environments
+// of each, hunting for a ref that starts with the seed. That is O(projects) per
+// tick (77 requests per tick on a real account), and it was slow enough that the
+// access token expired mid-wait and the create died with a 401 while the project
+// it had just made was provisioning perfectly well.
+//
+// `rest` is the FACTORY, not a client: each tick re-resolves the credential, so a
+// wait that outlives the current access token refreshes it instead of 401ing.
+//
+// A 404 is "not yet": the saga writes the Project row (AllocateRef), so for the
+// first seconds of provisioning the id we hold names a row that does not exist.
+func waitForProject(ctx context.Context, rest func() REST, projectID string) (createdProject, error) {
 	deadline := time.Now().Add(projectPollTimeout)
 	ticker := time.NewTicker(projectPollInterval)
 	defer ticker.Stop()
 
-	seen := false
 	for {
-		projects := []selection.Project{}
-		if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects", nil, &projects); err != nil {
+		envs, err := selection.ListEnvironments(ctx, rest(), projectID)
+		if err != nil && !isNotFound(err) {
 			return createdProject{}, err
 		}
-		for _, p := range projects {
-			envs, err := selection.ListEnvironments(ctx, rest, p.ID)
-			if err != nil {
-				return createdProject{}, err
+		for _, e := range envs {
+			if !e.IsProduction {
+				continue
 			}
-			for _, e := range envs {
-				if !strings.HasPrefix(e.Ref, refSeed) || !e.IsProduction {
-					continue
-				}
-				seen = true
-				if e.Status != "active" {
-					continue
-				}
-				return createdProject{
-					ProjectID:       p.ID,
-					EnvironmentID:   e.ID,
-					EnvironmentRef:  e.Ref,
-					EnvironmentSlug: e.Slug,
-				}, nil
+			if e.Status != "active" {
+				break // it exists but is still provisioning — wait for it
 			}
+			return createdProject{
+				ProjectID:       projectID,
+				EnvironmentID:   e.ID,
+				EnvironmentRef:  e.Ref,
+				EnvironmentSlug: e.Slug,
+			}, nil
 		}
 
 		if time.Now().After(deadline) {
-			if seen {
-				return createdProject{}, fmt.Errorf("project %q is still provisioning after %s — check `palbase project list`", refSeed, projectPollTimeout)
-			}
-			return createdProject{}, fmt.Errorf("project %q did not appear after %s — provisioning failed or was rolled back; check Studio", refSeed, projectPollTimeout)
+			return createdProject{}, fmt.Errorf(
+				"project %s is still provisioning after %s — check `palbase project status --project %s`",
+				projectID, projectPollTimeout, projectID)
 		}
 		select {
 		case <-ctx.Done():
@@ -232,4 +236,11 @@ func waitForProject(ctx context.Context, rest REST, refSeed string) (createdProj
 		case <-ticker.C:
 		}
 	}
+}
+
+// isNotFound reports whether err is the API's 404. During a create it means the
+// saga has not committed the Project row yet — a state to wait through, not fail on.
+func isNotFound(err error) bool {
+	var apiErr *transport.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }

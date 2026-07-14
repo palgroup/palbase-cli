@@ -272,3 +272,109 @@ func TestErrNotSelected_IsMatchable(t *testing.T) {
 	var target selection.ErrNotSelected
 	require.True(t, errors.As(selection.ErrNotSelected{}, &target))
 }
+
+// A v1 `ref` is the OLD env-CONTAINER ref, NOT an environment ref: migration 129
+// folded container+branch into one environment whose ref is the old ENDPOINT ref,
+// `<ref><branchSlug>`. This is the real todoapp config, and it is what every
+// existing user has on disk — before the fix it resolved to nothing and `palbase
+// status` died with "no environment with ref "todoappm8p6z" is visible to you".
+func TestMigrate_V1RefIsTheBaseOfTheEnvironmentRef(t *testing.T) {
+	dir := t.TempDir()
+	selectiontest.WriteRawConfig(t, dir, `{"ref":"todoappm8p6z","default_env":"main"}`)
+
+	fake := selectiontest.New(t)
+	fake.Projects = []selectiontest.Project{{ID: "proj_todo", Name: "todoapp", Mode: "platform"}}
+	fake.Environments = map[string][]selection.Environment{
+		"proj_todo": {selectiontest.Env("env_todo", "proj_todo", "todoappm8p6zm", "production", "production", true)},
+	}
+	var warn bytes.Buffer
+	r := fake.Resolver(&warn)
+	r.Dir = dir
+
+	cfg, err := r.Config(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "proj_todo", cfg.ProjectID)
+	require.Equal(t, "env_todo", cfg.EnvironmentID)
+	require.Contains(t, warn.String(), "migrated")
+}
+
+// Several environments share the base ref (the old branches). `default_env` says
+// which one this directory meant: v1 `main` is the branch the cutover folded into
+// the PRODUCTION environment.
+func TestMigrate_AmbiguousBaseRefIsBrokenByDefaultEnv(t *testing.T) {
+	tests := []struct {
+		name       string
+		defaultEnv string
+		wantEnv    string
+	}{
+		{name: "main is the production environment", defaultEnv: "main", wantEnv: "env_prod"},
+		{name: "a named branch matches its environment", defaultEnv: "staging", wantEnv: "env_stg"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			selectiontest.WriteRawConfig(t, dir,
+				`{"ref":"abc1","default_env":"`+tc.defaultEnv+`"}`)
+
+			fake := selectiontest.New(t)
+			fake.Projects = []selectiontest.Project{{ID: "proj_a", Name: "a", Mode: "platform"}}
+			fake.Environments = map[string][]selection.Environment{
+				"proj_a": {
+					selectiontest.Env("env_prod", "proj_a", "abc1m", "production", "production", true),
+					selectiontest.Env("env_stg", "proj_a", "abc1s", "staging", "staging", false),
+				},
+			}
+			r := fake.Resolver(&bytes.Buffer{})
+			r.Dir = dir
+
+			cfg, err := r.Config(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEnv, cfg.EnvironmentID)
+		})
+	}
+}
+
+// An UNRESOLVABLE tie is an error that LISTS the candidates. Guessing would point
+// `palbase push` at the wrong environment — silently deploying to staging (or
+// production) is worse than refusing.
+func TestMigrate_UnresolvableAmbiguityErrorsWithCandidates(t *testing.T) {
+	dir := t.TempDir()
+	selectiontest.WriteRawConfig(t, dir, `{"ref":"abc1","default_env":"feature-x"}`)
+
+	fake := selectiontest.New(t)
+	fake.Projects = []selectiontest.Project{{ID: "proj_a", Name: "a", Mode: "platform"}}
+	fake.Environments = map[string][]selection.Environment{
+		"proj_a": {
+			selectiontest.Env("env_prod", "proj_a", "abc1m", "production", "production", true),
+			selectiontest.Env("env_stg", "proj_a", "abc1s", "staging", "staging", false),
+		},
+	}
+	r := fake.Resolver(&bytes.Buffer{})
+	r.Dir = dir
+
+	_, err := r.Config(context.Background())
+	require.ErrorContains(t, err, "matches 2 environments")
+	require.ErrorContains(t, err, "abc1m")
+	require.ErrorContains(t, err, "abc1s")
+	require.ErrorContains(t, err, "palbase project use")
+}
+
+// The base ref must match on a SLUG BOUNDARY, never on a bare prefix: with ref
+// "app1", the NEIGHBOURING project "app12"'s production environment is "app12m".
+// A prefix scan would migrate this directory onto a stranger's project and the next
+// `palbase push` would deploy there.
+func TestMigrate_NeighbouringProjectRefIsNotAMatch(t *testing.T) {
+	dir := t.TempDir()
+	selectiontest.WriteRawConfig(t, dir, `{"ref":"app1","default_env":"main"}`)
+
+	fake := selectiontest.New(t)
+	fake.Projects = []selectiontest.Project{{ID: "proj_neighbour", Name: "app12", Mode: "platform"}}
+	fake.Environments = map[string][]selection.Environment{
+		"proj_neighbour": {selectiontest.Env("env_n", "proj_neighbour", "app12m", "production", "production", true)},
+	}
+	r := fake.Resolver(&bytes.Buffer{})
+	r.Dir = dir
+
+	_, err := r.Config(context.Background())
+	require.ErrorContains(t, err, `no environment with ref "app1"`)
+}
