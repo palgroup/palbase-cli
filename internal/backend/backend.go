@@ -1,16 +1,12 @@
 // Package backend provides the top-level backend lifecycle commands
-// (serve / list / rollback / status / types / mobile). palbase IS the
-// backend CLI — there is no `backend` parent command. These cover the
-// local dev + observation loop for the per-project backend-runtime pod.
+// (serve / push / pull / clone / deploys / rollback / status / spec / types /
+// the platform link commands). palbase IS the backend CLI — there is no
+// `backend` parent command.
 //
-// Deploy is GitHub-native: code flows via `git push` to the project's
-// GitHub repo → webhook → orchestrator deploys (and applies the
-// config-as-code committed in the repo). The CLI no longer pushes/pulls
-// a tar bundle.
-//
-// All remote calls go through Studio's tRPC layer via the studio
-// package — never directly to br-<ref> — so project-membership + the
-// backend_enabled gate are enforced server-side.
+// EVERY one of them acts on the SELECTED ENVIRONMENT (`palbase env use`,
+// overridable with the global --project / --environment). There is no
+// `--branch`: the Palbase branch is gone as a resource, and a Git branch is
+// never a runtime selector — it only maps to an Environment for auto-deploy.
 package backend
 
 import (
@@ -37,6 +33,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/secret"
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -70,14 +67,13 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 //go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/extract_meta.js
 var devServerFS embed.FS
 
-// REST is the subset of the Management-API transport the mode-aware deploy
-// verbs (push/pull/clone) use: PostMultipart for the platform-mode tarball
-// deploy and Do for the project lookup. *transport.Client satisfies it; tests
-// substitute a stub. Kept as a narrow interface (mirroring project.REST) so the
-// backend package doesn't depend on internal/transport and stays testable.
+// REST is the subset of the Management-API transport the provider-aware deploy
+// verbs (push/pull/clone) and the v2 reads use: PostMultipart for the
+// palbase-provider tarball deploy (with its Idempotency-Key) and Do for
+// everything else. *transport.Client satisfies it; tests substitute a stub.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
-	PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error)
+	PostMultipart(ctx context.Context, path string, tarball []byte, fields map[string]string, idempotencyKey string) ([]byte, error)
 }
 
 // Resolvers returns lazy accessors for the shared CLI globals, so the
@@ -92,6 +88,19 @@ type Resolvers struct {
 	// Lazy (a func) like the other accessors, and only CALLED at RunE time —
 	// constructing the command tree with a zero-value Resolvers must not panic.
 	REST func() REST
+	// Selection resolves (--project, --environment, .palbase/config.json) into
+	// the Project + Environment every command below acts on.
+	Selection func() *selection.Resolver
+}
+
+// resolve is the one-liner every RunE opens with. It exists so a nil Selection
+// accessor (the structural registration tests build the tree with a zero-value
+// Resolvers) fails with a clear error instead of a nil dereference.
+func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
+	if r.Selection == nil || r.Selection() == nil {
+		return selection.Selection{}, errors.New("no project selected — run `palbase project use <projectId>`")
+	}
+	return r.Selection().Resolve(ctx)
 }
 
 // Commands returns the flat, top-level command set the root mounts
@@ -179,10 +188,9 @@ No-op when the project has no db/schema.ts.`,
 	}
 }
 
-// backendTarget is the resolved (URL + publishable key) for a project's
-// backend at a given branch. Used by lookupBackendTarget (which `palbase spec`
-// and `palbase web link`'s artifact fetch share) to address the deployed
-// tenant host.
+// backendTarget is the resolved (URL + publishable key) for one ENVIRONMENT's
+// backend. Used by lookupBackendTarget (which `palbase spec` and the link
+// commands' artifact fetch share) to address the deployed tenant host.
 type backendTarget struct {
 	URL    string
 	APIKey string
@@ -200,90 +208,8 @@ func (s *stringFlag) String() string     { return s.value }
 func (s *stringFlag) Set(v string) error { s.value = v; return nil }
 func (s *stringFlag) Type() string       { return "string" }
 
-// resolveOrLinkRef wraps auth.ResolveProjectRef with an interactive picker
-// that reads project.list, prompts the user when there's >1, and writes the
-// chosen ref to .palbase/config.json so subsequent runs are silent.
-//
-// The picker fires only when stdin is a TTY — non-interactive callers
-// (CI, piped scripts) get the original auth.ErrNotLinked back so they can
-// fail loudly instead of hanging waiting for input.
-func resolveOrLinkRef(ctx context.Context, override string, c *studio.Client, out io.Writer) (string, error) {
-	ref, err := auth.ResolveProjectRef(override)
-	if err == nil {
-		return ref, nil
-	}
-	if !errors.Is(err, auth.ErrNotLinked) {
-		return "", err
-	}
-
-	picked, err := pickProject(ctx, override, c, out)
-	if err != nil {
-		return "", err
-	}
-
-	// Default to the project's main branch: a fresh link should pull/serve
-	// against main, not staging. --branch selects another branch per command.
-	if err := auth.SaveProjectConfig(&auth.ProjectConfig{Ref: picked.Ref, DefaultEnv: "main"}); err != nil {
-		return "", fmt.Errorf("save .palbase/config.json: %w", err)
-	}
-	fmt.Fprintf(out, "✓ Linked to %s (%s)\n", picked.Name, picked.Ref)
-	return picked.Ref, nil
-}
-
-// pickProject resolves which project the caller should act on when the cwd
-// isn't linked: it lists the user's projects and selects one. With a
-// non-empty override it matches by ref (CI/scripted path); otherwise it
-// auto-picks the only project or prompts interactively. It does NOT write
-// any config — the caller persists the link in the cwd.
-func pickProject(ctx context.Context, override string, c *studio.Client, out io.Writer) (*auth.Project, error) {
-	if override == "" && !isInteractive() {
-		return nil, fmt.Errorf("project not linked — pass --ref to select a project in a non-interactive shell")
-	}
-
-	var rows []auth.Project
-	if listErr := c.Query(ctx, "project.list", nil, &rows); listErr != nil {
-		return nil, fmt.Errorf("auto-link: %w", listErr)
-	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("no projects in your account — create one at the Palbase Studio dashboard first")
-	}
-
-	// --ref override: match by ref, no prompt (works under CI / piped input).
-	if override != "" {
-		for i := range rows {
-			if rows[i].Ref == override {
-				return &rows[i], nil
-			}
-		}
-		return nil, fmt.Errorf("no project with ref %q found in your account", override)
-	}
-
-	if len(rows) == 1 {
-		// Mode-neutral wording: pickProject feeds both the in-place link
-		// ("✓ Linked to …" follows) and clone-mode ("Cloning … into …/"),
-		// so this line must read sensibly before either.
-		fmt.Fprintf(out, "Using your only project: %s (%s)\n", rows[0].Name, rows[0].Ref)
-		return &rows[0], nil
-	}
-
-	fmt.Fprintln(out, "Select a project:")
-	for i, p := range rows {
-		fmt.Fprintf(out, "  %d) %s (%s)\n", i+1, p.Name, p.Ref)
-	}
-	fmt.Fprint(out, "Enter number: ")
-	var choice int
-	if _, scanErr := fmt.Fscan(os.Stdin, &choice); scanErr != nil {
-		return nil, fmt.Errorf("invalid selection: %w", scanErr)
-	}
-	if choice < 1 || choice > len(rows) {
-		return nil, fmt.Errorf("invalid selection: %d", choice)
-	}
-	return &rows[choice-1], nil
-}
-
-// isInteractive returns true when stdin is a TTY. Used by
-// resolveOrLinkRef to gate the picker — running under CI / piped input
-// shouldn't block waiting for `Enter number:`.
+// isInteractive returns true when stdin is a TTY. Prompts fire only when
+// interactive; a piped/CI shell must pass the explicit flag instead.
 func isInteractive() bool {
 	// term.IsTerminal, not a ModeCharDevice check: /dev/null IS a char
 	// device, so `palbase ios link </dev/null` used to open the interactive
@@ -385,20 +311,6 @@ func ensureDevServerTools(dir string) {
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("  warning: could not install %s — /openapi.json will omit request/response schemas (run `npm i %s` manually)\n", pkg, pkg)
 	}
-}
-
-// resolveDevProjectRef picks the ref the dev server should build its
-// <ref>.<host> URL from. Kong only routes the branch endpoint_ref
-// subdomain, so prefer the endpoint_ref apikey.reveal returns. When
-// reveal was skipped (ref "" / "local") or failed, endpointRef is empty
-// and we fall back to the bare ref — dev still launches and the module
-// clients (ctx.docs/…) surface a clear downstream error rather than
-// hard-failing here.
-func resolveDevProjectRef(ref, endpointRef string) string {
-	if endpointRef != "" {
-		return endpointRef
-	}
-	return ref
 }
 
 // freeDevPort best-effort frees `port` before starting the dev server, so a
@@ -513,10 +425,10 @@ func processComm(pid int) string {
 
 func newDevCmd(r Resolvers) *cobra.Command {
 	var port int
-	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run controllers/ locally with hot reload",
+		Args:  cobra.NoArgs,
+		Short: "Run controllers/ locally against the selected environment",
 		Long: `Serve the project's controllers/ from a local Node.js dev server with
 hot reload — the local equivalent of the deployed backend-runtime pod.
 Routes (controller basePath + route.path), the per-request req, the imported
@@ -593,44 +505,41 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				return fmt.Errorf("extract dev server: %w", err)
 			}
 
-			ref, _ := auth.ResolveProjectRef("") // best-effort; default ref to "local" inside the JS
-
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			// Preflight: serve runs your controllers LOCALLY but proxies
-			// Database and ctx.* (docs/storage/…) to the DEPLOYED branch. So a
-			// branch that isn't a live, active deployment can't back local dev
-			// — fail fast with an actionable message ("push first" / "wake it")
-			// instead of an opaque reveal warning + a half-working server.
-			branchName := devBranchValue(branchFlag) // "main" or the active/flag branch
-			if ref != "" && ref != "local" {
-				if err := preflightServeBranch(ctx, r.Studio(), ref, branchName); err != nil {
+			// serve runs your controllers LOCALLY but proxies Database and the
+			// module clients to the SELECTED ENVIRONMENT. Without a selection it
+			// still boots (offline dev), it just cannot reach any of them.
+			sel, selErr := r.resolve(ctx)
+			if selErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v — Database and the module clients will be unavailable\n", selErr)
+			}
+			ref := sel.Ref()
+
+			// Preflight: an environment that is not a live, active deployment
+			// cannot back local dev — fail fast with an actionable message
+			// ("push first" / "wake it") instead of a half-working server.
+			if ref != "" {
+				if err := preflightServeEnvironment(sel.Environment); err != nil {
 					return err
 				}
 			}
-			// Migration awareness: because serve uses the deployed branch DB,
-			// local db/schema.ts or db/migrations/ changes that aren't pushed
-			// won't be reflected. Warn (never block) so the gap is obvious.
-			warnUndeployedSchema(cwd, branchName, os.Stderr)
+			// Migration awareness: because serve uses the DEPLOYED environment's DB,
+			// local db/schema.ts or db/migrations/ changes that aren't pushed won't
+			// be reflected. Warn (never block) so the gap is obvious.
+			warnUndeployedSchema(cwd, sel.Environment.Slug, os.Stderr)
 
-			// Reveal the project's publishable key so dev-server can wire its
+			// Reveal the environment's publishable key so dev-server can wire its
 			// inline module clients (module-clients.js) + the Database edge for the
 			// anon/authenticated RLS path.
 			var revealResp struct {
-				EndpointRef    string `json:"endpointRef"`
+				EnvironmentRef string `json:"environmentRef"`
 				PublishableKey string `json:"publishableKey"`
 			}
-			if ref != "" && ref != "local" {
-				// Thread the active branch so reveal returns THIS branch's
-				// endpoint_ref (e.g. test0r8q3p1) — otherwise serve's module
-				// clients (ctx.docs/storage/…) route to the default branch.
-				revealPayload := map[string]any{"ref": ref}
-				if b := resolveActiveBranch(branchFlag); b != "" {
-					revealPayload["branch"] = b
-				}
-				if err := r.Studio().Query(ctx, "apikey.reveal", revealPayload, &revealResp); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — ctx.docs/ctx.storage/… will be unavailable\n", err)
+			if ref != "" {
+				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — the module clients will be unavailable\n", err)
 				}
 			}
 
@@ -655,21 +564,18 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			node.Env = append(os.Environ(),
 				fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 				fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
-				// PROJECT_REF feeds dev-server.js's https://<ref>.<host> URL,
-				// which goes through Kong — and Kong routes the branch
-				// endpoint_ref subdomain (e.g. test0r8q3m), NOT the bare ref.
-				// apikey.reveal returns the resolved endpoint_ref; prefer it,
-				// falling back to the bare ref when reveal was skipped/failed
-				// so dev still launches (ctx.docs/… then errors clearly).
-				fmt.Sprintf("PALBASE_PROJECT_REF=%s", resolveDevProjectRef(ref, revealResp.EndpointRef)),
+				// The ENVIRONMENT ref feeds dev-server.js's https://<ref>.<host> URL.
+				// Kong routes exactly this subdomain — it is the endpoint, the DNS
+				// label and the ref inside every API key, all one value.
+				fmt.Sprintf("PALBASE_ENVIRONMENT_REF=%s", devEnvironmentRef(ref)),
+				// The canonical metadata ids the local runtime stamps on
+				// job/webhook/worker payloads — the same pair the deployed runtime
+				// emits (projectId = the product, environmentId = the runtime). No
+				// Palbase branch identity is emitted anywhere.
+				fmt.Sprintf("PALBASE_PROJECT_ID=%s", devIdentity(sel.ProjectID)),
+				fmt.Sprintf("PALBASE_ENVIRONMENT_ID=%s", devIdentity(sel.Environment.ID)),
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.PublishableKey),
-				// PALBASE_BRANCH gives dev-server the active branch (--branch
-				// wins, else ProjectConfig.DefaultEnv from `palbase branch
-				// switch`). resolveActiveBranch returns "" for main; we surface
-				// "main" explicitly so the value is always present for the
-				// dev-server to read (local only — no Kong/server round-trip).
-				fmt.Sprintf("PALBASE_BRANCH=%s", devBranchValue(branchFlag)),
 				fmt.Sprintf("NODE_PATH=%s", filepath.Join(cwd, "node_modules")),
 			)
 			// The owner's palauth session token — enables local asService() KEYLESSLY:
@@ -694,7 +600,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			// priority, so a node.Env value would BEAT .env.local and invert
 			// the intended precedence (shell env > .env.local > remote).
 			// Best-effort: any failure warns once and serve continues.
-			node.Env = appendRemoteEnv(ctx, r.Studio(), ref, resolveActiveBranch(branchFlag), tmpDir, node.Env, os.Stdout, os.Stderr)
+			node.Env = appendRemoteEnv(ctx, r.Studio(), ref, tmpDir, node.Env, os.Stdout, os.Stderr)
 			node.Stdout = os.Stdout
 			node.Stderr = os.Stderr
 			// Best-effort: free the port if a stale dev-server is still holding
@@ -751,40 +657,40 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 	// probe) all hit localhost:4003 for the local /openapi.json, so a plain
 	// `palbase serve` must land there. --port still overrides for the rare conflict.
 	cmd.Flags().IntVar(&port, "port", 4003, "Local port for the dev server")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to run against (defaults to the active branch; omit for main)")
 	return cmd
 }
 
-// devBranchValue resolves the branch name for the dev-server's PALBASE_BRANCH
-// env. Unlike the server payload (which omits "main" for back-compat),
-// dev-server is local and always wants a concrete value, so resolveActiveBranch's
-// "" (main/unset) is surfaced as "main".
-func devBranchValue(flag string) string {
-	if b := resolveActiveBranch(flag); b != "" {
-		return b
+// devEnvironmentRef / devIdentity surface "local" for an unselected directory so
+// dev-server always reads a concrete value and degrades cleanly (no remote URL,
+// no module clients) instead of building "https://.dev.palbase.studio".
+func devEnvironmentRef(ref string) string { return devIdentity(ref) }
+
+func devIdentity(v string) string {
+	if v == "" {
+		return "local"
 	}
-	return "main"
+	return v
 }
 
-// appendRemoteEnv fetches the branch's remote env vars (Studio env.pull, via
-// secret.Pull — the exact fetch `palbase secret pull` uses), writes them as a
-// {KEY: value} JSON object to <dir>/remote-env.json (0600, wiped with serve's
+// appendRemoteEnv fetches the ENVIRONMENT's remote env vars (Studio env.pull,
+// via secret.Pull — the exact fetch `palbase secret pull` uses), writes them as
+// a {KEY: value} JSON object to <dir>/remote-env.json (0600, wiped with serve's
 // tmpDir on exit) and returns env with PALBASE_REMOTE_ENV_FILE appended.
 // dev-server.js loads that file AFTER .env.local with only-if-unset semantics,
 // keeping the precedence: real shell env > .env.local > remote.
 //
-// Never blocks serve: an unlinked project, an insufficient role (env.pull
+// Never blocks serve: an unselected project, an insufficient role (env.pull
 // needs project admin), or an offline Studio prints ONE warning line to errW
-// and returns env unchanged. branch "" means the default branch (main).
-func appendRemoteEnv(ctx context.Context, sc *studio.Client, ref, branch, dir string, env []string, out, errW io.Writer) []string {
+// and returns env unchanged.
+func appendRemoteEnv(ctx context.Context, sc *studio.Client, ref, dir string, env []string, out, errW io.Writer) []string {
 	warn := func(reason string) []string {
 		fmt.Fprintf(errW, "warning: could not fetch remote env vars (%s) — using local env only\n", reason)
 		return env
 	}
-	if ref == "" || ref == "local" {
-		return warn("project not linked")
+	if ref == "" {
+		return warn("no environment selected")
 	}
-	vars, err := secret.Pull(ctx, sc, ref, branch)
+	vars, err := secret.Pull(ctx, sc, ref)
 	if err != nil {
 		return warn(err.Error())
 	}
@@ -800,78 +706,37 @@ func appendRemoteEnv(ctx context.Context, sc *studio.Client, ref, branch, dir st
 	if err := os.WriteFile(file, data, 0o600); err != nil {
 		return warn(err.Error())
 	}
-	displayBranch := branch
-	if displayBranch == "" {
-		displayBranch = "main"
-	}
-	fmt.Fprintf(out, "loaded %d remote env var(s) for branch %s\n", len(vars), displayBranch)
+	fmt.Fprintf(out, "loaded %d remote env var(s) for environment %s\n", len(vars), ref)
 	return append(env, "PALBASE_REMOTE_ENV_FILE="+file)
 }
 
-// servedBranch is the subset of a `project.listBranches` row the serve
-// preflight needs.
-type servedBranch struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	URL    string `json:"url"`
-}
-
-// preflightServeBranch fails fast with an actionable message when the branch
-// the dev server targets isn't a live, active deployment. serve proxies
-// Database/ctx.* to the deployed branch, so an undeployed/provisioning/
-// hibernated branch can't back local dev. A listing failure (offline/auth) is
-// non-fatal: it warns and lets the reveal step surface any real problem.
-func preflightServeBranch(ctx context.Context, sc *studio.Client, ref, branch string) error {
-	var rows []servedBranch
-	if err := sc.Query(ctx, "project.listBranches", map[string]any{"ref": ref}, &rows); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: couldn't verify branch %q is deployed (%v) — continuing\n", branch, err)
-		return nil
-	}
-	var found *servedBranch
-	for i := range rows {
-		if rows[i].Name == branch {
-			found = &rows[i]
-			break
-		}
-	}
-	return branchPreflightError(branch, found)
-}
-
-// branchPreflightError maps a branch's deployment state to an actionable error
-// (nil = good to serve). Pure, so the status→guidance mapping is unit-tested.
-func branchPreflightError(branch string, found *servedBranch) error {
-	if found == nil {
-		return fmt.Errorf(`branch %q isn't deployed yet.
-
-`+"`palbase serve`"+` runs your controllers locally but proxies Database and ctx.*
-to the deployed branch — which doesn't exist until you create and push it:
-
-  • new branch:                palbase branch create %s
-  • or deploy the current one: git push origin %s
-
-then re-run `+"`palbase serve --branch %s`"+`.`, branch, branch, branch, branch)
-	}
-	switch found.Status {
+// preflightServeEnvironment maps the SELECTED Environment's state to an
+// actionable error (nil = good to serve). serve proxies Database and the module
+// clients to the deployed environment, so an archived or still-provisioning one
+// cannot back local dev. Pure — the status→guidance mapping is unit-tested.
+func preflightServeEnvironment(env selection.Environment) error {
+	switch env.Status {
 	case "active", "":
 		return nil
-	case "creating":
-		return fmt.Errorf("branch %q is still provisioning — check `palbase branch list` and re-run once it's active", branch)
-	case "hibernated", "paused", "stopped", "idle":
-		return fmt.Errorf("branch %q is not awake (archived or sleeping) — wake it first:\n\n  palbase branch wake %s", branch, branch)
+	case "creating", "provisioning", "migrating":
+		return fmt.Errorf("environment %q is still provisioning — re-run once `palbase env list` shows it active", env.Slug)
+	case "archived", "hibernated", "asleep", "paused", "stopped", "idle":
+		return fmt.Errorf("environment %q is not awake — wake it first:\n\n  palbase env wake %s", env.Slug, env.Slug)
 	case "deleted":
-		return fmt.Errorf("branch %q was deleted — recreate it:\n\n  palbase branch create %s", branch, branch)
+		return fmt.Errorf("environment %q was deleted — recreate it:\n\n  palbase env create %s --from production", env.Slug, env.Slug)
 	default:
 		// Unknown/transient state: don't block local dev, but make it visible.
-		fmt.Fprintf(os.Stderr, "warning: branch %q reports status %q — serving anyway\n", branch, found.Status)
+		fmt.Fprintf(os.Stderr, "warning: environment %q reports status %q — serving anyway\n", env.Slug, env.Status)
 		return nil
 	}
 }
 
 // warnUndeployedSchema prints a best-effort note when the project's local
-// db/schema.ts or db/migrations/ differ from what's deployed to `branch`.
-// serve runs against the deployed branch DB, so unpushed schema changes won't
-// be reflected. Never blocks; silent when git is unavailable or db/ is clean.
-func warnUndeployedSchema(cwd, branch string, w io.Writer) {
+// db/schema.ts or db/migrations/ differ from what is deployed to the selected
+// environment. serve runs against the DEPLOYED environment's DB, so unpushed
+// schema changes won't be reflected. Never blocks; silent when git is
+// unavailable or db/ is clean.
+func warnUndeployedSchema(cwd, environment string, w io.Writer) {
 	if _, err := os.Stat(filepath.Join(cwd, "db", "schema.ts")); err != nil {
 		return // no schema → nothing to migrate
 	}
@@ -894,24 +759,23 @@ func warnUndeployedSchema(cwd, branch string, w io.Writer) {
 	if !dirty && !unpushed {
 		return
 	}
-	fmt.Fprintf(w, `note: local db/schema.ts or db/migrations/ has changes not deployed to branch %q.
-serve runs against the DEPLOYED branch database — new tables/columns won't exist
-until you push. Additive changes auto-migrate on deploy; type changes need an
-explicit migration in db/migrations/ (the deploy drift-gate blocks unmigrated
+	fmt.Fprintf(w, `note: local db/schema.ts or db/migrations/ has changes not deployed to environment %q.
+serve runs against the DEPLOYED environment's database — new tables/columns won't
+exist until you push. Additive changes auto-migrate on deploy; type changes need
+an explicit migration in db/migrations/ (the deploy drift-gate blocks unmigrated
 type changes).
 
-`, branch)
+`, environment)
 }
 
-// deployRow mirrors one control-pg `deployments` attempt as the deployments REST
+// deployRow mirrors one control-pg `deployments` attempt as the deployments v2
 // route returns it. This is the canonical attempt log — a FAILED attempt (or a
-// pod that never went Ready) has no git commit but does have a row here, so
-// unlike the old Store A `backend.versions` read it never hides a failure behind
-// "(no versions)". succeeded + a non-empty Error = "deployed with warnings".
+// pod that never went Ready) has no git commit but does have a row here, so it
+// never hides a failure behind "(no versions)". succeeded + a non-empty Error =
+// "deployed with warnings".
 type deployRow struct {
 	Status        string  `json:"status"`
 	Version       *string `json:"version"`
-	Branch        string  `json:"branch"`
 	Trigger       string  `json:"trigger"`
 	Error         *string `json:"error"`
 	CommitMessage *string `json:"commitMessage"`
@@ -919,13 +783,13 @@ type deployRow struct {
 }
 
 func newDeploysCmd(r Resolvers) *cobra.Command {
-	var refFlag string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "deploys",
-		Short: "Show deploy history (newest first, all branches)",
+		Args:  cobra.NoArgs,
+		Short: "Show the selected environment's deploy history (newest first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -933,23 +797,23 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 				Deployments []deployRow `json:"deployments"`
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
-				"/api/v1/projects/"+ref+"/deployments?limit=20", nil, &resp); err != nil {
+				DeploymentsPath(sel.ProjectID, sel.Ref())+"?limit=20", nil, &resp); err != nil {
 				return fmt.Errorf("list deployments: %w", err)
 			}
+			out := cmd.OutOrStdout()
 			if jsonOut {
-				return json.NewEncoder(os.Stdout).Encode(resp.Deployments)
+				return json.NewEncoder(out).Encode(resp.Deployments)
 			}
 			if len(resp.Deployments) == 0 {
-				fmt.Println("(no deploy attempts yet — push with 'palbase push' or git push)")
+				fmt.Fprintln(out, "(no deploy attempts yet — deploy with `palbase push`)")
 				return nil
 			}
-			fmt.Printf("%-11s %-8s %-10s %-20s %-12s %s\n",
-				"STATUS", "VERSION", "BRANCH", "WHEN", "TRIGGER", "NOTE")
+			fmt.Fprintf(out, "%-11s %-8s %-20s %-12s %s\n",
+				"STATUS", "VERSION", "WHEN", "TRIGGER", "NOTE")
 			for _, d := range resp.Deployments {
-				fmt.Printf("%-11s %-8s %-10s %-20s %-12s %s\n",
+				fmt.Fprintf(out, "%-11s %-8s %-20s %-12s %s\n",
 					deployStatusLabel(d),
 					deployVersion(d.Version),
-					d.Branch,
 					deployWhen(d.CreatedAt),
 					d.Trigger,
 					deployNote(d),
@@ -958,7 +822,6 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON (full untruncated notes/errors)")
 	return cmd
 }
@@ -1023,133 +886,108 @@ func truncateNote(s string, max int) string {
 }
 
 func newRollbackCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "rollback <version-sha>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Roll back to a previous version (creates a new commit)",
+		Short: "Roll back the selected environment to a previous version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
-			}
-			version := args[0]
-			// Branch context (Track A · Feature 3): --branch wins; otherwise
-			// the locally-active branch from `palbase branch switch`
-			// (ProjectConfig.DefaultEnv). "main"/empty is omitted so the
-			// server resolves the default branch (back-compat).
-			branch := resolveActiveBranch(branchFlag)
-			payload := map[string]any{"ref": ref, "version": version}
-			if branch != "" {
-				payload["branch"] = branch
 			}
 			var resp struct {
 				Status         string `json:"status"`
 				Version        string `json:"version"`
 				RolledBackFrom string `json:"rolled_back_from"`
 			}
-			if err := r.Studio().Mutation(cmd.Context(), "backend.rollback", payload, &resp); err != nil {
+			if err := r.Studio().Mutation(cmd.Context(), "backend.rollback",
+				map[string]any{"ref": sel.Ref(), "version": args[0]}, &resp); err != nil {
 				return fmt.Errorf("backend.rollback: %w", err)
 			}
-			target := "default branch"
-			if branch != "" {
-				target = "branch " + branch
-			}
-			fmt.Printf("✓ rolled back %s to %s (new HEAD: %s)\n", target, resp.RolledBackFrom, resp.Version)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back environment %s to %s (new HEAD: %s)\n",
+				sel.Ref(), resp.RolledBackFrom, resp.Version)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to roll back (defaults to the active branch; omit for main)")
 	return cmd
 }
 
-// resolveActiveBranch picks the branch the rollback targets: the --branch flag
-// if set, else the locally-active branch (ProjectConfig.DefaultEnv, set by
-// `palbase branch switch`). Returns "" for main / unset so the caller omits the
-// branch field and the server resolves the default branch (back-compat).
-func resolveActiveBranch(flag string) string {
-	if flag != "" {
-		if flag == "main" {
-			return ""
-		}
-		return flag
-	}
-	cfg, err := auth.LoadProjectConfig()
-	if err != nil || cfg == nil || cfg.DefaultEnv == "" || cfg.DefaultEnv == "main" {
-		return ""
-	}
-	return cfg.DefaultEnv
-}
-
 // lastDeploy mirrors backend.status's `lastDeploy` field: the newest deploy row
-// for the active branch (from control-pg.deployments). Nil when the branch has
-// never been deployed. This is the visibility surface — a server-side deploy
-// failure that only lived in logs now shows up in `palbase status`.
+// for the environment (from control-pg.deployments). Nil when it has never been
+// deployed. This is the visibility surface — a server-side deploy failure that
+// only lived in logs shows up in `palbase status`.
 type lastDeploy struct {
 	Status    string  `json:"status"`
 	Error     *string `json:"error"`
 	Version   *string `json:"version"`
-	Branch    *string `json:"branch"`
 	UpdatedAt *string `json:"updatedAt"`
 }
 
+// statusOut is `palbase status --json`. It names the full context — project,
+// environment, endpoint, repository — because "which runtime am I looking at"
+// must never be a guess (UAT CLI-005).
+type statusOut struct {
+	ProjectID          string      `json:"projectId"`
+	EnvironmentID      string      `json:"environmentId"`
+	EnvironmentRef     string      `json:"environmentRef"`
+	EnvironmentSlug    string      `json:"environmentSlug"`
+	RepositoryProvider string      `json:"repositoryProvider"`
+	Head               *string     `json:"head"`
+	ActiveVersion      *string     `json:"activeVersion"`
+	LastDeploy         *lastDeploy `json:"lastDeploy"`
+}
+
 func newStatusCmd(r Resolvers) *cobra.Command {
-	var refFlag string
-	var branchFlag string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the project's active version + deploy state",
+		Args:  cobra.NoArgs,
+		Short: "Show the selected environment's active version + deploy state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
-			// backend.status still carries backendEnabled server-side, but the
-			// CLI no longer surfaces it: backend is the default (every project
-			// is a backend), so there's no enable state for a user to act on.
-			// We show the version/deploy info, which is what `status` is for.
 			var resp struct {
-				Ref           string      `json:"ref"`
 				Head          *string     `json:"head"`
 				ActiveVersion *string     `json:"activeVersion"`
 				LastDeploy    *lastDeploy `json:"lastDeploy"`
 			}
-			// Send the active branch so status reflects the branch the user is
-			// on (--branch wins, else ProjectConfig.DefaultEnv; "main"/empty is
-			// omitted so the server resolves the default branch — F14 fix).
-			payload := map[string]any{"ref": ref}
-			if branch := resolveActiveBranch(branchFlag); branch != "" {
-				payload["branch"] = branch
-			}
-			if err := r.Studio().Query(cmd.Context(), "backend.status", payload, &resp); err != nil {
+			if err := r.Studio().Query(cmd.Context(), "backend.status",
+				map[string]any{"ref": sel.Ref()}, &resp); err != nil {
 				return fmt.Errorf("backend.status: %w", err)
 			}
-			// --json: emit the raw status so a script/CI can poll deploy state
-			// without parsing the human lines. Mirrors `project status --json` /
-			// `apikey list --json`; the flag was missing here, so `palbase status
-			// --json` errored "unknown flag" and a poll loop got no output.
+			out := statusOut{
+				ProjectID:          sel.ProjectID,
+				EnvironmentID:      sel.Environment.ID,
+				EnvironmentRef:     sel.Ref(),
+				EnvironmentSlug:    sel.Environment.Slug,
+				RepositoryProvider: sel.RepositoryProvider,
+				Head:               resp.Head,
+				ActiveVersion:      resp.ActiveVersion,
+				LastDeploy:         resp.LastDeploy,
+			}
+			w := cmd.OutOrStdout()
 			if jsonOut {
-				fmt.Println(renderJSON(resp))
+				fmt.Fprintln(w, renderJSON(out))
 				return nil
 			}
-			fmt.Printf("ref:    %s\n", resp.Ref)
-			if resp.Head != nil {
-				fmt.Printf("head:   %s\n", *resp.Head)
+			fmt.Fprintf(w, "project:      %s\n", out.ProjectID)
+			fmt.Fprintf(w, "environment:  %s (%s)\n", out.EnvironmentSlug, out.EnvironmentRef)
+			fmt.Fprintf(w, "endpoint:     https://%s.%s\n", out.EnvironmentRef, r.Endpoints().PublicHost)
+			fmt.Fprintf(w, "repository:   %s\n", out.RepositoryProvider)
+			if out.Head != nil {
+				fmt.Fprintf(w, "head:         %s\n", *out.Head)
 			}
-			if resp.ActiveVersion != nil {
-				fmt.Printf("active: %s\n", *resp.ActiveVersion)
+			if out.ActiveVersion != nil {
+				fmt.Fprintf(w, "active:       %s\n", *out.ActiveVersion)
 			}
-			if line := formatLastDeploy(resp.LastDeploy, time.Now()); line != "" {
-				fmt.Print(line)
+			if line := formatLastDeploy(out.LastDeploy, time.Now()); line != "" {
+				fmt.Fprint(w, line)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to report (defaults to the active branch; omit for main)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
 	return cmd
 }
@@ -1181,22 +1019,18 @@ func formatLastDeploy(d *lastDeploy, now time.Time) string {
 	return b.String()
 }
 
-// deployMeta formats the " (branch, 3m ago)" suffix. Branch defaults to "main"
-// when the server omitted it (default branch), and the age is dropped when the
+// deployMeta formats the " (3m ago)" suffix. The age is dropped when the
 // timestamp is missing or unparseable rather than printing a bogus duration.
+// There is no branch to name — the environment IS the deploy target.
 func deployMeta(d *lastDeploy, now time.Time) string {
-	branch := "main"
-	if d.Branch != nil && *d.Branch != "" {
-		branch = *d.Branch
-	}
 	if d.UpdatedAt == nil {
-		return fmt.Sprintf(" (%s)", branch)
+		return ""
 	}
 	t, err := time.Parse(time.RFC3339, *d.UpdatedAt)
 	if err != nil {
-		return fmt.Sprintf(" (%s)", branch)
+		return ""
 	}
-	return fmt.Sprintf(" (%s, %s)", branch, humanizeAgo(now.Sub(t)))
+	return fmt.Sprintf(" (%s)", humanizeAgo(now.Sub(t)))
 }
 
 // humanizeAgo renders a coarse "3m ago" / "2h ago" / "5d ago" relative age.
@@ -1226,27 +1060,20 @@ func renderJSON(v any) string {
 
 var _ = renderJSON // silence "unused" until --json lands
 
-func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string, branch string) (backendTarget, error) {
+// lookupBackendTarget resolves an ENVIRONMENT's (URL + publishable key). The ref
+// IS the endpoint: there is no endpoint_ref/bare-ref translation left to do.
+func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string) (backendTarget, error) {
 	var resp struct {
-		EndpointRef    string `json:"endpointRef"`
 		PublishableKey string `json:"publishableKey"`
 	}
-	payload := map[string]any{"ref": ref}
-	if branch != "" {
-		payload["branch"] = branch
-	}
-	if err := sc.Query(ctx, "apikey.reveal", payload, &resp); err != nil {
+	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
 		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)
 	}
 	if resp.PublishableKey == "" {
 		return backendTarget{}, errors.New("apikey.reveal: missing publishable key")
 	}
-	endpointRef := resp.EndpointRef
-	if endpointRef == "" {
-		endpointRef = ref
-	}
 	return backendTarget{
-		URL:    fmt.Sprintf("https://%s.%s", endpointRef, endpoints.PublicHost),
+		URL:    fmt.Sprintf("https://%s.%s", ref, endpoints.PublicHost),
 		APIKey: resp.PublishableKey,
 	}, nil
 }

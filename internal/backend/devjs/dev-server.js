@@ -26,7 +26,7 @@
  * (Conflict/NotFound/…) caught by SHAPE (`{ status:number, error:string }`).
  *
  * Invocation (set by the Go CLI):
- *   PALBASE_DEV_PORT=4003 PALBASE_PROJECT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
+ *   PALBASE_DEV_PORT=4003 PALBASE_ENVIRONMENT_REF=foo PALBASE_DEV_ROOT=/abs/path node dev-server.js
  */
 'use strict';
 
@@ -124,7 +124,15 @@ function parseDotenv(text) {
   }
 })();
 
-const PROJECT_REF = process.env.PALBASE_PROJECT_REF || 'local';
+// The ENVIRONMENT ref: the endpoint / DNS label / API-key ref of the environment
+// `palbase serve` proxies Database and the module clients to. 'local' when the
+// directory has no selection (no `palbase project use`).
+const ENVIRONMENT_REF = process.env.PALBASE_ENVIRONMENT_REF || 'local';
+// The canonical ids the runtime stamps on job/webhook/worker metadata.
+// projectId names the logical PRODUCT; environmentId names the selected RUNTIME.
+// Neither is ever a Palbase branch — that identity no longer exists.
+const PROJECT_ID = process.env.PALBASE_PROJECT_ID || 'local';
+const ENVIRONMENT_ID = process.env.PALBASE_ENVIRONMENT_ID || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 // PALBASE_CHECK=1 => one-shot pre-deploy validation (`palbase build`): stage +
 // bundle + run the deploy's extract_meta.js over every controller, then exit
@@ -313,10 +321,10 @@ const TENANT_APIKEY = process.env.PALBASE_TENANT_APIKEY || '';
 delete process.env.PALBASE_TENANT_APIKEY;
 
 // Public host the SDK calls. Same shape as prod: <ref>.<host>.
-// When PROJECT_REF==='local' (no `palbase login`) we run without
+// When ENVIRONMENT_REF==='local' (no selection) we run without
 // the module clients live — ctx.docs/ctx.storage/… throw on use.
-const PALBASE_URL = (PROJECT_REF !== 'local' && PUBLIC_HOST)
-  ? `https://${PROJECT_REF}.${PUBLIC_HOST.replace(/\/+$/, '')}`
+const PALBASE_URL = (ENVIRONMENT_REF !== 'local' && PUBLIC_HOST)
+  ? `https://${ENVIRONMENT_REF}.${PUBLIC_HOST.replace(/\/+$/, '')}`
   : '';
 
 const CONTROLLER_FILE_RE = /\.(c?js|mjs|ts)$/i;
@@ -1103,8 +1111,8 @@ function workerMeta() {
     env: Object.assign({}, process.env),
     user: null,
     requestId: `req_job_${Date.now().toString(36)}`,
-    projectId: PROJECT_REF,
-    environmentId: process.env.PALBASE_BRANCH || 'main',
+    projectId: PROJECT_ID,
+    environmentId: ENVIRONMENT_ID,
   };
 }
 
@@ -2427,11 +2435,11 @@ async function main() {
   server.listen(PORT, '0.0.0.0', () => {
     const ip = lanIP();
     log(`listening on http://localhost:${PORT}` + (ip ? ` and http://${ip}:${PORT} (device)` : ''));
-    log(`project ref: ${PROJECT_REF}`);
+    log(`environment: ${ENVIRONMENT_REF}`);
     log(`watching: ${CONTROLLERS_DIR}`);
     if (PALBASE_URL) {
       log('────────────────────────────────────────────────────────────');
-      log(`⚠ connected to LIVE data for project ${PROJECT_REF}`);
+      log(`⚠ connected to LIVE data for environment ${ENVIRONMENT_REF}`);
       log(`  Documents/Storage/… writes hit ${PALBASE_URL}`);
       log(`  key: publishable — protected module writes require managed runtime authority`);
       log(`  Auth tokens verified by ${PALBASE_URL}/auth/user`);

@@ -6,545 +6,322 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
-// Compile-time guard: the real mgmt client must satisfy deployClient, so the
-// Task 12 command can wire *transport.Client straight in. A signature drift
-// breaks the build here, not at the wiring site.
-var _ deployClient = (*transport.Client)(nil)
+// ── the v2 deploy paths ─────────────────────────────────────────────────────
 
-// Compile-time guard: the real mgmt client must satisfy the backend.REST
-// accessor type (Do + PostMultipart) that main.go wires into Resolvers.REST.
-// A signature drift breaks the build here, not at the main.go wiring site.
-var _ REST = (*transport.Client)(nil)
-
-func TestResolveMode(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  *auth.ProjectConfig
-		want string
-	}{
-		{"explicit platform", &auth.ProjectConfig{Ref: "r", Mode: "platform"}, "platform"},
-		{"explicit github", &auth.ProjectConfig{Ref: "r", Mode: "github"}, "github"},
-		// Absent mode defaults to PLATFORM: github is opt-in and always written
-		// explicitly by `palbase clone` of a GitHub project; every other link path
-		// (picker / web link / hand-written config) targets a platform project and
-		// omits mode. Defaulting absent→github made platform `push` run `git push`
-		// and fail (wave-4 w4budget). Only explicit "github" takes the git path.
-		{"empty defaults to platform", &auth.ProjectConfig{Ref: "r", Mode: ""}, "platform"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := auth.SaveProjectConfigIn(dir, c.cfg); err != nil {
-				t.Fatal(err)
-			}
-			wd, _ := os.Getwd()
-			t.Cleanup(func() { _ = os.Chdir(wd) })
-			_ = os.Chdir(dir)
-			got, err := resolveMode()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != c.want {
-				t.Fatalf("resolveMode = %q, want %q", got, c.want)
-			}
-		})
-	}
+func TestDeployPaths_AreEnvironmentScoped(t *testing.T) {
+	require.Equal(t,
+		"/api/v2/projects/proj_1/environments/app1prod/deploy",
+		DeployPath("proj_1", "app1prod"))
+	require.Equal(t,
+		"/api/v2/projects/proj_1/environments/app1prod/deployments",
+		DeploymentsPath("proj_1", "app1prod"))
+	require.Equal(t,
+		"/api/v2/projects/proj_1/environments/app1prod/deployments/dep_1",
+		DeploymentPath("proj_1", "app1prod", "dep_1"))
 }
 
-func TestPush_GithubMode_ExecsGitPush(t *testing.T) {
-	dir := t.TempDir()
-	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "r", DefaultEnv: "main", Mode: "github"})
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
+// fakeDeploy records every upload and status poll.
+type fakeDeploy struct {
+	uploads  []upload
+	statuses []string
+	// fail makes the FIRST n uploads fail with a transport-level error (a lost
+	// response), so the retry can be observed.
+	failFirst int
+	// apiErr, when set, is returned instead: a server VERDICT, not a lost response.
+	apiErr error
+	reply  string
+	// status is what the poll returns.
+	status string
+}
 
-	var gotArgs []string
-	runner := func(name string, args ...string) error {
-		gotArgs = append([]string{name}, args...)
+type upload struct {
+	path           string
+	fields         map[string]string
+	idempotencyKey string
+}
+
+func (f *fakeDeploy) PostMultipart(_ context.Context, path string, _ []byte, fields map[string]string, key string) ([]byte, error) {
+	f.uploads = append(f.uploads, upload{path: path, fields: fields, idempotencyKey: key})
+	if f.apiErr != nil {
+		return nil, f.apiErr
+	}
+	if len(f.uploads) <= f.failFirst {
+		return nil, errors.New("Post: context deadline exceeded (Client.Timeout)")
+	}
+	reply := f.reply
+	if reply == "" {
+		reply = `{"data":{"workflowId":"wf","runId":"r","deploymentId":"dep_1"},"request_id":"req"}`
+	}
+	return []byte(reply), nil
+}
+
+func (f *fakeDeploy) Do(_ context.Context, _, path string, _, out any) error {
+	f.statuses = append(f.statuses, path)
+	st, ok := out.(*deploymentStatus)
+	if !ok {
 		return nil
 	}
-	if err := runPush(pushDeps{git: runner, rest: nil, branch: "main"}); err != nil {
-		t.Fatalf("runPush: %v", err)
+	status := f.status
+	if status == "" {
+		status = "succeeded"
 	}
-	if len(gotArgs) < 2 || gotArgs[0] != "git" || gotArgs[1] != "push" {
-		t.Fatalf("git args = %v, want git push prefix", gotArgs)
-	}
-}
-
-func TestPush_PlatformMode_BuildsAndPostsTarball(t *testing.T) {
-	dir := t.TempDir()
-	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "todoapp", DefaultEnv: "main", Mode: "platform"})
-	_ = os.WriteFile(filepath.Join(dir, "index.ts"), []byte("export const x=1"), 0o644)
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
-
-	var posted struct {
-		path   string
-		hadTar bool
-	}
-	fakeREST := &fakeDeployClient{onPostMultipart: func(path string, tarball []byte, fields map[string]string) ([]byte, error) {
-		posted.path = path
-		posted.hadTar = len(tarball) > 0
-		return []byte(`{"deploymentId":"dep_1"}`), nil
-	}}
-	if err := runPush(pushDeps{git: func(string, ...string) error { return nil }, rest: fakeREST, branch: "main"}); err != nil {
-		t.Fatalf("runPush: %v", err)
-	}
-	if posted.path != "/api/v1/projects/todoapp/deploy" {
-		t.Fatalf("path = %q", posted.path)
-	}
-	if !posted.hadTar {
-		t.Fatal("expected a tarball in the multipart post")
-	}
-}
-
-func TestPush_PrintsSuccess(t *testing.T) {
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-
-	t.Run("platform mode prints deploy-started + deployment id", func(t *testing.T) {
-		dir := t.TempDir()
-		_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "todoapp", DefaultEnv: "main", Mode: "platform"})
-		_ = os.WriteFile(filepath.Join(dir, "index.ts"), []byte("export const x=1"), 0o644)
-		_ = os.Chdir(dir)
-
-		rest := &fakeDeployClient{onPostMultipart: func(string, []byte, map[string]string) ([]byte, error) {
-			// the real deploy route wraps the payload in a {data:...} envelope
-			return []byte(`{"data":{"workflowId":"wf1","runId":"r1","deploymentId":"dep_42"},"request_id":"req_x"}`), nil
-		}}
-		var out bytes.Buffer
-		if err := runPush(pushDeps{git: func(string, ...string) error { return nil }, rest: rest, branch: "main", out: &out}); err != nil {
-			t.Fatalf("runPush: %v", err)
-		}
-		got := out.String()
-		if !strings.Contains(got, "✓ deploy started for todoapp") {
-			t.Fatalf("missing success line; got:\n%s", got)
-		}
-		if !strings.Contains(got, "dep_42") {
-			t.Fatalf("missing deployment id; got:\n%s", got)
-		}
-	})
-
-	t.Run("github mode prints pushed-to-github", func(t *testing.T) {
-		dir := t.TempDir()
-		_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "r", DefaultEnv: "main", Mode: "github"})
-		_ = os.Chdir(dir)
-
-		var out bytes.Buffer
-		if err := runPush(pushDeps{git: func(string, ...string) error { return nil }, branch: "main", out: &out}); err != nil {
-			t.Fatalf("runPush: %v", err)
-		}
-		if !strings.Contains(out.String(), "✓ pushed to GitHub") {
-			t.Fatalf("missing github success line; got:\n%s", out.String())
-		}
-	})
-}
-
-type fakeDeployClient struct {
-	onPostMultipart func(path string, tarball []byte, fields map[string]string) ([]byte, error)
-	// onDo stubs the status-poll GET. When nil, Do returns a terminal
-	// "succeeded" status so the older push tests (which only assert the
-	// deploy-started lines) don't hang on the poll loop.
-	onDo func(ctx context.Context, method, path string, body, out any) error
-}
-
-func (f *fakeDeployClient) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
-	return f.onPostMultipart(path, tarball, fields)
-}
-
-func (f *fakeDeployClient) Do(ctx context.Context, method, path string, body, out any) error {
-	if f.onDo != nil {
-		return f.onDo(ctx, method, path, body, out)
-	}
-	// Default: report the deploy as already succeeded on the first poll.
-	if st, ok := out.(*deploymentStatus); ok {
-		*st = deploymentStatus{Status: "succeeded", Version: "sha-default"}
-	}
+	st.Status = status
+	st.Version = "abc1234"
 	return nil
 }
 
-// deployStartedBody is the deploy POST's success envelope carrying a
-// deploymentId, so runPush proceeds into the poll loop.
-func deployStartedBody(id string) []byte {
-	return []byte(fmt.Sprintf(`{"data":{"workflowId":"wf1","runId":"r1","deploymentId":%q},"request_id":"req_x"}`, id))
+func palbaseProject(t *testing.T) selection.Selection {
+	t.Helper()
+	return selection.Selection{
+		ProjectID:          "proj_1",
+		Environment:        selection.Environment{ID: "env_prod", Ref: "app1prod", Slug: "production"},
+		RepositoryProvider: selection.ProviderPalbase,
+	}
 }
 
-// pushForPoll runs runPush in a temp platform-mode project with a fast poll
-// interval and the given status-poll stub, returning combined output. stderr is
-// redirected into the same buffer so the ✗/dots land where the test can read
-// them (waitForDeploy writes failures + progress to os.Stderr).
-func pushForPoll(t *testing.T, onDo func(ctx context.Context, method, path string, body, out any) error) (string, error) {
+// seedBackendDir makes the cwd look like a deployable backend so runBuild's
+// no-op path is taken (no controllers/ → nothing to validate) and BuildTarball
+// has something to package.
+func seedBackendDir(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "todoapp", DefaultEnv: "main", Mode: "platform"})
-	_ = os.WriteFile(filepath.Join(dir, "index.ts"), []byte("export const x=1"), 0o644)
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"app"}`), 0o644))
+	t.Chdir(dir)
+}
 
-	// Capture os.Stderr (waitForDeploy's failure/progress sink) via an OS pipe.
-	origStderr := os.Stderr
-	rPipe, wPipe, _ := os.Pipe()
-	os.Stderr = wPipe
-	t.Cleanup(func() { os.Stderr = origStderr })
+// THE deploy contract. The upload must go to the SELECTED ENVIRONMENT's v2
+// ingress, and it MUST carry an Idempotency-Key — that header is the only thing
+// standing between a timed-out push and a second deploy.
+func TestPush_PalbaseProvider_PostsToV2WithAnIdempotencyKey(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{}
+	var out bytes.Buffer
 
-	rest := &fakeDeployClient{
-		onPostMultipart: func(string, []byte, map[string]string) ([]byte, error) {
-			return deployStartedBody("dep_42"), nil
-		},
-		onDo: onDo,
-	}
-	var stdout bytes.Buffer
+	require.NoError(t, runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: &out,
+		ctx: context.Background(), pollInterval: time.Millisecond,
+	}))
+
+	require.Len(t, f.uploads, 1)
+	require.Equal(t, "/api/v2/projects/proj_1/environments/app1prod/deploy", f.uploads[0].path)
+	require.NotEmpty(t, f.uploads[0].idempotencyKey, "the deploy upload MUST carry an Idempotency-Key")
+	// The multipart form carries only the message: the Environment is in the URL,
+	// and there is no `branch` field left to send.
+	require.Equal(t, map[string]string{"message": "deploy via cli"}, f.uploads[0].fields)
+
+	require.Equal(t, []string{"/api/v2/projects/proj_1/environments/app1prod/deployments/dep_1"}, f.statuses)
+	require.Contains(t, out.String(), "deploy succeeded (version abc1234)")
+}
+
+// A TIMED-OUT upload is retried on the SAME key. Minting a fresh key per attempt
+// is exactly the bug that deploys twice.
+func TestPush_TimedOutUpload_RetriesWithTheSameKey(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{failFirst: 1}
+
+	require.NoError(t, runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: io.Discard,
+		ctx: context.Background(), pollInterval: time.Millisecond, uploadRetries: 2,
+	}))
+
+	require.Len(t, f.uploads, 2, "the lost upload must be retried")
+	require.Equal(t, f.uploads[0].idempotencyKey, f.uploads[1].idempotencyKey,
+		"the retry MUST reuse the first key — a new key is a second deploy")
+	require.NotEmpty(t, f.uploads[0].idempotencyKey)
+}
+
+// A server VERDICT (any *APIError, including the 409 in-progress) is NOT a lost
+// response: retrying it would be pointless at best and confusing at worst.
+func TestPush_ServerError_IsNotRetried(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{apiErr: &transport.APIError{
+		Code: "idempotency_key_in_progress", Status: http.StatusConflict,
+		Description: "a request with this key is still running",
+	}}
+
 	err := runPush(pushDeps{
-		git:          func(string, ...string) error { return nil },
-		rest:         rest,
-		branch:       "main",
-		out:          &stdout,
-		pollInterval: time.Millisecond,
-		pollTimeout:  2 * time.Second,
+		rest: f, sel: palbaseProject(t), out: io.Discard,
+		ctx: context.Background(), uploadRetries: 2,
 	})
-
-	_ = wPipe.Close()
-	os.Stderr = origStderr
-	var stderr bytes.Buffer
-	_, _ = stderr.ReadFrom(rPipe)
-	return stdout.String() + stderr.String(), err
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "idempotency_key_in_progress")
+	require.Len(t, f.uploads, 1, "a server verdict must not be retried")
 }
 
-func TestPush_Poll_SucceededExitsZeroWithVersion(t *testing.T) {
-	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, out any) error {
-		if st, ok := out.(*deploymentStatus); ok {
-			*st = deploymentStatus{Status: "succeeded", Version: "sha-deadbeef"}
+func TestPush_EachInvocationMintsItsOwnKey(t *testing.T) {
+	seedBackendDir(t)
+	first := &fakeDeploy{}
+	second := &fakeDeploy{}
+	for _, f := range []*fakeDeploy{first, second} {
+		require.NoError(t, runPush(pushDeps{
+			rest: f, sel: palbaseProject(t), out: io.Discard,
+			ctx: context.Background(), pollInterval: time.Millisecond,
+		}))
+	}
+	require.NotEqual(t, first.uploads[0].idempotencyKey, second.uploads[0].idempotencyKey,
+		"two separate deploys are two separate mutations")
+}
+
+func TestNewIdempotencyKey_IsRandomAndHex(t *testing.T) {
+	a, b := transport.NewIdempotencyKey(), transport.NewIdempotencyKey()
+	require.NotEqual(t, a, b)
+	require.Len(t, a, 32)
+	require.NotContains(t, a, "-")
+}
+
+// A failed deploy exits NON-ZERO carrying the server's reason — a silently
+// broken deploy that scripts read as success is the failure mode this guards.
+func TestPush_FailedDeploy_ExitsNonZero(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{status: "failed"}
+
+	err := runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: io.Discard,
+		ctx: context.Background(), pollInterval: time.Millisecond,
+	})
+	require.ErrorContains(t, err, "deploy failed")
+}
+
+// ── github provider ─────────────────────────────────────────────────────────
+
+func TestPush_GitHubProvider_ExecsGitPush_AndNeverUploads(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{}
+	var got []string
+	var out bytes.Buffer
+
+	sel := palbaseProject(t)
+	sel.RepositoryProvider = selection.ProviderGitHub
+
+	require.NoError(t, runPush(pushDeps{
+		git:  func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
+		rest: f, sel: sel, out: &out, ctx: context.Background(),
+	}))
+	require.Equal(t, []string{"git", "push"}, got)
+	require.Empty(t, f.uploads, "the github provider deploys via webhook — it must not upload a tarball")
+	require.Contains(t, out.String(), "webhook")
+}
+
+func TestPush_GitHubProvider_PropagatesGitFailure(t *testing.T) {
+	seedBackendDir(t)
+	sel := palbaseProject(t)
+	sel.RepositoryProvider = selection.ProviderGitHub
+
+	err := runPush(pushDeps{
+		git:  func(string, ...string) error { return fmt.Errorf("rejected: non-fast-forward") },
+		rest: &fakeDeploy{}, sel: sel, out: io.Discard, ctx: context.Background(),
+	})
+	require.ErrorContains(t, err, "non-fast-forward")
+}
+
+// ── clone / pull ────────────────────────────────────────────────────────────
+
+func TestRunClone_GitHubProvider_ClonesThenWritesConfigV2(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	var got []string
+	cfg := &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod",
+		RepositoryProvider: selection.ProviderGitHub,
+	}
+	require.NoError(t, runClone(cloneDeps{
+		git: func(name string, args ...string) error {
+			got = append([]string{name}, args...)
+			return os.MkdirAll("todoapp", 0o755)
+		},
+		provider: selection.ProviderGitHub,
+		repoURL:  "https://github.com/pal-salih/todoapp.git",
+		dir:      "todoapp",
+		cfg:      cfg,
+		writeCfg: selection.Save,
+	}))
+	require.Equal(t, []string{"git", "clone", "https://github.com/pal-salih/todoapp.git", "todoapp"}, got)
+
+	loaded, err := selection.Load("todoapp")
+	require.NoError(t, err)
+	require.Equal(t, "proj_1", loaded.ProjectID)
+	require.Equal(t, "env_prod", loaded.EnvironmentID)
+	require.Equal(t, selection.ProviderGitHub, loaded.RepositoryProvider)
+}
+
+func TestRunPull_RoutesByProvider(t *testing.T) {
+	t.Run("github runs git pull", func(t *testing.T) {
+		var got []string
+		require.NoError(t, runPull(pullDeps{
+			provider: selection.ProviderGitHub,
+			git:      func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
+		}))
+		require.Equal(t, []string{"git", "pull"}, got)
+	})
+	t.Run("palbase refetches the bundle", func(t *testing.T) {
+		called := false
+		require.NoError(t, runPull(pullDeps{
+			provider: selection.ProviderPalbase,
+			refetch:  func() error { called = true; return nil },
+		}))
+		require.True(t, called)
+	})
+}
+
+func TestRepoURLFromFullName(t *testing.T) {
+	require.Equal(t, "https://github.com/org/repo.git", repoURLFromFullName("org/repo"))
+	require.Empty(t, repoURLFromFullName(""))
+	require.Equal(t, "repo", repoDirFromFullName("org/repo"))
+}
+
+// pullBundle asks Studio for the ENVIRONMENT's bundle by ref — one input, no
+// branch.
+func TestPullBundle_SendsOnlyTheEnvironmentRef(t *testing.T) {
+	var gotInput map[string]any
+	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(req.URL.Path, "backend.pull") {
+			gotInput = decodeTRPCInput(t, req)
+			trpcOK(w, map[string]any{"version": "abc", "archive": base64.StdEncoding.EncodeToString(tinyTarGz(t)), "size": 1})
+			return
 		}
-		return nil
+		trpcOK(w, map[string]any{})
 	})
-	if err != nil {
-		t.Fatalf("expected nil error on success, got: %v", err)
-	}
-	if !strings.Contains(out, "✓ deploy succeeded (version sha-deadbeef)") {
-		t.Fatalf("missing success line; got:\n%s", out)
-	}
+
+	dst := t.TempDir()
+	require.NoError(t, pullBundle(context.Background(), r.Resolvers(), "app1prod", dst, io.Discard))
+	require.Equal(t, map[string]any{"ref": "app1prod"}, gotInput)
+	require.NotContains(t, gotInput, "branch")
+	require.FileExists(t, filepath.Join(dst, "hello.txt"))
 }
 
-func TestPush_Poll_FailedExitsNonZeroWithServerError(t *testing.T) {
-	const serverErr = `push to backend: migration failed: ERROR: column "id" cannot be cast automatically to type bigint (SQLSTATE 42804)`
-	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, out any) error {
-		if st, ok := out.(*deploymentStatus); ok {
-			*st = deploymentStatus{Status: "failed", CurrentStep: "Pushing to runtime", Error: serverErr}
-		}
-		return nil
-	})
-	if err == nil {
-		t.Fatal("expected a non-nil error (non-zero exit) on a failed deploy")
-	}
-	// The EXACT server error (SQLSTATE / drift text) must reach the user.
-	if !strings.Contains(out, "✗ deploy FAILED:") || !strings.Contains(out, "SQLSTATE 42804") {
-		t.Fatalf("failed deploy did not surface the server error; got:\n%s", out)
-	}
-}
-
-func TestPush_Poll_TimeoutExitsZeroWithNote(t *testing.T) {
-	// Never terminal: always "deploying" → the loop must hit the deadline and
-	// return nil (don't falsely fail a slow-but-fine deploy).
-	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, out any) error {
-		if st, ok := out.(*deploymentStatus); ok {
-			*st = deploymentStatus{Status: "deploying", CurrentStep: "Building"}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("expected nil error on timeout (slow-but-fine deploy), got: %v", err)
-	}
-	if !strings.Contains(out, "deploy still running after") || !strings.Contains(out, "palbase status") {
-		t.Fatalf("missing timeout note; got:\n%s", out)
-	}
-}
-
-func TestPush_Poll_404FallsBackToFireAndForget(t *testing.T) {
-	// An un-upgraded server without the status route 404s — fall back to the
-	// fire-and-forget note and exit 0, never hard-break.
-	out, err := pushForPoll(t, func(_ context.Context, _, _ string, _, _ any) error {
-		return &transport.APIError{Code: "not_found", Status: http.StatusNotFound}
-	})
-	if err != nil {
-		t.Fatalf("expected nil error on 404 fallback, got: %v", err)
-	}
-	if !strings.Contains(out, "deploy status unavailable") || !strings.Contains(out, "palbase status") {
-		t.Fatalf("missing fallback note; got:\n%s", out)
-	}
-}
-
-// fakeStudioServer builds an httptest.Server that acts as a minimal tRPC
-// endpoint for backend.pull. It returns a tar.gz containing the given files
-// (name → content), base64-encoded in the tRPC success envelope.
-func fakeStudioServer(t *testing.T, version string, files map[string]string) *studio.Client {
+func tinyTarGz(t *testing.T) []byte {
 	t.Helper()
-	// Build a real tar.gz to return.
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
-	for name, body := range files {
-		hdr := &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}
-		if err := tw.WriteHeader(hdr); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fmt.Fprint(tw, body); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_ = tw.Close()
-	_ = gw.Close()
-	archiveB64 := base64.StdEncoding.EncodeToString(buf.Bytes())
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// tRPC success envelope wrapping {version, archive, size}.
-		resp := map[string]any{
-			"result": map[string]any{
-				"data": map[string]any{
-					"json": map[string]any{
-						"version": version,
-						"archive": archiveB64,
-						"size":    len(buf.Bytes()),
-					},
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(srv.Close)
-	return studio.New(srv.URL, nil)
+	body := []byte("hi")
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "hello.txt", Mode: 0o644, Size: int64(len(body))}))
+	_, err := tw.Write(body)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+	return buf.Bytes()
 }
 
-func TestClone_GithubMode_ExecsGitClone(t *testing.T) {
-	var gotArgs []string
-	runner := func(name string, args ...string) error { gotArgs = append([]string{name}, args...); return nil }
-
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
-
-	err := runClone(cloneDeps{
-		git:      runner,
-		mode:     "github",
-		repoURL:  "https://github.com/palcore/app.git",
-		ref:      "app",
-		branch:   "main",
-		writeCfg: auth.SaveProjectConfigIn,
-	})
-	if err != nil {
-		t.Fatalf("runClone: %v", err)
-	}
-	if len(gotArgs) < 3 || gotArgs[0] != "git" || gotArgs[1] != "clone" {
-		t.Fatalf("git args = %v, want git clone <url>", gotArgs)
-	}
-}
-
-func TestPull_GithubMode_ExecsGitPull(t *testing.T) {
-	dir := t.TempDir()
-	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "r", DefaultEnv: "main", Mode: "github"})
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
-
-	var gotArgs []string
-	runner := func(name string, args ...string) error { gotArgs = append([]string{name}, args...); return nil }
-	if err := runPull(pullDeps{git: runner}); err != nil {
-		t.Fatalf("runPull: %v", err)
-	}
-	if len(gotArgs) < 2 || gotArgs[1] != "pull" {
-		t.Fatalf("git args = %v, want git pull", gotArgs)
-	}
-}
-
-func TestClone_PlatformMode_WithoutDownloaderErrors(t *testing.T) {
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
-	err := runClone(cloneDeps{
-		git:      func(string, ...string) error { return nil },
-		mode:     "platform",
-		ref:      "app",
-		branch:   "main",
-		writeCfg: auth.SaveProjectConfigIn,
-	})
-	if err == nil {
-		t.Fatal("expected platform-mode clone without a downloader to error")
-	}
-}
-
-// fakeProjectREST stubs the REST surface lookupProjectMode hits. Its Do mirrors
-// the real transport.Client.Do contract: that method unwraps the `{data: {...}}`
-// success envelope and unmarshals the INNER project object into out — so here we
-// populate out with just that inner object (mode + github_repo), not the
-// envelope. github_repo is null in platform mode (repo == "").
-type fakeProjectREST struct {
-	mode string
-	repo string // "org/repo" full name; "" → github_repo null
-}
-
-func (f *fakeProjectREST) Do(ctx context.Context, method, path string, body, out any) error {
-	payload := map[string]any{"ref": "todoapp", "mode": f.mode, "github_repo": nil}
-	if f.repo != "" {
-		payload["github_repo"] = f.repo
-	}
-	b, _ := json.Marshal(payload)
-	return json.Unmarshal(b, out)
-}
-
-func (f *fakeProjectREST) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
-	return nil, nil
-}
-
-func TestLookupProjectMode_Github(t *testing.T) {
-	r := Resolvers{REST: func() REST { return &fakeProjectREST{mode: "github", repo: "palcore/app"} }}
-	mode, repoURL, err := lookupProjectMode(context.Background(), r, "todoapp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode != "github" {
-		t.Fatalf("mode=%q", mode)
-	}
-	if repoURL != "https://github.com/palcore/app.git" {
-		t.Fatalf("repoURL=%q", repoURL)
-	}
-}
-
-func TestLookupProjectMode_Platform(t *testing.T) {
-	r := Resolvers{REST: func() REST { return &fakeProjectREST{mode: "platform"} }}
-	mode, repoURL, err := lookupProjectMode(context.Background(), r, "todoapp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode != "platform" {
-		t.Fatalf("mode=%q", mode)
-	}
-	if repoURL != "" {
-		t.Fatalf("repoURL=%q", repoURL)
-	}
-}
-
-// TestClone_PlatformMode_DownloadsAndExtractsBundleAndWritesConfig tests the
-// happy path: a wired download func is called, extracts files into ./<ref>/,
-// and writes platform-mode .palbase/config.json.
-func TestClone_PlatformMode_DownloadsAndExtractsBundleAndWritesConfig(t *testing.T) {
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
-
-	sc := fakeStudioServer(t, "sha-abc123", map[string]string{
-		"index.ts": "export const x = 1",
-	})
-	r := Resolvers{Studio: func() *studio.Client { return sc }}
-
-	var out bytes.Buffer
-	var downloadCalled bool
-	download := func(ref, branch string) error {
-		downloadCalled = true
-		dst := ref
-		if err := platformPullBundle(context.Background(), r, ref, branch, dst, &out); err != nil {
-			return err
-		}
-		return auth.SaveProjectConfigIn(dst, &auth.ProjectConfig{
-			Ref: ref, DefaultEnv: branch, Mode: "platform",
-		})
-	}
-	err := runClone(cloneDeps{
-		git:      func(string, ...string) error { return nil },
-		mode:     "platform",
-		ref:      "todoapp",
-		branch:   "main",
-		writeCfg: auth.SaveProjectConfigIn,
-		download: download,
-	})
-	if err != nil {
-		t.Fatalf("runClone: %v", err)
-	}
-	if !downloadCalled {
-		t.Fatal("download func was not called")
-	}
-	// Bundle was extracted into ./todoapp/
-	if _, err := os.Stat(filepath.Join("todoapp", "index.ts")); err != nil {
-		t.Fatalf("expected todoapp/index.ts to exist: %v", err)
-	}
-	// Config was written with mode=platform — read it directly to avoid needing
-	// a LoadProjectConfigFrom helper that doesn't exist.
-	cfgData, err := os.ReadFile(filepath.Join("todoapp", ".palbase", "config.json"))
-	if err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	var cfg auth.ProjectConfig
-	if err := json.Unmarshal(cfgData, &cfg); err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	if cfg.Mode != "platform" {
-		t.Fatalf("config mode = %q, want platform", cfg.Mode)
-	}
-	if cfg.Ref != "todoapp" {
-		t.Fatalf("config ref = %q", cfg.Ref)
-	}
-	// Success line was printed
-	if !strings.Contains(out.String(), "✓ pulled todoapp") {
-		t.Fatalf("missing success line; got: %s", out.String())
-	}
-}
-
-// TestPull_PlatformMode_RefetchesBundle tests that runPull with a wired
-// refetch func downloads and overwrites files in cwd.
-func TestPull_PlatformMode_RefetchesBundle(t *testing.T) {
-	dir := t.TempDir()
-	_ = auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{
-		Ref: "todoapp", DefaultEnv: "main", Mode: "platform",
-	})
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	_ = os.Chdir(dir)
-
-	sc := fakeStudioServer(t, "sha-def456", map[string]string{
-		"controllers/todo.controller.ts": "// updated",
-	})
-	r := Resolvers{Studio: func() *studio.Client { return sc }}
-
-	var out bytes.Buffer
-	var refetchCalled bool
-	refetch := func() error {
-		refetchCalled = true
-		cfg, err := auth.LoadProjectConfig()
-		if err != nil {
-			return err
-		}
-		return platformPullBundle(context.Background(), r, cfg.Ref, cfg.DefaultEnv, dir, &out)
-	}
-	if err := runPull(pullDeps{git: func(string, ...string) error { return nil }, refetch: refetch}); err != nil {
-		t.Fatalf("runPull: %v", err)
-	}
-	if !refetchCalled {
-		t.Fatal("refetch func was not called")
-	}
-	// File was extracted into cwd.
-	if _, err := os.Stat(filepath.Join(dir, "controllers", "todo.controller.ts")); err != nil {
-		t.Fatalf("expected controllers/todo.controller.ts to exist: %v", err)
-	}
-	if !strings.Contains(out.String(), "✓ pulled todoapp") {
-		t.Fatalf("missing success line; got: %s", out.String())
-	}
+func TestDeploymentIDFromResponse(t *testing.T) {
+	require.Equal(t, "dep_9",
+		deploymentIDFromResponse([]byte(`{"data":{"deploymentId":"dep_9"},"request_id":"r"}`)))
+	require.Empty(t, deploymentIDFromResponse([]byte(`not json`)))
 }

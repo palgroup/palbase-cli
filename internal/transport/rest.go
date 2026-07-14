@@ -1,9 +1,11 @@
 // Package transport is the CLI's REST client for the Palbase Management
-// API (`/api/v1/*` on api.palbase.studio). It is the single transport
-// for the project + apikey command families (Spec 1 of the Management
-// API plan); `backend *` still rides the tRPC `internal/studio` client
-// until backend REST routes exist (see
-// docs/decisions/2026-05-24-s5-cli-pat-provisioning-and-backend-trpc.md).
+// API (`/api/v2/*` on api.palbase.studio). It is the single transport for the
+// project / env / apikey / apps command families; `backend *` still rides the
+// tRPC `internal/studio` client for the procedures that have no v2 route
+// (logs, env vars, migrations, test data).
+//
+// `/api/v1` survives ONLY for `palbase admin *` — the fleet-operator routes
+// deliberately stay on v1.
 //
 // Auth model (D-32 / RFC 9449): every request carries
 //
@@ -14,11 +16,20 @@
 // the actual request and its `ath` binds to the PAT. palauth (reached by
 // Studio's introspection hop) re-derives htm/htu and checks the binding.
 // Bearer presentation is rejected server-side — we never downgrade.
+//
+// IDEMPOTENCY. Every mutating v2 route honours an `Idempotency-Key` header:
+// the first 2xx is stored and replayed byte-for-byte for 24h, and an in-flight
+// duplicate is a 409. The CLI sends one on the deploy upload (the only mutation
+// whose side effect is not already collapsed by a stable Temporal workflow id),
+// so a push whose response is lost to a timeout can be retried on the SAME key
+// without deploying twice.
 package transport
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +41,19 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 )
+
+// NewIdempotencyKey mints a fresh key for one logical mutation. crypto/rand —
+// never math/rand: a predictable key would let one caller replay another's
+// stored response if the scope hash were ever weakened.
+func NewIdempotencyKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is fatal-class; returning "" makes the client send
+		// no header (a plain, non-idempotent request) rather than a guessable one.
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
 
 // Client issues DPoP-bound requests to the Management API.
 type Client struct {
@@ -75,7 +99,7 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("%s (%d)", e.Code, e.Status)
 }
 
-// okEnvelope is the success wrapper every /api/v1 200/201/202 emits.
+// okEnvelope is the success wrapper every 200/201/202 emits.
 // The real payload lives under `data`; request_id is correlation only.
 type okEnvelope struct {
 	Data      json.RawMessage `json:"data"`
@@ -91,7 +115,7 @@ type errorEnvelope struct {
 }
 
 // Do performs one Management-API request. method is the HTTP verb; path
-// is appended to BaseURL (e.g. "/api/v1/projects"). body is JSON-encoded
+// is appended to BaseURL (e.g. "/api/v2/projects"). body is JSON-encoded
 // when non-nil (a nil body sends no request body). On a 2xx the success
 // envelope's `data` is decoded into out (out may be nil to discard). On a
 // non-2xx the error envelope is parsed into an *APIError.
@@ -188,7 +212,13 @@ func (c *Client) newSignedRequest(ctx context.Context, method, path string, body
 // reuses the exact DPoP/PAT signing of every other request (newSignedRequest),
 // so the proof's htm/htu match this POST. Returns the raw 2xx response body;
 // a non-2xx is surfaced as an *APIError (same envelope shape as Do).
-func (c *Client) PostMultipart(path string, tarball []byte, fields map[string]string) ([]byte, error) {
+//
+// idempotencyKey (when non-empty) rides the `Idempotency-Key` header: the same
+// key replayed on the same route by the same user returns the FIRST response
+// instead of running the mutation again. The deploy upload is the CLI's one
+// mutation with no server-side stable workflow id to collapse a double-submit,
+// so a timed-out push MUST be retried with the same key — never a new one.
+func (c *Client) PostMultipart(ctx context.Context, path string, tarball []byte, fields map[string]string, idempotencyKey string) ([]byte, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 
@@ -214,11 +244,14 @@ func (c *Client) PostMultipart(path string, tarball []byte, fields map[string]st
 
 	// Build + sign AFTER the body exists; the multipart Content-Type
 	// (with boundary) must be the writer's FormDataContentType().
-	req, err := c.newSignedRequest(context.Background(), http.MethodPost, path, &buf)
+	req, err := c.newSignedRequest(ctx, http.MethodPost, path, &buf)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

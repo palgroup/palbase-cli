@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -34,7 +34,8 @@ import (
 // client uploads provider secrets via the env.set mutation (the SAME path
 // `palbase secret set` uses).
 type Resolvers struct {
-	Studio func() *studio.Client
+	Studio    func() *studio.Client
+	Selection func() *selection.Resolver
 }
 
 // Cmd returns the `palbase notifications` parent command.
@@ -53,7 +54,7 @@ The deploy creates the configured providers; it never deletes a provider dropped
 from the file. Provider SECRETS (cert/key/api-key) are uploaded to reserved
 encrypted env vars — they never enter git.`,
 	}
-	cmd.AddCommand(providersCmd(), addCmd(r.Studio), removeCmd())
+	cmd.AddCommand(providersCmd(), addCmd(r), removeCmd())
 	return cmd
 }
 
@@ -114,7 +115,7 @@ func providersCmd() *cobra.Command {
 // addCmd configures a single provider: it (1) uploads the provider's secret(s)
 // to the reserved env key via env.set (isSecret=true), then (2) writes/updates
 // the provider's non-secret fields in config/notifications.ts (enabled:true).
-func addCmd(studioFn func() *studio.Client) *cobra.Command {
+func addCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <provider> [flags]",
 		Short: "Configure a provider: upload its secret + write its config entry",
@@ -138,11 +139,11 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				return fmt.Errorf("unknown provider %q — run `palbase notifications providers` to list them", name)
 			}
 
-			refOverride, _ := cmd.Flags().GetString("ref")
-			ref, err := auth.ResolveProjectRef(refOverride)
+			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
+			ref := sel.Ref()
 
 			// 1. Collect non-secret fields from flags; validate required ones.
 			entry := providerEntry{enabled: true, fields: map[string]string{}}
@@ -183,7 +184,7 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 					return serr
 				}
 				reserved := reservedSecretKey(name, s.name)
-				if uerr := studioFn().Mutation(cmd.Context(), "env.set", map[string]any{
+				if uerr := r.Studio().Mutation(cmd.Context(), "env.set", map[string]any{
 					"ref":      ref,
 					"key":      reserved,
 					"value":    value,
@@ -213,7 +214,6 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			return nil
 		},
 	}
-	cmd.Flags().String("ref", "", "Project ref (defaults to .palbase/config.json)")
 	// Register a flag for every catalog field + every secret file across all
 	// providers. cobra ignores flags a given provider doesn't use; the RunE only
 	// reads the ones in that provider's spec.

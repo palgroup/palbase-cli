@@ -1,12 +1,9 @@
 package backend
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/auth"
 )
 
 // noopResolvers builds a Resolvers whose accessors return nil — enough to
@@ -95,11 +92,11 @@ func TestCommands_WebGroup(t *testing.T) {
 	t.Fatal("web group not found in flat surface")
 }
 
-// TestCommands_IncludesGitNativeVerbs pins that the mode-aware deploy verbs
+// TestCommands_IncludesGitNativeVerbs pins that the provider-aware deploy verbs
 // (push/pull/clone) are registered as top-level commands. They route by the
-// linked project's mode: github (git push/pull/clone) or platform (tarball /
-// bundle). Constructing with a zero-value Resolvers must not panic — the REST
-// accessor is only called at RunE time.
+// project's repository_provider: github (git push/pull/clone) or palbase
+// (tarball / bundle). Constructing with a zero-value Resolvers must not panic —
+// the accessors are only called at RunE time.
 func TestCommands_IncludesGitNativeVerbs(t *testing.T) {
 	cmds := Commands(Resolvers{})
 	have := map[string]bool{}
@@ -128,32 +125,4 @@ func keys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
-}
-
-// chdirLinked makes a temp dir the cwd, seeds .palbase/config.json so
-// resolveOrLinkRef finds the ref without prompting, and restores cwd.
-func chdirLinked(t *testing.T, ref string) {
-	t.Helper()
-	dir := t.TempDir()
-	prev, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-	require.NoError(t, os.MkdirAll(".palbase", 0o755))
-	require.NoError(t, auth.SaveProjectConfig(&auth.ProjectConfig{Ref: ref, DefaultEnv: "main"}))
-}
-
-// TestIsInteractive_DevNullIsNotATTY pins the /dev/null trap: it IS a char
-// device, so the old ModeCharDevice check treated `palbase ios link
-// </dev/null` as interactive and opened a 66-line picker that died on EOF.
-// term.IsTerminal must say false for it. (Mutation-evident: revert
-// isInteractive to the ModeCharDevice check and this fails.)
-func TestIsInteractive_DevNullIsNotATTY(t *testing.T) {
-	devnull, err := os.Open(os.DevNull)
-	require.NoError(t, err)
-	defer devnull.Close()
-	orig := os.Stdin
-	os.Stdin = devnull
-	t.Cleanup(func() { os.Stdin = orig })
-	require.False(t, isInteractive(), "/dev/null stdin must NOT count as interactive")
 }

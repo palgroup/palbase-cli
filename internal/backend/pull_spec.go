@@ -12,25 +12,29 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/apps"
-	"github.com/palgroup/palbase-cli/internal/auth"
 )
 
-// pullSpecConfigEntry is the single active-env config the Swift SPM plugin turns
-// into Palbase-Info.plist — plain JSON so the plugin owns serialization.
+// pullSpecConfigEntry is the single-ENVIRONMENT config the SDK code generators
+// consume (the Swift SPM plugin turns it into Palbase-Info.plist; the Gradle
+// plugin and @palbase/web read it directly).
+//
+// It names the Environment — `environment_ref` — and carries NO branch. The URL
+// and the API key already identify the Environment; a `branch` field would be a
+// second, drift-prone name for the same runtime, and the Palbase branch no
+// longer exists.
 type pullSpecConfigEntry struct {
-	AppID         string                    `json:"app_id"`
-	EnvPreset     string                    `json:"env_preset"`
-	BaseURL       string                    `json:"base_url"`
-	APIKey        string                    `json:"api_key"`
-	OAuth         *oauthConfigJSON          `json:"oauth,omitempty"`
-	Integrity     *apps.IntegrityConfig     `json:"integrity,omitempty"`
-	Notifications *apps.NotificationsConfig `json:"notifications,omitempty"`
+	AppID          string                    `json:"app_id"`
+	EnvironmentRef string                    `json:"environment_ref"`
+	Kind           string                    `json:"kind"`
+	BaseURL        string                    `json:"base_url"`
+	APIKey         string                    `json:"api_key"`
+	OAuth          *oauthConfigJSON          `json:"oauth,omitempty"`
+	Integrity      *apps.IntegrityConfig     `json:"integrity,omitempty"`
+	Notifications  *apps.NotificationsConfig `json:"notifications,omitempty"`
 }
 
 // oauthConfigJSON mirrors apps.OAuthConfig field-for-field so the emitted JSON's
-// `oauth` block decodes identically to the plist's. Kept local (not a reuse of
-// apps.OAuthConfig directly) only so the JSON shape this command commits to is
-// explicit and self-documenting.
+// `oauth` block decodes identically to the plist's.
 type oauthConfigJSON struct {
 	Apple  *oauthAppleJSON  `json:"apple,omitempty"`
 	Google *oauthGoogleJSON `json:"google,omitempty"`
@@ -46,98 +50,76 @@ type oauthGoogleJSON struct {
 	RedirectURI string `json:"redirect_uri"`
 }
 
-// newSpecCmd (`palbase spec`) is the codegen-split fetcher: it downloads ONLY
-// the artifacts SDK code generators consume (openapi.json and platform config)
-// — the CLI does NOT generate client
-// code; that is the SDKs' job. Today the PalbaseCodegen SPM build-tool plugin
-// generates Swift offline over these committed files on every Xcode build.
+// newSpecCmd (`palbase spec`) fetches ONLY the artifact the SDK code generators
+// consume: the SELECTED ENVIRONMENT's openapi.json. The CLI does not generate
+// client code — that is the SDKs' job.
 //
-// spec NEVER probes a local `palbase serve` on :4003 — it fetches the
-// REMOTE spec for the resolved --ref via the wake-aware fetch. (A future
-// --local opt-in could add a serve probe; for now, remote only.)
+// spec NEVER probes a local `palbase serve` on :4003 — it fetches the REMOTE
+// spec via the wake-aware fetch.
 func newSpecCmd(r Resolvers) *cobra.Command {
-	var refFlag, branchFlag, outDir string
+	var outDir string
 	cmd := &cobra.Command{
 		Use:   "spec",
 		Args:  cobra.NoArgs,
 		Short: "Refresh openapi.json — the API contract the SDK code generators consume",
-		Long: `Fetch the deployed backend's openapi.json into --out-dir (default ./.palbase).
+		Long: `Fetch the SELECTED environment's openapi.json into --out-dir (default ./.palbase).
 Run it after every deploy so the committed API contract stays current; the SDK
-code generators (the iOS PalbaseCodegen plugin, @palbase/web's palbe-gen)
-regenerate from it.
+code generators (the iOS PalbaseCodegen plugin, @palbase/web's palbe-gen, the
+Android Gradle plugin) regenerate from it.
 
-spec ONLY refreshes the API contract. The per-env runtime config
-(palbase-config.json — base URLs + keys) is written once by 'palbase ios link'
-at setup time and changes only when your app bindings do; re-run 'palbase ios
-link' to refresh it, not spec. Native runtime config lives in fixed
-.palbase/ios and .palbase/macos slots.`,
+spec ONLY refreshes the API contract. The per-environment runtime config
+(palbase-config.json — base URL + key) is written by the platform link commands
+and re-written by ` + "`palbase ios|android use <environment>`" + `.
+
+Override the target with the global --project / --environment flags.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ref, err := resolveOrLinkRef(cmd.Context(), refFlag, r.Studio(), os.Stdout)
+			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
-			branch := branchFlag
-			if branch == "" {
-				if cfg, err := auth.LoadProjectConfig(); err == nil && cfg.DefaultEnv != "" {
-					branch = cfg.DefaultEnv
-				} else {
-					branch = "main"
-				}
-			}
 			// spec fetches the API contract ONLY (empty appID → no config).
-			// palbase-config.json is `ios link`'s responsibility.
-			// resolveOrLinkRef + lookupSpecTarget ride the tRPC studio client
-			// (project.list / apikey.reveal); the app bindings + config artifact
-			// ride the Management-API REST client. spec passes appID="", so the
-			// binding/config seams are never actually reached — but they still
-			// construct here.
 			return runPullSpec(
 				cmd.Context(),
 				lookupSpecTarget(r),
 				fetchRemoteOpenAPISpec,
 				studioBindingLister(r.REST()),
 				studioConfigArtifactFetch(r.REST()),
-				ref, branch, outDir, "", "",
-				os.Stdout,
+				sel.Ref(), outDir, "", "",
+				cmd.OutOrStdout(),
 			)
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to the linked .palbase/config.json; auto-picker in an interactive shell)")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to fetch the spec from (defaults to the linked branch, else main)")
 	cmd.Flags().StringVar(&outDir, "out-dir", "./.palbase", "Directory to write openapi.json")
 	return cmd
 }
 
 // specTargetLookup resolves a backend target (URL + publishable key) for an
-// (ref, branch). Injected so runPullSpec is testable without a live tRPC server.
-type specTargetLookup func(ctx context.Context, ref, branch string) (backendTarget, error)
+// ENVIRONMENT ref. Injected so runPullSpec is testable without a live server.
+type specTargetLookup func(ctx context.Context, environmentRef string) (backendTarget, error)
 
-// remoteSpecFetch fetches the openapi.json bytes from a remote tenant host. Its
-// signature matches fetchRemoteOpenAPISpec so the production wire is a direct
-// reference; tests inject a stub.
+// remoteSpecFetch fetches the openapi.json bytes from a remote tenant host.
 type remoteSpecFetch func(ctx context.Context, specURL, apiKey string, w io.Writer) ([]byte, error)
 
 // lookupSpecTarget binds the production lookupBackendTarget to the resolvers.
 func lookupSpecTarget(r Resolvers) specTargetLookup {
-	return func(ctx context.Context, ref, branch string) (backendTarget, error) {
-		return lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), ref, branch)
+	return func(ctx context.Context, environmentRef string) (backendTarget, error) {
+		return lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), environmentRef)
 	}
 }
 
-// runPullSpec is the testable core: resolve the remote target, fetch
-// openapi.json (wake-aware, REMOTE only — no :4003 probe), write it, and with a
-// non-empty appID also emit its flat app-bound palbase-config.json. App-bound
-// fetches use the artifact key; runtime bundle/origin headers are metadata.
+// runPullSpec is the testable core: resolve the Environment's remote target,
+// fetch openapi.json (wake-aware, REMOTE only), write it, and with a non-empty
+// appID also emit that app's palbase-config.json for the SAME Environment.
 func runPullSpec(
 	ctx context.Context,
 	lookup specTargetLookup,
 	fetch remoteSpecFetch,
 	list bindingLister,
 	cfgFetch configArtifactFetch,
-	ref, branch, specOutDir, configOutDir, appID string,
+	environmentRef, specOutDir, configOutDir, appID string,
 	w io.Writer,
 ) error {
-	target, err := lookup(ctx, ref, branch)
+	target, err := lookup(ctx, environmentRef)
 	if err != nil {
 		return err
 	}
@@ -146,12 +128,11 @@ func runPullSpec(
 	specKey := target.APIKey
 	var entry *pullSpecConfigEntry
 	if appID != "" {
-		entry, err = buildPullSpecConfig(ctx, list, cfgFetch, appID, ref, branch)
+		entry, err = buildPullSpecConfig(ctx, list, cfgFetch, appID, environmentRef)
 		if err != nil {
 			return err
 		}
-		// App links fetch with their app-bound key. Runtime bundle/origin
-		// metadata is intentionally absent from CLI artifact requests.
+		// App links fetch with their app-bound key.
 		specURL = strings.TrimRight(entry.BaseURL, "/") + "/openapi.json"
 		specKey = entry.APIKey
 	}
@@ -182,11 +163,8 @@ func runPullSpec(
 		return fmt.Errorf("mkdir %s: %w", configOutDir, err)
 	}
 
-	// SINGLE-env config: the config is for the ONE active target — the linked
-	// env-project (ref) at the requested branch. `ios link` sets it to production;
-	// `ios use <branch>` re-fetches it for that branch. The SDK reads a flat
-	// {base_url, api_key, ...} object for the platform slot.
-	// `spec` (config-less, appID=="") never reaches here.
+	// SINGLE-environment config: the ONE active target the CLI selected. The SDK
+	// reads a flat {environment_ref, base_url, api_key, ...} object.
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal palbase-config.json: %w", err)
@@ -199,41 +177,40 @@ func runPullSpec(
 	return nil
 }
 
-// buildPullSpecConfig fetches the config artifact for the ONE active env — the
-// binding whose project_ref == ref, at branchName — and returns it as a single
-// flat entry. The active target is what the CLI already selected (`ios link` →
-// production, `ios use` → the branch).
+// buildPullSpecConfig fetches the config artifact for the ONE selected
+// Environment — the binding whose environment_ref == environmentRef.
 func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
 	fetch configArtifactFetch,
-	appID, ref, branchName string,
+	appID, environmentRef string,
 ) (*pullSpecConfigEntry, error) {
 	bindings, err := list(ctx, appID)
 	if err != nil {
 		return nil, fmt.Errorf("list app %q bindings: %w", appID, err)
 	}
-	var refBinding *AppBinding
+	bound := false
 	for i := range bindings {
-		if bindings[i].ProjectRef == ref {
-			refBinding = &bindings[i]
+		if bindings[i].EnvironmentRef == environmentRef {
+			bound = true
 			break
 		}
 	}
-	if refBinding == nil {
-		return nil, fmt.Errorf("app %q is not bound to project ref %q — run the platform link command again", appID, ref)
+	if !bound {
+		return nil, fmt.Errorf("app %q is not bound to environment %q — run the platform link command again", appID, environmentRef)
 	}
-	art, err := fetch(ctx, appID, ref, branchName)
+	art, err := fetch(ctx, appID, environmentRef)
 	if err != nil {
-		return nil, fmt.Errorf("fetch config artifact for %s: %w", ref, err)
+		return nil, fmt.Errorf("fetch config artifact for %s: %w", environmentRef, err)
 	}
 	entry := &pullSpecConfigEntry{
-		AppID:         art.AppID,
-		EnvPreset:     art.EnvPreset,
-		BaseURL:       art.BaseURL,
-		APIKey:        art.APIKey,
-		Integrity:     art.Integrity,
-		Notifications: art.Notifications,
+		AppID:          art.AppID,
+		EnvironmentRef: art.EnvironmentRef,
+		Kind:           art.Kind,
+		BaseURL:        art.BaseURL,
+		APIKey:         art.APIKey,
+		Integrity:      art.Integrity,
+		Notifications:  art.Notifications,
 	}
 	if art.OAuth != nil {
 		oc := &oauthConfigJSON{}

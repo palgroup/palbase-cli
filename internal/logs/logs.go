@@ -1,9 +1,10 @@
-// Package logs wires `palbase logs` — tail the deployed backend's logs from
-// the terminal. Transport: Studio tRPC `logs.entries.search` (Studio validates
-// project membership, then proxies modules/logs' /logs/v1/search). One-shot by
-// default (newest lines, printed oldest-first); --follow polls the same search
-// FORWARD from the last seen timestamp every 2s — no SSE/apikey plumbing, the
-// session token authorizes every poll.
+// Package logs wires `palbase logs` — tail the SELECTED ENVIRONMENT's deployed
+// backend logs from the terminal. Transport: Studio tRPC `logs.entries.search`
+// (Studio validates membership, then proxies modules/logs' /logs/v1/search).
+// One-shot by default (newest lines, printed oldest-first); --follow polls the
+// same search FORWARD from the last seen timestamp every 2s.
+//
+// Logs belong to an Environment: override the target with --environment.
 package logs
 
 import (
@@ -16,7 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
 // Studio is the tRPC transport subset the logs command needs.
@@ -24,9 +25,11 @@ type Studio interface {
 	Query(ctx context.Context, path string, input any, out any) error
 }
 
-// Resolvers carries the lazily-built Studio client (apps.Resolvers pattern).
+// Resolvers carries the lazily-built Studio client + the shared selection
+// resolver.
 type Resolvers struct {
-	Studio func() Studio
+	Studio    func() Studio
+	Selection func() *selection.Resolver
 }
 
 // logLine mirrors the Studio logs router's LogLine wire type.
@@ -49,8 +52,6 @@ var followInterval = 2 * time.Second
 // Cmd returns the `palbase logs` command.
 func Cmd(r Resolvers) *cobra.Command {
 	var (
-		refFlag   string
-		branch    string
 		source    string
 		container string
 		levels    string
@@ -72,20 +73,13 @@ new lines every 2s — Ctrl-C to stop.
   palbase logs --follow                 tail live`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := auth.ResolveProjectRef(refFlag)
+			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
-			if branch == "" {
-				if cfg, cfgErr := auth.LoadProjectConfig(); cfgErr == nil && cfg.DefaultEnv != "" && cfg.DefaultEnv != "main" {
-					branch = cfg.DefaultEnv
-				}
-			}
+			ref := sel.Ref()
 
 			base := map[string]any{"ref": ref, "limit": limit}
-			if branch != "" {
-				base["branch"] = branch
-			}
 			if source != "" {
 				base["source"] = source
 			}
@@ -160,8 +154,6 @@ new lines every 2s — Ctrl-C to stop.
 			}
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch (defaults to the active branch; omit for main)")
 	cmd.Flags().StringVar(&source, "source", "", "Only this source (e.g. backend)")
 	cmd.Flags().StringVar(&container, "container", "", "Only this container")
 	cmd.Flags().StringVar(&levels, "level", "", "Comma-separated levels: debug,info,warn,error")

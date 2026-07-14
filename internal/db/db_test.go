@@ -12,6 +12,8 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
 // trpcOK writes a tRPC success envelope (mirrors secret_test.go).
@@ -101,7 +103,7 @@ func TestDiff_WritesMigrationFile_WhenPlanNonEmpty(t *testing.T) {
 		require.Equal(t, http.MethodPost, r.Method)
 		require.Equal(t, "/api/trpc/backend.migrationSQL", r.URL.Path)
 		in := innerInput(t, r)
-		require.Equal(t, "myproj", in["ref"])
+		require.Equal(t, "app1prod", in["ref"])
 		sentSchema, _ = in["schema"].(string)
 		trpcOK(w, migSQLResponse(
 			"CREATE TABLE todos (id uuid);\nALTER TABLE todos ADD COLUMN done boolean;",
@@ -110,8 +112,8 @@ func TestDiff_WritesMigrationFile_WhenPlanNonEmpty(t *testing.T) {
 	})
 
 	var out, errOut strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "Add Todos!"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "Add Todos!"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SilenceUsage = true
@@ -159,8 +161,8 @@ func TestDiff_DestructivePrintsWarning(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "--name", "drop_stuff"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "--name", "drop_stuff"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -185,8 +187,8 @@ func TestDiff_NoOp_WhenPlanEmpty(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "noop"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "noop"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -212,8 +214,8 @@ func TestDiff_WritesMigrationFile_WhenOnlyConstraints(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_constraint"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "add_constraint"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -257,8 +259,8 @@ func TestDiff_WritesMigrationFile_WhenOnlyPolicies(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_policy"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "add_policy"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -297,8 +299,8 @@ func TestDiff_WritesMigrationFile_WhenOnlyForeignKeys(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_fk"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "add_fk"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -331,8 +333,8 @@ func TestDiff_WritesMigrationFile_WhenOnlyIndexes(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "add_index"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "add_index"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -366,8 +368,8 @@ func TestDiff_DropConstraint_IsNotDestructive(t *testing.T) {
 	})
 
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "drop_constraint"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "drop_constraint"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -390,8 +392,8 @@ func TestDiff_RequiresName(t *testing.T) {
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("must not call Studio when -f/--name is missing")
 	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff"})
 	cmd.SetOut(&strings.Builder{})
 	cmd.SetErr(&strings.Builder{})
 	cmd.SilenceUsage = true
@@ -403,8 +405,8 @@ func TestDiff_ErrorsWhenSchemaMissing(t *testing.T) {
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("must not call Studio when db/schema.ts is absent")
 	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"diff", "--ref", "myproj", "-f", "x"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "x"})
 	cmd.SetOut(&strings.Builder{})
 	cmd.SetErr(&strings.Builder{})
 	cmd.SilenceUsage = true
@@ -422,8 +424,8 @@ func TestCheck_NilWhenInSync(t *testing.T) {
 		trpcOK(w, migSQLResponse("", nil))
 	})
 	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"check", "--ref", "myproj"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"check"})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SilenceUsage = true
@@ -444,8 +446,8 @@ func TestCheck_ErrorsWhenDrift(t *testing.T) {
 		))
 	})
 	var stdout, stderr strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }})
-	cmd.SetArgs([]string{"check", "--ref", "myproj"})
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"check"})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SilenceUsage = true

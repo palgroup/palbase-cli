@@ -7,51 +7,73 @@ import (
 	"os"
 	"strings"
 
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
-// deleteCmd wires `palbase project delete <ref>` over the Management API
-// (DELETE /api/v1/projects/{ref}) — the same DPoP/PAT transport every other
-// project verb uses, so delete works headless too.
+// deleteCmd wires `palbase project delete <projectId>`.
 //
-// Deletion is irreversible — it tears down the entire project stack. The
-// server requires confirm_ref == ref (anti-accidental-delete), and the CLI
-// adds its own guard: an interactive prompt by default, skippable with --yes
-// for scripted use.
-func deleteCmd(rest func() REST) *cobra.Command {
+// DELETE /api/v2/projects/{projectId} is OWNER-only and takes
+// `{"confirm_name": "<the project's NAME>"}` — the name, not the id: typing a
+// name you can read off the dashboard is the anti-fat-finger gate, and it is
+// what the server compares. 202: DeleteProjectWorkflow tears down every
+// Environment underneath.
+func deleteCmd(r Resolvers) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "delete <ref>",
+		Use:   "delete <projectId>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Permanently delete a project and tear down its stack",
-		Long: `Permanently delete a project and all its associated resources
-(database, backend runtime, storage, API keys, secrets, …).
+		Short: "Permanently delete a project and every environment under it",
+		Long: `Permanently delete a project and ALL of its environments (databases,
+backend runtimes, storage, API keys, secrets, apps).
 
-THIS IS IRREVERSIBLE. You will be prompted to re-type the project ref
-to confirm. Pass --yes to skip the prompt in non-interactive environments.`,
+THIS IS IRREVERSIBLE. You will be prompted to type the project's NAME to
+confirm. Pass --yes to skip the prompt in a non-interactive shell.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref := args[0]
+			projectID := args[0]
+			ctx := cmd.Context()
 
-			if !yes {
-				fmt.Fprintf(cmd.OutOrStdout(), "This will permanently delete project %q and all its resources.\n", ref)
-				fmt.Fprintf(cmd.OutOrStdout(), "Type the project ref to confirm: ")
-				scanner := bufio.NewScanner(os.Stdin)
-				scanner.Scan()
-				typed := strings.TrimSpace(scanner.Text())
-				if typed != ref {
-					return fmt.Errorf("confirmation mismatch: expected %q, got %q — delete cancelled", ref, typed)
-				}
-			}
-
-			if err := rest().Do(cmd.Context(), http.MethodDelete, "/api/v1/projects/"+ref,
-				map[string]any{"confirm_ref": ref}, nil); err != nil {
+			// Read the name first: it is what the server's confirm_name compares,
+			// and showing it makes the prompt meaningful ("delete todoapp?").
+			detail, err := selection.GetProject(ctx, r.REST(), projectID)
+			if err != nil {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ deleted project %s\n", ref)
+			if !yes {
+				out := cmd.OutOrStdout()
+				fmt.Fprintf(out, "This will permanently delete project %q (%s) and every environment under it.\n", detail.Name, projectID)
+				fmt.Fprintf(out, "Type the project name to confirm: ")
+				scanner := bufio.NewScanner(cmd.InOrStdin())
+				scanner.Scan()
+				typed := strings.TrimSpace(scanner.Text())
+				if typed != detail.Name {
+					return fmt.Errorf("confirmation mismatch: expected %q, got %q — delete cancelled", detail.Name, typed)
+				}
+			}
+
+			var handle struct {
+				WorkflowID string `json:"workflowId"`
+				RunID      string `json:"runId"`
+			}
+			if err := r.REST().Do(ctx, http.MethodDelete, "/api/v2/projects/"+projectID,
+				map[string]any{"confirm_name": detail.Name}, &handle); err != nil {
+				return err
+			}
+
+			// The selection now points at a project that is being torn down. Drop it
+			// rather than leaving every later command to fail with a 404.
+			if cfg, cfgErr := selection.Load(""); cfgErr == nil && cfg.ProjectID == projectID {
+				if rmErr := os.Remove(selection.ConfigPath("")); rmErr == nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "removed %s (it selected the deleted project)\n", selection.ConfigPath(""))
+				}
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ teardown started for %s (%s)\n", detail.Name, projectID)
+			fmt.Fprintf(cmd.OutOrStdout(), "  workflow: %s\n", handle.WorkflowID)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&yes, "yes", false, "skip confirmation prompt (for scripted use)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt (for scripted use)")
 	return cmd
 }

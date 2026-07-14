@@ -2,154 +2,234 @@ package project
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
+	"strings"
+	"time"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
-// REST is the subset of the Management-API transport the project
-// commands use. transport.Client satisfies it; tests substitute a stub.
-type REST interface {
-	Do(ctx context.Context, method, path string, body, out any) error
-}
-
-// createCmd wires `palbase project create`. Project provisioning is
-// async (Temporal): POST returns 202 with a workflow handle and the
-// caller polls `project status <ref>`.
-func createCmd(rest func() REST) *cobra.Command {
+// createCmd wires `palbase project create <ref-seed>`.
+//
+// POST /api/v2/projects takes NO organizationId: the CLI convenience flow
+// targets the caller's SERVER-SIDE default Organization (Personal for a new
+// account). Choosing the payer explicitly is what the Organization-scoped API
+// and Studio are for — spec §7.3 keeps Organization out of the CLI entirely.
+//
+// The positional arg is the ref SEED (4-13 lowercase alnum). The Project itself
+// has no ref; the seed names its production Environment's ref (`<seed><slug>`).
+// Provisioning is async (Temporal): the 202 carries a workflow handle.
+func createCmd(r Resolvers) *cobra.Command {
 	var (
 		name          string
-		tier          string
 		region        string
 		githubAccount string
 		repoName      string
+		async         bool
 		jsonOut       bool
-		yes           bool
 	)
 	cmd := &cobra.Command{
-		Use:   "create <ref>",
+		Use:   "create <ref-seed>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Create a new project (async — poll `project status <ref>`)",
-		Long: `Create a new project. Provisioning is async: the command returns a
-workflow handle; poll progress with ` + "`palbase project status <ref>`" + `.
+		Short: "Create a project in your default organization (async)",
+		Long: `Create a project. Provisioning is async: the command returns a workflow
+handle and creates the project's production environment.
+
+<ref-seed> is 4-13 lowercase alphanumerics. It is not the project's id — it
+seeds the ref of the environments underneath it (the endpoint / DNS label /
+API-key ref).
+
+The project is created in your DEFAULT organization, which pays for it. There is
+no --organization flag: pick the payer in Studio or the Organization-scoped API.
 
 GitHub is OPTIONAL. Two modes:
 
-  platform mode (default — no GitHub flags):
-      The platform manages your project's code; no GitHub repo is created.
-      Deploy from your working directory with the tarball flow:
-      ` + "`palbase push`" + ` (and sync with ` + "`palbase clone` / `palbase pull`" + `).
+  palbase mode (default — no GitHub flags):
+      Deploy from your working directory with ` + "`palbase push`" + `.
 
   github mode (--github-account AND --repo):
-      A GitHub repo is created and linked; deploys trigger on ` + "`git push`" + `
-      via webhook.
+      A GitHub repo is created and linked; deploys run on ` + "`git push`" + ` via webhook.
 
 Pass both GitHub flags or neither — exactly one is an error.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref := args[0]
+			refSeed := args[0]
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
-			// GitHub mode needs both halves; the server contract rejects a
-			// lone field too. Catch it client-side with a clear message
-			// instead of silently degrading to platform mode.
+			// The server rejects a lone GitHub field too (contract superRefine);
+			// catching it here gives the actionable message instead of a 400.
 			if (githubAccount != "") != (repoName != "") {
-				return fmt.Errorf("use both --github-account and --repo for GitHub mode, or neither for platform mode")
+				return fmt.Errorf("use both --github-account and --repo for GitHub mode, or neither for palbase mode")
 			}
-			// Ownership is the authenticated user (projects.owner_user_id); there
-			// is no org layer. The server derives the owner from the session.
-			body := map[string]any{
-				"ref":  ref,
-				"name": name,
-			}
-			// GitHub is optional. Both flags present → github mode (deploy via
-			// git push → webhook); absent → platform mode (deploy via tarball).
-			// In platform mode the github fields are OMITTED from the payload
-			// entirely (the server treats "both absent" as platform mode).
-			mode := "platform"
-			if githubAccount != "" && repoName != "" {
+
+			body := map[string]any{"ref": refSeed, "name": name}
+			provider := selection.ProviderPalbase
+			if githubAccount != "" {
 				body["githubAccount"] = githubAccount
 				body["repoName"] = repoName
-				mode = "github"
-			}
-			if tier != "" {
-				body["tier"] = tier
+				provider = selection.ProviderGitHub
 			}
 			if region != "" {
 				body["region"] = region
 			}
+
 			var handle struct {
-				WorkflowID string `json:"workflowId"`
-				RunID      string `json:"runId"`
+				WorkflowID     string `json:"workflowId"`
+				RunID          string `json:"runId"`
+				OrganizationID string `json:"organizationId"`
 			}
-			if err := rest().Do(cmd.Context(), http.MethodPost, "/api/v1/projects", body, &handle); err != nil {
+			ctx := cmd.Context()
+			if err := r.REST().Do(ctx, http.MethodPost, "/api/v2/projects", body, &handle); err != nil {
 				return err
 			}
-			// Persist the link so subsequent commands (deploy, secret, …) key
-			// off the ref + mode without re-prompting. The create response
-			// carries no ref, so we use the positional arg the user passed.
-			cwd, _ := os.Getwd()
-			_ = auth.SaveProjectConfigIn(cwd, &auth.ProjectConfig{
-				Ref:        ref,
-				DefaultEnv: "main",
-				Mode:       mode,
-				GithubRepo: repoName, // "" in platform mode
-			})
-			if jsonOut {
-				return encodeJSON(handle)
+
+			out := cmd.OutOrStdout()
+			progress := cmd.ErrOrStderr()
+
+			if async {
+				if jsonOut {
+					return encodeJSON(out, handle)
+				}
+				fmt.Fprintf(out, "✓ provisioning started (%s, seed %s, repository %s)\n", name, refSeed, provider)
+				fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
+				fmt.Fprintln(out, "  next:     palbase project list   # then: palbase project use <projectId>")
+				return nil
 			}
-			fmt.Fprintf(os.Stdout, "✓ provisioning started for %s\n", ref)
-			fmt.Fprintf(os.Stdout, "  workflow: %s\n", handle.WorkflowID)
-			fmt.Fprintf(os.Stdout, "  poll:     palbase project status %s\n", ref)
+
+			// The 202 carries NO project id: the saga writes the row. So we wait for
+			// the production Environment the saga provisions — its ref starts with
+			// the seed we chose, which is what makes it identifiable — and that
+			// resolves the project id. Without this, `create` would hand the user a
+			// workflow id and no way to name what it built.
+			fmt.Fprintf(progress, "→ provisioning %s (project + production environment) ...\n", name)
+			created, err := waitForProject(ctx, r.REST(), refSeed)
+			if err != nil {
+				return err
+			}
+
+			// The local Git invariant (spec §4): exactly ONE containing repository.
+			// An ancestor repo (a monorepo) is reused; a standalone directory gets
+			// `git init -b main`. Never a nested .git.
+			if _, err := ensureGitRepo(gitRun, ".", progress); err != nil {
+				return err
+			}
+
+			// Select what we just made: a fresh create leaves the directory ready to
+			// use (UAT CLI-001 — config v2 is written by the create/link flow).
+			cfg := &selection.Config{
+				ProjectID:          created.ProjectID,
+				EnvironmentID:      created.EnvironmentID,
+				RepositoryProvider: provider,
+			}
+			if err := selection.Save("", cfg); err != nil {
+				return err
+			}
+			if err := selection.EnsureGitignored(".gitignore"); err != nil {
+				return fmt.Errorf("update .gitignore: %w", err)
+			}
+
+			if jsonOut {
+				return encodeJSON(out, createdProject{
+					ProjectID:          created.ProjectID,
+					EnvironmentID:      created.EnvironmentID,
+					EnvironmentRef:     created.EnvironmentRef,
+					EnvironmentSlug:    created.EnvironmentSlug,
+					RepositoryProvider: provider,
+					WorkflowID:         handle.WorkflowID,
+				})
+			}
+			fmt.Fprintf(out, "✓ created project %s (%s)\n", name, created.ProjectID)
+			fmt.Fprintf(out, "  environment: %s (%s)\n", created.EnvironmentSlug, created.EnvironmentRef)
+			fmt.Fprintf(out, "  repository:  %s\n", provider)
+			fmt.Fprintf(out, "  selected in %s\n", selection.ConfigPath(""))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Human-readable project name (required)")
-	cmd.Flags().StringVar(&githubAccount, "github-account", "", `GitHub target: "personal" or an installation id (optional — omit for platform mode)`)
-	cmd.Flags().StringVar(&repoName, "repo", "", "GitHub repo name to create for this project (optional — omit for platform mode)")
-	cmd.Flags().StringVar(&tier, "tier", "", "Tier: free|pro|scale|enterprise (default free)")
+	cmd.Flags().StringVar(&githubAccount, "github-account", "", `GitHub target: "personal" or an installation id (omit for palbase mode)`)
+	cmd.Flags().StringVar(&repoName, "repo", "", "GitHub repo name to create for this project (omit for palbase mode)")
 	cmd.Flags().StringVar(&region, "region", "", "Region (default northeurope)")
+	cmd.Flags().BoolVar(&async, "async", false, "Return the workflow handle immediately instead of waiting (nothing is selected)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	cmd.Flags().BoolVar(&yes, "yes", false, "skip prompts (headless)")
 	return cmd
 }
 
-// statusCmd wires `palbase project status <ref>`. Reads the project row
-// (GET /api/v1/projects/{ref}); the `status` field reflects provisioning
-// progress.
-func statusCmd(rest func() REST) *cobra.Command {
-	var jsonOut bool
-	cmd := &cobra.Command{
-		Use:   "status <ref>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Show a project's provisioning/runtime status",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ref := args[0]
-			var row projectRow
-			if err := rest().Do(cmd.Context(), http.MethodGet, "/api/v1/projects/"+ref, nil, &row); err != nil {
-				return err
+// gitRun is the git seam `project create` uses to enforce the local repository
+// invariant. A var so tests can drive it without forking a real git.
+var gitRun gitRunner
+
+// createdProject is `palbase project create --json`. It names everything the
+// caller needs to act next: the project, its production environment, and the
+// endpoint ref that environment answers on.
+type createdProject struct {
+	ProjectID          string `json:"project_id"`
+	EnvironmentID      string `json:"environment_id"`
+	EnvironmentRef     string `json:"environment_ref"`
+	EnvironmentSlug    string `json:"environment_slug"`
+	RepositoryProvider string `json:"repository_provider"`
+	WorkflowID         string `json:"workflow_id"`
+}
+
+// Provisioning a project spins up a DB + pod + ingress + keys. vars, not consts,
+// so tests can shrink the interval; production never reassigns them.
+var (
+	projectPollInterval = 2 * time.Second
+	projectPollTimeout  = 10 * time.Minute
+)
+
+// waitForProject polls until the saga's production Environment is active, and
+// returns the project it hangs under.
+//
+// The seed is the handle: `environments.ref` keeps the `<seed><envSlug>` wire
+// format, so the Environment this create provisions is the one whose ref starts
+// with the seed we passed. (This is exactly how the server authorizes its own
+// create-status poll.) The Project row does not exist for the first part of the
+// saga, so polling the project list alone would race.
+func waitForProject(ctx context.Context, rest REST, refSeed string) (createdProject, error) {
+	deadline := time.Now().Add(projectPollTimeout)
+	ticker := time.NewTicker(projectPollInterval)
+	defer ticker.Stop()
+
+	seen := false
+	for {
+		projects := []selection.Project{}
+		if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects", nil, &projects); err != nil {
+			return createdProject{}, err
+		}
+		for _, p := range projects {
+			envs, err := selection.ListEnvironments(ctx, rest, p.ID)
+			if err != nil {
+				return createdProject{}, err
 			}
-			if jsonOut {
-				return encodeJSON(row)
+			for _, e := range envs {
+				if !strings.HasPrefix(e.Ref, refSeed) || !e.IsProduction {
+					continue
+				}
+				seen = true
+				if e.Status != "active" {
+					continue
+				}
+				return createdProject{
+					ProjectID:       p.ID,
+					EnvironmentID:   e.ID,
+					EnvironmentRef:  e.Ref,
+					EnvironmentSlug: e.Slug,
+				}, nil
 			}
-			fmt.Fprintf(os.Stdout, "ref:     %s\n", row.Ref)
-			fmt.Fprintf(os.Stdout, "name:    %s\n", row.Name)
-			fmt.Fprintf(os.Stdout, "tier:    %s\n", row.Tier)
-			fmt.Fprintf(os.Stdout, "region:  %s\n", row.Region)
-			fmt.Fprintf(os.Stdout, "status:  %s\n", row.Status)
-			return nil
-		},
+		}
+
+		if time.Now().After(deadline) {
+			if seen {
+				return createdProject{}, fmt.Errorf("project %q is still provisioning after %s — check `palbase project list`", refSeed, projectPollTimeout)
+			}
+			return createdProject{}, fmt.Errorf("project %q did not appear after %s — provisioning failed or was rolled back; check Studio", refSeed, projectPollTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return createdProject{}, ctx.Err()
+		case <-ticker.C:
+		}
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	return cmd
-}
-
-func encodeJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }

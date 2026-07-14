@@ -15,6 +15,8 @@ import (
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
 // chdirTemp moves into a fresh temp dir so each test gets its own
@@ -87,7 +89,8 @@ func (f *fakeStudio) calls() []capturedMutation {
 // run drives the notifications command tree with args, capturing stdout+stderr.
 func run(t *testing.T, studioFn func() *studio.Client, args ...string) (string, error) {
 	t.Helper()
-	cmd := Cmd(Resolvers{Studio: studioFn})
+	t.Helper()
+	cmd := Cmd(Resolvers{Studio: studioFn, Selection: selectiontest.Selected(t)})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -106,6 +109,7 @@ func readConfigFile(t *testing.T) string {
 // --- providers --------------------------------------------------------------
 
 func TestProviders_ListsCatalog(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	out, err := run(t, nil, "providers")
 	require.NoError(t, err)
@@ -120,6 +124,7 @@ func TestProviders_ListsCatalog(t *testing.T) {
 }
 
 func TestProviders_MarksConfigured(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	// Seed a config with apns enabled.
 	require.NoError(t, writeConfig(notificationsConfig{
@@ -133,6 +138,7 @@ func TestProviders_MarksConfigured(t *testing.T) {
 // --- add --------------------------------------------------------------------
 
 func TestAddApns_UploadsReservedSecretAndWritesConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	// Write a .p8 file to feed --p8-file.
 	p8 := filepath.Join(t.TempDir(), "AuthKey.p8")
@@ -141,7 +147,6 @@ func TestAddApns_UploadsReservedSecretAndWritesConfig(t *testing.T) {
 	fs := newFakeStudio(t)
 	out, err := run(t, fs.client,
 		"add", "apns",
-		"--ref", "demo1234m",
 		"--team-id", "TEAM12345",
 		"--key-id", "KEY1234567",
 		"--bundle-id", "com.acme.app",
@@ -170,12 +175,13 @@ func TestAddApns_UploadsReservedSecretAndWritesConfig(t *testing.T) {
 }
 
 func TestAddApns_MissingRequiredField(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	p8 := filepath.Join(t.TempDir(), "k.p8")
 	require.NoError(t, os.WriteFile(p8, []byte("key"), 0o600))
 	fs := newFakeStudio(t)
 	// Missing --bundle-id.
-	_, err := run(t, fs.client, "add", "apns", "--ref", "r1", "--team-id", "T", "--key-id", "K", "--p8-file", p8)
+	_, err := run(t, fs.client, "add", "apns", "--team-id", "T", "--key-id", "K", "--p8-file", p8)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--bundle-id")
 	// No secret uploaded when validation fails before the upload step.
@@ -183,21 +189,23 @@ func TestAddApns_MissingRequiredField(t *testing.T) {
 }
 
 func TestAddApns_MissingSecretFile(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	fs := newFakeStudio(t)
 	// No --p8-file and stdin is not a TTY in tests → hard error.
-	_, err := run(t, fs.client, "add", "apns", "--ref", "r1", "--team-id", "T", "--key-id", "K", "--bundle-id", "com.x")
+	_, err := run(t, fs.client, "add", "apns", "--team-id", "T", "--key-id", "K", "--bundle-id", "com.x")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--p8-file")
 	assert.Empty(t, fs.calls())
 }
 
 func TestAddFcm_ServiceAccountFile(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	sa := filepath.Join(t.TempDir(), "sa.json")
 	require.NoError(t, os.WriteFile(sa, []byte(`{"type":"service_account","project_id":"p"}`), 0o600))
 	fs := newFakeStudio(t)
-	out, err := run(t, fs.client, "add", "fcm", "--ref", "r1", "--service-account-file", sa)
+	out, err := run(t, fs.client, "add", "fcm", "--service-account-file", sa)
 	require.NoError(t, err, out)
 	calls := fs.calls()
 	require.Len(t, calls, 1)
@@ -208,17 +216,19 @@ func TestAddFcm_ServiceAccountFile(t *testing.T) {
 }
 
 func TestAddTwilio_RequiresOneOfFromOrMessaging(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	fs := newFakeStudio(t)
-	_, err := run(t, fs.client, "add", "twilio", "--ref", "r1", "--account-sid", "AC1", "--auth-token-file", writeTemp(t, "tok"))
+	_, err := run(t, fs.client, "add", "twilio", "--account-sid", "AC1", "--auth-token-file", writeTemp(t, "tok"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--from-number")
 	assert.Empty(t, fs.calls())
 }
 
 func TestAddUnknownProvider(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
-	_, err := run(t, nil, "add", "nope", "--ref", "r1")
+	_, err := run(t, nil, "add", "nope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown provider")
 }
@@ -226,6 +236,7 @@ func TestAddUnknownProvider(t *testing.T) {
 // --- remove -----------------------------------------------------------------
 
 func TestRemove_DropsFromConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	require.NoError(t, writeConfig(notificationsConfig{
 		"apns": {enabled: true, fields: map[string]string{"teamId": "T", "keyId": "K", "bundleId": "com.x"}},
@@ -237,6 +248,7 @@ func TestRemove_DropsFromConfig(t *testing.T) {
 }
 
 func TestRemove_NotDeclared(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	require.NoError(t, writeConfig(notificationsConfig{}))
 	_, err := run(t, nil, "remove", "apns")
@@ -247,6 +259,7 @@ func TestRemove_NotDeclared(t *testing.T) {
 // --- config round-trip ------------------------------------------------------
 
 func TestConfig_RoundTrips(t *testing.T) {
+	t.Chdir(t.TempDir())
 	chdirTemp(t)
 	in := notificationsConfig{
 		"apns":     {enabled: true, fields: map[string]string{"teamId": "T1", "keyId": "K1", "bundleId": "com.acme", "isProduction": "false"}},
@@ -266,12 +279,13 @@ func TestConfig_RoundTrips(t *testing.T) {
 }
 
 func TestReservedSecretKey_Derivation(t *testing.T) {
+	t.Chdir(t.TempDir())
 	cases := map[string]string{
-		"apns/p8":               "PB_NOTIFICATIONS_APNS_P8",
-		"fcm/serviceAccount":    "PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT",
-		"twilio/authToken":      "PB_NOTIFICATIONS_TWILIO_AUTH_TOKEN",
-		"ses/secretAccessKey":   "PB_NOTIFICATIONS_SES_SECRET_ACCESS_KEY",
-		"acs/connectionString":  "PB_NOTIFICATIONS_ACS_CONNECTION_STRING",
+		"apns/p8":              "PB_NOTIFICATIONS_APNS_P8",
+		"fcm/serviceAccount":   "PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT",
+		"twilio/authToken":     "PB_NOTIFICATIONS_TWILIO_AUTH_TOKEN",
+		"ses/secretAccessKey":  "PB_NOTIFICATIONS_SES_SECRET_ACCESS_KEY",
+		"acs/connectionString": "PB_NOTIFICATIONS_ACS_CONNECTION_STRING",
 	}
 	for in, want := range cases {
 		parts := strings.SplitN(in, "/", 2)

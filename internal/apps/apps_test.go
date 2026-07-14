@@ -1,150 +1,208 @@
 package apps
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
-	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/transport"
+	"github.com/palgroup/palbase-cli/internal/selection"
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
-func restAgainst(t *testing.T, h http.HandlerFunc) REST {
+func run(t *testing.T, fake *selectiontest.Fake, args ...string) error {
 	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	key, err := auth.NewDPoPKey()
-	require.NoError(t, err)
-	return transport.New(srv.URL, key, "pat_test")
-}
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
 
-func okData(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "request_id": "req_x"})
-}
-
-type fatalREST struct{ t *testing.T }
-
-func (f fatalREST) Do(context.Context, string, string, any, any) error {
-	f.t.Fatal("must not call the API")
-	return nil
+	rest := fake.REST()
+	resolver := fake.Resolver(&bytes.Buffer{})
+	cmd := Cmd(Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return resolver },
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(args)
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	return cmd.Execute()
 }
 
 func TestAppsCmd_Subcommands(t *testing.T) {
-	cmd := Cmd(Resolvers{REST: func() REST { return nil }})
+	cmd := Cmd(Resolvers{})
 	var got []string
-	for _, child := range cmd.Commands() {
-		got = append(got, child.Name())
+	for _, c := range cmd.Commands() {
+		got = append(got, c.Name())
 	}
 	sort.Strings(got)
 	require.Equal(t, []string{"attest", "config", "create", "delete", "enforce", "list"}, got)
 }
 
-func TestAttestHelp_MatchesGatewayRouteScope(t *testing.T) {
-	cmd := Cmd(Resolvers{REST: func() REST { return nil }})
-	attest, _, err := cmd.Find([]string{"attest"})
-	require.NoError(t, err)
-	require.Contains(t, attest.Long, "user-backend calls")
-	require.Contains(t, attest.Long, "all branches")
-	require.Contains(t, attest.Long, "Storage uploads")
-	require.Contains(t, attest.Long, "remain exempt")
-	require.NotContains(t, attest.Long, "requests to that env")
-}
-
-func TestAppsCreate_PostsOnlyPlatformAndName(t *testing.T) {
-	var body map[string]any
-	rest := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/v1/groups/grp_1/apps", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		okData(w, http.StatusCreated, map[string]any{"id": "app_mac", "platform": "macos", "display_name": "Mac"})
-	})
-	cmd := Cmd(Resolvers{REST: func() REST { return rest }})
-	cmd.SetArgs([]string{"create", "grp_1", "--platform", "macos", "--name", "Mac", "--json"})
-	require.NoError(t, cmd.Execute())
-	require.Equal(t, map[string]any{"platform": "macos", "name": "Mac"}, body)
-	create := createCmd(func() REST { return nil })
-	var flags []string
-	create.Flags().VisitAll(func(flag *pflag.Flag) { flags = append(flags, flag.Name) })
-	sort.Strings(flags)
-	require.Equal(t, []string{"json", "name", "platform"}, flags)
-}
-
-func TestAppsCreate_InvalidPlatformFailsBeforeAPI(t *testing.T) {
-	cmd := Cmd(Resolvers{REST: func() REST { return fatalREST{t} }})
-	cmd.SetArgs([]string{"create", "grp_1", "--platform", "bogus", "--name", "X"})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	require.ErrorContains(t, cmd.Execute(), "--platform")
-}
-
-func TestAppsCreate_PlatformContract(t *testing.T) {
-	for _, platform := range []string{"ios", "macos", "tvos", "watchos", "android", "web"} {
-		require.True(t, isValidPlatform(platform), platform)
+// The apps surface splits across the two boundaries: REGISTRATION is
+// Project-scoped (apps.project_id is singular), CONFIGURATION is
+// Environment-scoped (one binding per environment). A path that mixes them up
+// is the bug this table catches.
+func TestApps_HitsTheV2Paths(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		route string
+		query string
+		reply func(f *selectiontest.Fake)
+	}{
+		{
+			name: "list is project-scoped", args: []string{"list", "--json"},
+			route: "GET /api/v2/projects/proj_1/apps",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("GET /api/v2/projects/proj_1/apps", []map[string]any{{"id": "app_1", "platform": "ios", "display_name": "App"}})
+			},
+		},
+		{
+			name: "create is project-scoped", args: []string{"create", "--platform", "macos", "--name", "Mac", "--json"},
+			route: "POST /api/v2/projects/proj_1/apps",
+			reply: func(f *selectiontest.Fake) {
+				f.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+					selectiontest.WriteOK(w, http.StatusCreated, map[string]any{"id": "app_mac", "platform": "macos", "display_name": "Mac"})
+				})
+			},
+		},
+		{
+			name: "delete is app-scoped", args: []string{"delete", "app_mac", "--json"},
+			route: "DELETE /api/v2/apps/app_mac",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("DELETE /api/v2/apps/app_mac", map[string]any{"projectId": "proj_1"})
+			},
+		},
+		{
+			name: "enforce patches the PROJECT", args: []string{"enforce", "--json"},
+			route: "PATCH /api/v2/projects/proj_1",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("PATCH /api/v2/projects/proj_1", map[string]any{"id": "proj_1", "apps_required": true})
+			},
+		},
+		{
+			name: "attest patches the (app x ENVIRONMENT) binding", args: []string{"attest", "--app", "app_ios", "--json"},
+			route: "PATCH /api/v2/apps/app_ios/bindings/app1prod",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("PATCH /api/v2/apps/app_ios/bindings/app1prod", map[string]any{"projectId": "proj_1"})
+			},
+		},
+		{
+			name: "config takes environmentRef as a QUERY param", args: []string{"config", "--app", "app_web"},
+			route: "GET /api/v2/apps/app_web/config-artifact", query: "environmentRef=app1prod",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
+					"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_web",
+					"base_url": "https://app1prod.dev.palbase.studio", "kind": "production", "platform": "web",
+				})
+			},
+		},
 	}
-	require.False(t, isValidPlatform("visionos"))
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := selectiontest.New(t)
+			tc.reply(fake)
+			require.NoError(t, run(t, fake, tc.args...))
+
+			req, ok := fake.Find(tc.route)
+			require.True(t, ok, "expected %s, got %v", tc.route, fake.Routes())
+			require.Equal(t, tc.query, req.Query)
+			for _, route := range fake.Routes() {
+				require.NotContains(t, route, "/api/v1/")
+				require.NotContains(t, route, "/groups/", "groups are gone — apps hang off the PROJECT")
+			}
+		})
+	}
 }
 
-func TestAppsConfig_WritesCanonicalWebConfig(t *testing.T) {
-	rest := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/apps/app_web/config-artifact", r.URL.Path)
-		require.Equal(t, "prodref", r.URL.Query().Get("env"))
-		okData(w, http.StatusOK, map[string]any{
-			"app_id": "app_web", "project_ref": "prodref", "api_key": "pb_web",
-			"base_url": "https://prodm.dev.palbase.studio", "env_preset": "production", "platform": "web",
-		})
+func TestAppsCreate_SendsTheV2Body(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusCreated, map[string]any{"id": "app_a", "platform": "android"})
 	})
-	out := filepath.Join(t.TempDir(), "palbase-config.json")
-	cmd := Cmd(Resolvers{REST: func() REST { return rest }})
-	cmd.SetArgs([]string{"config", "--app", "app_web", "--env", "prodref", "--out", out})
+	require.NoError(t, run(t, fake, "create", "--platform", "android", "--name", "Droid", "--identifier", "com.x.y", "--json"))
+
+	req, ok := fake.Find("POST /api/v2/projects/proj_1/apps")
+	require.True(t, ok)
+	// `displayName`, not `name` — the v2 body is STRICT, so the old key is a 400.
+	require.Equal(t, map[string]any{
+		"platform": "android", "displayName": "Droid", "identifier": "com.x.y",
+	}, req.Body)
+}
+
+func TestAppsEnforce_SendsAppsRequired(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.OK("PATCH /api/v2/projects/proj_1", map[string]any{"id": "proj_1", "apps_required": false})
+	require.NoError(t, run(t, fake, "enforce", "--disable", "--json"))
+
+	req, ok := fake.Find("PATCH /api/v2/projects/proj_1")
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"appsRequired": false}, req.Body)
+}
+
+func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
+		"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_web",
+		"base_url": "https://app1prod.dev.palbase.studio", "kind": "production", "platform": "web",
+	})
+
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+	out := filepath.Join(dir, "palbase-config.json")
+
+	rest := fake.REST()
+	resolver := fake.Resolver(&bytes.Buffer{})
+	cmd := Cmd(Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return resolver },
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"config", "--app", "app_web", "--out", out})
 	require.NoError(t, cmd.Execute())
+
 	raw, err := os.ReadFile(out)
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
+	// The config names the ENVIRONMENT and carries NO branch: the URL + key
+	// already identify the runtime.
 	require.Equal(t, map[string]any{
-		"app_id": "app_web", "env_preset": "production",
-		"base_url": "https://prodm.dev.palbase.studio", "api_key": "pb_web",
+		"app_id": "app_web", "environment_ref": "app1prod", "kind": "production",
+		"base_url": "https://app1prod.dev.palbase.studio", "api_key": "pb_web",
 	}, got)
+	require.NotContains(t, string(raw), "branch")
+	require.NotContains(t, string(raw), "env_preset")
+	require.NotContains(t, string(raw), "project_ref")
 }
 
-func TestAppsConfig_RejectsNativeApp(t *testing.T) {
-	rest := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		okData(w, http.StatusOK, map[string]any{"app_id": "app_ios", "platform": "ios"})
-	})
-	cmd := Cmd(Resolvers{REST: func() REST { return rest }})
-	cmd.SetArgs([]string{"config", "--app", "app_ios", "--env", "prodref"})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	require.ErrorContains(t, cmd.Execute(), "web config only")
+func TestAppsConfig_RejectsANativeApp(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.OK("GET /api/v2/apps/app_ios/config-artifact", map[string]any{"app_id": "app_ios", "platform": "ios"})
+	require.ErrorContains(t, run(t, fake, "config", "--app", "app_ios"), "web config only")
 }
 
-func TestAppsEnforceAndAttestRoutes(t *testing.T) {
-	t.Run("enforce", func(t *testing.T) {
-		rest := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-			require.Equal(t, http.MethodPatch, r.Method)
-			require.Equal(t, "/api/v1/groups/grp_1", r.URL.Path)
-			okData(w, http.StatusOK, map[string]any{"ok": true})
-		})
-		cmd := Cmd(Resolvers{REST: func() REST { return rest }})
-		cmd.SetArgs([]string{"enforce", "grp_1", "--json"})
-		require.NoError(t, cmd.Execute())
-	})
-	t.Run("attest", func(t *testing.T) {
-		rest := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-			require.Equal(t, http.MethodPatch, r.Method)
-			require.Equal(t, "/api/v1/apps/app_ios/bindings/prodref", r.URL.Path)
-			okData(w, http.StatusOK, map[string]any{"ok": true})
-		})
-		cmd := Cmd(Resolvers{REST: func() REST { return rest }})
-		cmd.SetArgs([]string{"attest", "--app", "app_ios", "--env", "prodref", "--json"})
-		require.NoError(t, cmd.Execute())
-	})
+func TestAppsCreate_InvalidPlatformFailsBeforeTheAPI(t *testing.T) {
+	fake := selectiontest.New(t)
+	require.ErrorContains(t, run(t, fake, "create", "--platform", "visionos", "--name", "X"), "--platform")
+	require.Empty(t, fake.Routes(), "a bad platform must never reach the server")
+}
+
+func TestPlatformContract(t *testing.T) {
+	for _, p := range []string{"ios", "macos", "tvos", "watchos", "android", "web"} {
+		require.True(t, IsValidPlatform(p), p)
+	}
+	require.False(t, IsValidPlatform("visionos"))
+}
+
+func TestConfigArtifactPath_EscapesTheEnvironmentRef(t *testing.T) {
+	require.Equal(t,
+		"/api/v2/apps/app_1/config-artifact?environmentRef=app1prod",
+		ConfigArtifactPath("app_1", "app1prod"))
 }

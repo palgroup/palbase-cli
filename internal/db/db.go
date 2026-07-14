@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
@@ -37,7 +37,8 @@ import (
 // PersistentPreRunE on the root command before any subcommand fires
 // (mirrors secret.Resolvers).
 type Resolvers struct {
-	Studio func() *studio.Client
+	Studio    func() *studio.Client
+	Selection func() *selection.Resolver
 }
 
 // diffPlan mirrors the br-pod's config-as-code planner output, decoded from
@@ -107,7 +108,7 @@ type migrationSQLResult struct {
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "db",
-		Short: "Manage the project's database schema migrations",
+		Short: "Manage the selected environment's database schema migrations",
 		Long: `Commands to keep db/schema.ts and the live database in sync.
 
   palbase db diff -f <name>   Generate a migration from db/schema.ts vs the live DB.
@@ -115,11 +116,11 @@ func Cmd(r Resolvers) *cobra.Command {
                               migration was generated yet (pre-push gate).
 
 The diff is computed server-side: db/schema.ts is sent to Palbase, which diffs
-it against the deployed branch's database and returns the migration SQL.`,
+it against the SELECTED environment's database and returns the migration SQL.`,
 	}
 	cmd.AddCommand(
-		diffCmd(r.Studio),
-		checkCmd(r.Studio),
+		diffCmd(r),
+		checkCmd(r),
 	)
 	return cmd
 }
@@ -140,13 +141,11 @@ func readSchema() (string, error) {
 	return string(data), nil
 }
 
-// migrationSQL calls Studio's backend.migrationSQL for the given ref+branch,
-// shipping the declared schema source and decoding {sql, plan}.
-func migrationSQL(ctx context.Context, c *studio.Client, ref, branch, schema string) (migrationSQLResult, error) {
+// migrationSQL calls Studio's backend.migrationSQL for ONE ENVIRONMENT, shipping
+// the declared schema source and decoding {sql, plan}. ref is the Environment's
+// ref — the database it diffs against is that environment's.
+func migrationSQL(ctx context.Context, c *studio.Client, ref, schema string) (migrationSQLResult, error) {
 	input := map[string]any{"ref": ref, "schema": schema}
-	if branch != "" {
-		input["branch"] = branch
-	}
 	var resp migrationSQLResult
 	if err := c.Mutation(ctx, "backend.migrationSQL", input, &resp); err != nil {
 		return migrationSQLResult{}, fmt.Errorf("backend.migrationSQL: %w", err)
@@ -208,16 +207,12 @@ func unpushedMigrations() []string {
 	return out
 }
 
-func diffCmd(studioFn func() *studio.Client) *cobra.Command {
-	var (
-		refFlag    string
-		branchFlag string
-		nameFlag   string
-	)
+func diffCmd(r Resolvers) *cobra.Command {
+	var nameFlag string
 	cmd := &cobra.Command{
 		Use:   "diff -f <name>",
 		Short: "Generate a migration from db/schema.ts vs the live database",
-		Long: `Diff db/schema.ts against the deployed branch's database and, if they differ,
+		Long: `Diff db/schema.ts against the SELECTED environment's database and, if they differ,
 write the reconciling migration SQL to db/migrations/<timestamp>_<name>.sql.
 
 When the schema is already in sync, nothing is written. When the migration
@@ -228,16 +223,17 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 				return fmt.Errorf("-f/--name is required (a short migration name, e.g. -f add_todos)")
 			}
 
-			ref, err := auth.ResolveProjectRef(refFlag)
+			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
+			ref := sel.Ref()
 			schema, err := readSchema()
 			if err != nil {
 				return err
 			}
 
-			resp, err := migrationSQL(cmd.Context(), studioFn(), ref, branchFlag, schema)
+			resp, err := migrationSQL(cmd.Context(), r.Studio(), ref, schema)
 			if err != nil {
 				return err
 			}
@@ -303,17 +299,12 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to diff against (defaults to the project's default branch)")
 	cmd.Flags().StringVarP(&nameFlag, "name", "f", "", "Migration name (sanitized to [a-z0-9_]) — required")
 	return cmd
 }
 
-func checkCmd(studioFn func() *studio.Client) *cobra.Command {
-	var (
-		refFlag    string
-		branchFlag string
-	)
+func checkCmd(r Resolvers) *cobra.Command {
+
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Fail (non-zero) if db/schema.ts has drifted from the live database",
@@ -322,16 +313,17 @@ match; exits non-zero (printing the drift) when they differ. This is the gate
 the pre-push hook uses to stop a push that would deploy unmigrated schema
 changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := auth.ResolveProjectRef(refFlag)
+			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
+			ref := sel.Ref()
 			schema, err := readSchema()
 			if err != nil {
 				return err
 			}
 
-			resp, err := migrationSQL(cmd.Context(), studioFn(), ref, branchFlag, schema)
+			resp, err := migrationSQL(cmd.Context(), r.Studio(), ref, schema)
 			if err != nil {
 				return err
 			}
@@ -365,7 +357,5 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			return fmt.Errorf("schema drift: migration needed")
 		},
 	}
-	cmd.Flags().StringVar(&refFlag, "ref", "", "Project ref (defaults to .palbase/config.json)")
-	cmd.Flags().StringVar(&branchFlag, "branch", "", "Branch to check against (defaults to the project's default branch)")
 	return cmd
 }

@@ -2,171 +2,236 @@ package backend
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"os"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
+
+	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
-// ptr is a tiny helper for the nullable lastDeploy fields.
 func ptr[T any](v T) *T { return &v }
 
-// TestFormatLastDeploy is the pure-function lock on the visibility surface: a
-// server-side deploy failure that only lived in logs must render as a human
-// line. Mutation-lock (M5): delete the `formatLastDeploy(...)` print call in
-// newStatusCmd and TestStatus_PrintsLastDeploy goes RED.
+func decodeTRPCInput(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	// tRPC queries carry `?input={"json":{...}}`; mutations carry it in the body.
+	raw := r.URL.Query().Get("input")
+	if raw == "" {
+		var body struct {
+			JSON map[string]any `json:"json"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		return body.JSON
+	}
+	var wrapper struct {
+		JSON map[string]any `json:"json"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &wrapper))
+	return wrapper.JSON
+}
+
+// `palbase status` names the FULL context — which project, which environment,
+// which endpoint — because "which runtime am I looking at" must never be a guess
+// (UAT CLI-005). And it sends only the ENVIRONMENT ref: there is no branch.
+func TestStatus_NamesTheContextAndSendsOnlyTheRef(t *testing.T) {
+	var gotInput map[string]any
+	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(req.URL.Path, "backend.status") {
+			gotInput = decodeTRPCInput(t, req)
+			trpcOK(w, map[string]any{
+				"head":          "abc1234",
+				"activeVersion": "abc1234",
+				"lastDeploy": map[string]any{
+					"status": "succeeded", "version": "abc1234",
+					"updatedAt": time.Now().Add(-3 * time.Minute).Format(time.RFC3339),
+				},
+			})
+			return
+		}
+		trpcOK(w, map[string]any{})
+	})
+
+	out, err := r.Run(t, "status")
+	require.NoError(t, err)
+
+	require.Equal(t, map[string]any{"ref": "app1prod"}, gotInput)
+	require.NotContains(t, gotInput, "branch")
+
+	require.Contains(t, out, "project:      proj_1")
+	require.Contains(t, out, "environment:  production (app1prod)")
+	require.Contains(t, out, "endpoint:     https://app1prod.dev.palbase.studio")
+	require.Contains(t, out, "repository:   palbase")
+	require.Contains(t, out, "last deploy: SUCCEEDED (3m ago)")
+	requireNoV1(t, r.Fake)
+}
+
+func TestStatusJSON_CarriesProjectIdAndEnvironmentId(t *testing.T) {
+	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
+		trpcOK(w, map[string]any{"head": "abc", "activeVersion": "abc"})
+	})
+	out, err := r.Run(t, "status", "--json")
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	// The canonical metadata pair (spec §7.4): projectId names the product,
+	// environmentId names the runtime. No branch identity anywhere.
+	require.Equal(t, "proj_1", got["projectId"])
+	require.Equal(t, "env_prod", got["environmentId"])
+	require.Equal(t, "app1prod", got["environmentRef"])
+	require.NotContains(t, out, "branch")
+}
+
+// A succeeded deploy that still carries an error is "succeeded with warnings" —
+// a green-looking deploy that produced zero endpoints must not read as fine.
 func TestFormatLastDeploy(t *testing.T) {
-	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
-	threeMinAgo := now.Add(-3 * time.Minute).Format(time.RFC3339)
-	cases := []struct {
-		name    string
-		in      *lastDeploy
-		want    string // substrings that MUST appear
-		notWant string // "" = no negative assertion
+	now := time.Now()
+	tests := []struct {
+		name string
+		d    *lastDeploy
+		want []string
+		not  []string
 	}{
+		{name: "never deployed", d: nil},
 		{
-			name:    "nil renders nothing",
-			in:      nil,
-			want:    "",
-			notWant: "last deploy",
+			name: "succeeded",
+			d:    &lastDeploy{Status: "succeeded", Version: ptr("abc"), UpdatedAt: ptr(now.Add(-2 * time.Hour).Format(time.RFC3339))},
+			want: []string{"last deploy: SUCCEEDED (2h ago)"},
 		},
 		{
-			name: "failed carries the server error to the terminal",
-			in: &lastDeploy{
-				Status:    "failed",
-				Error:     ptr("controller metadata extraction failed: @Query(zodSchema)…"),
-				Branch:    ptr("main"),
-				UpdatedAt: ptr(threeMinAgo),
-			},
-			want: "last deploy: FAILED (main, 3m ago)\n  error: controller metadata extraction failed: @Query(zodSchema)…\n",
+			name: "succeeded WITH warnings",
+			d: &lastDeploy{Status: "succeeded", Error: ptr("zero endpoints collected"),
+				UpdatedAt: ptr(now.Format(time.RFC3339))},
+			want: []string{"SUCCEEDED WITH WARNINGS", "zero endpoints collected"},
 		},
 		{
-			name: "succeeded with a warning error reads as succeeded-with-warnings",
-			in: &lastDeploy{
-				Status:    "succeeded",
-				Error:     ptr("zero endpoints collected (deploy unaffected)"),
-				Branch:    ptr("staging"),
-				UpdatedAt: ptr(threeMinAgo),
-			},
-			want: "last deploy: SUCCEEDED WITH WARNINGS (staging, 3m ago)\n  error: zero endpoints collected (deploy unaffected)\n",
+			name: "failed carries the server reason",
+			d:    &lastDeploy{Status: "failed", Error: ptr("42P07: relation exists")},
+			want: []string{"FAILED", "42P07: relation exists"},
 		},
 		{
-			name: "clean success prints no error line, defaults branch to main",
-			in: &lastDeploy{
-				Status:    "succeeded",
-				Version:   ptr("sha-abc123"),
-				UpdatedAt: ptr(threeMinAgo),
-			},
-			want:    "last deploy: SUCCEEDED (main, 3m ago)\n",
-			notWant: "error:",
+			name: "unparseable timestamp drops the age, never invents one",
+			d:    &lastDeploy{Status: "succeeded", UpdatedAt: ptr("not-a-time")},
+			want: []string{"last deploy: SUCCEEDED\n"},
+			not:  []string{"ago"},
 		},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := formatLastDeploy(c.in, now)
-			if c.want == "" {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatLastDeploy(tt.d, now)
+			if tt.d == nil {
 				require.Empty(t, got)
-			} else {
-				require.Equal(t, c.want, got)
+				return
 			}
-			if c.notWant != "" {
-				require.NotContains(t, got, c.notWant)
+			for _, w := range tt.want {
+				require.Contains(t, got, w)
 			}
+			for _, n := range tt.not {
+				require.NotContains(t, got, n)
+			}
+			// Whatever it prints, it never names a branch — there is none.
+			require.NotContains(t, got, "branch")
 		})
 	}
 }
 
 func TestHumanizeAgo(t *testing.T) {
-	cases := []struct {
+	tests := []struct {
 		d    time.Duration
 		want string
 	}{
 		{30 * time.Second, "just now"},
-		{3 * time.Minute, "3m ago"},
-		{2 * time.Hour, "2h ago"},
+		{5 * time.Minute, "5m ago"},
+		{3 * time.Hour, "3h ago"},
 		{50 * time.Hour, "2d ago"},
 	}
-	for _, c := range cases {
-		require.Equal(t, c.want, humanizeAgo(c.d))
+	for _, tt := range tests {
+		require.Equal(t, tt.want, humanizeAgo(tt.d))
 	}
 }
 
-// TestStatus_PrintsLastDeploy_AndSendsBranch is the end-to-end lock: it drives
-// newStatusCmd against a fake tRPC backend.status, asserts the FAILED lastDeploy
-// block reaches stdout (centauri), AND that the active branch from the on-disk
-// config is sent in the query input (F14).
-func TestStatus_PrintsLastDeploy_AndSendsBranch(t *testing.T) {
-	// A cwd linked to ref=todoapp on the "staging" branch.
-	dir := t.TempDir()
-	require.NoError(t, auth.SaveProjectConfigIn(dir, &auth.ProjectConfig{Ref: "todoapp", DefaultEnv: "staging"}))
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	require.NoError(t, os.Chdir(dir))
+// ── deploys ─────────────────────────────────────────────────────────────────
 
-	var gotInput map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// tRPC query carries the input as ?input={"json":{...}}.
-		raw := r.URL.Query().Get("input")
-		decoded, _ := url.QueryUnescape(raw)
-		var env struct {
-			JSON map[string]any `json:"json"`
-		}
-		_ = json.Unmarshal([]byte(decoded), &env)
-		gotInput = env.JSON
-
-		resp := map[string]any{
-			"result": map[string]any{"data": map[string]any{"json": map[string]any{
-				"ref":           "todoapp",
-				"activeVersion": "sha-abc123",
-				"lastDeploy": map[string]any{
-					"status":    "failed",
-					"error":     "controller metadata extraction failed: @Query(zodSchema)…",
-					"branch":    "staging",
-					"updatedAt": time.Now().Add(-3 * time.Minute).Format(time.RFC3339),
-				},
-			}}},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(srv.Close)
-
-	out := captureStdout(t, func() {
-		cmd := newStatusCmd(Resolvers{Studio: func() *studio.Client { return studio.New(srv.URL, nil) }})
-		cmd.SetArgs([]string{})
-		cmd.SilenceUsage = true
-		require.NoError(t, cmd.Execute())
+func TestDeploys_ReadsTheV2EnvironmentHistory(t *testing.T) {
+	r := newRig(t, nil)
+	const route = "/api/v2/projects/proj_1/environments/app1prod/deployments"
+	r.Fake.OK("GET "+route, map[string]any{
+		"deployments": []map[string]any{
+			{"status": "failed", "trigger": "cli", "error": "42P07: relation exists\nsecond line",
+				"createdAt": "2026-07-01T10:00:00Z"},
+			{"status": "succeeded", "version": "abc1234", "trigger": "webhook",
+				"error": "zero endpoints collected", "createdAt": "2026-07-01T09:00:00Z"},
+		},
 	})
 
-	// F14: the active branch from config reached the server.
-	require.Equal(t, "staging", gotInput["branch"], "status must send the active branch")
-	require.Equal(t, "todoapp", gotInput["ref"])
+	out, err := r.Run(t, "deploys")
+	require.NoError(t, err)
 
-	// Centauri: the failed deploy + its server-side error are on the terminal.
-	require.Contains(t, out, "last deploy: FAILED (staging, 3m ago)")
-	require.Contains(t, out, "error: controller metadata extraction failed: @Query(zodSchema)…")
+	req, ok := r.Fake.Find("GET " + route)
+	require.True(t, ok, "got %v", r.Fake.Routes())
+	require.Equal(t, "limit=20", req.Query)
+
+	require.Contains(t, out, "FAILED")
+	require.Contains(t, out, "42P07: relation exists")
+	require.NotContains(t, out, "second line", "the table shows the FIRST line; --json carries the rest")
+	// A succeeded row carrying an error is WARN, never a clean success.
+	require.Contains(t, out, "WARN")
+	// There is no BRANCH column left to print.
+	require.NotContains(t, out, "BRANCH")
+	requireNoV1(t, r.Fake)
 }
 
-// captureStdout swaps os.Stdout for a pipe, runs fn, and returns what it wrote.
-// The status command prints via fmt.Printf to the real os.Stdout, so cmd.SetOut
-// alone would not capture the lastDeploy line.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
+func TestDeploys_Empty(t *testing.T) {
+	r := newRig(t, nil)
+	r.Fake.OK("GET /api/v2/projects/proj_1/environments/app1prod/deployments",
+		map[string]any{"deployments": []any{}})
+	out, err := r.Run(t, "deploys")
 	require.NoError(t, err)
-	orig := os.Stdout
-	os.Stdout = w
-	fn()
-	_ = w.Close()
-	os.Stdout = orig
-	b, _ := io.ReadAll(r)
-	_ = r.Close()
-	return string(b)
+	require.Contains(t, out, "no deploy attempts yet")
+}
+
+func TestTruncateNote(t *testing.T) {
+	require.Equal(t, "abc", truncateNote("abc", 10))
+	require.Equal(t, "abc…", truncateNote("abcdef", 4))
+	require.Equal(t, "one", firstLine("one\ntwo"))
+}
+
+// ── rollback ────────────────────────────────────────────────────────────────
+
+func TestRollback_TargetsTheEnvironmentNotABranch(t *testing.T) {
+	var gotInput map[string]any
+	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(req.URL.Path, "backend.rollback") {
+			gotInput = decodeTRPCInput(t, req)
+			trpcOK(w, map[string]any{"status": "ok", "version": "new1", "rolled_back_from": "old1"})
+			return
+		}
+		trpcOK(w, map[string]any{})
+	})
+
+	out, err := r.Run(t, "rollback", "old1")
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"ref": "app1prod", "version": "old1"}, gotInput)
+	require.NotContains(t, gotInput, "branch")
+	require.Contains(t, out, "rolled back environment app1prod")
+}
+
+// ── selection failure ───────────────────────────────────────────────────────
+
+// A directory with NO selection fails with the actionable message, not a nil
+// dereference and not a request to a nonsense URL.
+func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
+	for _, name := range []string{"status", "deploys", "push", "spec"} {
+		t.Run(name, func(t *testing.T) {
+			selectiontest.Chdir(t) // no .palbase/config.json
+			r := &rig{Fake: selectiontest.New(t)}
+			r.Resolver = r.Fake.Resolver(nil)
+
+			_, err := r.Run(t, name)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "palbase project use")
+		})
+	}
 }
