@@ -17,9 +17,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -231,7 +233,6 @@ func createCmd(r Resolvers) *cobra.Command {
 	var (
 		from       string
 		kind       string
-		ref        string
 		name       string
 		gitBranch  string
 		withData   bool
@@ -276,13 +277,15 @@ branch mapping.
 			if name == "" {
 				name = slug
 			}
-			if ref == "" {
-				ref = deriveRef(source.Ref, source.Slug, slug)
-			}
 
+			// The ref is ALLOCATED BY THE SERVER from the Project's seed. The CLI names a
+			// SLUG and never computes a ref: the old deriveRef tried to strip the source's
+			// SLUG WORD ("production") off its ref ("e2e140357m"), found nothing to strip,
+			// and appended — asking to provision `e2e140357msta`. The slug word and the ref
+			// suffix are different things; only the server, which holds the seed, maps one
+			// to the other.
 			body := map[string]any{
 				"sourceEnvironmentRef": source.Ref,
-				"ref":                  ref,
 				"name":                 name,
 				"slug":                 slug,
 				"kind":                 kind,
@@ -307,13 +310,13 @@ branch mapping.
 				if jsonOut {
 					return encodeJSON(out, handle)
 				}
-				fmt.Fprintf(out, "✓ provisioning started for environment %s (%s)\n", slug, ref)
+				fmt.Fprintf(out, "✓ provisioning started for environment %s\n", slug)
 				fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
 				return nil
 			}
 
 			fmt.Fprintf(progress, "→ provisioning %s from %s (schema + non-secret config) ...\n", slug, source.Slug)
-			created, err := waitForEnvironment(ctx, r.REST(), projectID, ref)
+			created, err := waitForEnvironmentCreate(ctx, r.REST, projectID, slug, handle.WorkflowID)
 			if err != nil {
 				return err
 			}
@@ -327,7 +330,6 @@ branch mapping.
 	}
 	cmd.Flags().StringVar(&from, "from", "", "Source ENVIRONMENT to copy schema + non-secret config from (required)")
 	cmd.Flags().StringVar(&kind, "kind", "staging", "Environment kind: staging | dev | preprod")
-	cmd.Flags().StringVar(&ref, "ref", "", "Endpoint ref for the new environment (default: derived from the source's ref seed + slug)")
 	cmd.Flags().StringVar(&name, "name", "", "Display name (default: the slug)")
 	cmd.Flags().StringVar(&gitBranch, "git-branch", "", "Git branch that auto-deploys into this environment (never a runtime selector)")
 	cmd.Flags().BoolVar(&withData, "with-data", false, "Also copy the source's table DATA (default: schema only — no production rows)")
@@ -338,65 +340,71 @@ branch mapping.
 	return cmd
 }
 
-// deriveRef builds the new Environment's ref from the source's. Refs keep the
-// `<seed><envSlug>` wire format, so the seed is the source's ref minus its own
-// slug suffix; the new ref is that seed plus this slug's first 3 chars (16-char
-// ceiling: k8s namespace / pg-meta / storage). --ref overrides when a caller
-// wants an exact value.
-func deriveRef(sourceRef, sourceSlug, slug string) string {
-	seed := sourceRef
-	for n := len(sourceSlug); n > 0; n-- {
-		if strings.HasSuffix(seed, sourceSlug[:n]) {
-			seed = strings.TrimSuffix(seed, sourceSlug[:n])
-			break
-		}
-	}
-	suffix := slug
-	if len(suffix) > 3 {
-		suffix = suffix[:3]
-	}
-	ref := seed + suffix
-	if len(ref) > 16 {
-		ref = ref[:16]
-	}
-	return ref
+// envCreateStatus is `GET .../environments/create-status` — the provisioning saga's
+// own state. `Failure` is the reason it DIED (empty while it runs). Mirrors
+// `project create`'s createStatus: the saga is the ONLY thing that can tell "still
+// provisioning" apart from "died in the first second".
+type envCreateStatus struct {
+	Status          string `json:"status"`
+	CurrentActivity string `json:"currentActivity"`
+	Failure         string `json:"failure"`
 }
 
-// waitForEnvironment polls the project's Environment list until `ref` is active.
+// waitForEnvironmentCreate waits on the SAGA, not on a list that a dead create never
+// fills. This is the same fix `palbase project create` got: watching the environments
+// list cannot distinguish a create that is STILL running from one that DIED in its
+// first second (both are "the env isn't there yet"), so a create killed non-retryably
+// — "source_environment_ref required", a quota, a bad slug — used to sit here for the
+// full 5-minute timeout and then blame the wait. The saga knows it failed; ask it.
 //
-// Failure detection: the saga inserts the row, flips it to active on success,
-// and REMOVES it on compensation. So a ref that VANISHES after we have seen it
-// provisioning failed and rolled back — as opposed to never appearing, which on
-// the first tick is just the row not being written yet.
-func waitForEnvironment(ctx context.Context, rest REST, projectID, ref string) (selection.Environment, error) {
+// `rest` is the FACTORY, not a client: each tick re-resolves the credential, so a wait
+// that outlives the current access token refreshes it instead of 401ing.
+func waitForEnvironmentCreate(ctx context.Context, rest func() REST, projectID, slug, workflowID string) (selection.Environment, error) {
 	deadline := time.Now().Add(envPollTimeout)
 	ticker := time.NewTicker(envPollInterval)
 	defer ticker.Stop()
 
-	seen := false
+	path := envPath(projectID, "", "create-status") + "?workflowId=" + url.QueryEscape(workflowID)
+
+	var last envCreateStatus
 	for {
-		envs, err := selection.ListEnvironments(ctx, rest, projectID)
-		if err != nil {
+		if err := rest().Do(ctx, http.MethodGet, path, nil, &last); err != nil {
 			return selection.Environment{}, err
 		}
-		var found *selection.Environment
-		for i := range envs {
-			if envs[i].Ref == ref {
-				found = &envs[i]
-				break
+
+		switch last.Status {
+		case "COMPLETED":
+			// The saga finished (its last steps land the env active). The server
+			// allocated the ref, so the CLI finds the new env by the SLUG it chose
+			// (unique per Project) rather than by a ref it cannot compute. A brief miss
+			// is possible if the row is not visible yet — poll again, don't fail a
+			// create that worked.
+			env, err := environmentBySlug(ctx, rest(), projectID, slug)
+			if err == nil {
+				return env, nil
 			}
-		}
-		switch {
-		case found != nil && found.Status == "active":
-			return *found, nil
-		case found != nil:
-			seen = true
-		case seen:
-			return selection.Environment{}, fmt.Errorf("environment %q failed to provision (the stack was rolled back) — check Studio for the reason", ref)
+			if !errors.Is(err, errEnvNotYetVisible) {
+				return selection.Environment{}, err
+			}
+		case "FAILED", "TERMINATED", "CANCELED", "TIMED_OUT":
+			// Dead, and it said why — in SECONDS, not after five minutes.
+			reason := last.Failure
+			if reason == "" {
+				reason = fmt.Sprintf("provisioning %s (workflow %s)", strings.ToLower(last.Status), workflowID)
+			}
+			return selection.Environment{}, fmt.Errorf("environment create failed: %s", reason)
 		}
 
 		if time.Now().After(deadline) {
-			return selection.Environment{}, fmt.Errorf("environment %q is still provisioning after %s — check `palbase env list`", ref, envPollTimeout)
+			// Honest: STILL RUNNING when we stopped looking is a different statement
+			// from "it failed", and must not be dressed up as one.
+			step := last.CurrentActivity
+			if step == "" {
+				step = last.Status
+			}
+			return selection.Environment{}, fmt.Errorf(
+				"gave up waiting after %s — environment %q is STILL provisioning (workflow %s, at %s). It is not lost: run `palbase env list` once it finishes",
+				envPollTimeout, slug, workflowID, step)
 		}
 		select {
 		case <-ctx.Done():
@@ -405,6 +413,25 @@ func waitForEnvironment(ctx context.Context, rest REST, projectID, ref string) (
 		}
 	}
 }
+
+// environmentBySlug reads the newly-created Environment by the slug the caller chose.
+// A brief absence (the saga closed before its last write is visible to a fresh read) is
+// errEnvNotYetVisible, retried on the next tick — never a failure.
+func environmentBySlug(ctx context.Context, rest REST, projectID, slug string) (selection.Environment, error) {
+	envs, err := selection.ListEnvironments(ctx, rest, projectID)
+	if err != nil {
+		return selection.Environment{}, err
+	}
+	for _, e := range envs {
+		if e.Slug == slug {
+			return e, nil
+		}
+	}
+	return selection.Environment{}, errEnvNotYetVisible
+}
+
+// errEnvNotYetVisible: the saga completed but its Environment row is not readable yet.
+var errEnvNotYetVisible = errors.New("environment not visible yet")
 
 // Provisioning an Environment spins up a DB + pod + ingress (30-120s typical).
 // vars, not consts, so tests can shrink the interval; production never reassigns.

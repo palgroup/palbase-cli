@@ -141,40 +141,50 @@ func TestEnvCreate_SafeCopyByDefault(t *testing.T) {
 
 	req, ok := fake.Find("POST " + base)
 	require.True(t, ok)
+	// The body carries NO ref: the server allocates it from the Project seed. The
+	// client names a SLUG. Sending a ref is the deriveRef bug that minted
+	// `e2e140357msta`.
 	require.Equal(t, map[string]any{
 		"sourceEnvironmentRef": "app1prod",
-		// `<seed><envSlug>`: the source's ref minus its own slug, plus this slug.
-		"ref":               "app1sta",
-		"name":              "staging",
-		"slug":              "staging",
-		"kind":              "staging",
-		"withData":          false,
-		"includeSecretKeys": []any{},
-		"testUserSeedCount": float64(0),
+		"name":                 "staging",
+		"slug":                 "staging",
+		"kind":                 "staging",
+		"withData":             false,
+		"includeSecretKeys":    []any{},
+		"testUserSeedCount":    float64(0),
 	}, req.Body)
+	require.NotContains(t, req.Body, "ref", "the client must not compute or send a ref — the server allocates it")
 	// No git branch is mapped unless asked for: a Git branch is never a selector.
 	require.NotContains(t, req.Body, "sourceGitBranch")
 
+	// The created env is found by the SLUG the client chose; its ref is whatever the
+	// server minted (the fake mints app1+slug[:3]).
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 	require.Equal(t, "app1sta", got["ref"])
 	require.Equal(t, "staging", got["slug"])
 }
 
-// provisions is the fake's "the saga succeeded" handler: it inserts an ACTIVE
-// environment at exactly the ref the request asked for, which is what the
-// create command polls for.
+// provisions is the fake's "the saga succeeded" handler. It stands in for the SERVER
+// side that now ALLOCATES the ref (the client sends no ref): it mints seed "app1" + the
+// slug's first 3 chars, stages an ACTIVE environment under it, and returns the workflow
+// handle. The create command then polls create-status (COMPLETED by default) and finds
+// the new env by the SLUG it chose — never by a ref it computed.
 func provisions(f *selectiontest.Fake) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Ref  string `json:"ref"`
 			Slug string `json:"slug"`
 			Kind string `json:"kind"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		suffix := body.Slug
+		if len(suffix) > 3 {
+			suffix = suffix[:3]
+		}
+		ref := "app1" + suffix
 		f.Environments["proj_1"] = append(f.Environments["proj_1"],
-			selectiontest.Env("env_"+body.Slug, "proj_1", body.Ref, body.Slug, body.Kind, false))
-		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "create-environment-" + body.Ref})
+			selectiontest.Env("env_"+body.Slug, "proj_1", ref, body.Slug, body.Kind, false))
+		selectiontest.WriteOK(w, http.StatusAccepted, map[string]any{"workflowId": "create-environment-" + ref})
 	}
 }
 
@@ -190,13 +200,13 @@ func TestEnvCreate_OptInsAreExplicit(t *testing.T) {
 	_, exec := newCmd(t, fake)
 	require.NoError(t, exec("create", "staging", "--from", "production",
 		"--with-data", "--include-secret", "STRIPE_KEY",
-		"--git-branch", "staging", "--ref", "app1stg", "--json"))
+		"--git-branch", "staging", "--json"))
 
 	req, _ := fake.Find("POST " + base)
 	require.Equal(t, true, req.Body["withData"])
 	require.Equal(t, []any{"STRIPE_KEY"}, req.Body["includeSecretKeys"])
 	require.Equal(t, "staging", req.Body["sourceGitBranch"])
-	require.Equal(t, "app1stg", req.Body["ref"])
+	require.NotContains(t, req.Body, "ref", "there is no --ref: the server allocates the ref")
 }
 
 func TestEnvCreate_RequiresFrom(t *testing.T) {
@@ -278,21 +288,66 @@ func TestEnvDelete_DeclinedPromptSendsNothing(t *testing.T) {
 	require.False(t, sent)
 }
 
-// deriveRef is pure: `<seed><envSlug>`. The seed is the source's ref minus its
-// own slug suffix.
-func TestDeriveRef(t *testing.T) {
-	tests := []struct {
-		sourceRef, sourceSlug, slug, want string
-	}{
-		{"app1prod", "production", "staging", "app1sta"},
-		{"app1prod", "production", "dev", "app1dev"},
-		{"todoappm", "main", "staging", "todoappsta"},
-		{"abcd", "production", "staging", "abcdsta"},
-		{"aaaaaaaaaaaaaprod", "production", "staging", "aaaaaaaaaaaaasta"},
-	}
-	for _, tc := range tests {
-		got := deriveRef(tc.sourceRef, tc.sourceSlug, tc.slug)
-		require.Equal(t, tc.want, got, "%s/%s + %s", tc.sourceRef, tc.sourceSlug, tc.slug)
-		require.LessOrEqual(t, len(got), 16, "refs must fit the 16-char k8s/pg-meta/storage ceiling")
-	}
+// A create whose SAGA DIES must surface the saga's OWN reason in SECONDS — not sit for
+// the full timeout and then blame the wait. This is the exact bug the ticket names:
+// `env create` polled a list where a dead saga and a slow one both look like "not there
+// yet", so "src_project_ref required" never reached the user for five minutes.
+//
+// MUTATION GATE: make waitForEnvironmentCreate ignore the FAILED status (watch only the
+// list) and this test blocks to the 30s timeout and loses the failure text → RED.
+func TestEnvCreate_DeadSagaSurfacesTheRealReasonFast(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	// The POST is accepted (a workflow starts), but the saga DIES: create-status reports
+	// FAILED with the reason. The env is NEVER staged — exactly like a rolled-back saga.
+	fake.Accepted("POST "+base, map[string]any{"workflowId": "create-environment-proj_1-staging"})
+	fake.Handle("GET "+base+"/create-status", func(w http.ResponseWriter, r *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, map[string]any{
+			"workflowId":      r.URL.Query().Get("workflowId"),
+			"status":          "FAILED",
+			"currentActivity": nil,
+			"failure":         "source_environment_ref required",
+		})
+	})
+	// A long timeout: if the wait ignored the FAILED status it would block on this and
+	// the test would take 30s instead of returning at once — the fast-fail is the point.
+	envPollInterval, envPollTimeout = time.Millisecond, 30*time.Second
+
+	_, exec := newCmd(t, fake)
+	err := exec("create", "staging", "--from", "production", "--json")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "environment create failed")
+	require.ErrorContains(t, err, "source_environment_ref required",
+		"the saga's OWN reason must reach the user, not a generic 'still provisioning'")
+}
+
+// A create that is STILL RUNNING when the wait gives up must say exactly that — never
+// dressed up as a failure (the honest-timeout half of the fix).
+func TestEnvCreate_StillRunningTimesOutHonestly(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.Accepted("POST "+base, map[string]any{"workflowId": "create-environment-proj_1-staging"})
+	fake.Handle("GET "+base+"/create-status", func(w http.ResponseWriter, r *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, map[string]any{
+			"workflowId":      r.URL.Query().Get("workflowId"),
+			"status":          "RUNNING",
+			"currentActivity": "ProvisionEnv",
+			"failure":         nil,
+		})
+	})
+	envPollInterval, envPollTimeout = time.Millisecond, 20*time.Millisecond
+
+	_, exec := newCmd(t, fake)
+	err := exec("create", "staging", "--from", "production", "--json")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "STILL provisioning",
+		"a running saga must be reported as running, never as a failure")
+	require.NotContains(t, err.Error(), "failed",
+		"'still provisioning' must not be worded as a failure")
 }

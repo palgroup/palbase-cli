@@ -212,6 +212,16 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 			"failure":         nil,
 		})
 		return
+	// The ENV-create saga poll — same default as the Project one: a saga that already
+	// finished. Tests about a dying / still-running env-create register their own.
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/environments/create-status"):
+		WriteOK(w, http.StatusOK, map[string]any{
+			"workflowId":      r.URL.Query().Get("workflowId"),
+			"status":          "COMPLETED",
+			"currentActivity": nil,
+			"failure":         nil,
+		})
+		return
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/environments"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/projects/"), "/environments")
 		if envs, ok := f.Environments[id]; ok {
