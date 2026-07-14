@@ -44,17 +44,13 @@ var endpointsByMode = map[Mode]Endpoints{
 		// Real Studio dev hostname is `app.dev.palbase.studio`; the
 		// `dev.palbase.studio` apex doesn't resolve. palauth (OAuth +
 		// /.well-known) is fronted by the same host so Auth points
-		// there too. Project endpoints are at <ref>.dev.palbase.studio.
-		//
-		// PlatformAPI is the Management API (`/api/v2/*`) origin. In dev that
-		// is Studio itself: `api.dev.palbase.studio` is the Spec-1 contract but
-		// the Kong route for it has never landed, so the name does not resolve
-		// and every command dies with a 503. Pointing it at the host that
-		// actually serves the API beats shipping a CLI that needs an env var to
-		// work at all. (Prod keeps api.palbase.studio, which does resolve.)
+		// there too. The canonical Management API has its own Kong-fronted
+		// origin; keeping PlatformAPI on that host makes dev exercise the same
+		// routing and DPoP `htu` contract as production. Project endpoints are
+		// at <ref>.dev.palbase.studio.
 		Studio:      "https://app.dev.palbase.studio",
 		Auth:        "https://app.dev.palbase.studio",
-		PlatformAPI: "https://app.dev.palbase.studio",
+		PlatformAPI: "https://api.dev.palbase.studio",
 		PublicHost:  "dev.palbase.studio",
 	},
 }

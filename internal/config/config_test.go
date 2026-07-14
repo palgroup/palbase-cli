@@ -39,6 +39,9 @@ func TestResolve_Flag(t *testing.T) {
 	if r.Endpoints.Studio != "https://app.dev.palbase.studio" {
 		t.Fatalf("unexpected studio url: %s", r.Endpoints.Studio)
 	}
+	if r.Endpoints.PlatformAPI != "https://api.dev.palbase.studio" {
+		t.Fatalf("unexpected platform API url: %s", r.Endpoints.PlatformAPI)
+	}
 }
 
 func TestResolve_Env(t *testing.T) {
