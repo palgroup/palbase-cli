@@ -13,7 +13,7 @@
 //	DELETE /api/v2/apps/{appId}                                         delete
 //	GET    /api/v2/apps/{appId}/bindings                                bindings
 //	PATCH  /api/v2/apps/{appId}/bindings/{environmentRef}               attest
-//	GET    /api/v2/apps/{appId}/config-artifact?environmentRef={ref}    config
+//	GET    /api/v2/apps/{appId}/config-artifact?environment_ref={ref}   config
 //	PATCH  /api/v2/projects/{projectId}       {appsRequired}            enforce
 //
 // Studio authorizes server-side (member+ to read, Project admin+ to mutate); a
@@ -267,20 +267,20 @@ func attestCmd(r Resolvers) *cobra.Command {
 				ProjectID string `json:"projectId"`
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodPatch,
-				"/api/v2/apps/"+appID+"/bindings/"+sel.Ref(),
+				"/api/v2/apps/"+appID+"/bindings/"+sel.EnvironmentRef(),
 				map[string]any{"attestEnforce": on}, &out); err != nil {
 				return err
 			}
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), map[string]any{
-					"appId": appID, "environmentRef": sel.Ref(), "attest_enforce": on,
+					"appId": appID, "environment_ref": sel.EnvironmentRef(), "attest_enforce": on,
 				})
 			}
 			state := "enabled"
 			if !on {
 				state = "disabled"
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ App Attest %s for app %s on environment %s\n", state, appID, sel.Ref())
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ App Attest %s for app %s on environment %s\n", state, appID, sel.EnvironmentRef())
 			return nil
 		},
 	}
@@ -294,8 +294,7 @@ func attestCmd(r Resolvers) *cobra.Command {
 // ConfigArtifact mirrors the per-(app × Environment) config the Management API
 // returns. Exported so the platform link commands can write SDK input.
 //
-// It is keyed by `environment_ref` — there is no project_ref, no endpoint_ref
-// and no branch: the Environment IS the deployment target.
+// It is keyed by `environment_ref`; the Environment is the deployment target.
 type ConfigArtifact struct {
 	AppID          string               `json:"app_id"`
 	EnvironmentRef string               `json:"environment_ref"`
@@ -350,10 +349,10 @@ type OAuthGoogle struct {
 }
 
 // ConfigArtifactPath is the v2 route for one (app × Environment) artifact. The
-// Environment is a QUERY parameter (`environmentRef`), not a path segment: the
+// Environment is a QUERY parameter (`environment_ref`), not a path segment: the
 // artifact hangs off the app, and the Environment selects which binding.
 func ConfigArtifactPath(appID, environmentRef string) string {
-	return "/api/v2/apps/" + appID + "/config-artifact?environmentRef=" + url.QueryEscape(environmentRef)
+	return "/api/v2/apps/" + appID + "/config-artifact?environment_ref=" + url.QueryEscape(environmentRef)
 }
 
 func configCmd(r Resolvers) *cobra.Command {
@@ -376,7 +375,7 @@ func configCmd(r Resolvers) *cobra.Command {
 			}
 			var art ConfigArtifact
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
-				ConfigArtifactPath(appID, sel.Ref()), nil, &art); err != nil {
+				ConfigArtifactPath(appID, sel.EnvironmentRef()), nil, &art); err != nil {
 				return err
 			}
 			if art.Platform != "web" {
@@ -389,7 +388,7 @@ func configCmd(r Resolvers) *cobra.Command {
 			if err := WriteWebConfig(art, out); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ wrote web config to %s (environment %s)\n", out, sel.Ref())
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ wrote web config to %s (environment %s)\n", out, sel.EnvironmentRef())
 			return nil
 		},
 	}

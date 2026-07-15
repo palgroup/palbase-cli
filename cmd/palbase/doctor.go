@@ -50,14 +50,14 @@ func doctorCmd() *cobra.Command {
 			}
 
 			cfg, cfgErr := selection.Load(".")
-			var legacy *selection.ErrLegacyConfig
+			var notSelected selection.ErrNotSelected
 			switch {
 			case cfgErr == nil:
 				ok("link", fmt.Sprintf("project %s / environment %s via .palbase/config.json", cfg.ProjectID, cfg.EnvironmentID))
-			case errors.As(cfgErr, &legacy):
-				ok("link", fmt.Sprintf("legacy v1 config (ref %q) — migrates to v2 on the next project command", legacy.Ref))
-			default:
+			case errors.As(cfgErr, &notSelected):
 				ok("link", "cwd not linked to a project — run `palbase project use <projectId>` here (or pass --project)")
+			default:
+				bad("link", cfgErr.Error())
 			}
 
 			// pre-push deploy-validation hook (report-only). Meaningful only in a
@@ -113,7 +113,7 @@ func studioSelectionURL(ctx context.Context, studioRoot string, r *selection.Res
 	var projectID, ref string
 	if r != nil {
 		if s, err := r.Resolve(ctx); err == nil {
-			projectID, ref = s.ProjectID, s.Ref()
+			projectID, ref = s.ProjectID, s.EnvironmentRef()
 		}
 	}
 	return canonicalStudioURL(studioRoot, projectID, ref)

@@ -85,7 +85,7 @@ func listCmd(r Resolvers) *cobra.Command {
 			}
 			var rows []listRow
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
-				keysPath(sel.ProjectID, sel.Ref(), ""), nil, &rows); err != nil {
+				keysPath(sel.ProjectID, sel.EnvironmentRef(), ""), nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -143,8 +143,11 @@ func createCmd(r Resolvers) *cobra.Command {
 				LookupPrefix   string `json:"lookup_prefix"`
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost,
-				keysPath(sel.ProjectID, sel.Ref(), ""),
+				keysPath(sel.ProjectID, sel.EnvironmentRef(), ""),
 				map[string]any{"name": name}, &created); err != nil {
+				return err
+			}
+			if err := validateEnvironmentRef("create", sel.EnvironmentRef(), created.EnvironmentRef); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -173,15 +176,18 @@ func revealCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 			var revealed struct {
-				EnvironmentRef string  `json:"environmentRef"`
-				PublishableKey *string `json:"publishableKey"`
+				EnvironmentRef string  `json:"environment_ref"`
+				PublishableKey *string `json:"publishable_key"`
 				Keys           []struct {
 					ID    string `json:"id"`
 					Scope string `json:"scope"`
 				} `json:"keys"`
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
-				keysPath(sel.ProjectID, sel.Ref(), "")+"?reveal=true", nil, &revealed); err != nil {
+				keysPath(sel.ProjectID, sel.EnvironmentRef(), "")+"?reveal=true", nil, &revealed); err != nil {
+				return err
+			}
+			if err := validateEnvironmentRef("reveal", sel.EnvironmentRef(), revealed.EnvironmentRef); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -210,7 +216,7 @@ func revokeCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodDelete,
-				keysPath(sel.ProjectID, sel.Ref(), keyID), nil, nil); err != nil {
+				keysPath(sel.ProjectID, sel.EnvironmentRef(), keyID), nil, nil); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -229,6 +235,19 @@ func keyType(scope string) string {
 		return "publishable"
 	}
 	return scope
+}
+
+func validateEnvironmentRef(operation, selected, returned string) error {
+	if returned == "" {
+		return fmt.Errorf("apikey %s response is missing environment_ref", operation)
+	}
+	if returned != selected {
+		return fmt.Errorf(
+			"apikey %s response environment_ref %q does not match selected environment %q",
+			operation, returned, selected,
+		)
+	}
+	return nil
 }
 
 func encodeJSON(w io.Writer, v any) error {

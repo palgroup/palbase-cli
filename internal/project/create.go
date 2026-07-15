@@ -170,7 +170,7 @@ var gitRun gitRunner
 
 // createdProject is `palbase project create --json`. It names everything the
 // caller needs to act next: the project, its production environment, and the
-// endpoint ref that environment answers on.
+// Environment ref that the runtime answers on.
 type createdProject struct {
 	ProjectID          string `json:"project_id"`
 	EnvironmentID      string `json:"environment_id"`

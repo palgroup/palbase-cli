@@ -80,7 +80,8 @@ func TestStatusJSON_CarriesProjectIdAndEnvironmentId(t *testing.T) {
 	// environmentId names the runtime. No branch identity anywhere.
 	require.Equal(t, "proj_1", got["projectId"])
 	require.Equal(t, "env_prod", got["environmentId"])
-	require.Equal(t, "app1prod", got["environmentRef"])
+	require.Equal(t, "app1prod", got["environment_ref"])
+	require.NotContains(t, got, "environmentRef")
 	require.NotContains(t, out, "branch")
 }
 
@@ -227,7 +228,7 @@ func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			selectiontest.Chdir(t) // no .palbase/config.json
 			r := &rig{Fake: selectiontest.New(t)}
-			r.Resolver = r.Fake.Resolver(nil)
+			r.Resolver = r.Fake.Resolver()
 
 			_, err := r.Run(t, name)
 			require.Error(t, err)

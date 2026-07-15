@@ -130,9 +130,6 @@ func newRootCmd() *cobra.Command {
 				REST:            func() selection.REST { return managementREST() },
 				ProjectFlag:     projectFlag,
 				EnvironmentFlag: environmentFlag,
-				// Migration notices and progress go to STDERR: stdout is the stable,
-				// parseable command output (--json).
-				Warn: os.Stderr,
 			}
 			return nil
 		},

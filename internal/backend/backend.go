@@ -506,7 +506,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			if selErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: %v — Database and the module clients will be unavailable\n", selErr)
 			}
-			ref := sel.Ref()
+			ref := sel.EnvironmentRef()
 
 			// Preflight: an environment that is not a live, active deployment
 			// cannot back local dev — fail fast with an actionable message
@@ -525,8 +525,8 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			// inline module clients (module-clients.js) + the Database edge for the
 			// anon/authenticated RLS path.
 			var revealResp struct {
-				EnvironmentRef string `json:"environmentRef"`
-				PublishableKey string `json:"publishableKey"`
+				EnvironmentRef string `json:"environment_ref"`
+				PublishableKey string `json:"publishable_key"`
 			}
 			if ref != "" {
 				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
@@ -791,7 +791,7 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 				Deployments []deployRow `json:"deployments"`
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
-				DeploymentsPath(sel.ProjectID, sel.Ref())+"?limit=20", nil, &resp); err != nil {
+				DeploymentsPath(sel.ProjectID, sel.EnvironmentRef())+"?limit=20", nil, &resp); err != nil {
 				return fmt.Errorf("list deployments: %w", err)
 			}
 			out := cmd.OutOrStdout()
@@ -895,11 +895,11 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 				RolledBackFrom string `json:"rolled_back_from"`
 			}
 			if err := r.Studio().Mutation(cmd.Context(), "backend.rollback",
-				map[string]any{"ref": sel.Ref(), "version": args[0]}, &resp); err != nil {
+				map[string]any{"ref": sel.EnvironmentRef(), "version": args[0]}, &resp); err != nil {
 				return fmt.Errorf("backend.rollback: %w", err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back environment %s to %s (new HEAD: %s)\n",
-				sel.Ref(), resp.RolledBackFrom, resp.Version)
+				sel.EnvironmentRef(), resp.RolledBackFrom, resp.Version)
 			return nil
 		},
 	}
@@ -923,7 +923,7 @@ type lastDeploy struct {
 type statusOut struct {
 	ProjectID          string      `json:"projectId"`
 	EnvironmentID      string      `json:"environmentId"`
-	EnvironmentRef     string      `json:"environmentRef"`
+	EnvironmentRef     string      `json:"environment_ref"`
 	EnvironmentSlug    string      `json:"environmentSlug"`
 	RepositoryProvider string      `json:"repositoryProvider"`
 	Head               *string     `json:"head"`
@@ -948,13 +948,13 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 				LastDeploy    *lastDeploy `json:"lastDeploy"`
 			}
 			if err := r.Studio().Query(cmd.Context(), "backend.status",
-				map[string]any{"ref": sel.Ref()}, &resp); err != nil {
+				map[string]any{"ref": sel.EnvironmentRef()}, &resp); err != nil {
 				return fmt.Errorf("backend.status: %w", err)
 			}
 			out := statusOut{
 				ProjectID:          sel.ProjectID,
 				EnvironmentID:      sel.Environment.ID,
-				EnvironmentRef:     sel.Ref(),
+				EnvironmentRef:     sel.EnvironmentRef(),
 				EnvironmentSlug:    sel.Environment.Slug,
 				RepositoryProvider: sel.RepositoryProvider,
 				Head:               resp.Head,
@@ -1054,11 +1054,11 @@ func renderJSON(v any) string {
 
 var _ = renderJSON // silence "unused" until --json lands
 
-// lookupBackendTarget resolves an ENVIRONMENT's (URL + publishable key). The ref
-// IS the endpoint: there is no endpoint_ref/bare-ref translation left to do.
+// lookupBackendTarget resolves an Environment's URL and publishable key directly
+// from its Environment ref.
 func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string) (backendTarget, error) {
 	var resp struct {
-		PublishableKey string `json:"publishableKey"`
+		PublishableKey string `json:"publishable_key"`
 	}
 	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
 		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)

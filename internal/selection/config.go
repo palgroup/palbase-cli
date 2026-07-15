@@ -14,15 +14,15 @@
 // project_id resolves its Organization server-side, so there is no
 // `organization_id` here, no `palbase org`, and no `--organization`.
 //
-// A Git branch is never a runtime selector. The old v1 file's bare `ref` and
-// `default_env` are gone: `ref` was ambiguous (it named a "project" that was
-// really an Environment) and `default_env` was the Palbase-branch selector the
-// cutover removed. Migrate reads a v1 file once and rewrites it in place.
+// A Git branch is never a runtime selector. Files using any other schema are
+// rejected and must be replaced with `palbase project use <projectId>`.
 package selection
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,25 +57,6 @@ type Config struct {
 	AndroidAppID string `json:"android_app_id,omitempty"`
 }
 
-// legacyConfig is the v1 file this CLI no longer writes. It is read ONLY by
-// Migrate, which resolves its bare `ref` (an endpoint ref — what is now an
-// Environment ref) into {project_id, environment_id} and rewrites the file.
-type legacyConfig struct {
-	Version      int    `json:"version"`
-	Ref          string `json:"ref"`
-	DefaultEnv   string `json:"default_env"`
-	Mode         string `json:"mode"`
-	GithubRepo   string `json:"github_repo"`
-	IOSAppID     string `json:"ios_app_id"`
-	MacOSAppID   string `json:"macos_app_id"`
-	WebAppID     string `json:"web_app_id"`
-	AndroidAppID string `json:"android_app_id"`
-}
-
-// IsLegacy reports whether raw JSON is a v1 config (no version, and a bare
-// `ref`). A v2 file always carries `"version": 2`.
-func (l legacyConfig) IsLegacy() bool { return l.Version < Version && l.Ref != "" }
-
 // ConfigPath is `<dir>/.palbase/config.json`. dir "" means the cwd.
 func ConfigPath(dir string) string {
 	if dir == "" {
@@ -84,18 +65,17 @@ func ConfigPath(dir string) string {
 	return filepath.Join(dir, ".palbase", "config.json")
 }
 
-// ErrNotSelected is returned when the cwd has no usable config and no
-// --project override was passed. Callers branch on it with errors.Is to decide
-// between prompting and failing loudly.
+// ErrNotSelected is returned when the cwd has no config and no --project
+// override was passed. Callers branch on it with errors.As to decide between
+// prompting and failing loudly.
 type ErrNotSelected struct{}
 
 func (ErrNotSelected) Error() string {
 	return "no project selected — run `palbase project use <projectId>` in this directory, or pass --project"
 }
 
-// Load reads the v2 config from dir. A missing file yields ErrNotSelected. A v1
-// file yields ErrLegacyConfig so the caller can migrate it (Resolver does this
-// automatically).
+// Load reads the current config from dir. A missing file yields ErrNotSelected.
+// Unknown fields and unsupported schema versions are rejected.
 func Load(dir string) (*Config, error) {
 	data, err := os.ReadFile(ConfigPath(dir))
 	if err != nil {
@@ -104,44 +84,31 @@ func Load(dir string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", ConfigPath(dir), err)
 	}
-	var legacy legacyConfig
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ConfigPath(dir), err)
-	}
-	if legacy.IsLegacy() {
-		return nil, &ErrLegacyConfig{Dir: dir, Ref: legacy.Ref, legacy: legacy}
-	}
-
 	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ConfigPath(dir), err)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w — run `palbase project use <projectId>`", ConfigPath(dir), err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("parse %s: expected one JSON object — run `palbase project use <projectId>`", ConfigPath(dir))
 	}
 	if cfg.Version != Version {
-		return nil, fmt.Errorf("%s has version %d — this CLI writes version %d; delete it and run `palbase project use <projectId>`",
+		return nil, fmt.Errorf("%s has unsupported config version %d (expected %d) — run `palbase project use <projectId>`",
 			ConfigPath(dir), cfg.Version, Version)
 	}
-	if cfg.ProjectID == "" {
-		return nil, ErrNotSelected{}
+	if cfg.ProjectID == "" || cfg.EnvironmentID == "" {
+		return nil, fmt.Errorf("%s must contain project_id and environment_id — run `palbase project use <projectId>`", ConfigPath(dir))
 	}
 	return &cfg, nil
-}
-
-// ErrLegacyConfig marks a v1 `.palbase/config.json` found on disk. It carries
-// the bare ref so Resolver can resolve it to {project_id, environment_id}.
-type ErrLegacyConfig struct {
-	Dir string
-	Ref string
-
-	legacy legacyConfig
-}
-
-func (e *ErrLegacyConfig) Error() string {
-	return fmt.Sprintf("%s is a v1 config (bare ref %q) — it needs migrating to v2", ConfigPath(e.Dir), e.Ref)
 }
 
 // Save writes the config to <dir>/.palbase/config.json, always stamping the
 // current Version so a hand-edited file can never claim to be something else.
 func Save(dir string, cfg *Config) error {
+	if cfg.ProjectID == "" || cfg.EnvironmentID == "" {
+		return fmt.Errorf("config must contain project_id and environment_id")
+	}
 	cfg.Version = Version
 	palbaseDir := filepath.Dir(ConfigPath(dir))
 	if err := os.MkdirAll(palbaseDir, 0o755); err != nil {

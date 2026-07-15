@@ -79,7 +79,7 @@ from .palbase/config.json).`, label, label, platform, rebuild, platform),
 			if err := runPullSpec(ctx,
 				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
 				studioBindingLister(rest), studioConfigArtifactFetch(rest),
-				sel.Ref(), ".palbase", ".palbase/"+platform, appID,
+				sel.EnvironmentRef(), ".palbase", ".palbase/"+platform, appID,
 				out); err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ from .palbase/config.json).`, label, label, platform, rebuild, platform),
 				return fmt.Errorf("save %s: %w", selection.ConfigPath(""), err)
 			}
 
-			fmt.Fprintf(out, "✓ %s project now targets environment %s (%s)\n", label, sel.Environment.Slug, sel.Ref())
+			fmt.Fprintf(out, "✓ %s project now targets environment %s (%s)\n", label, sel.Environment.Slug, sel.EnvironmentRef())
 			fmt.Fprintf(out, "  %s\n", rebuild)
 			fmt.Fprintf(out, "  ⚠ this build (and any archive) connects to %s until you `palbase %s use <other>`\n",
 				sel.Environment.Slug, platform)

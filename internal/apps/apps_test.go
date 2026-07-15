@@ -17,20 +17,28 @@ import (
 
 func run(t *testing.T, fake *selectiontest.Fake, args ...string) error {
 	t.Helper()
+	_, err := runOutput(t, fake, args...)
+	return err
+}
+
+func runOutput(t *testing.T, fake *selectiontest.Fake, args ...string) (string, error) {
+	t.Helper()
 	dir := selectiontest.Chdir(t)
 	selectiontest.WriteConfig(t, dir, nil)
 
 	rest := fake.REST()
-	resolver := fake.Resolver(&bytes.Buffer{})
+	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },
 	})
-	cmd.SetOut(&bytes.Buffer{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs(args)
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	return cmd.Execute()
+	err := cmd.Execute()
+	return out.String(), err
 }
 
 func TestAppsCmd_Subcommands(t *testing.T) {
@@ -93,8 +101,8 @@ func TestApps_HitsTheV2Paths(t *testing.T) {
 			},
 		},
 		{
-			name: "config takes environmentRef as a QUERY param", args: []string{"config", "--app", "app_web"},
-			route: "GET /api/v2/apps/app_web/config-artifact", query: "environmentRef=app1prod",
+			name: "config takes environment_ref as a QUERY param", args: []string{"config", "--app", "app_web"},
+			route: "GET /api/v2/apps/app_web/config-artifact", query: "environment_ref=app1prod",
 			reply: func(f *selectiontest.Fake) {
 				f.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
 					"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_web",
@@ -146,6 +154,18 @@ func TestAppsEnforce_SendsAppsRequired(t *testing.T) {
 	require.Equal(t, map[string]any{"appsRequired": false}, req.Body)
 }
 
+func TestAppsAttest_JSONUsesCanonicalEnvironmentRef(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.OK("PATCH /api/v2/apps/app_ios/bindings/app1prod", map[string]any{"projectId": "proj_1"})
+
+	out, err := runOutput(t, fake, "attest", "--app", "app_ios", "--json")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, "app1prod", got["environment_ref"])
+	require.NotContains(t, got, "environmentRef")
+}
+
 func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
@@ -158,7 +178,7 @@ func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	out := filepath.Join(dir, "palbase-config.json")
 
 	rest := fake.REST()
-	resolver := fake.Resolver(&bytes.Buffer{})
+	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },
@@ -203,6 +223,6 @@ func TestPlatformContract(t *testing.T) {
 
 func TestConfigArtifactPath_EscapesTheEnvironmentRef(t *testing.T) {
 	require.Equal(t,
-		"/api/v2/apps/app_1/config-artifact?environmentRef=app1prod",
+		"/api/v2/apps/app_1/config-artifact?environment_ref=app1prod",
 		ConfigArtifactPath("app_1", "app1prod"))
 }

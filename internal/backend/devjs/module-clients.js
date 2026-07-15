@@ -34,9 +34,9 @@
  *
  * URLs target the same `/v1/...` (and `/auth/...`) paths the published
  * @palbase/server clients used. The base URL comes from `palbase.url`
- * which the Go runtime sets to `https://<endpointRef>.<publicHost>`.
+ * which the Go runtime sets to `https://<environmentRef>.<publicHost>`.
  *
- * Auth headers: `apikey` carries the project publishable key in local
+ * Auth headers: `apikey` carries the Environment publishable key in local
  * dev. Kong's pre-function plugin reads scope from byte offset 12 and stamps the iJWT — the runtime must NOT
  * put the key in `Authorization`, which PostgREST would try to decode
  * as a JWT and 500 on.

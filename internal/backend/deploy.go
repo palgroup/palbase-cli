@@ -135,14 +135,14 @@ func runPush(d pushDeps) error {
 		retries = 2
 	}
 
-	path := DeployPath(d.sel.ProjectID, d.sel.Ref())
+	path := DeployPath(d.sel.ProjectID, d.sel.EnvironmentRef())
 	body, err := postDeployWithRetry(ctx, d.rest, path, tarball,
 		map[string]string{"message": "deploy via cli"}, key, retries, os.Stderr)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(out, "✓ deploy started for environment %s\n", d.sel.Ref())
+	fmt.Fprintf(out, "✓ deploy started for environment %s\n", d.sel.EnvironmentRef())
 	id := deploymentIDFromResponse(body)
 	if id == "" {
 		// No deployment id in the response: nothing to poll. Keep the
@@ -229,7 +229,7 @@ func waitForDeploy(d pushDeps, id string, out io.Writer) error {
 		timeout = 5 * time.Minute
 	}
 
-	path := DeploymentPath(d.sel.ProjectID, d.sel.Ref(), id)
+	path := DeploymentPath(d.sel.ProjectID, d.sel.EnvironmentRef(), id)
 	deadline := time.Now().Add(timeout)
 	// stderr carries the machine-readable failure and the progress dots, so a
 	// script capturing stdout isn't polluted.
@@ -455,7 +455,7 @@ func newPullCmd(r Resolvers) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return pullBundle(cmd.Context(), r, sel.Ref(), cwd, cmd.OutOrStdout())
+				return pullBundle(cmd.Context(), r, sel.EnvironmentRef(), cwd, cmd.OutOrStdout())
 			}
 			return runPull(pullDeps{git: execGit, provider: sel.RepositoryProvider, refetch: refetch})
 		},

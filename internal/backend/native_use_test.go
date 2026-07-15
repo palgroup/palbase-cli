@@ -43,7 +43,7 @@ func useRig(t *testing.T, cfg *selection.Config) (*selectiontest.Fake, Resolvers
 		Studio:    func() *studio.Client { return trpc },
 		REST:      func() REST { return rest },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
-		Selection: func() *selection.Resolver { return f.Resolver(&bytes.Buffer{}) },
+		Selection: func() *selection.Resolver { return f.Resolver() },
 	}
 }
 
@@ -65,7 +65,7 @@ func newTenantStub(t *testing.T) string {
 func newTRPCStub(t *testing.T) *studio.Client {
 	t.Helper()
 	url := httptestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		trpcOK(w, map[string]any{"publishableKey": "pb_generic"})
+		trpcOK(w, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_generic"})
 	})
 	return studio.New(url, func(context.Context) (string, error) { return "tok", nil })
 }
@@ -104,7 +104,7 @@ func TestNativeUse_RetargetsTheEnvironment(t *testing.T) {
 	// The config-artifact was fetched FOR STAGING.
 	req, ok := f.Find("GET /api/v2/apps/app_ios/config-artifact")
 	require.True(t, ok, "got %v", f.Routes())
-	require.Equal(t, "environmentRef=app1stg", req.Query)
+	require.Equal(t, "environment_ref=app1stg", req.Query)
 
 	// The emitted codegen config names the environment and carries no branch.
 	raw, err := os.ReadFile(filepath.Join(".palbase", "ios", "palbase-config.json"))

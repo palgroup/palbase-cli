@@ -28,7 +28,7 @@ func stubArtifactsFunc() func(context.Context, Resolvers, selection.Selection, i
 			return err
 		}
 		return os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"),
-			[]byte(`{"environment_ref":"`+sel.Ref()+`","base_url":"https://stub","api_key":"pb_stub"}`+"\n"), 0o600)
+			[]byte(`{"environment_ref":"`+sel.EnvironmentRef()+`","base_url":"https://stub","api_key":"pb_stub"}`+"\n"), 0o600)
 	}
 }
 
@@ -77,7 +77,7 @@ func webRig(t *testing.T) Resolvers {
 	selectiontest.WriteConfig(t, ".", nil)
 	f := selectiontest.New(t)
 	rest := f.REST()
-	resolver := f.Resolver(&bytes.Buffer{})
+	resolver := f.Resolver()
 	return Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },
@@ -528,7 +528,7 @@ func TestWebLink_FetchesForTheSelectedEnvironment(t *testing.T) {
 	f.Environments["proj_1"] = append(f.Environments["proj_1"],
 		selectiontest.Env("env_stg", "proj_1", "app1stg", "staging", "staging", false))
 	rest := f.REST()
-	resolver := f.Resolver(&bytes.Buffer{})
+	resolver := f.Resolver()
 	r := Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },
@@ -553,7 +553,7 @@ func TestWebLink_FetchesForTheSelectedEnvironment(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 
 	require.Equal(t, "proj_1", gotSel.ProjectID)
-	require.Equal(t, "app1stg", gotSel.Ref(), "artifacts must be fetched for the SELECTED environment")
+	require.Equal(t, "app1stg", gotSel.EnvironmentRef(), "artifacts must be fetched for the SELECTED environment")
 
 	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
 	require.NoError(t, err)

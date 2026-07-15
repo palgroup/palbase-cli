@@ -227,7 +227,7 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 			if err != nil {
 				return err
 			}
-			ref := sel.Ref()
+			ref := sel.EnvironmentRef()
 			schema, err := readSchema()
 			if err != nil {
 				return err
@@ -317,7 +317,7 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			if err != nil {
 				return err
 			}
-			ref := sel.Ref()
+			ref := sel.EnvironmentRef()
 			schema, err := readSchema()
 			if err != nil {
 				return err

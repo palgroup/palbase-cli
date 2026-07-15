@@ -158,7 +158,7 @@ Local project files are left untouched.
 			summary, err := runNativeLink(ctx, deps, nativeLinkOpts{
 				platform:       platform,
 				projectID:      sel.ProjectID,
-				environmentRef: sel.Ref(),
+				environmentRef: sel.EnvironmentRef(),
 				appID:          persistedAppID,
 				identifier:     packageName,
 			}, human)

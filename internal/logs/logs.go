@@ -77,7 +77,7 @@ new lines every 2s — Ctrl-C to stop.
 			if err != nil {
 				return err
 			}
-			ref := sel.Ref()
+			ref := sel.EnvironmentRef()
 
 			base := map[string]any{"ref": ref, "limit": limit}
 			if source != "" {

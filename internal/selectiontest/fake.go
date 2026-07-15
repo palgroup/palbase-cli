@@ -2,8 +2,8 @@
 //
 // It exists so every rewritten command can be tested against the SAME server
 // that records the EXACT method + path + query + body + headers it received.
-// That recording is what stops a silent 404: a command that quietly keeps a v1
-// path (or drops the Environment out of a v2 one) fails the path assertion, not
+// That recording is what stops a silent 404: a command that uses a non-canonical
+// path (or drops the Environment out of the current one) fails the path assertion, not
 // some downstream behaviour test that happened to stub the response anyway.
 package selectiontest
 
@@ -164,13 +164,11 @@ func (f *Fake) REST() *transport.Client {
 	return transport.New(f.Server.URL, key, "pat_test")
 }
 
-// Resolver builds a selection.Resolver against the fake. warn is where migration
-// notices land (pass an io.Discard or a buffer to assert on them).
-func (f *Fake) Resolver(warn io.Writer) *selection.Resolver {
+// Resolver builds a selection.Resolver against the fake.
+func (f *Fake) Resolver() *selection.Resolver {
 	rest := f.REST()
 	return &selection.Resolver{
 		REST: func() selection.REST { return rest },
-		Warn: warn,
 	}
 }
 
@@ -238,8 +236,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Anything else is UNHANDLED — the 404 is the point. A command that still
-	// calls a v1 path (or a v2 path with the Environment missing) lands here.
+	// Anything else is UNHANDLED — the 404 is the point. A command that uses a
+	// non-canonical path (or omits the Environment) lands here.
 	WriteError(w, http.StatusNotFound, "not_found", "no route "+r.Method+" "+r.URL.Path)
 }
 
@@ -295,7 +293,7 @@ func Selected(t *testing.T) func() *selection.Resolver {
 	t.Helper()
 	requireTempCwd(t)
 	WriteConfig(t, ".", nil)
-	r := New(t).Resolver(io.Discard)
+	r := New(t).Resolver()
 	return func() *selection.Resolver { return r }
 }
 
@@ -334,8 +332,7 @@ func WriteConfig(t *testing.T, dir string, cfg *selection.Config) {
 	}
 }
 
-// WriteRawConfig writes arbitrary bytes as `.palbase/config.json` — used to seed
-// a v1 file for the migration test.
+// WriteRawConfig writes arbitrary bytes as `.palbase/config.json`.
 func WriteRawConfig(t *testing.T, dir, content string) {
 	t.Helper()
 	path := selection.ConfigPath(dir)

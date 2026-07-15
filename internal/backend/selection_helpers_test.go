@@ -57,7 +57,7 @@ func newRig(t *testing.T, trpcHandler http.HandlerFunc) *rig {
 	}))
 	t.Cleanup(srv.Close)
 	r.Studio = studio.New(srv.URL, func(context.Context) (string, error) { return "tok", nil })
-	r.Resolver = r.Fake.Resolver(&bytes.Buffer{})
+	r.Resolver = r.Fake.Resolver()
 	return r
 }
 

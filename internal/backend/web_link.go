@@ -79,7 +79,7 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 		return err
 	}
 
-	art, err := studioConfigArtifactFetch(rest)(ctx, appID, sel.Ref())
+	art, err := studioConfigArtifactFetch(rest)(ctx, appID, sel.EnvironmentRef())
 	if err != nil {
 		return fmt.Errorf("fetch app config: %w", err)
 	}

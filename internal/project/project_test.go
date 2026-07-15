@@ -19,7 +19,7 @@ import (
 func newCmd(t *testing.T, fake *selectiontest.Fake) (*bytes.Buffer, *bytes.Buffer, func(...string) error) {
 	t.Helper()
 	rest := fake.REST()
-	resolver := fake.Resolver(&bytes.Buffer{})
+	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },
@@ -205,7 +205,7 @@ func TestProjectDelete_PromptMismatchCancels(t *testing.T) {
 	fake := selectiontest.New(t)
 
 	rest := fake.REST()
-	resolver := fake.Resolver(&bytes.Buffer{})
+	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },

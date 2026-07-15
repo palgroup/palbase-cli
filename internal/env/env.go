@@ -200,7 +200,7 @@ func statusCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 			var detail environmentDetail
-			if err := r.REST().Do(ctx, http.MethodGet, envPath(sel.ProjectID, sel.Ref(), ""), nil, &detail); err != nil {
+			if err := r.REST().Do(ctx, http.MethodGet, envPath(sel.ProjectID, sel.EnvironmentRef(), ""), nil, &detail); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -493,7 +493,7 @@ func targetEnv(ctx context.Context, r Resolvers, args []string) (projectID, ref 
 		if selErr != nil {
 			return "", "", selErr
 		}
-		return sel.ProjectID, sel.Ref(), nil
+		return sel.ProjectID, sel.EnvironmentRef(), nil
 	}
 	projectID, err = r.Selection().ProjectID(ctx)
 	if err != nil {

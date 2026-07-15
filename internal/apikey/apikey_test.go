@@ -2,6 +2,7 @@ package apikey
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"sort"
 	"testing"
@@ -20,7 +21,7 @@ func run(t *testing.T, fake *selectiontest.Fake, args ...string) (string, error)
 	selectiontest.WriteConfig(t, dir, nil)
 
 	rest := fake.REST()
-	resolver := fake.Resolver(&bytes.Buffer{})
+	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
 		REST:      func() REST { return rest },
 		Selection: func() *selection.Resolver { return resolver },
@@ -30,7 +31,8 @@ func run(t *testing.T, fake *selectiontest.Fake, args ...string) (string, error)
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs(args)
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	return out.String(), func() error { err := cmd.Execute(); return err }()
+	err := cmd.Execute()
+	return out.String(), err
 }
 
 func TestApikeyCmd_Subcommands(t *testing.T) {
@@ -67,7 +69,7 @@ func TestApikey_HitsTheV2EnvironmentScopedPath(t *testing.T) {
 			name: "reveal", args: []string{"reveal", "--json"},
 			route: "GET " + base, query: "reveal=true",
 			reply: func(f *selectiontest.Fake) {
-				f.OK("GET "+base, map[string]any{"environmentRef": "app1prod", "publishableKey": "pb_app1prod_cx", "keys": []any{}})
+				f.OK("GET "+base, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_app1prod_cx", "keys": []any{}})
 			},
 		},
 		{
@@ -75,7 +77,9 @@ func TestApikey_HitsTheV2EnvironmentScopedPath(t *testing.T) {
 			route: "POST " + base,
 			reply: func(f *selectiontest.Fake) {
 				f.Handle("POST "+base, func(w http.ResponseWriter, _ *http.Request) {
-					selectiontest.WriteOK(w, http.StatusCreated, map[string]any{"id": "key_2", "plaintext": "pb_app1prod_cnew"})
+					selectiontest.WriteOK(w, http.StatusCreated, map[string]any{
+						"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_app1prod_cnew",
+					})
 				})
 			},
 		},
@@ -108,15 +112,71 @@ func TestApikeyCreate_SendsOnlyTheName(t *testing.T) {
 	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
 	fake := selectiontest.New(t)
 	fake.Handle("POST "+base, func(w http.ResponseWriter, _ *http.Request) {
-		selectiontest.WriteOK(w, http.StatusCreated, map[string]any{"id": "key_2", "plaintext": "pb_x"})
+		selectiontest.WriteOK(w, http.StatusCreated, map[string]any{
+			"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_x",
+		})
 	})
 
-	_, err := run(t, fake, "create", "--name", "ci", "--json")
+	out, err := run(t, fake, "create", "--name", "ci", "--json")
 	require.NoError(t, err)
 
 	req, ok := fake.Find("POST " + base)
 	require.True(t, ok)
 	require.Equal(t, map[string]any{"name": "ci"}, req.Body)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, "app1prod", got["environment_ref"])
+	require.NotContains(t, got, "environmentRef")
+}
+
+func TestApikeyReveal_JSONUsesCanonicalFieldNames(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	fake := selectiontest.New(t)
+	fake.OK("GET "+base, map[string]any{
+		"environment_ref": "app1prod",
+		"publishable_key": "pb_app1prod_cx",
+		"keys":            []any{},
+	})
+
+	out, err := run(t, fake, "reveal", "--json")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, "app1prod", got["environment_ref"])
+	require.Equal(t, "pb_app1prod_cx", got["publishable_key"])
+	require.NotContains(t, got, "environmentRef")
+	require.NotContains(t, got, "publishableKey")
+}
+
+func TestApikeyCreateAndReveal_RejectWrongResponseEnvironment(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	tests := []struct {
+		name  string
+		args  []string
+		value string
+	}{
+		{name: "create missing", args: []string{"create", "--name", "ci"}},
+		{name: "create mismatch", args: []string{"create", "--name", "ci"}, value: "app1stg"},
+		{name: "reveal missing", args: []string{"reveal"}},
+		{name: "reveal mismatch", args: []string{"reveal"}, value: "app1stg"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := selectiontest.New(t)
+			method := http.MethodGet
+			response := map[string]any{"environment_ref": tc.value, "publishable_key": "pb_app1prod_cx"}
+			if tc.args[0] == "create" {
+				method = http.MethodPost
+				response = map[string]any{"environment_ref": tc.value, "plaintext": "pb_app1prod_cx"}
+			}
+			fake.OK(method+" "+base, response)
+
+			out, err := run(t, fake, tc.args...)
+			require.ErrorContains(t, err, "environment_ref")
+			require.Empty(t, out, "a response for the wrong environment must not emit credentials")
+		})
+	}
 }
 
 func TestApikeyCreate_RequiresName(t *testing.T) {
@@ -138,7 +198,7 @@ func TestApikeyList_EnvironmentOverrideRetargetsTheKeys(t *testing.T) {
 	selectiontest.WriteConfig(t, dir, nil)
 
 	rest := fake.REST()
-	resolver := fake.Resolver(&bytes.Buffer{})
+	resolver := fake.Resolver()
 	resolver.EnvironmentFlag = "staging"
 	cmd := Cmd(Resolvers{
 		REST:      func() REST { return rest },

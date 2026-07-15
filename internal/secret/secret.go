@@ -36,7 +36,7 @@ func (r Resolvers) envRef(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return sel.Ref(), nil
+	return sel.EnvironmentRef(), nil
 }
 
 // Cmd returns the `palbase secret` parent command.

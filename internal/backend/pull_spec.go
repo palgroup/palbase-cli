@@ -84,7 +84,7 @@ Override the target with the global --project / --environment flags.`,
 				fetchRemoteOpenAPISpec,
 				studioBindingLister(r.REST()),
 				studioConfigArtifactFetch(r.REST()),
-				sel.Ref(), outDir, "", "",
+				sel.EnvironmentRef(), outDir, "", "",
 				cmd.OutOrStdout(),
 			)
 		},

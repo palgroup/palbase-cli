@@ -38,8 +38,8 @@ func (r Resolvers) projectID(ctx context.Context) (string, error) {
 	return r.Selection().ProjectID(ctx)
 }
 
-// memberRow / invitationRow mirror the projectMembers router's MAPPED
-// (camelCase) return shapes.
+// memberRow / invitationRow mirror the projectMembers router's mapped return
+// shapes. Environment identifiers use the canonical environment_ref wire key.
 type memberRow struct {
 	UserID      string  `json:"userId"`
 	Role        string  `json:"role"`
@@ -61,12 +61,12 @@ type invitationRow struct {
 }
 
 type myInvitationRow struct {
-	ID          string  `json:"id"`
-	ProjectID   string  `json:"projectId"`
-	ProjectName string  `json:"projectName"`
-	Role        string  `json:"role"`
-	CreatedAt   string  `json:"createdAt"`
-	EnvRef      *string `json:"environmentRef"`
+	ID             string  `json:"id"`
+	ProjectID      string  `json:"projectId"`
+	ProjectName    string  `json:"projectName"`
+	Role           string  `json:"role"`
+	CreatedAt      string  `json:"createdAt"`
+	EnvironmentRef *string `json:"environment_ref"`
 }
 
 // Cmd returns the `palbase members` parent command.

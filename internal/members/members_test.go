@@ -132,6 +132,69 @@ func TestMembersList_DecodesWrappedCamelCase_AndToleratesForbiddenInvites(t *tes
 		"a FORBIDDEN pending-invitations read must not fail members list")
 }
 
+func TestInvitationsJSON_UsesOnlyEnvironmentRefSnakeCase(t *testing.T) {
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/trpc/projectMembers.listMyInvitations", r.URL.Path)
+		trpcOK(w, []map[string]any{
+			{
+				"id":              "inv_1",
+				"projectId":       "proj_1",
+				"projectName":     "Acme",
+				"role":            "member",
+				"createdAt":       "2026-07-15T00:00:00Z",
+				"environment_ref": "acmeprod",
+			},
+		})
+	})
+
+	var out bytes.Buffer
+	cmd := Cmd(Resolvers{
+		Studio:    func() Studio { return c },
+		Selection: selectiontest.Selected(t),
+	})
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"invitations", "--json"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	require.NoError(t, cmd.Execute())
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	require.Equal(t, "acmeprod", rows[0]["environment_ref"])
+	require.NotContains(t, rows[0], "environmentRef")
+}
+
+func TestInvitationsJSON_DoesNotFallbackToCamelCaseEnvironmentRef(t *testing.T) {
+	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		trpcOK(w, []map[string]any{
+			{
+				"id":             "inv_1",
+				"projectId":      "proj_1",
+				"projectName":    "Acme",
+				"role":           "member",
+				"createdAt":      "2026-07-15T00:00:00Z",
+				"environmentRef": "retired-value",
+			},
+		})
+	})
+
+	var out bytes.Buffer
+	cmd := Cmd(Resolvers{
+		Studio:    func() Studio { return c },
+		Selection: selectiontest.Selected(t),
+	})
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"invitations", "--json"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	require.NoError(t, cmd.Execute())
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0]["environment_ref"])
+	require.NotContains(t, rows[0], "environmentRef")
+}
+
 func TestMembersInvite_RejectsAnInvalidRoleBeforeTheAPI(t *testing.T) {
 	c := studioAgainst(t, func(http.ResponseWriter, *http.Request) {
 		t.Fatal("must not call the API for an invalid role")

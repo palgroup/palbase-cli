@@ -116,10 +116,12 @@ func TestE2E_CreateResolveReveal_DPoPBound(t *testing.T) {
 
 	// 3. reveal — the key hangs off the ENVIRONMENT, under its Project.
 	var revealed struct {
-		PublishableKey *string `json:"publishableKey"`
+		EnvironmentRef string  `json:"environment_ref"`
+		PublishableKey *string `json:"publishable_key"`
 	}
 	require.NoError(t, c.Do(ctx, http.MethodGet,
 		"/api/v2/projects/"+projectID+"/environments/"+envRef+"/api-keys?reveal=true", nil, &revealed))
+	require.Equal(t, envRef, revealed.EnvironmentRef, "reveal must identify the selected environment")
 	require.NotNil(t, revealed.PublishableKey, "reveal must surface the publishable key plaintext")
 	require.True(t, strings.HasPrefix(*revealed.PublishableKey, "pb_"), "publishable key has pb_ prefix")
 	require.Contains(t, *revealed.PublishableKey, envRef, "the environment ref is embedded in the key")

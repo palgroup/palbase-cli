@@ -103,7 +103,7 @@ func createCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ref := sel.Ref()
+			ref := sel.EnvironmentRef()
 			out := cmd.OutOrStdout()
 
 			// --scenario: mint ONE user + populate their data tree from the

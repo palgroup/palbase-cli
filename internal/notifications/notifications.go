@@ -143,7 +143,7 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			if err != nil {
 				return err
 			}
-			ref := sel.Ref()
+			ref := sel.EnvironmentRef()
 
 			// 1. Collect non-secret fields from flags; validate required ones.
 			entry := providerEntry{enabled: true, fields: map[string]string{}}
