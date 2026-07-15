@@ -133,6 +133,7 @@ func TestMembersList_DecodesWrappedCamelCase_AndToleratesForbiddenInvites(t *tes
 }
 
 func TestInvitationsJSON_UsesOnlyEnvironmentRefSnakeCase(t *testing.T) {
+	t.Chdir(t.TempDir())
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/trpc/projectMembers.listMyInvitations", r.URL.Path)
 		trpcOK(w, []map[string]any{
@@ -165,6 +166,7 @@ func TestInvitationsJSON_UsesOnlyEnvironmentRefSnakeCase(t *testing.T) {
 }
 
 func TestInvitationsJSON_DoesNotFallbackToCamelCaseEnvironmentRef(t *testing.T) {
+	t.Chdir(t.TempDir())
 	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
 		trpcOK(w, []map[string]any{
 			{
