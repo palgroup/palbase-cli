@@ -300,7 +300,7 @@ func TestEnvDelete_DeclinedPromptSendsNothing(t *testing.T) {
 // A create whose SAGA DIES must surface the saga's OWN reason in SECONDS — not sit for
 // the full timeout and then blame the wait. This is the exact bug the ticket names:
 // `env create` polled a list where a dead saga and a slow one both look like "not there
-// yet", so "src_project_ref required" never reached the user for five minutes.
+// yet", so "source_environment_ref required" never reached the user for five minutes.
 //
 // MUTATION GATE: make waitForEnvironmentCreate ignore the FAILED status (watch only the
 // list) and this test blocks to the 30s timeout and loses the failure text → RED.

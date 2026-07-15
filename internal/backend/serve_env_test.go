@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -112,11 +113,10 @@ func TestDevIdentity_DegradesToLocal(t *testing.T) {
 	require.Equal(t, "app1prod", devEnvironmentRef("app1prod"))
 }
 
-// The embedded dev-server must read the CANONICAL identity env vars and must not
-// resurrect the branch identity. This is a source-level lock on the JS the CLI
-// ships: PALBASE_BRANCH used to become `environmentId`, which is exactly the
-// "no Palbase branch identity is emitted" rule (SDK-007).
-func TestDevServerJS_UsesProjectIdAndEnvironmentId_NotBranch(t *testing.T) {
+// The embedded dev-server must read only the CANONICAL identity env vars. This
+// is a source-level lock on the JS the CLI ships and enforces the rule that no
+// retired branch identity is emitted (SDK-007).
+func TestDevServerJS_UsesOnlyCanonicalIdentityEnvVars(t *testing.T) {
 	raw, err := devServerFS.ReadFile("devjs/dev-server.js")
 	require.NoError(t, err)
 	js := string(raw)
@@ -125,10 +125,18 @@ func TestDevServerJS_UsesProjectIdAndEnvironmentId_NotBranch(t *testing.T) {
 	require.Contains(t, js, "process.env.PALBASE_ENVIRONMENT_ID")
 	require.Contains(t, js, "process.env.PALBASE_ENVIRONMENT_REF")
 
-	require.NotContains(t, js, "PALBASE_BRANCH",
-		"the dev server must not read a branch — environmentId names the runtime")
-	require.NotContains(t, js, "PALBASE_PROJECT_REF",
-		"the old ref env named an ENVIRONMENT while calling itself a project")
+	// Exact allowlisting keeps retired identity aliases from reappearing without
+	// preserving those aliases in the CLI's own source tree.
+	identityEnvPattern := regexp.MustCompile(`process\.env\.(PALBASE_(?:PROJECT|ENVIRONMENT|BRANCH)[A-Z_]*)`)
+	identityEnvVars := make(map[string]struct{})
+	for _, match := range identityEnvPattern.FindAllStringSubmatch(js, -1) {
+		identityEnvVars[match[1]] = struct{}{}
+	}
+	require.Equal(t, map[string]struct{}{
+		"PALBASE_PROJECT_ID":      {},
+		"PALBASE_ENVIRONMENT_ID":  {},
+		"PALBASE_ENVIRONMENT_REF": {},
+	}, identityEnvVars)
 
 	// workerMeta must stamp the canonical pair.
 	require.True(t, strings.Contains(js, "projectId: PROJECT_ID"), "workerMeta must carry the PROJECT id")

@@ -197,9 +197,10 @@ func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 		"app_id": "app_web", "environment_ref": "app1prod", "kind": "production",
 		"base_url": "https://app1prod.dev.palbase.studio", "api_key": "pb_web",
 	}, got)
+	// Exact equality above locks the artifact to the canonical Environment
+	// identity without permitting any extra identity field.
 	require.NotContains(t, string(raw), "branch")
 	require.NotContains(t, string(raw), "env_preset")
-	require.NotContains(t, string(raw), "project_ref")
 }
 
 func TestAppsConfig_RejectsANativeApp(t *testing.T) {

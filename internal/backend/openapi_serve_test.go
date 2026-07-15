@@ -169,7 +169,7 @@ func TestServeOpenAPISpec(t *testing.T) {
 		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
 		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
-		"PALBASE_PROJECT_REF=local",
+		"PALBASE_ENVIRONMENT_REF=local",
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -879,7 +879,7 @@ func startDevServer(t *testing.T, root string) int {
 		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
 		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
-		"PALBASE_PROJECT_REF=local",
+		"PALBASE_ENVIRONMENT_REF=local",
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -1304,7 +1304,7 @@ func TestServeOpenAPISpec_TypedErrors(t *testing.T) {
 		fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
 		fmt.Sprintf("PALBASE_DEV_ROOT=%s", root),
 		fmt.Sprintf("NODE_PATH=%s", filepath.Join(root, "node_modules")),
-		"PALBASE_PROJECT_REF=local",
+		"PALBASE_ENVIRONMENT_REF=local",
 	)
 	var serveErr syncBuffer
 	cmd.Stdout = os.Stderr
