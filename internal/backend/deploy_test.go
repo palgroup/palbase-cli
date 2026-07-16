@@ -208,10 +208,13 @@ func TestPush_GitHubProvider_ExecsGitPush_AndNeverUploads(t *testing.T) {
 
 	sel := palbaseProject(t)
 	sel.RepositoryProvider = selection.ProviderGitHub
+	mapped := "main"
+	sel.Environment.SourceGitBranch = &mapped
 
 	require.NoError(t, runPush(pushDeps{
-		git:  func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
-		rest: f, sel: sel, out: &out, ctx: context.Background(),
+		git:       func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
+		gitBranch: func() (string, error) { return "main", nil },
+		rest:      f, sel: sel, out: &out, ctx: context.Background(),
 	}))
 	require.Equal(t, []string{"git", "push"}, got)
 	require.Empty(t, f.uploads, "the github provider deploys via webhook — it must not upload a tarball")
@@ -222,12 +225,40 @@ func TestPush_GitHubProvider_PropagatesGitFailure(t *testing.T) {
 	seedBackendDir(t)
 	sel := palbaseProject(t)
 	sel.RepositoryProvider = selection.ProviderGitHub
+	mapped := "main"
+	sel.Environment.SourceGitBranch = &mapped
 
 	err := runPush(pushDeps{
-		git:  func(string, ...string) error { return fmt.Errorf("rejected: non-fast-forward") },
-		rest: &fakeDeploy{}, sel: sel, out: io.Discard, ctx: context.Background(),
+		git:       func(string, ...string) error { return fmt.Errorf("rejected: non-fast-forward") },
+		gitBranch: func() (string, error) { return "main", nil },
+		rest:      &fakeDeploy{}, sel: sel, out: io.Discard, ctx: context.Background(),
 	})
 	require.ErrorContains(t, err, "non-fast-forward")
+}
+
+func TestPush_GitHubProvider_RejectsBranchThatDoesNotMapToSelectedEnvironment(t *testing.T) {
+	seedBackendDir(t)
+	sel := palbaseProject(t)
+	sel.RepositoryProvider = selection.ProviderGitHub
+	mapped := "develop"
+	sel.Environment.SourceGitBranch = &mapped
+	gitCalled := false
+
+	err := runPush(pushDeps{
+		git:       func(string, ...string) error { gitCalled = true; return nil },
+		gitBranch: func() (string, error) { return "main", nil },
+		sel:       sel,
+		out:       io.Discard,
+	})
+	require.ErrorContains(t, err, `selected environment "production" maps Git branch "develop"`)
+	require.False(t, gitCalled)
+}
+
+func TestPush_GitHubProvider_RejectsUnmappedEnvironment(t *testing.T) {
+	sel := palbaseProject(t)
+	sel.RepositoryProvider = selection.ProviderGitHub
+	err := runPush(pushDeps{sel: sel, out: io.Discard})
+	require.ErrorContains(t, err, "has no mapped Git branch")
 }
 
 // ── clone / pull ────────────────────────────────────────────────────────────
@@ -264,20 +295,38 @@ func TestRunClone_GitHubProvider_ClonesThenWritesConfigV2(t *testing.T) {
 func TestRunPull_RoutesByProvider(t *testing.T) {
 	t.Run("github runs git pull", func(t *testing.T) {
 		var got []string
+		sel := palbaseProject(t)
+		sel.RepositoryProvider = selection.ProviderGitHub
+		mapped := "main"
+		sel.Environment.SourceGitBranch = &mapped
 		require.NoError(t, runPull(pullDeps{
-			provider: selection.ProviderGitHub,
-			git:      func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
+			sel:       sel,
+			git:       func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
+			gitBranch: func() (string, error) { return "main", nil },
 		}))
 		require.Equal(t, []string{"git", "pull"}, got)
 	})
 	t.Run("palbase refetches the bundle", func(t *testing.T) {
 		called := false
 		require.NoError(t, runPull(pullDeps{
-			provider: selection.ProviderPalbase,
-			refetch:  func() error { called = true; return nil },
+			sel:     palbaseProject(t),
+			refetch: func() error { called = true; return nil },
 		}))
 		require.True(t, called)
 	})
+}
+
+func TestPull_GitHubProvider_RejectsWrongBranch(t *testing.T) {
+	sel := palbaseProject(t)
+	sel.RepositoryProvider = selection.ProviderGitHub
+	mapped := "release"
+	sel.Environment.SourceGitBranch = &mapped
+	err := runPull(pullDeps{
+		sel:       sel,
+		git:       func(string, ...string) error { return nil },
+		gitBranch: func() (string, error) { return "main", nil },
+	})
+	require.ErrorContains(t, err, `maps Git branch "release"`)
 }
 
 func TestRepoURLFromFullName(t *testing.T) {

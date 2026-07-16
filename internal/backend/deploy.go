@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/hook"
@@ -32,12 +33,26 @@ type deployClient interface {
 // github-mode path is testable without forking a real git push.
 type gitRunner func(name string, args ...string) error
 
+type gitBranchResolver func() (string, error)
+
 // execGit forks a real command, wiring std streams so git's prompts and
 // progress reach the user's terminal.
 func execGit(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+func currentGitBranch() (string, error) {
+	out, err := exec.Command("git", "branch", "--show-current").Output()
+	if err != nil {
+		return "", fmt.Errorf("read current Git branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("current checkout is detached — switch to the Git branch mapped to the selected environment")
+	}
+	return branch, nil
 }
 
 // DeployPath is the v2 deploy ingress for one Environment.
@@ -63,6 +78,7 @@ func DeploymentsPath(projectID, environmentRef string) string {
 // they default (background ctx, 1.5s, 5m) so tests can shrink them.
 type pushDeps struct {
 	git          gitRunner
+	gitBranch    gitBranchResolver
 	rest         deployClient
 	sel          selection.Selection
 	out          io.Writer
@@ -91,6 +107,9 @@ func runPush(d pushDeps) error {
 	}
 
 	if d.sel.RepositoryProvider == selection.ProviderGitHub {
+		if err := requireMappedGitBranch(d.sel, d.gitBranch); err != nil {
+			return err
+		}
 		// Wire (or self-heal to v2) the pre-push hook before pushing so the
 		// deploy-validation gate runs on THIS push. Best-effort — never blocks the
 		// push. Only a github-provider project has a git checkout to hook.
@@ -345,20 +364,52 @@ func runClone(d cloneDeps) error {
 
 // pullDeps are the injected collaborators for runPull.
 type pullDeps struct {
-	git      gitRunner
-	provider string
-	refetch  func() error
+	git       gitRunner
+	gitBranch gitBranchResolver
+	sel       selection.Selection
+	refetch   func() error
 }
 
 // runPull routes `palbase pull` by the project's repository provider.
 func runPull(d pullDeps) error {
-	if d.provider == selection.ProviderGitHub {
+	if d.sel.RepositoryProvider == selection.ProviderGitHub {
+		if err := requireMappedGitBranch(d.sel, d.gitBranch); err != nil {
+			return err
+		}
 		return d.git("git", "pull")
 	}
 	if d.refetch == nil {
 		return fmt.Errorf("palbase-provider pull is not available (bundle refetch not wired)")
 	}
 	return d.refetch()
+}
+
+func requireMappedGitBranch(sel selection.Selection, resolve gitBranchResolver) error {
+	mapped := ""
+	if sel.Environment.SourceGitBranch != nil {
+		mapped = strings.TrimSpace(*sel.Environment.SourceGitBranch)
+	}
+	label := sel.Environment.Slug
+	if label == "" {
+		label = sel.EnvironmentRef()
+	}
+	if mapped == "" {
+		return fmt.Errorf("selected environment %q has no mapped Git branch — map one in Environment settings before push/pull", label)
+	}
+	if resolve == nil {
+		resolve = currentGitBranch
+	}
+	current, err := resolve()
+	if err != nil {
+		return err
+	}
+	if current != mapped {
+		return fmt.Errorf(
+			"selected environment %q maps Git branch %q, but the current branch is %q — switch branches or select the matching environment",
+			label, mapped, current,
+		)
+	}
+	return nil
 }
 
 // pullResponse mirrors the backend.pull tRPC query result:
@@ -429,11 +480,12 @@ Override the target with the global --project / --environment flags.`,
 				return err
 			}
 			return runPush(pushDeps{
-				git:  execGit,
-				rest: r.REST(),
-				sel:  sel,
-				out:  cmd.OutOrStdout(),
-				ctx:  cmd.Context(),
+				git:       execGit,
+				gitBranch: currentGitBranch,
+				rest:      r.REST(),
+				sel:       sel,
+				out:       cmd.OutOrStdout(),
+				ctx:       cmd.Context(),
 			})
 		},
 	}
@@ -457,7 +509,9 @@ func newPullCmd(r Resolvers) *cobra.Command {
 				}
 				return pullBundle(cmd.Context(), r, sel.EnvironmentRef(), cwd, cmd.OutOrStdout())
 			}
-			return runPull(pullDeps{git: execGit, provider: sel.RepositoryProvider, refetch: refetch})
+			return runPull(pullDeps{
+				git: execGit, gitBranch: currentGitBranch, sel: sel, refetch: refetch,
+			})
 		},
 	}
 }
@@ -482,25 +536,29 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			prod := productionEnv(envs)
-			if prod == nil {
-				return fmt.Errorf("project %s has no production environment yet", projectID)
+			target, ok := selection.DefaultEnvironment(envs)
+			if !ok {
+				return fmt.Errorf("project %s has no visible environment yet", projectID)
+			}
+			provider, err := detail.RepositoryProvider()
+			if err != nil {
+				return err
 			}
 			dir := dirFlag
 			if dir == "" {
-				dir = prod.Slug
+				dir = target.Slug
 				if detail.GithubRepo != "" {
 					dir = repoDirFromFullName(detail.GithubRepo)
 				}
 			}
 			cfg := &selection.Config{
 				ProjectID:          projectID,
-				EnvironmentID:      prod.ID,
-				RepositoryProvider: detail.RepositoryProvider(),
+				EnvironmentID:      target.ID,
+				RepositoryProvider: provider,
 			}
 			return runClone(cloneDeps{
 				git:      execGit,
-				provider: detail.RepositoryProvider(),
+				provider: provider,
 				repoURL:  repoURLFromFullName(detail.GithubRepo),
 				dir:      dir,
 				cfg:      cfg,
@@ -509,22 +567,13 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 					if err := os.MkdirAll(dst, 0o755); err != nil {
 						return err
 					}
-					return pullBundle(ctx, r, prod.Ref, dst, cmd.OutOrStdout())
+					return pullBundle(ctx, r, target.Ref, dst, cmd.OutOrStdout())
 				},
 			})
 		},
 	}
 	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the repo or environment name)")
 	return cmd
-}
-
-func productionEnv(envs []selection.Environment) *selection.Environment {
-	for i := range envs {
-		if envs[i].IsProduction {
-			return &envs[i]
-		}
-	}
-	return nil
 }
 
 // repoURLFromFullName turns a GitHub "org/repo" full name into a cloneable

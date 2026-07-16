@@ -36,11 +36,15 @@ type ProjectDetail struct {
 
 // RepositoryProvider maps the server's `mode` onto the config's
 // `repository_provider` vocabulary (spec §4: palbase | github).
-func (p ProjectDetail) RepositoryProvider() string {
-	if p.Mode == "github" {
-		return ProviderGitHub
+func (p ProjectDetail) RepositoryProvider() (string, error) {
+	switch p.Mode {
+	case "github":
+		return ProviderGitHub, nil
+	case "platform":
+		return ProviderPalbase, nil
+	default:
+		return "", fmt.Errorf("project %s has unsupported repository mode %q", p.ID, p.Mode)
 	}
-	return ProviderPalbase
 }
 
 // Environment mirrors a `GET /api/v2/projects/{projectId}/environments` row.
@@ -164,6 +168,14 @@ func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 		}
 		projectID = cfg.ProjectID
 	}
+	detail, err := GetProject(ctx, rest, projectID)
+	if err != nil {
+		return Selection{}, fmt.Errorf("get project %s: %w", projectID, err)
+	}
+	provider, err := detail.RepositoryProvider()
+	if err != nil {
+		return Selection{}, err
+	}
 
 	envs, err := ListEnvironments(ctx, rest, projectID)
 	if err != nil {
@@ -182,10 +194,6 @@ func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 		return Selection{}, err
 	}
 
-	provider := ProviderPalbase
-	if cfg != nil && cfg.RepositoryProvider != "" {
-		provider = cfg.RepositoryProvider
-	}
 	sel := Selection{ProjectID: projectID, Environment: env, RepositoryProvider: provider}
 	r.cached = &sel
 	return sel, nil
@@ -213,12 +221,50 @@ func pickEnvironment(envs []Environment, flag, wantID string) (Environment, erro
 			"the selected environment (%s) no longer exists — re-select with `palbase env use <slug>` (have: %s)",
 			wantID, slugList(envs))
 	}
-	for _, e := range envs {
-		if e.IsProduction {
-			return e, nil
+	best, _ := DefaultEnvironment(envs)
+	return best, nil
+}
+
+// DefaultEnvironment applies the same deterministic default as Studio:
+// production, then the oldest durable Environment, then a preview.
+func DefaultEnvironment(envs []Environment) (Environment, bool) {
+	if len(envs) == 0 {
+		return Environment{}, false
+	}
+	best := envs[0]
+	for _, candidate := range envs[1:] {
+		if environmentLess(candidate, best) {
+			best = candidate
 		}
 	}
-	return Environment{}, fmt.Errorf("no environment selected and this project has no production environment — pick one with `palbase env use <slug>` (have: %s)", slugList(envs))
+	return best, true
+}
+
+func environmentLess(left, right Environment) bool {
+	leftClass, rightClass := environmentClass(left), environmentClass(right)
+	if leftClass != rightClass {
+		return leftClass < rightClass
+	}
+	if left.CreatedAt != right.CreatedAt {
+		if left.CreatedAt == "" {
+			return false
+		}
+		if right.CreatedAt == "" {
+			return true
+		}
+		return left.CreatedAt < right.CreatedAt
+	}
+	return left.Ref < right.Ref
+}
+
+func environmentClass(e Environment) int {
+	if e.IsProduction || e.Kind == "production" {
+		return 0
+	}
+	if e.Ephemeral || e.Kind == "preview" {
+		return 2
+	}
+	return 1
 }
 
 func slugList(envs []Environment) string {

@@ -236,7 +236,7 @@ func TestEnvCreate_UnknownSourceIsResolvedByServer(t *testing.T) {
 	require.Equal(t, "prod", req.Body["source_environment_ref"])
 }
 
-func TestEnvUse_RewritesOnlyTheEnvironmentId(t *testing.T) {
+func TestEnvUse_RewritesEnvironmentAndRefreshesServerOwnedProvider(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	selectiontest.WriteConfig(t, dir, &selection.Config{
 		ProjectID: "proj_1", EnvironmentID: "env_prod",
@@ -251,13 +251,49 @@ func TestEnvUse_RewritesOnlyTheEnvironmentId(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "env_stg", cfg.EnvironmentID)
 	require.Equal(t, "proj_1", cfg.ProjectID)
-	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
+	require.Equal(t, selection.ProviderPalbase, cfg.RepositoryProvider)
 	require.Equal(t, "app_ios", cfg.IOSAppID)
 
 	// `use` is LOCAL: it must not mutate anything server-side.
 	for _, route := range fake.Routes() {
-		require.True(t, route == "GET /api/v2/projects/proj_1/environments", route)
+		require.Contains(t, []string{
+			"GET /api/v2/projects/proj_1",
+			"GET /api/v2/projects/proj_1/environments",
+		}, route)
 	}
+}
+
+func TestEnvUse_ProjectOverrideAtomicallySwitchesTheSelection(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod",
+		RepositoryProvider: selection.ProviderPalbase,
+		IOSAppID:           "app_ios_a", WebAppID: "app_web_a",
+	})
+	fake := selectiontest.New(t)
+	fake.Projects = append(fake.Projects, selectiontest.Project{
+		ID: "proj_2", Name: "other", Mode: "github",
+	})
+	fake.Environments["proj_2"] = []selection.Environment{
+		selectiontest.Env("env_b", "proj_2", "app2stg", "staging", "staging", false),
+	}
+	resolver := fake.Resolver()
+	resolver.ProjectFlag = "proj_2"
+	cmd := Cmd(Resolvers{
+		REST:      func() REST { return fake.REST() },
+		Selection: func() *selection.Resolver { return resolver },
+	})
+	cmd.SetArgs([]string{"use", "staging"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	require.NoError(t, cmd.Execute())
+
+	cfg, err := selection.Load(dir)
+	require.NoError(t, err)
+	require.Equal(t, "proj_2", cfg.ProjectID)
+	require.Equal(t, "env_b", cfg.EnvironmentID)
+	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
+	require.Empty(t, cfg.IOSAppID)
+	require.Empty(t, cfg.WebAppID)
 }
 
 // archive/wake with NO argument act on the SELECTED environment.

@@ -128,48 +128,36 @@ func listCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-// useCmd selects the Environment this directory acts on. Local only — it
-// rewrites `.palbase/config.json`'s environment_id and calls no mutation.
+// useCmd selects the Environment this directory acts on. It reads the
+// server-owned Project mode and Environment list, then writes one atomic local
+// selection; it performs no server mutation.
 func useCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "use <slug|ref>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Select the environment this directory acts on (no server call)",
+		Short: "Select the environment this directory acts on (no server mutation)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
 			want := args[0]
-			projectID, err := r.Selection().ProjectID(ctx)
+			resolver := r.Selection()
+			resolver.EnvironmentFlag = want
+			sel, err := resolver.Resolve(cmd.Context())
 			if err != nil {
 				return err
-			}
-			envs, err := selection.ListEnvironments(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			var target *selection.Environment
-			for i := range envs {
-				if envs[i].Slug == want || envs[i].Ref == want || strings.EqualFold(envs[i].Name, want) {
-					target = &envs[i]
-					break
-				}
-			}
-			if target == nil {
-				return fmt.Errorf("no environment %q in this project — have: %s", want, slugsOf(envs))
 			}
 
 			cfg, err := selection.Load("")
 			if err != nil {
 				return err
 			}
-			cfg.EnvironmentID = target.ID
+			selection.ApplySelection(cfg, sel)
 			if err := selection.Save("", cfg); err != nil {
 				return err
 			}
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), cfg)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ selected environment %s (%s)\n", target.Slug, target.Ref)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ selected environment %s (%s)\n", sel.Environment.Slug, sel.EnvironmentRef())
 			return nil
 		},
 	}

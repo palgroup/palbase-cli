@@ -63,6 +63,9 @@ from .palbase/config.json).`, label, label, platform, rebuild, platform),
 				return err
 			}
 			appID := cfg.AppID(platform)
+			if cfg.ProjectID != sel.ProjectID {
+				appID = ""
+			}
 			if appID == "" {
 				return fmt.Errorf("no %s app linked — run `palbase %s link` first", platform, platform)
 			}
@@ -72,7 +75,7 @@ from .palbase/config.json).`, label, label, platform, rebuild, platform),
 			if err != nil {
 				return err
 			}
-			if err := persistProjectAppSlot(platform, appID); err != nil {
+			if err := persistProjectAppSlot(platform, appID, &sel, true); err != nil {
 				return err
 			}
 
@@ -82,17 +85,6 @@ from .palbase/config.json).`, label, label, platform, rebuild, platform),
 				sel.EnvironmentRef(), ".palbase", ".palbase/"+platform, appID,
 				out); err != nil {
 				return err
-			}
-
-			// Record the environment as THE selection: a build made now connects to
-			// it, so the local selection and the baked config must not disagree.
-			cfg, err = selection.Load("")
-			if err != nil {
-				return err
-			}
-			cfg.EnvironmentID = sel.Environment.ID
-			if err := selection.Save("", cfg); err != nil {
-				return fmt.Errorf("save %s: %w", selection.ConfigPath(""), err)
 			}
 
 			fmt.Fprintf(out, "✓ %s project now targets environment %s (%s)\n", label, sel.Environment.Slug, sel.EnvironmentRef())

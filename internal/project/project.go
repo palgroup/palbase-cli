@@ -107,23 +107,22 @@ func useCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			prod := productionOf(envs)
-			if prod == nil {
-				return fmt.Errorf("project %s has no production environment yet — it may still be provisioning (`palbase project status %s`)", projectID, projectID)
+			target, ok := selection.DefaultEnvironment(envs)
+			if !ok {
+				return fmt.Errorf("project %s has no visible environment yet — it may still be provisioning (`palbase project status %s`)", projectID, projectID)
+			}
+			provider, err := detail.RepositoryProvider()
+			if err != nil {
+				return err
 			}
 
 			cfg, _ := selection.Load("")
 			if cfg == nil {
 				cfg = &selection.Config{}
 			}
-			// A different Project owns different app registrations — carrying the
-			// old ones over would point `ios use` at an app in another product.
-			if cfg.ProjectID != projectID {
-				cfg.IOSAppID, cfg.MacOSAppID, cfg.WebAppID, cfg.AndroidAppID = "", "", "", ""
-			}
-			cfg.ProjectID = projectID
-			cfg.EnvironmentID = prod.ID
-			cfg.RepositoryProvider = detail.RepositoryProvider()
+			selection.ApplySelection(cfg, selection.Selection{
+				ProjectID: projectID, Environment: target, RepositoryProvider: provider,
+			})
 			if err := selection.Save("", cfg); err != nil {
 				return err
 			}
@@ -134,8 +133,8 @@ func useCmd(r Resolvers) *cobra.Command {
 				return encodeJSON(cmd.OutOrStdout(), cfg)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ selected project %s (%s)\n", detail.Name, projectID)
-			fmt.Fprintf(cmd.OutOrStdout(), "  environment: %s (%s)\n", prod.Slug, prod.Ref)
-			fmt.Fprintf(cmd.OutOrStdout(), "  repository:  %s\n", detail.RepositoryProvider())
+			fmt.Fprintf(cmd.OutOrStdout(), "  environment: %s (%s)\n", target.Slug, target.Ref)
+			fmt.Fprintf(cmd.OutOrStdout(), "  repository:  %s\n", provider)
 			return nil
 		},
 	}
@@ -165,6 +164,10 @@ func statusCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			provider, err := detail.RepositoryProvider()
+			if err != nil {
+				return err
+			}
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), struct {
 					Project      selection.ProjectDetail `json:"project"`
@@ -174,7 +177,7 @@ func statusCmd(r Resolvers) *cobra.Command {
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "project:     %s (%s)\n", detail.Name, detail.ID)
 			fmt.Fprintf(out, "role:        %s\n", detail.Role)
-			fmt.Fprintf(out, "repository:  %s", detail.RepositoryProvider())
+			fmt.Fprintf(out, "repository:  %s", provider)
 			if detail.GithubRepo != "" {
 				fmt.Fprintf(out, " (%s)", detail.GithubRepo)
 			}
@@ -190,15 +193,6 @@ func statusCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
-}
-
-func productionOf(envs []selection.Environment) *selection.Environment {
-	for i := range envs {
-		if envs[i].IsProduction {
-			return &envs[i]
-		}
-	}
-	return nil
 }
 
 // day trims an RFC3339 timestamp to its date. A value we cannot parse is shown

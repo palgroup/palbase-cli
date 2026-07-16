@@ -57,11 +57,13 @@ type nativeLinkDeps struct {
 
 // nativeLinkOpts is the resolved context runNativeLink acts on.
 type nativeLinkOpts struct {
-	platform       string // ios, macos, or android
-	projectID      string
-	environmentRef string
-	appID          string // locally persisted platform app id; empty on first link
-	identifier     string // bundle id / Android applicationId
+	platform           string // ios, macos, or android
+	projectID          string
+	environmentID      string
+	environmentRef     string
+	repositoryProvider string
+	appID              string // locally persisted platform app id; empty on first link
+	identifier         string // bundle id / Android applicationId
 }
 
 // newIOSCmd builds the `palbase ios` command group.
@@ -144,7 +146,7 @@ Local project files are left untouched.
 				rest = r.REST()
 			}
 			persistedAppID := ""
-			if cfg, cfgErr := selection.Load(""); cfgErr == nil {
+			if cfg, cfgErr := selection.Load(""); cfgErr == nil && cfg.ProjectID == sel.ProjectID {
 				persistedAppID = cfg.AppID(platform)
 			}
 
@@ -156,11 +158,13 @@ Local project files are left untouched.
 				cfgFetch: studioConfigArtifactFetch(rest),
 			}
 			summary, err := runNativeLink(ctx, deps, nativeLinkOpts{
-				platform:       platform,
-				projectID:      sel.ProjectID,
-				environmentRef: sel.EnvironmentRef(),
-				appID:          persistedAppID,
-				identifier:     packageName,
+				platform:           platform,
+				projectID:          sel.ProjectID,
+				environmentID:      sel.Environment.ID,
+				environmentRef:     sel.EnvironmentRef(),
+				repositoryProvider: sel.RepositoryProvider,
+				appID:              persistedAppID,
+				identifier:         packageName,
 			}, human)
 			if err != nil {
 				return err
@@ -196,7 +200,14 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 	}
 	// Persist the concrete app immediately. If a later config/spec fetch fails,
 	// the next run reuses this exact registration instead of creating another.
-	if err := persistProjectAppSlot(opts.platform, appID); err != nil {
+	sel := selection.Selection{
+		ProjectID: opts.projectID,
+		Environment: selection.Environment{
+			ID: opts.environmentID, Ref: opts.environmentRef,
+		},
+		RepositoryProvider: opts.repositoryProvider,
+	}
+	if err := persistProjectAppSlot(opts.platform, appID, &sel, false); err != nil {
 		return nil, err
 	}
 
@@ -217,12 +228,24 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 }
 
 // persistProjectAppSlot records one platform's app registration in
-// `.palbase/config.json`, leaving every sibling slot (and the selection itself)
-// intact.
-func persistProjectAppSlot(platform, appID string) error {
+// `.palbase/config.json`. A cross-Project move clears every foreign app slot;
+// within one Project, sibling slots remain intact.
+func persistProjectAppSlot(platform, appID string, sel *selection.Selection, retarget bool) error {
 	cfg, err := selection.Load("")
 	if err != nil {
 		return err
+	}
+	if sel != nil {
+		projectChanged := cfg.ProjectID != sel.ProjectID
+		if projectChanged || retarget {
+			if sel.ProjectID == "" || sel.Environment.ID == "" || sel.RepositoryProvider == "" {
+				return fmt.Errorf("cannot persist an incomplete Project/Environment selection")
+			}
+			selection.ApplySelection(cfg, *sel)
+		} else if sel.RepositoryProvider != "" {
+			// Repository mode is server-owned and may have changed since link.
+			cfg.RepositoryProvider = sel.RepositoryProvider
+		}
 	}
 	if err := cfg.SetAppID(platform, appID); err != nil {
 		return err

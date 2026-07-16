@@ -75,7 +75,7 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 	if err != nil {
 		return err
 	}
-	if err := persistProjectAppSlot("web", appID); err != nil {
+	if err := persistProjectAppSlot("web", appID, &sel, false); err != nil {
 		return err
 	}
 

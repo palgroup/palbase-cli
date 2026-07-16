@@ -124,6 +124,22 @@ func TestLoad_RejectsUnknownFieldsWithoutRewriting(t *testing.T) {
 	require.Equal(t, raw, selectiontest.ReadConfig(t, dir))
 }
 
+func TestLoad_RejectsUnknownRepositoryProvider(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"version":2,"project_id":"proj_1","environment_id":"env_1","repository_provider":"gitlab"}`
+	require.NoError(t, os.MkdirAll(filepath.Dir(selection.ConfigPath(dir)), 0o755))
+	require.NoError(t, os.WriteFile(selection.ConfigPath(dir), []byte(raw), 0o644))
+	_, err := selection.Load(dir)
+	require.ErrorContains(t, err, "repository_provider")
+}
+
+func TestSave_RejectsUnknownRepositoryProvider(t *testing.T) {
+	err := selection.Save(t.TempDir(), &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_1", RepositoryProvider: "gitlab",
+	})
+	require.ErrorContains(t, err, "repository_provider")
+}
+
 func TestResolverConfig_RejectsUnsupportedShapeWithoutNetworkOrRewrite(t *testing.T) {
 	dir := t.TempDir()
 	const raw = `{"ref":"app1prod","default_env":"main"}`
@@ -189,7 +205,7 @@ func TestResolve_DeletedEnvironmentIsNamed_NotSilentlyReplaced(t *testing.T) {
 func TestResolve_ProjectFlagOverridesConfig(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	fake := selectiontest.New(t)
-	fake.Projects = append(fake.Projects, selectiontest.Project{ID: "proj_2", Name: "other", Mode: "platform"})
+	fake.Projects = append(fake.Projects, selectiontest.Project{ID: "proj_2", Name: "other", Mode: "github"})
 	fake.Environments["proj_2"] = []selection.Environment{
 		selectiontest.Env("env_p2", "proj_2", "app2prod", "production", "production", true),
 	}
@@ -202,6 +218,57 @@ func TestResolve_ProjectFlagOverridesConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "proj_2", sel.ProjectID)
 	require.Equal(t, "app2prod", sel.EnvironmentRef())
+	require.Equal(t, selection.ProviderGitHub, sel.RepositoryProvider)
+	_, fetched := fake.Find("GET /api/v2/projects/proj_2")
+	require.True(t, fetched, "--project must refresh the server-owned repository mode")
+}
+
+func TestResolve_ServerProviderOverridesStaleConfig(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Projects[0].Mode = "github"
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
+
+	r := fake.Resolver()
+	r.Dir = dir
+	sel, err := r.Resolve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, selection.ProviderGitHub, sel.RepositoryProvider)
+}
+
+func TestResolve_RejectsUnknownServerProvider(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Projects[0].Mode = "gitlab"
+	selectiontest.WriteConfig(t, dir, nil)
+
+	r := fake.Resolver()
+	r.Dir = dir
+	_, err := r.Resolve(context.Background())
+	require.ErrorContains(t, err, "unsupported repository mode")
+}
+
+func TestResolve_DefaultsToOldestDurableEnvironmentWithoutVisibleProduction(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	oldest := selectiontest.Env("env_old", "proj_1", "app1old", "old", "staging", false)
+	oldest.CreatedAt = "2026-06-01T00:00:00Z"
+	newer := selectiontest.Env("env_new", "proj_1", "app1new", "new", "staging", false)
+	newer.CreatedAt = "2026-07-01T00:00:00Z"
+	preview := selectiontest.Env("env_preview", "proj_1", "app1pr", "preview", "preview", false)
+	preview.CreatedAt = "2026-05-01T00:00:00Z"
+	preview.Ephemeral = true
+	fake.Environments["proj_1"] = []selection.Environment{newer, preview, oldest}
+
+	r := fake.Resolver()
+	r.Dir = dir
+	r.ProjectFlag = "proj_1"
+	sel, err := r.Resolve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, oldest.Ref, sel.EnvironmentRef())
 }
 
 // The resolver hits ONE environments listing even when a command asks twice.

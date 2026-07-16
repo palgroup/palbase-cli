@@ -126,6 +126,54 @@ func TestNativeLink_PersistsOnlyItsOwnAppSlot(t *testing.T) {
 	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
 }
 
+func TestPersistProjectAppSlot_CrossProjectSwitchIsAtomic(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_a", EnvironmentID: "env_a",
+		RepositoryProvider: selection.ProviderPalbase,
+		IOSAppID:           "ios_a", WebAppID: "web_a",
+	})
+	sel := selection.Selection{
+		ProjectID: "proj_b",
+		Environment: selection.Environment{
+			ID: "env_b", Ref: "envbref", Slug: "staging",
+		},
+		RepositoryProvider: selection.ProviderGitHub,
+	}
+
+	require.NoError(t, persistProjectAppSlot("android", "android_b", &sel, false))
+	cfg, err := selection.Load(dir)
+	require.NoError(t, err)
+	require.Equal(t, "proj_b", cfg.ProjectID)
+	require.Equal(t, "env_b", cfg.EnvironmentID)
+	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
+	require.Equal(t, "android_b", cfg.AndroidAppID)
+	require.Empty(t, cfg.IOSAppID)
+	require.Empty(t, cfg.WebAppID)
+}
+
+func TestPersistProjectAppSlot_SameProjectLinkPreservesEnvironment(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
+	sel := selection.Selection{
+		ProjectID: "proj_1",
+		Environment: selection.Environment{
+			ID: "env_stg", Ref: "stgref", Slug: "staging",
+		},
+		RepositoryProvider: selection.ProviderGitHub,
+	}
+
+	require.NoError(t, persistProjectAppSlot("web", "web_1", &sel, false))
+	cfg, err := selection.Load(dir)
+	require.NoError(t, err)
+	require.Equal(t, "env_prod", cfg.EnvironmentID, "link must not retarget within one Project")
+	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
+	require.Equal(t, "web_1", cfg.WebAppID)
+}
+
 // A persisted app id that no longer belongs to the selected project (or is the
 // wrong platform) is REPLACED — never reused, never guessed at.
 func TestNativeLink_StalePersistedAppIsReplaced(t *testing.T) {

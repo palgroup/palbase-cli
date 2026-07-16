@@ -100,6 +100,9 @@ func Load(dir string) (*Config, error) {
 	if cfg.ProjectID == "" || cfg.EnvironmentID == "" {
 		return nil, fmt.Errorf("%s must contain project_id and environment_id — run `palbase project use <projectId>`", ConfigPath(dir))
 	}
+	if err := validateRepositoryProvider(cfg.RepositoryProvider); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", ConfigPath(dir), err)
+	}
 	return &cfg, nil
 }
 
@@ -108,6 +111,9 @@ func Load(dir string) (*Config, error) {
 func Save(dir string, cfg *Config) error {
 	if cfg.ProjectID == "" || cfg.EnvironmentID == "" {
 		return fmt.Errorf("config must contain project_id and environment_id")
+	}
+	if err := validateRepositoryProvider(cfg.RepositoryProvider); err != nil {
+		return err
 	}
 	cfg.Version = Version
 	palbaseDir := filepath.Dir(ConfigPath(dir))
@@ -119,6 +125,26 @@ func Save(dir string, cfg *Config) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	return os.WriteFile(ConfigPath(dir), append(data, '\n'), 0o644)
+}
+
+func validateRepositoryProvider(provider string) error {
+	switch provider {
+	case "", ProviderPalbase, ProviderGitHub:
+		return nil
+	default:
+		return fmt.Errorf("repository_provider must be %q or %q (got %q)", ProviderPalbase, ProviderGitHub, provider)
+	}
+}
+
+// ApplySelection atomically moves a local config to one server-resolved
+// Project/Environment. App registrations cannot cross the Project boundary.
+func ApplySelection(cfg *Config, sel Selection) {
+	if cfg.ProjectID != sel.ProjectID {
+		cfg.IOSAppID, cfg.MacOSAppID, cfg.WebAppID, cfg.AndroidAppID = "", "", "", ""
+	}
+	cfg.ProjectID = sel.ProjectID
+	cfg.EnvironmentID = sel.Environment.ID
+	cfg.RepositoryProvider = sel.RepositoryProvider
 }
 
 // AppID returns the locally-remembered app registration for a platform slot.
