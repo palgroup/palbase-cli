@@ -393,10 +393,25 @@ func TestRefreshTokens(t *testing.T) {
 // --- Logout Tests ---
 
 func TestLogout(t *testing.T) {
-	revokeCalled := false
+	type revocationPayload struct {
+		Token         string `json:"token"`
+		TokenTypeHint string `json:"token_type_hint"`
+	}
+	type revocationRequest struct {
+		ContentType string
+		Payload     revocationPayload
+		DecodeErr   error
+	}
+	revocations := make(chan revocationRequest, 1)
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/oauth/revoke" {
-			revokeCalled = true
+			var payload revocationPayload
+			decodeErr := json.NewDecoder(r.Body).Decode(&payload)
+			revocations <- revocationRequest{
+				ContentType: r.Header.Get("Content-Type"),
+				Payload:     payload,
+				DecodeErr:   decodeErr,
+			}
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
@@ -409,11 +424,11 @@ func TestLogout(t *testing.T) {
 	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	// Save credentials first
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken:  "access",
 		RefreshToken: "refresh",
 		User:         UserInfo{Email: "test@example.com"},
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{
@@ -423,7 +438,11 @@ func TestLogout(t *testing.T) {
 
 	err := client.Logout(context.Background())
 	require.NoError(t, err)
-	assert.True(t, revokeCalled)
+	revocation := <-revocations
+	require.NoError(t, revocation.DecodeErr)
+	assert.Equal(t, "application/json", revocation.ContentType)
+	assert.Equal(t, "refresh", revocation.Payload.Token)
+	assert.Equal(t, "refresh_token", revocation.Payload.TokenTypeHint)
 	assert.Contains(t, output.String(), "✓ Logged out")
 
 	// Credentials should be gone

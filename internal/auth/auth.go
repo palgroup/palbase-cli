@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -365,7 +366,9 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 func (c *Client) Logout(ctx context.Context) error {
 	creds, err := LoadCredentials(c.Cfg.Mode)
 	if err == nil && creds.RefreshToken != "" {
-		c.revokeToken(ctx, creds.RefreshToken)
+		if err := c.revokeToken(ctx, creds.RefreshToken); err != nil {
+			fmt.Fprintf(c.Output, "  ! could not revoke refresh token: %v\n", err)
+		}
 	}
 
 	if err := DeleteCredentials(c.Cfg.Mode); err != nil {
@@ -382,18 +385,43 @@ func (c *Client) Logout(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) revokeToken(ctx context.Context, token string) {
-	data := url.Values{
-		"token":           {token},
-		"token_type_hint": {"refresh_token"},
-		"client_id":       {c.Cfg.ClientID},
+func (c *Client) revokeToken(ctx context.Context, token string) (retErr error) {
+	payload, err := json.Marshal(struct {
+		Token         string `json:"token"`
+		TokenTypeHint string `json:"token_type_hint"`
+	}{
+		Token:         token,
+		TokenTypeHint: "refresh_token",
+	})
+	if err != nil {
+		return fmt.Errorf("encode revocation request: %w", err)
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.Cfg.AuthURL+"/oauth/revoke", strings.NewReader(data.Encode()))
-	if req != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		c.HttpClient.Do(req)
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.Cfg.AuthURL+"/oauth/revoke",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return fmt.Errorf("create revocation request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HttpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("revoke token: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close revocation response: %w", err)
+		}
+	}()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("read revocation response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("revoke token: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	return nil
 }
 
 // Whoami prints the current logged-in user info.
