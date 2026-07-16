@@ -173,8 +173,9 @@ func newRootCmd() *cobra.Command {
 			Selection: selectionResolver,
 		}),
 		apps.Cmd(apps.Resolvers{
-			REST:      func() apps.REST { return managementREST() },
-			Selection: selectionResolver,
+			REST:       func() apps.REST { return managementREST() },
+			Selection:  selectionResolver,
+			PublicHost: func() string { return resolved.Endpoints.PublicHost },
 		}),
 		logs.Cmd(logs.Resolvers{
 			Studio:    func() logs.Studio { return studioClient },

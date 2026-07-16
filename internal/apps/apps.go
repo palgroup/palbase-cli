@@ -45,6 +45,10 @@ type REST interface {
 type Resolvers struct {
 	REST      func() REST
 	Selection func() *selection.Resolver
+	// PublicHost is the configured tenant DNS suffix (for example
+	// dev.palbase.studio). Config artifacts must target exactly
+	// <environment_ref>.<PublicHost>.
+	PublicHost func() string
 }
 
 // Cmd returns the `palbase apps` parent command.
@@ -317,9 +321,16 @@ var publishableAPIKeyPattern = regexp.MustCompile(`^pb_([a-z0-9]+)_c[A-Za-z0-9]{
 // ValidateConfigArtifact binds a Management API config response to the exact
 // app and Environment requested by the caller before its URL, key, or contents
 // can drive another network request or a local file write.
-func ValidateConfigArtifact(art ConfigArtifact, expectedAppID, expectedEnvironmentRef string) error {
-	if expectedAppID == "" || expectedEnvironmentRef == "" {
-		return fmt.Errorf("config artifact validation requires an app_id and environment_ref")
+func ValidateConfigArtifact(
+	art ConfigArtifact,
+	expectedAppID, expectedEnvironmentRef, publicHost string,
+) error {
+	publicHost = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(publicHost)), ".")
+	if expectedAppID == "" || expectedEnvironmentRef == "" || publicHost == "" {
+		return fmt.Errorf("config artifact validation requires an app_id, environment_ref, and public host")
+	}
+	if strings.ContainsAny(publicHost, "/:@?#") {
+		return fmt.Errorf("config artifact validation requires a hostname-only public host")
 	}
 	if art.AppID != expectedAppID {
 		return fmt.Errorf("config artifact app_id %q does not match requested app %q", art.AppID, expectedAppID)
@@ -336,15 +347,13 @@ func ValidateConfigArtifact(art ConfigArtifact, expectedAppID, expectedEnvironme
 	}
 
 	baseURL, err := url.Parse(art.BaseURL)
-	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.Hostname() == "" || baseURL.User != nil {
-		return fmt.Errorf("config artifact base_url must be an HTTPS URL without user info")
-	}
-	host := strings.ToLower(baseURL.Hostname())
-	if strings.HasSuffix(host, ".palbase.studio") {
-		firstLabel, _, _ := strings.Cut(host, ".")
-		if firstLabel != expectedEnvironmentRef {
-			return fmt.Errorf("config artifact base_url host does not match environment %q", expectedEnvironmentRef)
-		}
+	expectedHost := strings.ToLower(expectedEnvironmentRef) + "." + publicHost
+	rootPath := baseURL != nil && (baseURL.EscapedPath() == "" || baseURL.EscapedPath() == "/")
+	if err != nil || baseURL.Scheme != "https" || baseURL.Opaque != "" || baseURL.Host == "" ||
+		baseURL.User != nil || baseURL.Port() != "" || strings.ToLower(baseURL.Hostname()) != expectedHost ||
+		!rootPath || baseURL.RawQuery != "" || baseURL.ForceQuery ||
+		baseURL.Fragment != "" || strings.Contains(art.BaseURL, "#") {
+		return fmt.Errorf("config artifact base_url must be the root HTTPS URL for environment host %q", expectedHost)
 	}
 	return nil
 }
@@ -417,7 +426,10 @@ func configCmd(r Resolvers) *cobra.Command {
 				ConfigArtifactPath(appID, sel.EnvironmentRef()), nil, &art); err != nil {
 				return err
 			}
-			if err := ValidateConfigArtifact(art, appID, sel.EnvironmentRef()); err != nil {
+			if r.PublicHost == nil {
+				return fmt.Errorf("tenant public host is not configured")
+			}
+			if err := ValidateConfigArtifact(art, appID, sel.EnvironmentRef(), r.PublicHost()); err != nil {
 				return err
 			}
 			if art.Platform != "web" {

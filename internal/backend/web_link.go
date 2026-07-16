@@ -79,14 +79,14 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 		return err
 	}
 
-	art, err := studioConfigArtifactFetch(rest)(ctx, appID, sel.EnvironmentRef())
+	art, err := studioConfigArtifactFetch(rest, r.Endpoints().PublicHost)(ctx, appID, sel.EnvironmentRef())
 	if err != nil {
 		return fmt.Errorf("fetch app config: %w", err)
 	}
 	if art.Platform != "web" {
 		return fmt.Errorf("app %s is %s, not web", appID, art.Platform)
 	}
-	spec, err := fetchRemoteOpenAPISpec(ctx, art.BaseURL+"/openapi.json", art.APIKey, w)
+	spec, err := fetchRemoteOpenAPISpec(ctx, strings.TrimRight(art.BaseURL, "/")+"/openapi.json", art.APIKey, w)
 	if err != nil {
 		return err
 	}

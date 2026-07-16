@@ -83,8 +83,8 @@ Override the target with the global --project / --environment flags.`,
 				lookupSpecTarget(r),
 				fetchRemoteOpenAPISpec,
 				studioBindingLister(r.REST()),
-				studioConfigArtifactFetch(r.REST()),
-				sel.EnvironmentRef(), outDir, "", "",
+				studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
+				sel.EnvironmentRef(), r.Endpoints().PublicHost, outDir, "", "",
 				cmd.OutOrStdout(),
 			)
 		},
@@ -116,7 +116,7 @@ func runPullSpec(
 	fetch remoteSpecFetch,
 	list bindingLister,
 	cfgFetch configArtifactFetch,
-	environmentRef, specOutDir, configOutDir, appID string,
+	environmentRef, publicHost, specOutDir, configOutDir, appID string,
 	w io.Writer,
 ) error {
 	target, err := lookup(ctx, environmentRef)
@@ -128,7 +128,7 @@ func runPullSpec(
 	specKey := target.APIKey
 	var entry *pullSpecConfigEntry
 	if appID != "" {
-		entry, err = buildPullSpecConfig(ctx, list, cfgFetch, appID, environmentRef)
+		entry, err = buildPullSpecConfig(ctx, list, cfgFetch, appID, environmentRef, publicHost)
 		if err != nil {
 			return err
 		}
@@ -183,7 +183,7 @@ func buildPullSpecConfig(
 	ctx context.Context,
 	list bindingLister,
 	fetch configArtifactFetch,
-	appID, environmentRef string,
+	appID, environmentRef, publicHost string,
 ) (*pullSpecConfigEntry, error) {
 	bindings, err := list(ctx, appID)
 	if err != nil {
@@ -203,7 +203,7 @@ func buildPullSpecConfig(
 	if err != nil {
 		return nil, fmt.Errorf("fetch config artifact for %s: %w", environmentRef, err)
 	}
-	if err := apps.ValidateConfigArtifact(art, appID, environmentRef); err != nil {
+	if err := apps.ValidateConfigArtifact(art, appID, environmentRef, publicHost); err != nil {
 		return nil, err
 	}
 	entry := &pullSpecConfigEntry{

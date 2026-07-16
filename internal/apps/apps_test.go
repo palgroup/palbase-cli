@@ -29,8 +29,9 @@ func runOutput(t *testing.T, fake *selectiontest.Fake, args ...string) (string, 
 	rest := fake.REST()
 	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
-		REST:      func() REST { return rest },
-		Selection: func() *selection.Resolver { return resolver },
+		REST:       func() REST { return rest },
+		Selection:  func() *selection.Resolver { return resolver },
+		PublicHost: func() string { return "dev.palbase.studio" },
 	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -180,8 +181,9 @@ func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	rest := fake.REST()
 	resolver := fake.Resolver()
 	cmd := Cmd(Resolvers{
-		REST:      func() REST { return rest },
-		Selection: func() *selection.Resolver { return resolver },
+		REST:       func() REST { return rest },
+		Selection:  func() *selection.Resolver { return resolver },
+		PublicHost: func() string { return "dev.palbase.studio" },
 	})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetArgs([]string{"config", "--app", "app_web", "--out", out})
@@ -216,8 +218,9 @@ func TestAppsConfig_RejectsForeignArtifactBeforeWriting(t *testing.T) {
 	out := filepath.Join(dir, "palbase-config.json")
 	rest := fake.REST()
 	cmd := Cmd(Resolvers{
-		REST:      func() REST { return rest },
-		Selection: func() *selection.Resolver { return fake.Resolver() },
+		REST:       func() REST { return rest },
+		Selection:  func() *selection.Resolver { return fake.Resolver() },
+		PublicHost: func() string { return "dev.palbase.studio" },
 	})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetArgs([]string{"config", "--app", "app_web", "--out", out})
@@ -233,7 +236,17 @@ func TestValidateConfigArtifact(t *testing.T) {
 		APIKey:  "pb_app1prod_c01234567890123456789",
 		BaseURL: "https://app1prod.dev.palbase.studio",
 	}
-	require.NoError(t, ValidateConfigArtifact(valid, "app_web", "app1prod"))
+	require.NoError(t, ValidateConfigArtifact(valid, "app_web", "app1prod", "dev.palbase.studio"))
+	for _, publicHost := range []string{"palbase.studio", "integ.dev.palbase.studio"} {
+		art := valid
+		art.BaseURL = "https://app1prod." + publicHost + "/"
+		require.NoError(t, ValidateConfigArtifact(art, "app_web", "app1prod", publicHost))
+	}
+	require.ErrorContains(
+		t,
+		ValidateConfigArtifact(valid, "app_web", "app1prod", "https://dev.palbase.studio"),
+		"hostname-only public host",
+	)
 
 	tests := []struct {
 		name string
@@ -246,13 +259,19 @@ func TestValidateConfigArtifact(t *testing.T) {
 		{"foreign publishable key", func(a *ConfigArtifact) { a.APIKey = "pb_app1stg_c01234567890123456789" }, "api_key"},
 		{"http base url", func(a *ConfigArtifact) { a.BaseURL = "http://app1prod.dev.palbase.studio" }, "base_url"},
 		{"official foreign host", func(a *ConfigArtifact) { a.BaseURL = "https://app1stg.dev.palbase.studio" }, "base_url"},
+		{"external host", func(a *ConfigArtifact) { a.BaseURL = "https://evil.example" }, "base_url"},
+		{"official suffix confusion", func(a *ConfigArtifact) { a.BaseURL = "https://app1prod.evil.palbase.studio" }, "base_url"},
+		{"explicit port", func(a *ConfigArtifact) { a.BaseURL = "https://app1prod.dev.palbase.studio:8443" }, "base_url"},
+		{"query", func(a *ConfigArtifact) { a.BaseURL = "https://app1prod.dev.palbase.studio?target=other" }, "base_url"},
+		{"fragment", func(a *ConfigArtifact) { a.BaseURL = "https://app1prod.dev.palbase.studio#other" }, "base_url"},
+		{"non-root path", func(a *ConfigArtifact) { a.BaseURL = "https://app1prod.dev.palbase.studio/proxy" }, "base_url"},
 		{"userinfo", func(a *ConfigArtifact) { a.BaseURL = "https://user@app1prod.dev.palbase.studio" }, "base_url"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			art := valid
 			tc.edit(&art)
-			require.ErrorContains(t, ValidateConfigArtifact(art, "app_web", "app1prod"), tc.want)
+			require.ErrorContains(t, ValidateConfigArtifact(art, "app_web", "app1prod", "dev.palbase.studio"), tc.want)
 		})
 	}
 }

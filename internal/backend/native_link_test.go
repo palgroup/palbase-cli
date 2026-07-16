@@ -24,6 +24,7 @@ import (
 func stubPullSeams(t *testing.T, wantApp, wantEnvRef, platform string) nativeLinkDeps {
 	t.Helper()
 	return nativeLinkDeps{
+		publicHost: "dev.palbase.studio",
 		lookup: func(_ context.Context, ref string) (backendTarget, error) {
 			require.Equal(t, wantEnvRef, ref)
 			return backendTarget{URL: "https://" + ref + ".dev.palbase.studio", APIKey: "pb_generic"}, nil

@@ -41,13 +41,13 @@ type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
 // The artifact does not carry OAuth, so this wrapper also fetches palauth's
 // public `/auth/oauth/providers` against the artifact's base_url and api_key.
 // Best-effort: a blip leaves OAuth nil.
-func studioConfigArtifactFetch(rest restDoer) configArtifactFetch {
+func studioConfigArtifactFetch(rest restDoer, publicHost string) configArtifactFetch {
 	return func(ctx context.Context, appID, environmentRef string) (apps.ConfigArtifact, error) {
 		var art apps.ConfigArtifact
 		if err := rest.Do(ctx, http.MethodGet, apps.ConfigArtifactPath(appID, environmentRef), nil, &art); err != nil {
 			return apps.ConfigArtifact{}, err
 		}
-		if err := apps.ValidateConfigArtifact(art, appID, environmentRef); err != nil {
+		if err := apps.ValidateConfigArtifact(art, appID, environmentRef, publicHost); err != nil {
 			return apps.ConfigArtifact{}, err
 		}
 		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)

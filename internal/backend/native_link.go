@@ -53,6 +53,8 @@ type nativeLinkDeps struct {
 	fetch    remoteSpecFetch
 	list     bindingLister
 	cfgFetch configArtifactFetch
+	// publicHost binds config artifacts to the configured tenant DNS suffix.
+	publicHost string
 }
 
 // nativeLinkOpts is the resolved context runNativeLink acts on.
@@ -151,11 +153,12 @@ Local project files are left untouched.
 			}
 
 			deps := nativeLinkDeps{
-				rest:     rest,
-				lookup:   lookupSpecTarget(r),
-				fetch:    fetchRemoteOpenAPISpec,
-				list:     studioBindingLister(rest),
-				cfgFetch: studioConfigArtifactFetch(rest),
+				rest:       rest,
+				lookup:     lookupSpecTarget(r),
+				fetch:      fetchRemoteOpenAPISpec,
+				list:       studioBindingLister(rest),
+				cfgFetch:   studioConfigArtifactFetch(rest, r.Endpoints().PublicHost),
+				publicHost: r.Endpoints().PublicHost,
 			}
 			summary, err := runNativeLink(ctx, deps, nativeLinkOpts{
 				platform:           platform,
@@ -214,7 +217,7 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 	configDir := filepath.Join(".palbase", opts.platform)
 	if err := runPullSpec(
 		ctx, d.lookup, d.fetch, d.list, d.cfgFetch,
-		opts.environmentRef, ".palbase", configDir, appID, w,
+		opts.environmentRef, d.publicHost, ".palbase", configDir, appID, w,
 	); err != nil {
 		return nil, err
 	}
