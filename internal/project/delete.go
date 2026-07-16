@@ -24,8 +24,9 @@ func deleteCmd(r Resolvers) *cobra.Command {
 		Use:   "delete <projectId>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Permanently delete a project and every environment under it",
-		Long: `Permanently delete a project and ALL of its environments (databases,
-backend runtimes, storage, API keys, secrets, apps).
+		Long: `Permanently delete a project (metadata and apps) and ALL environments
+under it. Each environment's database, backend runtime, storage, API keys, and
+secrets are torn down.
 
 THIS IS IRREVERSIBLE. You will be prompted to type the project's NAME to
 confirm. Pass --yes to skip the prompt in a non-interactive shell.`,

@@ -263,7 +263,7 @@ func TestEnvUse_RewritesEnvironmentAndRefreshesServerOwnedProvider(t *testing.T)
 	}
 }
 
-func TestEnvUse_ProjectOverrideAtomicallySwitchesTheSelection(t *testing.T) {
+func TestEnvUse_ProjectOverrideCannotSwitchTheLinkedProject(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	selectiontest.WriteConfig(t, dir, &selection.Config{
 		ProjectID: "proj_1", EnvironmentID: "env_prod",
@@ -285,15 +285,44 @@ func TestEnvUse_ProjectOverrideAtomicallySwitchesTheSelection(t *testing.T) {
 	})
 	cmd.SetArgs([]string{"use", "staging"})
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	require.NoError(t, cmd.Execute())
+	err := cmd.Execute()
+	require.ErrorContains(t, err, "cannot switch projects")
+	require.ErrorContains(t, err, "palbase project use proj_2")
 
 	cfg, err := selection.Load(dir)
 	require.NoError(t, err)
-	require.Equal(t, "proj_2", cfg.ProjectID)
-	require.Equal(t, "env_b", cfg.EnvironmentID)
-	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
-	require.Empty(t, cfg.IOSAppID)
-	require.Empty(t, cfg.WebAppID)
+	require.Equal(t, "proj_1", cfg.ProjectID)
+	require.Equal(t, "env_prod", cfg.EnvironmentID)
+	require.Equal(t, selection.ProviderPalbase, cfg.RepositoryProvider)
+	require.Equal(t, "app_ios_a", cfg.IOSAppID)
+	require.Equal(t, "app_web_a", cfg.WebAppID)
+	require.Empty(t, fake.Routes(), "a rejected cross-project selection must not reach the API")
+}
+
+func TestEnvUse_CannotSelectAnEnvironmentFromAnotherProject(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
+	fake := selectiontest.New(t)
+	fake.Projects = append(fake.Projects, selectiontest.Project{
+		ID: "proj_2", Name: "other", Mode: "github",
+	})
+	fake.Environments["proj_2"] = []selection.Environment{
+		selectiontest.Env("env_foreign", "proj_2", "app2stg", "staging", "staging", false),
+	}
+
+	_, exec := newCmd(t, fake)
+	err := exec("use", "app2stg")
+	require.ErrorContains(t, err, `no environment "app2stg" in this project`)
+
+	cfg, loadErr := selection.Load(dir)
+	require.NoError(t, loadErr)
+	require.Equal(t, "proj_1", cfg.ProjectID)
+	require.Equal(t, "env_prod", cfg.EnvironmentID)
+	_, queriedForeign := fake.Find("GET /api/v2/projects/proj_2/environments")
+	require.False(t, queriedForeign, "env use must only inspect the linked Project")
 }
 
 // archive/wake with NO argument act on the SELECTED environment.

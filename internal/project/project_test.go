@@ -256,6 +256,31 @@ func TestProjectUse_ClearsAppSlotsOnProjectSwitch(t *testing.T) {
 	require.Empty(t, cfg.IOSAppID)
 }
 
+func TestProjectUse_SwitchesProjectAndResetsToItsProductionEnvironment(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_stg",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
+	fake := selectiontest.New(t)
+	fake.Projects = append(fake.Projects, selectiontest.Project{
+		ID: "proj_2", Name: "other", Mode: "github",
+	})
+	fake.Environments["proj_2"] = []selection.Environment{
+		selectiontest.Env("env_2_stg", "proj_2", "app2stg", "staging", "staging", false),
+		selectiontest.Env("env_2_prod", "proj_2", "app2prod", "production", "production", true),
+	}
+
+	_, _, exec := newCmd(t, fake)
+	require.NoError(t, exec("use", "proj_2"))
+
+	cfg, err := selection.Load(dir)
+	require.NoError(t, err)
+	require.Equal(t, "proj_2", cfg.ProjectID, "the SaaS Project link must be preserved exactly")
+	require.Equal(t, "env_2_prod", cfg.EnvironmentID, "a Project switch must select its production Environment")
+	require.Equal(t, selection.ProviderGitHub, cfg.RepositoryProvider)
+}
+
 // noopGit stands in for a directory that is already inside a git repository, so
 // a create test never forks a real git.
 func noopGit(string, ...string) (string, error) { return "/repo", nil }

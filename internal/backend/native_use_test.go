@@ -158,6 +158,35 @@ func TestNativeUse_UnknownEnvironmentIsNamed(t *testing.T) {
 	require.ErrorContains(t, err, `no environment "qa"`)
 }
 
+func TestNativeUse_ProjectOverrideCannotSwitchTheLinkedProject(t *testing.T) {
+	f, r := useRig(t, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod", IOSAppID: "app_ios",
+	})
+	f.Projects = append(f.Projects, selectiontest.Project{
+		ID: "proj_2", Name: "other", Mode: "github",
+	})
+	f.Environments["proj_2"] = []selection.Environment{
+		selectiontest.Env("env_2_stg", "proj_2", "app2stg", "staging", "staging", false),
+	}
+	resolver := f.Resolver()
+	resolver.ProjectFlag = "proj_2"
+	r.Selection = func() *selection.Resolver { return resolver }
+
+	cmd := newNativeUseCmd(r, "ios")
+	cmd.SetOut(io.Discard)
+	cmd.SetArgs([]string{"staging"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	err := cmd.Execute()
+	require.ErrorContains(t, err, "cannot switch projects")
+	require.ErrorContains(t, err, "palbase project use proj_2")
+	require.Empty(t, f.Routes())
+
+	cfg, loadErr := selection.Load("")
+	require.NoError(t, loadErr)
+	require.Equal(t, "proj_1", cfg.ProjectID)
+	require.Equal(t, "env_prod", cfg.EnvironmentID)
+}
+
 // ── runPullSpec ─────────────────────────────────────────────────────────────
 
 func TestRunPullSpec_WithoutAnApp_WritesOnlyTheContract(t *testing.T) {

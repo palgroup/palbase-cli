@@ -3,6 +3,7 @@ package selection_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,7 +159,7 @@ func TestResolverConfig_RejectsUnsupportedShapeWithoutNetworkOrRewrite(t *testin
 
 // ── environment picking ─────────────────────────────────────────────────────
 
-func TestResolve_EnvironmentFlagMatchesSlugRefOrName(t *testing.T) {
+func TestResolve_EnvironmentFlagMatchesExactSlugOrRef(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	fake := selectiontest.New(t)
 	fake.Environments["proj_1"] = append(fake.Environments["proj_1"],
@@ -175,6 +176,21 @@ func TestResolve_EnvironmentFlagMatchesSlugRefOrName(t *testing.T) {
 	}
 }
 
+func TestResolve_EnvironmentDisplayNameIsNotASelectorAlias(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	env := selectiontest.Env("env_stg", "proj_1", "app1stg", "staging", "staging", false)
+	env.Name = "Team Staging"
+	fake.Environments["proj_1"] = append(fake.Environments["proj_1"], env)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	r := fake.Resolver()
+	r.Dir = dir
+	r.EnvironmentFlag = "Team Staging"
+	_, err := r.Resolve(context.Background())
+	require.ErrorContains(t, err, `no environment "Team Staging"`)
+}
+
 func TestResolve_UnknownEnvironmentListsTheRealOnes(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	fake := selectiontest.New(t)
@@ -186,6 +202,50 @@ func TestResolve_UnknownEnvironmentListsTheRealOnes(t *testing.T) {
 	_, err := r.Resolve(context.Background())
 	require.ErrorContains(t, err, `no environment "nope"`)
 	require.ErrorContains(t, err, "production")
+}
+
+func TestListEnvironments_RejectsForeignProjectRows(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.Environments["proj_1"] = []selection.Environment{
+		selectiontest.Env("env_foreign", "proj_2", "app2prod", "production", "production", true),
+	}
+
+	_, err := selection.ListEnvironments(context.Background(), fake.REST(), "proj_1")
+	require.ErrorContains(t, err, "belongs to project proj_2")
+	require.ErrorContains(t, err, "requested project proj_1")
+}
+
+func TestListEnvironments_RejectsIncompleteRuntimeIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		env  selection.Environment
+	}{
+		{name: "missing id", env: selection.Environment{ProjectID: "proj_1", Ref: "app1prod"}},
+		{name: "missing ref", env: selection.Environment{ID: "env_prod", ProjectID: "proj_1"}},
+		{name: "missing project id", env: selection.Environment{ID: "env_prod", Ref: "app1prod"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := selectiontest.New(t)
+			fake.Environments["proj_1"] = []selection.Environment{tc.env}
+
+			_, err := selection.ListEnvironments(context.Background(), fake.REST(), "proj_1")
+			require.ErrorContains(t, err, "without id, ref, or project_id")
+		})
+	}
+}
+
+func TestGetProject_RejectsMismatchedProjectRow(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.Handle("GET /api/v2/projects/proj_1", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, selectiontest.Project{
+			ID: "proj_2", Name: "other", Mode: "platform",
+		})
+	})
+
+	_, err := selection.GetProject(context.Background(), fake.REST(), "proj_1")
+	require.ErrorContains(t, err, "returned project proj_2")
+	require.ErrorContains(t, err, "requested project proj_1")
 }
 
 // A config pointing at an environment that has since been deleted must say so —
@@ -200,6 +260,18 @@ func TestResolve_DeletedEnvironmentIsNamed_NotSilentlyReplaced(t *testing.T) {
 	_, err := r.Resolve(context.Background())
 	require.ErrorContains(t, err, "env_gone")
 	require.ErrorContains(t, err, "palbase env use")
+}
+
+func TestResolve_ProjectWithoutAnEnvironmentIsNotAUsableRuntime(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	fake.Environments["proj_1"] = []selection.Environment{}
+	selectiontest.WriteConfig(t, dir, nil)
+
+	r := fake.Resolver()
+	r.Dir = dir
+	_, err := r.Resolve(context.Background())
+	require.ErrorContains(t, err, "project proj_1 has no environments")
 }
 
 func TestResolve_ProjectFlagOverridesConfig(t *testing.T) {

@@ -88,7 +88,7 @@ type Resolver struct {
 	// REST is the Management-API client (lazy: main.go builds it per invocation).
 	REST func() REST
 	// ProjectFlag / EnvironmentFlag are the global --project / --environment
-	// headless overrides. EnvironmentFlag matches a ref, slug, or name.
+	// headless overrides. EnvironmentFlag matches an exact ref or slug.
 	ProjectFlag     string
 	EnvironmentFlag string
 	// Dir is the directory holding .palbase/config.json ("" = cwd).
@@ -107,6 +107,17 @@ func ListEnvironments(ctx context.Context, rest REST, projectID string) ([]Envir
 	if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects/"+projectID+"/environments", nil, &envs); err != nil {
 		return nil, fmt.Errorf("list environments of %s: %w", projectID, err)
 	}
+	for _, env := range envs {
+		if env.ID == "" || env.Ref == "" || env.ProjectID == "" {
+			return nil, fmt.Errorf("list environments of %s: server returned an environment without id, ref, or project_id", projectID)
+		}
+		if env.ProjectID != projectID {
+			return nil, fmt.Errorf(
+				"list environments of %s: environment %s belongs to project %s, not requested project %s",
+				projectID, env.ID, env.ProjectID, projectID,
+			)
+		}
+	}
 	return envs, nil
 }
 
@@ -115,6 +126,12 @@ func GetProject(ctx context.Context, rest REST, projectID string) (ProjectDetail
 	var p ProjectDetail
 	if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects/"+projectID, nil, &p); err != nil {
 		return ProjectDetail{}, err
+	}
+	if p.ID == "" {
+		return ProjectDetail{}, fmt.Errorf("get project %s: server returned no project id", projectID)
+	}
+	if p.ID != projectID {
+		return ProjectDetail{}, fmt.Errorf("get project %s: server returned project %s for requested project %s", projectID, p.ID, projectID)
 	}
 	return p, nil
 }
@@ -147,9 +164,9 @@ func (r *Resolver) ProjectID(ctx context.Context) (string, error) {
 // Resolve produces the full (Project, Environment) context.
 //
 // Precedence: --project / --environment > .palbase/config.json. --environment
-// accepts a ref, a slug, or a display name so `--environment staging` works
-// without the user knowing the ref. With a Project but no Environment selected,
-// production is the default — a Project always has exactly one.
+// accepts an exact ref or slug so `--environment staging` works without the
+// user knowing the ref. With a Project but no Environment selected, production
+// is the default — a Project always has exactly one.
 func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 	if r.cached != nil {
 		return *r.cached, nil
@@ -200,12 +217,12 @@ func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 }
 
 // pickEnvironment selects from a Project's Environments. `flag` is the
-// --environment override (ref | slug | name); `wantID` is the config's
+// --environment override (ref | slug); `wantID` is the config's
 // environment_id. With neither, production wins.
 func pickEnvironment(envs []Environment, flag, wantID string) (Environment, error) {
 	if flag != "" {
 		for _, e := range envs {
-			if e.Ref == flag || e.Slug == flag || strings.EqualFold(e.Name, flag) {
+			if e.Ref == flag || e.Slug == flag {
 				return e, nil
 			}
 		}

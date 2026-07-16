@@ -103,7 +103,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:     "palbase",
 		Short:   "Palbase CLI — Backend-as-a-Service platform",
-		Long:    "Develop, test, and deploy backend projects on Palbase.",
+		Long:    "Develop backend code and deploy it to Palbase environments.",
 		Version: Version,
 		// main() prints the returned error once (os.Stderr) — let it own that so
 		// cobra doesn't ALSO print it (double-print).

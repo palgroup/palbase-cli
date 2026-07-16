@@ -125,13 +125,11 @@ function parseDotenv(text) {
 })();
 
 // The ENVIRONMENT ref: the endpoint / DNS label / API-key ref of the environment
-// `palbase serve` proxies Database and the module clients to. 'local' when the
-// directory has no selection (no `palbase project use`).
+// `palbase serve` proxies Database and the module clients to. serve always passes
+// a concrete value; 'local' is only for the embedded build/check runner, which
+// performs no runtime calls.
 const ENVIRONMENT_REF = process.env.PALBASE_ENVIRONMENT_REF || 'local';
-// The canonical ids the runtime stamps on job/webhook/worker metadata.
-// projectId names the logical PRODUCT; environmentId names the selected RUNTIME.
-// Neither is ever a Palbase branch — that identity no longer exists.
-const PROJECT_ID = process.env.PALBASE_PROJECT_ID || 'local';
+// The Environment UUID is the sole runtime identity stamped on worker metadata.
 const ENVIRONMENT_ID = process.env.PALBASE_ENVIRONMENT_ID || 'local';
 const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 // PALBASE_CHECK=1 => one-shot pre-deploy validation (`palbase build`): stage +
@@ -786,7 +784,7 @@ function moduleClients() {
   return out;
 }
 
-// The Database singleton = the project's own Postgres surface in deployed
+// The Database singleton = the selected Environment's Postgres surface in deployed
 // mode. In `palbase serve` we don't have a local pgx pool (that's pod-local on
 // 127.0.0.1), so we proxy the SAME @palbase/backend DBClient surface
 // (insert/update/delete/findById/findMany/query + transaction + asService) to
@@ -1102,16 +1100,15 @@ function registerWorkers() {
 }
 
 // workerMeta builds the WorkerMeta passed to a worker handler — mirrors the SDK's
-// WorkerMeta shape ({ env, user, requestId, projectId, environmentId }). Local
-// dev has no per-branch secret injection, so env is the developer's own env (a
-// copy, matching resourceEnvMap). The enqueuing user isn't threaded through the
-// local queue, so user is null (background jobs are usually system-initiated).
+// WorkerMeta shape ({ env, user, requestId, environmentId }). env is
+// a copy of the selected Environment's assembled local process env. The
+// enqueuing user isn't threaded through the local queue, so user is null
+// (background jobs are usually system-initiated).
 function workerMeta() {
   return {
     env: Object.assign({}, process.env),
     user: null,
     requestId: `req_job_${Date.now().toString(36)}`,
-    projectId: PROJECT_ID,
     environmentId: ENVIRONMENT_ID,
   };
 }
@@ -1907,7 +1904,7 @@ const server = http.createServer(async (req, res) => {
     // route the live gateway serves (auth, flags, docs, storage, …). `palbase
     // serve` runs YOUR controllers locally but is otherwise a transparent
     // window onto the deployed tenant — same as it proxies Database/ctx.* to the
-    // live branch. So forward unknown module routes to the tenant gateway
+    // selected Environment. So forward unknown module routes to the tenant gateway
     // (PALBASE_URL) with the apikey + the caller's Authorization preserved.
     // Everything else is a genuine 404.
     if (PALBASE_URL && TENANT_APIKEY && isTenantModuleRoute(parsed.pathname)) {

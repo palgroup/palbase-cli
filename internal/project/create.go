@@ -180,8 +180,9 @@ type createdProject struct {
 	WorkflowID         string `json:"workflow_id"`
 }
 
-// Provisioning a project spins up a DB + pod + ingress + keys. vars, not consts,
-// so tests can shrink the interval; production never reassigns them.
+// Creating a Project also provisions its initial production Environment (DB,
+// runtime, ingress, and keys). vars, not consts, so tests can shrink the
+// interval; production never reassigns them.
 var (
 	projectPollInterval = 2 * time.Second
 	projectPollTimeout  = 10 * time.Minute

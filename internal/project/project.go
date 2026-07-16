@@ -2,9 +2,10 @@
 // the Management API v2 (`/api/v2/projects*`, Authorization: DPoP <pat> +
 // per-request proof).
 //
-// A Project is the PRODUCT boundary — members, apps, ONE repository. It carries
-// no ref, no tier and no region: entitlement lives on its Organization and the
-// endpoint lives on its Environments.
+// A Project is the SaaS control-plane aggregate and CLI link anchor — members,
+// apps, ONE repository, and its Environment set. It carries no runtime ref,
+// tier, or region: entitlement lives on its Organization and runtime identity
+// lives only on its Environments.
 //
 // Organization is NOT a CLI context (spec §7.3): create targets the caller's
 // server-side default Organization, and there is no `--organization`.

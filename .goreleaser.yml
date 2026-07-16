@@ -35,7 +35,7 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://palbase.studio"
-    description: "Palbase CLI — develop, test, and deploy backend projects"
+    description: "Palbase CLI — develop backend code and deploy it to environments"
     # `palbase pull` shells out to the system git for its 3-way merge / conflict
     # markers, so guarantee git is present.
     dependencies:

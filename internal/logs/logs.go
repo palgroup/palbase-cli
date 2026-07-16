@@ -63,8 +63,8 @@ func Cmd(r Resolvers) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Show (or --follow) the deployed backend's logs",
-		Long: `Fetch the project's deployed logs (newest last). --follow keeps polling for
+		Short: "Show (or --follow) the selected environment's backend logs",
+		Long: `Fetch the selected environment's deployed logs (newest last). --follow keeps polling for
 new lines every 2s — Ctrl-C to stop.
 
   palbase logs                          last 100 lines

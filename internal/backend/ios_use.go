@@ -46,26 +46,31 @@ from .palbase/config.json).`, label, label, platform, rebuild, platform),
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
-			// The positional arg IS the environment: resolve through the shared
-			// resolver so a slug, a ref, or a display name all work.
+			// The positional arg IS the environment: resolve its exact slug or ref
+			// through the shared resolver.
 			resolver := r.Selection()
 			if resolver == nil {
 				return fmt.Errorf("no project selected — run `palbase project use <projectId>`")
+			}
+			cfg, err := selection.Load("")
+			if err != nil {
+				return err
+			}
+			if resolver.ProjectFlag != "" && resolver.ProjectFlag != cfg.ProjectID {
+				return fmt.Errorf(
+					"%s use cannot switch projects from %s to %s — run `palbase project use %s` first",
+					platform, cfg.ProjectID, resolver.ProjectFlag, resolver.ProjectFlag,
+				)
 			}
 			resolver.EnvironmentFlag = args[0]
 			sel, err := resolver.Resolve(ctx)
 			if err != nil {
 				return err
 			}
-
-			cfg, err := selection.Load("")
-			if err != nil {
-				return err
+			if sel.ProjectID != cfg.ProjectID {
+				return fmt.Errorf("resolved environment belongs to project %s, not linked project %s", sel.ProjectID, cfg.ProjectID)
 			}
 			appID := cfg.AppID(platform)
-			if cfg.ProjectID != sel.ProjectID {
-				appID = ""
-			}
 			if appID == "" {
 				return fmt.Errorf("no %s app linked — run `palbase %s link` first", platform, platform)
 			}

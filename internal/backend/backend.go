@@ -107,10 +107,9 @@ func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 // backend CLI). Subcommands call the resolvers at action time, after
 // PersistentPreRunE has finished.
 //
-// There is no `init`/`enable`/`disable`: a project IS a backend from
-// creation (backend is the default), so the CLI never enables, checks, or
-// tears down the backend — it assumes the linked project is ready. The
-// server-side gating is owned by the platform, not the CLI.
+// There is no `init`/`enable`/`disable`: the Project is only the SaaS control-
+// plane container and link anchor. Backend runtimes live on its Environments;
+// every runtime command below resolves one concrete Environment first.
 //
 // push/pull/clone are mode-aware deploy verbs: for a github-mode project they
 // shell out to git (push/pull/clone → webhook → orchestrator deploys); for a
@@ -428,12 +427,25 @@ func newDevCmd(r Resolvers) *cobra.Command {
 		Use:   "serve",
 		Args:  cobra.NoArgs,
 		Short: "Run controllers/ locally against the selected environment",
-		Long: `Serve the project's controllers/ from a local Node.js dev server with
+		Long: `Serve the local controllers/ from a Node.js dev server with
 hot reload — the local equivalent of the deployed backend-runtime pod.
 Routes (controller basePath + route.path), the per-request req, the imported
 singleton services, and resources behave identically to production, so what
 runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + ` it to deploy.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			// A Project link alone is not a runtime. Resolve its concrete Environment
+			// before reading files, installing dependencies, or starting local code.
+			sel, err := r.resolve(ctx)
+			if err != nil {
+				return err
+			}
+			if err := preflightServeEnvironment(sel.Environment); err != nil {
+				return err
+			}
+
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
@@ -496,26 +508,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				return fmt.Errorf("extract dev server: %w", err)
 			}
 
-			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-			defer cancel()
-
-			// serve runs your controllers LOCALLY but proxies Database and the
-			// module clients to the SELECTED ENVIRONMENT. Without a selection it
-			// still boots (offline dev), it just cannot reach any of them.
-			sel, selErr := r.resolve(ctx)
-			if selErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: %v — Database and the module clients will be unavailable\n", selErr)
-			}
 			ref := sel.EnvironmentRef()
-
-			// Preflight: an environment that is not a live, active deployment
-			// cannot back local dev — fail fast with an actionable message
-			// ("push first" / "wake it") instead of a half-working server.
-			if ref != "" {
-				if err := preflightServeEnvironment(sel.Environment); err != nil {
-					return err
-				}
-			}
 			// Migration awareness: because serve uses the DEPLOYED environment's DB,
 			// local db/schema.ts or db/migrations/ changes that aren't pushed won't
 			// be reflected. Warn (never block) so the gap is obvious.
@@ -528,10 +521,8 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				EnvironmentRef string `json:"environment_ref"`
 				PublishableKey string `json:"publishable_key"`
 			}
-			if ref != "" {
-				if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — the module clients will be unavailable\n", err)
-				}
+			if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — the module clients will be unavailable\n", err)
 			}
 
 			// KEYLESS asService(): we do NOT pull the service-role key to the laptop
@@ -558,13 +549,11 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 				// The ENVIRONMENT ref feeds dev-server.js's https://<ref>.<host> URL.
 				// Kong routes exactly this subdomain — it is the endpoint, the DNS
 				// label and the ref inside every API key, all one value.
-				fmt.Sprintf("PALBASE_ENVIRONMENT_REF=%s", devEnvironmentRef(ref)),
-				// The canonical metadata ids the local runtime stamps on
-				// job/webhook/worker payloads — the same pair the deployed runtime
-				// emits (projectId = the product, environmentId = the runtime). No
-				// Palbase branch identity is emitted anywhere.
-				fmt.Sprintf("PALBASE_PROJECT_ID=%s", devIdentity(sel.ProjectID)),
-				fmt.Sprintf("PALBASE_ENVIRONMENT_ID=%s", devIdentity(sel.Environment.ID)),
+				fmt.Sprintf("PALBASE_ENVIRONMENT_REF=%s", ref),
+				// The Environment UUID is the sole runtime identity stamped on
+				// job/webhook/worker payloads. The selected Project remains a CLI
+				// link anchor and is never exported into the worker process.
+				fmt.Sprintf("PALBASE_ENVIRONMENT_ID=%s", sel.Environment.ID),
 				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
 				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.PublishableKey),
 				// The CLI's pinned TypeScript parser first, then the project's
@@ -652,18 +641,6 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 	// `palbase serve` must land there. --port still overrides for the rare conflict.
 	cmd.Flags().IntVar(&port, "port", 4003, "Local port for the dev server")
 	return cmd
-}
-
-// devEnvironmentRef / devIdentity surface "local" for an unselected directory so
-// dev-server always reads a concrete value and degrades cleanly (no remote URL,
-// no module clients) instead of building "https://.dev.palbase.studio".
-func devEnvironmentRef(ref string) string { return devIdentity(ref) }
-
-func devIdentity(v string) string {
-	if v == "" {
-		return "local"
-	}
-	return v
 }
 
 // appendRemoteEnv fetches the ENVIRONMENT's remote env vars (Studio env.pull,

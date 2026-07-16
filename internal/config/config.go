@@ -18,8 +18,8 @@ type Endpoints struct {
 	Studio      string
 	Auth        string
 	PlatformAPI string
-	// PublicHost is the suffix every project endpoint lives under. A
-	// project with ref "mu0028" is reachable at "<ref>.<PublicHost>"
+	// PublicHost is the suffix every Environment endpoint lives under. An
+	// Environment with ref "mu0028" is reachable at "<ref>.<PublicHost>"
 	// (e.g. "https://mu0028.dev.palbase.studio"). The CLI hands this to
 	// `palbase serve` so dev-server.js can build a ServerClient
 	// pointed at the same hosts the deployed pod hits — no URL parsing
@@ -46,7 +46,7 @@ var endpointsByMode = map[Mode]Endpoints{
 		// /.well-known) is fronted by the same host so Auth points
 		// there too. The canonical Management API has its own Kong-fronted
 		// origin; keeping PlatformAPI on that host makes dev exercise the same
-		// routing and DPoP `htu` contract as production. Project endpoints are
+		// routing and DPoP `htu` contract as production. Environment endpoints are
 		// at <ref>.dev.palbase.studio.
 		Studio:      "https://app.dev.palbase.studio",
 		Auth:        "https://app.dev.palbase.studio",

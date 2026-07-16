@@ -47,7 +47,7 @@ func TestInit_EmptyDir(t *testing.T) {
 	chdirTemp(t)
 	out, err := run(t, "myapp")
 	require.NoError(t, err)
-	assert.Contains(t, out, `scaffolding Palbase backend project "myapp"`)
+	assert.Contains(t, out, `scaffolding Palbase backend codebase "myapp"`)
 	assert.Contains(t, out, "npm install")
 	assert.Contains(t, out, "palbase serve")
 	assert.Contains(t, out, "palbase push")

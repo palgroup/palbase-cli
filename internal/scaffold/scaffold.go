@@ -1,5 +1,5 @@
 // Package scaffold provides `palbase init` — it writes a minimal, working
-// Palbase backend project skeleton (class-controller model, @palbase/backend
+// Palbase backend codebase skeleton (class-controller model, @palbase/backend
 // ^9.0.0) into a directory: package.json, tsconfig.json, db/schema.ts,
 // controllers/hello.controller.ts, and .gitignore. Purely local file
 // authoring — no Studio / network, mirroring internal/storage's local-only
@@ -143,8 +143,8 @@ const gitignore = `node_modules/
 func Cmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init [dir]",
-		Short: "Scaffold a new Palbase backend project",
-		Long: `Scaffold a new Palbase backend project in [dir] (default: current directory).
+		Short: "Scaffold a new Palbase backend codebase",
+		Long: `Scaffold a new Palbase backend codebase in [dir] (default: current directory).
 
 Writes a minimal working skeleton:
 
@@ -189,7 +189,9 @@ Refuses to run in a directory that already contains a package.json.`,
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ scaffolding Palbase backend project %q in %s\n", name, dir)
+			if _, err := fmt.Fprintf(out, "✓ scaffolding Palbase backend codebase %q in %s\n", name, dir); err != nil {
+				return err
+			}
 			for _, f := range files {
 				abs := filepath.Join(dir, f.path)
 				if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {

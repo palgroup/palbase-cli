@@ -110,17 +110,6 @@ func TestAppendRemoteEnv_NoEnvironmentWarnsWithoutCalling(t *testing.T) {
 	require.Contains(t, errW.String(), "no environment selected")
 }
 
-// The dev-server's identity contract (spec §7.4 / UAT SDK-007): the local
-// runtime stamps job/webhook/worker metadata with projectId + environmentId. An
-// unselected directory degrades to "local" instead of building a nonsense URL
-// like https://.dev.palbase.studio.
-func TestDevIdentity_DegradesToLocal(t *testing.T) {
-	require.Equal(t, "local", devIdentity(""))
-	require.Equal(t, "proj_1", devIdentity("proj_1"))
-	require.Equal(t, "local", devEnvironmentRef(""))
-	require.Equal(t, "app1prod", devEnvironmentRef("app1prod"))
-}
-
 // The embedded dev-server must read only the CANONICAL identity env vars. This
 // is a source-level lock on the JS the CLI ships and enforces the rule that no
 // retired branch identity is emitted (SDK-007).
@@ -129,7 +118,6 @@ func TestDevServerJS_UsesOnlyCanonicalIdentityEnvVars(t *testing.T) {
 	require.NoError(t, err)
 	js := string(raw)
 
-	require.Contains(t, js, "process.env.PALBASE_PROJECT_ID")
 	require.Contains(t, js, "process.env.PALBASE_ENVIRONMENT_ID")
 	require.Contains(t, js, "process.env.PALBASE_ENVIRONMENT_REF")
 
@@ -141,12 +129,11 @@ func TestDevServerJS_UsesOnlyCanonicalIdentityEnvVars(t *testing.T) {
 		identityEnvVars[match[1]] = struct{}{}
 	}
 	require.Equal(t, map[string]struct{}{
-		"PALBASE_PROJECT_ID":      {},
 		"PALBASE_ENVIRONMENT_ID":  {},
 		"PALBASE_ENVIRONMENT_REF": {},
 	}, identityEnvVars)
 
-	// workerMeta must stamp the canonical pair.
-	require.True(t, strings.Contains(js, "projectId: PROJECT_ID"), "workerMeta must carry the PROJECT id")
+	// workerMeta must stamp only the runtime Environment identity.
+	require.NotContains(t, js, "projectId:")
 	require.True(t, strings.Contains(js, "environmentId: ENVIRONMENT_ID"), "workerMeta must carry the ENVIRONMENT id")
 }

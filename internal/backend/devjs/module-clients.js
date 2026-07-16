@@ -571,7 +571,7 @@ function buildRealtimeClient(_http) {
   const wsError = new Error(
     'Realtime channel WebSocket is not supported in backend-runtime: each ' +
     'endpoint runs in a fresh Node subprocess; a WS would die with the ' +
-    'process. To publish from a backend handler, call the project\'s ' +
+    'process. To publish from a backend handler, call the selected Environment\'s ' +
     'broadcast HTTP route or queue a worker that owns the long-lived WS.',
   );
   const channels = new Map();

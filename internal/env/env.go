@@ -140,15 +140,23 @@ func useCmd(r Resolvers) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			want := args[0]
 			resolver := r.Selection()
+			cfg, err := selection.Load("")
+			if err != nil {
+				return err
+			}
+			if resolver.ProjectFlag != "" && resolver.ProjectFlag != cfg.ProjectID {
+				return fmt.Errorf(
+					"env use cannot switch projects from %s to %s — run `palbase project use %s` first",
+					cfg.ProjectID, resolver.ProjectFlag, resolver.ProjectFlag,
+				)
+			}
 			resolver.EnvironmentFlag = want
 			sel, err := resolver.Resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
-
-			cfg, err := selection.Load("")
-			if err != nil {
-				return err
+			if sel.ProjectID != cfg.ProjectID {
+				return fmt.Errorf("resolved environment belongs to project %s, not linked project %s", sel.ProjectID, cfg.ProjectID)
 			}
 			selection.ApplySelection(cfg, sel)
 			if err := selection.Save("", cfg); err != nil {
