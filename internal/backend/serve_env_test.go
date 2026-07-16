@@ -38,7 +38,11 @@ func remoteEnvStudio(t *testing.T, status int, rows []map[string]string, gotInpu
 		}
 		trpcOK(w, rows)
 	})
-	return studio.New(url, func(context.Context) (string, error) { return "tok", nil })
+	return studio.New(
+		url,
+		func(context.Context) (string, error) { return "tok", nil },
+		func(context.Context, string, string, string) (string, error) { return "proof", nil },
+	)
 }
 
 // appendRemoteEnv is serve's automatic env fetch. It asks for ONE thing — the
@@ -93,7 +97,11 @@ func TestAppendRemoteEnv_FailureWarnsAndContinues(t *testing.T) {
 func TestAppendRemoteEnv_NoEnvironmentWarnsWithoutCalling(t *testing.T) {
 	called := false
 	url := httptestServer(t, func(http.ResponseWriter, *http.Request) { called = true })
-	sc := studio.New(url, func(context.Context) (string, error) { return "tok", nil })
+	sc := studio.New(
+		url,
+		func(context.Context) (string, error) { return "tok", nil },
+		func(context.Context, string, string, string) (string, error) { return "proof", nil },
+	)
 
 	var out, errW bytes.Buffer
 	env := appendRemoteEnv(context.Background(), sc, "", t.TempDir(), []string{"BASE=1"}, &out, &errW)

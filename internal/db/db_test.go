@@ -32,7 +32,7 @@ func studioAgainst(t *testing.T, h http.HandlerFunc) *studio.Client {
 	t.Cleanup(srv.Close)
 	return studio.New(srv.URL, func(_ context.Context) (string, error) {
 		return "test-token", nil
-	})
+	}, func(context.Context, string, string, string) (string, error) { return "test-proof", nil })
 }
 
 // innerInput decodes the inner {"json":{...}} of a tRPC POST body.

@@ -247,7 +247,7 @@ func (c *Client) exchangeCode(ctx context.Context, code, redirectURI, codeVerifi
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
 
-	userInfo, err := c.fetchUserInfo(ctx, tokenResp.AccessToken)
+	userInfo, err := c.fetchUserInfo(ctx, tokenResp.AccessToken, key)
 	if err != nil {
 		return nil, err
 	}
@@ -260,12 +260,22 @@ func (c *Client) exchangeCode(ctx context.Context, code, redirectURI, codeVerifi
 	}, nil
 }
 
-func (c *Client) fetchUserInfo(ctx context.Context, accessToken string) (*UserInfoResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Cfg.AuthURL+"/oauth/userinfo", nil)
+func (c *Client) fetchUserInfo(ctx context.Context, accessToken string, key *DPoPKey) (*UserInfoResponse, error) {
+	userinfoURL := c.Cfg.AuthURL + "/oauth/userinfo"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userinfoURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create userinfo request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	proof, err := key.NewProof(ProofOptions{
+		HTTPMethod:  http.MethodGet,
+		URL:         userinfoURL,
+		AccessToken: accessToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dpop proof for userinfo: %w", err)
+	}
+	req.Header.Set("Authorization", "DPoP "+accessToken)
+	req.Header.Set("DPoP", proof)
 
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {

@@ -67,7 +67,11 @@ func newTRPCStub(t *testing.T) *studio.Client {
 	url := httptestServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		trpcOK(w, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_generic"})
 	})
-	return studio.New(url, func(context.Context) (string, error) { return "tok", nil })
+	return studio.New(
+		url,
+		func(context.Context) (string, error) { return "tok", nil },
+		func(context.Context, string, string, string) (string, error) { return "proof", nil },
+	)
 }
 
 // `<platform> use <environment>` re-targets the ENVIRONMENT: it rewrites the

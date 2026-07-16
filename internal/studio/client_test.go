@@ -1,9 +1,45 @@
 package studio
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestClient_SignsBoundTokenWithDPoP(t *testing.T) {
+	var gotMethod, gotURL, gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "DPoP access-token", r.Header.Get("Authorization"))
+		require.Equal(t, "signed-proof", r.Header.Get("DPoP"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"data": map[string]any{"json": map[string]any{"ok": true}}}})
+	}))
+	defer srv.Close()
+
+	c := New(
+		srv.URL,
+		func(context.Context) (string, error) { return "access-token", nil },
+		func(_ context.Context, method, rawURL, token string) (string, error) {
+			gotMethod, gotURL, gotToken = method, rawURL, token
+			return "signed-proof", nil
+		},
+	)
+	var out map[string]any
+	require.NoError(t, c.Query(context.Background(), "backend.status", map[string]any{"ref": "envref"}, &out))
+	require.Equal(t, http.MethodGet, gotMethod)
+	require.True(t, strings.HasPrefix(gotURL, srv.URL+"/api/trpc/backend.status?input="), gotURL)
+	require.Equal(t, "access-token", gotToken)
+}
+
+func TestClient_FailsClosedWithoutDPoPProofSigner(t *testing.T) {
+	c := New("https://studio.example", func(context.Context) (string, error) { return "bound-token", nil }, nil)
+	err := c.Query(context.Background(), "backend.status", nil, nil)
+	require.ErrorContains(t, err, "dpop proof signer")
+}
 
 // CLI-14 regression: Studio routinely returns error envelopes whose
 // `message` is empty (module-not-provisioned, rate-limit, some Zod
@@ -22,8 +58,8 @@ func TestTRPCError_NeverEmpty(t *testing.T) {
 		notSS  []string // substrings the error MUST NOT contain (regression markers)
 	}{
 		{
-			name: "message present — verbatim",
-			body: trpcErrorBody{Message: "row not found"},
+			name:   "message present — verbatim",
+			body:   trpcErrorBody{Message: "row not found"},
 			wantSS: []string{"row not found"},
 			notSS:  []string{"empty error", "no error message"},
 		},
@@ -48,8 +84,8 @@ func TestTRPCError_NeverEmpty(t *testing.T) {
 			notSS:  []string{"studio: \""},
 		},
 		{
-			name: "nothing at all → constant fallback (never bare ‘studio: ’)",
-			body: trpcErrorBody{},
+			name:   "nothing at all → constant fallback (never bare ‘studio: ’)",
+			body:   trpcErrorBody{},
 			wantSS: []string{"empty error envelope"},
 			notSS:  []string{},
 		},

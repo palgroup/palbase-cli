@@ -125,7 +125,8 @@ func TestDeleteCredentials(t *testing.T) {
 
 func TestLogin_FullFlow(t *testing.T) {
 	// Mock auth server
-	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var authServer *httptest.Server
+	authServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth/token":
 			r.ParseForm()
@@ -147,7 +148,13 @@ func TestLogin_FullFlow(t *testing.T) {
 			})
 
 		case "/oauth/userinfo":
-			assert.Equal(t, "Bearer access_123", r.Header.Get("Authorization"))
+			assert.Equal(t, "DPoP access_123", r.Header.Get("Authorization"))
+			proof := r.Header.Get("DPoP")
+			require.NotEmpty(t, proof)
+			claims := decodeJWTPayload(t, proof)
+			assert.Equal(t, http.MethodGet, claims["htm"])
+			assert.Equal(t, authServer.URL+"/oauth/userinfo", claims["htu"])
+			assert.Equal(t, accessTokenHash("access_123"), claims["ath"])
 			json.NewEncoder(w).Encode(UserInfoResponse{
 				Sub:   "usr_abc",
 				Email: "test@example.com",
@@ -229,6 +236,17 @@ func TestLogin_FullFlow(t *testing.T) {
 	assert.NotContains(t, gotJKT, "=", "base64url thumbprint must be unpadded")
 	assert.NotContains(t, gotJKT, "+", "base64url uses - not +")
 	assert.NotContains(t, gotJKT, "/", "base64url uses _ not /")
+}
+
+func decodeJWTPayload(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	parts := strings.Split(raw, ".")
+	require.Len(t, parts, 3)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
 }
 
 func TestLogin_Timeout(t *testing.T) {

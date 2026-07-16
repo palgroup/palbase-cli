@@ -123,9 +123,19 @@ func newRootCmd() *cobra.Command {
 				ClientID: "palbase-cli",
 				Mode:     string(r.Mode),
 			}, os.Stdout)
-			studioClient = studio.New(r.Endpoints.Studio, func(ctx context.Context) (string, error) {
-				return authClient.GetValidToken(ctx)
-			})
+			studioClient = studio.New(
+				r.Endpoints.Studio,
+				func(ctx context.Context) (string, error) { return authClient.GetValidToken(ctx) },
+				func(_ context.Context, method, rawURL, token string) (string, error) {
+					key, err := auth.LoadDPoPKey(string(r.Mode))
+					if err != nil {
+						return "", fmt.Errorf("load dpop key: %w", err)
+					}
+					return key.NewProof(auth.ProofOptions{
+						HTTPMethod: method, URL: rawURL, AccessToken: token,
+					})
+				},
+			)
 			sel = &selection.Resolver{
 				REST:            func() selection.REST { return managementREST() },
 				ProjectFlag:     projectFlag,

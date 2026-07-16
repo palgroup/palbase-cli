@@ -1,8 +1,6 @@
 // Package studio provides a thin tRPC HTTP client used by `palbase
-// backend init/deploy/...`. We talk to Studio's tRPC endpoints directly
-// because the CLI's auth model — user JWT carried as a bearer token —
-// matches Studio's own session reader, and we get every Phase 7
-// authorization check (project membership + backend_enabled gate) for free.
+// backend init/deploy/...`. CLI access tokens are sender-constrained, so every
+// request presents the token with the DPoP scheme and a request-bound proof.
 package studio
 
 import (
@@ -24,14 +22,20 @@ type Client struct {
 	// Token resolver runs lazily so the CLI can refresh its access
 	// token without baking the auth.Client import into this package.
 	TokenFn func(ctx context.Context) (string, error)
+	// ProofFn signs one proof for this exact method, URL, and access token.
+	// It is required whenever TokenFn is configured.
+	ProofFn ProofFn
 }
 
+type ProofFn func(ctx context.Context, method, rawURL, accessToken string) (string, error)
+
 // New builds a Client with sane defaults.
-func New(baseURL string, token func(ctx context.Context) (string, error)) *Client {
+func New(baseURL string, token func(ctx context.Context) (string, error), proof ProofFn) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		HTTPClient: &http.Client{Timeout: 120 * time.Second},
 		TokenFn:    token,
+		ProofFn:    proof,
 	}
 }
 
@@ -71,7 +75,15 @@ func (c *Client) do(ctx context.Context, req *http.Request, out any) error {
 		if err != nil {
 			return fmt.Errorf("acquire token: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
+		if c.ProofFn == nil {
+			return fmt.Errorf("studio: dpop proof signer is not configured")
+		}
+		proof, err := c.ProofFn(ctx, req.Method, req.URL.String(), token)
+		if err != nil {
+			return fmt.Errorf("sign studio dpop proof: %w", err)
+		}
+		req.Header.Set("Authorization", "DPoP "+token)
+		req.Header.Set("DPoP", proof)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

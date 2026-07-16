@@ -56,7 +56,11 @@ func newRig(t *testing.T, trpcHandler http.HandlerFunc) *rig {
 		trpcOK(w, map[string]any{})
 	}))
 	t.Cleanup(srv.Close)
-	r.Studio = studio.New(srv.URL, func(context.Context) (string, error) { return "tok", nil })
+	r.Studio = studio.New(
+		srv.URL,
+		func(context.Context) (string, error) { return "tok", nil },
+		func(context.Context, string, string, string) (string, error) { return "proof", nil },
+	)
 	r.Resolver = r.Fake.Resolver()
 	return r
 }

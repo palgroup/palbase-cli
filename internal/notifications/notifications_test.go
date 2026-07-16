@@ -77,7 +77,11 @@ func newFakeStudio(t *testing.T) *fakeStudio {
 }
 
 func (f *fakeStudio) client() *studio.Client {
-	return studio.New(f.srv.URL, func(context.Context) (string, error) { return "test-token", nil })
+	return studio.New(
+		f.srv.URL,
+		func(context.Context) (string, error) { return "test-token", nil },
+		func(context.Context, string, string, string) (string, error) { return "test-proof", nil },
+	)
 }
 
 func (f *fakeStudio) calls() []capturedMutation {
