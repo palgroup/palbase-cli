@@ -105,7 +105,7 @@ func TestApps_HitsTheV2Paths(t *testing.T) {
 			route: "GET /api/v2/apps/app_web/config-artifact", query: "environment_ref=app1prod",
 			reply: func(f *selectiontest.Fake) {
 				f.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
-					"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_web",
+					"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_app1prod_c01234567890123456789",
 					"base_url": "https://app1prod.dev.palbase.studio", "kind": "production", "platform": "web",
 				})
 			},
@@ -169,7 +169,7 @@ func TestAppsAttest_JSONUsesCanonicalEnvironmentRef(t *testing.T) {
 func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
-		"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_web",
+		"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_app1prod_c01234567890123456789",
 		"base_url": "https://app1prod.dev.palbase.studio", "kind": "production", "platform": "web",
 	})
 
@@ -195,7 +195,7 @@ func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	// already identify the runtime.
 	require.Equal(t, map[string]any{
 		"app_id": "app_web", "environment_ref": "app1prod", "kind": "production",
-		"base_url": "https://app1prod.dev.palbase.studio", "api_key": "pb_web",
+		"base_url": "https://app1prod.dev.palbase.studio", "api_key": "pb_app1prod_c01234567890123456789",
 	}, got)
 	// Exact equality above locks the artifact to the canonical Environment
 	// identity without permitting any extra identity field.
@@ -203,9 +203,67 @@ func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	require.NotContains(t, string(raw), "env_preset")
 }
 
+func TestAppsConfig_RejectsForeignArtifactBeforeWriting(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
+		"app_id": "app_foreign", "environment_ref": "app1prod",
+		"api_key":  "pb_app1prod_c01234567890123456789",
+		"base_url": "https://app1prod.dev.palbase.studio", "kind": "production", "platform": "web",
+	})
+
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+	out := filepath.Join(dir, "palbase-config.json")
+	rest := fake.REST()
+	cmd := Cmd(Resolvers{
+		REST:      func() REST { return rest },
+		Selection: func() *selection.Resolver { return fake.Resolver() },
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"config", "--app", "app_web", "--out", out})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	require.ErrorContains(t, cmd.Execute(), "app_id")
+	require.NoFileExists(t, out)
+}
+
+func TestValidateConfigArtifact(t *testing.T) {
+	valid := ConfigArtifact{
+		AppID: "app_web", EnvironmentRef: "app1prod",
+		APIKey:  "pb_app1prod_c01234567890123456789",
+		BaseURL: "https://app1prod.dev.palbase.studio",
+	}
+	require.NoError(t, ValidateConfigArtifact(valid, "app_web", "app1prod"))
+
+	tests := []struct {
+		name string
+		edit func(*ConfigArtifact)
+		want string
+	}{
+		{"foreign app", func(a *ConfigArtifact) { a.AppID = "app_other" }, "app_id"},
+		{"foreign environment", func(a *ConfigArtifact) { a.EnvironmentRef = "app1stg" }, "environment_ref"},
+		{"malformed publishable key", func(a *ConfigArtifact) { a.APIKey = "pb_app1prod_cshort" }, "api_key"},
+		{"foreign publishable key", func(a *ConfigArtifact) { a.APIKey = "pb_app1stg_c01234567890123456789" }, "api_key"},
+		{"http base url", func(a *ConfigArtifact) { a.BaseURL = "http://app1prod.dev.palbase.studio" }, "base_url"},
+		{"official foreign host", func(a *ConfigArtifact) { a.BaseURL = "https://app1stg.dev.palbase.studio" }, "base_url"},
+		{"userinfo", func(a *ConfigArtifact) { a.BaseURL = "https://user@app1prod.dev.palbase.studio" }, "base_url"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			art := valid
+			tc.edit(&art)
+			require.ErrorContains(t, ValidateConfigArtifact(art, "app_web", "app1prod"), tc.want)
+		})
+	}
+}
+
 func TestAppsConfig_RejectsANativeApp(t *testing.T) {
 	fake := selectiontest.New(t)
-	fake.OK("GET /api/v2/apps/app_ios/config-artifact", map[string]any{"app_id": "app_ios", "platform": "ios"})
+	fake.OK("GET /api/v2/apps/app_ios/config-artifact", map[string]any{
+		"app_id": "app_ios", "environment_ref": "app1prod", "platform": "ios",
+		"api_key":  "pb_app1prod_c01234567890123456789",
+		"base_url": "https://app1prod.dev.palbase.studio",
+	})
 	require.ErrorContains(t, run(t, fake, "config", "--app", "app_ios"), "web config only")
 }
 

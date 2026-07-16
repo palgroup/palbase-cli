@@ -203,6 +203,9 @@ func buildPullSpecConfig(
 	if err != nil {
 		return nil, fmt.Errorf("fetch config artifact for %s: %w", environmentRef, err)
 	}
+	if err := apps.ValidateConfigArtifact(art, appID, environmentRef); err != nil {
+		return nil, err
+	}
 	entry := &pullSpecConfigEntry{
 		AppID:          art.AppID,
 		EnvironmentRef: art.EnvironmentRef,

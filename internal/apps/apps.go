@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/palgroup/palbase-cli/internal/selection"
@@ -310,6 +312,43 @@ type ConfigArtifact struct {
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
 }
 
+var publishableAPIKeyPattern = regexp.MustCompile(`^pb_([a-z0-9]+)_c[A-Za-z0-9]{20}$`)
+
+// ValidateConfigArtifact binds a Management API config response to the exact
+// app and Environment requested by the caller before its URL, key, or contents
+// can drive another network request or a local file write.
+func ValidateConfigArtifact(art ConfigArtifact, expectedAppID, expectedEnvironmentRef string) error {
+	if expectedAppID == "" || expectedEnvironmentRef == "" {
+		return fmt.Errorf("config artifact validation requires an app_id and environment_ref")
+	}
+	if art.AppID != expectedAppID {
+		return fmt.Errorf("config artifact app_id %q does not match requested app %q", art.AppID, expectedAppID)
+	}
+	if art.EnvironmentRef != expectedEnvironmentRef {
+		return fmt.Errorf(
+			"config artifact environment_ref %q does not match selected environment %q",
+			art.EnvironmentRef, expectedEnvironmentRef,
+		)
+	}
+	keyParts := publishableAPIKeyPattern.FindStringSubmatch(art.APIKey)
+	if len(keyParts) != 2 || keyParts[1] != expectedEnvironmentRef {
+		return fmt.Errorf("config artifact api_key is not a canonical publishable key for environment %q", expectedEnvironmentRef)
+	}
+
+	baseURL, err := url.Parse(art.BaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.Hostname() == "" || baseURL.User != nil {
+		return fmt.Errorf("config artifact base_url must be an HTTPS URL without user info")
+	}
+	host := strings.ToLower(baseURL.Hostname())
+	if strings.HasSuffix(host, ".palbase.studio") {
+		firstLabel, _, _ := strings.Cut(host, ".")
+		if firstLabel != expectedEnvironmentRef {
+			return fmt.Errorf("config artifact base_url host does not match environment %q", expectedEnvironmentRef)
+		}
+	}
+	return nil
+}
+
 // IntegrityConfig carries the Palbase-managed Google Cloud project number used
 // by Android Play Integrity. It contains no credential.
 type IntegrityConfig struct {
@@ -376,6 +415,9 @@ func configCmd(r Resolvers) *cobra.Command {
 			var art ConfigArtifact
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
 				ConfigArtifactPath(appID, sel.EnvironmentRef()), nil, &art); err != nil {
+				return err
+			}
+			if err := ValidateConfigArtifact(art, appID, sel.EnvironmentRef()); err != nil {
 				return err
 			}
 			if art.Platform != "web" {

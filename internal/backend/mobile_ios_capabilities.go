@@ -47,6 +47,9 @@ func studioConfigArtifactFetch(rest restDoer) configArtifactFetch {
 		if err := rest.Do(ctx, http.MethodGet, apps.ConfigArtifactPath(appID, environmentRef), nil, &art); err != nil {
 			return apps.ConfigArtifact{}, err
 		}
+		if err := apps.ValidateConfigArtifact(art, appID, environmentRef); err != nil {
+			return apps.ConfigArtifact{}, err
+		}
 		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)
 		art.OAuth = swiftOAuthToApps(oauth)
 		return art, nil

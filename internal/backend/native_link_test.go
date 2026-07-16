@@ -40,7 +40,7 @@ func stubPullSeams(t *testing.T, wantApp, wantEnvRef, platform string) nativeLin
 			require.Equal(t, wantEnvRef, envRef)
 			return apps.ConfigArtifact{
 				AppID: appID, EnvironmentRef: envRef, Kind: "production",
-				BaseURL: "https://" + envRef + ".dev.palbase.studio", APIKey: "pb_app",
+				BaseURL: "https://" + envRef + ".dev.palbase.studio", APIKey: "pb_" + envRef + "_c01234567890123456789",
 				Platform: platform,
 			}, nil
 		},

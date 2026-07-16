@@ -89,7 +89,7 @@ func TestNativeUse_RetargetsTheEnvironment(t *testing.T) {
 		{"environment_ref": "app1stg", "kind": "staging"},
 	})
 	f.OK("GET /api/v2/apps/app_ios/config-artifact", map[string]any{
-		"app_id": "app_ios", "environment_ref": "app1stg", "api_key": "pb_stg",
+		"app_id": "app_ios", "environment_ref": "app1stg", "api_key": "pb_app1stg_c01234567890123456789",
 		"base_url": "https://app1stg.dev.palbase.studio", "kind": "staging", "platform": "ios",
 	})
 
@@ -117,7 +117,7 @@ func TestNativeUse_RetargetsTheEnvironment(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &got))
 	require.Equal(t, map[string]any{
 		"app_id": "app_ios", "environment_ref": "app1stg", "kind": "staging",
-		"base_url": "https://app1stg.dev.palbase.studio", "api_key": "pb_stg",
+		"base_url": "https://app1stg.dev.palbase.studio", "api_key": "pb_app1stg_c01234567890123456789",
 	}, got)
 	require.NotContains(t, string(raw), "branch")
 
@@ -218,15 +218,15 @@ func TestRunPullSpec_AppConfigSeparatesTheOutputs(t *testing.T) {
 		func(_ context.Context, appID, envRef string) (apps.ConfigArtifact, error) {
 			return apps.ConfigArtifact{
 				AppID: appID, EnvironmentRef: envRef, Kind: "production",
-				BaseURL: "https://app1prod.dev", APIKey: "pb_app", Platform: "ios",
+				BaseURL: "https://app1prod.example.com", APIKey: "pb_app1prod_c01234567890123456789", Platform: "ios",
 			}, nil
 		},
 		"app1prod", specDir, cfgDir, "app_ios", io.Discard)
 	require.NoError(t, err)
 
 	// An app link fetches the spec with the APP-BOUND key, not the generic one.
-	require.Equal(t, "https://app1prod.dev/openapi.json", fetchedURL)
-	require.Equal(t, "pb_app", fetchedKey)
+	require.Equal(t, "https://app1prod.example.com/openapi.json", fetchedURL)
+	require.Equal(t, "pb_app1prod_c01234567890123456789", fetchedKey)
 
 	require.FileExists(t, filepath.Join(specDir, "openapi.json"))
 	raw, err := os.ReadFile(filepath.Join(cfgDir, "palbase-config.json"))
@@ -236,4 +236,33 @@ func TestRunPullSpec_AppConfigSeparatesTheOutputs(t *testing.T) {
 	require.Equal(t, "app1prod", got["environment_ref"])
 	require.NotContains(t, got, "branch")
 	require.NotContains(t, got, "env_preset")
+}
+
+func TestRunPullSpec_RejectsForeignArtifactBeforeTenantNetworkOrWrite(t *testing.T) {
+	dir := t.TempDir()
+	fetchCalled := false
+	err := runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.example.com", APIKey: "generic"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			fetchCalled = true
+			return []byte(`{}`), nil
+		},
+		func(context.Context, string) ([]AppBinding, error) {
+			return []AppBinding{{EnvironmentRef: "app1prod"}}, nil
+		},
+		func(context.Context, string, string) (apps.ConfigArtifact, error) {
+			return apps.ConfigArtifact{
+				AppID: "app_foreign", EnvironmentRef: "app1prod",
+				BaseURL: "https://app1prod.example.com",
+				APIKey:  "pb_app1prod_c01234567890123456789",
+			}, nil
+		},
+		"app1prod", dir, dir, "app_ios", io.Discard)
+
+	require.ErrorContains(t, err, "app_id")
+	require.False(t, fetchCalled, "an untrusted artifact must not select a tenant network target")
+	require.NoFileExists(t, filepath.Join(dir, "openapi.json"))
+	require.NoFileExists(t, filepath.Join(dir, "palbase-config.json"))
 }
