@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"text/tabwriter"
 
@@ -316,8 +315,6 @@ type ConfigArtifact struct {
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
 }
 
-var publishableAPIKeyPattern = regexp.MustCompile(`^pb_([a-z0-9]+)_c[A-Za-z0-9]{20}$`)
-
 // ValidateConfigArtifact binds a Management API config response to the exact
 // app and Environment requested by the caller before its URL, key, or contents
 // can drive another network request or a local file write.
@@ -335,15 +332,8 @@ func ValidateConfigArtifact(
 	if art.AppID != expectedAppID {
 		return fmt.Errorf("config artifact app_id %q does not match requested app %q", art.AppID, expectedAppID)
 	}
-	if art.EnvironmentRef != expectedEnvironmentRef {
-		return fmt.Errorf(
-			"config artifact environment_ref %q does not match selected environment %q",
-			art.EnvironmentRef, expectedEnvironmentRef,
-		)
-	}
-	keyParts := publishableAPIKeyPattern.FindStringSubmatch(art.APIKey)
-	if len(keyParts) != 2 || keyParts[1] != expectedEnvironmentRef {
-		return fmt.Errorf("config artifact api_key is not a canonical publishable key for environment %q", expectedEnvironmentRef)
+	if err := selection.ValidateRuntimeBinding(expectedEnvironmentRef, art.EnvironmentRef, art.APIKey); err != nil {
+		return fmt.Errorf("config artifact environment_ref/api_key binding is invalid: %w", err)
 	}
 
 	baseURL, err := url.Parse(art.BaseURL)

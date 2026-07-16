@@ -276,6 +276,38 @@ func TestValidateConfigArtifact(t *testing.T) {
 	}
 }
 
+func TestValidateConfigArtifact_EnforcesCanonicalEnvironmentRefEnvelope(t *testing.T) {
+	const random = "01234567890123456789"
+	for _, ref := range []string{"abcd", "abcdefghijklmnopqrstuvwx"} {
+		art := ConfigArtifact{
+			AppID:          "app_web",
+			EnvironmentRef: ref,
+			APIKey:         "pb_" + ref + "_c" + random,
+			BaseURL:        "https://" + ref + ".dev.palbase.studio",
+		}
+		require.NoError(t, ValidateConfigArtifact(art, "app_web", ref, "dev.palbase.studio"))
+	}
+
+	for _, ref := range []string{
+		"abc",
+		"abcdefghijklmnopqrstuvwxy",
+		"UPPERCASE",
+		"bad_ref",
+		"bad-ref",
+		"tést",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			art := ConfigArtifact{
+				AppID:          "app_web",
+				EnvironmentRef: ref,
+				APIKey:         "pb_" + ref + "_c" + random,
+				BaseURL:        "https://" + ref + ".dev.palbase.studio",
+			}
+			require.Error(t, ValidateConfigArtifact(art, "app_web", ref, "dev.palbase.studio"))
+		})
+	}
+}
+
 func TestAppsConfig_RejectsANativeApp(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.OK("GET /api/v2/apps/app_ios/config-artifact", map[string]any{

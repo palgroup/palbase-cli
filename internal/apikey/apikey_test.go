@@ -69,7 +69,7 @@ func TestApikey_HitsTheV2EnvironmentScopedPath(t *testing.T) {
 			name: "reveal", args: []string{"reveal", "--json"},
 			route: "GET " + base, query: "reveal=true",
 			reply: func(f *selectiontest.Fake) {
-				f.OK("GET "+base, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_app1prod_cx", "keys": []any{}})
+				f.OK("GET "+base, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_app1prod_c01234567890123456789", "keys": []any{}})
 			},
 		},
 		{
@@ -78,7 +78,7 @@ func TestApikey_HitsTheV2EnvironmentScopedPath(t *testing.T) {
 			reply: func(f *selectiontest.Fake) {
 				f.Handle("POST "+base, func(w http.ResponseWriter, _ *http.Request) {
 					selectiontest.WriteOK(w, http.StatusCreated, map[string]any{
-						"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_app1prod_cnew",
+						"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
 					})
 				})
 			},
@@ -113,7 +113,7 @@ func TestApikeyCreate_SendsOnlyTheName(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.Handle("POST "+base, func(w http.ResponseWriter, _ *http.Request) {
 		selectiontest.WriteOK(w, http.StatusCreated, map[string]any{
-			"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_x",
+			"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
 		})
 	})
 
@@ -134,7 +134,7 @@ func TestApikeyReveal_JSONUsesCanonicalFieldNames(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.OK("GET "+base, map[string]any{
 		"environment_ref": "app1prod",
-		"publishable_key": "pb_app1prod_cx",
+		"publishable_key": "pb_app1prod_c01234567890123456789",
 		"keys":            []any{},
 	})
 
@@ -143,7 +143,7 @@ func TestApikeyReveal_JSONUsesCanonicalFieldNames(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
 	require.Equal(t, "app1prod", got["environment_ref"])
-	require.Equal(t, "pb_app1prod_cx", got["publishable_key"])
+	require.Equal(t, "pb_app1prod_c01234567890123456789", got["publishable_key"])
 	require.NotContains(t, got, "environmentRef")
 	require.NotContains(t, got, "publishableKey")
 }
@@ -165,10 +165,10 @@ func TestApikeyCreateAndReveal_RejectWrongResponseEnvironment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := selectiontest.New(t)
 			method := http.MethodGet
-			response := map[string]any{"environment_ref": tc.value, "publishable_key": "pb_app1prod_cx"}
+			response := map[string]any{"environment_ref": tc.value, "publishable_key": "pb_app1prod_c01234567890123456789"}
 			if tc.args[0] == "create" {
 				method = http.MethodPost
-				response = map[string]any{"environment_ref": tc.value, "plaintext": "pb_app1prod_cx"}
+				response = map[string]any{"environment_ref": tc.value, "plaintext": "pb_app1prod_c01234567890123456789"}
 			}
 			fake.OK(method+" "+base, response)
 
@@ -177,6 +177,52 @@ func TestApikeyCreateAndReveal_RejectWrongResponseEnvironment(t *testing.T) {
 			require.Empty(t, out, "a response for the wrong environment must not emit credentials")
 		})
 	}
+}
+
+func TestApikeyCreateAndReveal_RejectMalformedOrForeignPublishableKeys(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	tests := []struct {
+		name      string
+		operation string
+		key       string
+	}{
+		{name: "create malformed", operation: "create", key: "pb_app1prod_cshort"},
+		{name: "create foreign", operation: "create", key: "pb_app1stg_c01234567890123456789"},
+		{name: "reveal malformed", operation: "reveal", key: "pb_app1prod_cshort"},
+		{name: "reveal foreign", operation: "reveal", key: "pb_app1stg_c01234567890123456789"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := selectiontest.New(t)
+			if tc.operation == "create" {
+				fake.OK("POST "+base, map[string]any{
+					"id": "key_2", "environment_ref": "app1prod", "plaintext": tc.key,
+				})
+			} else {
+				fake.OK("GET "+base, map[string]any{
+					"environment_ref": "app1prod", "publishable_key": tc.key,
+				})
+			}
+
+			args := []string{tc.operation, "--json"}
+			if tc.operation == "create" {
+				args = append(args, "--name", "mobile")
+			}
+			out, err := run(t, fake, args...)
+			require.ErrorContains(t, err, "publishable")
+			require.Empty(t, out, "an unbound credential must not be emitted")
+		})
+	}
+}
+
+func TestApikeyReveal_RejectsAMissingPublishableKey(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	fake := selectiontest.New(t)
+	fake.OK("GET "+base, map[string]any{"environment_ref": "app1prod"})
+
+	out, err := run(t, fake, "reveal", "--json")
+	require.ErrorContains(t, err, "publishable")
+	require.Empty(t, out, "a missing credential must not look like a successful reveal")
 }
 
 func TestApikeyCreate_RequiresName(t *testing.T) {

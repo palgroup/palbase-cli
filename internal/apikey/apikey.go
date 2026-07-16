@@ -150,6 +150,9 @@ func createCmd(r Resolvers) *cobra.Command {
 			if err := validateEnvironmentRef("create", sel.EnvironmentRef(), created.EnvironmentRef); err != nil {
 				return err
 			}
+			if err := selection.ValidateRuntimeBinding(sel.EnvironmentRef(), created.EnvironmentRef, created.Plaintext); err != nil {
+				return fmt.Errorf("apikey create returned an invalid publishable credential: %w", err)
+			}
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), created)
 			}
@@ -189,6 +192,12 @@ func revealCmd(r Resolvers) *cobra.Command {
 			}
 			if err := validateEnvironmentRef("reveal", sel.EnvironmentRef(), revealed.EnvironmentRef); err != nil {
 				return err
+			}
+			if revealed.PublishableKey == nil {
+				return fmt.Errorf("apikey reveal response is missing the publishable credential")
+			}
+			if err := selection.ValidateRuntimeBinding(sel.EnvironmentRef(), revealed.EnvironmentRef, *revealed.PublishableKey); err != nil {
+				return fmt.Errorf("apikey reveal returned an invalid publishable credential: %w", err)
 			}
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), revealed)
@@ -238,8 +247,11 @@ func keyType(scope string) string {
 }
 
 func validateEnvironmentRef(operation, selected, returned string) error {
-	if returned == "" {
-		return fmt.Errorf("apikey %s response is missing environment_ref", operation)
+	if !selection.IsCanonicalEnvironmentRef(selected) {
+		return fmt.Errorf("apikey %s selected environment_ref %q is non-canonical", operation, selected)
+	}
+	if !selection.IsCanonicalEnvironmentRef(returned) {
+		return fmt.Errorf("apikey %s response environment_ref %q is missing or non-canonical", operation, returned)
 	}
 	if returned != selected {
 		return fmt.Errorf(

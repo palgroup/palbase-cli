@@ -64,8 +64,18 @@ func newTenantStub(t *testing.T) string {
 
 func newTRPCStub(t *testing.T) *studio.Client {
 	t.Helper()
-	url := httptestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		trpcOK(w, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_generic"})
+	url := httptestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			JSON struct {
+				Ref string `json:"ref"`
+			} `json:"json"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(r.URL.Query().Get("input")), &input))
+		ref := input.JSON.Ref
+		trpcOK(w, map[string]any{
+			"environment_ref": ref,
+			"publishable_key": "pb_" + ref + "_c01234567890123456789",
+		})
 	})
 	return studio.New(
 		url,

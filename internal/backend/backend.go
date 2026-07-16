@@ -523,6 +523,9 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			}
 			if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — the module clients will be unavailable\n", err)
+			} else if err := selection.ValidateRuntimeBinding(ref, revealResp.EnvironmentRef, revealResp.PublishableKey); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: apikey.reveal returned an invalid Environment binding (%v) — the module clients will be unavailable\n", err)
+				revealResp.PublishableKey = ""
 			}
 
 			// KEYLESS asService(): we do NOT pull the service-role key to the laptop
@@ -1034,14 +1037,18 @@ var _ = renderJSON // silence "unused" until --json lands
 // lookupBackendTarget resolves an Environment's URL and publishable key directly
 // from its Environment ref.
 func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string) (backendTarget, error) {
+	if !selection.IsCanonicalEnvironmentRef(ref) {
+		return backendTarget{}, fmt.Errorf("environment ref %q is non-canonical", ref)
+	}
 	var resp struct {
+		EnvironmentRef string `json:"environment_ref"`
 		PublishableKey string `json:"publishable_key"`
 	}
 	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
 		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)
 	}
-	if resp.PublishableKey == "" {
-		return backendTarget{}, errors.New("apikey.reveal: missing publishable key")
+	if err := selection.ValidateRuntimeBinding(ref, resp.EnvironmentRef, resp.PublishableKey); err != nil {
+		return backendTarget{}, fmt.Errorf("apikey.reveal returned an invalid Environment binding: %w", err)
 	}
 	return backendTarget{
 		URL:    fmt.Sprintf("https://%s.%s", ref, endpoints.PublicHost),

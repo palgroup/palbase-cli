@@ -111,6 +111,12 @@ func ListEnvironments(ctx context.Context, rest REST, projectID string) ([]Envir
 		if env.ID == "" || env.Ref == "" || env.ProjectID == "" {
 			return nil, fmt.Errorf("list environments of %s: server returned an environment without id, ref, or project_id", projectID)
 		}
+		if !IsCanonicalEnvironmentRef(env.Ref) {
+			return nil, fmt.Errorf(
+				"list environments of %s: environment %s has non-canonical ref %q",
+				projectID, env.ID, env.Ref,
+			)
+		}
 		if env.ProjectID != projectID {
 			return nil, fmt.Errorf(
 				"list environments of %s: environment %s belongs to project %s, not requested project %s",

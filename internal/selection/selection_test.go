@@ -235,6 +235,39 @@ func TestListEnvironments_RejectsIncompleteRuntimeIdentity(t *testing.T) {
 	}
 }
 
+func TestListEnvironments_RejectsNonCanonicalRuntimeRefs(t *testing.T) {
+	for _, ref := range []string{
+		"abc",
+		"abcdefghijklmnopqrstuvwxy",
+		"UPPERCASE",
+		"bad_ref",
+		"bad-ref",
+		"tést",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			fake := selectiontest.New(t)
+			fake.Environments["proj_1"] = []selection.Environment{
+				selectiontest.Env("env_bad", "proj_1", ref, "bad", "staging", false),
+			}
+
+			_, err := selection.ListEnvironments(context.Background(), fake.REST(), "proj_1")
+			require.ErrorContains(t, err, "non-canonical ref")
+		})
+	}
+}
+
+func TestListEnvironments_AcceptsCanonicalRuntimeRefBoundaries(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.Environments["proj_1"] = []selection.Environment{
+		selectiontest.Env("env_min", "proj_1", "abcd", "min", "staging", false),
+		selectiontest.Env("env_max", "proj_1", "abcdefghijklmnopqrstuvwx", "max", "staging", false),
+	}
+
+	envs, err := selection.ListEnvironments(context.Background(), fake.REST(), "proj_1")
+	require.NoError(t, err)
+	require.Len(t, envs, 2)
+}
+
 func TestGetProject_RejectsMismatchedProjectRow(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.Handle("GET /api/v2/projects/proj_1", func(w http.ResponseWriter, _ *http.Request) {

@@ -118,3 +118,35 @@ func requireNoV1(t *testing.T, f *selectiontest.Fake) {
 		require.NotContains(t, route, "/groups/", "groups are gone — apps and members hang off the PROJECT")
 	}
 }
+
+func TestLookupBackendTarget_RejectsAnUnboundPublishableKey(t *testing.T) {
+	r := newRig(t, func(w http.ResponseWriter, _ *http.Request) {
+		trpcOK(w, map[string]any{
+			"environment_ref": "app1prod",
+			"publishable_key": "pb_app1stg_c01234567890123456789",
+		})
+	})
+
+	target, err := lookupBackendTarget(
+		context.Background(), r.Studio,
+		config.Endpoints{PublicHost: "dev.palbase.studio"}, "app1prod",
+	)
+	require.ErrorContains(t, err, "publishable")
+	require.Empty(t, target)
+}
+
+func TestLookupBackendTarget_RejectsInvalidRefBeforeStudioRequest(t *testing.T) {
+	r := newRig(t, func(w http.ResponseWriter, _ *http.Request) {
+		trpcOK(w, map[string]any{
+			"environment_ref": "bad-ref",
+			"publishable_key": "pb_bad-ref_c01234567890123456789",
+		})
+	})
+
+	_, err := lookupBackendTarget(
+		context.Background(), r.Studio,
+		config.Endpoints{PublicHost: "dev.palbase.studio"}, "bad-ref",
+	)
+	require.ErrorContains(t, err, "environment ref")
+	require.Empty(t, r.TRPCCalls(), "an invalid runtime ref must fail before a network request")
+}
