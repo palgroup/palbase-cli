@@ -3,8 +3,10 @@ package studio
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -39,6 +41,43 @@ func TestClient_FailsClosedWithoutDPoPProofSigner(t *testing.T) {
 	c := New("https://studio.example", func(context.Context) (string, error) { return "bound-token", nil }, nil)
 	err := c.Query(context.Background(), "backend.status", nil, nil)
 	require.ErrorContains(t, err, "dpop proof signer")
+}
+
+func TestClient_DebugLogNeverPrintsResponseBody(t *testing.T) {
+	const secret = "pb_app1prod_cSECRETSECRETSECRET12"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Request-ID", "req_debug_1")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": map[string]any{"data": map[string]any{"json": map[string]any{
+				"api_key": secret,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("PALBASE_DEBUG_TRPC", "1")
+	readEnd, writeEnd, err := os.Pipe()
+	require.NoError(t, err)
+	originalStderr := os.Stderr
+	os.Stderr = writeEnd
+	t.Cleanup(func() { os.Stderr = originalStderr })
+
+	c := New(
+		srv.URL,
+		func(context.Context) (string, error) { return "access-token", nil },
+		func(context.Context, string, string, string) (string, error) { return "proof", nil },
+	)
+	var out map[string]any
+	require.NoError(t, c.Query(context.Background(), "apps.config", nil, &out))
+	require.NoError(t, writeEnd.Close())
+	os.Stderr = originalStderr
+	debug, err := io.ReadAll(readEnd)
+	require.NoError(t, err)
+	require.NoError(t, readEnd.Close())
+
+	require.NotContains(t, string(debug), secret)
+	require.Contains(t, string(debug), "status=200")
+	require.Contains(t, string(debug), "request_id=\"req_debug_1\"")
 }
 
 // CLI-14 regression: Studio routinely returns error envelopes whose

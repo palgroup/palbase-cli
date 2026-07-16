@@ -95,7 +95,13 @@ func (c *Client) do(ctx context.Context, req *http.Request, out any) error {
 		return fmt.Errorf("read response: %w", err)
 	}
 	if os.Getenv("PALBASE_DEBUG_TRPC") != "" {
-		fmt.Fprintf(os.Stderr, "studio trpc debug: status=%d body=%s\n", resp.StatusCode, truncate(body, 1024))
+		fmt.Fprintf(
+			os.Stderr,
+			"studio trpc debug: status=%d content_length=%d request_id=%q\n",
+			resp.StatusCode,
+			len(body),
+			resp.Header.Get("X-Request-ID"),
+		)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return parseTRPCError(body, resp.StatusCode)
