@@ -19,8 +19,8 @@ jobs:
     name: build + vet + unit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"
           cache: true
@@ -40,13 +40,11 @@ jobs:
         # preinstalled Node (exec.LookPath("node")).
         run: go test ./... -race -count=1
 
-      # golangci-lint: no released version supports go1.26 yet (same toolchain
-      # lag as palanalytics ci / palbase palmessaging-ci) — keep it reporting
-      # but non-blocking; go vet above is the enforced static gate.
-      # TODO: drop continue-on-error once a go1.26-compatible release ships.
+      # v2.12.2 supports Go 1.26, but the CLI still has pre-existing errcheck
+      # debt. Keep the exact pinned scan visible while vet remains blocking.
       - name: Lint
         continue-on-error: true
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.12.2
           args: --timeout=5m
