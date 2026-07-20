@@ -136,6 +136,9 @@ export default class HelloController {
 const gitignore = `node_modules/
 .palbase/config.json
 .env.local
+# Deno/edge-runtime residue — the isolate host, not the tenant, owns these.
+deno.lock
+deno.json
 `
 
 // Cmd returns the `palbase init` command. It takes no resolvers: scaffolding

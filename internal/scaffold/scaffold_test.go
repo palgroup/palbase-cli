@@ -79,7 +79,11 @@ func TestInit_EmptyDir(t *testing.T) {
 	model := read(filepath.Join("models", "hello", "shared.ts"))
 	assert.Contains(t, model, "export const HelloSchema = z.object({")
 	assert.Contains(t, model, "export type HelloSchema = z.infer<typeof HelloSchema>")
-	assert.Contains(t, read(".gitignore"), "node_modules/")
+	gitignore := read(".gitignore")
+	assert.Contains(t, gitignore, "node_modules/")
+	// Runtime residue must never land in a tenant repo (P2.5).
+	assert.Contains(t, gitignore, "deno.lock")
+	assert.Contains(t, gitignore, "deno.json")
 }
 
 func TestInit_DefaultsToCwd(t *testing.T) {
