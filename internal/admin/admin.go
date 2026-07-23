@@ -18,14 +18,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-// validModules are the modules whose migrations can be reconciled. Kept
-// in sync with the mgmt API's `migrateTenantsInput` enum and the
-// orchestrator's `migrationActivityForModule` map.
+// validModules are the modules whose migrations can be reconciled (they have a
+// migrate-Job). Kept in sync with the mgmt API's `migrateTenantsInput` enum and
+// the orchestrator's `migrationActivityForModule` map.
 var validModules = []string{"palnotify", "paldocs", "palflags", "palauth"}
+
+// imageModules are the modules whose container image can be pinned on the
+// module-image channel. A superset of validModules: channel-only modules
+// (backend-runtime, palsvc, palmessaging, schema-diff-proxy) have no migrate-Job
+// but DO have a pinnable image. Kept in sync with the mgmt API's
+// `moduleImageName` enum (platform/studio .../services/admin.ts).
+var imageModules = []string{"palnotify", "paldocs", "palflags", "palauth", "palmessaging", "palsvc", "backend-runtime", "schema-diff-proxy"}
 
 // REST is the subset of the Management-API transport the admin commands
 // use. transport.Client satisfies it; tests substitute a stub.
@@ -71,8 +80,8 @@ func migrateAllTenantsCmd(rest func() REST) *cobra.Command {
 			"orchestrator workflow; this command starts it and prints its id.\n\n" +
 			"Platform-admin only (server-side allowlist).",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !isValidModule(module) {
-				return fmt.Errorf("invalid --module %q (one of: %s)", module, validModuleList())
+			if !isValidModule(module, validModules) {
+				return fmt.Errorf("invalid --module %q (one of: %s)", module, moduleList(validModules))
 			}
 			out := cmd.OutOrStdout()
 
@@ -96,7 +105,7 @@ func migrateAllTenantsCmd(rest func() REST) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&module, "module", "", "Module to migrate ("+validModuleList()+")")
+	cmd.Flags().StringVar(&module, "module", "", "Module to migrate ("+moduleList(validModules)+")")
 	_ = cmd.MarkFlagRequired("module")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
@@ -129,8 +138,8 @@ func setModuleImageCmd(rest func() REST) *cobra.Command {
 			"orchestrator workflow; this command starts it and prints its id.\n\n" +
 			"Platform-admin only (server-side allowlist).",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !isValidModule(module) {
-				return fmt.Errorf("invalid --module %q (one of: %s)", module, validModuleList())
+			if !isValidModule(module, imageModules) {
+				return fmt.Errorf("invalid --module %q (one of: %s)", module, moduleList(imageModules))
 			}
 			if image == "" {
 				return fmt.Errorf("image is required")
@@ -157,7 +166,7 @@ func setModuleImageCmd(rest func() REST) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&module, "module", "", "Module to pin ("+validModuleList()+")")
+	cmd.Flags().StringVar(&module, "module", "", "Module to pin ("+moduleList(imageModules)+")")
 	_ = cmd.MarkFlagRequired("module")
 	cmd.Flags().StringVar(&image, "image", "", "Container image reference to pin")
 	_ = cmd.MarkFlagRequired("image")
@@ -165,24 +174,12 @@ func setModuleImageCmd(rest func() REST) *cobra.Command {
 	return cmd
 }
 
-func isValidModule(m string) bool {
-	for _, v := range validModules {
-		if v == m {
-			return true
-		}
-	}
-	return false
+func isValidModule(m string, list []string) bool {
+	return slices.Contains(list, m)
 }
 
-// validModuleList renders the valid modules as a pipe-separated list for
-// help text and error messages (e.g. "palnotify|paldocs|palflags|palauth").
-func validModuleList() string {
-	s := ""
-	for i, v := range validModules {
-		if i > 0 {
-			s += "|"
-		}
-		s += v
-	}
-	return s
+// moduleList renders a module set as a pipe-separated list for help text and
+// error messages (e.g. "palnotify|paldocs|palflags|palauth").
+func moduleList(list []string) string {
+	return strings.Join(list, "|")
 }

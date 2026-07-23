@@ -192,6 +192,41 @@ func TestSetModuleImage_ImageRequired(t *testing.T) {
 	require.Contains(t, err.Error(), "image")
 }
 
+// TestSetModuleImage_AcceptsBackendRuntime locks the fix: set-module-image pins
+// CHANNEL-only modules (no migrate-Job), so backend-runtime — the shared-isolate
+// runtime image — must reach the API, not be rejected client-side. Mirrors the
+// mgmt API's broader `moduleImageName` enum. Revert set-module-image to validate
+// against `validModules` and this goes red (the pre-fix bug: could never pin it).
+func TestSetModuleImage_AcceptsBackendRuntime(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusAccepted, map[string]any{"workflowId": "set-module-image-backend-runtime-1"})
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"set-module-image", "--module", "backend-runtime", "--image", "registry.example/backend-runtime:sha-abc@sha256:def"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "backend-runtime", gotBody["module"])
+	require.Contains(t, out.String(), "set-module-image-backend-runtime-1")
+}
+
+// TestMigrateAllTenants_RejectsBackendRuntime locks the distinction: backend-runtime
+// has NO migrate-Job, so migrate-all-tenants must reject it client-side (only
+// image-pinning accepts it).
+func TestMigrateAllTenants_RejectsBackendRuntime(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the API — backend-runtime has no migrations")
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"migrate-all-tenants", "--module", "backend-runtime"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid --module")
+}
+
 func TestSetModuleImage_403SurfacesAPIError(t *testing.T) {
 	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
