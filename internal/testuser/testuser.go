@@ -2,16 +2,20 @@
 //
 // Transport: Studio tRPC (`testData.*`), reached via the same user-JWT
 // `internal/studio` client the `apps`/`secret`/`db` commands use. We talk to
-// tRPC directly because the test-data feature (0b-3) is exposed ONLY as a tRPC
+// tRPC directly because the test-data feature is exposed ONLY as a tRPC
 // router — there are no `/api/v1/...` REST routes for it, so the Management-API
 // REST transport (used by `apikey`/`project`) cannot reach it.
 //
 // The procedures hit:
 //
-//	testData.testUserCreate  mutation {ref,count,withTokens}  -> {users:[...]}
-//	testData.runScenario     mutation {ref,name}              -> {user,inserted}
+//	testData.testUserCreate      mutation {ref,count,withTokens} -> {users:[...]}
+//	testData.createFromTemplate  mutation {ref,name}             -> {user,inserted,existing}
+//	testData.listTemplates       query    {ref}                  -> [{name,email,tables}]
+//	testData.testUsers           query    {ref}                  -> {users:[{id,email}]}
+//	testData.cloneTestUser       mutation {ref,sourceUserId,...}  -> {user,inserted}
+//	testData.deleteTestUser      mutation {ref,userId}           -> {ok}
 //
-// Studio runs the developer env-role authorization inside the tRPC procedure;
+// Studio runs the developer env-role authorization inside each tRPC procedure;
 // a below-role / non-member caller surfaces as a FORBIDDEN error here. NO
 // secret is generated client-side — palauth mints the passwords + tokens
 // server-side; the CLI only displays them.
@@ -22,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/palgroup/palbase-cli/internal/selection"
@@ -42,30 +47,40 @@ type Resolvers struct {
 	Selection func() *selection.Resolver
 }
 
-// Cmd returns the `test-user` parent command (registered under `auth`).
+// Cmd returns the `test-user` parent command.
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "test-user",
-		Short: "Mint disposable is_test users (optionally populated from a scenario)",
-		Long: `Mint disposable test users for the SELECTED environment.
+		Short: "Create, list, clone and delete disposable test users",
+		Long: `Manage disposable is_test users for the SELECTED environment.
 
-  palbase test-user create                    Mint 1 plain test user.
-  palbase test-user create --count 5          Mint 5 plain test users.
-  palbase test-user create --scenario demo    Mint 1 user + populate their data
-                                              tree from a saved scenario.
-  palbase test-user create --json             Emit creds+token as JSON.
+  palbase test-user create                     Mint 1 plain test user.
+  palbase test-user create --count 5           Mint 5 plain test users.
+  palbase test-user create --template demo     Mint 1 user + seed their data
+                                               tree from a declared template.
+  palbase test-user templates                  List templates declared in
+                                               config/test-users.ts.
+  palbase test-user list                       List this environment's test users.
+  palbase test-user clone <id> --email x@y.z --password ...
+                                               Copy a test user's data tree onto
+                                               a new user.
+  palbase test-user delete <id>                Purge a test user.
+
+Templates are declared in your project's config/test-users.ts and applied on
+deploy — there is no way to author one from here, because git is the source of
+truth for them.
 
 Each environment verifies tokens against its OWN auth, so a minted token is only
 valid on the environment that minted it. Override the target with --environment.
 
 The minted users are is_test; the server mints their passwords + access tokens.`,
 	}
-	cmd.AddCommand(createCmd(r))
+	cmd.AddCommand(createCmd(r), listCmd(r), templatesCmd(r), cloneCmd(r), deleteCmd(r))
 	return cmd
 }
 
-// plainUser mirrors one entry of testData.testUserCreate's {users:[...]} result.
-type plainUser struct {
+// mintedUser mirrors one minted user across every procedure that returns one.
+type mintedUser struct {
 	ID          string `json:"id"`
 	Email       string `json:"email"`
 	Password    string `json:"password"`
@@ -73,24 +88,44 @@ type plainUser struct {
 }
 
 type plainResult struct {
-	Users []plainUser `json:"users"`
+	Users []mintedUser `json:"users"`
 }
 
-// scenarioResult mirrors testData.runScenario's return shape: the minted user's
-// creds+token + a per-table count of inserted rows.
-type scenarioResult struct {
-	User struct {
-		ID          string `json:"id"`
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		AccessToken string `json:"access_token"`
-	} `json:"user"`
+// materializeResult mirrors createFromTemplate / cloneTestUser: the minted
+// user's creds + a per-table count of inserted rows.
+type materializeResult struct {
+	User     mintedUser     `json:"user"`
 	Inserted map[string]int `json:"inserted"`
+	Existing bool           `json:"existing"`
+}
+
+type templateEntry struct {
+	Name   string   `json:"name"`
+	Email  *string  `json:"email"`
+	Tables []string `json:"tables"`
+}
+
+type testUserEntry struct {
+	ID    string  `json:"id"`
+	Email *string `json:"email"`
+}
+
+type testUserList struct {
+	Users []testUserEntry `json:"users"`
+}
+
+// envRef resolves the selected (or --environment overridden) environment.
+func envRef(cmd *cobra.Command, r Resolvers) (string, error) {
+	sel, err := r.Selection().Resolve(cmd.Context())
+	if err != nil {
+		return "", err
+	}
+	return sel.EnvironmentRef(), nil
 }
 
 func createCmd(r Resolvers) *cobra.Command {
 	var (
-		scenario string
+		template string
 		count    int
 		jsonOut  bool
 	)
@@ -99,61 +134,39 @@ func createCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Mint test user(s) for the selected environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sel, err := r.Selection().Resolve(cmd.Context())
+			ref, err := envRef(cmd, r)
 			if err != nil {
 				return err
 			}
-			ref := sel.EnvironmentRef()
 			out := cmd.OutOrStdout()
 
-			// --scenario: mint ONE user + populate their data tree from the
-			// saved scenario. --count is meaningless here (a scenario mints
-			// exactly one user), so reject the combination rather than silently
-			// ignore it.
-			if scenario != "" {
+			// --template: mint ONE user + seed their data tree from the declared
+			// template. --count is meaningless here (a template mints exactly one
+			// user), so reject the combination rather than silently ignore it.
+			if template != "" {
 				if cmd.Flags().Changed("count") {
-					return fmt.Errorf("--count cannot be combined with --scenario (a scenario mints exactly one user)")
+					return fmt.Errorf("--count cannot be combined with --template (a template mints exactly one user)")
 				}
-				var res scenarioResult
-				scenarioPayload := map[string]any{
-					"ref":  ref,
-					"name": scenario,
-				}
-				if err := r.Studio().Mutation(cmd.Context(), "testData.runScenario", scenarioPayload, &res); err != nil {
+				var res materializeResult
+				payload := map[string]any{"ref": ref, "name": template}
+				if err := r.Studio().Mutation(cmd.Context(), "testData.createFromTemplate", payload, &res); err != nil {
 					return err
 				}
 				if jsonOut {
 					return encodeJSON(out, res)
 				}
-				fmt.Fprintf(out, "✓ ran scenario %q — minted 1 test user\n", scenario)
-				fmt.Fprintf(out, "  id:       %s\n", res.User.ID)
-				fmt.Fprintf(out, "  email:    %s\n", res.User.Email)
-				fmt.Fprintf(out, "  password: %s\n", res.User.Password)
-				if res.User.AccessToken != "" {
-					fmt.Fprintf(out, "  token:    %s\n", res.User.AccessToken)
-				}
-				if len(res.Inserted) > 0 {
-					fmt.Fprintln(out, "  inserted:")
-					tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-					for table, n := range res.Inserted {
-						fmt.Fprintf(tw, "    %s\t%d\n", table, n)
-					}
-					_ = tw.Flush()
-				}
+				fmt.Fprintf(out, "✓ created 1 test user from template %q\n", template)
+				printUser(out, res.User)
+				printInserted(out, res.Inserted)
 				fmt.Fprintln(out, "  (creds shown once — store them now)")
 				return nil
 			}
 
-			// No --scenario: mint `count` plain test users (no data tree).
 			if count < 1 {
 				return fmt.Errorf("--count must be at least 1")
 			}
 			var res plainResult
-			payload := map[string]any{
-				"ref":        ref,
-				"count":      count,
-				"withTokens": true,
-			}
+			payload := map[string]any{"ref": ref, "count": count, "withTokens": true}
 			if err := r.Studio().Mutation(cmd.Context(), "testData.testUserCreate", payload, &res); err != nil {
 				return err
 			}
@@ -175,10 +188,242 @@ func createCmd(r Resolvers) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&scenario, "scenario", "", "Populate the minted user's data tree from a saved scenario")
-	cmd.Flags().IntVar(&count, "count", 1, "Number of plain test users to mint (ignored with --scenario)")
+	cmd.Flags().StringVar(&template, "template", "", "Seed the minted user's data tree from a declared template")
+	cmd.Flags().IntVar(&count, "count", 1, "Number of plain test users to mint (ignored with --template)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit creds+token as JSON (for scripting)")
 	return cmd
+}
+
+func listCmd(r Resolvers) *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Args:  cobra.NoArgs,
+		Short: "List the selected environment's test users",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := envRef(cmd, r)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+
+			var res testUserList
+			if err := r.Studio().Query(cmd.Context(), "testData.testUsers", map[string]any{"ref": ref}, &res); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(out, res)
+			}
+			if len(res.Users) == 0 {
+				fmt.Fprintln(out, "No test users in this environment.")
+				return nil
+			}
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "ID\tEMAIL")
+			for _, u := range res.Users {
+				fmt.Fprintf(tw, "%s\t%s\n", u.ID, derefOr(u.Email, "-"))
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the list as JSON")
+	return cmd
+}
+
+func templatesCmd(r Resolvers) *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "templates",
+		Args:  cobra.NoArgs,
+		Short: "List the templates declared in config/test-users.ts",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := envRef(cmd, r)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+
+			var res []templateEntry
+			if err := r.Studio().Query(cmd.Context(), "testData.listTemplates", map[string]any{"ref": ref}, &res); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(out, res)
+			}
+			if len(res) == 0 {
+				fmt.Fprintln(out, "No templates declared. Add them to config/test-users.ts and deploy.")
+				return nil
+			}
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tFIXTURE EMAIL\tSEEDS")
+			for _, t := range res {
+				seeds := "-"
+				if len(t.Tables) > 0 {
+					seeds = strings.Join(t.Tables, ", ")
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", t.Name, derefOr(t.Email, "-"), seeds)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the list as JSON")
+	return cmd
+}
+
+func cloneCmd(r Resolvers) *cobra.Command {
+	var (
+		email    string
+		password string
+		sets     []string
+		jsonOut  bool
+	)
+	cmd := &cobra.Command{
+		Use:   "clone <user-id>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Copy a test user's data tree onto a new test user",
+		Long: `Copy a test user's whole data tree onto a newly minted test user.
+
+Rows are re-keyed, not duplicated: the copy gets its own primary keys, the new
+user owns them, and foreign keys within the copied tree are remapped.
+
+Give --email and --password together for fixed credentials, or neither to have
+the server generate them. Use --set to change a column on every copied row of a
+table, which is how the clone gets its own name or handle:
+
+  palbase test-user clone usr_123 --set profiles.display_name="Copy"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := envRef(cmd, r)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+
+			if (email == "") != (password == "") {
+				return fmt.Errorf("--email and --password must be given together, or neither")
+			}
+			overrides, err := parseSets(sets)
+			if err != nil {
+				return err
+			}
+
+			payload := map[string]any{"ref": ref, "sourceUserId": args[0]}
+			if email != "" {
+				payload["email"] = email
+				payload["password"] = password
+			}
+			if len(overrides) > 0 {
+				payload["overrides"] = overrides
+			}
+
+			var res materializeResult
+			if err := r.Studio().Mutation(cmd.Context(), "testData.cloneTestUser", payload, &res); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(out, res)
+			}
+			fmt.Fprintf(out, "✓ cloned %s\n", args[0])
+			printUser(out, res.User)
+			printInserted(out, res.Inserted)
+			fmt.Fprintln(out, "  (creds shown once — store them now)")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&email, "email", "", "Fixed e-mail for the clone (requires --password)")
+	cmd.Flags().StringVar(&password, "password", "", "Fixed password for the clone (requires --email)")
+	cmd.Flags().StringArrayVar(&sets, "set", nil, "Change a column on the copy: --set table.column=value (repeatable)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit creds+token as JSON (for scripting)")
+	return cmd
+}
+
+func deleteCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete <user-id>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Purge a test user and everything that belongs to them",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, err := envRef(cmd, r)
+			if err != nil {
+				return err
+			}
+			var res struct {
+				OK bool `json:"ok"`
+			}
+			payload := map[string]any{"ref": ref, "userId": args[0]}
+			if err := r.Studio().Mutation(cmd.Context(), "testData.deleteTestUser", payload, &res); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ deleted %s\n", args[0])
+			return nil
+		},
+	}
+	return cmd
+}
+
+// parseSets turns repeated `--set table.column=value` flags into the
+// { <table>: { <column>: value } } shape the clone procedure takes.
+//
+// Values are parsed leniently, the same way the Studio row editor does: `null`
+// becomes null and anything that is valid JSON is decoded, so numbers and
+// booleans arrive typed; everything else stays the literal string. Column names
+// are validated server-side against the live schema, never here.
+func parseSets(sets []string) (map[string]map[string]any, error) {
+	if len(sets) == 0 {
+		return nil, nil
+	}
+	out := map[string]map[string]any{}
+	for _, raw := range sets {
+		key, value, found := strings.Cut(raw, "=")
+		if !found {
+			return nil, fmt.Errorf("--set %q must be table.column=value", raw)
+		}
+		table, column, found := strings.Cut(key, ".")
+		if !found || table == "" || column == "" {
+			return nil, fmt.Errorf("--set %q must name a table and a column: table.column=value", raw)
+		}
+		var parsed any = value
+		if value == "null" {
+			parsed = nil
+		} else {
+			var decoded any
+			if err := json.Unmarshal([]byte(value), &decoded); err == nil {
+				parsed = decoded
+			}
+		}
+		if out[table] == nil {
+			out[table] = map[string]any{}
+		}
+		out[table][column] = parsed
+	}
+	return out, nil
+}
+
+func printUser(w io.Writer, u mintedUser) {
+	fmt.Fprintf(w, "  id:       %s\n", u.ID)
+	fmt.Fprintf(w, "  email:    %s\n", u.Email)
+	fmt.Fprintf(w, "  password: %s\n", u.Password)
+	if u.AccessToken != "" {
+		fmt.Fprintf(w, "  token:    %s\n", u.AccessToken)
+	}
+}
+
+func printInserted(w io.Writer, inserted map[string]int) {
+	if len(inserted) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "  inserted:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for table, n := range inserted {
+		fmt.Fprintf(tw, "    %s\t%d\n", table, n)
+	}
+	_ = tw.Flush()
+}
+
+func derefOr(s *string, fallback string) string {
+	if s == nil || *s == "" {
+		return fallback
+	}
+	return *s
 }
 
 func encodeJSON(w io.Writer, v any) error {
