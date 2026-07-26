@@ -79,6 +79,7 @@ const tsconfigJSON = `{
     "resources/**/*.ts",
     "seeds/**/*.ts",
     "db/**/*.ts",
+    "config/**/*.ts",
     "*.d.ts"
   ]
 }
