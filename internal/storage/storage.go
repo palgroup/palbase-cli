@@ -57,6 +57,12 @@ type bucketDef struct {
 	Public           bool     `json:"public"`
 	FileSizeLimit    *int64   `json:"file_size_limit,omitempty"`
 	AllowedMimeTypes []string `json:"allowed_mime_types,omitempty"`
+
+	// SizeLiteral is the raw TS literal fileSizeLimit was written as in the file
+	// (`"25MB"` or `26214400`), kept so a rewrite re-emits it VERBATIM instead of
+	// normalizing an author's human string into bytes. Empty for a bucket the CLI
+	// is creating (the generator then falls back to the byte count).
+	SizeLiteral string `json:"-"`
 }
 
 // Cmd returns the `palbase storage` parent command. It takes no resolvers:
@@ -109,6 +115,25 @@ func parseSize(raw string) (int64, error) {
 		return 0, fmt.Errorf("--max-size must not be negative")
 	}
 	return int64(bytes + 0.5), nil
+}
+
+// parseSizeLiteral converts a fileSizeLimit TS literal as written in
+// config/storage.ts — a quoted human string (`"25MB"`) or a bare byte count
+// (`26214400`) — to bytes. Both forms are valid SDK input, so both must read
+// back; parseSize handles the string form's units.
+func parseSizeLiteral(lit string) (int64, error) {
+	if strings.HasPrefix(lit, `"`) {
+		unq, err := strconv.Unquote(lit)
+		if err != nil {
+			return 0, fmt.Errorf("not a valid string literal")
+		}
+		n, err := parseSize(unq)
+		if err != nil {
+			return 0, fmt.Errorf("expected a size like \"5MB\" or \"1GB\"")
+		}
+		return n, nil
+	}
+	return strconv.ParseInt(lit, 10, 64)
 }
 
 func bucketsAddCmd() *cobra.Command {

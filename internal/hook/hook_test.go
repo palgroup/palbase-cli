@@ -1,12 +1,14 @@
 package hook
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -147,4 +149,33 @@ func TestEnsure_UpgradesV1_Mutation(t *testing.T) {
 	body, err := os.ReadFile(hookFile)
 	require.NoError(t, err)
 	require.Equal(t, Body, string(body), "v1 hook must be overwritten with v2")
+}
+
+// A hook that carries OUR current marker but a DRIFTED body must be rewritten to
+// Body. This is what keeps the orchestrator's scaffold-template copy of the hook
+// from becoming a second, permanent source of truth: before this, `v >= Version`
+// alone short-circuited and any divergent copy was pinned into a repo forever.
+// MUTATION CHECK: drop `&& body == Body` from Ensure's no-op condition → RED.
+func TestEnsure_RewritesDriftedCurrentVersionBody(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "hooks"), 0o755))
+	// Same "# palbase-hook: v2" marker, different body (a stale template copy).
+	drifted := "#!/bin/sh\n# palbase-hook: v2\n# an older shipped copy\nexit 0\n"
+	hookPath := filepath.Join(dir, "hooks", "pre-push")
+	require.NoError(t, os.WriteFile(hookPath, []byte(drifted), 0o755))
+
+	Ensure(dir, io.Discard)
+
+	got, err := os.ReadFile(hookPath)
+	require.NoError(t, err)
+	assert.Equal(t, Body, string(got), "a drifted copy of our own hook must be restored to Body")
+
+	// And an identical copy is still left alone (no pointless rewrite churn).
+	info, err := os.Stat(hookPath)
+	require.NoError(t, err)
+	Ensure(dir, io.Discard)
+	info2, err := os.Stat(hookPath)
+	require.NoError(t, err)
+	assert.Equal(t, info.ModTime(), info2.ModTime(), "a byte-identical hook must be a no-op")
 }

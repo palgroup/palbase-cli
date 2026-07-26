@@ -144,6 +144,11 @@ func Status(repoDir string) (state, detail string) {
 	}
 	s := string(body)
 	if v, ok := markedVersion(s); ok {
+		if v >= Version && s != Body {
+			// Marked current but byte-different — a drifted copy (e.g. an out-of-date
+			// scaffold template). A push/serve rewrites it to the canonical Body.
+			return "outdated", fmt.Sprintf("v%d but modified — a push/serve restores it", v)
+		}
 		if v >= Version {
 			cfg := currentHooksPath(repoDir)
 			if cfg == "" {
@@ -178,10 +183,16 @@ func Ensure(repoDir string, out io.Writer) {
 	case err == nil:
 		body := string(existing)
 		if v, ok := markedVersion(body); ok {
-			if v >= Version {
-				return // ours + current → no-op
+			if v >= Version && body == Body {
+				return // ours + current + byte-identical → no-op
 			}
-			// ours, older marker → upgrade.
+			// Ours, but either an older marker OR a marked-current body that has
+			// DRIFTED from Body. The drift case matters because the orchestrator's
+			// scaffold template ships its own copy of this hook: without the body
+			// compare, a template that diverged would be pinned into every scaffolded
+			// repo forever and nothing would ever heal it (the comment saying "keep
+			// these two in sync" was the only thing holding the contract). Rewriting
+			// makes Body the single source of truth in practice, not just on paper.
 		} else if !isKnownV1(body) {
 			// A hook we didn't write — never clobber the user's own.
 			fmt.Fprintln(out, "note: hooks/pre-push exists but isn't palbase's — add 'palbase build' to it to catch deploy failures before pushing")

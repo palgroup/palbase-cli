@@ -204,3 +204,62 @@ func TestReadConfig_RefusesUnrelatedFile(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not look like a defineStorage")
 }
+
+// TestRoundTrip_HumanSizeLiteralSurvivesRewrite locks the SDK's OTHER valid
+// fileSizeLimit form. The docs (and the SDK's own examples) teach the human
+// string `"25MB"`; the CLI regenerates the whole file on every write, so a
+// parser that only reads digits silently DROPPED the limit — the bucket then
+// deployed unlimited. MUTATION CHECK: narrow sizeFieldRE back to `(\d+)` (or
+// make renderOpts emit the byte count instead of the literal) and this test
+// goes RED.
+func TestRoundTrip_HumanSizeLiteralSurvivesRewrite(t *testing.T) {
+	chdirTemp(t)
+	require.NoError(t, os.MkdirAll("config", 0o755))
+	handWritten := `import { defineStorage, bucket } from "@palbase/backend";
+
+export default defineStorage({
+  buckets: {
+    docs: bucket({
+      public: false,
+      fileSizeLimit: "25MB",
+      allowedMimeTypes: ["application/pdf"],
+    }),
+  },
+});
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(handWritten), 0o644))
+
+	// The string form parses to bytes (25 * 1024^2).
+	buckets, err := readConfig()
+	require.NoError(t, err)
+	require.NotNil(t, buckets["docs"].FileSizeLimit)
+	assert.Equal(t, int64(26214400), *buckets["docs"].FileSizeLimit)
+
+	// Adding an UNRELATED bucket rewrites the file; docs' limit must be intact
+	// and still written as the author's own literal.
+	_, err = run(t, "add", "avatars", "--public")
+	require.NoError(t, err)
+	src := readFile(t)
+	assert.Contains(t, src, `fileSizeLimit: "25MB"`)
+	assert.NotContains(t, src, "fileSizeLimit: 26214400")
+
+	buckets, err = readConfig()
+	require.NoError(t, err)
+	require.NotNil(t, buckets["docs"].FileSizeLimit)
+	assert.Equal(t, int64(26214400), *buckets["docs"].FileSizeLimit)
+	assert.Equal(t, []string{"application/pdf"}, buckets["docs"].AllowedMimeTypes)
+}
+
+// TestReadConfig_RejectsBadSizeLiteral: an unparseable size must ERROR, never
+// silently become "no limit" (the failure mode this whole fix is about).
+func TestReadConfig_RejectsBadSizeLiteral(t *testing.T) {
+	chdirTemp(t)
+	require.NoError(t, os.MkdirAll("config", 0o755))
+	src := `import { defineStorage, bucket } from "@palbase/backend";
+export default defineStorage({ buckets: { docs: bucket({ fileSizeLimit: "25 megs" }) } });
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(src), 0o644))
+	_, err := readConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fileSizeLimit")
+}

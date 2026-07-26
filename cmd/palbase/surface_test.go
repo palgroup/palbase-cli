@@ -58,6 +58,10 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"db",
 		"deploys",
 		"doctor",
+		// egress: config/egress.ts was the one module config surface with no
+		// command — it had to be hand-written, and a host the deploy's fail-closed
+		// validator rejects only surfaced as a failed deploy.
+		"egress",
 		"env",
 		"flags",
 		"github",

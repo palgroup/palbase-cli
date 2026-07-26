@@ -78,7 +78,11 @@ func parseConfig(src string) (map[string]bucketDef, error) {
 
 var (
 	publicFieldRE = regexp.MustCompile(`\bpublic\s*:\s*(true|false)\b`)
-	sizeFieldRE   = regexp.MustCompile(`\bfileSizeLimit\s*:\s*(\d+)\b`)
+	// The SDK's fileSizeLimit accepts BOTH a human string ("25MB") and a bare byte
+	// count, and the docs teach the string form — so both must parse here. Matching
+	// only digits silently dropped a `"25MB"` limit on the next rewrite (the file is
+	// fully regenerated), leaving the bucket unlimited on the following deploy.
+	sizeFieldRE   = regexp.MustCompile(`\bfileSizeLimit\s*:\s*("(?:[^"\\]|\\.)*"|\d+)`)
 	mimeFieldRE   = regexp.MustCompile(`\ballowedMimeTypes\s*:\s*\[([^\]]*)\]`)
 	mimeElementRE = regexp.MustCompile(`"([^"]*)"`)
 )
@@ -90,11 +94,15 @@ func parseBucketBody(name, body string) (bucketDef, error) {
 		def.Public = m[1] == "true"
 	}
 	if m := sizeFieldRE.FindStringSubmatch(body); m != nil {
-		n, err := strconv.ParseInt(m[1], 10, 64)
+		n, err := parseSizeLiteral(m[1])
 		if err != nil {
-			return bucketDef{}, fmt.Errorf("bucket %q: bad fileSizeLimit %q", name, m[1])
+			return bucketDef{}, fmt.Errorf("bucket %q: bad fileSizeLimit %q: %w", name, m[1], err)
 		}
 		def.FileSizeLimit = &n
+		// Keep the raw TS literal so the generator re-emits it verbatim — a
+		// hand-written `"25MB"` survives a CLI rewrite unchanged (same lossless
+		// round-trip the flags parser gets from its verbatim default literal).
+		def.SizeLiteral = m[1]
 	}
 	if m := mimeFieldRE.FindStringSubmatch(body); m != nil {
 		for _, em := range mimeElementRE.FindAllStringSubmatch(m[1], -1) {
@@ -157,7 +165,11 @@ func renderOpts(def bucketDef) string {
 		parts = append(parts, "public: true")
 	}
 	if def.FileSizeLimit != nil {
-		parts = append(parts, fmt.Sprintf("fileSizeLimit: %d", *def.FileSizeLimit))
+		lit := def.SizeLiteral
+		if lit == "" {
+			lit = strconv.FormatInt(*def.FileSizeLimit, 10)
+		}
+		parts = append(parts, "fileSizeLimit: "+lit)
 	}
 	if len(def.AllowedMimeTypes) > 0 {
 		quoted := make([]string, len(def.AllowedMimeTypes))

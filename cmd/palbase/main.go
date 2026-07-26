@@ -13,6 +13,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
+	"github.com/palgroup/palbase-cli/internal/egress"
 	envcmd "github.com/palgroup/palbase-cli/internal/env"
 	"github.com/palgroup/palbase-cli/internal/flags"
 	"github.com/palgroup/palbase-cli/internal/github"
@@ -196,6 +197,7 @@ func newRootCmd() *cobra.Command {
 		dbCmdWithTypes(),
 		storage.Cmd(),
 		flags.Cmd(),
+		egress.Cmd(),
 		notifications.Cmd(notifications.Resolvers{
 			Studio:    func() *studio.Client { return studioClient },
 			Selection: selectionResolver,
