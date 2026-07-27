@@ -160,7 +160,7 @@ export default defineSchema({
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	if err := generateEnvTypes(ctx, root); err != nil {
+	if err := generateEnvTypes(ctx, root, filepath.Join(root, "node_modules")); err != nil {
 		t.Fatalf("generateEnvTypes: %v", err)
 	}
 
@@ -212,7 +212,7 @@ func TestGenerateEnvTypesNoSchema(t *testing.T) {
 	// A plain v1 project: endpoints/ but no db/schema.ts.
 	mustWrite(t, root, "endpoints/hello/get.ts", "export default { handler: async () => ({}) };\n")
 
-	if err := generateEnvTypes(context.Background(), root); err != nil {
+	if err := generateEnvTypes(context.Background(), root, filepath.Join(root, "node_modules")); err != nil {
 		t.Fatalf("generateEnvTypes (no schema) must be a clean no-op, got: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "palbase-env.d.ts")); !os.IsNotExist(err) {

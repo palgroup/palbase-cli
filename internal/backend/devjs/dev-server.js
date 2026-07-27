@@ -138,6 +138,14 @@ const PUBLIC_HOST = process.env.PALBASE_PUBLIC_HOST || '';
 // still BUNDLED so a controller's external `../resources/*` require resolves
 // when the bundle is loaded). Empty otherwise.
 const CHECK_MODE = process.env.PALBASE_CHECK === '1';
+// Where @palbase/backend actually lives, which is NOT always inside PROJECT_ROOT.
+// `palbase build` stages the tree the DEPLOY would receive (node_modules stripped,
+// exactly like the push tarball) so esbuild can't resolve a bare third-party import
+// the deploy would fail on. The metadata extractor still has to require()
+// @palbase/backend, and on the pod that comes from the runtime's own global install
+// — not the user's tree. This env var is that "global install" for the local run.
+// Unset (i.e. `palbase serve`) => PROJECT_ROOT/node_modules, the previous behaviour.
+const RUNTIME_MODULES = process.env.PALBASE_RUNTIME_MODULES || path.join(PROJECT_ROOT, 'node_modules');
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
 const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
 const WORKERS_DIR = path.join(PROJECT_ROOT, 'workers');
@@ -294,6 +302,12 @@ function bundleSrcDir(srcDir, outDir, externals = []) {
   // a handler/service imports) + relative imports anchor to the project. esbuild
   // is resolved via `npx --yes` — the same way the CLI's env-gen bundling shells
   // out (bundleSchemaTS), so no separate install is required.
+  // NODE_PATH is PROJECT_ROOT/node_modules and must STAY that — do NOT "unify" it
+  // with RUNTIME_MODULES. esbuild honours NODE_PATH, so pointing it at the real
+  // node_modules lets a bare `import "zod"` resolve here while the deploy (which
+  // bundles from a node_modules-free tarball) fails on it — the exact false-green
+  // `palbase build` used to print. Under `palbase build` this path does not exist,
+  // which is what makes the local bundle match the deploy.
   execFileSync('npx', args, {
     cwd: PROJECT_ROOT,
     env: Object.assign({}, process.env, { NODE_PATH: path.join(PROJECT_ROOT, 'node_modules') }),
@@ -585,7 +599,11 @@ function deployExtractErrors() {
     try {
       stdout = execFileSync('node', [extractor], {
         input: JSON.stringify({ bundle_path: file }),
-        env: Object.assign({}, process.env, { NODE_PATH: path.join(PROJECT_ROOT, 'node_modules') }),
+        // RUNTIME_MODULES, not PROJECT_ROOT/node_modules: under `palbase build` the
+        // project root is the DEPLOY-SHAPED staging tree, which has no node_modules
+        // (that is the point — see RUNTIME_MODULES). The extractor still needs the
+        // real @palbase/backend, the same way the pod's global install provides it.
+        env: Object.assign({}, process.env, { NODE_PATH: RUNTIME_MODULES }),
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
       });

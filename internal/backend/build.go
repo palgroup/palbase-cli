@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,15 +114,46 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		return fmt.Errorf("extract dev server: %w", err)
 	}
 
+	// Validate the tree the DEPLOY receives, not the one on disk. BuildTarball is
+	// the same walk `palbase push` ships, and it strips node_modules — so bundling
+	// the working directory resolved bare third-party imports (`import { z } from
+	// "zod"`) that the deploy then failed on with `Could not resolve "zod"`, after
+	// this command had already printed "build OK". Staging closes that gap at the
+	// source: same bytes in, same bundler behaviour out. Staging failure is an
+	// environment problem, not user code → warn + fall back to the live tree.
+	buildRoot := cwd
+	if staged, serr := stageDeployTree(cwd); serr != nil {
+		fmt.Fprintf(out, "warning: could not stage the deploy tree (%v) — validating the working directory instead; a bare third-party import may still pass here and fail the deploy\n", serr)
+	} else {
+		defer os.RemoveAll(staged)
+		buildRoot = staged
+	}
+
 	node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
-	node.Dir = cwd
+	node.Dir = buildRoot
 	node.Env = append(os.Environ(),
 		"PALBASE_CHECK=1",
-		fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
+		fmt.Sprintf("PALBASE_DEV_ROOT=%s", buildRoot),
 		// The CLI's pinned TypeScript parser first, then the project's deps —
 		// the user's typescript may be 7.x (no compiler API) or absent.
 		fmt.Sprintf("NODE_PATH=%s", devNodePath(cwd, out)),
+		// The staged tree has no node_modules (that is the point). The metadata
+		// extractor still has to require() the real @palbase/backend, exactly as
+		// the pod's global install provides it — point it at the project's copy.
+		fmt.Sprintf("PALBASE_RUNTIME_MODULES=%s", filepath.Join(cwd, "node_modules")),
 	)
+	// db/schema.ts is deploy-fatal too and check mode never looked at it: a schema
+	// module that doesn't export a defineSchema() result passed `palbase build`
+	// and then failed the deploy with `schema module does not export a
+	// defineSchema() result with .tables`. generateEnvTypes runs the SAME bundle +
+	// bridge the deploy's extractor does (and is a clean no-op when there is no
+	// db/schema.ts), so reuse it rather than restating the rule. It writes into the
+	// staging tree, which is discarded — build validates, it does not mutate.
+	if err := generateEnvTypes(ctx, buildRoot, filepath.Join(cwd, "node_modules")); err != nil {
+		fmt.Fprintf(out, "✗ DEPLOY WOULD FAIL: db/schema.ts — %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+
 	node.Stdout = out
 	node.Stderr = out
 	if err := node.Run(); err != nil {
@@ -135,6 +167,32 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		return nil
 	}
 	return nil
+}
+
+// stageDeployTree materialises, in a temp dir, EXACTLY the source tree a deploy
+// receives: the `palbase push` tarball, unpacked. It reuses BuildTarball rather
+// than re-implementing its ignore rules, so the two can never drift — if push
+// starts shipping (or stripping) a path, the local build follows automatically.
+//
+// The load-bearing effect is what is ABSENT: node_modules. esbuild resolves bare
+// imports by walking up from the entry file, so bundling the working directory
+// silently satisfied `import { z } from "zod"` from the project's installed deps,
+// while the deploy — which bundles from this tarball and never runs npm install —
+// could not. Caller removes the returned dir.
+func stageDeployTree(cwd string) (string, error) {
+	tarball, err := BuildTarball(cwd)
+	if err != nil {
+		return "", fmt.Errorf("pack the project: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "palbase-build-stage-*")
+	if err != nil {
+		return "", err
+	}
+	if err := extractTarGz(dir, bytes.NewReader(tarball)); err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("unpack the project: %w", err)
+	}
+	return dir, nil
 }
 
 // warnBackendSkew prints a warn-only Layer A skew notice for `palbase serve`

@@ -177,7 +177,7 @@ No-op when the project has no db/schema.ts.`,
 				}
 				return err
 			}
-			if err := generateEnvTypes(cmd.Context(), cwd); err != nil {
+			if err := generateEnvTypes(cmd.Context(), cwd, filepath.Join(cwd, "node_modules")); err != nil {
 				return err
 			}
 			fmt.Fprintf(os.Stdout, "✓ wrote %s\n", filepath.Join(cwd, "palbase-env.d.ts"))
@@ -486,7 +486,7 @@ runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + `
 			// has no db/schema.ts. Best-effort: a generation failure must not
 			// block local dev, so we warn and continue (the dev-server runs the
 			// handlers regardless; only authoring-time types are affected).
-			if err := generateEnvTypes(cmd.Context(), cwd); err != nil {
+			if err := generateEnvTypes(cmd.Context(), cwd, filepath.Join(cwd, "node_modules")); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not regenerate palbase-env.d.ts (%v)\n", err)
 			}
 
@@ -1325,7 +1325,12 @@ var envGenExternals = []string{"@palbase/backend", "@palbase/core"}
 // It is a clean no-op when the project has no db/schema.ts (a v1 project, or a
 // v2 project that doesn't declare a schema): there is no typed Database to
 // generate, so we return nil without touching the filesystem.
-func generateEnvTypes(ctx context.Context, projectDir string) error {
+// nodeModules is where @palbase/backend actually lives, which is not always
+// inside projectDir: `palbase build` validates a DEPLOY-SHAPED staging tree
+// (node_modules stripped, exactly like the push tarball) while the bridge still
+// has to require() the real SDK — the same split the pod has between the tenant
+// source and the runtime's global install.
+func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
 	schemaPath := filepath.Join(projectDir, "db", "schema.ts")
 	if _, err := os.Stat(schemaPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -1349,7 +1354,7 @@ func generateEnvTypes(ctx context.Context, projectDir string) error {
 
 	// Bundle db/schema.ts → temp CJS, keeping @palbase/* external.
 	bundlePath := filepath.Join(tmpDir, "schema.js")
-	if err := bundleSchemaTS(ctx, projectDir, schemaPath, bundlePath); err != nil {
+	if err := bundleSchemaTS(ctx, projectDir, nodeModules, schemaPath, bundlePath); err != nil {
 		return fmt.Errorf("bundle db/schema.ts: %w", err)
 	}
 
@@ -1364,7 +1369,7 @@ func generateEnvTypes(ctx context.Context, projectDir string) error {
 	}
 
 	outPath := filepath.Join(projectDir, "palbase-env.d.ts")
-	if err := runEnvGenBridge(ctx, projectDir, scriptPath, bundlePath, outPath); err != nil {
+	if err := runEnvGenBridge(ctx, projectDir, nodeModules, scriptPath, bundlePath, outPath); err != nil {
 		return err
 	}
 	return nil
@@ -1373,7 +1378,7 @@ func generateEnvTypes(ctx context.Context, projectDir string) error {
 // bundleSchemaTS runs `npx esbuild` over db/schema.ts, emitting a CJS bundle at
 // outPath with @palbase/* kept external. Runs from projectDir so node_modules
 // resolution and any relative imports inside schema.ts anchor to the project.
-func bundleSchemaTS(ctx context.Context, projectDir, schemaPath, outPath string) error {
+func bundleSchemaTS(ctx context.Context, projectDir, nodeModules, schemaPath, outPath string) error {
 	bundleCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -1392,6 +1397,10 @@ func bundleSchemaTS(ctx context.Context, projectDir, schemaPath, outPath string)
 
 	cmd := exec.CommandContext(bundleCtx, "npx", args...)
 	cmd.Dir = projectDir
+	// Deliberately NOT nodeModules: esbuild honours NODE_PATH, so handing it the
+	// real tree would resolve a bare third-party import here that the deploy —
+	// which bundles a node_modules-free tarball — cannot resolve. Under
+	// `palbase build` this path does not exist, and that is what makes the two agree.
 	cmd.Env = append(os.Environ(), "NODE_PATH="+filepath.Join(projectDir, "node_modules"))
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
@@ -1406,7 +1415,7 @@ func bundleSchemaTS(ctx context.Context, projectDir, schemaPath, outPath string)
 // palbase-env.d.ts to outPath. NODE_PATH points at the project's node_modules so
 // the bridge's `require('@palbase/backend')` (for makeEnvDts) resolves to the
 // project's installed SDK.
-func runEnvGenBridge(ctx context.Context, projectDir, scriptPath, bundlePath, outPath string) error {
+func runEnvGenBridge(ctx context.Context, projectDir, nodeModules, scriptPath, bundlePath, outPath string) error {
 	evalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -1420,7 +1429,7 @@ func runEnvGenBridge(ctx context.Context, projectDir, scriptPath, bundlePath, ou
 
 	cmd := exec.CommandContext(evalCtx, "node", scriptPath)
 	cmd.Dir = projectDir
-	cmd.Env = append(os.Environ(), "NODE_PATH="+filepath.Join(projectDir, "node_modules"))
+	cmd.Env = append(os.Environ(), "NODE_PATH="+nodeModules)
 	cmd.Stdin = bytes.NewReader(reqData)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

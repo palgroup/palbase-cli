@@ -196,12 +196,20 @@ func runCheckMode(t *testing.T, dir string) (string, bool) {
 	useTestParserCache(t)
 	tmp := t.TempDir()
 	require.NoError(t, extractFS(devServerFS, "devjs", tmp))
+	// Stage exactly as runBuild does — the deploy-shaped tree (no node_modules),
+	// with the extractor pointed at the real one. Mirroring runBuild here is the
+	// point of this helper: a test that skipped staging would validate a tree no
+	// deploy ever sees, which is the false-green this whole layer exists to kill.
+	staged, err := stageDeployTree(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(staged) })
 	cmd := exec.Command("node", filepath.Join(tmp, "dev-server.js"))
-	cmd.Dir = dir
+	cmd.Dir = staged
 	cmd.Env = append(os.Environ(),
 		"PALBASE_CHECK=1",
-		"PALBASE_DEV_ROOT="+dir,
+		"PALBASE_DEV_ROOT="+staged,
 		"NODE_PATH="+devNodePath(dir, io.Discard),
+		"PALBASE_RUNTIME_MODULES="+filepath.Join(dir, "node_modules"),
 	)
 	out, err := cmd.CombinedOutput()
 	return string(out), err == nil
@@ -356,4 +364,110 @@ export default class TodosController {
 	out, ok := runCheckMode(t, dir)
 	require.False(t, ok, "inline return type must fail check mode:\n%s", out)
 	require.Contains(t, out, "DEPLOY WOULD FAIL")
+}
+
+// TestCheckMode_BareThirdPartyImportFails is the build==deploy parity lock.
+//
+// The deploy bundles the `palbase push` tarball, which strips node_modules, and
+// never runs npm install — so a bare `import { z } from "zod"` dies there with
+// `Could not resolve "zod"`. Check mode used to bundle the WORKING DIRECTORY,
+// where npm has hoisted zod under @palbase/backend, so esbuild resolved it and
+// the command printed "build OK" over a push that could not deploy. This is the
+// live report: `palbase build` green, deploy red.
+//
+// Both directions on one fixture: the bare import must FAIL, and the identical
+// code taking z from the SDK's re-export (the sanctioned form, kept external by
+// the bundler exactly as the pod's global install provides it) must PASS. Flip
+// the import, flip the exit — a harness that stopped staging would go green on
+// the first case and this test turns red.
+func TestCheckMode_BareThirdPartyImportFails(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	// zod must really be resolvable on disk, or the test would pass for the
+	// wrong reason (absent dep rather than deploy-shaped staging).
+	require.DirExists(t, filepath.Join(dir, "node_modules", "zod"),
+		"fixture must have zod hoisted in node_modules — otherwise this test proves nothing")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "models"), 0o755))
+	// .parse() keeps the import in a VALUE position: a type-only reference is
+	// erased by esbuild and would never reach the resolver at all.
+	const controller = `import { Controller, Get } from "@palbase/backend";
+import { TodoSchema } from "../models/todo";
+
+@Controller("/todos")
+export default class TodosController {
+  @Get("/")
+  async list(): Promise<TodoSchema> {
+    return TodoSchema.parse({ id: "1", title: "x" });
+  }
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "todos.controller.ts"), []byte(controller), 0o644))
+
+	bareZod := `import { z } from "zod";
+export const TodoSchema = z.object({ id: z.string(), title: z.string() });
+export type TodoSchema = z.infer<typeof TodoSchema>;
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(bareZod), 0o644))
+	out, ok := runCheckMode(t, dir)
+	require.False(t, ok, "a bare third-party import must fail check mode — the deploy cannot resolve it:\n%s", out)
+	require.Contains(t, out, `Could not resolve "zod"`,
+		"must fail with the DEPLOY's own resolver error, not a proxy for it:\n%s", out)
+
+	// Mutation twin: same code, SDK re-export. Must pass.
+	sdkZod := `import { z } from "@palbase/backend";
+export const TodoSchema = z.object({ id: z.string(), title: z.string() });
+export type TodoSchema = z.infer<typeof TodoSchema>;
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(sdkZod), 0o644))
+	out, ok = runCheckMode(t, dir)
+	require.True(t, ok, "z re-exported from @palbase/backend is the sanctioned form and must pass:\n%s", out)
+}
+
+// TestCheckMode_BrokenSchemaFails locks the db/schema.ts half of build==deploy.
+//
+// The deploy runs schema_extract.js over db/schema.ts and dies with "schema
+// module does not export a defineSchema() result with .tables"; check mode never
+// loaded the file at all, so `export {}` printed "build OK" and then failed the
+// deploy. Both directions: a schema with no defineSchema() must FAIL, and a real
+// one must PASS.
+func TestCheckMode_BrokenSchemaFails(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	useTestParserCache(t)
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
+
+	// The reported shape: a schema module that exports nothing usable.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte("export {};\n"), 0o644))
+	var out bytes.Buffer
+	fakeRegistry(t, installedBackendVersion(dir))
+	err := runBuild(context.Background(), dir, &out)
+	require.Error(t, err, "a schema with no defineSchema() must fail the build:\n%s", out.String())
+	require.Contains(t, out.String(), "db/schema.ts", "the failure must name the file:\n%s", out.String())
+
+	// Mutation twin: a real defineSchema() result must pass.
+	// Shape verified against the SDK's real exports + a deployed project's
+	// db/schema.ts — not invented: defineSchema({ tables: { <t>: { columns } } }).
+	const realSchema = `import { defineSchema, uuid, text } from "@palbase/backend";
+export default defineSchema({
+  tables: {
+    todos: {
+      columns: {
+        id: uuid().primaryKey().defaultRandom(),
+        title: text().notNull(),
+      },
+    },
+  },
+});
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte(realSchema), 0o644))
+	out.Reset()
+	require.NoError(t, runBuild(context.Background(), dir, &out),
+		"a valid defineSchema() must pass:\n%s", out.String())
 }
