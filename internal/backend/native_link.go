@@ -347,8 +347,9 @@ next steps (Android app):
 next steps (%s Xcode target):
   1. File ▸ Add Package Dependencies… → https://github.com/palgroup/palbackend-ios
   2. Add the "Palbe" library to your app target
-  3. Target ▸ Build Phases ▸ Run Build Tool Plug-ins → add "PalbaseCodegen"
-  4. Commit .palbase/openapi.json and %s/palbase-config.json
-Build the app — the plugin generates PalbaseGenerated.swift + Palbase-Info.plist; then `+"`import Palbe`"+` and use `+"`pb`"+`.
+  3. Drag the Palbase folder into your app target (folder reference) — its
+     PalbaseGenerated.swift compiles and Palbase-Info.plist ships as a resource
+  4. Commit .palbase/openapi.json, %s/palbase-config.json and Palbase/Generated/
+Then `+"`import Palbe`"+` and use `+"`pb`"+`. Re-run `+"`palbase spec`"+` after every deploy to regenerate.
 `, platform, outDir)
 }

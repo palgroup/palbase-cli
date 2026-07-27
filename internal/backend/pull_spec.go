@@ -61,15 +61,19 @@ func newSpecCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "spec",
 		Args:  cobra.NoArgs,
-		Short: "Refresh openapi.json — the API contract the SDK code generators consume",
+		Short: "Refresh openapi.json and regenerate the committed client from it",
 		Long: `Fetch the SELECTED environment's openapi.json into --out-dir (default ./.palbase).
-Run it after every deploy so the committed API contract stays current; the SDK
-code generators (the iOS PalbaseCodegen plugin, @palbase/web's palbe-gen, the
-Android Gradle plugin) regenerate from it.
+Run it after every deploy so the committed API contract stays current.
 
-spec ONLY refreshes the API contract. The per-environment runtime config
-(palbase-config.json — base URL + key) is written by the platform link commands
-and re-written by ` + "`palbase ios|android use <environment>`" + `.
+For a checkout with an Apple platform slot (.palbase/ios or .palbase/macos), spec
+then regenerates Palbase/Generated/ — PalbaseGenerated.swift + Palbase-Info.plist
+— using the generator from the palbackend-ios checkout SwiftPM resolved for this
+project. Commit the result. Android regenerates from its Gradle plugin and web
+from @palbase/web's palbe-gen; for those, spec refreshes the contract only.
+
+spec does NOT write the per-environment runtime config (palbase-config.json —
+base URL + key). That comes from the platform link commands and is re-written by
+` + "`palbase ios|android use <environment>`" + `.
 
 Override the target with the global --project / --environment flags.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -153,28 +157,32 @@ func runPullSpec(
 	}
 	fmt.Fprintf(w, "✓ wrote %s\n", specPath)
 
-	if appID == "" {
-		return nil
-	}
-	if configOutDir == "" {
-		configOutDir = specOutDir
-	}
-	if err := os.MkdirAll(configOutDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", configOutDir, err)
+	if appID != "" {
+		if configOutDir == "" {
+			configOutDir = specOutDir
+		}
+		if err := os.MkdirAll(configOutDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", configOutDir, err)
+		}
+
+		// SINGLE-environment config: the ONE active target the CLI selected. The
+		// SDK reads a flat {environment_ref, base_url, api_key, ...} object.
+		data, err := json.MarshalIndent(entry, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal palbase-config.json: %w", err)
+		}
+		cfgPath := filepath.Join(configOutDir, "palbase-config.json")
+		if err := os.WriteFile(cfgPath, append(data, '\n'), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", cfgPath, err)
+		}
+		fmt.Fprintf(w, "✓ wrote %s (%s)\n", cfgPath, entry.BaseURL)
 	}
 
-	// SINGLE-environment config: the ONE active target the CLI selected. The SDK
-	// reads a flat {environment_ref, base_url, api_key, ...} object.
-	data, err := json.MarshalIndent(entry, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal palbase-config.json: %w", err)
-	}
-	cfgPath := filepath.Join(configOutDir, "palbase-config.json")
-	if err := os.WriteFile(cfgPath, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", cfgPath, err)
-	}
-	fmt.Fprintf(w, "✓ wrote %s (%s)\n", cfgPath, entry.BaseURL)
-	return nil
+	// The contract just moved, so regenerate from it. Every refresh path lands
+	// here — `palbase spec`, the platform link commands, and `palbase ios|macos
+	// |android use` — so none of them can leave a spec on disk that the
+	// committed client no longer reflects.
+	return generateAppleClient(specOutDir, w)
 }
 
 // buildPullSpecConfig fetches the config artifact for the ONE selected
