@@ -126,7 +126,7 @@ func TestFollowOffsetPrintsOnlyNewRecords(t *testing.T) {
 	if _, err := file.WriteString(realNetworkLine + "\n"); err != nil {
 		t.Fatal(err)
 	}
-	file.Close()
+	_ = file.Close()
 
 	second, _ := render(t, path, offset, 0, false, false)
 	if strings.Contains(second, "cart is empty") {
@@ -142,8 +142,8 @@ func TestATornFinalLineCostsOneRecord(t *testing.T) {
 	// one record; the tail must not abort the whole session.
 	path := writeSession(t, realMessageLine, realNetworkLine)
 	file, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	file.WriteString(`{"schemaVersion":1,"netw`)
-	file.Close()
+	_, _ = file.WriteString(`{"schemaVersion":1,"netw`)
+	_ = file.Close()
 
 	out, _ := render(t, path, 0, 0, false, false)
 	if !strings.Contains(out, "cart is empty") || !strings.Contains(out, "/auth/login") {

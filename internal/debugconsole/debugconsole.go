@@ -318,7 +318,7 @@ func renderFrom(out io.Writer, path string, offset int64, limit int, errorsOnly,
 		}
 		return offset, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		return offset, err
