@@ -56,6 +56,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"build",
 		"clone",
 		"db",
+		"debug",
 		"deploys",
 		"doctor",
 		// egress: config/egress.ts was the one module config surface with no

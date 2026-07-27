@@ -13,6 +13,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
+	"github.com/palgroup/palbase-cli/internal/debugconsole"
 	"github.com/palgroup/palbase-cli/internal/egress"
 	envcmd "github.com/palgroup/palbase-cli/internal/env"
 	"github.com/palgroup/palbase-cli/internal/flags"
@@ -178,6 +179,7 @@ func newRootCmd() *cobra.Command {
 			Selection:  selectionResolver,
 			PublicHost: func() string { return resolved.Endpoints.PublicHost },
 		}),
+		debugconsole.Cmd(),
 		logs.Cmd(logs.Resolvers{
 			Studio:    func() logs.Studio { return studioClient },
 			Selection: selectionResolver,
