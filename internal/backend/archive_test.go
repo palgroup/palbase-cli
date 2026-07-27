@@ -45,10 +45,10 @@ func makeTarGz(t *testing.T, entries map[string]string) []byte {
 
 func TestExtractTarGz_HappyPath(t *testing.T) {
 	gz := makeTarGz(t, map[string]string{
-		"index.ts":              "export const x = 1",
-		"controllers/":          "",
-		"controllers/todo.ts":   "// ctrl",
-		"nested/deep/file.txt":  "deep",
+		"index.ts":             "export const x = 1",
+		"controllers/":         "",
+		"controllers/todo.ts":  "// ctrl",
+		"nested/deep/file.txt": "deep",
 	})
 	dst := t.TempDir()
 	if err := extractTarGz(dst, bytes.NewReader(gz)); err != nil {
