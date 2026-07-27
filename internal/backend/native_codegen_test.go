@@ -149,12 +149,16 @@ func TestFindSwiftgenSources(t *testing.T) {
 	require.Error(t, err, "an empty checkout dir is not a generator")
 	require.Contains(t, err.Error(), "resolvePackageDependencies")
 
-	for _, name := range swiftgenSourceNames {
+	// A directory is the generator when it has the entry point; every other
+	// *.swift beside it comes along, so an SDK that adds a file (0.28.0 added
+	// Purchases.swift) still compiles instead of failing on a stale name list.
+	for _, name := range []string{"main.swift", "Parse.swift", "Emit.swift", "Plist.swift", "Purchases.swift"} {
 		require.NoError(t, os.WriteFile(filepath.Join(src, name), []byte("// swift"), 0o644))
 	}
 	found, err := findSwiftgenSources(root)
 	require.NoError(t, err)
 	require.Equal(t, src, found)
+	require.Len(t, swiftgenSourcePaths(found), 5, "every generator source is compiled, not a fixed four")
 }
 
 func TestHashFilesTracksContent(t *testing.T) {

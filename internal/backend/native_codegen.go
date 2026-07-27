@@ -26,9 +26,12 @@ import (
 	"strings"
 )
 
-// swiftgenSourceNames are the generator's sources inside the SDK checkout. The
-// generator is Foundation-only, so compiling it needs nothing but swiftc.
-var swiftgenSourceNames = []string{"main.swift", "Parse.swift", "Emit.swift", "Plist.swift"}
+// swiftgenEntryPoint is the one file the generator directory must contain for
+// us to recognise it. Everything else compiled is whatever *.swift sits beside
+// it: the SDK owns its own file list, and a generator that grows a file (0.28.0
+// added Purchases.swift) must not break every app's codegen because this CLI
+// hardcoded four names.
+const swiftgenEntryPoint = "main.swift"
 
 // swiftgenToolHome is the CLI-owned tool cache root, shared with the pinned
 // TypeScript parser (~/.palbase/tools). A var only so tests can redirect it.
@@ -186,21 +189,19 @@ func derivedDataNames(projectRoot string) []string {
 	return append(names, filepath.Base(projectRoot))
 }
 
+// swiftgenSourcePaths is every Swift file in the generator directory, sorted so
+// the compile command — and the cache hash built from it — are deterministic.
 func swiftgenSourcePaths(dir string) []string {
-	paths := make([]string, 0, len(swiftgenSourceNames))
-	for _, name := range swiftgenSourceNames {
-		paths = append(paths, filepath.Join(dir, name))
+	paths, err := filepath.Glob(filepath.Join(dir, "*.swift"))
+	if err != nil {
+		return nil
 	}
+	sort.Strings(paths)
 	return paths
 }
 
 func hasSwiftgenSources(dir string) bool {
-	for _, p := range swiftgenSourcePaths(dir) {
-		if !isRegularFile(p) {
-			return false
-		}
-	}
-	return true
+	return isRegularFile(filepath.Join(dir, swiftgenEntryPoint)) && len(swiftgenSourcePaths(dir)) > 0
 }
 
 // hashFiles digests the generator sources so a changed SDK compiles to a new
