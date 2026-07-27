@@ -24,7 +24,10 @@ func newIOSUseCmd(r Resolvers) *cobra.Command {
 
 func newNativeUseCmd(r Resolvers, platform string) *cobra.Command {
 	label := "iOS"
-	rebuild := "rebuild in Xcode — the codegen plugin regenerates from the new config"
+	// The iOS build-tool plugin was retired: the generated client is written to
+	// Palbase/Generated/ by THIS command and committed, so nothing regenerates
+	// at build time.
+	rebuild := "commit the refreshed Palbase/Generated/ output alongside .palbase/"
 	if platform == "android" {
 		label = "Android"
 		rebuild = "rebuild the app — the Gradle plugin regenerates from the new config"
@@ -41,7 +44,7 @@ Writes the shared contract to .palbase/openapi.json, the %s runtime config to
 .palbase/config.json. %s.
 
 The project must already be linked with 'palbase %s link' (its app id is read
-from .palbase/config.json).`, label, label, platform, rebuild, platform),
+from .palbase/config.json, falling back to the committed platform slot).`, label, label, platform, rebuild, platform),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()

@@ -303,3 +303,37 @@ func TestAndroidLink_PrintsGradleNextSteps(t *testing.T) {
 		require.Contains(t, out.String(), want)
 	}
 }
+
+// A teammate's fresh clone has no `.palbase/config.json` (it is gitignored CLI
+// state) but DOES have the committed platform slot, which names the app this
+// checkout is already linked to. Linking there must reuse that app — before
+// this, it registered a second app for the same project and rewrote the
+// committed api_key. Mutation-evident: drop the slot fallback and the POST
+// guard below fires.
+func TestNativeLink_FreshCloneReusesTheCommittedAppSlot(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_prod",
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".palbase", "ios"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".palbase", "ios", "palbase-config.json"),
+		[]byte(`{"app_id":"app_ios","environment_ref":"app1prod","base_url":"https://app1prod.dev.palbase.studio","api_key":"pb_app1prod_c01234567890123456789"}`),
+		0o644,
+	))
+
+	f := selectiontest.New(t)
+	f.OK("GET /api/v2/projects/proj_1/apps", []map[string]any{{"id": "app_ios", "platform": "ios", "display_name": "Phone"}})
+	f.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("the committed app slot must be reused, not duplicated")
+	})
+
+	deps := stubPullSeams(t, "app_ios", "app1prod", "ios")
+	deps.rest = f.REST()
+
+	summary, err := runNativeLink(context.Background(), deps, nativeLinkOpts{
+		platform: "ios", projectID: "proj_1", environmentRef: "app1prod",
+	}, io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, "app_ios", summary.AppID)
+}

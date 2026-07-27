@@ -17,6 +17,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -197,7 +198,16 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 		return nil, fmt.Errorf("Android applicationId is required; pass --package-name")
 	}
 
-	appID, err := resolveNativeApp(ctx, d, opts.projectID, opts.platform, opts.appID, opts.identifier, w)
+	linkedAppID := opts.appID
+	if linkedAppID == "" {
+		// Fresh clone: `.palbase/config.json` is gitignored (it is CLI state),
+		// but the COMMITTED platform slot already names the app this checkout
+		// is linked to. Without this, the first link on a teammate's machine
+		// registers a SECOND app for the same project and rewrites the
+		// committed api_key.
+		linkedAppID = appIDFromPlatformSlot(opts.platform)
+	}
+	appID, err := resolveNativeApp(ctx, d, opts.projectID, opts.platform, linkedAppID, opts.identifier, w)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +238,24 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 		AppID:          appID,
 		ConfigDir:      configDir,
 	}, nil
+}
+
+// appIDFromPlatformSlot reads the app id out of the committed platform config
+// (`.palbase/<platform>/palbase-config.json`). Returns "" when the file is
+// absent or carries no id — the genuine first-link case, where registering a
+// new app is correct.
+func appIDFromPlatformSlot(platform string) string {
+	data, err := os.ReadFile(filepath.Join(".palbase", platform, "palbase-config.json"))
+	if err != nil {
+		return ""
+	}
+	var slot struct {
+		AppID string `json:"app_id"`
+	}
+	if err := json.Unmarshal(data, &slot); err != nil {
+		return ""
+	}
+	return slot.AppID
 }
 
 // persistProjectAppSlot records one platform's app registration in
