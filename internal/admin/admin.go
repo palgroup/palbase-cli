@@ -24,17 +24,32 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// validModules are the modules whose migrations can be reconciled (they have a
-// migrate-Job). Kept in sync with the mgmt API's `migrateTenantsInput` enum and
-// the orchestrator's `migrationActivityForModule` map.
-var validModules = []string{"palnotify", "paldocs", "palflags", "palauth"}
+// validModules are the modules the platform actively reconciles — the same set
+// the orchestrator schedules a 6-hourly reconcile for (schedules.reconcileModules).
+// The parent repo's "module reconcile surface parity" check fails when this, the
+// mgmt API's `migrateTenantsInput` enum, and that list disagree.
+//
+// It stopped at palauth while the orchestrator had gained palsvc, so there was
+// NO supported way to reconcile the schemas palsvc owns — including messaging's,
+// after the absorb moved them there. Discovering the fleet was two migrations
+// behind did not help: the command to repair it refused the module.
+//
+// palmessaging is deliberately NOT here even though the orchestrator can map it:
+// its activity runs the standalone messaging-server image, which the absorb
+// stopped building. palsvc reconciles that schema now.
+var validModules = []string{"palauth", "palnotify", "paldocs", "palflags", "palsvc"}
 
 // imageModules are the modules whose container image can be pinned on the
 // module-image channel. A superset of validModules: channel-only modules
-// (backend-runtime, palsvc, palmessaging, schema-diff-proxy) have no migrate-Job
-// but DO have a pinnable image. Kept in sync with the mgmt API's
-// `moduleImageName` enum (platform/studio .../services/admin.ts).
-var imageModules = []string{"palnotify", "paldocs", "palflags", "palauth", "palmessaging", "palsvc", "backend-runtime", "schema-diff-proxy"}
+// (backend-runtime, schema-diff-proxy) have no reconcile of their own but DO
+// have a pinnable image. The parity check keeps this and the mgmt API's
+// `moduleImageName` enum identical.
+//
+// palmessaging is NOT pinnable: the absorb deleted the messaging-server build
+// workflow, so no new immutable `sha-<40hex>@sha256:<64hex>` is ever published
+// for it — the only ref the channel accepts. Offering the module would let an
+// operator try to pin an image that cannot exist.
+var imageModules = []string{"palnotify", "paldocs", "palflags", "palauth", "palsvc", "backend-runtime", "schema-diff-proxy"}
 
 // REST is the subset of the Management-API transport the admin commands
 // use. transport.Client satisfies it; tests substitute a stub.
