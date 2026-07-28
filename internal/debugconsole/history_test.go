@@ -18,7 +18,7 @@ import (
 type historyStudio struct {
 	path    string
 	input   map[string]any
-	records []string
+	records []historyRecord
 	err     error
 }
 
@@ -34,9 +34,7 @@ func (h *historyStudio) Query(_ context.Context, path string, input any, out any
 	if !ok {
 		return errors.New("unexpected out type")
 	}
-	for _, r := range h.records {
-		resp.Records = append(resp.Records, json.RawMessage(r))
-	}
+	resp.Records = append(resp.Records, h.records...)
 	return nil
 }
 
@@ -63,6 +61,14 @@ func runHistory(t *testing.T, studio Studio, args ...string) (string, string, er
 	debug.SetArgs(append([]string{"history"}, args...))
 	err := debug.Execute()
 	return out.String(), errOut.String(), err
+}
+
+// wrapped is how the module stores a record: the envelope plus its batch context.
+func wrapped(envelope string) historyRecord {
+	return historyRecord{
+		SessionID: "018f4c2a", DistinctID: "u_42", Trigger: "error",
+		ReceivedAt: 1785172999000, Record: json.RawMessage(envelope),
+	}
 }
 
 // Exactly one of --user / --session: neither is a query nobody can answer, both
@@ -112,20 +118,53 @@ func TestHistoryEmptyResultSaysWhyItMightBeEmpty(t *testing.T) {
 
 // --json must emit the SAME envelope `attach --json` does, so one jq works
 // across both. Anything reshaped here forks the CLI's decoder in practice.
-func TestHistoryJSONIsTheSameEnvelopeAsAttach(t *testing.T) {
-	studio := &historyStudio{records: []string{realNetworkLine, realMessageLine}}
+func TestHistoryJSONFlattensTheEnvelopeAndKeepsItsContext(t *testing.T) {
+	studio := &historyStudio{records: []historyRecord{wrapped(realNetworkLine), wrapped(realMessageLine)}}
 	out, _, err := runHistory(t, studio, "--user", "u_42", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var viaAttach bytes.Buffer
-	warned := map[int]bool{}
-	for _, line := range []string{realNetworkLine, realMessageLine} {
-		printRecord(&viaAttach, &bytes.Buffer{}, []byte(line), false, true, false, warned)
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want one JSON object per record, got:\n%s", out)
 	}
-	if out != viaAttach.String() {
-		t.Errorf("history --json and attach --json disagree:\nhistory:\n%s\nattach:\n%s", out, viaAttach.String())
+
+	var got map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatal(err)
+	}
+
+	// The envelope is at the TOP level, exactly where attach --json puts it, so
+	// `jq '.network.url'` reads the same on both commands.
+	var attachEnvelope map[string]any
+	if err := json.Unmarshal([]byte(realNetworkLine), &attachEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range attachEnvelope {
+		gotJSON, _ := json.Marshal(got[key])
+		wantJSON, _ := json.Marshal(want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("%q differs from what attach --json emits:\n got: %s\nwant: %s", key, gotJSON, wantJSON)
+		}
+	}
+
+	// The context a live view cannot have rides alongside.
+	for key, want := range map[string]any{
+		"session_id": "018f4c2a", "distinct_id": "u_42",
+		"trigger": "error", "received_at": float64(1785172999000),
+	} {
+		if got[key] != want {
+			t.Errorf("%q = %v, want %v", key, got[key], want)
+		}
+	}
+
+	// Two spellings of one field is how a decoder reads the wrong one.
+	if _, found := got["schema_version"]; found {
+		t.Error("the wrapper's schema_version survived next to the record's schemaVersion")
+	}
+	if got["schemaVersion"] != float64(1) {
+		t.Errorf("schemaVersion = %v, want the record's own", got["schemaVersion"])
 	}
 }
 

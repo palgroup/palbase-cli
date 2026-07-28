@@ -16,12 +16,49 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// historyResponse keeps records RAW so one decode serves both paths: --json
-// emits the bytes verbatim (a developer's jq works across `attach` and
-// `history` because it is the same envelope), and the rendered path unmarshals
-// the same bytes through the same formatter.
 type historyResponse struct {
-	Records []json.RawMessage `json:"records"`
+	Records []historyRecord `json:"records"`
+}
+
+// historyRecord is the stored wrapper: the console envelope plus the context
+// only history has — which batch it came from, whose device, and what triggered
+// the upload.
+type historyRecord struct {
+	SessionID  string          `json:"session_id"`
+	DistinctID string          `json:"distinct_id"`
+	Trigger    string          `json:"trigger"`
+	ReceivedAt int64           `json:"received_at"`
+	Record     json.RawMessage `json:"record"`
+}
+
+// flatten lifts the envelope to the TOP level and hangs the wrapper's context
+// beside it as siblings, so `jq '.network.url'` reads the same on `history` as
+// on `attach` while `trigger` and `distinct_id` — the two things a live view
+// cannot have — survive.
+//
+// The wrapper's `schema_version` is dropped on purpose: it is the record's own
+// `schemaVersion` in snake_case, and two spellings of one field in one object
+// is how a decoder ends up reading the wrong one.
+func (h historyRecord) flatten() []byte {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(h.Record, &envelope); err != nil {
+		return h.Record // not an object — emit it as-is rather than lose it
+	}
+	for key, value := range map[string]any{
+		"session_id":  h.SessionID,
+		"distinct_id": h.DistinctID,
+		"trigger":     h.Trigger,
+		"received_at": h.ReceivedAt,
+	} {
+		if raw, err := json.Marshal(value); err == nil {
+			envelope[key] = raw
+		}
+	}
+	flat, err := json.Marshal(envelope)
+	if err != nil {
+		return h.Record
+	}
+	return flat
 }
 
 func historyCmd(r Resolvers) *cobra.Command {
@@ -79,8 +116,8 @@ func historyCmd(r Resolvers) *cobra.Command {
 				return nil
 			}
 			warned := map[int]bool{}
-			for _, raw := range resp.Records {
-				printRecord(out, errOut, raw, errorsOnly, asJSON, true, warned)
+			for _, rec := range resp.Records {
+				printRecord(out, errOut, rec.flatten(), errorsOnly, asJSON, true, warned)
 			}
 			return nil
 		},
