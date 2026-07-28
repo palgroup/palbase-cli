@@ -179,7 +179,11 @@ func newRootCmd() *cobra.Command {
 			Selection:  selectionResolver,
 			PublicHost: func() string { return resolved.Endpoints.PublicHost },
 		}),
-		debugconsole.Cmd(),
+		debugconsole.Cmd(debugconsole.Resolvers{
+			Studio:     func() debugconsole.Studio { return studioClient },
+			Selection:  selectionResolver,
+			PublicHost: func() string { return resolved.Endpoints.PublicHost },
+		}),
 		logs.Cmd(logs.Resolvers{
 			Studio:    func() logs.Studio { return studioClient },
 			Selection: selectionResolver,

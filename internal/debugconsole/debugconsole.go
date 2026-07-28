@@ -78,7 +78,7 @@ type bodyRef struct {
 }
 
 // Cmd returns the `palbase debug` command group.
-func Cmd() *cobra.Command {
+func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "debug",
 		Short: "Inspect an app's in-app Palbe console",
@@ -86,9 +86,11 @@ func Cmd() *cobra.Command {
 			"log line, and everything the app pushed in with pb.debug.\n\n" +
 			"`palbase logs` shows the server's view of a deployment. This shows the\n" +
 			"client's: the request that never left, the 401 nobody surfaced, the body\n" +
-			"that came back empty.",
+			"that came back empty.\n\n" +
+			"`tail` reads a simulator's own files — no network, no credentials. `attach`\n" +
+			"watches a REAL device live, with a pairing code the device shows.",
 	}
-	cmd.AddCommand(tailCmd())
+	cmd.AddCommand(tailCmd(), attachCmd(r))
 	return cmd
 }
 
@@ -114,7 +116,7 @@ func tailCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", session.describe())
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", session.describe())
 
 			out := cmd.OutOrStdout()
 			offset, err := renderFrom(out, session.path, 0, limit, errorsOnly, asJSON)
@@ -134,7 +136,7 @@ func tailCmd() *cobra.Command {
 				// than tailing a file nothing will ever append to again.
 				next, err := locateSession(device, bundleID)
 				if err == nil && next.path != session.path {
-					fmt.Fprintf(cmd.ErrOrStderr(), "▸ new session — %s\n", next.describe())
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "▸ new session — %s\n", next.describe())
 					session, offset = next, 0
 				}
 				offset, err = renderFrom(out, session.path, offset, 0, errorsOnly, asJSON)
@@ -351,7 +353,7 @@ func renderFrom(out io.Writer, path string, offset int64, limit int, errorsOnly,
 		}
 		text, keep := format(rec, errorsOnly, asJSON, line)
 		if keep {
-			fmt.Fprintln(out, text)
+			_, _ = fmt.Fprintln(out, text)
 		}
 	}
 	return consumed, nil
