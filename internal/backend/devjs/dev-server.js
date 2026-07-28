@@ -2156,7 +2156,18 @@ const server = http.createServer(async (req, res) => {
     requestId: pbReq.requestId,
     idempotencyKey: (parsedHeaders && parsedHeaders['idempotency-key']) || null,
   };
-  const palbaseALS = require('@palbase/backend').__requestALS;
+  // Reuse the cached resolve (runtimeModule) rather than a bare require: it
+  // already owns the "package not resolvable" contract. A resolvable SDK that
+  // predates __requestALS would otherwise surface as `Cannot read properties of
+  // undefined (reading 'run')` on EVERY request, which says nothing about the
+  // actual problem being an SDK too old for this dev-server.
+  const palbaseALS = (runtimeModule() || {}).__requestALS;
+  if (!palbaseALS) {
+    throw new Error(
+      "@palbase/backend does not export __requestALS, so `palbase serve` cannot scope this request. " +
+        'Upgrade the SDK in this project (npm i @palbase/backend@latest).',
+    );
+  }
   let result;
   try {
     // Execute the controller method bound to the cached instance so `this`

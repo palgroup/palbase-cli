@@ -1201,6 +1201,10 @@ module.exports = {
   // Runtime seam: record the installed services (fixtures return literals, so a
   // no-op store is enough).
   __setRuntime(services) { module.exports.__runtime = services; },
+  // The dev-server scopes every dispatch in this ALS so ctx.db / the Purchases
+  // decorators read THIS request's identity. A real SDK exports it; the stub
+  // must too, or dispatch fails before any handler runs.
+  __requestALS: new (require('node:async_hooks').AsyncLocalStorage)(),
   __registerResource(r) { registry.push(r); },
   async __runResourceBoot() {},
   async __shutdownResources() { registry.length = 0; },
@@ -1243,6 +1247,9 @@ module.exports = {
   // dispatch installs the runtime clients into the SDK on first request —
   // a no-op here (the typed-errors test only exercises spec + guard).
   __setRuntime: () => {},
+  // Dispatch scopes every request in this ALS, so even a stub that never runs
+  // a handler must export it or the request fails before reaching one.
+  __requestALS: new (require('node:async_hooks').AsyncLocalStorage)(),
 };
 `)
 }
