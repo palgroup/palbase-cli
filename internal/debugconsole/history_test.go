@@ -18,7 +18,7 @@ import (
 type historyStudio struct {
 	path    string
 	input   map[string]any
-	records []historyRecord
+	records []string
 	err     error
 }
 
@@ -34,7 +34,9 @@ func (h *historyStudio) Query(_ context.Context, path string, input any, out any
 	if !ok {
 		return errors.New("unexpected out type")
 	}
-	resp.Records = append(resp.Records, h.records...)
+	for _, r := range h.records {
+		resp.Records = append(resp.Records, json.RawMessage(r))
+	}
 	return nil
 }
 
@@ -61,14 +63,6 @@ func runHistory(t *testing.T, studio Studio, args ...string) (string, string, er
 	debug.SetArgs(append([]string{"history"}, args...))
 	err := debug.Execute()
 	return out.String(), errOut.String(), err
-}
-
-// wrapped is how the module stores a record: the envelope plus its batch context.
-func wrapped(envelope string) historyRecord {
-	return historyRecord{
-		SessionID: "018f4c2a", DistinctID: "u_42", Trigger: "error",
-		ReceivedAt: 1785172999000, Record: json.RawMessage(envelope),
-	}
 }
 
 // Exactly one of --user / --session: neither is a query nobody can answer, both
@@ -118,53 +112,38 @@ func TestHistoryEmptyResultSaysWhyItMightBeEmpty(t *testing.T) {
 
 // --json must emit the SAME envelope `attach --json` does, so one jq works
 // across both. Anything reshaped here forks the CLI's decoder in practice.
-func TestHistoryJSONFlattensTheEnvelopeAndKeepsItsContext(t *testing.T) {
-	studio := &historyStudio{records: []historyRecord{wrapped(realNetworkLine), wrapped(realMessageLine)}}
-	out, _, err := runHistory(t, studio, "--user", "u_42", "--json")
+// Studio flattens (studio ded4f78ee): it sends the console envelope at the TOP
+// level with the batch context alongside. The CLI is a thin forwarder — it must
+// pass those bytes through untouched AND render them.
+//
+// Pointed at what Studio returns, not at what the CLI builds, because the bug
+// this pins is the two ends disagreeing about the envelope. When they did, the
+// wrapper's absent top-level `schemaVersion` read 0, every record was skipped as
+// a version mismatch, and the user got an empty result with no error.
+func TestHistoryForwardsAndRendersWhatStudioSends(t *testing.T) {
+	// realNetworkLine with the four context fields Studio adds as siblings.
+	flat := strings.TrimSuffix(realNetworkLine, "}") +
+		`,"session_id":"018f4c2a","distinct_id":"u_42","trigger":"error","received_at":1785172999000}`
+
+	out, _, err := runHistory(t, &historyStudio{records: []string{flat}}, "--user", "u_42", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want one JSON object per record, got:\n%s", out)
+	if strings.TrimSpace(out) != flat {
+		t.Errorf("--json must forward Studio's bytes verbatim:\n got: %s\nwant: %s", out, flat)
 	}
 
-	var got map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+	// And the rendered path must actually RENDER it. This is the guard: a shape
+	// whose schemaVersion is not top-level renders nothing at all.
+	rendered, errOut, err := runHistory(t, &historyStudio{records: []string{flat}}, "--user", "u_42")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The envelope is at the TOP level, exactly where attach --json puts it, so
-	// `jq '.network.url'` reads the same on both commands.
-	var attachEnvelope map[string]any
-	if err := json.Unmarshal([]byte(realNetworkLine), &attachEnvelope); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(rendered, "/auth/login") {
+		t.Errorf("Studio's shape did not render:\nstdout:\n%s\nstderr:\n%s", rendered, errOut)
 	}
-	for key, want := range attachEnvelope {
-		gotJSON, _ := json.Marshal(got[key])
-		wantJSON, _ := json.Marshal(want)
-		if string(gotJSON) != string(wantJSON) {
-			t.Errorf("%q differs from what attach --json emits:\n got: %s\nwant: %s", key, gotJSON, wantJSON)
-		}
-	}
-
-	// The context a live view cannot have rides alongside.
-	for key, want := range map[string]any{
-		"session_id": "018f4c2a", "distinct_id": "u_42",
-		"trigger": "error", "received_at": float64(1785172999000),
-	} {
-		if got[key] != want {
-			t.Errorf("%q = %v, want %v", key, got[key], want)
-		}
-	}
-
-	// Two spellings of one field is how a decoder reads the wrong one.
-	if _, found := got["schema_version"]; found {
-		t.Error("the wrapper's schema_version survived next to the record's schemaVersion")
-	}
-	if got["schemaVersion"] != float64(1) {
-		t.Errorf("schemaVersion = %v, want the record's own", got["schemaVersion"])
+	if strings.Contains(errOut, "NOT being rendered") {
+		t.Errorf("records were skipped as a version mismatch:\n%s", errOut)
 	}
 }
 
