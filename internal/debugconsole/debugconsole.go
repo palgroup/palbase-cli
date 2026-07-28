@@ -75,6 +75,11 @@ type networkRecord struct {
 type bodyRef struct {
 	Size      int  `json:"size"`
 	Truncated bool `json:"truncated"`
+	// Inline carries the bytes when the body was small enough to keep in the
+	// record; Swift encodes `Data` as base64, which is what []byte decodes.
+	// Otherwise BlobKey (the body's SHA-256) says where the bytes went.
+	Inline  []byte `json:"inline"`
+	BlobKey string `json:"blobKey"`
 }
 
 // Cmd returns the `palbase debug` command group.
@@ -87,10 +92,11 @@ func Cmd(r Resolvers) *cobra.Command {
 			"`palbase logs` shows the server's view of a deployment. This shows the\n" +
 			"client's: the request that never left, the 401 nobody surfaced, the body\n" +
 			"that came back empty.\n\n" +
-			"`tail` reads a simulator's own files — no network, no credentials. `attach`\n" +
-			"watches a REAL device live, with a pairing code the device shows.",
+			"Three views of the same records: `tail` reads a simulator\x27s own files,\n" +
+			"`attach` watches a real device live with a pairing code it shows, and\n" +
+			"`history` reads back what already happened, days later.",
 	}
-	cmd.AddCommand(tailCmd(), attachCmd(r))
+	cmd.AddCommand(tailCmd(), attachCmd(r), historyCmd(r))
 	return cmd
 }
 

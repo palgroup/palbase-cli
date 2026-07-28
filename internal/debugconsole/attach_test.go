@@ -270,7 +270,7 @@ func TestForeignSchemaVersionIsReportedNeverCoerced(t *testing.T) {
 	t.Run("rendered output withholds it and says why", func(t *testing.T) {
 		var out, errOut bytes.Buffer
 		warned := map[int]bool{}
-		printRecord(&out, &errOut, []byte(foreign), false, false, warned)
+		printRecord(&out, &errOut, []byte(foreign), false, false, false, warned)
 
 		if out.Len() != 0 {
 			t.Errorf("rendered a schemaVersion=2 record through the v1 formatter:\n%s", out.String())
@@ -286,7 +286,7 @@ func TestForeignSchemaVersionIsReportedNeverCoerced(t *testing.T) {
 		var out, errOut bytes.Buffer
 		warned := map[int]bool{}
 		for i := 0; i < 5; i++ {
-			printRecord(&out, &errOut, []byte(foreign), false, false, warned)
+			printRecord(&out, &errOut, []byte(foreign), false, false, false, warned)
 		}
 		if got := strings.Count(errOut.String(), "schemaVersion=2"); got != 1 {
 			t.Errorf("reported %d times — repeating it buries the records that DO render", got)
@@ -295,7 +295,7 @@ func TestForeignSchemaVersionIsReportedNeverCoerced(t *testing.T) {
 
 	t.Run("--json still emits the bytes verbatim", func(t *testing.T) {
 		var out, errOut bytes.Buffer
-		printRecord(&out, &errOut, []byte(foreign), false, true, map[int]bool{})
+		printRecord(&out, &errOut, []byte(foreign), false, true, false, map[int]bool{})
 		if strings.TrimSpace(out.String()) != foreign {
 			t.Errorf("--json interprets nothing, so the record must pass through unchanged:\n got: %s\nwant: %s",
 				out.String(), foreign)
@@ -307,7 +307,7 @@ func TestForeignSchemaVersionIsReportedNeverCoerced(t *testing.T) {
 
 	t.Run("v1 renders", func(t *testing.T) {
 		var out, errOut bytes.Buffer
-		printRecord(&out, &errOut, []byte(realMessageLine), false, false, map[int]bool{})
+		printRecord(&out, &errOut, []byte(realMessageLine), false, false, false, map[int]bool{})
 		if !strings.Contains(out.String(), "cart is empty") {
 			t.Errorf("a v1 record must render:\n%s", out.String())
 		}
@@ -387,6 +387,13 @@ type fakeStudio struct {
 	input any
 	out   string // session_id to hand back
 	err   error
+}
+
+// Query is present only to satisfy the interface: `attach` must never resolve a
+// code through it, because tRPC puts a query's input in the URL.
+func (f *fakeStudio) Query(_ context.Context, path string, _ any, _ any) error {
+	f.path = path
+	return errors.New("attach must not put the pairing code in a URL")
 }
 
 func (f *fakeStudio) Mutation(_ context.Context, path string, input any, out any) error {
@@ -684,7 +691,7 @@ func TestAttachAndTailRenderIdentically(t *testing.T) {
 			var attached bytes.Buffer
 			warned := map[int]bool{}
 			for _, line := range []string{realMessageLine, realNetworkLine, successNetworkLine} {
-				printRecord(&attached, &bytes.Buffer{}, []byte(line), mode.errorsOnly, mode.asJSON, warned)
+				printRecord(&attached, &bytes.Buffer{}, []byte(line), mode.errorsOnly, mode.asJSON, false, warned)
 			}
 			if attached.String() != tailed {
 				t.Errorf("attach and tail disagree:\nattach:\n%s\ntail:\n%s", attached.String(), tailed)

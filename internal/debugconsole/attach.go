@@ -63,10 +63,14 @@ var (
 // exactly the record someone is attached to see.
 const readLimit = 8 << 20
 
-// Studio is the tRPC transport subset `attach` needs — a Mutation, NOT a Query,
-// because tRPC puts a query's input in the URL and the pairing code is a
-// capability. Same reason §D2 keeps it out of the topic name: URLs reach logs.
+// Studio is the tRPC transport subset this package needs.
+//
+// `attach` resolves a pairing code with Mutation and NOT Query, because tRPC
+// puts a query's input in the URL and the code is a capability — the same
+// reason §D2 keeps it out of the topic name. `history` reads with Query: its
+// inputs (an end user id, a window) are not capabilities.
 type Studio interface {
+	Query(ctx context.Context, path string, input any, out any) error
 	Mutation(ctx context.Context, path string, input any, out any) error
 }
 
@@ -437,14 +441,17 @@ func handleFrame(raw []byte, out, errOut io.Writer, errorsOnly, asJSON bool, war
 		if err := json.Unmarshal(f.Payload, &b); err != nil || b.Event != recordEvent {
 			return nil
 		}
-		printRecord(out, errOut, b.Payload, errorsOnly, asJSON, warned)
+		printRecord(out, errOut, b.Payload, errorsOnly, asJSON, false, warned)
 	}
 	return nil
 }
 
-// printRecord renders one broadcast envelope through the SAME formatter `tail`
-// uses, so attaching to a device and tailing a simulator look identical.
-func printRecord(out, errOut io.Writer, payload []byte, errorsOnly, asJSON bool, warned map[int]bool) {
+// printRecord renders one envelope through the SAME formatter `tail` uses, so
+// attaching to a device, tailing a simulator and reading history all look
+// identical. `bodies` adds the request/response payloads underneath — `history`
+// wants them (they are the whole question it answers); the live views do not,
+// because a multi-line body breaks a stream you scan by eye.
+func printRecord(out, errOut io.Writer, payload []byte, errorsOnly, asJSON, bodies bool, warned map[int]bool) {
 	var rec record
 	if err := json.Unmarshal(payload, &rec); err != nil {
 		return
@@ -466,5 +473,66 @@ func printRecord(out, errOut io.Writer, payload []byte, errorsOnly, asJSON bool,
 	}
 	if text, keep := format(rec, errorsOnly, asJSON, string(payload)); keep {
 		_, _ = fmt.Fprintln(out, text)
+		if bodies && !asJSON && rec.Network != nil {
+			_, _ = fmt.Fprint(out, bodyText("request", rec.Network.RequestBody))
+			_, _ = fmt.Fprint(out, bodyText("response", rec.Network.ResponseBody))
+		}
 	}
+}
+
+// bodyText renders one body under its record, or nothing when there was no body
+// at all. The three states a reader must be able to tell apart:
+//
+//	we have the bytes · we have a PREFIX of them · they are stored elsewhere
+//
+// "no body" is the absent case and prints nothing, because a GET with no
+// request body is not a gap in the record — it is the record.
+func bodyText(label string, ref *bodyRef) string {
+	if ref == nil {
+		return ""
+	}
+	head := fmt.Sprintf("    %-8s %s", label, byteCount(ref.Size))
+	switch {
+	case len(ref.Inline) > 0:
+		body := string(ref.Inline)
+		if ref.Truncated {
+			// size is the TRUE size, so this says how much is missing rather
+			// than letting a prefix read as the whole thing.
+			head += fmt.Sprintf(" (first %s of it)", byteCount(len(ref.Inline)))
+		}
+		return head + "\n" + indent(body) + "\n"
+	case ref.BlobKey != "":
+		// ponytail: not fetched. The blob read path is history-ingest's and does
+		// not exist yet; say where the bytes are rather than pretend they are
+		// absent. One call swaps in here when that contract lands.
+		return head + fmt.Sprintf(" (kept out of line, not fetched — blob %s)\n", short(ref.BlobKey))
+	case ref.Size == 0:
+		return head + " (empty)\n"
+	default:
+		// Sized, but neither inline nor keyed: the bytes were dropped, and the
+		// only honest thing is to say so instead of showing an empty body.
+		return head + " (not retained)\n"
+	}
+}
+
+func indent(body string) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = "      " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func byteCount(n int) string {
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	return fmt.Sprintf("%.1fkB", float64(n)/1024)
+}
+
+func short(key string) string {
+	if len(key) > 12 {
+		return key[:12] + "…"
+	}
+	return key
 }
