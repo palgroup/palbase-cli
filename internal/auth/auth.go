@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -156,9 +157,20 @@ func (c *Client) Login(ctx context.Context) error {
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	for _, listener := range listeners {
-		go srv.Serve(listener)
+		go func() {
+			// ponytail: report, do NOT abort. One login is served by several
+			// loopback listeners (v4 + v6), so failing the whole flow on the
+			// first one's Accept error would kill a login the others could still
+			// complete. Silencing it instead — which is what `_ =` here would
+			// do — turns a dead listener into a 120s wait ending in "timed out",
+			// with nothing saying why. ErrServerClosed is the normal path: the
+			// deferred Close below produces one per listener.
+			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				_, _ = fmt.Fprintf(c.Output, "(callback listener %s stopped: %s)\n", listener.Addr(), err)
+			}
+		}()
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	fmt.Fprintln(c.Output, "Opening browser for login...")
 	fmt.Fprintf(c.Output, "If your browser doesn't open, visit:\n  %s\n", authURL)

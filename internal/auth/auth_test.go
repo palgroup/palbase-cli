@@ -129,7 +129,7 @@ func TestLogin_FullFlow(t *testing.T) {
 	authServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth/token":
-			r.ParseForm()
+			_ = r.ParseForm()
 			assert.Equal(t, "authorization_code", r.FormValue("grant_type"))
 			assert.Equal(t, "palbase-cli", r.FormValue("client_id"))
 			assert.NotEmpty(t, r.FormValue("code_verifier"))
@@ -140,7 +140,7 @@ func TestLogin_FullFlow(t *testing.T) {
 			// unbound and every later DPoP-only API call would 401.
 			assert.NotEmpty(t, r.Header.Get("DPoP"), "exchange must carry DPoP proof")
 
-			json.NewEncoder(w).Encode(TokenResponse{
+			_ = json.NewEncoder(w).Encode(TokenResponse{
 				AccessToken:  "access_123",
 				RefreshToken: "refresh_456",
 				ExpiresIn:    900,

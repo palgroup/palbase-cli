@@ -8,19 +8,19 @@
 //
 // Key lifecycle:
 //
-//   1. `palbase login` generates an ephemeral ECDSA P-256 keypair and
-//      stores the private JWK in the OS keyring (macOS Keychain, Linux
-//      Secret Service, Windows Credential Manager). The public thumbprint
-//      is included in the /oauth/authorize request as `dpop_jkt` so
-//      palauth pre-binds the access token at issue time.
+//  1. `palbase login` generates an ephemeral ECDSA P-256 keypair and
+//     stores the private JWK in the OS keyring (macOS Keychain, Linux
+//     Secret Service, Windows Credential Manager). The public thumbprint
+//     is included in the /oauth/authorize request as `dpop_jkt` so
+//     palauth pre-binds the access token at issue time.
 //
-//   2. Every HTTP call built via AttachProof signs a fresh proof JWT with
-//      the stored private key. The proof is unique per request (htm, htu,
-//      iat, jti, ath) and single-use — palauth's Redis jti dedup ensures
-//      replay fails server-side even if the proof is intercepted.
+//  2. Every HTTP call built via AttachProof signs a fresh proof JWT with
+//     the stored private key. The proof is unique per request (htm, htu,
+//     iat, jti, ath) and single-use — palauth's Redis jti dedup ensures
+//     replay fails server-side even if the proof is intercepted.
 //
-//   3. `palbase logout` (or any key rotation path) deletes the keyring
-//      entry; the next login mints a new keypair.
+//  3. `palbase logout` (or any key rotation path) deletes the keyring
+//     entry; the next login mints a new keypair.
 //
 // The mode name ("prod", "dev") is part of the keyring slot so the two
 // sessions can coexist without clobbering each other.
