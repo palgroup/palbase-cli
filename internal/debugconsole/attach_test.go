@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
 // The frames below are REAL bytes, not hand-authored shapes:
@@ -495,6 +498,54 @@ func TestResolveWithoutAStudioSaysWhatToDo(t *testing.T) {
 	}
 }
 
+// Studio sets the tRPC message to palsvc's reason VERBATIM so this CLI can tell
+// the failures apart. That promise spans three hops — palsvc's reason, Studio's
+// error envelope, studio.Client's rendering — and every one of them is a place
+// someone could "tidy" the reason away. So drive the REAL client against the
+// REAL superjson envelope Studio emits, and assert on the string a user reads.
+func TestStudioErrorReasonsSurviveToTheTerminal(t *testing.T) {
+	tests := []struct {
+		name, reason, trpcCode string
+		status                 int
+	}{
+		{"no such session", "unknown_session", "NOT_FOUND", 404},
+		// tRPC has no GONE, so expired travels as PRECONDITION_FAILED — the
+		// precondition being a live session.
+		{"expired", "expired", "PRECONDITION_FAILED", 412},
+		{"rate limited", "rate_limited", "TOO_MANY_REQUESTS", 429},
+	}
+
+	seen := map[string]bool{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				// tRPC + superjson: the real fields nest under `json`.
+				_, _ = fmt.Fprintf(w,
+					`{"error":{"json":{"message":%q,"code":-32001,"data":{"code":%q,"httpStatus":%d}}}}`,
+					tc.reason, tc.trpcCode, tc.status)
+			}))
+			defer srv.Close()
+
+			_, err := resolveSession(context.Background(),
+				studio.New(srv.URL, nil, nil), "todoappm8p6zm", "K7M4P2QX")
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			for _, want := range []string{"debug.resolveSession", tc.trpcCode, tc.reason} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the message a user reads is missing %q:\n%s", want, err)
+				}
+			}
+			if seen[err.Error()] {
+				t.Errorf("this failure is indistinguishable from an earlier one: %s", err)
+			}
+			seen[err.Error()] = true
+		})
+	}
+}
+
 // MARK: - Attaching
 
 // palsvc fans out and forgets (§7), so silence after a successful join is
@@ -536,7 +587,11 @@ func TestTailNeedsNoTransport(t *testing.T) {
 	// under `go test` is the test binary's own flags — the command would fail
 	// on argument parsing and never reach RunE, and this test would pass
 	// without proving anything.
-	debug.SetArgs([]string{"tail"})
+	//
+	// --device short-circuits the `xcrun simctl list devices` shell-out (which
+	// costs ~10s and is not what this test is about); RunE still runs, so the
+	// nil-resolver check below is unaffected.
+	debug.SetArgs([]string{"tail", "--device", "no-such-simulator"})
 
 	var err error
 	var ran bool
