@@ -710,7 +710,7 @@ function findRouteParam(params, kind) {
 // internal/runtime/module-clients.js. Keep them in lockstep — edit both
 // when changing any client surface. There is no @palbase/server dep
 // anymore; customers only add @palbase/backend.
-const { buildModuleClients, buildDbEdgeClient } = require('./module-clients.js');
+const { buildModuleClients, buildDbEdgeClient, buildPurchasesClient } = require('./module-clients.js');
 
 // Per-request identity carried in an AsyncLocalStorage box — mirrors the
 // deployed executor.js (internal/runtime/executor.js: `requestALS.getStore()`).
@@ -1186,9 +1186,13 @@ function localQueue() {
 // worker registry survive across the per-request installRuntime() calls.
 //
 // EXCLUDED on purpose: Realtime, Functions, CMS, Links, Analytics, Auth.
+//
+// Returns the bag as well as installing it: the purchases decorators resolve
+// their services from the SDK's OWN request box (see the dispatch site), which
+// has to carry the same bag the global slot holds.
 function installRuntime() {
   const clients = moduleClients();
-  require('@palbase/backend').__setRuntime({
+  const services = {
     Database: databaseClient(),
     Documents: clients.docs,
     Storage: clients.storage,
@@ -1197,7 +1201,14 @@ function installRuntime() {
     Log: makeLog(),
     Notifications: clients.notifications,
     Flags: clients.flags,
-  });
+    // Backs @RequireEntitlement/@Spend. Talks to a real palstore over
+    // PALSTORE_BASE_URL / PALSTORE_SECRET_KEY (.env.local under serve) — there
+    // is no local fake, so a paywalled endpoint behaves in dev exactly as it
+    // will in prod, and says which variable is missing when it can't.
+    Purchases: buildPurchasesClient(),
+  };
+  require('@palbase/backend').__setRuntime(services);
+  return services;
 }
 
 // makeRequest builds the request-scoped object the dispatcher pulls injected
@@ -2028,7 +2039,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  installRuntime();
+  const runtimeServices = installRuntime();
   const pbReq = makeRequest(req, params, query, body, user);
 
   // --- Validate present source schemas off the LIVE registry ---------------
@@ -2132,13 +2143,29 @@ const server = http.createServer(async (req, res) => {
     userId: (pbReq.user && pbReq.user.id) || null,
     userToken: (user && user.token) || null,
   };
+  // The purchases decorators (@RequireEntitlement/@Spend) read the SDK's OWN
+  // request box, not this file's: `currentSubjectId()` resolves the subject from
+  // its `userId` (server-owned — never a decorator argument), and @Spend takes
+  // its idempotency scope from `idempotencyKey || requestId`. Deployed, worker.js
+  // writes exactly these three fields; without them here a decorated handler
+  // throws "used outside a request scope" under `palbase serve` while working in
+  // prod, which is the dev≠prod gap this file exists to prevent.
+  const sdkBox = {
+    runtime: runtimeServices,
+    userId: requestBox.userId,
+    requestId: pbReq.requestId,
+    idempotencyKey: (parsedHeaders && parsedHeaders['idempotency-key']) || null,
+  };
+  const palbaseALS = require('@palbase/backend').__requestALS;
   let result;
   try {
     // Execute the controller method bound to the cached instance so `this`
     // resolves the controller's fields/services — inside the ALS scope so every
     // ctx.db / ctx.flags call the handler makes (across any await) reads THIS
     // request's identity, not a concurrently-dispatched one.
-    result = await runInRequestContext(requestBox, () => instance[liveRoute.fnName](...args));
+    result = await runInRequestContext(requestBox, () =>
+      palbaseALS.run(sdkBox, () => instance[liveRoute.fnName](...args)),
+    );
   } catch (err) {
     // The SDK's global throw classes (Conflict/NotFound/BadRequest/… and the
     // base PalError/HttpError) all extend HttpError and set `.status` (number)

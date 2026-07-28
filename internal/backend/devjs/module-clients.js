@@ -1328,9 +1328,184 @@ function buildModuleClients(palbase, options) {
   };
 }
 
+// ─── Purchases (palstore `sk_` backend surface) ──────────────────────────
+//
+// The @RequireEntitlement / @Spend decorators (SDK: purchases/decorators.ts)
+// resolve `Purchases` off the runtime bag. This is the client the runtime
+// injects there — a small fetch wrapper, same "no external deps" rule as every
+// other client in this file.
+//
+// Deliberately NOT `require('@palstore/purchases')`: @palbase/backend is
+// published public and baked into the br-pod from a tarball, so the pod has no
+// palstore package to resolve. That is exactly why the SDK declares
+// PurchasesService as a narrow STRUCTURAL interface (purchases/service.ts) —
+// this object satisfies it with no adapter. Only the three methods the
+// decorators call are implemented; a tenant wanting grants/refunds/credits
+// imports palstore's own SDK directly.
+//
+// CONFIG is read at CALL time, not at boot, from the same variables the
+// deployed environment carries. Under `palbase serve` they come from
+// .env.local/.env (auto-loaded into process.env at startup); in the pod they are
+// environment variables laid onto the executor child after the scrubbed fork.
+// Same surface the SDK's subject.ts already reads PALSTORE_STORE_ENV from.
+//
+//   PALSTORE_BASE_URL    e.g. https://api.palstore.dev
+//   PALSTORE_SECRET_KEY  the project's sk_… key
+//
+// The key travels in X-Palstore-Key. NOT `Authorization: Bearer` — palstore's
+// backend surface answers 401 to a Bearer.
+const PURCHASES_PREFIX = '/api/v1/backend/purchases';
+
+// PalstoreError mirrors @palstore/purchases' error shape just enough for the
+// SDK's toHttpError (purchases/errors.ts), which detects STRUCTURALLY on
+// `code` + `status` and reads `.entitlement` / `.state` off the error. Anything
+// it does not recognise is rethrown verbatim and surfaces as a 500 — correct: a
+// palstore outage must not be dressed up as a tidy 403.
+class PalstoreError extends Error {
+  constructor(code, status, message, data) {
+    super(message);
+    this.name = 'PalstoreError';
+    this.code = code;
+    this.status = status;
+    if (data !== undefined) this.data = data;
+  }
+}
+
+// purchasesUnconfigured is the FAIL-CLOSED answer to a missing key: a paywalled
+// endpoint must never answer as if the caller were entitled just because the
+// deployment forgot a variable. It carries the HttpError shape the runtime
+// matches (`.status` + `.error`) so the developer gets a 503 naming the variable
+// instead of a generic 500 with a transport message. It carries NO `.code`, so
+// the SDK's toHttpError passes it through untouched rather than re-mapping it.
+function purchasesUnconfigured(missing) {
+  const message =
+    `Purchases is not configured: ${missing.join(' and ')} must be set on this ` +
+    "environment's variables. @RequireEntitlement/@Spend call palstore with the project's " +
+    'sk_ secret key (sent as X-Palstore-Key); with none, the gate refuses rather than ' +
+    'letting a paywalled endpoint answer as if the user were entitled.';
+  const err = new Error(message);
+  err.name = 'PurchasesUnconfigured';
+  err.status = 503;
+  err.error = 'purchases_unconfigured';
+  err.errorDescription = message;
+  return err;
+}
+
+function palstoreConfig() {
+  const baseUrl = (process.env.PALSTORE_BASE_URL || '').replace(/\/+$/, '');
+  const secretKey = process.env.PALSTORE_SECRET_KEY || '';
+  const missing = [];
+  if (!baseUrl) missing.push('PALSTORE_BASE_URL');
+  if (!secretKey) missing.push('PALSTORE_SECRET_KEY');
+  if (missing.length > 0) throw purchasesUnconfigured(missing);
+  return { baseUrl, secretKey };
+}
+
+// palstoreErrorFrom parses a non-2xx body into the structural shape toHttpError
+// maps: `entitlement_required` → 403 (carrying `.entitlement`), `quota_exceeded`
+// / `credit_insufficient` → 429 (carrying `.state`, which a paywall renders as
+// "3 of 3 used, resets at X"). `requested` is peeled off the payload because it
+// is a property of the CALL, not of the limit's state.
+function palstoreErrorFrom(status, body) {
+  const record = body && typeof body === 'object' ? body : {};
+  const code = typeof record.error === 'string' ? record.error : 'unknown_error';
+  const data = record.data && typeof record.data === 'object' ? record.data : {};
+  const message =
+    typeof record.detail === 'string' ? record.detail : `palstore request failed (${status})`;
+  const err = new PalstoreError(code, status, message, record);
+  if (code === 'entitlement_required') {
+    err.entitlement = data.entitlement === undefined ? null : data.entitlement;
+  }
+  if (code === 'quota_exceeded' || code === 'credit_insufficient') {
+    const state = { ...data };
+    delete state.requested;
+    err.state = state;
+  }
+  return err;
+}
+
+async function palstoreRequest(method, subpath, body) {
+  const { baseUrl, secretKey } = palstoreConfig();
+  const res = await fetch(`${baseUrl}${PURCHASES_PREFIX}${subpath}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Palstore-Key': secretKey },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => undefined);
+  if (!res.ok) throw palstoreErrorFrom(res.status, json);
+  return json;
+}
+
+// buildPurchasesClient returns the object injected as the `Purchases` singleton.
+// Stateless — every call re-reads the config, so a variable added to .env.local
+// takes effect on the next request instead of at the next restart.
+function buildPurchasesClient() {
+  return {
+    resolveSubject(input) {
+      return palstoreRequest('POST', '/subjects/resolve', {
+        userRef: input.userRef,
+        storeEnv: input.storeEnv,
+      });
+    },
+
+    // ponytail: no read cache. palstore's own SDK caches customer-info for 30s,
+    // but it can invalidate on its own writes and the runtime never writes — a
+    // cache here would keep a REVOKED entitlement answering 200 for the whole
+    // TTL. One round-trip per gated request until that measurably hurts; the
+    // upgrade path is a short TTL keyed on (subjectId, entitlementKey).
+    async require(subjectId, entitlementKey) {
+      const info = await palstoreRequest(
+        'GET',
+        `/customer-info/${encodeURIComponent(subjectId)}`,
+      );
+      const held = info && info.entitlements && info.entitlements[entitlementKey];
+      if (!held || !held.active) {
+        const err = new PalstoreError(
+          'entitlement_required',
+          403,
+          `entitlement "${entitlementKey}" is required`,
+        );
+        err.entitlement = entitlementKey;
+        throw err;
+      }
+    },
+
+    // Reserve → run → commit on success, cancel on throw, ALWAYS rethrowing the
+    // handler's own error so a tenant's catch sees its own exception. Mirrors
+    // @palstore/purchases' withSpend (spend.ts); getting the cancel-on-throw
+    // half wrong silently charges a user for work that never completed.
+    async withSpend(subjectId, key, opts, handler) {
+      const receipt = await palstoreRequest('POST', '/reserve', {
+        subjectId,
+        key,
+        count: opts && opts.count !== undefined ? opts.count : 1,
+        idempotencyKey: opts && opts.idempotencyKey,
+      });
+      let result;
+      try {
+        result = await handler();
+      } catch (err) {
+        // A failed cancel must not mask the handler's real error — the hold
+        // expires on the server's own lease TTL either way.
+        await palstoreRequest('POST', '/cancel', {
+          receiptId: receipt.receiptId,
+          claimToken: receipt.claimToken,
+        }).catch(() => undefined);
+        throw err;
+      }
+      await palstoreRequest('POST', '/commit', {
+        receiptId: receipt.receiptId,
+        claimToken: receipt.claimToken,
+      });
+      return result;
+    },
+  };
+}
+
 module.exports = {
   PalbaseError,
   buildModuleClients,
+  buildPurchasesClient,
   buildDbEdgeClient,
   // Exported for tests so individual clients can be exercised in isolation.
   makeHttpClient,
