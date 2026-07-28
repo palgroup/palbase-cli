@@ -297,7 +297,16 @@ func (c *Client) fetchUserInfo(ctx context.Context, accessToken string, key *DPo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("userinfo failed (%d)", resp.StatusCode)
+		// A bare "(401)" says nothing and sends the next person reading it
+		// into the server logs. palauth answers here with either a plaintext
+		// OP error ("access token invalid") or an RFC 9449 challenge naming
+		// the exact binding that failed — both belong in the error.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		detail := strings.TrimSpace(string(body))
+		if challenge := resp.Header.Get("WWW-Authenticate"); challenge != "" {
+			detail += " (" + challenge + ")"
+		}
+		return nil, fmt.Errorf("userinfo failed (%d): %s", resp.StatusCode, detail)
 	}
 
 	var info UserInfoResponse
