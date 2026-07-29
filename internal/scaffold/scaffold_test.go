@@ -63,7 +63,11 @@ func TestInit_EmptyDir(t *testing.T) {
 		return string(data)
 	}
 	assert.Contains(t, read("package.json"), `"name": "myapp"`)
-	assert.Contains(t, read("package.json"), `"@palbase/backend": "^10.0.0"`)
+	// A new project tracks the newest published SDK rather than a major pinned
+	// into this binary — a pin here goes stale the moment the SDK ships a major,
+	// and every CLI released before that bump scaffolds a tree the deploy gate
+	// refuses. Keep this in step with the orchestrator's backend_template.
+	assert.Contains(t, read("package.json"), `"@palbase/backend": "latest"`)
 	assert.Contains(t, read("tsconfig.json"), `"experimentalDecorators": true`)
 	assert.Contains(t, read(filepath.Join("db", "schema.ts")), "export default defineSchema({")
 	ctrl := read(filepath.Join("controllers", "hello.controller.ts"))

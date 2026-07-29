@@ -53,7 +53,7 @@ const packageJSON = `{
     "prepare": "git config core.hooksPath hooks 2>/dev/null && chmod +x hooks/* 2>/dev/null || true"
   },
   "dependencies": {
-    "@palbase/backend": "^10.0.0"
+    "@palbase/backend": "latest"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
