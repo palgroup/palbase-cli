@@ -1,6 +1,6 @@
 // Package scaffold provides `palbase init` — it writes a minimal, working
 // Palbase backend codebase skeleton (class-controller model, @palbase/backend
-// ^9.0.0) into a directory: package.json, tsconfig.json, db/schema.ts,
+// ^10.0.0) into a directory: package.json, tsconfig.json, db/schema.ts,
 // controllers/hello.controller.ts, and .gitignore. Purely local file
 // authoring — no Studio / network, mirroring internal/storage's local-only
 // command style. The generated contents are verified against the live
@@ -34,7 +34,14 @@ func sanitizeName(base string) string {
 }
 
 // packageJSON matches todoapp's minimum field set; the dependency major must
-// track the backend-runtime's @palbase/backend major (9.x today).
+// track the backend-runtime's @palbase/backend major (10.x today).
+//
+// This is NOT cosmetic and NOT the only copy. The deploy gate compares the
+// major this resolves to against the one the runtime vendors and REFUSES the
+// deploy on a mismatch, so a stale number here scaffolds a tree that cannot be
+// deployed by the supported path. The sibling copy is the orchestrator's seed
+// template (internal/activities/backend_template/package.json) — bumping one
+// and not the other is how this drifted.
 const packageJSON = `{
   "name": "%s",
   "version": "0.1.0",
@@ -46,7 +53,7 @@ const packageJSON = `{
     "prepare": "git config core.hooksPath hooks 2>/dev/null && chmod +x hooks/* 2>/dev/null || true"
   },
   "dependencies": {
-    "@palbase/backend": "^9.0.0"
+    "@palbase/backend": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
