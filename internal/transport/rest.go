@@ -120,6 +120,20 @@ type errorEnvelope struct {
 // envelope's `data` is decoded into out (out may be nil to discard). On a
 // non-2xx the error envelope is parsed into an *APIError.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWithIdempotency(ctx, method, path, body, out, "")
+}
+
+// DoIdempotent is Do with an `Idempotency-Key` header. The v2 API REQUIRES one
+// on some mutations — API-key creation and rotation answer
+// `400 Idempotency-Key is required` without it — so those routes must call this
+// rather than Do. Mint the key with NewIdempotencyKey once per logical
+// mutation, and reuse the SAME key on a retry: a fresh key on a timed-out
+// request is how one intended mutation becomes two.
+func (c *Client) DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
+	return c.doWithIdempotency(ctx, method, path, body, out, idempotencyKey)
+}
+
+func (c *Client) doWithIdempotency(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
 	var reqBody io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -135,6 +149,9 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 
 	resp, err := c.HTTPClient.Do(req)

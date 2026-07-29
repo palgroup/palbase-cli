@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"io"
 	"net/http"
 	"text/tabwriter"
@@ -28,6 +29,9 @@ import (
 // REST is the transport subset the apikey commands need.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
+	// DoIdempotent carries an Idempotency-Key. Key creation REQUIRES one
+	// server-side; Do alone gets a 400.
+	DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error
 }
 
 // Resolvers carries the lazily-built REST client + the shared selection resolver.
@@ -142,9 +146,14 @@ func createCmd(r Resolvers) *cobra.Command {
 				Plaintext      string `json:"plaintext"`
 				LookupPrefix   string `json:"lookup_prefix"`
 			}
-			if err := r.REST().Do(cmd.Context(), http.MethodPost,
+			// The v2 route REQUIRES an Idempotency-Key on key creation — without
+			// one it answers 400 and the command is simply unusable. Minted per
+			// invocation: a create is one logical mutation and the CLI does not
+			// retry it.
+			if err := r.REST().DoIdempotent(cmd.Context(), http.MethodPost,
 				keysPath(sel.ProjectID, sel.EnvironmentRef(), ""),
-				map[string]any{"name": name}, &created); err != nil {
+				map[string]any{"name": name}, &created,
+				transport.NewIdempotencyKey()); err != nil {
 				return err
 			}
 			if err := validateEnvironmentRef("create", sel.EnvironmentRef(), created.EnvironmentRef); err != nil {

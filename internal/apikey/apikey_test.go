@@ -123,6 +123,12 @@ func TestApikeyCreate_SendsOnlyTheName(t *testing.T) {
 	req, ok := fake.Find("POST " + base)
 	require.True(t, ok)
 	require.Equal(t, map[string]any{"name": "ci"}, req.Body)
+	// The v2 route REJECTS key creation without this header — 400, every time,
+	// which made `palbase apikey create` unusable on v0.13.0. Asserted on the
+	// wire rather than on the call site, because the call site compiled fine
+	// while sending nothing.
+	require.NotEmpty(t, req.Header.Get("Idempotency-Key"),
+		"apikey create MUST carry an Idempotency-Key")
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
 	require.Equal(t, "app1prod", got["environment_ref"])
