@@ -22,6 +22,7 @@
 package flags
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -47,8 +48,8 @@ var flagKeyRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 // validation + display.
 type flagDef struct {
 	Key            string   `json:"key"`
-	Type           string   `json:"type"`    // "boolean" | "number" | "string"
-	DefaultLiteral string   `json:"default"` // raw TS literal, e.g. `false`, `10`, `"light"`
+	Type           string   `json:"type"`    // "boolean" | "number" | "string" | "json"
+	DefaultLiteral string   `json:"default"` // raw TS literal, e.g. `false`, `10`, `"light"`, `{"daily":10}`
 	Variants       []string `json:"variants,omitempty"`
 	Description    string   `json:"description,omitempty"`
 }
@@ -99,6 +100,11 @@ func addCmd() *cobra.Command {
   palbase flags add new_dashboard --type boolean --default false --description "Roll out the new dashboard"
   palbase flags add max_uploads   --type number  --default 10
   palbase flags add theme         --type string  --default light --variants light,dark,system
+  palbase flags add limits        --type json    --default '{"daily":10,"burst":50}'
+
+--type json is a structured flag: the --default is a JSON OBJECT, written into
+config/flags.ts as an object literal. It is the same type ` + "`palbase flags user set --type json`" + `
+writes, and the server's "object" value type (objects nest at most 3 deep).
 
 --variants is only valid for --type string (the allowed values the flag may
 take); the --default must be one of them. Idempotent: running it again with the
@@ -111,7 +117,7 @@ config/flags.ts and ` + "`git push`" + ` to apply.`,
 				return fmt.Errorf("invalid flag key %q — must start with a letter and contain only letters, digits, and underscores", key)
 			}
 			if !cmd.Flags().Changed("type") {
-				return fmt.Errorf("--type is required (one of boolean, number, string)")
+				return fmt.Errorf("--type is required (one of boolean, number, string, json)")
 			}
 			if !cmd.Flags().Changed("default") {
 				return fmt.Errorf("--default is required")
@@ -143,8 +149,8 @@ config/flags.ts and ` + "`git push`" + ` to apply.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&typeFlag, "type", "", "Flag type: boolean, number, or string (required)")
-	cmd.Flags().StringVar(&defaultFlag, "default", "", "Default value — true/false, a number, or a string (required)")
+	cmd.Flags().StringVar(&typeFlag, "type", "", "Flag type: boolean, number, string, or json (required)")
+	cmd.Flags().StringVar(&defaultFlag, "default", "", "Default value — true/false, a number, a string, or a JSON object for --type json (required)")
 	cmd.Flags().StringVar(&variantsFlag, "variants", "", "Comma-separated allowed values (only for --type string), e.g. light,dark,system")
 	cmd.Flags().StringVar(&descFlag, "description", "", "Human description of what the flag controls")
 	return cmd
@@ -229,13 +235,13 @@ func listCmd() *cobra.Command {
 // buildFlagDef validates the add-command inputs (mirroring the SDK's flag()
 // rules) and produces a normalized flagDef. The --default string is interpreted
 // per --type: a boolean parses "true"/"false"; a number parses a numeric
-// literal; a string is taken verbatim. variants are only valid for string and
-// the default must be one of them.
+// literal; a string is taken verbatim; json parses a JSON object. variants are
+// only valid for string and the default must be one of them.
 func buildFlagDef(key, typeFlag, defaultFlag, variantsFlag, descFlag string) (flagDef, error) {
 	switch typeFlag {
-	case "boolean", "number", "string":
+	case "boolean", "number", "string", "json":
 	default:
-		return flagDef{}, fmt.Errorf("invalid --type %q — must be boolean, number, or string", typeFlag)
+		return flagDef{}, fmt.Errorf("invalid --type %q — must be boolean, number, string, or json", typeFlag)
 	}
 
 	def := flagDef{Key: key, Type: typeFlag, Description: strings.TrimSpace(descFlag)}
@@ -259,6 +265,23 @@ func buildFlagDef(key, typeFlag, defaultFlag, variantsFlag, descFlag string) (fl
 		def.DefaultLiteral = strconv.FormatFloat(n, 'f', -1, 64)
 	case "string":
 		def.DefaultLiteral = strconv.Quote(defaultFlag)
+	case "json":
+		// A JSON OBJECT, not any JSON: PalFlags' `object` value type decodes to a
+		// map and rejects an array or a scalar, so catch it here rather than at
+		// deploy time. Compacting normalises away whatever whitespace the shell
+		// carried in and re-emits a canonical one-line object literal (valid TS).
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(defaultFlag), &obj); err != nil {
+			return flagDef{}, fmt.Errorf("--default for a json flag must be a JSON object like '{\"daily\":10}' (got %q): %w", defaultFlag, err)
+		}
+		if obj == nil {
+			return flagDef{}, fmt.Errorf("--default for a json flag must be a JSON object, not null (got %q)", defaultFlag)
+		}
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, []byte(defaultFlag)); err != nil {
+			return flagDef{}, fmt.Errorf("--default for a json flag must be valid JSON (got %q): %w", defaultFlag, err)
+		}
+		def.DefaultLiteral = buf.String()
 	}
 
 	// variants are only valid for string flags.

@@ -88,6 +88,154 @@ func TestAdd_StringWithVariants(t *testing.T) {
 	assert.Equal(t, []string{"light", "dark", "system"}, declared["theme"].Variants)
 }
 
+func TestAdd_Json_WritesObjectLiteral(t *testing.T) {
+	chdirTemp(t)
+	out, err := run(t, "add", "limits", "--type", "json", "--default", `{"daily":10}`, "--description", "Per-plan limits")
+	require.NoError(t, err)
+	assert.Contains(t, out, "added flag \"limits\"")
+
+	src := readFile(t)
+	// An object literal, inline — valid TS that @palbase/backend's flag() accepts.
+	assert.Contains(t, src, `limits: flag({ type: "json", default: {"daily":10}, description: "Per-plan limits" }),`)
+
+	declared, err := readConfig()
+	require.NoError(t, err)
+	require.Contains(t, declared, "limits")
+	assert.Equal(t, "json", declared["limits"].Type)
+	assert.Equal(t, `{"daily":10}`, declared["limits"].DefaultLiteral)
+	assert.Equal(t, "Per-plan limits", declared["limits"].Description)
+	assert.Empty(t, declared["limits"].Variants)
+}
+
+// The object default is the input most likely to break a hand-written text
+// parser: its commas look like field separators, its braces look like the end of
+// the flag() body, and everything after it in the file is at risk. A sibling flag
+// is declared after it so a body that ran long would visibly swallow the next
+// entry rather than merely mangling its own.
+func TestAdd_Json_NestedBracesAndCommasRoundTrip(t *testing.T) {
+	chdirTemp(t)
+	const nested = `{"daily":10,"burst":{"per_minute":5,"per_hour":{"soft":100,"hard":200}},"tags":["a","b"]}`
+
+	_, err := run(t, "add", "limits", "--type", "json", "--default", nested)
+	require.NoError(t, err)
+	_, err = run(t, "add", "theme", "--type", "string", "--default", "dark", "--variants", "light,dark")
+	require.NoError(t, err)
+
+	declared, err := readConfig()
+	require.NoError(t, err)
+
+	// The object survived verbatim...
+	require.Contains(t, declared, "limits")
+	assert.Equal(t, "json", declared["limits"].Type)
+	assert.Equal(t, nested, declared["limits"].DefaultLiteral)
+	// ...and did NOT swallow the flag declared after it.
+	require.Contains(t, declared, "theme", "the object default must not consume the following entry")
+	assert.Equal(t, "string", declared["theme"].Type)
+	assert.Equal(t, []string{"light", "dark"}, declared["theme"].Variants)
+	assert.Len(t, declared, 2)
+
+	// Regenerating from the parsed set is lossless — this is the path that would
+	// silently DELETE the json flag if the parser could not read it back.
+	require.NoError(t, writeConfig(declared))
+	again, err := readConfig()
+	require.NoError(t, err)
+	assert.Equal(t, declared, again)
+}
+
+// A json default can contain the very keys the other fields are named after.
+// Read with a regex over the body text, `{"description":"..."}` becomes the
+// FLAG's description; read as one opaque value, it cannot.
+func TestParseConfig_JsonDefaultKeysAreNotReadAsFlagFields(t *testing.T) {
+	chdirTemp(t)
+	const decoy = `{"description":"decoy","variants":["x"],"type":"boolean","default":false}`
+
+	_, err := run(t, "add", "meta", "--type", "json", "--default", decoy)
+	require.NoError(t, err)
+
+	declared, err := readConfig()
+	require.NoError(t, err)
+	require.Contains(t, declared, "meta")
+	got := declared["meta"]
+	assert.Equal(t, "json", got.Type, "the object's own \"type\" key must not become the flag type")
+	assert.Equal(t, decoy, got.DefaultLiteral)
+	assert.Empty(t, got.Description, "the object's own \"description\" key must not become the flag description")
+	assert.Empty(t, got.Variants, "the object's own \"variants\" key must not become the flag variants")
+}
+
+// `//` inside a string is not a comment. It used to be stripped anyway, which for
+// an object default also unbalanced the braces and dropped the entry.
+func TestParseConfig_URLInJSONDefaultSurvivesCommentStripping(t *testing.T) {
+	chdirTemp(t)
+	const withURL = `{"webhook":"https://example.com/hook","note":"see http://docs"}`
+
+	_, err := run(t, "add", "endpoints", "--type", "json", "--default", withURL)
+	require.NoError(t, err)
+
+	declared, err := readConfig()
+	require.NoError(t, err)
+	require.Contains(t, declared, "endpoints")
+	assert.Equal(t, withURL, declared["endpoints"].DefaultLiteral)
+}
+
+func TestAdd_Json_RejectsNonObjectDefault(t *testing.T) {
+	cases := []struct {
+		name    string
+		def     string
+		wantErr string
+	}{
+		{"array", `[1,2]`, "must be a JSON object"},
+		{"number", `5`, "must be a JSON object"},
+		{"string", `"dark"`, "must be a JSON object"},
+		{"null", `null`, "not null"},
+		{"invalid JSON", `{nope}`, "must be a JSON object"},
+		{"empty", ``, "must be a JSON object"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			chdirTemp(t)
+			_, err := run(t, "add", "x", "--type", "json", "--default", c.def)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.wantErr)
+		})
+	}
+}
+
+func TestAdd_Json_AcceptsEmptyObject(t *testing.T) {
+	chdirTemp(t)
+	_, err := run(t, "add", "x", "--type", "json", "--default", `{}`)
+	require.NoError(t, err)
+	declared, err := readConfig()
+	require.NoError(t, err)
+	assert.Equal(t, `{}`, declared["x"].DefaultLiteral)
+}
+
+func TestAdd_RejectsVariantsOnJson(t *testing.T) {
+	chdirTemp(t)
+	_, err := run(t, "add", "x", "--type", "json", "--default", `{"a":1}`, "--variants", "a,b")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only valid for --type string")
+}
+
+// A default whose shape contradicts the declared type is refused on READ too —
+// otherwise the CLI would faithfully re-emit a config that @palbase/backend's
+// flag() throws on at deploy time, taking every other flag in the file with it.
+func TestParseConfig_RejectsDefaultShapeMismatch(t *testing.T) {
+	cases := map[string]string{
+		"json type with scalar default":    `x: flag({ type: "json", default: 5 }),`,
+		"json type with array default":     `x: flag({ type: "json", default: ["a"] }),`,
+		"boolean type with object default": `x: flag({ type: "boolean", default: {"a":1} }),`,
+		"string type with object default":  `x: flag({ type: "string", default: {"a":1} }),`,
+	}
+	for name, entry := range cases {
+		t.Run(name, func(t *testing.T) {
+			src := "import { defineFlags, flag } from \"@palbase/backend\";\nexport default defineFlags({\n  flags: {\n    " + entry + "\n  },\n});\n"
+			_, err := parseConfig(src)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "does not match type")
+		})
+	}
+}
+
 func TestAdd_SecondAddUpdatesNotDuplicates(t *testing.T) {
 	chdirTemp(t)
 	_, err := run(t, "add", "flag_x", "--type", "boolean", "--default", "true")
@@ -169,11 +317,15 @@ func TestAdd_RejectsBadKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid flag key")
 }
 
+// The structured type is spelled `json` on this surface (matching
+// `flags user set --type json`); the server's own name for it, `object`, is not
+// accepted — and the error has to say what is.
 func TestAdd_RejectsUnknownType(t *testing.T) {
 	chdirTemp(t)
 	_, err := run(t, "add", "x", "--type", "object", "--default", "1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid --type")
+	assert.Contains(t, err.Error(), "boolean, number, string, or json")
 }
 
 func TestAdd_RejectsBooleanDefaultMismatch(t *testing.T) {
