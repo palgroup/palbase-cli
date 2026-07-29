@@ -1,21 +1,24 @@
 // Package flags provides the `palbase flags` subcommand group: list / add /
-// remove. These commands are GUIDED authoring for the feature-flag
-// config-as-code surface — they read/write config/flags.ts (the typed DSL from
-// @palbase/backend), so an author declares flag DEFINITIONS without hand-writing
-// TypeScript. On `git push`, the deploy evals config/flags.ts and UPSERTS the
-// flag definitions into PalFlags (create-or-update; never auto-deleted).
+// remove (this file) and `user set/unset/list/clear` (user.go). The first three
+// are GUIDED authoring for the feature-flag config-as-code surface — they
+// read/write config/flags.ts (the typed DSL from @palbase/backend), so an author
+// declares flag DEFINITIONS without hand-writing TypeScript. On `git push`, the
+// deploy evals config/flags.ts and UPSERTS the flag definitions into PalFlags
+// (create-or-update; never auto-deleted).
 //
 // A flag DEFINITION is a typed project-wide DEFAULT (key + type + default value
 // + optional string variants + description). The per-user VALUE of a flag (an
-// override / A-B assignment) is runtime state set via the SDK, never in git.
+// override / A-B assignment) is runtime state, never in git — set from the SDK,
+// from Studio, or from `palbase flags user set` (user.go, the ONLY part of this
+// package that touches the network).
 //
 // The CLI is the SOLE author of config/flags.ts: every write regenerates the
 // whole file from the current flag set (deterministic template), and reads parse
 // that same generated shape back. This sidesteps having to parse arbitrary
 // TypeScript in Go — the file is config-as-code data the CLI fully owns.
 //
-// No secrets are involved (flags carry no credentials), so these commands never
-// touch the encrypted store — pure local file authoring.
+// No secrets are involved (flags carry no credentials), so no command in this
+// package touches the encrypted store.
 package flags
 
 import (
@@ -44,34 +47,40 @@ var flagKeyRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 // validation + display.
 type flagDef struct {
 	Key            string   `json:"key"`
-	Type           string   `json:"type"` // "boolean" | "number" | "string"
+	Type           string   `json:"type"`    // "boolean" | "number" | "string"
 	DefaultLiteral string   `json:"default"` // raw TS literal, e.g. `false`, `10`, `"light"`
 	Variants       []string `json:"variants,omitempty"`
 	Description    string   `json:"description,omitempty"`
 }
 
-// Cmd returns the `palbase flags` parent command. It takes no resolvers: flag
-// authoring is purely local file I/O (no Studio / network).
-func Cmd() *cobra.Command {
+// Cmd returns the `palbase flags` parent command. list / add / remove are pure
+// local file I/O and use nothing from Resolvers; the `user` subgroup talks to
+// the running Environment over Studio tRPC (see user.go).
+func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "flags",
-		Short: "Manage feature-flag config-as-code (config/flags.ts definitions)",
-		Long: `Author the project's feature-flag DEFINITIONS declaratively in config/flags.ts.
+		Short: "Manage feature-flag definitions (config/flags.ts) and per-user overrides",
+		Long: `Author the project's feature-flag DEFINITIONS declaratively in config/flags.ts,
+and override a flag for a single end user on the running Environment.
 
   palbase flags list                       Show the flags declared in config/flags.ts.
   palbase flags add <key> --type ... ...   Add or update a flag definition.
   palbase flags remove <key>               Remove a flag definition entry.
+  palbase flags user ...                   Set/inspect/clear ONE user's overrides.
 
 A flag definition is a typed project-wide DEFAULT (its type + default value, and
-for string flags an optional list of allowed variants). The per-user VALUE of a
-flag is runtime state set via the SDK, never declared here.
+for string flags an optional list of allowed variants). config/flags.ts is
+git-authoritative: commit it and ` + "`git push`" + ` to deploy. The deploy upserts
+the flag definitions (create-or-update, idempotent); it never deletes a flag
+dropped from the file (removing here leaves the live flag in place — see
+` + "`remove`" + `).
 
-config/flags.ts is git-authoritative: commit it and ` + "`git push`" + ` to deploy.
-The deploy upserts the flag definitions (create-or-update, idempotent); it never
-deletes a flag dropped from the file (removing here leaves the live flag in
-place — see ` + "`remove`" + `).`,
+A per-user VALUE is the other kind of thing: runtime state for one user in one
+Environment, live the moment it is written, never in git. That is
+` + "`palbase flags user`" + ` — including for the ` + "`palbase.`" + `-namespaced
+keys that cannot be declared in config/flags.ts at all.`,
 	}
-	cmd.AddCommand(listCmd(), addCmd(), removeCmd())
+	cmd.AddCommand(listCmd(), addCmd(), removeCmd(), userCmd(r))
 	return cmd
 }
 

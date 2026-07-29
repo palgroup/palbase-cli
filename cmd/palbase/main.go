@@ -202,7 +202,12 @@ func newRootCmd() *cobra.Command {
 		}),
 		dbCmdWithTypes(),
 		storage.Cmd(),
-		flags.Cmd(),
+		flags.Cmd(flags.Resolvers{
+			// *studio.Client satisfies flags.Studio (Query/Mutation); only the
+			// `flags user` overrides use it.
+			Studio:    func() flags.Studio { return studioClient },
+			Selection: selectionResolver,
+		}),
 		egress.Cmd(),
 		notifications.Cmd(notifications.Resolvers{
 			Studio:    func() *studio.Client { return studioClient },

@@ -24,7 +24,9 @@ func chdirTemp(t *testing.T) {
 // run drives the flags command with args, capturing stdout.
 func run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	cmd := Cmd()
+	// Zero Resolvers: list/add/remove are pure local file authoring and touch
+	// neither Studio nor the selection resolver.
+	cmd := Cmd(Resolvers{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
