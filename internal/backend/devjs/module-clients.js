@@ -530,6 +530,22 @@ function buildCollectionRef(http, path, state) {
 
 function buildDocsClient(http) {
   return {
+    // Documents.doc("users/alice") — the path form the SDK's PalbaseDocsClient
+    // declares. Kept in step with the deployed runtime's own client
+    // (modules/backend/internal/runtime/module-clients.js), where it was
+    // DECLARED and implemented nowhere: `palbase serve` must not be the only
+    // realm where a documented method throws. Firestore-shaped: segments are
+    // collection/documentId PAIRS, so an odd count addresses a collection.
+    doc(path) {
+      const segments = String(path).split('/').filter((s) => s.length > 0);
+      if (segments.length === 0 || segments.length % 2 !== 0) {
+        throw new Error(
+          `Invalid document path: "${path}". Expected collection/documentId pairs, got ${segments.length} segment(s).`,
+        );
+      }
+      segments.forEach((s, i) => validateSegment(s, i % 2 === 0 ? 'collection name' : 'document ID'));
+      return buildDocumentRef(http, segments.join('/'));
+    },
     collection(name) {
       validateSegment(name, 'collection name');
       return buildCollectionRef(http, name);
