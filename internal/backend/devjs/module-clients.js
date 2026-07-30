@@ -823,8 +823,17 @@ function buildNotificationsClient(http) {
     async send(params) {
       // camelCase templateSlug → snake_case template_slug; legacy
       // `template` field is forwarded as-is (server ignores it).
-      const { templateSlug, ...rest } = params;
-      const body = templateSlug !== undefined ? { ...rest, template_slug: templateSlug } : rest;
+      //
+      // html/text → html_body/text_body: the SDK declares `html` and `text`
+      // (PalbaseEmailSendParams) while palnotify reads html_body/text_body, and this
+      // client forwarded them VERBATIM — so `Notifications.email.send({ html })`
+      // answered 400 "html_body or text_body is required" in every realm, a declared
+      // field the server silently ignored. Caught live on todoapp 2026-07-30.
+      const { templateSlug, html, text, ...rest } = params;
+      const body = { ...rest };
+      if (templateSlug !== undefined) body.template_slug = templateSlug;
+      if (html !== undefined) body.html_body = html;
+      if (text !== undefined) body.text_body = text;
       return http.request('POST', '/v1/notifications/email', { body });
     },
   };
