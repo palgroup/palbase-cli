@@ -47,6 +47,8 @@ func Cmd(r Resolvers) *cobra.Command {
 		listCmd(r),
 		useCmd(r),
 		statusCmd(r),
+		connectRepoCmd(r),
+		disconnectRepoCmd(r),
 		deleteCmd(r),
 	)
 	return cmd

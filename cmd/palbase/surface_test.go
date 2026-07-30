@@ -103,8 +103,15 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 }
 
 // GOLDEN: `palbase project --help` — the canonical Project surface.
+//
+// connect-repo/disconnect-repo are the "bring your own repo" pair: `create
+// --repo` lets Palbase create one, these attach a repository that already
+// exists. Without them a repo Palbase did not create had no way in, and its
+// pushes deployed nothing.
 func TestGolden_ProjectSurface(t *testing.T) {
-	require.Equal(t, []string{"create", "delete", "list", "status", "use"}, subcommands(t, "project"))
+	require.Equal(t,
+		[]string{"connect-repo", "create", "delete", "disconnect-repo", "list", "status", "use"},
+		subcommands(t, "project"))
 }
 
 // GOLDEN: `palbase env --help` — the canonical Environment surface. It replaces

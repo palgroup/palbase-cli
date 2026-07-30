@@ -41,8 +41,13 @@ func TestProjectCmd_CanonicalSurface(t *testing.T) {
 		got = append(got, c.Name())
 	}
 	sort.Strings(got)
-	// spec §7.3: create|list|use|status|delete. Nothing else.
-	require.Equal(t, []string{"create", "delete", "list", "status", "use"}, got)
+	// spec §7.3: create|list|use|status|delete, plus the repository pair. A
+	// Project owns ONE repository; `create --repo` covers the repo Palbase makes
+	// and connect-repo/disconnect-repo cover one that already exists — which had
+	// no way in before, so its pushes deployed nothing.
+	require.Equal(t, []string{
+		"connect-repo", "create", "delete", "disconnect-repo", "list", "status", "use",
+	}, got)
 }
 
 func TestProject_HitsTheV2Paths(t *testing.T) {
