@@ -138,3 +138,24 @@ func TestSanitizeName(t *testing.T) {
 		})
 	}
 }
+
+// A scaffolded project's FIRST `palbase push` must succeed.
+//
+// It did not: db/schema.ts declared a live `todos` table while db/migrations was
+// empty, so the deploy's schema gate refused with
+// `table "todos": declared in schema.ts but not found in the database` — on the
+// very first deploy, against a gate the author has not read yet. The example is
+// commented out for that reason, and this pins the PAIR: a declared table must
+// ship with a migration, or not be declared.
+func TestScaffold_SchemaDeclaresNoTableWithoutAMigration(t *testing.T) {
+	// `todos: {` uncommented means a live declaration; the scaffold ships no
+	// migrations directory, so that combination is the first-push failure.
+	declared := bytes.Contains([]byte(schemaTS), []byte("\n    todos: {"))
+	if declared {
+		t.Errorf("schema.ts declares a table but the scaffold ships no migration — " +
+			"the first `palbase push` fails the schema gate")
+	}
+	if !bytes.Contains([]byte(schemaTS), []byte("palbase db diff")) {
+		t.Error("schema.ts must tell the author how a declared table reaches the database")
+	}
+}

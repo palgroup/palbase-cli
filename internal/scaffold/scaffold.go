@@ -95,20 +95,39 @@ const tsconfigJSON = `{
 const schemaTS = `import { defineSchema, uuid, text, boolean, timestamp } from "@palbase/backend";
 
 // Single source of truth for your project's Postgres schema (config-as-code).
-// The deploy diffs this file against the live database and auto-applies
-// additive changes (new tables, new nullable columns) as migrations.
+//
+// A table declared HERE reaches the database through a COMMITTED migration, not
+// automatically: the deploy compares this file with the live database and REFUSES
+// a deploy that would need a migration nobody wrote. That is what makes a deploy
+// reproducible — the same commit produces the same schema on every Environment.
+//
+// So the loop is:
+//
+//   1. declare the table below
+//   2. palbase db diff -f add_todos     # writes db/migrations/<ts>_add_todos.sql
+//   3. commit it, then palbase push
+//
+// The example is commented out on purpose: a scaffold that declared a table with
+// no migration would fail your FIRST push on a gate you have not read yet.
 export default defineSchema({
   tables: {
-    todos: {
-      columns: {
-        id: uuid().primaryKey().defaultRandom(),
-        title: text().notNull(),
-        completed: boolean().default(false),
-        created_at: timestamp().defaultNow(),
-      },
-    },
+    // todos: {
+    //   columns: {
+    //     id: uuid().primaryKey().defaultRandom(),
+    //     title: text().notNull(),
+    //     completed: boolean().default(false),
+    //     created_at: timestamp().defaultNow(),
+    //   },
+    // },
   },
 });
+
+// Keep the column imports referenced so the example above type-checks the moment
+// you uncomment it; drop them if you delete the example.
+void uuid;
+void text;
+void boolean;
+void timestamp;
 `
 
 // helloModelTS names the response schema in a model file: the runtime's
