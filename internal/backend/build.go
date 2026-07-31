@@ -23,14 +23,19 @@ import (
 // skew locally, before the push.
 const backendPkg = "@palbase/backend"
 
+// buildTempPrefix is the os.MkdirTemp prefix for the extracted build-check
+// runner. `palbase build` is one-shot and removes its own dir on return, so
+// nothing sweeps this prefix.
+const buildTempPrefix = "palbase-build-"
+
 // npmRegistryBase is the npm registry root the Layer-A skew check queries. A
 // package var (not a const) only so tests can point it at an httptest server;
 // production never changes it.
 var npmRegistryBase = "https://registry.npmjs.org"
 
 // newBuildCmd wires `palbase build` — the local pre-deploy validator. It runs
-// the SAME stage + bundle + extract_meta.js the deploy runs (via dev-server.js
-// PALBASE_CHECK=1), plus a fast npm-registry major skew check, so a broken push
+// the SAME stage + bundle + extract_meta.js the deploy runs (via build-check.js),
+// plus a fast npm-registry major skew check, so a broken push
 // (e.g. a `@Query("field")` string where a zod schema is required) is caught
 // before it produces a FAILED deploy. Non-interactive, no Studio auth, one
 // best-effort network call (npm GET). Exit 0 = PASSED (or environment couldn't
@@ -77,7 +82,7 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 			return nil
 		}
 	}
-	// Read the installed major BEFORE ensureDevServerTools: its `npm install
+	// Read the installed major BEFORE ensureBuildCheckTools: its `npm install
 	// --no-save` can prune a hand-placed @palbase/backend that isn't in
 	// package.json (test fixtures), and in general the version we want is the
 	// one already on disk, not whatever a tool install leaves behind.
@@ -85,7 +90,7 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 
 	// zod-to-json-schema powers the header-rule + schema lowering in the
 	// extractor; without it the header checks degrade (best-effort install).
-	ensureDevServerTools(cwd)
+	ensureBuildCheckTools(cwd)
 
 	// Layer A skew: local installed major vs npm latest major. A user can only
 	// install a major that npm published, so "local major < npm latest major"
@@ -104,14 +109,14 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		}
 	}
 
-	// Run the deploy-identical validation via dev-server.js in check mode.
-	tmpDir, err := os.MkdirTemp("", serveTempPrefix+"*")
+	// Run the deploy-identical validation via build-check.js.
+	tmpDir, err := os.MkdirTemp("", buildTempPrefix+"*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-	if err := extractFS(devServerFS, "devjs", tmpDir); err != nil {
-		return fmt.Errorf("extract dev server: %w", err)
+	if err := extractFS(buildCheckFS, "devjs", tmpDir); err != nil {
+		return fmt.Errorf("extract the build checker: %w", err)
 	}
 
 	// Validate the tree the DEPLOY receives, not the one on disk. BuildTarball is
@@ -129,10 +134,9 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		buildRoot = staged
 	}
 
-	node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
+	node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "build-check.js"))
 	node.Dir = buildRoot
 	node.Env = append(os.Environ(),
-		"PALBASE_CHECK=1",
 		fmt.Sprintf("PALBASE_DEV_ROOT=%s", buildRoot),
 		// The CLI's pinned TypeScript parser first, then the project's deps —
 		// the user's typescript may be 7.x (no compiler API) or absent.
@@ -157,8 +161,8 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	node.Stdout = out
 	node.Stderr = out
 	if err := node.Run(); err != nil {
-		// A non-zero exit from check mode = a user-code validation failure
-		// (dev-server.js already printed the per-controller reasons). Anything
+		// A non-zero exit = a user-code validation failure (build-check.js
+		// already printed the per-controller reasons). Anything
 		// else (couldn't spawn node) is environment — warn + fail-open.
 		if _, ok := err.(*exec.ExitError); ok {
 			return fmt.Errorf("build failed")
@@ -193,24 +197,6 @@ func stageDeployTree(cwd string) (string, error) {
 		return "", fmt.Errorf("unpack the project: %w", err)
 	}
 	return dir, nil
-}
-
-// warnBackendSkew prints a warn-only Layer A skew notice for `palbase serve`
-// (which runs the local SDK on purpose). Silent when the version can't be read
-// or the registry is unreachable — a warning must never block or noise up dev.
-func warnBackendSkew(ctx context.Context, cwd string, w io.Writer) {
-	installed := installedBackendVersion(cwd)
-	if installed == "" {
-		return
-	}
-	latest, err := npmLatestMajor(ctx, backendPkg)
-	if err != nil {
-		return
-	}
-	if im := majorOf(installed); im > 0 && im != latest {
-		fmt.Fprintf(w, "warning: local %s %s is a major behind the latest %d.x — deploys will fail; run: npm install %s@^%d\n",
-			backendPkg, installed, latest, backendPkg, latest)
-	}
 }
 
 // installedBackendVersion reads node_modules/@palbase/backend/package.json's

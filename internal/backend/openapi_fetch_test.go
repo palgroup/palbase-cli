@@ -110,7 +110,7 @@ func TestFetchOpenAPISpec_NoRetryOn4xx(t *testing.T) {
 	require.Contains(t, err.Error(), "401")
 }
 
-// A connection-refused (no server listening — the local `palbase serve` probe
+// A connection-refused (no server listening — a probe against a dead endpoint
 // when serve is down) must return FAST without burning the retry budget, so the
 // remote fallback kicks in immediately.
 func TestFetchOpenAPISpec_ConnRefusedFailsFast(t *testing.T) {

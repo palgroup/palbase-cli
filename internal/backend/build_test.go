@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -135,7 +136,7 @@ func TestRunBuild_NoControllersPasses(t *testing.T) {
 //
 // The above tests hold the skew LAYER. The extraction layer — the centauri
 // class `@QueryParams("field")` (a string where a zod schema is required) that
-// serve's route-register SILENTLY accepts but the deploy's extract_meta.js
+// the route-register SILENTLY accepts but the deploy's extract_meta.js
 // rejects — can only be proven with the REAL SDK's decorators running. This
 // test installs the real published @palbase/backend into a temp fixture and
 // runs check mode against it, so a real bundled controller meets the real
@@ -186,7 +187,7 @@ func useTestParserCache(t *testing.T) {
 	t.Cleanup(func() { parserTSHome = prev })
 }
 
-// runCheckMode extracts the embedded devjs and runs PALBASE_CHECK=1 dev-server.js
+// runCheckMode extracts the embedded devjs and runs build-check.js
 // against dir, returning (combined output, exitOK). Mirrors runBuild's node
 // invocation exactly — including devNodePath, so the shipped parser resolution
 // (CLI's pinned typescript first, project's node_modules second) is what the
@@ -195,7 +196,7 @@ func runCheckMode(t *testing.T, dir string) (string, bool) {
 	t.Helper()
 	useTestParserCache(t)
 	tmp := t.TempDir()
-	require.NoError(t, extractFS(devServerFS, "devjs", tmp))
+	require.NoError(t, extractFS(buildCheckFS, "devjs", tmp))
 	// Stage exactly as runBuild does — the deploy-shaped tree (no node_modules),
 	// with the extractor pointed at the real one. Mirroring runBuild here is the
 	// point of this helper: a test that skipped staging would validate a tree no
@@ -203,10 +204,9 @@ func runCheckMode(t *testing.T, dir string) (string, bool) {
 	staged, err := stageDeployTree(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(staged) })
-	cmd := exec.Command("node", filepath.Join(tmp, "dev-server.js"))
+	cmd := exec.Command("node", filepath.Join(tmp, "build-check.js"))
 	cmd.Dir = staged
 	cmd.Env = append(os.Environ(),
-		"PALBASE_CHECK=1",
 		"PALBASE_DEV_ROOT="+staged,
 		"NODE_PATH="+devNodePath(dir, io.Discard),
 		"PALBASE_RUNTIME_MODULES="+filepath.Join(dir, "node_modules"),
@@ -220,7 +220,8 @@ export const TodoSchema = z.object({ id: z.string(), title: z.string() });
 `
 
 // brokenControllerTS uses @QueryParams("field") — a STRING where a zod schema
-// is required (the centauri class). Deploy-fatal at extraction; serve accepts
+// is required (the centauri class). Deploy-fatal at extraction; the route
+// register accepts
 // it silently.
 const brokenControllerTS = `import { Controller, Get, QueryParams, z } from "@palbase/backend";
 import { TodoSchema } from "../models/todo";
@@ -470,4 +471,25 @@ export default defineSchema({
 	out.Reset()
 	require.NoError(t, runBuild(context.Background(), dir, &out),
 		"a valid defineSchema() must pass:\n%s", out.String())
+}
+
+// TestBundleSrcDirKeepsNames pins --keep-names on the embedded build checker's
+// esbuild invocation — prod parity with the deploy bundler, whose bundler_test
+// pins the same flag on its args. The dotted operationId namespace derives from
+// the live Ctrl.name, which only survives esbuild scope-hoisting renames under
+// --keep-names, so dropping the flag would silently rename a controller class
+// that collides with an imported service class (TodosController → TodosController2)
+// and emit a different operationId than the deploy does.
+func TestBundleSrcDirKeepsNames(t *testing.T) {
+	src, err := buildCheckFS.ReadFile("devjs/build-check.js")
+	require.NoError(t, err)
+	body := string(src)
+	start := strings.Index(body, "function bundleSrcDir")
+	require.GreaterOrEqual(t, start, 0, "bundleSrcDir not found in embedded build-check.js")
+	fn := body[start:]
+	if end := strings.Index(fn, "\nfunction "); end >= 0 {
+		fn = fn[:end]
+	}
+	require.Contains(t, fn, "'--keep-names'",
+		"bundleSrcDir esbuild args must include --keep-names (dotted-id parity: Ctrl.name must survive bundle scope-hoisting renames)")
 }

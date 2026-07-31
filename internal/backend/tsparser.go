@@ -73,7 +73,7 @@ func ensureParserTS(w io.Writer) string {
 	return mods
 }
 
-// devNodePath is the NODE_PATH the dev-server harness runs with (both `palbase
+// devNodePath is the NODE_PATH the build checker runs with (`palbase
 // serve` and the `palbase build`/push check mode): the CLI's pinned TypeScript
 // FIRST, then the project's node_modules (@palbase/backend, esbuild, the user's
 // deps).

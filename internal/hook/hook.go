@@ -152,7 +152,7 @@ func Status(repoDir string) (state, detail string) {
 		if v >= Version {
 			cfg := currentHooksPath(repoDir)
 			if cfg == "" {
-				return "wired-v2", "core.hooksPath not set — run 'palbase push' or 'palbase serve' once"
+				return "wired-v2", "core.hooksPath not set — run 'palbase push' or 'palbase clone' once"
 			}
 			return "wired-v2", "core.hooksPath=" + cfg
 		}

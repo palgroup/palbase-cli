@@ -17,7 +17,23 @@ var defaultIgnoreDirs = map[string]bool{
 	".palbase":     true,
 	"node_modules": true,
 	".next":        true, // Next.js build output — bloat, never part of the backend bundle
+	// `palbase build` stages a return-binding-injected COPY of controllers/ here
+	// (it must sit beside controllers/ so the copies' ../models relative imports
+	// still resolve). It is removed on exit, but a SIGKILL leaves it behind — and
+	// an orphan in the project root would otherwise ride along in the next deploy
+	// tarball as a second, shadow copy of every controller.
+	stagedControllersDir: true,
+	// `palbase build` stages a return-binding-injected COPY of controllers/ here
+	// (it must sit beside controllers/ so the copies' ../models relative imports
+	// still resolve). It is removed on exit, but a SIGKILL leaves it behind — and
+	// an orphan in the project root would otherwise ride along in the next deploy
+	// tarball as a second, shadow copy of every controller.
 }
+
+// stagedControllersDir is the in-project staging tree build-check.js writes.
+// Duplicated as a Go constant (the JS side owns the real definition) so the
+// tarball walk can skip it; archive_test pins the two spellings together.
+const stagedControllersDir = ".palbase-build-controllers"
 
 // hasIgnoredSegment reports whether ANY path segment of rel is an ignored dir.
 // The walk must skip an ignored dir at EVERY depth, not just the top level: a

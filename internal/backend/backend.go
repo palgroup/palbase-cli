@@ -1,5 +1,5 @@
 // Package backend provides the top-level backend lifecycle commands
-// (serve / push / pull / clone / deploys / rollback / status / spec / types /
+// (build / push / pull / clone / deploys / rollback / status / spec / types /
 // the platform link commands). palbase IS the backend CLI — there is no
 // `backend` parent command.
 //
@@ -21,17 +21,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/config"
-	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
@@ -52,19 +48,19 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 	return req, nil
 }
 
-// devServerFS embeds the local Node.js dev server. Shipped beside the
-// CLI binary so `palbase serve` works without an internet round
-// trip; copied to a temp dir at runtime so Node can resolve relative
-// requires the way it would inside a real package.
+// buildCheckFS embeds the Node.js side of `palbase build`. Shipped beside the
+// CLI binary so validation works without an internet round trip; copied to a
+// temp dir at runtime so Node can resolve relative requires the way it would
+// inside a real package — build-check.js require()s its three siblings, so all
+// of them must land in that dir.
 //
-// module-clients.js is dev-server.js's sibling require — it carries
-// the module-client fetch wrappers (Documents/Storage/… singletons; a
-// lockstep mirror of the backend-runtime image's
-// internal/runtime/module-clients.js). Both files must land in the temp
-// dir so the relative resolve works.
+// return_types.js, throw_analysis.js and extract_meta.js are byte-identical
+// copies of the deploy runtime's own (modules/backend/internal/runtime/*).
+// That identity is what makes a local PASS mean the deploy accepts the tree;
+// copy_parity_test.go fails CI the moment a copy drifts.
 //
-//go:embed devjs/dev-server.js devjs/module-clients.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/extract_meta.js
-var devServerFS embed.FS
+//go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/extract_meta.js
+var buildCheckFS embed.FS
 
 // REST is the subset of the Management-API transport the provider-aware deploy
 // verbs (push/pull/clone) and the v2 reads use: PostMultipart for the
@@ -115,16 +111,15 @@ func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 // shell out to git (push/pull/clone → webhook → orchestrator deploys); for a
 // platform-mode project they upload/fetch a tarball bundle via the Management
 // API. `merge` stays retired (the old go-git merge verb is gone). Alongside
-// them the CLI keeps local dev (`serve`), the observation/control verbs
-// (deploys, rollback, status) and the artifact fetcher (`spec`) — client
-// codegen itself is the SDKs' job, not the CLI's.
+// them the CLI keeps the pre-deploy validator (`build`), the
+// observation/control verbs (deploys, rollback, status) and the artifact
+// fetcher (`spec`) — client codegen itself is the SDKs' job, not the CLI's.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newWebCmd(r),
 		newIOSCmd(r),
 		newMacOSCmd(r),
 		newAndroidCmd(r),
-		newDevCmd(r),
 		newBuildCmd(r),
 		newDeploysCmd(r),
 		newRollbackCmd(r),
@@ -145,12 +140,11 @@ func EnvTypesCmd() *cobra.Command {
 	return newGenTypesCmd()
 }
 
-// newGenTypesCmd is the standalone regeneration of palbase-env.d.ts from the
-// project's db/schema.ts — the same step `palbase serve` runs on startup,
-// exposed on its own so it can run from a build/CI step or after editing the
-// schema without booting the dev server. It types the project's OWN handlers
-// (`Database.tables.*`) from the local schema source. No project link, no
-// network — purely local. (NOT client codegen — that is the SDKs' job.)
+// newGenTypesCmd regenerates palbase-env.d.ts from the project's db/schema.ts.
+// It types the project's OWN handlers (`Database.tables.*`) from the local
+// schema source, and runs from a build/CI step or after editing the schema. No
+// project link, no network — purely local. (NOT client codegen — that is the
+// SDKs' job.)
 func newGenTypesCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "types",
@@ -160,8 +154,8 @@ get a typed Database.tables.* with no import and no generic.
 
 esbuild-bundles db/schema.ts (with @palbase/* external), evaluates the
 defineSchema() result, and writes palbase-env.d.ts to the project root.
-Requires Node.js + npx. ` + "`palbase serve`" + ` runs this automatically on startup;
-run it standalone after editing db/schema.ts or from a build step.
+Requires Node.js + npx. Run it after editing db/schema.ts or from a build step;
+` + "`palbase build`" + ` validates the same schema module on the deploy path.
 
 No-op when the project has no db/schema.ts.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -273,473 +267,40 @@ func installNodeDeps(dir string) error {
 	return cmd.Run()
 }
 
-// devServerToolMissing reports whether `pkg` is absent from the project's
-// node_modules. Used for the dev-server's OWN runtime tools (not the user's
-// declared deps) that the deployed br-pod provides globally (Dockerfile) but a
-// local `palbase serve` must supply itself.
-func devServerToolMissing(projectDir, pkg string) bool {
+// buildToolMissing reports whether `pkg` is absent from the project's
+// node_modules. Used for the metadata extractor's OWN runtime tools (not the
+// user's declared deps) that the deploy runtime provides globally (Dockerfile)
+// but a local validation run must supply itself.
+func buildToolMissing(projectDir, pkg string) bool {
 	_, err := os.Stat(filepath.Join(projectDir, "node_modules", pkg))
 	return os.IsNotExist(err)
 }
 
-// ensureDevServerTools guarantees the runtime packages the dev-server require()s
-// to behave like the deployed runtime are present in node_modules, WITHOUT
+// ensureBuildCheckTools guarantees the packages extract_meta.js require()s to
+// behave like the deployed extractor are present in node_modules, WITHOUT
 // writing them into the user's package.json (--no-save) — they're the runtime's
-// dependencies, not the project's. Today that's zod-to-json-schema: the deployed
-// br-pod installs it globally (modules/backend/Dockerfile), but a local serve
-// resolves it from the project's node_modules, so when it's missing
-// /openapi.json silently omits every request/response schema and the typed pb.*
-// client comes out bodyless (Penny #2's local root cause). Best-effort: a failed
-// install only means OpenAPI schemas stay absent — the dev-server's own hint
-// fires — so we warn but never block serve.
-func ensureDevServerTools(dir string) {
+// dependencies, not the project's. Today that's zod-to-json-schema, which the
+// deploy runtime installs globally (modules/backend/Dockerfile) but a local run
+// resolves from the project's node_modules; without it the extractor's header
+// rules and schema lowering degrade. Best-effort: a failed install only weakens
+// the check, so we warn and continue rather than fail the build.
+func ensureBuildCheckTools(dir string) {
 	const pkg = "zod-to-json-schema"
-	if !devServerToolMissing(dir, pkg) {
+	if !buildToolMissing(dir, pkg) {
 		return
 	}
 	bin, err := exec.LookPath("npm")
 	if err != nil {
 		return // installNodeDeps already surfaced the npm-missing error path
 	}
-	fmt.Printf("→ installing %s (dev-server tool, --no-save) ...\n", pkg)
+	fmt.Printf("→ installing %s (extractor tool, --no-save) ...\n", pkg)
 	cmd := exec.Command(bin, "install", "--no-save", "--silent", "--no-audit", "--no-fund", pkg)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("  warning: could not install %s — /openapi.json will omit request/response schemas (run `npm i %s` manually)\n", pkg, pkg)
+		fmt.Printf("  warning: could not install %s — the header/schema checks will be weaker (run `npm i %s` manually)\n", pkg, pkg)
 	}
-}
-
-// freeDevPort best-effort frees `port` before starting the dev server, so a
-// re-run after a crashed/orphaned `palbase serve` doesn't bounce off
-// EADDRINUSE. The chosen design is the single fixed port (4003) + this
-// free-on-start — no marker file.
-//
-// Safety guards (we'd rather let the bind fail than kill the wrong process):
-//   - Only darwin/linux (lsof). Other OSes: skip silently, let node surface
-//     EADDRINUSE.
-//   - If lsof is absent: skip silently.
-//   - Only SIGTERM (never SIGKILL) PIDs whose `ps -o comm=` is exactly "node"
-//     — i.e. a previous dev-server, not an unrelated listener. For anything
-//     else, print a clear warning and DON'T kill it.
-//   - Never signal PID <= 0 and never our own PID.
-//
-// `w` receives the human-readable log lines (what was freed / what was left).
-func freeDevPort(port int, w io.Writer) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return
-	}
-	lsof, err := exec.LookPath("lsof")
-	if err != nil {
-		return // no lsof → let node's EADDRINUSE surface
-	}
-	out, err := exec.Command(lsof, "-ti", fmt.Sprintf("tcp:%d", port), "-sTCP:LISTEN").Output()
-	if err != nil {
-		// Non-zero exit just means "no listener on this port" — nothing to free.
-		return
-	}
-	self := os.Getpid()
-	for _, line := range strings.Fields(string(out)) {
-		pid, perr := strconv.Atoi(strings.TrimSpace(line))
-		if perr != nil || pid <= 0 || pid == self {
-			continue
-		}
-		comm := strings.TrimSpace(processComm(pid))
-		if comm != "node" {
-			fmt.Fprintf(w, "warning: port %d is held by pid %d (%s) — not a dev-server; "+
-				"not killing it (use --port to pick another port)\n",
-				port, pid, comm)
-			continue
-		}
-		if err := terminatePID(pid); err != nil {
-			fmt.Fprintf(w, "warning: could not free port %d (pid %d): %v\n", port, pid, err)
-			continue
-		}
-		fmt.Fprintf(w, "freed port %d (stopped stale dev-server pid %d)\n", port, pid)
-	}
-}
-
-// serveTempPrefix is the os.MkdirTemp prefix for the per-serve dev-server
-// extract dir (holds the copied dev-server.js + the 0600 owner-token file).
-// Sweeping by THIS exact prefix is how a crashed previous serve's leftovers get
-// reclaimed — including the lingering owner-token, since it lives inside the dir.
-const serveTempPrefix = "palbase-dev-"
-
-// staleServeTempAge is how old a leftover serve temp dir must be before the
-// next serve start reclaims it. A small grace window so we never race a serve
-// that's launching concurrently in another shell (its fresh dir is younger than
-// this and is kept). The current run's own dir is created AFTER this sweep, so
-// it's never a candidate.
-const staleServeTempAge = 1 * time.Minute
-
-// sweepStaleServeTempDirs removes serve temp dirs left behind by a previous
-// crashed/SIGKILLed run. The graceful-exit paths (signal handler + the
-// dev-server's process-exit hook) clean up normally; this reclaims the dirs a
-// HARD crash couldn't. It only ever touches entries whose name starts with our
-// exact serveTempPrefix AND that are older than `olderThan` — never anything
-// else in the shared OS temp dir. Pure + injectable (tempRoot, prefix, now) so
-// it's unit-tested without depending on the real os.TempDir or wall clock.
-// Returns the directories it removed (for logging/testing). Best-effort: an
-// unreadable temp root or a dir we can't stat/remove is skipped, never fatal.
-func sweepStaleServeTempDirs(tempRoot, prefix string, now time.Time, olderThan time.Duration) []string {
-	entries, err := os.ReadDir(tempRoot)
-	if err != nil {
-		return nil
-	}
-	var removed []string
-	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
-			continue // not ours — leave it strictly alone
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue // can't tell its age → don't risk removing a live dir
-		}
-		if now.Sub(info.ModTime()) < olderThan {
-			continue // too fresh — could be a serve launching right now
-		}
-		full := filepath.Join(tempRoot, e.Name())
-		if err := os.RemoveAll(full); err != nil {
-			continue // best-effort
-		}
-		removed = append(removed, full)
-	}
-	return removed
-}
-
-// processComm returns the executable name of a pid via `ps -p <pid> -o comm=`.
-// Empty string when the process is gone or ps fails — callers treat a
-// non-"node" comm (including "") as "don't touch it".
-func processComm(pid int) string {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
-		return ""
-	}
-	// `comm` may be a full path (Linux ps prints the basename, macOS the path);
-	// take the basename so "/usr/local/bin/node" → "node".
-	return filepath.Base(strings.TrimSpace(string(out)))
-}
-
-func newDevCmd(r Resolvers) *cobra.Command {
-	var port int
-	cmd := &cobra.Command{
-		Use:   "serve",
-		Args:  cobra.NoArgs,
-		Short: "Run controllers/ locally against the selected environment",
-		Long: `Serve the local controllers/ from a Node.js dev server with
-hot reload — the local equivalent of the deployed backend-runtime pod.
-Routes (controller basePath + route.path), the per-request req, the imported
-singleton services, and resources behave identically to production, so what
-runs under ` + "`palbase serve`" + ` runs the same once you ` + "`git push`" + ` it to deploy.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-			defer cancel()
-
-			// A Project link alone is not a runtime. Resolve its concrete Environment
-			// before reading files, installing dependencies, or starting local code.
-			sel, err := r.resolve(ctx)
-			if err != nil {
-				return err
-			}
-			if err := preflightServeEnvironment(sel.Environment); err != nil {
-				return err
-			}
-
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			controllersDir := filepath.Join(cwd, "controllers")
-			if _, err := os.Stat(controllersDir); err != nil {
-				return fmt.Errorf("no controllers/ directory in cwd — run from your project root (clone it with `git clone`)")
-			}
-
-			// Controllers import @palbase/backend (Controller/Get/Body decorators)
-			// and the bundler keeps it external, require()ing it from the project's
-			// node_modules at load time. The new flow is `git clone` + `palbase
-			// serve` — no scaffold step installs deps anymore — so a fresh clone has
-			// no node_modules and every controller would fail to load (silently
-			// skipped → "registered 0 route(s)"). Install once when @palbase/backend
-			// is absent so a clean clone serves in one step.
-			if backendDepMissing(cwd) {
-				if err := installNodeDeps(cwd); err != nil {
-					return fmt.Errorf("@palbase/backend is not installed and `npm install` failed: %w\nfix the error above (or run `npm install` manually) and re-run `palbase serve`", err)
-				}
-			}
-
-			// The dev-server require()s zod-to-json-schema to emit OpenAPI
-			// request/response schemas (the deployed br-pod installs it globally;
-			// a local serve must supply it). Ensure it's present so /openapi.json
-			// is populated and the typed pb.* client isn't bodyless — without
-			// adding it to the user's package.json.
-			ensureDevServerTools(cwd)
-
-			// serve deliberately runs the LOCAL SDK, so a major behind the
-			// deploy runtime PASSES here but FAILS on deploy (the centauri
-			// direction). Warn — never block — so `palbase serve` no longer
-			// silently promises deploy parity it can't keep.
-			warnBackendSkew(cmd.Context(), cwd, os.Stderr)
-
-			// Regenerate palbase-env.d.ts from db/schema.ts so the project's
-			// handlers get a typed `Database.tables.*`. No-op when the project
-			// has no db/schema.ts. Best-effort: a generation failure must not
-			// block local dev, so we warn and continue (the dev-server runs the
-			// handlers regardless; only authoring-time types are affected).
-			if err := generateEnvTypes(cmd.Context(), cwd, filepath.Join(cwd, "node_modules")); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not regenerate palbase-env.d.ts (%v)\n", err)
-			}
-
-			// Reclaim serve temp dirs leaked by a previous HARD crash (SIGKILL /
-			// power loss) before we create this run's dir. Graceful exits clean up
-			// themselves (signal handler + the dev-server's process-exit hook); this
-			// catches only what a crash couldn't. Scoped to our exact prefix + an age
-			// grace so a serve launching concurrently in another shell is untouched.
-			for _, stale := range sweepStaleServeTempDirs(os.TempDir(), serveTempPrefix, time.Now(), staleServeTempAge) {
-				fmt.Fprintf(os.Stderr, "cleaned up stale serve temp dir from a previous run: %s\n", stale)
-			}
-
-			tmpDir, err := os.MkdirTemp("", serveTempPrefix+"*")
-			if err != nil {
-				return err
-			}
-			defer os.RemoveAll(tmpDir)
-			if err := extractFS(devServerFS, "devjs", tmpDir); err != nil {
-				return fmt.Errorf("extract dev server: %w", err)
-			}
-
-			ref := sel.EnvironmentRef()
-			// Migration awareness: because serve uses the DEPLOYED environment's DB,
-			// local db/schema.ts or db/migrations/ changes that aren't pushed won't
-			// be reflected. Warn (never block) so the gap is obvious.
-			warnUndeployedSchema(cwd, sel.Environment.Slug, os.Stderr)
-
-			// Reveal the environment's publishable key so dev-server can wire its
-			// inline module clients (module-clients.js) + the Database edge for the
-			// anon/authenticated RLS path.
-			var revealResp struct {
-				EnvironmentRef string `json:"environment_ref"`
-				PublishableKey string `json:"publishable_key"`
-			}
-			if err := r.Studio().Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &revealResp); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: apikey.reveal failed (%v) — the module clients will be unavailable\n", err)
-			} else if err := selection.ValidateRuntimeBinding(ref, revealResp.EnvironmentRef, revealResp.PublishableKey); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: apikey.reveal returned an invalid Environment binding (%v) — the module clients will be unavailable\n", err)
-				revealResp.PublishableKey = ""
-			}
-
-			// KEYLESS asService(): we do NOT pull the service-role key to the laptop
-			// (a leaked/committed BYPASSRLS key is a disaster). Instead serve forwards
-			// the OWNER's normal palauth session token to the Database edge; the edge
-			// verifies project ownership against control-pg (via Studio) and grants
-			// service_role server-side as a tx-local SET LOCAL ROLE — no service-role
-			// credential ever reaches the laptop. ownerToken is the same login session
-			// serve already uses to call Studio; it's a short-lived, refreshable,
-			// revocable USER session, NOT a service-role credential.
-			ownerToken, _ := r.Auth().GetValidToken(ctx) // best-effort; empty → asService degrades
-
-			node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "dev-server.js"))
-			// dev-server.js runs from a temp dir but needs to require()
-			// the user's local @palbase/backend (and any other declared
-			// deps). NODE_PATH adds the project's node_modules to the
-			// resolver path, and setting Dir keeps `process.cwd()` and
-			// any relative paths from user endpoints anchored to the
-			// project root.
-			node.Dir = cwd
-			node.Env = append(os.Environ(),
-				fmt.Sprintf("PALBASE_DEV_PORT=%d", port),
-				fmt.Sprintf("PALBASE_DEV_ROOT=%s", cwd),
-				// The ENVIRONMENT ref feeds dev-server.js's https://<ref>.<host> URL.
-				// Kong routes exactly this subdomain — it is the endpoint, the DNS
-				// label and the ref inside every API key, all one value.
-				fmt.Sprintf("PALBASE_ENVIRONMENT_REF=%s", ref),
-				// The Environment UUID is the sole runtime identity stamped on
-				// job/webhook/worker payloads. The selected Project remains a CLI
-				// link anchor and is never exported into the worker process.
-				fmt.Sprintf("PALBASE_ENVIRONMENT_ID=%s", sel.Environment.ID),
-				fmt.Sprintf("PALBASE_PUBLIC_HOST=%s", r.Endpoints().PublicHost),
-				fmt.Sprintf("PALBASE_TENANT_APIKEY=%s", revealResp.PublishableKey),
-				// The CLI's pinned TypeScript parser first, then the project's
-				// deps — the user's typescript may be 7.x (whose CJS build has no
-				// compiler API) or absent; ours is not their business.
-				fmt.Sprintf("NODE_PATH=%s", devNodePath(cwd, os.Stderr)),
-			)
-			// The owner's palauth session token — enables local asService() KEYLESSLY:
-			// dev-server.js forwards it to the Database edge, which verifies project
-			// ownership (control-pg, via Studio) and grants service_role server-side.
-			// NOT a service-role credential — a short-lived, refreshable USER session.
-			// Written to a FILE (not a static env) and refreshed periodically while
-			// serve runs, because a session token expires (~30m) — a static env
-			// would silently break asService() mid-session. dev-server.js reads the
-			// file fresh on each asService() call. Absent file → asService() degrades.
-			ownerTokenFile := filepath.Join(tmpDir, "owner-token")
-			if ownerToken != "" {
-				if werr := os.WriteFile(ownerTokenFile, []byte(ownerToken), 0o600); werr == nil {
-					node.Env = append(node.Env, fmt.Sprintf("PALBASE_OWNER_TOKEN_FILE=%s", ownerTokenFile))
-				}
-			}
-			// Auto-fetch the branch's remote env vars (the same Studio env.pull
-			// `palbase secret pull` uses) so local dev sees platform-configured
-			// vars WITHOUT the user knowing `secret pull` exists. Delivered via
-			// a 0600 JSON file in tmpDir — NOT node.Env — because dev-server's
-			// loadDotEnvLocal treats already-set process.env as highest
-			// priority, so a node.Env value would BEAT .env.local and invert
-			// the intended precedence (shell env > .env.local > remote).
-			// Best-effort: any failure warns once and serve continues.
-			node.Env = appendRemoteEnv(ctx, r.Studio(), ref, tmpDir, node.Env, os.Stdout, os.Stderr)
-			node.Stdout = os.Stdout
-			node.Stderr = os.Stderr
-			// Best-effort: free the port if a stale dev-server is still holding
-			// it, so a re-run doesn't bounce off EADDRINUSE. Only ever stops a
-			// process whose comm is "node" (a previous dev-server); anything
-			// else is left alone with a warning. Safe to call even when nothing
-			// is listening.
-			freeDevPort(port, os.Stderr)
-			if err := node.Start(); err != nil {
-				return fmt.Errorf("start node: %w (is Node.js installed?)", err)
-			}
-			// Keep the owner-token file fresh while serve runs so asService()
-			// (BYPASSRLS) doesn't silently break when the session token expires.
-			// We REFRESH-AHEAD: GetFreshToken refreshes whenever the token has
-			// less than 5 minutes of life left (not only once it's already
-			// expired, as GetValidToken does), so the file we write always holds
-			// a token with several minutes of margin. Combined with the 30s tick
-			// this closes the stale window entirely — a tick can no longer
-			// rewrite a token that's seconds from expiry. Stops when the context
-			// is cancelled (Ctrl+C) or node exits.
-			const ownerTokenMinRemaining = 5 * time.Minute
-			if ownerToken != "" {
-				go func() {
-					t := time.NewTicker(30 * time.Second)
-					defer t.Stop()
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-t.C:
-							if tok, err := r.Auth().GetFreshToken(ctx, ownerTokenMinRemaining); err == nil && tok != "" {
-								_ = os.WriteFile(ownerTokenFile, []byte(tok), 0o600)
-							}
-						}
-					}
-				}()
-			}
-			waitErr := node.Wait()
-			// Translate the typical SIGINT exit so the user doesn't see a
-			// scary stack trace when they Ctrl+C.
-			if waitErr != nil {
-				if exit, ok := waitErr.(*exec.ExitError); ok {
-					if exit.ExitCode() == 130 || exit.ExitCode() == -1 {
-						return nil
-					}
-				}
-				return fmt.Errorf("dev server exited: %w", waitErr)
-			}
-			return nil
-		},
-	}
-	// 4003 is the single canonical local port: the codegen consumers
-	// (`palbase web gen` local/auto probe, the SPM plugin's spec-fetch local
-	// probe) all hit localhost:4003 for the local /openapi.json, so a plain
-	// `palbase serve` must land there. --port still overrides for the rare conflict.
-	cmd.Flags().IntVar(&port, "port", 4003, "Local port for the dev server")
-	return cmd
-}
-
-// appendRemoteEnv fetches the ENVIRONMENT's remote env vars (Studio env.pull,
-// via secret.Pull — the exact fetch `palbase secret pull` uses), writes them as
-// a {KEY: value} JSON object to <dir>/remote-env.json (0600, wiped with serve's
-// tmpDir on exit) and returns env with PALBASE_REMOTE_ENV_FILE appended.
-// dev-server.js loads that file AFTER .env.local with only-if-unset semantics,
-// keeping the precedence: real shell env > .env.local > remote.
-//
-// Never blocks serve: an unselected project, an insufficient role (env.pull
-// needs project admin), or an offline Studio prints ONE warning line to errW
-// and returns env unchanged.
-func appendRemoteEnv(ctx context.Context, sc *studio.Client, ref, dir string, env []string, out, errW io.Writer) []string {
-	warn := func(reason string) []string {
-		fmt.Fprintf(errW, "warning: could not fetch remote env vars (%s) — using local env only\n", reason)
-		return env
-	}
-	if ref == "" {
-		return warn("no environment selected")
-	}
-	vars, err := secret.Pull(ctx, sc, ref)
-	if err != nil {
-		return warn(err.Error())
-	}
-	m := make(map[string]string, len(vars))
-	for _, v := range vars {
-		m[v.Key] = v.Value
-	}
-	data, err := json.Marshal(m)
-	if err != nil {
-		return warn(err.Error())
-	}
-	file := filepath.Join(dir, "remote-env.json")
-	if err := os.WriteFile(file, data, 0o600); err != nil {
-		return warn(err.Error())
-	}
-	fmt.Fprintf(out, "loaded %d remote env var(s) for environment %s\n", len(vars), ref)
-	return append(env, "PALBASE_REMOTE_ENV_FILE="+file)
-}
-
-// preflightServeEnvironment maps the SELECTED Environment's state to an
-// actionable error (nil = good to serve). serve proxies Database and the module
-// clients to the deployed environment, so an archived or still-provisioning one
-// cannot back local dev. Pure — the status→guidance mapping is unit-tested.
-func preflightServeEnvironment(env selection.Environment) error {
-	switch env.Status {
-	case "active", "":
-		return nil
-	case "creating", "provisioning", "migrating":
-		return fmt.Errorf("environment %q is still provisioning — re-run once `palbase env list` shows it active", env.Slug)
-	case "archived", "asleep", "paused", "stopped", "idle":
-		return fmt.Errorf("environment %q is not awake — wake it first:\n\n  palbase env wake %s", env.Slug, env.Slug)
-	case "deleted":
-		return fmt.Errorf("environment %q was deleted — recreate it:\n\n  palbase env create %s --from production", env.Slug, env.Slug)
-	default:
-		// Unknown/transient state: don't block local dev, but make it visible.
-		fmt.Fprintf(os.Stderr, "warning: environment %q reports status %q — serving anyway\n", env.Slug, env.Status)
-		return nil
-	}
-}
-
-// warnUndeployedSchema prints a best-effort note when the project's local
-// db/schema.ts or db/migrations/ differ from what is deployed to the selected
-// environment. serve runs against the DEPLOYED environment's DB, so unpushed
-// schema changes won't be reflected. Never blocks; silent when git is
-// unavailable or db/ is clean.
-func warnUndeployedSchema(cwd, environment string, w io.Writer) {
-	if _, err := os.Stat(filepath.Join(cwd, "db", "schema.ts")); err != nil {
-		return // no schema → nothing to migrate
-	}
-	paths := []string{"db/schema.ts", "db/migrations"}
-
-	dirty := false
-	statusArgs := append([]string{"-C", cwd, "status", "--porcelain", "--"}, paths...)
-	if out, err := exec.Command("git", statusArgs...).Output(); err == nil {
-		dirty = len(strings.TrimSpace(string(out))) > 0
-	}
-
-	unpushed := false
-	if !dirty {
-		logArgs := append([]string{"-C", cwd, "log", "--oneline", "@{upstream}..HEAD", "--"}, paths...)
-		if out, err := exec.Command("git", logArgs...).Output(); err == nil {
-			unpushed = len(strings.TrimSpace(string(out))) > 0
-		}
-	}
-
-	if !dirty && !unpushed {
-		return
-	}
-	fmt.Fprintf(w, `note: local db/schema.ts or db/migrations/ has changes not deployed to environment %q.
-serve runs against the DEPLOYED environment's database — new tables/columns won't
-exist until you push. Additive changes auto-migrate on deploy; type changes need
-an explicit migration in db/migrations/ (the deploy drift-gate blocks unmigrated
-type changes).
-
-`, environment)
 }
 
 // deployRow mirrors one control-pg `deployments` attempt as the deployments v2
@@ -1188,8 +749,7 @@ func fetchRemoteOpenAPISpec(ctx context.Context, specURL, apiKey string, w io.Wr
 // fetchOpenAPISpecOpts is the wake-aware core. It retries ONLY on signals that
 // mean "the backend pod is still waking" — HTTP 502/503 and per-attempt
 // timeouts — honoring a Retry-After header when present. Everything else fails
-// immediately: a connection-refused (the local `palbase serve` probe when serve
-// is down) returns fast so the remote fallback kicks in without burning the
+// immediately: a connection-refused returns fast rather than burning the
 // budget, and a hard 4xx (e.g. 401 invalid_apikey) is a real error, not a wake.
 func fetchOpenAPISpecOpts(ctx context.Context, specURL, apiKey string, opts fetchOpts) ([]byte, error) {
 	deadline := time.Now().Add(opts.totalBudget)
@@ -1360,7 +920,7 @@ func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error
 
 	// Extract the embedded env-gen.js bridge next to the bundle.
 	scriptPath := filepath.Join(tmpDir, "env-gen.js")
-	body, err := devServerFS.ReadFile("devjs/env-gen.js")
+	body, err := buildCheckFS.ReadFile("devjs/env-gen.js")
 	if err != nil {
 		return fmt.Errorf("read embedded env-gen.js: %w", err)
 	}

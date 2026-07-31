@@ -494,7 +494,7 @@ func (c *Client) GetValidToken(ctx context.Context) (string, error) {
 // GetValidToken only refreshes once the token is ALREADY expired
 // (creds.IsExpired()): a caller that polls on a fixed tick can therefore write
 // out a token with only a few seconds left, which then expires before the next
-// tick fires — leaving a stale-token window (e.g. `palbase serve`'s asService()
+// tick fires — leaving a stale-token window (e.g. a long-running command's
 // silently returns empty until the next refresh actually triggers).
 // GetFreshToken closes that window: it refreshes when the token has LESS THAN
 // minRemaining left, so the returned token always has a comfortable margin.

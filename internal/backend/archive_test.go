@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // makeTarGz builds an in-memory tar.gz with the given entries (name → content).
@@ -285,4 +287,41 @@ func TestBuildTarball_ExcludesSecretFilesByDefault(t *testing.T) {
 	if !contains(got, "index.ts") {
 		t.Fatalf("index.ts missing: entries=%v", got)
 	}
+}
+
+// TestBuildTarball_ExcludesStagedControllers locks the staging tree out of the
+// deploy bundle. `palbase build` writes .palbase-build-controllers/ beside
+// controllers/ (return bindings injected) and removes it on exit — but a
+// SIGKILLed run leaves it in the project root, and shipping it would put a
+// second, shadow copy of every controller into the tarball the deploy stages.
+// The JS side owns the real name; this test pins the Go constant to the same
+// spelling, so renaming one without the other fails here.
+func TestBuildTarball_ExcludesStagedControllers(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(dir, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+	}
+	write("controllers/todos.controller.ts", "export default class T {}")
+	write(stagedControllersDir+"/todos.controller.ts", "STAGED_COPY_CANARY")
+	write(stagedControllersDir+"/nested/deep.ts", "STAGED_COPY_CANARY")
+
+	tarball, err := BuildTarball(dir)
+	require.NoError(t, err)
+	names := tarEntries(t, tarball)
+
+	require.Contains(t, names, "controllers/todos.controller.ts", "the real controller must ship")
+	for _, n := range names {
+		require.NotContains(t, n, stagedControllersDir,
+			"the build staging tree must never enter the deploy tarball (got %q)", n)
+	}
+}
+
+// stagedControllersDir must match build-check.js's STAGED_CONTROLLERS_DIR.
+func TestStagedControllersDirMatchesBuildCheck(t *testing.T) {
+	src, err := buildCheckFS.ReadFile("devjs/build-check.js")
+	require.NoError(t, err)
+	require.Contains(t, string(src), "'"+stagedControllersDir+"'",
+		"build-check.js must stage into %s — the tarball walk skips exactly that name", stagedControllersDir)
 }

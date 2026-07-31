@@ -81,7 +81,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"push",
 		"rollback",
 		"secret",
-		"serve",
 		"spec",
 		"status",
 		"storage",
@@ -96,7 +95,7 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 	for _, name := range topLevel(t) {
 		have[name] = true
 	}
-	for _, gone := range []string{"branch", "groups", "group", "org", "organization"} {
+	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev"} {
 		require.False(t, have[gone],
 			"`palbase %s` must NOT exist after the cutover (no shims, no aliases)", gone)
 	}

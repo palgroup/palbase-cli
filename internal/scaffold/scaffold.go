@@ -47,7 +47,7 @@ const packageJSON = `{
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "palbase serve",
+    "build": "palbase build",
     "deploy": "palbase push",
     "typecheck": "tsc --noEmit",
     "prepare": "git config core.hooksPath hooks 2>/dev/null && chmod +x hooks/* 2>/dev/null || true"
@@ -161,6 +161,7 @@ export default class HelloController {
 `
 
 const gitignore = `node_modules/
+.palbase-build-controllers/
 .palbase/config.json
 .env.local
 # Deno/edge-runtime residue — the isolate host, not the tenant, owns these.
@@ -238,7 +239,7 @@ Refuses to run in a directory that already contains a package.json.`,
 				fmt.Fprintf(out, "  cd %s\n", target)
 			}
 			fmt.Fprintln(out, "  npm install")
-			fmt.Fprintln(out, "  palbase serve                                # run locally")
+			fmt.Fprintln(out, "  palbase build                                # validate locally")
 			fmt.Fprintln(out, "  palbase project create <ref> --name \"...\"    # create the project")
 			fmt.Fprintln(out, "  palbase push                                 # deploy")
 			return nil

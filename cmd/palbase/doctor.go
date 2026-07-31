@@ -71,12 +71,12 @@ func doctorCmd() *cobra.Command {
 				case "foreign":
 					ok("hook", fmt.Sprintf("hooks/pre-push %s", detail))
 				default: // missing
-					bad("hook", "hooks/pre-push missing — run 'palbase push' or 'palbase serve' once to install it")
+					bad("hook", "hooks/pre-push missing — run 'palbase push' or 'palbase clone' once to install it")
 				}
 			}
 
 			if node, err := exec.LookPath("node"); err != nil {
-				bad("node", "not found on PATH — `palbase serve` and `palbase db types` need Node.js")
+				bad("node", "not found on PATH — `palbase build` and `palbase db types` need Node.js")
 			} else {
 				v, _ := exec.CommandContext(ctx, node, "--version").Output()
 				ok("node", fmt.Sprintf("%s (%s)", strings.TrimSpace(string(v)), node))

@@ -27,13 +27,14 @@ func TestCommands_FlatSurface(t *testing.T) {
 	}
 
 	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
-	// CLI keeps local dev + observation/control verbs only.
-	for _, want := range []string{"serve", "deploys", "rollback", "status", "spec", "web", "ios", "macos"} {
+	// CLI keeps the pre-deploy validator + observation/control verbs only.
+	for _, want := range []string{"build", "deploys", "rollback", "status", "spec", "web", "ios", "macos"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
 	// Removed: no enable/disable (backend is the default — the CLI never
-	// enables or tears down), no `dev` (→ serve), no `backend` parent. `merge`
+	// enables or tears down), no `serve`/`dev` (the local Node dev server is
+	// gone — deploy to a dev Environment instead), no `backend` parent. `merge`
 	// stays retired (the go-git merge verb is gone). push/pull are BACK as
 	// mode-aware verbs (github: git push/pull; platform: tarball/bundle) — see
 	// TestCommands_IncludesGitNativeVerbs. The CLI-audit renames retired

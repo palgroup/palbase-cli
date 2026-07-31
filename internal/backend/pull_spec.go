@@ -54,7 +54,7 @@ type oauthGoogleJSON struct {
 // consume: the SELECTED ENVIRONMENT's openapi.json. The CLI does not generate
 // client code — that is the SDKs' job.
 //
-// spec NEVER probes a local `palbase serve` on :4003 — it fetches the REMOTE
+// spec NEVER probes a local server on :4003 — it fetches the REMOTE
 // spec via the wake-aware fetch.
 func newSpecCmd(r Resolvers) *cobra.Command {
 	var outDir string

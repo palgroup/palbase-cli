@@ -1,7 +1,7 @@
 // Package secret provides the `palbase secret` subcommand group:
 // set / list / remove / pull / push. They manage the SELECTED ENVIRONMENT's
 // remote env vars via Studio tRPC (user JWT → Studio env.* → control-pg). NOT
-// dev-server-local.
+// local to the developer's machine.
 //
 // Env vars belong to an Environment, not a Project: staging's DATABASE_URL is
 // not production's. Override the target with the global --project /
@@ -207,7 +207,7 @@ type PulledVar struct {
 
 // Pull fetches every env var of ONE ENVIRONMENT (plain + decrypted secrets) via
 // Studio's env.pull — the single fetch used by both `palbase secret pull` and
-// `palbase serve`'s automatic remote-env load. ref is the Environment's ref;
+// the `palbase secret pull` env fetch. ref is the Environment's ref;
 // there is no branch parameter.
 func Pull(ctx context.Context, sc *studio.Client, ref string) ([]PulledVar, error) {
 	var vars []PulledVar

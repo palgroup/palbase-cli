@@ -49,7 +49,7 @@ func TestInit_EmptyDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, `scaffolding Palbase backend codebase "myapp"`)
 	assert.Contains(t, out, "npm install")
-	assert.Contains(t, out, "palbase serve")
+	assert.Contains(t, out, "palbase build")
 	assert.Contains(t, out, "palbase push")
 
 	for _, f := range scaffoldFiles {
@@ -75,7 +75,7 @@ func TestInit_EmptyDir(t *testing.T) {
 	assert.Contains(t, ctrl, `@Controller("/hello"`)
 	// The runtime REQUIRES a NAMED zod schema as the return type — an inline
 	// object type is rejected and the endpoint registers 0 routes (found by
-	// the live `palbase serve` smoke). Lock the named-schema shape.
+	// the live deploy smoke). Lock the named-schema shape.
 	assert.Contains(t, ctrl, "hello(): HelloSchema")
 	assert.Contains(t, ctrl, `import { HelloSchema } from "../models/hello/shared"`)
 	assert.NotContains(t, ctrl, "Promise<{")

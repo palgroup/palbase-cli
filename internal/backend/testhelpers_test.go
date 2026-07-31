@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// localSpecServer stands in for a local `palbase serve` serving an empty
+// localSpecServer stands in for a local endpoint serving an empty
 // OpenAPI spec, so the auto/local spec path takes the LOCAL-spec branch.
 func localSpecServer(t *testing.T) {
 	t.Helper()
