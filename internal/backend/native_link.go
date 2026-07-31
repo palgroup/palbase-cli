@@ -18,6 +18,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -148,10 +149,7 @@ Local project files are left untouched.
 			if r.REST != nil {
 				rest = r.REST()
 			}
-			persistedAppID := ""
-			if cfg, cfgErr := selection.Load(""); cfgErr == nil && cfg.ProjectID == sel.ProjectID {
-				persistedAppID = cfg.AppID(platform)
-			}
+			persistedAppID := persistedAppIDFor(platform, sel)
 
 			deps := nativeLinkDeps{
 				rest:       rest,
@@ -258,13 +256,39 @@ func appIDFromPlatformSlot(platform string) string {
 	return slot.AppID
 }
 
+// persistedAppIDFor returns the locally-remembered app registration for
+// platform, but only when the local config still selects the SAME project as
+// sel. A slot left over from no selection, a different project, or an
+// unreadable config must never be handed to the remote API as if it already
+// belonged to the project being linked — resolveNativeApp/resolveWebApp fall
+// back to registering a fresh app instead.
+func persistedAppIDFor(platform string, sel selection.Selection) string {
+	cfg, err := selection.Load("")
+	if err != nil || cfg.ProjectID != sel.ProjectID {
+		return ""
+	}
+	return cfg.AppID(platform)
+}
+
 // persistProjectAppSlot records one platform's app registration in
 // `.palbase/config.json`. A cross-Project move clears every foreign app slot;
 // within one Project, sibling slots remain intact.
+//
+// The directory may genuinely have no config yet — `--project X` resolves the
+// Selection without ever touching disk (selection.Resolver.Resolve), so a
+// config-less directory is the ORDINARY first-link case, not an error. Only a
+// config that failed to load for some OTHER reason (corrupt JSON, wrong
+// version) must still fail loudly: the caller already registered the app
+// remotely by this point, and silently discarding a real config error would
+// paper over a broken checkout instead of surfacing it.
 func persistProjectAppSlot(platform, appID string, sel *selection.Selection, retarget bool) error {
 	cfg, err := selection.Load("")
 	if err != nil {
-		return err
+		var notSelected selection.ErrNotSelected
+		if !errors.As(err, &notSelected) {
+			return err
+		}
+		cfg = &selection.Config{}
 	}
 	if sel != nil {
 		projectChanged := cfg.ProjectID != sel.ProjectID

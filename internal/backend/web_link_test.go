@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -660,6 +661,63 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 
 	outStr := runWebLink(t)
 	require.Contains(t, outStr, "palbe.gen", "manual instruction should mention gen file")
+}
+
+// TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate exercises
+// the two real functions webLinkArtifacts calls before ever touching the
+// network for the spec/config — resolveWebApp and persistProjectAppSlot —
+// going AROUND the webLinkArtifacts stub every other test in this file
+// installs (stubArtifactsFunc never calls either). Every other web-link test
+// stubs webLinkArtifacts wholesale, so this exact bug shipped with CI green:
+// `palbase web link --project X` in a config-less directory registered the app
+// remotely, then persistProjectAppSlot's unconditional selection.Load("")
+// returned ErrNotSelected and the whole call failed with "no project
+// selected" — orphaning the just-created app. Mutation-evident: restore the
+// unconditional `if err != nil { return err }` in persistProjectAppSlot and
+// the first block below turns red.
+func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	// Deliberately no selectiontest.WriteConfig: this is the config-less
+	// directory `--project proj_1` resolves without ever touching disk.
+
+	var registered []map[string]any
+	var postCount int
+	f := selectiontest.New(t)
+	f.Handle("GET /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, registered)
+	})
+	f.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+		postCount++
+		row := map[string]any{"id": "app_web", "platform": "web"}
+		registered = append(registered, row)
+		selectiontest.WriteOK(w, http.StatusCreated, row)
+	})
+	rest := f.REST()
+
+	sel := selection.Selection{
+		ProjectID:          "proj_1",
+		Environment:        selection.Environment{ID: "env_prod", Ref: "app1prod"},
+		RepositoryProvider: selection.ProviderPalbase,
+	}
+
+	// First run: register then persist — must not fail with "no project
+	// selected" even though the directory had no config a moment ago.
+	appID, err := resolveWebApp(context.Background(), rest, sel.ProjectID, persistedAppIDFor("web", sel), io.Discard)
+	require.NoError(t, err)
+	require.NoError(t, persistProjectAppSlot("web", appID, &sel, false),
+		"registering the app remotely must not leave the run failing with 'no project selected'")
+	require.Equal(t, 1, postCount)
+
+	cfg, err := selection.Load(dir)
+	require.NoError(t, err, "the fresh registration must be persisted, not orphaned")
+	require.Equal(t, "app_web", cfg.WebAppID)
+
+	// Second run: mirrors webLinkArtifacts re-reading the persisted app id.
+	appID2, err := resolveWebApp(context.Background(), rest, sel.ProjectID, persistedAppIDFor("web", sel), io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, appID, appID2)
+	require.NoError(t, persistProjectAppSlot("web", appID2, &sel, false))
+	require.Equal(t, 1, postCount, "the second run must reuse the persisted app, not register a duplicate")
 }
 
 // TestWebUnlink_RemovesConfig: `web unlink` removes .palbase/config.json and

@@ -337,3 +337,82 @@ func TestNativeLink_FreshCloneReusesTheCommittedAppSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "app_ios", summary.AppID)
 }
+
+// A config-less directory linked headlessly (`palbase ios link --project X`)
+// used to register the app remotely and THEN fail persistProjectAppSlot's
+// unconditional selection.Load("") with "no project selected" — the register
+// call has no config to check against, so it always orphaned the just-created
+// app. Mutation-evident: restore the unconditional `if err != nil { return
+// err }` in persistProjectAppSlot and the first runNativeLink call below turns
+// red; the second (which would then register a SECOND app because nothing was
+// ever persisted) never even runs.
+func TestNativeLink_ProjectFlagWithoutConfig_DoesNotOrphanOrDuplicate(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	// Deliberately no selectiontest.WriteConfig: this is the config-less
+	// directory `--project proj_1` resolves without ever touching disk
+	// (selection.Resolver.Resolve skips Config() once ProjectFlag is set).
+
+	var registered []map[string]any
+	var postCount int
+	f := selectiontest.New(t)
+	f.Handle("GET /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+		selectiontest.WriteOK(w, http.StatusOK, registered)
+	})
+	f.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+		postCount++
+		row := map[string]any{"id": "app_ios", "platform": "ios"}
+		registered = append(registered, row)
+		selectiontest.WriteOK(w, http.StatusCreated, row)
+	})
+
+	deps := stubPullSeams(t, "app_ios", "app1prod", "ios")
+	deps.rest = f.REST()
+
+	opts := nativeLinkOpts{
+		platform: "ios", projectID: "proj_1",
+		environmentID: "env_prod", environmentRef: "app1prod",
+		repositoryProvider: selection.ProviderPalbase,
+	}
+
+	// First run: the app is registered remotely; persisting it must succeed
+	// even though the directory had no config a moment ago.
+	summary1, err := runNativeLink(context.Background(), deps, opts, io.Discard)
+	require.NoError(t, err, "registering the app remotely must not leave the run failing with 'no project selected'")
+	require.Equal(t, "app_ios", summary1.AppID)
+	require.Equal(t, 1, postCount)
+
+	cfg, err := selection.Load(dir)
+	require.NoError(t, err, "the fresh registration must be persisted, not orphaned")
+	require.Equal(t, "proj_1", cfg.ProjectID)
+	require.Equal(t, "app_ios", cfg.IOSAppID)
+
+	// Second run: mirrors newNativeLinkCmd re-reading the persisted app id
+	// from disk (native_link.go's persistedAppIDFor) before calling
+	// runNativeLink again.
+	opts.appID = cfg.AppID("ios")
+	summary2, err := runNativeLink(context.Background(), deps, opts, io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, "app_ios", summary2.AppID)
+	require.Equal(t, 1, postCount, "the second run must reuse the persisted app, not register a duplicate")
+}
+
+// persistedAppIDFor is the shared read both `native link` and `web link` use
+// before registering: a slot from a DIFFERENT project (or no config at all)
+// must never be handed to resolve*App as if it already belonged to the
+// project being linked.
+func TestPersistedAppIDFor_OnlyReusesTheSameProjectSlot(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_a", EnvironmentID: "env_a", WebAppID: "web_a", IOSAppID: "ios_a",
+	})
+
+	require.Equal(t, "web_a", persistedAppIDFor("web", selection.Selection{ProjectID: "proj_a"}))
+	require.Equal(t, "ios_a", persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_a"}))
+	require.Empty(t, persistedAppIDFor("web", selection.Selection{ProjectID: "proj_b"}),
+		"a slot from a different project must not be reused")
+}
+
+func TestPersistedAppIDFor_NoConfigReturnsEmpty(t *testing.T) {
+	selectiontest.Chdir(t)
+	require.Empty(t, persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_1"}))
+}
