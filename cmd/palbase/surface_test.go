@@ -116,9 +116,11 @@ func TestGolden_ProjectSurface(t *testing.T) {
 
 // GOLDEN: `palbase env --help` — the canonical Environment surface. It replaces
 // the retired `branch` group, and it has NO `switch` (that was the branch verb).
+// `branch` here is the GIT-branch mapping verb, not that resource: it writes the
+// value push/pull and the deploy webhook both route on.
 func TestGolden_EnvSurface(t *testing.T) {
 	require.Equal(t,
-		[]string{"archive", "create", "delete", "list", "status", "use", "wake"},
+		[]string{"archive", "branch", "create", "delete", "list", "status", "use", "wake"},
 		subcommands(t, "env"))
 }
 

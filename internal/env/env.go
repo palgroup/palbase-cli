@@ -64,10 +64,98 @@ and secrets. It replaces the Palbase branch — there is no branch resource and 
 		listCmd(r),
 		useCmd(r),
 		statusCmd(r),
+		branchCmd(r),
 		lifecycleCmd(r, "archive", "Archive an environment (tear down compute; `env wake` reactivates it)"),
 		lifecycleCmd(r, "wake", "Reactivate an archived environment"),
 		deleteCmd(r),
 	)
+	return cmd
+}
+
+// branchCmd maps the Git branch whose pushes auto-deploy an Environment.
+//
+// It exists because `push` refuses an Environment with no mapping and told
+// people to "map one in Environment settings" — advice that pointed nowhere:
+// no CLI verb set it, and Studio had no such control either. A freshly created
+// Environment starts unmapped by design (spec §3.2 keeps Git mapping out of
+// create), so without this the new Environment was a runtime nothing could
+// reach.
+func branchCmd(r Resolvers) *cobra.Command {
+	var (
+		create  bool
+		unmap   bool
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "branch [<git-branch>]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Show or set the Git branch whose pushes deploy to the selected environment",
+		Long: `Pushes to the mapped branch auto-deploy to this environment. One branch drives
+one environment; an unmapped branch deploys nothing.
+
+  palbase env branch                  # show the current mapping
+  palbase env branch dev              # map pushes on "dev" here
+  palbase env branch dev --create     # ...and open "dev" on GitHub if missing
+  palbase env branch --unmap          # stop deploying any branch here`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			sel, err := r.Selection().Resolve(ctx)
+			if err != nil {
+				return err
+			}
+			path := envPath(sel.ProjectID, sel.EnvironmentRef(), "")
+
+			// No argument and no --unmap is a read: print what is mapped.
+			if len(args) == 0 && !unmap {
+				var detail environmentDetail
+				if err := r.REST().Do(ctx, http.MethodGet, path, nil, &detail); err != nil {
+					return err
+				}
+				if jsonOut {
+					return encodeJSON(cmd.OutOrStdout(), detail)
+				}
+				if detail.SourceGitBranch == nil || *detail.SourceGitBranch == "" {
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"No branch is mapped to %s — pushes cannot deploy here.\nMap one: palbase env branch <git-branch>\n",
+						detail.Slug)
+					return nil
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s deploys from %s\n", detail.Slug, *detail.SourceGitBranch)
+				return nil
+			}
+			if unmap && len(args) > 0 {
+				return errors.New("--unmap takes no branch argument")
+			}
+
+			body := struct {
+				SourceGitBranch *string `json:"sourceGitBranch"`
+				CreateBranch    bool    `json:"createBranch,omitempty"`
+			}{}
+			if !unmap {
+				body.SourceGitBranch = &args[0]
+				body.CreateBranch = create
+			}
+			var out struct {
+				Ref             string  `json:"ref"`
+				SourceGitBranch *string `json:"source_git_branch"`
+			}
+			if err := r.REST().Do(ctx, http.MethodPatch, path, body, &out); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(cmd.OutOrStdout(), out)
+			}
+			if out.SourceGitBranch == nil || *out.SourceGitBranch == "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "✓ %s no longer deploys from any branch\n", out.Ref)
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ pushes to %s now deploy to %s\n", *out.SourceGitBranch, out.Ref)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&create, "create", false, "Create the branch on the connected repository if it does not exist")
+	cmd.Flags().BoolVar(&unmap, "unmap", false, "Remove the mapping (nothing auto-deploys here)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 

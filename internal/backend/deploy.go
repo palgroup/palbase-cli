@@ -394,7 +394,7 @@ func requireMappedGitBranch(sel selection.Selection, resolve gitBranchResolver) 
 		label = sel.EnvironmentRef()
 	}
 	if mapped == "" {
-		return fmt.Errorf("selected environment %q has no mapped Git branch — map one in Environment settings before push/pull", label)
+		return fmt.Errorf("selected environment %q has no mapped Git branch — run `palbase env branch <git-branch>` before push/pull", label)
 	}
 	if resolve == nil {
 		resolve = currentGitBranch

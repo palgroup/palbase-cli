@@ -48,9 +48,13 @@ func TestEnvCmd_CanonicalSurface(t *testing.T) {
 		got = append(got, c.Name())
 	}
 	sort.Strings(got)
-	// spec §7.3: create|list|use|status|archive|wake|delete. Nothing else — and
-	// crucially no `switch`, which is what the retired `branch` command had.
-	require.Equal(t, []string{"archive", "create", "delete", "list", "status", "use", "wake"}, got)
+	// spec §7.3: create|list|use|status|archive|wake|delete, plus `branch` — the
+	// GIT-branch mapping verb. It is NOT the retired Palbase-Branch resource
+	// coming back: it sets environments.source_git_branch (which push/pull and
+	// the webhook already require) and there is still no `switch`, which is the
+	// verb that made a branch a runtime selector.
+	require.Equal(t,
+		[]string{"archive", "branch", "create", "delete", "list", "status", "use", "wake"}, got)
 }
 
 func TestEnv_HitsTheV2Paths(t *testing.T) {
@@ -424,4 +428,90 @@ func TestEnvCreate_StillRunningTimesOutHonestly(t *testing.T) {
 		"a running saga must be reported as running, never as a failure")
 	require.NotContains(t, err.Error(), "failed",
 		"'still provisioning' must not be worded as a failure")
+}
+
+// `env branch` is the ONLY way to set environments.source_git_branch from the
+// CLI, and that value is the deploy webhook's only routing key. Before it
+// existed, `push` refused an unmapped Environment and pointed at "Environment
+// settings" — a screen that had no such control. So these lock the wire: the
+// PATCH body, the create opt-in, and the read that names the gap out loud.
+func TestEnvBranch_MapsThroughPatch(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.OK("PATCH "+base+"/app1prod", map[string]any{
+		"ref": "app1prod", "source_git_branch": "dev",
+	})
+
+	out, exec := newCmd(t, fake)
+	require.NoError(t, exec("branch", "dev"))
+
+	req, ok := fake.Find("PATCH " + base + "/app1prod")
+	require.True(t, ok, "expected the v2 PATCH, got %v", fake.Routes())
+	require.Equal(t, "dev", req.Body["sourceGitBranch"])
+	// --create is opt-in: mapping must never silently create a branch on
+	// someone's repository.
+	require.NotContains(t, req.Body, "createBranch")
+	require.Contains(t, out.String(), "now deploy to app1prod")
+}
+
+func TestEnvBranch_CreateFlagAsksForTheBranch(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.OK("PATCH "+base+"/app1prod", map[string]any{
+		"ref": "app1prod", "source_git_branch": "dev",
+	})
+
+	_, exec := newCmd(t, fake)
+	require.NoError(t, exec("branch", "dev", "--create"))
+
+	req, _ := fake.Find("PATCH " + base + "/app1prod")
+	require.Equal(t, true, req.Body["createBranch"])
+}
+
+func TestEnvBranch_UnmapSendsNull(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.OK("PATCH "+base+"/app1prod", map[string]any{
+		"ref": "app1prod", "source_git_branch": nil,
+	})
+
+	out, exec := newCmd(t, fake)
+	require.NoError(t, exec("branch", "--unmap"))
+
+	req, _ := fake.Find("PATCH " + base + "/app1prod")
+	require.Nil(t, req.Body["sourceGitBranch"], "unmapping must send an explicit null")
+	require.Contains(t, out.String(), "no longer deploys from any branch")
+}
+
+func TestEnvBranch_ReadNamesTheGap(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.OK("GET "+base+"/app1prod", map[string]any{
+		"id": "env_prod", "ref": "app1prod", "slug": "production", "kind": "production",
+		"status": "active", "organization_id": "org_1", "tier": "free",
+		"url": "https://app1prod.dev.palbase.studio", "source_git_branch": nil,
+	})
+
+	out, exec := newCmd(t, fake)
+	require.NoError(t, exec("branch"))
+
+	// An unmapped Environment must not read as "fine, nothing set" — it is a
+	// runtime no push can reach.
+	require.Contains(t, out.String(), "No branch is mapped")
+	require.Contains(t, out.String(), "pushes cannot deploy here")
+	for _, route := range fake.Routes() {
+		require.NotContains(t, route, "PATCH")
+	}
 }
