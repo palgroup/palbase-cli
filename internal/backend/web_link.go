@@ -67,7 +67,10 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 		return fmt.Errorf("management API is unavailable")
 	}
 	rest := r.REST()
-	persistedAppID := persistedAppIDFor("web", sel)
+	persistedAppID, err := persistedAppIDFor("web", sel)
+	if err != nil {
+		return err
+	}
 	appID, err := resolveWebApp(ctx, rest, sel.ProjectID, persistedAppID, w)
 	if err != nil {
 		return err

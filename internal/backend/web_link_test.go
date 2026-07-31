@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 
+	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
@@ -702,7 +703,9 @@ func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *test
 
 	// First run: register then persist — must not fail with "no project
 	// selected" even though the directory had no config a moment ago.
-	appID, err := resolveWebApp(context.Background(), rest, sel.ProjectID, persistedAppIDFor("web", sel), io.Discard)
+	firstPersistedID, err := persistedAppIDFor("web", sel)
+	require.NoError(t, err)
+	appID, err := resolveWebApp(context.Background(), rest, sel.ProjectID, firstPersistedID, io.Discard)
 	require.NoError(t, err)
 	require.NoError(t, persistProjectAppSlot("web", appID, &sel, false),
 		"registering the app remotely must not leave the run failing with 'no project selected'")
@@ -713,11 +716,69 @@ func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *test
 	require.Equal(t, "app_web", cfg.WebAppID)
 
 	// Second run: mirrors webLinkArtifacts re-reading the persisted app id.
-	appID2, err := resolveWebApp(context.Background(), rest, sel.ProjectID, persistedAppIDFor("web", sel), io.Discard)
+	secondPersistedID, err := persistedAppIDFor("web", sel)
+	require.NoError(t, err)
+	appID2, err := resolveWebApp(context.Background(), rest, sel.ProjectID, secondPersistedID, io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, appID, appID2)
 	require.NoError(t, persistProjectAppSlot("web", appID2, &sel, false))
 	require.Equal(t, 1, postCount, "the second run must reuse the persisted app, not register a duplicate")
+}
+
+// TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp is the web-link
+// equivalent of the native test of the same shape: a `.palbase/config.json`
+// that exists but fails to load (corrupt JSON, an unsupported version) must
+// abort the command BEFORE webLinkArtifacts ever calls resolveWebApp. Before
+// persistedAppIDFor gated on the error, this Load failure was swallowed into
+// "" and resolveWebApp registered an app remotely that persistProjectAppSlot
+// then failed to persist against the SAME broken config — an orphan.
+// `--project proj_1` is required to reach this: without it, Resolver.Resolve
+// reads the same broken file itself and fails first, which would pass this
+// test for the wrong reason.
+func TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"bad JSON", `{not valid json`},
+		{"unsupported version (v1)", `{"version":1,"project_ref":"proj_1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectiontest.Chdir(t)
+			selectiontest.WriteRawConfig(t, "", tc.raw)
+			writePkgJSON(t, minimalPkgJSON())
+
+			var postCount int
+			f := selectiontest.New(t)
+			// A real (empty) apps list, so a gate bypass proceeds all the way to a
+			// genuine POST instead of failing earlier on an unmodeled route — the
+			// postCount assertion below must be locking the real gate, not an
+			// incidental 404.
+			f.OK("GET /api/v2/projects/proj_1/apps", []map[string]any{})
+			f.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+				postCount++
+				selectiontest.WriteOK(w, http.StatusCreated, map[string]any{"id": "app_web", "platform": "web"})
+			})
+			rest := f.REST()
+			resolver := &selection.Resolver{
+				REST:        func() selection.REST { return rest },
+				ProjectFlag: "proj_1", // headless --project: Resolve() never reads the broken config itself
+			}
+			r := Resolvers{
+				REST:      func() REST { return rest },
+				Selection: func() *selection.Resolver { return resolver },
+				Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
+			}
+
+			cmd := newWebCmd(r)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs([]string{"link"})
+			err := cmd.Execute()
+			require.Error(t, err, "a broken local config must fail the command")
+			require.Equal(t, 0, postCount, "no app may be registered before the broken config is surfaced")
+		})
+	}
 }
 
 // TestWebUnlink_RemovesConfig: `web unlink` removes .palbase/config.json and

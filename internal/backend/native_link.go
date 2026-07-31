@@ -149,7 +149,10 @@ Local project files are left untouched.
 			if r.REST != nil {
 				rest = r.REST()
 			}
-			persistedAppID := persistedAppIDFor(platform, sel)
+			persistedAppID, err := persistedAppIDFor(platform, sel)
+			if err != nil {
+				return err
+			}
 
 			deps := nativeLinkDeps{
 				rest:       rest,
@@ -258,16 +261,34 @@ func appIDFromPlatformSlot(platform string) string {
 
 // persistedAppIDFor returns the locally-remembered app registration for
 // platform, but only when the local config still selects the SAME project as
-// sel. A slot left over from no selection, a different project, or an
-// unreadable config must never be handed to the remote API as if it already
-// belonged to the project being linked — resolveNativeApp/resolveWebApp fall
-// back to registering a fresh app instead.
-func persistedAppIDFor(platform string, sel selection.Selection) string {
+// sel. A slot left over from no selection or a different project must never
+// be handed to the remote API as if it already belonged to the project being
+// linked — resolveNativeApp/resolveWebApp fall back to registering a fresh
+// app instead.
+//
+// The returned error is non-nil ONLY when `.palbase/config.json` exists but
+// failed to load for a reason OTHER than "nothing selected yet" (corrupt
+// JSON, unsupported version — selection.ErrNotSelected is NOT an error here,
+// it is the ordinary first-link case). Callers MUST check it and return
+// before registering anything remotely: register-then-persist is how a
+// config-less directory used to orphan an app (persistProjectAppSlot failed
+// AFTER the remote create), and a genuinely broken config hits that exact
+// same trap — persistProjectAppSlot's Load("") fails there too, just with an
+// error persistProjectAppSlot correctly refuses to paper over. Gating here,
+// before any remote call, closes that corner instead of merely surfacing it.
+func persistedAppIDFor(platform string, sel selection.Selection) (string, error) {
 	cfg, err := selection.Load("")
-	if err != nil || cfg.ProjectID != sel.ProjectID {
-		return ""
+	if err != nil {
+		var notSelected selection.ErrNotSelected
+		if errors.As(err, &notSelected) {
+			return "", nil
+		}
+		return "", err
 	}
-	return cfg.AppID(platform)
+	if cfg.ProjectID != sel.ProjectID {
+		return "", nil
+	}
+	return cfg.AppID(platform), nil
 }
 
 // persistProjectAppSlot records one platform's app registration in

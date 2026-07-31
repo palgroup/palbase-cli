@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/palgroup/palbase-cli/internal/apps"
+	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
@@ -396,6 +397,61 @@ func TestNativeLink_ProjectFlagWithoutConfig_DoesNotOrphanOrDuplicate(t *testing
 	require.Equal(t, 1, postCount, "the second run must reuse the persisted app, not register a duplicate")
 }
 
+// A `.palbase/config.json` that exists but fails to load (corrupt JSON, an
+// unsupported schema version) must abort the command BEFORE any remote
+// registration. Before persistedAppIDFor gated on the error, the command ran
+// resolveNativeApp anyway (persistedAppIDFor swallowed every Load error into
+// ""), registered an app remotely, and only THEN hit persistProjectAppSlot's
+// (correct) refusal to paper over the same broken config — orphaning the
+// registration exactly like the config-less case above. `--project proj_1`
+// is required to reach this: without it, Resolver.Resolve reads the same
+// broken file itself and fails even earlier, which would pass this test for
+// the wrong reason.
+func TestNativeLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"bad JSON", `{not valid json`},
+		{"unsupported version (v1)", `{"version":1,"project_ref":"proj_1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectiontest.Chdir(t)
+			selectiontest.WriteRawConfig(t, "", tc.raw)
+
+			var postCount int
+			f := selectiontest.New(t)
+			// A real (empty) apps list, so a gate bypass proceeds all the way to a
+			// genuine POST instead of failing earlier on an unmodeled route — the
+			// postCount assertion below must be locking the real gate, not an
+			// incidental 404.
+			f.OK("GET /api/v2/projects/proj_1/apps", []map[string]any{})
+			f.Handle("POST /api/v2/projects/proj_1/apps", func(w http.ResponseWriter, _ *http.Request) {
+				postCount++
+				selectiontest.WriteOK(w, http.StatusCreated, map[string]any{"id": "app_ios", "platform": "ios"})
+			})
+			rest := f.REST()
+			resolver := &selection.Resolver{
+				REST:        func() selection.REST { return rest },
+				ProjectFlag: "proj_1", // headless --project: Resolve() never reads the broken config itself
+			}
+			r := Resolvers{
+				REST:      func() REST { return rest },
+				Selection: func() *selection.Resolver { return resolver },
+				Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
+			}
+
+			cmd := newNativeLinkCmd(r, "ios")
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SilenceErrors, cmd.SilenceUsage = true, true
+			err := cmd.Execute()
+			require.Error(t, err, "a broken local config must fail the command")
+			require.Equal(t, 0, postCount, "no app may be registered before the broken config is surfaced")
+		})
+	}
+}
+
 // persistedAppIDFor is the shared read both `native link` and `web link` use
 // before registering: a slot from a DIFFERENT project (or no config at all)
 // must never be handed to resolve*App as if it already belonged to the
@@ -406,13 +462,46 @@ func TestPersistedAppIDFor_OnlyReusesTheSameProjectSlot(t *testing.T) {
 		ProjectID: "proj_a", EnvironmentID: "env_a", WebAppID: "web_a", IOSAppID: "ios_a",
 	})
 
-	require.Equal(t, "web_a", persistedAppIDFor("web", selection.Selection{ProjectID: "proj_a"}))
-	require.Equal(t, "ios_a", persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_a"}))
-	require.Empty(t, persistedAppIDFor("web", selection.Selection{ProjectID: "proj_b"}),
-		"a slot from a different project must not be reused")
+	webID, err := persistedAppIDFor("web", selection.Selection{ProjectID: "proj_a"})
+	require.NoError(t, err)
+	require.Equal(t, "web_a", webID)
+
+	iosID, err := persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_a"})
+	require.NoError(t, err)
+	require.Equal(t, "ios_a", iosID)
+
+	otherID, err := persistedAppIDFor("web", selection.Selection{ProjectID: "proj_b"})
+	require.NoError(t, err)
+	require.Empty(t, otherID, "a slot from a different project must not be reused")
 }
 
 func TestPersistedAppIDFor_NoConfigReturnsEmpty(t *testing.T) {
 	selectiontest.Chdir(t)
-	require.Empty(t, persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_1"}))
+	id, err := persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_1"})
+	require.NoError(t, err, "a config-less directory is the ordinary first-link case, not an error")
+	require.Empty(t, id)
+}
+
+// A `.palbase/config.json` that exists but fails to load (corrupt JSON, an
+// unsupported schema version) must surface as an error, not be silently
+// treated the same as "nothing selected yet" — a caller that swallowed this
+// would go on to register a remote app it can never persist (see
+// TestNativeLink_BrokenConfig_AbortsBeforeRegisteringAnyApp below).
+func TestPersistedAppIDFor_BrokenConfigReturnsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"bad JSON", `{not valid json`},
+		{"unsupported version (v1)", `{"version":1,"project_ref":"proj_1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := selectiontest.Chdir(t)
+			selectiontest.WriteRawConfig(t, dir, tc.raw)
+
+			id, err := persistedAppIDFor("ios", selection.Selection{ProjectID: "proj_1"})
+			require.Error(t, err)
+			require.Empty(t, id)
+		})
+	}
 }
