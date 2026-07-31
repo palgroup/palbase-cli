@@ -997,3 +997,171 @@ func TestWebLink_ProvidersGenRelPath(t *testing.T) {
 	require.Contains(t, string(body), "../palbe.gen",
 		"providers.tsx import path must be relative to its own directory")
 }
+
+// ── Task 3 regression tests: providers clobber, wrong path, dangling import ──
+
+// TestWebLink_ProvidersNeverOverwritesExisting is the EZME (overwrite) lock:
+// an existing providers.tsx whose first line is NOT 'use client' (so Palbase
+// cannot safely reason about splicing an import into it — see
+// firstLineIsUseClientDirective) must survive link BYTE-IDENTICAL. Before
+// this fix, wireNextProviders's idempotency check only skipped writing when
+// the file ALREADY imported the gen stem; anything else — a project's own
+// React Query / theme / i18n provider — was silently clobbered by
+// os.WriteFile with the generated template. Irrecoverable data loss.
+func TestWebLink_ProvidersNeverOverwritesExisting(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	existing := "import { QueryClientProvider } from '@tanstack/react-query';\n\n" +
+		"export function Providers({ children }) {\n" +
+		"  return <QueryClientProvider>{children}</QueryClientProvider>;\n}\n"
+	require.NoError(t, os.WriteFile("app/providers.tsx", []byte(existing), 0o644))
+
+	out := runWebLink(t)
+
+	body, err := os.ReadFile("app/providers.tsx")
+	require.NoError(t, err)
+	require.Equal(t, existing, string(body),
+		"an existing providers.tsx that isn't a 'use client' component must survive byte-identical")
+	require.Contains(t, out, "Palbase left it untouched",
+		"the CLI must tell the user it skipped the file and why")
+}
+
+// TestWebLink_ProvidersSplicedIntoExistingClientComponent: an existing
+// providers.tsx that IS a 'use client' component (the only case where a
+// splice is provably safe) gets a single import line added, not overwritten
+// — the rest of the file, including its own providers, must survive intact.
+func TestWebLink_ProvidersSplicedIntoExistingClientComponent(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	existing := "'use client';\nimport { ThemeProvider } from './theme';\n\n" +
+		"export function Providers({ children }) {\n" +
+		"  return <ThemeProvider>{children}</ThemeProvider>;\n}\n"
+	require.NoError(t, os.WriteFile("app/providers.tsx", []byte(existing), 0o644))
+
+	runWebLink(t)
+
+	body, err := os.ReadFile("app/providers.tsx")
+	require.NoError(t, err)
+	s := string(body)
+	require.Contains(t, s, "import '../palbe.gen'", "the gen import must be spliced in")
+	require.Contains(t, s, "ThemeProvider", "the existing provider content must survive")
+	require.Contains(t, s, "'use client';", "the existing directive must survive")
+
+	// Re-running must not duplicate the spliced import (idempotent on the
+	// gen-import check, same as the fresh-create path).
+	runWebLink(t)
+	second, err := os.ReadFile("app/providers.tsx")
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(string(second), "palbe.gen"), "the spliced import must not be duplicated on re-link")
+}
+
+// TestWebLink_ProvidersJSXAppRouter (.jsx silent-skip fix): a plain-JS App
+// Router project (app/layout.jsx) must get providers.jsx wired up too —
+// before this, nextAppLayouts only recognized .tsx keys, so a .jsx layout
+// got its entry import wired but silently NO providers file at all, and
+// autoEntryPaths didn't even auto-detect a .jsx layout to begin with.
+func TestWebLink_ProvidersJSXAppRouter(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.jsx", []byte("export default function Layout() {}\n"), 0o644))
+
+	runWebLink(t)
+
+	entryBody, err := os.ReadFile("app/layout.jsx")
+	require.NoError(t, err)
+	require.Contains(t, string(entryBody), "palbe.gen", "the .jsx entry must still be auto-detected and wired")
+
+	body, err := os.ReadFile("app/providers.jsx")
+	require.NoError(t, err, "app/providers.jsx must be created for a .jsx App Router layout")
+	s := string(body)
+	require.Contains(t, s, "'use client'")
+	require.Contains(t, s, "palbe.gen")
+	require.Contains(t, s, "setupPalbeNext")
+	require.NotContains(t, s, "React.ReactNode", "a .jsx project must not get TypeScript type syntax it can't parse")
+
+	_, tsxErr := os.Stat("app/providers.tsx")
+	require.True(t, os.IsNotExist(tsxErr), "must not also create a .tsx sibling")
+}
+
+// TestWebLink_NoDanglingImportWhenSDKNotInstalled: when @palbase/web's
+// palbe-gen binary isn't installed, outFile never gets created — the entry
+// file (and providers.tsx) must NOT get an import wired to it, or the
+// command "succeeds" while leaving a project that fails to resolve the
+// import until install. package.json's predev/prebuild hooks still get set
+// up so a later install + build regenerates and this can be re-linked.
+func TestWebLink_NoDanglingImportWhenSDKNotInstalled(t *testing.T) {
+	t.Chdir(t.TempDir())
+	orig := webLinkArtifacts
+	webLinkArtifacts = stubArtifactsFunc()
+	t.Cleanup(func() { webLinkArtifacts = orig })
+	// Deliberately do NOT create node_modules/.bin/palbe-gen.
+
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	out := runWebLink(t)
+	require.Contains(t, out, "not installed yet")
+
+	entryBody, err := os.ReadFile("app/layout.tsx")
+	require.NoError(t, err)
+	require.NotContains(t, string(entryBody), "palbe.gen",
+		"no import may be wired to a gen file that was never generated")
+
+	_, providersErr := os.Stat("app/providers.tsx")
+	require.True(t, os.IsNotExist(providersErr), "providers.tsx must not be created either — it would also dangle")
+
+	pkgBody, err := os.ReadFile("package.json")
+	require.NoError(t, err)
+	require.Contains(t, string(pkgBody), `"predev": "palbe-gen --soft || exit 0"`,
+		"predev/prebuild must still be wired so a later install regenerates")
+}
+
+// TestWebLink_EntryImportRelPath locks filepath.Rel(filepath.Dir(entryPath),
+// outFile)'s output against REAL directory-tree fixtures, verified against
+// Go's actual filepath.Rel semantics (checked by hand, not assumed) rather
+// than any hand-written expectation. Includes the exact (entry, out) pair
+// that reproduces the user-reported `../../palbe.gen`: with the DEFAULT out
+// (no --out, so out=palbe.gen.ts at the repo root) a src/app/layout.tsx
+// entry is TWO directories below the root — "../../palbe.gen" IS the
+// mathematically correct relative import for that pair, not a formula bug.
+// The pair the report's prose named explicitly (--out src/palbe.gen.ts with
+// a src/app/layout.tsx entry) already computes correctly today: "../palbe.gen".
+func TestWebLink_EntryImportRelPath(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		entry, out string
+		want       string
+	}{
+		{"default out, root App Router", "app/layout.tsx", "palbe.gen.ts", "../palbe.gen"},
+		{"default out, src App Router", "src/app/layout.tsx", "palbe.gen.ts", "../../palbe.gen"},
+		{"--out under src, src App Router entry", "src/app/layout.tsx", "src/palbe.gen.ts", "../palbe.gen"},
+		{"--out co-located with a non-Next src entry", "src/main.tsx", "src/palbe.gen.ts", "./palbe.gen"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			require.NoError(t, os.MkdirAll(filepath.Dir(tc.entry), 0o755))
+			require.NoError(t, os.WriteFile(tc.entry, []byte("// entry\n"), 0o644))
+
+			require.NoError(t, wireEntryImport("", tc.out, io.Discard))
+
+			body, err := os.ReadFile(tc.entry)
+			require.NoError(t, err)
+			wantLine := "import '" + tc.want + "';"
+			// Exact LINE match, not Contains: "../palbe.gen" is itself a
+			// substring of "../../palbe.gen", so a plain substring check
+			// would not catch a formula regression between these two cases.
+			require.Contains(t, strings.Split(string(body), "\n"), wantLine)
+		})
+	}
+}

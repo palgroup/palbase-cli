@@ -243,30 +243,41 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 			// 4b. First generation via the SDK's generator when it is
 			// installed; otherwise leave the instruction (predev/prebuild
 			// hooks regenerate on every build once @palbase/web is in).
-			if err := runPalbeGen(ctx, outFile, out); err != nil {
+			generated, err := runPalbeGen(ctx, outFile, out)
+			if err != nil {
 				return err
 			}
 
-			// 5. Patch package.json scripts.
+			// 5. Patch package.json scripts. Always — predev/prebuild pick up
+			// generation on the next build regardless of whether outFile
+			// exists today.
 			if err := patchPackageJSONScriptsWithCommand(
 				"package.json", webTypesCmdFor(outFile), out,
 			); err != nil {
 				return fmt.Errorf("patch package.json: %w", err)
 			}
 
-			// 6. Wire import in entry file.
-			if err := wireEntryImport(entryFlag, outFile, out); err != nil {
-				return fmt.Errorf("wire entry import: %w", err)
-			}
+			if generated {
+				// 6. Wire import in entry file.
+				if err := wireEntryImport(entryFlag, outFile, out); err != nil {
+					return fmt.Errorf("wire entry import: %w", err)
+				}
 
-			// 7. For Next.js App Router layouts, ensure providers.tsx exists so
-			// the browser bundle also imports and configures the generated client.
-			// (The server layout import covers Server Components; the client bundle
-			// has its OWN module graph and needs a separate import via a "use client"
-			// component — without this, pb is not configured in the browser and every
-			// pb call throws "Palbe is not configured".)
-			if err := wireNextProviders(entryFlag, outFile, out); err != nil {
-				return fmt.Errorf("wire providers.tsx: %w", err)
+				// 7. For Next.js App Router layouts, ensure providers.tsx exists so
+				// the browser bundle also imports and configures the generated client.
+				// (The server layout import covers Server Components; the client bundle
+				// has its OWN module graph and needs a separate import via a "use client"
+				// component — without this, pb is not configured in the browser and every
+				// pb call throws "Palbe is not configured".)
+				if err := wireNextProviders(entryFlag, outFile, out); err != nil {
+					return fmt.Errorf("wire providers.tsx: %w", err)
+				}
+			} else {
+				// outFile doesn't exist yet (SDK not installed): writing the
+				// import now would leave the project unable to resolve it
+				// until install. Defer instead of a "successful" link with a
+				// dangling import.
+				fmt.Fprintf(out, "\nnote: skipping the entry-file import until %s exists — after installing @palbase/web, re-run `palbase web link` to wire it in\n", outFile)
 			}
 
 			// 8. Gitignore guard for the GEN file (warn only, never edit the rule).
@@ -287,19 +298,21 @@ var palbeGenBin = filepath.Join("node_modules", ".bin", "palbe-gen")
 // runPalbeGen runs the SDK's generator for the first palbe.gen.ts when
 // @palbase/web is already installed; when it isn't, it prints the follow-up
 // instead of failing the link (npm install → the predev/prebuild hook takes
-// over from there).
-func runPalbeGen(ctx context.Context, outFile string, w io.Writer) error {
+// over from there). The returned bool reports whether outFile now exists —
+// callers MUST NOT wire an import to it when it doesn't, or the link "succeeds"
+// while leaving a dangling import the project can't resolve.
+func runPalbeGen(ctx context.Context, outFile string, w io.Writer) (bool, error) {
 	if _, err := os.Stat(palbeGenBin); err != nil {
 		fmt.Fprintln(w, "  @palbase/web not installed yet — run `npm install @palbase/web` then `npx palbe-gen` to generate the typed client")
-		return nil
+		return false, nil
 	}
 	c := exec.CommandContext(ctx, palbeGenBin, "--out", outFile)
 	c.Stdout = w
 	c.Stderr = w
 	if err := c.Run(); err != nil {
-		return fmt.Errorf("palbe-gen: %w", err)
+		return false, fmt.Errorf("palbe-gen: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // newWebUnlinkCmd builds `palbase web unlink`.
@@ -627,10 +640,14 @@ func encodeJSONString(s string) string {
 // ── entry file import wiring ──────────────────────────────────────────────────
 
 // autoEntryPaths is the ordered list of entry files to probe when --entry is
-// not given.
+// not given. .jsx variants sit right after their .tsx counterpart — .tsx
+// wins when a project somehow has both, but a plain-JS App Router layout is
+// still found without needing --entry.
 var autoEntryPaths = []string{
 	"app/layout.tsx",
+	"app/layout.jsx",
 	"src/app/layout.tsx",
+	"src/app/layout.jsx",
 	"src/main.tsx",
 	"src/main.ts",
 	"main.tsx",
@@ -850,9 +867,11 @@ func printGitignoreWarning(w io.Writer, outFile string) {
 
 // ── Next.js providers.tsx wiring ─────────────────────────────────────────────
 
-// nextAppDirs lists the App Router layout paths that indicate a Next.js project.
-// When the detected entry file is one of these, we also create providers.tsx in
-// the same directory so the CLIENT bundle imports and configures the gen file.
+// nextAppLayouts lists the App Router layout paths that indicate a Next.js
+// project. When the detected entry file is one of these, we also wire up
+// providers.tsx (or .jsx) in the same directory so the CLIENT bundle imports
+// and configures the gen file. Both .tsx and .jsx are listed — a plain-JS App
+// Router project must get the same wiring, not a silent skip.
 //
 // Background: app/layout.tsx is a Server Component. Its module graph configures
 // pb for the server. The browser's client-component bundle has a SEPARATE module
@@ -861,12 +880,49 @@ func printGitignoreWarning(w io.Writer, outFile string) {
 // "Palbe is not configured" in every client component.
 var nextAppLayouts = map[string]bool{
 	"app/layout.tsx":     true,
+	"app/layout.jsx":     true,
 	"src/app/layout.tsx": true,
+	"src/app/layout.jsx": true,
 }
 
-// wireNextProviders creates app/providers.tsx (or src/app/providers.tsx) when
-// the project is a Next.js App Router app. It is idempotent: a providers file
-// that already imports the gen stem is left untouched.
+// providersFileFor names the providers companion for entryPath's own App
+// Router directory, matched to its extension: a .jsx layout gets a plain
+// providers.jsx (no TS type syntax it can't parse), a .tsx layout the usual
+// providers.tsx.
+func providersFileFor(appDir, entryPath string) (path string, typescript bool) {
+	if strings.HasSuffix(entryPath, ".jsx") {
+		return filepath.Join(appDir, "providers.jsx"), false
+	}
+	return filepath.Join(appDir, "providers.tsx"), true
+}
+
+// firstLineIsUseClientDirective reports whether lines[0] (trimmed) is exactly
+// the 'use client' directive. It is the ONLY place splicing a bare import
+// into an EXISTING, unrecognized file is safe: React requires the directive
+// to be a file's first statement, so if it is there the file is provably a
+// Client Component. Anything else (a Server Component, or a file we can't
+// otherwise reason about) must be left alone — setupPalbeNext()/the gen
+// import silently no-op without `document`, so a wrong injection wouldn't
+// even fail loudly, it would just resurface as "Palbase is not configured"
+// with no trace of why.
+func firstLineIsUseClientDirective(lines []string) bool {
+	if len(lines) == 0 {
+		return false
+	}
+	t := strings.TrimSpace(lines[0])
+	return t == `'use client'` || t == `'use client';` || t == `"use client"` || t == `"use client";`
+}
+
+// wireNextProviders creates <appDir>/providers.tsx (or .jsx) when the project
+// is a Next.js App Router app, so the CLIENT bundle also imports and
+// configures the generated client. It is idempotent (a providers file that
+// already imports the gen stem is left untouched) and NEVER overwrites an
+// existing providers file — that file is, more often than not, the project's
+// OWN providers (React Query / theme / i18n and friends), and overwriting it
+// is irrecoverable data loss. When one already exists but isn't wired up, a
+// single import line is spliced in — ONLY when the file is provably a Client
+// Component (see firstLineIsUseClientDirective); otherwise nothing is
+// written and the user is told exactly what to add.
 func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 	// Determine the entry file that was (or would be) used by wireEntryImport.
 	entryPath := entryFlag
@@ -883,17 +939,8 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 	}
 
 	appDir := filepath.Dir(entryPath) // "app" or "src/app"
-	providersPath := filepath.Join(appDir, "providers.tsx")
+	providersPath, typescript := providersFileFor(appDir, entryPath)
 	genStem := strings.TrimSuffix(filepath.Base(outFile), ".ts") // e.g. "palbe.gen"
-
-	// Idempotency: if providers.tsx already imports the gen file, skip.
-	if existing, err := os.ReadFile(providersPath); err == nil {
-		for _, line := range strings.Split(string(existing), "\n") {
-			if lineImportsGen(line, genStem) {
-				return nil // already configured
-			}
-		}
-	}
 
 	// Compute the relative import path from appDir to the gen file.
 	rel, err := filepath.Rel(appDir, outFile)
@@ -904,8 +951,47 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 	if !strings.HasPrefix(rel, ".") {
 		rel = "./" + rel
 	}
+	importLine := fmt.Sprintf("import '%s'; // configures pb in the client bundle", rel)
 
-	content := fmt.Sprintf("'use client';\nimport '%s'; // configures pb in the client bundle\nimport { setupPalbeNext } from '@palbase/web/next/client';\n\nsetupPalbeNext(); // switches session storage to cookies\n\nexport function Providers({ children }: { children: React.ReactNode }) {\n  return children;\n}\n", rel)
+	existing, readErr := os.ReadFile(providersPath)
+	if readErr == nil {
+		// The file already exists — NEVER overwrite it.
+		lines := strings.Split(string(existing), "\n")
+		for _, line := range lines {
+			if lineImportsGen(line, genStem) {
+				return nil // already wired, idempotent
+			}
+		}
+		if !firstLineIsUseClientDirective(lines) {
+			fmt.Fprintf(w, "\nNOTE: %s already exists and its first line is not 'use client' — Palbase left it untouched to avoid corrupting it.\n", providersPath)
+			fmt.Fprintf(w, "      Add this import to a 'use client' component rendered inside your root layout:\n")
+			fmt.Fprintf(w, "        %s\n\n", importLine)
+			return nil
+		}
+		insertAt := entryImportInsertIndex(lines)
+		newLines := make([]string, 0, len(lines)+1)
+		newLines = append(newLines, lines[:insertAt]...)
+		newLines = append(newLines, importLine)
+		newLines = append(newLines, lines[insertAt:]...)
+		if err := os.WriteFile(providersPath, []byte(strings.Join(newLines, "\n")), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "✓ added the Palbase import to existing %s\n", providersPath)
+		return nil
+	}
+	if !os.IsNotExist(readErr) {
+		return fmt.Errorf("read %s: %w", providersPath, readErr)
+	}
+
+	// No existing providers file — write ours from scratch.
+	childrenParam := "{ children }"
+	if typescript {
+		childrenParam = "{ children }: { children: React.ReactNode }"
+	}
+	content := fmt.Sprintf(
+		"'use client';\n%s\nimport { setupPalbeNext } from '@palbase/web/next/client';\n\nsetupPalbeNext(); // switches session storage to cookies\n\nexport function Providers(%s) {\n  return children;\n}\n",
+		importLine, childrenParam,
+	)
 	if err := os.WriteFile(providersPath, []byte(content), 0o644); err != nil {
 		return err
 	}
