@@ -314,6 +314,7 @@ func statusCmd(r Resolvers) *cobra.Command {
 func createCmd(r Resolvers) *cobra.Command {
 	var (
 		from    string
+		tag     string
 		async   bool
 		jsonOut bool
 	)
@@ -333,8 +334,15 @@ ENVIRONMENT (slug or ref), never a Git branch.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			ctx := cmd.Context()
-			if name != "staging" && name != "dev" && name != "preprod" {
-				return fmt.Errorf("environment must be staging, dev, or preprod; got %q", name)
+			// The TAG is a fixed preset — it decides the ref suffix and whether the
+			// environment is production, so it cannot be free text. The NAME can:
+			// defaulting the tag to the name preserves `env create staging`, while
+			// `env create "QA Sandbox" --tag dev` now works at all.
+			if tag == "" {
+				tag = name
+			}
+			if tag != "staging" && tag != "dev" && tag != "preprod" {
+				return fmt.Errorf("--tag must be staging, dev, or preprod; got %q", tag)
 			}
 			if from == "" {
 				return fmt.Errorf("--from is required: name the source environment to copy schema + non-secret config from (e.g. --from production)")
@@ -343,12 +351,14 @@ ENVIRONMENT (slug or ref), never a Git branch.`,
 			if err != nil {
 				return err
 			}
-			// The locked API body has exactly these two snake_case fields. The source is
-			// a Project-scoped slug or ref; resolving it on the server avoids a TOCTOU
-			// lookup and keeps cross-Project identifiers non-enumerating.
+			// The locked API body is snake_case. The source is a Project-scoped slug or
+			// ref; resolving it on the server avoids a TOCTOU lookup and keeps
+			// cross-Project identifiers non-enumerating. `slug` is omitted on purpose —
+			// the server derives it from the name.
 			body := map[string]any{
 				"source_environment_ref": from,
 				"name":                   name,
+				"kind":                   tag,
 			}
 
 			var handle struct {
@@ -383,6 +393,7 @@ ENVIRONMENT (slug or ref), never a Git branch.`,
 		},
 	}
 	cmd.Flags().StringVar(&from, "from", "", "Source ENVIRONMENT to copy schema + non-secret config from (required)")
+	cmd.Flags().StringVar(&tag, "tag", "", "Environment tag: staging | dev | preprod (default: the name, when it is one of those)")
 	cmd.Flags().BoolVar(&async, "async", false, "Return the workflow handle immediately instead of waiting")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd

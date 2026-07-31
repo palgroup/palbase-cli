@@ -151,6 +151,9 @@ func TestEnvCreate_SafeCopyByDefault(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"source_environment_ref": "production",
 		"name":                   "staging",
+		// The TAG is its own field now: the name is free text, and a name that is
+		// not one of the presets still has to land in a preset slot.
+		"kind": "staging",
 	}, req.Body)
 	require.NotContains(t, req.Body, "ref", "the client must not compute or send a ref — the server allocates it")
 	require.NotContains(t, req.Body, "source_git_branch")
@@ -514,4 +517,60 @@ func TestEnvBranch_ReadNamesTheGap(t *testing.T) {
 	for _, route := range fake.Routes() {
 		require.NotContains(t, route, "PATCH")
 	}
+}
+
+// The NAME is free text; the TAG is the preset that decides the ref suffix and
+// whether the environment is production. They used to be one argument, so an
+// environment could only ever be called "staging", "dev" or "preprod".
+func TestEnvCreate_FreeTextNameWithExplicitTag(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.Accepted("POST "+base, map[string]any{"workflowId": "create-environment-app1d"})
+	envPollInterval, envPollTimeout = time.Millisecond, 20*time.Millisecond
+
+	_, exec := newCmd(t, fake)
+	// The poll times out (the fake never lands the env); the BODY is what this locks.
+	_ = exec("create", "QA Sandbox", "--tag", "dev", "--from", "production")
+
+	req, ok := fake.Find("POST " + base)
+	require.True(t, ok, "expected the create POST, got %v", fake.Routes())
+	require.Equal(t, "QA Sandbox", req.Body["name"], "the customer's words reach the server verbatim")
+	require.Equal(t, "dev", req.Body["kind"])
+	// The slug is the SERVER's derivation — a client that computes one is the
+	// deriveRef bug all over again.
+	require.NotContains(t, req.Body, "slug")
+}
+
+func TestEnvCreate_RejectsATagThatIsNotAPreset(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+	fake := selectiontest.New(t)
+
+	_, exec := newCmd(t, fake)
+	// A free-text TAG would have to decide is_production, ephemeral and the ref
+	// suffix — none of which an arbitrary word can answer.
+	err := exec("create", "QA Sandbox", "--tag", "qa", "--from", "production")
+	require.ErrorContains(t, err, "--tag must be staging, dev, or preprod")
+	require.Empty(t, fake.Routes(), "a rejected tag must send no API request")
+}
+
+func TestEnvCreate_BareNameStillWorksAsTheTag(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments"
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	fake := selectiontest.New(t)
+	fake.Handle("POST "+base, provisions(fake))
+	envPollInterval, envPollTimeout = time.Millisecond, 5*time.Second
+
+	_, exec := newCmd(t, fake)
+	// `palbase env create staging --from production` — the pre-existing form must
+	// keep working without a --tag.
+	require.NoError(t, exec("create", "staging", "--from", "production", "--json"))
+
+	req, _ := fake.Find("POST " + base)
+	require.Equal(t, "staging", req.Body["kind"])
 }
