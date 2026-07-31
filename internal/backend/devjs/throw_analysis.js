@@ -36,7 +36,7 @@
  * REAL project tree (`.ts` / `/index.ts` candidates); bare specifiers other
  * than @palbase/backend never resolve. Per-op descriptors dedupe by code.
  *
- * This module is SHARED VERBATIM by the deploy stager and `palbase serve`
+ * This module is SHARED VERBATIM by the deploy stager and `palbase build`
  * (the same parity rule as return_types.js). It needs only `typescript` on
  * NODE_PATH and never touches the filesystem itself — the caller injects
  * { readFile, fileExists }.
@@ -572,7 +572,7 @@ function analyzeThrows(sourceText, controllerPath, deps) {
 // statically invisible (the routes most likely to be missing typing), and it
 // distinguishes "analyzed, nothing visible" from "pre-analysis bundle". The
 // IIFE shape is a cross-repo contract — the SDK (recordThrows), the worker
-// guard, and `palbase serve` all key off it.
+// guard, and `palbase build` all key off it.
 function buildThrowInjection(className, ops) {
   const fnNames = Object.keys(ops);
   if (!className || fnNames.length === 0) return '';

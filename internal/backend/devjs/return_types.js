@@ -22,7 +22,7 @@
  *   - anything else (inline object, union, intersection, a type with no
  *     same-named exported zod) → HARD error naming <Controller>.<method>.
  *
- * This module is SHARED VERBATIM by the deploy extractor and `palbase serve`
+ * This module is SHARED VERBATIM by the deploy extractor and `palbase build`
  * (the load-bearing serve==deploy parity rule). It uses the `typescript` PARSER
  * only (ts.createSourceFile) — no type-checker, no Program — so it's cheap and
  * needs only `typescript` on NODE_PATH.
