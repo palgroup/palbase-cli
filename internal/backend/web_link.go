@@ -272,6 +272,16 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				if err := wireNextProviders(entryFlag, outFile, out); err != nil {
 					return fmt.Errorf("wire providers.tsx: %w", err)
 				}
+
+				// 7b. For Next.js App Router layouts, ensure middleware.ts exists so
+				// the session cookie refreshes BEFORE the RSC tree renders. Server
+				// Components cannot write cookies, so without this every RSC render
+				// re-refreshes from the same stale cookie token; two such refreshes
+				// landing more than palauth's 30s rotation grace apart makes the
+				// reuse detector revoke the whole token family (force logout).
+				if err := wireNextMiddleware(entryFlag, out); err != nil {
+					return fmt.Errorf("wire middleware.ts: %w", err)
+				}
 			} else {
 				// outFile doesn't exist yet (SDK not installed): writing the
 				// import now would leave the project unable to resolve it
@@ -996,5 +1006,118 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(w, "✓ wrote %s — render <Providers> inside your root layout\n", providersPath)
+	return nil
+}
+
+// ── Next.js middleware.ts wiring ─────────────────────────────────────────────
+
+// webConfigArtifact is the subset of Palbase/palbase-config.json (already
+// committed by webLinkArtifacts, step 4, before this runs) that
+// wireNextMiddleware needs. base_url and api_key are the SAME two published
+// values palbe.gen.ts itself is configured with — api_key is always the
+// publishable (anon) key, never service_role (see @palbase/web/next/middleware's
+// own doc comment: a service_role key has no business in a request-path bundle).
+type webConfigArtifact struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+}
+
+// middlewarePathFor names the middleware.ts (or .js) file Next.js recognizes
+// by convention: at the project root, or inside src/ when the project uses a
+// src/ layout — NEVER inside app/ (Next's own MIDDLEWARE_LOCATION_REGEXP only
+// matches "(?:src/)?middleware", confirmed against the Next 16.2.9 source:
+// isAtConventionLevel checks normalizedFileDir === '/' || === '/src').
+// Extension matches entryPath's own, same reasoning as providersFileFor: a
+// .jsx project must not get a file full of TypeScript type syntax it can't
+// parse (import type NextRequest, the request: NextRequest annotation).
+func middlewarePathFor(entryPath string) (path string, typescript bool) {
+	name, typescript := "middleware.ts", true
+	if strings.HasSuffix(entryPath, ".jsx") {
+		name, typescript = "middleware.js", false
+	}
+	if strings.HasPrefix(entryPath, "src/") {
+		return filepath.Join("src", name), typescript
+	}
+	return name, typescript
+}
+
+// existingMiddlewareCandidates are every path Next.js — or a project that
+// already made the Next-16 proxy.ts rename — would recognize as the ONE
+// middleware/proxy handler, at both possible convention levels.
+var existingMiddlewareCandidates = []string{
+	"middleware.ts", "middleware.js",
+	filepath.Join("src", "middleware.ts"), filepath.Join("src", "middleware.js"),
+	"proxy.ts", "proxy.js",
+	filepath.Join("src", "proxy.ts"), filepath.Join("src", "proxy.js"),
+}
+
+// wireNextMiddleware writes middleware.ts (or .js) for a Next.js App Router
+// project so the session cookie refreshes BEFORE the RSC tree renders — see
+// @palbase/web/next/middleware's package doc for why this is required, not
+// optional, for any session-bearing RSC app.
+//
+// It NEVER overwrites an existing middleware/proxy file. Unlike
+// providers.tsx, there is no safe auto-merge here: Next reads exactly ONE
+// middleware/default export per file, so splicing palbeMiddleware into
+// unknown existing logic would mean guessing how to combine two response
+// values — instead, an existing file is left byte-identical and the user is
+// told exactly what to add.
+func wireNextMiddleware(entryFlag string, w io.Writer) error {
+	entryPath := entryFlag
+	if entryPath == "" {
+		for _, candidate := range autoEntryPaths {
+			if _, err := os.Stat(candidate); err == nil {
+				entryPath = candidate
+				break
+			}
+		}
+	}
+	if !nextAppLayouts[entryPath] {
+		return nil // not an App Router project — nothing to do
+	}
+
+	for _, existing := range existingMiddlewareCandidates {
+		if _, err := os.Stat(existing); err == nil {
+			fmt.Fprintf(w, "\nNOTE: %s already exists — Palbase left it untouched.\n", existing)
+			fmt.Fprintf(w, "      Without this, RSC session refresh cannot persist (Server Components\n")
+			fmt.Fprintf(w, "      can't write cookies) and users get force-logged-out everywhere. Wire it\n")
+			fmt.Fprintf(w, "      in by hand — see the @palbase/web/next/middleware package doc for the\n")
+			fmt.Fprintf(w, "      exact call (palbeMiddleware(request, { url, apiKey })).\n\n")
+			return nil
+		}
+	}
+
+	cfgPath := filepath.Join(webArtifactsDir, "palbase-config.json")
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", cfgPath, err)
+	}
+	var art webConfigArtifact
+	if err := json.Unmarshal(raw, &art); err != nil {
+		return fmt.Errorf("parse %s: %w", cfgPath, err)
+	}
+
+	middlewarePath, typescript := middlewarePathFor(entryPath)
+	requestParam, importType := "request", ""
+	if typescript {
+		requestParam = "request: NextRequest"
+		importType = "import type { NextRequest } from 'next/server';\n"
+	}
+	content := fmt.Sprintf(
+		"import { palbeMiddleware } from '@palbase/web/next/middleware';\n%s\nexport function middleware(%s) {\n  return palbeMiddleware(request, {\n    url: %s,\n    apiKey: %s,\n  });\n}\n\n"+
+			"// `config` MUST be declared here, in this file: Next reads it off THIS\n"+
+			"// file's AST (export const + literal initializer). A re-exported or\n"+
+			"// imported config is invisible and silently degrades to a catch-all.\n"+
+			"export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'] };\n",
+		importType, requestParam, encodeJSONString(art.BaseURL), encodeJSONString(art.APIKey),
+	)
+	// MkdirAll(".", …) is a no-op when the project has no src/ layout.
+	if err := os.MkdirAll(filepath.Dir(middlewarePath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(middlewarePath, []byte(content), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "✓ wrote %s — required for RSC session refresh to persist\n", middlewarePath)
 	return nil
 }
