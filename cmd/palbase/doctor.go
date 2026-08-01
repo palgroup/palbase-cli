@@ -18,7 +18,7 @@ import (
 
 // doctorCmd is the environment triage verb: one command that answers "why is
 // the CLI not working for me" — mode/endpoints, login state, headless PAT,
-// project link, and the Node toolchain `serve`/`db types` need. Informative
+// project link, and the Node toolchain `build`/`db types` need. Informative
 // only (always exit 0): doctor diagnoses, the failing command still owns its
 // error.
 func doctorCmd() *cobra.Command {

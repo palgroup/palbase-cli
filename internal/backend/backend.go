@@ -34,9 +34,11 @@ import (
 	"golang.org/x/term"
 )
 
-// defaultHTTPClient is reused by `palbase web gen` (and any
-// future direct HTTP we add). 30s read timeout matches the SDK side
-// so a slow Kong response surfaces consistently.
+// defaultHTTPClient is reused by `palbase spec`/`web link`'s spec + OAuth-
+// provider fetches, the SDK-major check `build` runs against npm, and any
+// future direct HTTP we add. There is no `palbase web gen` — @palbase/web's
+// own `palbe-gen` owns client codegen (see web_link.go). 30s read timeout
+// matches the SDK side so a slow Kong response surfaces consistently.
 var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {

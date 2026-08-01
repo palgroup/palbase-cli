@@ -54,10 +54,12 @@ var resolved config.Resolved
 // authClient is built per invocation from the resolved mode/endpoints.
 var authClient *auth.Client
 
-// studioClient is the tRPC client the backend lifecycle commands
-// (serve/list/status/types/...) use to talk to Studio. Built per
-// invocation against resolved.Endpoints.Studio.
-// Retained ONLY for backend until backend REST routes exist (S5.4
+// studioClient is the tRPC client MOST command groups use to talk to Studio —
+// the backend lifecycle verbs (build/push/pull/clone/deploys/rollback/status/
+// spec/web/ios/macos/android), db types, debug console, logs, members,
+// github, secret, flags, notifications, testuser. Built per invocation
+// against resolved.Endpoints.Studio.
+// Retained ONLY until every group has its own Management-API REST route (S5.4
 // decision — see docs/decisions/2026-05-24-s5-cli-pat-provisioning-...).
 var studioClient *studio.Client
 
@@ -225,11 +227,11 @@ func newRootCmd() *cobra.Command {
 		}),
 	)
 
-	// CLI-1 flat redesign: the backend lifecycle commands (pull/push/dev/
-	// list/rollback/status/disable/types) live at the TOP LEVEL — palbase
-	// IS the backend CLI, there is no `backend` parent. Resolvers close
-	// over the package-level globals so PersistentPreRunE has populated
-	// them by the time a subcommand's RunE fires.
+	// CLI-1 flat redesign: the backend lifecycle commands (build/push/pull/
+	// clone/deploys/rollback/status/spec/web/ios/macos/android) live at the
+	// TOP LEVEL — palbase IS the backend CLI, there is no `backend` parent.
+	// Resolvers close over the package-level globals so PersistentPreRunE has
+	// populated them by the time a subcommand's RunE fires.
 	rootCmd.AddCommand(backend.Commands(backend.Resolvers{
 		Auth:      func() *auth.Client { return authClient },
 		Studio:    func() *studio.Client { return studioClient },

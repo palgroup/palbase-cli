@@ -277,6 +277,60 @@ func TestRunPullSpec_AppConfigSeparatesTheOutputs(t *testing.T) {
 	require.NotContains(t, got, "env_preset")
 }
 
+// TestRunPullSpec_WebLinkedCheckout_AlsoWritesThePalbaseDirCopy: on a checkout
+// that already ran `palbase web link` (Palbase/palbase-config.json exists),
+// a bare `palbase spec` must ALSO refresh Palbase/openapi.json — the ONE
+// directory @palbase/web's palbe-gen reads from by default. specOutDir stays
+// ./.palbase (the Apple-platform default, unaffected); this is a same-bytes
+// ADDITIONAL write, not a redirect. Before this fix, a web checkout's
+// `palbase spec` (no --out-dir) silently left palbe-gen reading a stale
+// spec until the caller remembered `--out-dir ./Palbase` by hand.
+func TestRunPullSpec_WebLinkedCheckout_AlsoWritesThePalbaseDirCopy(t *testing.T) {
+	projectRoot := t.TempDir()
+	specDir := filepath.Join(projectRoot, ".palbase")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, "Palbase"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, "Palbase", "palbase-config.json"), []byte(`{}`), 0o644))
+
+	err := runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			return []byte(`{"openapi":"3.1.0"}`), nil
+		},
+		nil, nil,
+		"app1prod", "dev.palbase.studio", specDir, specDir, "", io.Discard)
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(specDir, "openapi.json"))
+	webSpec := filepath.Join(projectRoot, "Palbase", "openapi.json")
+	require.FileExists(t, webSpec, "a web-linked checkout must ALSO get a fresh Palbase/openapi.json")
+	got, err := os.ReadFile(webSpec)
+	require.NoError(t, err)
+	require.Equal(t, `{"openapi":"3.1.0"}`, string(got), "must be the SAME bytes as the primary spec write, not a separate fetch")
+}
+
+// TestRunPullSpec_NonWebCheckout_DoesNotCreateAPalbaseDir: a checkout that
+// never ran `palbase web link` (no Palbase/palbase-config.json) must NOT get
+// a Palbase/ directory conjured out of nowhere — the web-detection is a
+// no-op there, not a default that starts creating unrelated directories.
+func TestRunPullSpec_NonWebCheckout_DoesNotCreateAPalbaseDir(t *testing.T) {
+	projectRoot := t.TempDir()
+	specDir := filepath.Join(projectRoot, ".palbase")
+
+	err := runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			return []byte(`{"openapi":"3.1.0"}`), nil
+		},
+		nil, nil,
+		"app1prod", "dev.palbase.studio", specDir, specDir, "", io.Discard)
+	require.NoError(t, err)
+	_, statErr := os.Stat(filepath.Join(projectRoot, "Palbase"))
+	require.True(t, os.IsNotExist(statErr), "a non-web checkout must not get a Palbase/ dir created")
+}
+
 func TestRunPullSpec_RejectsForeignHostBeforeTenantNetworkOrWrite(t *testing.T) {
 	dir := t.TempDir()
 	fetchCalled := false

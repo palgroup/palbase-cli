@@ -39,8 +39,10 @@ func TestCommands_FlatSurface(t *testing.T) {
 	// mode-aware verbs (github: git push/pull; platform: tarball/bundle) — see
 	// TestCommands_IncludesGitNativeVerbs. The CLI-audit renames retired
 	// `list` (→ deploys), `pull-spec` (→ spec), `gen-types` (→ db types) and
-	// `types` (→ web gen, interim until @palbase/web owns its codegen); there
-	// is NO top-level `gen` group — client codegen is the SDKs' job.
+	// `types` (→ an interim `web gen`, itself since RETIRED now that
+	// @palbase/web owns its own codegen via palbe-gen, invoked by `web link`
+	// and its predev/prebuild hooks — see web_link.go); there is NO top-level
+	// `gen` group — client codegen is the SDKs' job.
 	for _, gone := range []string{"deploy", "dev", "disable", "enable", "backend", "config", "merge", "list", "types", "gen-types", "pull-spec", "gen"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}

@@ -68,8 +68,11 @@ Run it after every deploy so the committed API contract stays current.
 For a checkout with an Apple platform slot (.palbase/ios or .palbase/macos), spec
 then regenerates Palbase/Generated/ — PalbaseGenerated.swift + Palbase-Info.plist
 — using the generator from the palbackend-ios checkout SwiftPM resolved for this
-project. Commit the result. Android regenerates from its Gradle plugin and web
-from @palbase/web's palbe-gen; for those, spec refreshes the contract only.
+project. Commit the result. Android regenerates from its Gradle plugin. For a
+checkout with Palbase/palbase-config.json (` + "`palbase web link`" + ` already ran), spec
+ALSO refreshes Palbase/openapi.json — the directory @palbase/web's palbe-gen reads
+from by default — so a bare spec never leaves palbe-gen reading a stale contract;
+` + "`npx palbe-gen`" + ` (or the predev/prebuild hook) still owns regenerating palbe.gen.ts.
 
 spec does NOT write the per-environment runtime config (palbase-config.json —
 base URL + key). That comes from the platform link commands and is re-written by
@@ -156,6 +159,26 @@ func runPullSpec(
 		return fmt.Errorf("write %s: %w", specPath, err)
 	}
 	fmt.Fprintf(w, "✓ wrote %s\n", specPath)
+
+	// A web-linked checkout keeps its OWN copy of openapi.json under Palbase/
+	// — the one directory `palbase web link` writes to and @palbase/web's
+	// palbe-gen reads from BY DEFAULT (its own --dir default; see
+	// sdk/palbase-ts palbe/src/gen/generate.ts). specOutDir defaults to
+	// ./.palbase (the Apple-platform convention, matching generateAppleClient
+	// below), so without this a bare `palbase spec` on a web checkout would
+	// silently leave palbe-gen reading a STALE spec until the caller
+	// remembered to pass `--out-dir ./Palbase` by hand — exactly the silent
+	// type-staleness this closes. Best-effort and additive: a checkout that
+	// was never web-linked has no Palbase/palbase-config.json, so this is a
+	// clean no-op there, and it never changes what --out-dir/specOutDir means.
+	webCfgPath := filepath.Join(filepath.Dir(specOutDir), "Palbase", "palbase-config.json")
+	if isRegularFile(webCfgPath) {
+		webSpecPath := filepath.Join(filepath.Dir(specOutDir), "Palbase", "openapi.json")
+		if err := os.WriteFile(webSpecPath, specBytes, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", webSpecPath, err)
+		}
+		fmt.Fprintf(w, "✓ wrote %s\n", webSpecPath)
+	}
 
 	if appID != "" {
 		if configOutDir == "" {

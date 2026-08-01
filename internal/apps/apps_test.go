@@ -205,6 +205,45 @@ func TestAppsConfig_WritesTheCanonicalWebConfig(t *testing.T) {
 	require.NotContains(t, string(raw), "env_preset")
 }
 
+// TestAppsConfig_DefaultsToTheCanonicalWebDirectory: without --out, config
+// must land in Palbase/palbase-config.json — the SAME directory `palbase web
+// link` writes to and @palbase/web's palbe-gen reads from by default. Before
+// this, the default was a bare ./palbase-config.json that palbe-gen never
+// saw unless the caller passed --out by hand. Palbase/ does not exist yet on
+// a fresh checkout, so this also locks that WriteWebConfig creates it.
+func TestAppsConfig_DefaultsToTheCanonicalWebDirectory(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{
+		"app_id": "app_web", "environment_ref": "app1prod", "api_key": "pb_app1prod_c01234567890123456789",
+		"base_url": "https://app1prod.dev.palbase.studio", "kind": "production", "platform": "web",
+	})
+
+	dir := selectiontest.Chdir(t)
+	selectiontest.WriteConfig(t, dir, nil)
+	_, statErr := os.Stat(filepath.Join(dir, "Palbase"))
+	require.True(t, os.IsNotExist(statErr), "Palbase/ must not pre-exist — this test proves config creates it")
+
+	rest := fake.REST()
+	resolver := fake.Resolver()
+	cmd := Cmd(Resolvers{
+		REST:       func() REST { return rest },
+		Selection:  func() *selection.Resolver { return resolver },
+		PublicHost: func() string { return "dev.palbase.studio" },
+	})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"config", "--app", "app_web"}) // no --out
+	require.NoError(t, cmd.Execute())
+
+	want := filepath.Join(dir, "Palbase", "palbase-config.json")
+	raw, err := os.ReadFile(want)
+	require.NoError(t, err, "default output must be Palbase/palbase-config.json")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, "app_web", got["app_id"])
+	require.Contains(t, out.String(), filepath.Join("Palbase", "palbase-config.json"))
+}
+
 func TestAppsConfig_RejectsForeignArtifactBeforeWriting(t *testing.T) {
 	fake := selectiontest.New(t)
 	fake.OK("GET /api/v2/apps/app_web/config-artifact", map[string]any{

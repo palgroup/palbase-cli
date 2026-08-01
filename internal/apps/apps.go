@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -393,6 +394,15 @@ func ConfigArtifactPath(appID, environmentRef string) string {
 	return "/api/v2/apps/" + appID + "/config-artifact?environment_ref=" + url.QueryEscape(environmentRef)
 }
 
+// defaultWebConfigPath is the ONE directory @palbase/web's `palbe-gen` reads
+// from by default (its own `--dir` default — see sdk/palbase-ts
+// palbe/src/gen/generate.ts USAGE) and `palbase web link` already writes to
+// (web_link.go's webArtifactsDir). `apps config` writing anywhere else by
+// default — it used to write bare `./palbase-config.json` — meant the file it
+// just wrote was invisible to palbe-gen unless the caller remembered to pass
+// `--out Palbase/palbase-config.json` by hand.
+var defaultWebConfigPath = filepath.Join("Palbase", "palbase-config.json")
+
 func configCmd(r Resolvers) *cobra.Command {
 	var (
 		appID   string
@@ -403,7 +413,8 @@ func configCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Write the web app's config file for the selected environment",
 		Long: "Fetch the config artifact for a web app in the SELECTED environment and\n" +
-			"write palbase-config.json ({app_id, kind, base_url, api_key}).\n" +
+			"write Palbase/palbase-config.json ({app_id, kind, base_url, api_key}) — the\n" +
+			"same directory `palbase web link` and @palbase/web's palbe-gen use.\n" +
 			"Override the environment with the global --environment flag.\n" +
 			"Native configs are written by `palbase ios|macos|android link`.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -427,7 +438,7 @@ func configCmd(r Resolvers) *cobra.Command {
 			}
 			out := outPath
 			if out == "" {
-				out = "palbase-config.json"
+				out = defaultWebConfigPath
 			}
 			if err := WriteWebConfig(art, out); err != nil {
 				return err
@@ -437,7 +448,7 @@ func configCmd(r Resolvers) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
-	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: palbase-config.json)")
+	cmd.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: Palbase/palbase-config.json)")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
 }
@@ -457,6 +468,14 @@ func WriteWebConfig(art ConfigArtifact, path string) error {
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode web config: %w", err)
+	}
+	// The default target (Palbase/) may not exist yet on a fresh checkout that
+	// never ran `palbase web link`. A caller-supplied --out is honored as-is
+	// (filepath.Dir(".") is a MkdirAll no-op for a bare filename).
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
 	}
 	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
