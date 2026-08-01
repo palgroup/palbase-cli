@@ -113,12 +113,19 @@ function isRowProducingCall(node, tsapi) {
   );
 }
 
-// isRefExpr reports whether `node` denotes a Ref<T> value: a field read off a
-// row (`st.id`, or the inline chain form), or a bare identifier previously
-// bound (directly or transitively) from one such read.
+// isRefExpr reports whether `node` denotes a Ref<T>-shaped value that is
+// ALWAYS an object, and therefore always truthy: a field read off a row
+// (`st.id`, or the inline chain form), a bare identifier previously bound
+// (directly or transitively) from one such field read — OR the ROW itself,
+// bound or inline. A row (`const pot = tx.tables.x.findMany(f).expectOne(e)`)
+// is exactly as truthy as any field on it: `if (!pot)` is the SAME bug as
+// `if (!pot.x)`, one level up, and is the literal shape of a real bug this
+// gate exists to catch (smartex controllers/savings.controller.ts:290:
+// `if (!pot) throw new NotFound(...)`, ported as-is onto the plan API).
 function isRefExpr(node, tsapi, rowNames, refNames) {
   if (!node) return false;
-  if (tsapi.isIdentifier(node)) return refNames.has(node.text);
+  if (isRowProducingCall(node, tsapi)) return true; // inline chain, e.g. `if (!tx.tables.x.select(f).expectOne(e))`
+  if (tsapi.isIdentifier(node)) return rowNames.has(node.text) || refNames.has(node.text);
   if (tsapi.isPropertyAccessExpression(node) || tsapi.isElementAccessExpression(node)) {
     const obj = node.expression;
     if (tsapi.isIdentifier(obj) && rowNames.has(obj.text)) return true;

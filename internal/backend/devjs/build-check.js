@@ -11,11 +11,14 @@
  * even when controller metadata extraction collapses, and the endpoints simply
  * vanish. Here it is a loud, local, exit-1 failure before the push.
  *
- * This is NOT an emulator. The three scripts it drives — return_types.js,
- * throw_analysis.js, extract_meta.js — are byte-identical copies of the deploy
- * runtime's own (modules/backend/internal/runtime/*), and copy_parity_test.go
- * fails CI the moment they diverge. What passes here is what the deploy accepts,
- * by construction rather than by resemblance.
+ * This is NOT an emulator. The scripts it drives — return_types.js,
+ * throw_analysis.js, tx_analysis.js, extract_meta.js — are byte-identical
+ * copies of the deploy runtime's own (modules/backend/internal/runtime/*).
+ * Neither submodule's CI can see the other, so the parent repo's
+ * .github/workflows/stager-copy-parity.yml diffs them and fails CI the
+ * moment a copy drifts (there is no Go test for this in this repo). What
+ * passes here is what the deploy accepts, by construction rather than by
+ * resemblance.
  *
  * Invocation (set by the Go CLI):
  *   PALBASE_DEV_ROOT=/abs/path PALBASE_RUNTIME_MODULES=/abs/node_modules node build-check.js

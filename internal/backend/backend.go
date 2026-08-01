@@ -57,8 +57,11 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // return_types.js, throw_analysis.js, tx_analysis.js and extract_meta.js are
 // byte-identical copies of the deploy runtime's own
 // (modules/backend/internal/runtime/*). That identity is what makes a local
-// PASS mean the deploy accepts the tree; copy_parity_test.go fails CI the
-// moment a copy drifts.
+// PASS mean the deploy accepts the tree. Neither submodule's CI can see the
+// other, so the comparison runs in the PARENT repo: palbase's
+// .github/workflows/stager-copy-parity.yml diffs each file against
+// modules/backend on every push/PR touching either submodule and fails the
+// moment a copy drifts — there is no Go test for this in this repo.
 //
 //go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js
 var buildCheckFS embed.FS

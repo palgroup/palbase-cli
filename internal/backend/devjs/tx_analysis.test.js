@@ -54,7 +54,34 @@ const POSITIVE = [
     ].join('\n'),
   },
   {
-    name: '!<ref> — adapted from smartex controllers/savings.controller.ts:290 (`if (!pot) throw new NotFound(...)`)',
+    // LITERAL real source: smartex controllers/savings.controller.ts:290 is
+    // exactly `if (!pot) throw new NotFound("Kasa bulunamadı");` — a
+    // row-existence guard ported as-is onto the Ref-producing expectOne()
+    // result. A ROW is an object too, so it is JUST AS truthy as a field read
+    // off it. Verified against the file at fixture-authoring time (2026-08-01):
+    // `grep -n 'if (!pot)' controllers/savings.controller.ts` → `290:        if (!pot) throw new NotFound("Kasa bulunamadı");`
+    name: '!<ref> on the ROW itself — LITERAL smartex controllers/savings.controller.ts:290',
+    pattern: 'not-ref',
+    marker: 'pot) throw new NotFound',
+    src: [
+      'import { Database, NotFound } from "@palbase/backend";',
+      '',
+      'export function addContribution(potId) {',
+      '  return Database.transaction((tx) => {',
+      '    const pot = tx.tables.savings_pots',
+      '      .findMany({ id: potId })',
+      '      .expectOne(new NotFound("Kasa bulunamadi"));',
+      '    if (!pot) throw new NotFound("Kasa bulunamadi");',
+      '  });',
+      '}',
+    ].join('\n'),
+  },
+  {
+    // Same forbidden pattern (!<ref>), a DIFFERENT branch of isRefExpr: a
+    // FIELD read off the row, not the row itself. Kept as its own fixture per
+    // review — a fix that only special-cases the row identifier (or only the
+    // field access) must not silently regress the other.
+    name: '!<ref> on a FIELD of the row',
     pattern: 'not-ref',
     marker: 'pot.household_id',
     src: [
@@ -192,9 +219,12 @@ for (const tc of POSITIVE) {
   });
 }
 
-test('positive fixtures cover exactly the 8 patterns the plan requires, no duplicates', () => {
-  const patterns = POSITIVE.map((tc) => tc.pattern);
-  assert.strictEqual(new Set(patterns).size, 8, 'each positive fixture must exercise a DISTINCT pattern');
+test('positive fixtures cover all 8 patterns the plan requires', () => {
+  // Not a 1:1 count anymore: not-ref has TWO fixtures (row itself vs. a
+  // field on it — see isRefExpr's two branches), so this checks pattern
+  // COVERAGE, not fixture count.
+  const patterns = new Set(POSITIVE.map((tc) => tc.pattern));
+  assert.strictEqual(patterns.size, 8, 'all 8 required patterns must be covered, each by at least one fixture');
 });
 
 // ── negative fixtures — legitimate plans, must produce ZERO violations ─────
