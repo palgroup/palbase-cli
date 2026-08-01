@@ -39,3 +39,29 @@ func TestBuildCheckNodeSuite(t *testing.T) {
 		t.Fatalf("build-check node suite did not report zero failures:\n%s", s)
 	}
 }
+
+// TestTxAnalysisNodeSuite runs tx_analysis.js's own node:test suite (the
+// TxPlan Ref-truthiness build gate's 8 positive + 6 negative fixtures) as part
+// of `go test`, the same reason TestBuildCheckNodeSuite exists: without this,
+// the JS-level guard only runs when a human invokes `node --test` by hand.
+//
+// Skips when node is not on PATH.
+func TestTxAnalysisNodeSuite(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	testFile := filepath.Join("devjs", "tx_analysis.test.js")
+	if _, err := os.Stat(testFile); err != nil {
+		t.Fatalf("tx_analysis test file missing: %v", err)
+	}
+	cmd := exec.Command(node, "--test", testFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test tx_analysis.test.js failed: %v\n%s", err, out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "# fail 0") {
+		t.Fatalf("tx_analysis node suite did not report zero failures:\n%s", s)
+	}
+}

@@ -54,12 +54,13 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // inside a real package — build-check.js require()s its three siblings, so all
 // of them must land in that dir.
 //
-// return_types.js, throw_analysis.js and extract_meta.js are byte-identical
-// copies of the deploy runtime's own (modules/backend/internal/runtime/*).
-// That identity is what makes a local PASS mean the deploy accepts the tree;
-// copy_parity_test.go fails CI the moment a copy drifts.
+// return_types.js, throw_analysis.js, tx_analysis.js and extract_meta.js are
+// byte-identical copies of the deploy runtime's own
+// (modules/backend/internal/runtime/*). That identity is what makes a local
+// PASS mean the deploy accepts the tree; copy_parity_test.go fails CI the
+// moment a copy drifts.
 //
-//go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/extract_meta.js
+//go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js
 var buildCheckFS embed.FS
 
 // REST is the subset of the Management-API transport the provider-aware deploy

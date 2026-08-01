@@ -193,3 +193,86 @@ test('parser guard: a missing typescript produces the same actionable error', ()
     },
   );
 });
+
+// ── TxPlan Ref-truthiness gate wiring ────────────────────────────────────────
+//
+// tx_analysis.js's OWN pattern-detection is covered exhaustively by
+// tx_analysis.test.js (8 positive + 6 negative fixtures, mutation-verified).
+// These two tests lock the WIRING into build-check.js instead — a real
+// `node build-check.js` subprocess against a fixture PROJECT_ROOT, because the
+// gate runs (and, on a violation, process.exit(1)s) BEFORE any esbuild/
+// @palbase/backend dependency is touched, so this is cheap and needs no
+// node_modules of its own.
+
+const { spawnSync } = require('node:child_process');
+
+function runBuildCheck(fixtureRoot) {
+  return spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'build-check.js')],
+    { env: Object.assign({}, process.env, { PALBASE_DEV_ROOT: fixtureRoot }), encoding: 'utf8' },
+  );
+}
+
+test('TxPlan gate: a Ref-truthiness violation in controllers/ fails the build before any bundling', () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-txgate-bad-'));
+  fs.mkdirSync(path.join(fixtureRoot, 'controllers'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, 'controllers', 'invites.controller.ts'), [
+    'import { Database, Conflict, NotFound } from "@palbase/backend";',
+    '',
+    'export function acceptInvite(token) {',
+    '  return Database.transaction((tx) => {',
+    '    const locked = tx.tables.invites.updateWhere({ token }, {}).expectOne(new NotFound("nf"));',
+    '    if (locked.accepted_at) throw new Conflict("used");',
+    '  });',
+    '}',
+  ].join('\n'));
+
+  const result = runBuildCheck(fixtureRoot);
+  assert.strictEqual(result.status, 1,
+    `expected exit 1, got ${result.status}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stdout, /TxPlan Ref-truthiness violation/);
+  assert.match(result.stdout, /invites\.controller\.ts:6:/, 'must name the offending file and line');
+});
+
+test('TxPlan gate: a clean transaction() plan does not trip it', () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-txgate-clean-'));
+  fs.mkdirSync(path.join(fixtureRoot, 'controllers'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, 'controllers', 'invites.controller.ts'), [
+    'import { Database, Conflict, now } from "@palbase/backend";',
+    '',
+    'export function acceptInvite(token) {',
+    '  return Database.transaction((tx) => {',
+    '    tx.tables.invites',
+    '      .updateWhere({ token, accepted_at: null }, { accepted_at: now() })',
+    '      .expectOne(new Conflict("used"));',
+    '  });',
+    '}',
+  ].join('\n'));
+
+  const result = runBuildCheck(fixtureRoot);
+  assert.doesNotMatch(result.stdout, /TxPlan Ref-truthiness violation/,
+    `the gate must not fire on a clean plan\nstdout: ${result.stdout}`);
+  // The build itself still fails past this point in this tiny fixture (no
+  // package.json, no @palbase/backend) — irrelevant here, this test locks
+  // ONLY the TxPlan gate's pass-through behavior.
+});
+
+test('TxPlan gate: services/*.ts is scanned too, not just controllers/', () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-txgate-services-'));
+  fs.mkdirSync(path.join(fixtureRoot, 'services'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, 'services', 'invite.service.ts'), [
+    'import { Database, Conflict, NotFound } from "@palbase/backend";',
+    '',
+    'export function acceptInvite(token) {',
+    '  return Database.transaction((tx) => {',
+    '    const locked = tx.tables.invites.updateWhere({ token }, {}).expectOne(new NotFound("nf"));',
+    '    if (locked.accepted_at) throw new Conflict("used");',
+    '  });',
+    '}',
+  ].join('\n'));
+
+  const result = runBuildCheck(fixtureRoot);
+  assert.strictEqual(result.status, 1, `expected exit 1, got ${result.status}\nstdout: ${result.stdout}`);
+  assert.match(result.stdout, /invite\.service\.ts:6:/, 'must name the offending file and line inside services/');
+});

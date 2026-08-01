@@ -38,6 +38,12 @@ const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
 const RUNTIME_MODULES = process.env.PALBASE_RUNTIME_MODULES || path.join(PROJECT_ROOT, 'node_modules');
 const CONTROLLERS_DIR = path.join(PROJECT_ROOT, 'controllers');
 const RESOURCES_DIR = path.join(PROJECT_ROOT, 'resources');
+// services/ is scanned directly (not just as a controller's transitive
+// import) for the SAME reason SOURCE — not bundled — .ts is what
+// scanTxPlanViolations() needs below: a Database.transaction() plan is
+// project business logic and, per the repo convention, as likely to live in
+// services/*.service.ts as directly in a controller method.
+const SERVICES_DIR = path.join(PROJECT_ROOT, 'services');
 
 // ── esbuild bundling — IDENTICAL to the deploy path ────────────────────────
 //
@@ -98,6 +104,15 @@ const returnTypes = require('./return_types.js');
 // (modules/backend/internal/runtime/throw_analysis.js), the same parity rule
 // as return_types.js: build and deploy must infer identical error sets.
 const throwAnalysis = require('./throw_analysis.js');
+// TxPlan Ref-truthiness build gate — VERBATIM-identical to the deploy copy
+// (modules/backend/internal/runtime/tx_analysis.js), same parity rule. Unlike
+// its two siblings above (return-schema binding, throw inference — both DX/
+// completeness passes), a miss here is silent DATA CORRUPTION: see the
+// module's own header for why `if (ref)` can never be trapped and must be
+// caught statically instead. scanTxPlanViolations() below runs it and is
+// NEVER merged into the softer `failures` list main() builds — it exits
+// straight away.
+const txAnalysis = require('./tx_analysis.js');
 
 // stageControllersWithReturnBindings copies controllers/*.ts into a staging dir,
 // appending each file's return-type schema injection, and returns the staging
@@ -516,7 +531,47 @@ function bundleResources() {
   }
 }
 
+// SOURCE_FILE_RE matches the TypeScript files scanTxPlanViolations reads —
+// SOURCE .ts/.tsx, never a bundled .js: tx_analysis.js is a parser (no
+// TypeChecker), so it needs the file that still carries the syntax it looks
+// for. Deliberately excludes .d.ts (types-only, never a call site).
+const SOURCE_FILE_RE = /(?<!\.d)\.tsx?$/i;
+
+// scanTxPlanViolations walks controllers/ + services/ (source, not bundled —
+// see SOURCE_FILE_RE) for Database.transaction() Ref-truthiness misuse. Every
+// finding here is a hard build failure — see tx_analysis.js's own header for
+// why this pass, alone among the three shared with the deploy stager, has no
+// best-effort / warn-only mode.
+function scanTxPlanViolations() {
+  const violations = [];
+  for (const dir of [CONTROLLERS_DIR, SERVICES_DIR]) {
+    if (!fs.existsSync(dir)) continue;
+    for (const file of walk(dir)) {
+      if (!SOURCE_FILE_RE.test(file)) continue;
+      const src = fs.readFileSync(file, 'utf8');
+      const rel = path.relative(PROJECT_ROOT, file);
+      violations.push(...txAnalysis.findTxPlanViolations(src, rel));
+    }
+  }
+  return violations;
+}
+
 function main() {
+  // TxPlan Ref-truthiness gate runs FIRST and exits immediately on any
+  // finding — never merged into the `failures` list below. That list can, in
+  // principle, grow a tolerated/soft entry some day; this one must never be
+  // able to. A Ref-truthiness miss is a transaction that commits the WRONG
+  // data with no error anywhere, which is worse than any other build failure
+  // this file reports — see tx_analysis.js's header.
+  const txViolations = scanTxPlanViolations();
+  if (txViolations.length > 0) {
+    for (const v of txViolations) log(`✗ DEPLOY WOULD FAIL: ${txAnalysis.formatViolation(v)}`);
+    log(`build FAILED (${txViolations.length} TxPlan Ref-truthiness violation${txViolations.length === 1 ? '' : 's'}) — ` +
+      'a transaction() plan reads a field that is a Ref, not a real value, in a boolean/string/arithmetic ' +
+      'context. See the message above each site for the fix.');
+    process.exit(1);
+  }
+
   // Resources bundle FIRST: registerControllers require()s the bundled
   // controllers, and their external `../resources/*` requires must resolve to
   // BUNDLE_ROOT/resources/.
