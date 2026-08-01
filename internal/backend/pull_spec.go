@@ -68,13 +68,17 @@ func newNativeSpecCmd(r Resolvers, platform string) *cobra.Command {
 regenerates Palbase/Generated/ — PalbaseGenerated.swift + Palbase-Info.plist —
 using the generator from the palbackend-ios checkout SwiftPM resolved for this
 project. Commit the result.`
+	// Android's client comes from its Gradle plugin, not from this command — the
+	// summary line must not claim a regeneration the CLI never performs.
+	short := "Refresh openapi.json for the selected environment (and regenerate the committed client)"
 	if platform == "android" {
 		regen = `The Gradle plugin regenerates from the refreshed spec on the next build.`
+		short = "Refresh openapi.json for the selected environment"
 	}
 	cmd := &cobra.Command{
 		Use:   "spec",
 		Args:  cobra.NoArgs,
-		Short: "Refresh openapi.json for the selected environment (and regenerate the committed client)",
+		Short: short,
 		Long: `Fetch the SELECTED environment's openapi.json into --out-dir (default ./` + nativeArtifactsDir + `).
 Run it after every deploy so the committed API contract stays current.
 
