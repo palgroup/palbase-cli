@@ -28,7 +28,7 @@ func TestCommands_FlatSurface(t *testing.T) {
 
 	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
 	// CLI keeps the pre-deploy validator + observation/control verbs only.
-	for _, want := range []string{"build", "deploys", "rollback", "status", "spec", "web", "ios", "macos"} {
+	for _, want := range []string{"build", "deploys", "rollback", "status", "web", "ios", "macos"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
@@ -43,7 +43,7 @@ func TestCommands_FlatSurface(t *testing.T) {
 	// @palbase/web owns its own codegen via palbe-gen, invoked by `web link`
 	// and its predev/prebuild hooks — see web_link.go); there is NO top-level
 	// `gen` group — client codegen is the SDKs' job.
-	for _, gone := range []string{"deploy", "dev", "disable", "enable", "backend", "config", "merge", "list", "types", "gen-types", "pull-spec", "gen"} {
+	for _, gone := range []string{"deploy", "dev", "disable", "enable", "backend", "config", "merge", "list", "types", "gen-types", "pull-spec", "gen", "spec"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}
 }
@@ -53,8 +53,11 @@ func TestCommands_MacOSGroup(t *testing.T) {
 		if c.Name() != "macos" {
 			continue
 		}
-		require.Len(t, c.Commands(), 1)
-		require.Equal(t, "link", c.Commands()[0].Name())
+		var names []string
+		for _, child := range c.Commands() {
+			names = append(names, child.Name())
+		}
+		require.ElementsMatch(t, []string{"link", "spec"}, names)
 		return
 	}
 	t.Fatal("macos group not found in flat surface")
@@ -69,16 +72,16 @@ func TestCommands_AndroidGroup(t *testing.T) {
 		for _, child := range c.Commands() {
 			names = append(names, child.Name())
 		}
-		require.Equal(t, []string{"link", "use"}, names)
+		require.ElementsMatch(t, []string{"link", "use", "spec"}, names)
 		return
 	}
 	t.Fatal("android group not found in flat surface")
 }
 
-// TestCommands_WebGroup pins the `web` group's children: link/unlink ONLY —
+// TestCommands_WebGroup pins the `web` group's children: link/unlink/use/spec —
 // no `generate` subcommand. Web's client comes from @palbase/web's `palbe-gen`
 // (over the committed Palbase/ inputs). Apple codegen has no subcommand either:
-// it rides every contract refresh (`palbase spec`, the link commands, `ios use`).
+// it rides every contract refresh (`ios spec`, the link commands, `ios use`).
 func TestCommands_WebGroup(t *testing.T) {
 	for _, c := range Commands(noopResolvers()) {
 		if c.Name() != "web" {
@@ -88,7 +91,7 @@ func TestCommands_WebGroup(t *testing.T) {
 		for _, sub := range c.Commands() {
 			names = append(names, sub.Name())
 		}
-		require.ElementsMatch(t, []string{"link", "unlink"}, names)
+		require.ElementsMatch(t, []string{"link", "unlink", "use", "spec"}, names)
 		return
 	}
 	t.Fatal("web group not found in flat surface")

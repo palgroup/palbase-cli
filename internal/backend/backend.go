@@ -34,7 +34,7 @@ import (
 	"golang.org/x/term"
 )
 
-// defaultHTTPClient is reused by `palbase spec`/`web link`'s spec + OAuth-
+// defaultHTTPClient is reused by the platform `spec`/`link` commands' spec + OAuth-
 // provider fetches, the SDK-major check `build` runs against npm, and any
 // future direct HTTP we add. There is no `palbase web gen` — @palbase/web's
 // own `palbe-gen` owns client codegen (see web_link.go). 30s read timeout
@@ -117,9 +117,14 @@ func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 // shell out to git (push/pull/clone → webhook → orchestrator deploys); for a
 // platform-mode project they upload/fetch a tarball bundle via the Management
 // API. `merge` stays retired (the old go-git merge verb is gone). Alongside
-// them the CLI keeps the pre-deploy validator (`build`), the
-// observation/control verbs (deploys, rollback, status) and the artifact
-// fetcher (`spec`) — client codegen itself is the SDKs' job, not the CLI's.
+// them the CLI keeps the pre-deploy validator (`build`) and the
+// observation/control verbs (deploys, rollback, status).
+//
+// Artifact fetching is PER PLATFORM — `palbase web|ios|macos|android spec` —
+// because the artifacts are: web reads Palbase/, the native platforms read
+// .palbase/ and re-emit a committed Swift client. A single top-level `spec`
+// had to guess which, so each platform group now owns link/use/spec together.
+// Client codegen itself is still the SDKs' job, not the CLI's.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newWebCmd(r),
@@ -130,7 +135,6 @@ func Commands(r Resolvers) []*cobra.Command {
 		newDeploysCmd(r),
 		newRollbackCmd(r),
 		newStatusCmd(r),
-		newSpecCmd(r),
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
@@ -141,7 +145,7 @@ func Commands(r Resolvers) []*cobra.Command {
 // Database.tables.*) so main can register it under `palbase db types` — it
 // types the author's OWN handlers from the local schema source, which is db
 // tooling, not client codegen. (Client codegen is the SDKs' job: the CLI only
-// fetches the artifacts — see `palbase spec`.)
+// fetches the artifacts — see `palbase web|ios|macos|android spec`.)
 func EnvTypesCmd() *cobra.Command {
 	return newGenTypesCmd()
 }
@@ -187,7 +191,7 @@ No-op when the project has no db/schema.ts.`,
 }
 
 // backendTarget is the resolved (URL + publishable key) for one ENVIRONMENT's
-// backend. Used by lookupBackendTarget (which `palbase spec` and the link
+// backend. Used by lookupBackendTarget (which the platform `spec` and link
 // commands' artifact fetch share) to address the deployed tenant host.
 type backendTarget struct {
 	URL    string

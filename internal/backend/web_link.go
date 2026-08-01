@@ -44,7 +44,7 @@ import (
 )
 
 // webArtifactsDir is the committed directory the SDK generators read — the
-// SAME convention `palbase spec` uses for iOS (openapi.json +
+// counterpart of the .palbase/ directory the native platforms read (openapi.json +
 // palbase-config.json under ./Palbase).
 const webArtifactsDir = "Palbase"
 
@@ -60,9 +60,13 @@ const webArtifactsDir = "Palbase"
 // identify the Environment, so a branch field would be a second name for the
 // same runtime — and the Palbase branch no longer exists.
 //
+// retarget records the selected Environment as this checkout's selection even
+// when the Project is unchanged — what `web use` does and `web link` must not
+// (a plain re-link keeps the environment the checkout already targets).
+//
 // The CLI does NOT generate the client — client codegen is the SDKs' job
 // (`palbe-gen`, shipped in @palbase/web). Tests replace the seam with a stub.
-var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Selection, w io.Writer) error {
+var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Selection, retarget bool, w io.Writer) error {
 	if r.REST == nil {
 		return fmt.Errorf("management API is unavailable")
 	}
@@ -75,7 +79,7 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 	if err != nil {
 		return err
 	}
-	if err := persistProjectAppSlot("web", appID, &sel, false); err != nil {
+	if err := persistProjectAppSlot("web", appID, &sel, retarget); err != nil {
 		return err
 	}
 
@@ -184,14 +188,15 @@ func webTypesCmdFor(outFile string) string {
 }
 
 // newWebCmd builds the `palbase web` command group: link/unlink wire the
-// project. Client generation lives in @palbase/web (`palbe-gen`), not here.
+// project, use re-targets its Environment, spec refreshes the contract. Client
+// generation lives in @palbase/web (`palbe-gen`), not here.
 func newWebCmd(r Resolvers) *cobra.Command {
 	wc := &webCmd{r: r}
 	cmd := &cobra.Command{
 		Use:   "web",
 		Short: "Wire a web project to a Palbase project",
 	}
-	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd())
+	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd(), wc.newWebUseCmd(), newWebSpecCmd(r))
 	return cmd
 }
 
@@ -236,7 +241,7 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 			// 4. Fetch the committed SDK-generator inputs (openapi.json +
 			// palbase-config.json under Palbase/). The CLI stops here —
 			// generating palbe.gen.ts is @palbase/web's job (palbe-gen).
-			if err := webLinkArtifacts(ctx, wc.r, sel, out); err != nil {
+			if err := webLinkArtifacts(ctx, wc.r, sel, false, out); err != nil {
 				return fmt.Errorf("fetch artifacts: %w", err)
 			}
 

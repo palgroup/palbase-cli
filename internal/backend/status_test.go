@@ -224,13 +224,13 @@ func TestRollback_TargetsTheEnvironmentNotABranch(t *testing.T) {
 // A directory with NO selection fails with the actionable message, not a nil
 // dereference and not a request to a nonsense URL.
 func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
-	for _, name := range []string{"status", "deploys", "push", "spec"} {
-		t.Run(name, func(t *testing.T) {
+	for _, argv := range [][]string{{"status"}, {"deploys"}, {"push"}, {"web", "spec"}, {"ios", "spec"}} {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
 			selectiontest.Chdir(t) // no .palbase/config.json
 			r := &rig{Fake: selectiontest.New(t)}
 			r.Resolver = r.Fake.Resolver()
 
-			_, err := r.Run(t, name)
+			_, err := r.Run(t, argv[0], argv[1:]...)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "palbase project use")
 		})

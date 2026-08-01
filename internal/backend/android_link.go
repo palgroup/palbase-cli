@@ -9,6 +9,6 @@ func newAndroidCmd(r Resolvers) *cobra.Command {
 		Use:   "android",
 		Short: "Wire an Android app to a Palbase project",
 	}
-	cmd.AddCommand(newNativeLinkCmd(r, "android"), newAndroidUseCmd(r))
+	cmd.AddCommand(newNativeLinkCmd(r, "android"), newAndroidUseCmd(r), newNativeSpecCmd(r, "android"))
 	return cmd
 }

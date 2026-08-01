@@ -76,7 +76,7 @@ func newIOSCmd(r Resolvers) *cobra.Command {
 		Use:   "ios",
 		Short: "Wire an iOS app to a Palbase project",
 	}
-	cmd.AddCommand(newIOSLinkCmd(r), newIOSUseCmd(r))
+	cmd.AddCommand(newIOSLinkCmd(r), newIOSUseCmd(r), newNativeSpecCmd(r, "ios"))
 	return cmd
 }
 
@@ -87,7 +87,7 @@ func newMacOSCmd(r Resolvers) *cobra.Command {
 		Use:   "macos",
 		Short: "Wire a macOS app to a Palbase project",
 	}
-	cmd.AddCommand(newNativeLinkCmd(r, "macos"))
+	cmd.AddCommand(newNativeLinkCmd(r, "macos"), newNativeSpecCmd(r, "macos"))
 	return cmd
 }
 
@@ -230,6 +230,12 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 		ctx, d.lookup, d.fetch, d.list, d.cfgFetch,
 		opts.environmentRef, d.publicHost, ".palbase", configDir, appID, w,
 	); err != nil {
+		return nil, err
+	}
+	// Emit the committed Swift client from the spec+config just written. A no-op
+	// on an Android-only checkout (no Apple slot), where the Gradle plugin
+	// generates instead.
+	if err := generateAppleClient(".palbase", w); err != nil {
 		return nil, err
 	}
 
@@ -423,6 +429,6 @@ next steps (%s Xcode target):
   3. Drag the Palbase folder into your app target (folder reference) — its
      PalbaseGenerated.swift compiles and Palbase-Info.plist ships as a resource
   4. Commit .palbase/openapi.json, %s/palbase-config.json and Palbase/Generated/
-Then `+"`import Palbe`"+` and use `+"`pb`"+`. Re-run `+"`palbase spec`"+` after every deploy to regenerate.
+Then `+"`import Palbe`"+` and use `+"`pb`"+`. Re-run `+"`palbase %[1]s spec`"+` after every deploy to regenerate.
 `, platform, outDir)
 }

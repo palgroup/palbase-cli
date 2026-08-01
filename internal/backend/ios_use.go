@@ -94,6 +94,11 @@ from .palbase/config.json, falling back to the committed platform slot).`, label
 				out); err != nil {
 				return err
 			}
+			// The config just moved to another Environment, so the committed
+			// Swift client (which embeds it) must be re-emitted from it.
+			if err := generateAppleClient(".palbase", out); err != nil {
+				return err
+			}
 
 			fmt.Fprintf(out, "✓ %s project now targets environment %s (%s)\n", label, sel.Environment.Slug, sel.EnvironmentRef())
 			fmt.Fprintf(out, "  %s\n", rebuild)

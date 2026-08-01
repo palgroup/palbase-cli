@@ -21,8 +21,8 @@ import (
 // stubArtifactsFunc replaces webLinkArtifacts for tests — writes minimal
 // committed artifacts (openapi.json + palbase-config.json) with no network. The
 // emitted config names the ENVIRONMENT and carries no branch.
-func stubArtifactsFunc() func(context.Context, Resolvers, selection.Selection, io.Writer) error {
-	return func(_ context.Context, _ Resolvers, sel selection.Selection, _ io.Writer) error {
+func stubArtifactsFunc() func(context.Context, Resolvers, selection.Selection, bool, io.Writer) error {
+	return func(_ context.Context, _ Resolvers, sel selection.Selection, _ bool, _ io.Writer) error {
 		if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
 			return err
 		}
@@ -538,9 +538,9 @@ func TestWebLink_FetchesForTheSelectedEnvironment(t *testing.T) {
 
 	var gotSel selection.Selection
 	orig := webLinkArtifacts
-	webLinkArtifacts = func(ctx context.Context, res Resolvers, sel selection.Selection, w io.Writer) error {
+	webLinkArtifacts = func(ctx context.Context, res Resolvers, sel selection.Selection, retarget bool, w io.Writer) error {
 		gotSel = sel
-		return stubArtifactsFunc()(ctx, res, sel, w)
+		return stubArtifactsFunc()(ctx, res, sel, retarget, w)
 	}
 	t.Cleanup(func() { webLinkArtifacts = orig })
 
