@@ -89,6 +89,7 @@ func newTRPCStub(t *testing.T) *studio.Client {
 // branch anywhere. This is UAT SDK-003/SDK-004: the generated config selects an
 // Environment, not a branch.
 func TestNativeUse_RetargetsTheEnvironment(t *testing.T) {
+	stubSwiftgenSources(t)
 	f, r := useRig(t, &selection.Config{
 		ProjectID: "proj_1", EnvironmentID: "env_prod",
 		RepositoryProvider: selection.ProviderPalbase, IOSAppID: "app_ios", MacOSAppID: "app_macos",

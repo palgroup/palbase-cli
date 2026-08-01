@@ -77,6 +77,13 @@ from .palbase/config.json, falling back to the committed platform slot).`, label
 			if appID == "" {
 				return fmt.Errorf("no %s app linked — run `palbase %s link` first", platform, platform)
 			}
+			// Re-targeting rewrites the config the committed Swift client embeds,
+			// so it must be re-emitted. Check that it can be before moving
+			// anything (link is exempt: on a first link the SDK package is not
+			// added yet, and having no client to regenerate is normal there).
+			if err := preflightAppleGenerator(".palbase"); err != nil {
+				return err
+			}
 
 			rest := r.REST()
 			appID, err = resolveNativeApp(ctx, nativeLinkDeps{rest: rest}, sel.ProjectID, platform, appID, "", out)

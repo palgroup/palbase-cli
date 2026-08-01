@@ -132,6 +132,15 @@ func writeSlot(t *testing.T, dir string) {
 		[]byte(`{"environment_ref":"app1prod","base_url":"https://app1prod.dev.palbase.studio","api_key":"pb_stub"}`+"\n"), 0o600))
 }
 
+// stubSwiftgenSources makes the Apple preflight pass without a resolved SwiftPM
+// checkout on disk. Tests that assert the preflight FIRES must not call it.
+func stubSwiftgenSources(t *testing.T) {
+	t.Helper()
+	orig := locateSwiftgenSources
+	locateSwiftgenSources = func(string) (string, error) { return "/stub/palbase-swiftgen", nil }
+	t.Cleanup(func() { locateSwiftgenSources = orig })
+}
+
 // `spec` writes the directory the LINKED platform's generator reads, and only
 // that one. A web checkout must never end up with a refreshed
 // .palbase/openapi.json while palbe-gen keeps reading a stale
@@ -154,6 +163,7 @@ func TestSpec_WebLinked_WritesOnlyTheWebContract(t *testing.T) {
 
 func TestSpec_NativeLinked_WritesOnlyTheNativeContract(t *testing.T) {
 	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+	stubSwiftgenSources(t)
 	writeSlot(t, filepath.Join(nativeArtifactsDir, "ios"))
 
 	cmd := newSpecCmd(r)
@@ -171,6 +181,7 @@ func TestSpec_NativeLinked_WritesOnlyTheNativeContract(t *testing.T) {
 // to run two, and forgetting one left that SDK generating from a stale spec.
 func TestSpec_WebAndNativeLinked_WritesBoth(t *testing.T) {
 	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+	stubSwiftgenSources(t)
 	writeSlot(t, webArtifactsDir)
 	writeSlot(t, filepath.Join(nativeArtifactsDir, "ios"))
 
@@ -199,4 +210,37 @@ func TestSpec_UnlinkedCheckout_FailsActionably(t *testing.T) {
 	require.ErrorContains(t, err, "palbase web link")
 	require.NoFileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
 	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+}
+
+// An Apple checkout whose SwiftPM package is not resolved cannot regenerate the
+// committed Swift client. Refreshing the spec anyway would leave that client
+// stale beside a newer contract — it still compiles, so the drift only surfaces
+// as a runtime 404 — which is why the old code deleted the generated files to
+// escape. Failing BEFORE the first write removes the dilemma: the contract and
+// the generated client both survive untouched, and re-running after an Xcode
+// build just works.
+func TestSpec_AppleCheckoutWithoutResolvedGenerator_WritesNothing(t *testing.T) {
+	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+	writeSlot(t, filepath.Join(nativeArtifactsDir, "ios"))
+	// NO stubSwiftgenSources: the real locator runs and finds no checkout here.
+
+	genDir := filepath.Join("Palbase", "Generated")
+	require.NoError(t, os.MkdirAll(genDir, 0o755))
+	client := filepath.Join(genDir, "PalbaseGenerated.swift")
+	require.NoError(t, os.WriteFile(client, []byte("// the app's committed client\n"), 0o644))
+
+	cmd := newSpecCmd(r)
+	cmd.SetOut(io.Discard)
+	cmd.SetArgs(nil)
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	err := cmd.Execute()
+
+	require.ErrorContains(t, err, "not resolved")
+	require.ErrorContains(t, err, "nothing was written")
+	// The contract was never fetched...
+	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+	// ...and the committed client is exactly as it was.
+	got, readErr := os.ReadFile(client)
+	require.NoError(t, readErr)
+	require.Equal(t, "// the app's committed client\n", string(got))
 }

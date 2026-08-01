@@ -125,6 +125,15 @@ Override the target with the global --project / --environment flags.`,
 					"this directory is not linked to a Palbase project — run `palbase web link`, `palbase ios link`, `palbase macos link` or `palbase android link` first")
 			}
 
+			// Apple regenerates from this refresh, so verify it CAN before any
+			// file moves — a spec written next to a client that cannot be
+			// re-emitted is exactly the drift this command exists to prevent.
+			if apple {
+				if err := preflightAppleGenerator(nativeArtifactsDir); err != nil {
+					return err
+				}
+			}
+
 			// One fetch, written to each linked platform's directory. Native
 			// platforms share one directory, so this is at most two writes.
 			dirs := []string{}

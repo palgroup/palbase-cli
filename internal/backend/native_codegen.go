@@ -47,6 +47,37 @@ var swiftgenToolHome = func() (string, error) {
 // assert the arguments the CLI passes without a Swift toolchain.
 var ensureSwiftgenTool = compileSwiftgen
 
+// locateSwiftgenSources is a seam over findSwiftgenSources so the preflight can
+// be exercised without a resolved SwiftPM checkout on disk.
+var locateSwiftgenSources = findSwiftgenSources
+
+// preflightAppleGenerator reports whether an Apple checkout can regenerate,
+// BEFORE anything on disk is touched.
+//
+// Order matters here. A refresh that writes the spec first and only then
+// discovers it cannot regenerate has already broken the checkout: the committed
+// Swift client no longer matches the spec beside it, and because that client
+// still COMPILES the drift stays invisible until a call 404s at runtime. The
+// only safe recoveries from that point are to delete the generated code (what
+// discardStaleGenerated does — loud, but it leaves the app unbuildable) or to
+// leave the drift in place (silent, and worse).
+//
+// Failing first avoids the choice entirely: nothing is written, so there is
+// nothing to reconcile, and re-running after `xcodebuild -resolvePackageDependencies`
+// (or one Xcode build) picks up exactly where it left off.
+func preflightAppleGenerator(palbaseDir string) error {
+	hasIOS := isRegularFile(filepath.Join(palbaseDir, "ios", "palbase-config.json"))
+	hasMacOS := isRegularFile(filepath.Join(palbaseDir, "macos", "palbase-config.json"))
+	if !hasIOS && !hasMacOS {
+		return nil
+	}
+	if _, err := locateSwiftgenSources(filepath.Dir(palbaseDir)); err != nil {
+		return fmt.Errorf("%w\n"+
+			"       (nothing was written — the committed contract and Palbase/Generated/ are untouched)", err)
+	}
+	return nil
+}
+
 // generateAppleClient regenerates Palbase/Generated from the spec and platform
 // slots under palbaseDir. It is a no-op for checkouts with no Apple slot —
 // Android generates from its Gradle plugin and @palbase/web from palbe-gen.
