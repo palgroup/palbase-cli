@@ -188,15 +188,16 @@ func webTypesCmdFor(outFile string) string {
 }
 
 // newWebCmd builds the `palbase web` command group: link/unlink wire the
-// project, use re-targets its Environment, spec refreshes the contract. Client
-// generation lives in @palbase/web (`palbe-gen`), not here.
+// project and use re-targets its Environment. The contract itself is refreshed
+// by the shared `palbase spec`, and client generation lives in @palbase/web
+// (`palbe-gen`), not here.
 func newWebCmd(r Resolvers) *cobra.Command {
 	wc := &webCmd{r: r}
 	cmd := &cobra.Command{
 		Use:   "web",
 		Short: "Wire a web project to a Palbase project",
 	}
-	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd(), wc.newWebUseCmd(), newWebSpecCmd(r))
+	cmd.AddCommand(wc.newWebLinkCmd(), wc.newWebUnlinkCmd(), wc.newWebUseCmd())
 	return cmd
 }
 

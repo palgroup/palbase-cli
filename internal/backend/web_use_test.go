@@ -123,14 +123,26 @@ func TestWebUse_RequiresALinkedApp(t *testing.T) {
 	require.ErrorContains(t, cmd.Execute(), "run `palbase web link` first")
 }
 
-// The point of splitting `spec` per platform: each command writes the directory
-// ITS generator reads, and only that one. A web checkout must never end up with
-// a refreshed .palbase/openapi.json while palbe-gen keeps reading a stale
-// Palbase/openapi.json (or the reverse on a native checkout).
-func TestWebSpec_RefreshesOnlyTheWebContract(t *testing.T) {
-	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+// writeSlot drops the COMMITTED platform slot a link command would have left,
+// which is what `spec` reads to decide where the contract belongs.
+func writeSlot(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "palbase-config.json"),
+		[]byte(`{"environment_ref":"app1prod","base_url":"https://app1prod.dev.palbase.studio","api_key":"pb_stub"}`+"\n"), 0o600))
+}
 
-	cmd := newWebSpecCmd(r)
+// `spec` writes the directory the LINKED platform's generator reads, and only
+// that one. A web checkout must never end up with a refreshed
+// .palbase/openapi.json while palbe-gen keeps reading a stale
+// Palbase/openapi.json (or the reverse on a native checkout). The old code
+// guessed this from a sibling directory relative to --out-dir; this reads the
+// committed slot instead.
+func TestSpec_WebLinked_WritesOnlyTheWebContract(t *testing.T) {
+	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+	writeSlot(t, webArtifactsDir)
+
+	cmd := newSpecCmd(r)
 	cmd.SetOut(io.Discard)
 	cmd.SetArgs(nil)
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
@@ -138,14 +150,13 @@ func TestWebSpec_RefreshesOnlyTheWebContract(t *testing.T) {
 
 	require.FileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
 	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
-	// spec is contract-only: runtime config comes from link/use.
-	require.NoFileExists(t, filepath.Join(webArtifactsDir, "palbase-config.json"))
 }
 
-func TestNativeSpec_RefreshesOnlyTheNativeContract(t *testing.T) {
+func TestSpec_NativeLinked_WritesOnlyTheNativeContract(t *testing.T) {
 	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+	writeSlot(t, filepath.Join(nativeArtifactsDir, "ios"))
 
-	cmd := newNativeSpecCmd(r, "ios")
+	cmd := newSpecCmd(r)
 	cmd.SetOut(io.Discard)
 	cmd.SetArgs(nil)
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
@@ -153,5 +164,39 @@ func TestNativeSpec_RefreshesOnlyTheNativeContract(t *testing.T) {
 
 	require.FileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
 	require.NoFileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
-	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
+}
+
+// The reason ONE command beats four: a checkout linked for both platforms gets
+// both contracts from a single run. With per-platform commands you had to know
+// to run two, and forgetting one left that SDK generating from a stale spec.
+func TestSpec_WebAndNativeLinked_WritesBoth(t *testing.T) {
+	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+	writeSlot(t, webArtifactsDir)
+	writeSlot(t, filepath.Join(nativeArtifactsDir, "ios"))
+
+	cmd := newSpecCmd(r)
+	cmd.SetOut(io.Discard)
+	cmd.SetArgs(nil)
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	require.NoError(t, cmd.Execute())
+
+	require.FileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
+	require.FileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+}
+
+// With no slot at all there is nothing to refresh and no directory to invent:
+// say which command to run instead of silently creating an empty tree.
+func TestSpec_UnlinkedCheckout_FailsActionably(t *testing.T) {
+	_, r := useRig(t, &selection.Config{ProjectID: "proj_1", EnvironmentID: "env_prod"})
+
+	cmd := newSpecCmd(r)
+	cmd.SetOut(io.Discard)
+	cmd.SetArgs(nil)
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	err := cmd.Execute()
+
+	require.ErrorContains(t, err, "not linked")
+	require.ErrorContains(t, err, "palbase web link")
+	require.NoFileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
+	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
 }

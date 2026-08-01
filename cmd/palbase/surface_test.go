@@ -81,6 +81,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"push",
 		"rollback",
 		"secret",
+		"spec",
 		"status",
 		"storage",
 		"test-user",
@@ -94,10 +95,7 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 	for _, name := range topLevel(t) {
 		have[name] = true
 	}
-	// `spec` was not renamed either — it SPLIT, into `palbase <platform> spec`
-	// (web writes Palbase/, the native platforms write .palbase/ and re-emit the
-	// Swift client). A top-level `spec` had to guess which a checkout meant.
-	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev", "spec"} {
+	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev"} {
 		require.False(t, have[gone],
 			"`palbase %s` must NOT exist after the cutover (no shims, no aliases)", gone)
 	}

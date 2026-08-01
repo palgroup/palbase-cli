@@ -120,11 +120,12 @@ func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 // them the CLI keeps the pre-deploy validator (`build`) and the
 // observation/control verbs (deploys, rollback, status).
 //
-// Artifact fetching is PER PLATFORM — `palbase web|ios|macos|android spec` —
-// because the artifacts are: web reads Palbase/, the native platforms read
-// .palbase/ and re-emit a committed Swift client. A single top-level `spec`
-// had to guess which, so each platform group now owns link/use/spec together.
-// Client codegen itself is still the SDKs' job, not the CLI's.
+// `spec` is ONE command: fetching the contract is one act, and where it lands
+// is a fact about the checkout (read from the committed platform slots), not a
+// question for the caller. It writes each linked platform's directory and runs
+// the one generator the CLI owns — the SDK's swiftgen, for Apple, which is the
+// only platform with no build-time generator of its own. Web's palbe-gen and
+// Android's Gradle plugin run from their own build steps.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
 		newWebCmd(r),
@@ -135,6 +136,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		newDeploysCmd(r),
 		newRollbackCmd(r),
 		newStatusCmd(r),
+		newSpecCmd(r),
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),

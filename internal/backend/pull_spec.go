@@ -55,38 +55,61 @@ type oauthGoogleJSON struct {
 // /android). The web SDK reads its own directory instead — webArtifactsDir.
 const nativeArtifactsDir = ".palbase"
 
-// newNativeSpecCmd (`palbase ios|macos|android spec`) fetches ONLY the artifact
-// the SDK code generators consume: the SELECTED ENVIRONMENT's openapi.json.
-// Client generation itself is the SDKs' job — for Apple that means the SDK's own
-// swiftgen, which this command then runs over the refreshed spec.
+// linkedPlatforms reports which platforms this checkout is linked for, read from
+// the COMMITTED slot files rather than from `.palbase/config.json` (which is
+// per-machine and gitignored, so a fresh clone has none) and rather than from a
+// guess about the directory layout.
+//
+// This is what makes ONE `spec` correct: the command does not ask you which
+// platform you are on, and it does not sniff a sibling directory relative to a
+// --out-dir that may have moved. It reads the same files the link commands
+// wrote and the repo carries.
+func linkedPlatforms() (web bool, apple bool, android bool) {
+	web = isRegularFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+	apple = isRegularFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")) ||
+		isRegularFile(filepath.Join(nativeArtifactsDir, "macos", "palbase-config.json"))
+	android = isRegularFile(filepath.Join(nativeArtifactsDir, "android", "palbase-config.json"))
+	return web, apple, android
+}
+
+// newSpecCmd (`palbase spec`) fetches ONLY the artifact the SDK code generators
+// consume: the SELECTED ENVIRONMENT's openapi.json. It writes it wherever this
+// checkout's linked platforms read it from, and then triggers the ONE generator
+// the CLI owns — the SDK's swiftgen, for an Apple checkout.
+//
+// It is a single command because fetching the contract is a single act. The
+// platforms differ only in (a) which directory their generator reads and (b)
+// who regenerates afterwards, and both of those are facts about the checkout,
+// not questions for the caller: web's palbe-gen runs from the predev/prebuild
+// hook, Android's Gradle plugin runs at build time, and only Apple has no build
+// step of its own — which is why the CLI runs swiftgen here and nowhere else.
 //
 // spec NEVER probes a local server on :4003 — it fetches the REMOTE
 // spec via the wake-aware fetch.
-func newNativeSpecCmd(r Resolvers, platform string) *cobra.Command {
-	var outDir string
-	regen := `A checkout with an Apple platform slot (` + nativeArtifactsDir + `/ios or ` + nativeArtifactsDir + `/macos) then
-regenerates Palbase/Generated/ — PalbaseGenerated.swift + Palbase-Info.plist —
-using the generator from the palbackend-ios checkout SwiftPM resolved for this
-project. Commit the result.`
-	// Android's client comes from its Gradle plugin, not from this command — the
-	// summary line must not claim a regeneration the CLI never performs.
-	short := "Refresh openapi.json for the selected environment (and regenerate the committed client)"
-	if platform == "android" {
-		regen = `The Gradle plugin regenerates from the refreshed spec on the next build.`
-		short = "Refresh openapi.json for the selected environment"
-	}
+func newSpecCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "spec",
 		Args:  cobra.NoArgs,
-		Short: short,
-		Long: `Fetch the SELECTED environment's openapi.json into --out-dir (default ./` + nativeArtifactsDir + `).
-Run it after every deploy so the committed API contract stays current.
+		Short: "Refresh openapi.json for the selected environment (and regenerate the committed Swift client)",
+		Long: `Fetch the SELECTED environment's openapi.json into every directory this
+checkout's linked platforms read it from. Run it after every deploy so the
+committed API contract stays current.
 
-` + regen + `
+  web      → ` + webArtifactsDir + `/openapi.json   (` + "`palbe-gen`" + ` regenerates palbe.gen.ts from it,
+                                    via the predev/prebuild hook or by hand)
+  ios/macos→ ` + nativeArtifactsDir + `/openapi.json  then regenerates Palbase/Generated/ —
+                                    PalbaseGenerated.swift + Palbase-Info.plist — using
+                                    the generator from the palbackend-ios checkout
+                                    SwiftPM resolved for this project. Commit the result.
+  android  → ` + nativeArtifactsDir + `/openapi.json  (the Gradle plugin regenerates on the next build)
+
+Which of those run is read from the COMMITTED slot files the link commands
+wrote (` + webArtifactsDir + `/palbase-config.json, ` + nativeArtifactsDir + `/<platform>/palbase-config.json),
+so a fresh clone behaves the same as the machine that linked it.
 
 spec does NOT write the per-environment runtime config (palbase-config.json —
-base URL + key). That comes from ` + "`palbase " + platform + " link`" + ` and is re-written by
-` + "`palbase " + platform + " use <environment>`" + `.
+base URL + key). That comes from ` + "`palbase <platform> link`" + ` and is re-written by
+` + "`palbase <platform> use <environment>`" + `.
 
 Override the target with the global --project / --environment flags.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -95,67 +118,44 @@ Override the target with the global --project / --environment flags.`,
 				return err
 			}
 			out := cmd.OutOrStdout()
-			// spec fetches the API contract ONLY (empty appID → no config).
-			if err := runPullSpec(
-				cmd.Context(),
-				lookupSpecTarget(r),
-				fetchRemoteOpenAPISpec,
-				studioBindingLister(r.REST()),
-				studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
-				sel.EnvironmentRef(), r.Endpoints().PublicHost, outDir, "", "",
-				out,
-			); err != nil {
-				return err
+
+			web, apple, android := linkedPlatforms()
+			if !web && !apple && !android {
+				return fmt.Errorf(
+					"this directory is not linked to a Palbase project — run `palbase web link`, `palbase ios link`, `palbase macos link` or `palbase android link` first")
 			}
-			if platform == "android" {
-				return nil
+
+			// One fetch, written to each linked platform's directory. Native
+			// platforms share one directory, so this is at most two writes.
+			dirs := []string{}
+			if web {
+				dirs = append(dirs, webArtifactsDir)
 			}
-			return generateAppleClient(outDir, out)
+			if apple || android {
+				dirs = append(dirs, nativeArtifactsDir)
+			}
+			for _, dir := range dirs {
+				// spec fetches the API contract ONLY (empty appID → no config).
+				if err := runPullSpec(
+					cmd.Context(),
+					lookupSpecTarget(r),
+					fetchRemoteOpenAPISpec,
+					studioBindingLister(r.REST()),
+					studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
+					sel.EnvironmentRef(), r.Endpoints().PublicHost, dir, "", "",
+					out,
+				); err != nil {
+					return err
+				}
+			}
+
+			// Apple is the only platform with no build-time generator of its own.
+			if apple {
+				return generateAppleClient(nativeArtifactsDir, out)
+			}
+			return nil
 		},
 	}
-	cmd.Flags().StringVar(&outDir, "out-dir", "./"+nativeArtifactsDir, "Directory to write openapi.json")
-	return cmd
-}
-
-// newWebSpecCmd (`palbase web spec`) refreshes the contract in the directory
-// @palbase/web's palbe-gen reads — Palbase/, never .palbase/ — and emits no
-// client: generating palbe.gen.ts is palbe-gen's job, run by the predev/prebuild
-// hook `palbase web link` installs (or `npx palbe-gen` by hand).
-func newWebSpecCmd(r Resolvers) *cobra.Command {
-	var outDir string
-	cmd := &cobra.Command{
-		Use:   "spec",
-		Args:  cobra.NoArgs,
-		Short: "Refresh openapi.json for the selected environment",
-		Long: `Fetch the SELECTED environment's openapi.json into --out-dir (default ./` + webArtifactsDir + `).
-Run it after every deploy so the committed API contract stays current.
-
-Regenerating the typed client from it is ` + "`palbe-gen`" + `'s job (shipped in
-@palbase/web): the predev/prebuild hook ` + "`palbase web link`" + ` installs runs it on
-every dev run and build, and ` + "`npx palbe-gen`" + ` does it on demand.
-
-spec does NOT write the per-environment runtime config (palbase-config.json —
-base URL + key). That comes from ` + "`palbase web link`" + ` and is re-written by
-` + "`palbase web use <environment>`" + `.
-
-Override the target with the global --project / --environment flags.`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			sel, err := r.resolve(cmd.Context())
-			if err != nil {
-				return err
-			}
-			return runPullSpec(
-				cmd.Context(),
-				lookupSpecTarget(r),
-				fetchRemoteOpenAPISpec,
-				studioBindingLister(r.REST()),
-				studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
-				sel.EnvironmentRef(), r.Endpoints().PublicHost, outDir, "", "",
-				cmd.OutOrStdout(),
-			)
-		},
-	}
-	cmd.Flags().StringVar(&outDir, "out-dir", "./"+webArtifactsDir, "Directory to write openapi.json")
 	return cmd
 }
 

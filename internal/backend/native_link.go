@@ -76,7 +76,7 @@ func newIOSCmd(r Resolvers) *cobra.Command {
 		Use:   "ios",
 		Short: "Wire an iOS app to a Palbase project",
 	}
-	cmd.AddCommand(newIOSLinkCmd(r), newIOSUseCmd(r), newNativeSpecCmd(r, "ios"))
+	cmd.AddCommand(newIOSLinkCmd(r), newIOSUseCmd(r))
 	return cmd
 }
 
@@ -87,7 +87,7 @@ func newMacOSCmd(r Resolvers) *cobra.Command {
 		Use:   "macos",
 		Short: "Wire a macOS app to a Palbase project",
 	}
-	cmd.AddCommand(newNativeLinkCmd(r, "macos"), newNativeSpecCmd(r, "macos"))
+	cmd.AddCommand(newNativeLinkCmd(r, "macos"))
 	return cmd
 }
 
