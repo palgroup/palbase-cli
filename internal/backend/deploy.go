@@ -428,6 +428,20 @@ type pullResponse struct {
 // pullBundle fetches the Environment's deployed bundle from Studio
 // (backend.pull), base64-decodes it and extracts it into dst. dst must already
 // exist. `ref` is the ENVIRONMENT ref — the only selector; there is no branch.
+// PullBundle downloads an Environment's ACTIVE deployed bundle into dst,
+// creating dst if needed.
+//
+// Exported for `project create`, which materializes the template provisioning
+// just seeded as version 1. That is deliberately the SAME download `clone` and
+// `pull` use: a new project's starting code is the code the server actually
+// deployed, so there is no second skeleton to drift from it.
+func PullBundle(ctx context.Context, r Resolvers, environmentRef, dst string, w io.Writer) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return pullBundle(ctx, r, environmentRef, dst, w)
+}
+
 func pullBundle(ctx context.Context, r Resolvers, ref, dst string, w io.Writer) error {
 	var resp pullResponse
 	if err := r.Studio().Query(ctx, "backend.pull", map[string]any{"ref": ref}, &resp); err != nil {
@@ -564,10 +578,7 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 				cfg:      cfg,
 				writeCfg: selection.Save,
 				download: func(dst string) error {
-					if err := os.MkdirAll(dst, 0o755); err != nil {
-						return err
-					}
-					return pullBundle(ctx, r, target.Ref, dst, cmd.OutOrStdout())
+					return PullBundle(ctx, r, target.Ref, dst, cmd.OutOrStdout())
 				},
 			})
 		},

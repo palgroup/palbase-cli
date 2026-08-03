@@ -70,6 +70,33 @@ func TestExtractTarGz_HappyPath(t *testing.T) {
 	}
 }
 
+// A RELATIVE destination must extract normally. The containment guard compares
+// the joined target against dst as a string prefix, so an un-normalized "."
+// rejects every entry — filepath.Join(".", ".git") is ".git", which is neither
+// prefixed by "./" nor equal to ".". `project create` extracts into the working
+// directory, and this is the failure it hit live: the deployed bundle carries a
+// .git directory (that is how the "initial template" commit arrives), so the
+// FIRST entry aborted the whole extraction.
+func TestExtractTarGz_RelativeDestinationExtracts(t *testing.T) {
+	gz := makeTarGz(t, map[string]string{
+		".git/":                "",
+		".git/HEAD":            "ref: refs/heads/main",
+		"controllers/hello.ts": "// ctrl",
+		"package.json":         "{}",
+	})
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if err := extractTarGz(".", bytes.NewReader(gz)); err != nil {
+		t.Fatalf("extractTarGz into %q: %v", ".", err)
+	}
+	for _, rel := range []string{".git/HEAD", "controllers/hello.ts", "package.json"} {
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("expected %s to exist: %v", rel, err)
+		}
+	}
+}
+
 func TestExtractTarGz_PathTraversalRejected(t *testing.T) {
 	cases := []string{
 		"../evil",

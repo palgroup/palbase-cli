@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -152,6 +153,35 @@ Pass both GitHub flags or neither — exactly one is an error.`,
 			fmt.Fprintf(out, "  environment: %s (%s)\n", created.EnvironmentSlug, created.EnvironmentRef)
 			fmt.Fprintf(out, "  repository:  %s\n", provider)
 			fmt.Fprintf(out, "  selected in %s\n", selection.ConfigPath(""))
+
+			// Bring the seeded code down. Provisioning already deployed the
+			// template as version 1, so leaving the directory empty here is what
+			// used to force a second, DIFFERENT skeleton onto disk. Only when the
+			// directory holds nothing of the user's — an existing tree is theirs
+			// to keep, and `palbase pull` is the deliberate way to overwrite it.
+			if r.Materialize == nil {
+				return nil
+			}
+			// Absolute, like `pull` uses — the extractor's containment check
+			// compares paths as strings, so it wants a normalized root.
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			empty, err := dirHasNoUserFiles(cwd)
+			if err != nil {
+				return err
+			}
+			if !empty {
+				fmt.Fprintln(out, "\nthis directory already has files — run `palbase pull` to fetch the deployed code")
+				return nil
+			}
+			if err := r.Materialize(ctx, created.EnvironmentRef, cwd, out); err != nil {
+				// The project EXISTS and is selected; only the download failed.
+				// Failing the command would imply otherwise and invite a retry
+				// that creates a second project.
+				fmt.Fprintf(out, "note: could not fetch the deployed code (%v) — run `palbase pull`\n", err)
+			}
 			return nil
 		},
 	}
@@ -162,6 +192,31 @@ Pass both GitHub flags or neither — exactly one is an error.`,
 	cmd.Flags().BoolVar(&async, "async", false, "Return the workflow handle immediately instead of waiting (nothing is selected)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
+}
+
+// createdByCreate are the entries `project create` itself puts in the working
+// directory before it materializes anything. They must not count as "the user
+// already has files here", or create would never fetch the code it just seeded.
+var createdByCreate = map[string]bool{
+	".git":       true, // ensureGitRepo
+	".palbase":   true, // selection.Save
+	".gitignore": true, // selection.EnsureGitignored
+}
+
+// dirHasNoUserFiles reports whether dir holds nothing except the entries create
+// made itself. A read error is returned rather than assumed empty: guessing
+// "empty" would extract a bundle over a tree we failed to look at.
+func dirHasNoUserFiles(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if !createdByCreate[e.Name()] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // gitRun is the git seam `project create` uses to enforce the local repository

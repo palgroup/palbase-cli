@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -22,7 +23,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/members"
 	"github.com/palgroup/palbase-cli/internal/notifications"
 	"github.com/palgroup/palbase-cli/internal/project"
-	"github.com/palgroup/palbase-cli/internal/scaffold"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/storage"
@@ -156,6 +156,19 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&environmentFlag, "environment", "",
 		"Environment slug or ref to act on (overrides .palbase/config.json)")
 
+	// One Resolvers value for every backend-package entry point: the top-level
+	// lifecycle commands below, and `project create`'s Materialize hop, which
+	// reuses the SAME bundle download as clone/pull.
+	backendResolvers := backend.Resolvers{
+		Auth:      func() *auth.Client { return authClient },
+		Studio:    func() *studio.Client { return studioClient },
+		Endpoints: func() config.Endpoints { return resolved.Endpoints },
+		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
+		// project/apikey) for the provider-aware push/pull/clone verbs.
+		REST:      func() backend.REST { return managementREST() },
+		Selection: selectionResolver,
+	}
+
 	rootCmd.AddCommand(
 		loginCmd(),
 		logoutCmd(),
@@ -163,10 +176,12 @@ func newRootCmd() *cobra.Command {
 		modeCmd(),
 		doctorCmd(),
 		openCmd(),
-		scaffold.Cmd(),
 		project.Cmd(project.Resolvers{
 			REST:      func() project.REST { return managementREST() },
 			Selection: selectionResolver,
+			Materialize: func(ctx context.Context, environmentRef, dir string, out io.Writer) error {
+				return backend.PullBundle(ctx, backendResolvers, environmentRef, dir, out)
+			},
 		}),
 		envcmd.Cmd(envcmd.Resolvers{
 			REST:      func() envcmd.REST { return managementREST() },
@@ -232,15 +247,7 @@ func newRootCmd() *cobra.Command {
 	// TOP LEVEL — palbase IS the backend CLI, there is no `backend` parent.
 	// Resolvers close over the package-level globals so PersistentPreRunE has
 	// populated them by the time a subcommand's RunE fires.
-	rootCmd.AddCommand(backend.Commands(backend.Resolvers{
-		Auth:      func() *auth.Client { return authClient },
-		Studio:    func() *studio.Client { return studioClient },
-		Endpoints: func() config.Endpoints { return resolved.Endpoints },
-		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
-		// project/apikey) for the provider-aware push/pull/clone verbs.
-		REST:      func() backend.REST { return managementREST() },
-		Selection: selectionResolver,
-	})...)
+	rootCmd.AddCommand(backend.Commands(backendResolvers)...)
 
 	return rootCmd
 }

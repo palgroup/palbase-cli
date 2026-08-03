@@ -157,6 +157,41 @@ func TestResolverConfig_RejectsUnsupportedShapeWithoutNetworkOrRewrite(t *testin
 	require.Equal(t, raw, selectiontest.ReadConfig(t, dir))
 }
 
+// ── the link precondition (pull/push) ───────────────────────────────────────
+//
+// `palbase pull` extracts a deployed bundle OVER the working directory, so an
+// unlinked directory has to fail closed. Resolving to some default project
+// instead would unpack one project's code on top of whatever happens to be
+// here. TestLoad_MissingFileIsNotSelected covers the file reader; these cover
+// the resolver the commands actually call, including the negative control that
+// no request is made.
+
+func TestResolve_UnlinkedDirectoryRefusesBeforeAnyRequest(t *testing.T) {
+	dir := t.TempDir() // deliberately no .palbase/config.json
+	fake := selectiontest.New(t)
+	r := fake.Resolver()
+	r.Dir = dir
+
+	_, err := r.Resolve(context.Background())
+	require.ErrorAs(t, err, &selection.ErrNotSelected{})
+	require.Contains(t, err.Error(), "palbase project use")
+	require.Empty(t, fake.Routes(), "an unlinked directory must not reach the API")
+}
+
+func TestResolve_LinkedDirectoryResolves(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+	selectiontest.WriteConfig(t, dir, nil)
+
+	r := fake.Resolver()
+	r.Dir = dir
+
+	sel, err := r.Resolve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "proj_1", sel.ProjectID)
+	require.NotEmpty(t, sel.EnvironmentRef())
+}
+
 // ── environment picking ─────────────────────────────────────────────────────
 
 func TestResolve_EnvironmentFlagMatchesExactSlugOrRef(t *testing.T) {

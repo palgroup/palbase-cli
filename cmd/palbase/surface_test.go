@@ -66,7 +66,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"env",
 		"flags",
 		"github",
-		"init",
 		"ios",
 		"login",
 		"logout",
@@ -95,7 +94,12 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 	for _, name := range topLevel(t) {
 		have[name] = true
 	}
-	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev"} {
+	// `init` scaffolded a SECOND skeleton onto disk while the server had already
+	// deployed the seed template as version 1. The two copies drifted (init's
+	// said `palbase build`, the server's said the retired `palbase serve`), and
+	// pushing init's tree overwrote a v1 the user never saw. `project create`
+	// now materializes the deployed bundle itself, so there is one skeleton.
+	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev", "init"} {
 		require.False(t, have[gone],
 			"`palbase %s` must NOT exist after the cutover (no shims, no aliases)", gone)
 	}

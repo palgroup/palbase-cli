@@ -34,6 +34,14 @@ type REST interface {
 type Resolvers struct {
 	REST      func() REST
 	Selection func() *selection.Resolver
+
+	// Materialize downloads an Environment's deployed bundle into dir. `create`
+	// uses it to bring down the template the server just seeded as version 1,
+	// which is why there is no local scaffolder: the code a new project starts
+	// from is the code that is actually deployed, not a second copy the CLI
+	// carries. Injected (rather than imported) to keep this package off the
+	// backend package's Studio client.
+	Materialize func(ctx context.Context, environmentRef, dir string, out io.Writer) error
 }
 
 // Cmd returns the `palbase project` parent command.

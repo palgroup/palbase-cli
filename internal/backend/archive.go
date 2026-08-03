@@ -178,6 +178,17 @@ func loadPalignore(path string) ([]string, error) {
 // (CWE-22). Safe to call on bundles from the server; any malformed entry is an
 // error, not a silent skip.
 func extractTarGz(dst string, r io.Reader) error {
+	// Resolve dst to an absolute path BEFORE the containment check below uses
+	// it as a prefix. That check compares strings, so a relative dst breaks it:
+	// with dst ".", filepath.Join(".", ".git") is ".git", which is neither
+	// prefixed by "./" nor equal to ".", and every entry looks like an escape.
+	// `project create` extracts into the working directory and hit exactly that.
+	// Abs+Clean gives a stable root, and the traversal guard keeps its meaning.
+	root, err := filepath.Abs(dst)
+	if err != nil {
+		return fmt.Errorf("resolve destination %q: %w", dst, err)
+	}
+	dst = root
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return fmt.Errorf("create destination directory: %w", err)
 	}
