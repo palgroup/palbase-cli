@@ -190,7 +190,26 @@ func isDeployArtifact(rel string) bool {
 	slash := filepath.ToSlash(rel)
 	return slash == ".palbase" ||
 		strings.HasPrefix(slash, ".palbase/") ||
-		strings.HasSuffix(slash, ".meta.json")
+		strings.HasSuffix(slash, ".meta.json") ||
+		// The bundle carries the platform's OWN repository — one "initial
+		// template" commit plus palbase-active-version / palbase-fastpath-version
+		// bookkeeping. Writing it into the destination is wrong twice over.
+		//
+		// On `pull` the destination is the developer's checkout, so this
+		// overwrites their git history with the platform's. It did not corrupt
+		// anything only by accident: git stores loose objects 0444, so the second
+		// pull in any directory died with "permission denied" on the first
+		// read-only object it had already written. An idempotence bug was
+		// standing in for a data-loss bug.
+		//
+		// On `create` inside an existing repository the same entries produce the
+		// nested .git that `ensureGitRepo` had just printed "no nested .git
+		// created" about.
+		//
+		// Deploy version history lives on the server — `palbase deploys` — not in
+		// a .git the platform ships to you.
+		slash == ".git" ||
+		strings.HasPrefix(slash, ".git/")
 }
 
 // extractSourceTree unpacks a deployed bundle into dst, keeping only what the

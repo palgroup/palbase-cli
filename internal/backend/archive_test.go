@@ -133,6 +133,77 @@ func TestExtractSourceTree_DropsDeployArtifacts(t *testing.T) {
 	}
 }
 
+// The bundle carries the PLATFORM's repository. Writing it into a destination
+// overwrote the developer's git history on `pull` and planted a nested .git on
+// `create` inside a monorepo — the second of which the CLI had just printed "no
+// nested .git created" about.
+//
+// It never actually corrupted a repository, but only by luck: git stores loose
+// objects 0444, so the second pull into any directory died with EACCES on the
+// first read-only object the first pull had written. The reported symptom was
+// "pull is not idempotent"; the defect underneath was writing someone else's
+// history over yours.
+func TestExtractSourceTree_NeverWritesTheBundlesOwnGit(t *testing.T) {
+	gz := makeTarGz(t, map[string]string{
+		".git/":                           "",
+		".git/HEAD":                       "ref: refs/heads/main",
+		".git/objects/ab/cdef":            "loose object",
+		".git/palbase-active-version":     "db8420a8",
+		"controllers/hello.controller.ts": "// ctrl",
+	})
+	dst := t.TempDir()
+	if err := extractSourceTree(dst, bytes.NewReader(gz)); err != nil {
+		t.Fatalf("extractSourceTree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
+		t.Error("the bundle's .git must never be written into the destination")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "controllers", "hello.controller.ts")); err != nil {
+		t.Errorf("sources must still extract: %v", err)
+	}
+}
+
+// roGitObjectTarGz builds a bundle whose git object carries git's REAL 0444
+// mode. That mode is the whole bug: makeTarGz's 0644 entries re-extract fine, so
+// a test built on it would pass with or without the fix.
+func roGitObjectTarGz(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	entries := []struct {
+		name string
+		mode int64
+		body string
+	}{
+		{".git/objects/ab/cdef", 0o444, "loose object"}, // git writes these read-only
+		{"controllers/hello.controller.ts", 0o644, "// ctrl"},
+		{"package.json", 0o644, "{}"},
+	}
+	for _, e := range entries {
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name: e.name, Typeflag: tar.TypeReg, Mode: e.mode, Size: int64(len(e.body)),
+		}))
+		_, err := tw.Write([]byte(e.body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+	return buf.Bytes()
+}
+
+// The consequence that matters: extracting the same bundle twice into the same
+// directory now succeeds. It did not before — the 0444 git objects the first
+// extraction wrote made every later pull die with EACCES.
+func TestExtractSourceTree_IsIdempotent(t *testing.T) {
+	dst := t.TempDir()
+	for i := 1; i <= 2; i++ {
+		if err := extractSourceTree(dst, bytes.NewReader(roGitObjectTarGz(t))); err != nil {
+			t.Fatalf("extraction %d into the same directory failed: %v", i, err)
+		}
+	}
+}
+
 func TestExtractTarGz_PathTraversalRejected(t *testing.T) {
 	cases := []string{
 		"../evil",

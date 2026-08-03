@@ -336,8 +336,12 @@ type cloneDeps struct {
 	dir      string
 	// download, when set, fetches+extracts the palbase-provider bundle into dir.
 	download func(dir string) error
-	writeCfg func(dir string, cfg *selection.Config) error
-	cfg      *selection.Config
+	// insideRepo reports whether dir already sits in a git work tree; nil uses
+	// the real probe. Tests substitute it to drive both branches.
+	insideRepo func(dir string) bool
+	out        io.Writer
+	writeCfg   func(dir string, cfg *selection.Config) error
+	cfg        *selection.Config
 }
 
 // runClone routes `palbase clone` by the project's repository provider:
@@ -359,7 +363,44 @@ func runClone(d cloneDeps) error {
 	if err := d.download(d.dir); err != nil {
 		return err
 	}
+	// The bundle no longer carries the platform's own .git (it used to, and
+	// pulling it over a checkout was a data-loss bug wearing an idempotence
+	// costume). A palbase-provider clone therefore has to start the repository
+	// itself — but only when nothing already contains this path, so cloning into
+	// a monorepo does not plant a nested .git.
+	insideRepo := d.insideRepo
+	if insideRepo == nil {
+		insideRepo = dirIsInsideGitRepo
+	}
+	out := d.out
+	if out == nil {
+		out = os.Stdout
+	}
+	if !insideRepo(d.dir) {
+		if err := quietGit(d.dir, "init", "-b", "main"); err != nil {
+			fmt.Fprintf(out, "note: could not initialise a git repository in %s (%v)\n", d.dir, err)
+		} else {
+			fmt.Fprintln(out, "initialized a git repository (branch main)")
+		}
+	}
 	return d.writeCfg(d.dir, d.cfg)
+}
+
+// quietGit runs git without wiring the user's terminal to it. The probe below
+// EXPECTS a failure outside a repository, and execGit would print git's "fatal:
+// not a git repository" straight at someone who did nothing wrong.
+func quietGit(dir string, args ...string) error {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	return cmd.Run()
+}
+
+// dirIsInsideGitRepo reports whether dir already sits inside a work tree, so a
+// clone into a monorepo subdirectory reuses that repository instead of nesting.
+// A git that is missing or errors counts as "not a repo" — the worst case is an
+// init that then fails and is reported.
+func dirIsInsideGitRepo(dir string) bool {
+	return quietGit(dir, "rev-parse", "--is-inside-work-tree") == nil
 }
 
 // pullDeps are the injected collaborators for runPull.
