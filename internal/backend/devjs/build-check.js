@@ -617,6 +617,15 @@ process.on('exit', () => {
   try { fs.rmSync(STAGED_CONTROLLERS_DIR, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
+// Node runs 'exit' handlers on a normal return or process.exit(), but NOT when a
+// default-handled signal kills the process. Ctrl-C during a build therefore left
+// .palbase-build-controllers/ sitting in the user's repo — the one path that put
+// it there at all, since a build otherwise stages into a temp tree. Re-exit
+// explicitly so the handler above runs. (128+signo is the shell convention.)
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
+  process.on(sig, () => process.exit(code));
+}
+
 // Auto-run only when invoked directly. Guarded so the file can be require()d by
 // tests (the resource-externals cross-boundary test drives the REAL bundle path)
 // without running the check.
