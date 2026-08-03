@@ -454,7 +454,7 @@ func pullBundle(ctx context.Context, r Resolvers, ref, dst string, w io.Writer) 
 	if err != nil {
 		return fmt.Errorf("decode bundle: %w", err)
 	}
-	if err := extractTarGz(dst, bytes.NewReader(decoded)); err != nil {
+	if err := extractSourceTree(dst, bytes.NewReader(decoded)); err != nil {
 		return fmt.Errorf("extract bundle: %w", err)
 	}
 	version := resp.Version

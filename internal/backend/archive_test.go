@@ -97,6 +97,42 @@ func TestExtractTarGz_RelativeDestinationExtracts(t *testing.T) {
 	}
 }
 
+// A pulled bundle carries deploy output next to the sources: the compiled
+// bundle under .palbase/ and a <controller>.ts.meta.json beside every
+// controller. Both are regenerated on every deploy, so extracting them into a
+// checkout just hands the developer files to ignore — the .meta.json sidecar
+// was the single untracked file in a freshly created project.
+func TestExtractSourceTree_DropsDeployArtifacts(t *testing.T) {
+	gz := makeTarGz(t, map[string]string{
+		"controllers/hello.controller.ts":           "// ctrl",
+		"controllers/hello.controller.ts.meta.json": `{"controller":true}`,
+		".palbase/":                     "",
+		".palbase/controllers/hello.js": "compiled",
+		".palbase/esm/package.json":     "{}",
+		"models/hello/greet.ts":         "// zod",
+		"package.json":                  "{}",
+	})
+	dst := t.TempDir()
+	if err := extractSourceTree(dst, bytes.NewReader(gz)); err != nil {
+		t.Fatalf("extractSourceTree: %v", err)
+	}
+
+	for _, rel := range []string{"controllers/hello.controller.ts", "models/hello/greet.ts", "package.json"} {
+		if _, err := os.Stat(filepath.Join(dst, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("source %s should have been extracted: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{
+		"controllers/hello.controller.ts.meta.json",
+		".palbase/controllers/hello.js",
+		".palbase/esm/package.json",
+	} {
+		if _, err := os.Stat(filepath.Join(dst, filepath.FromSlash(rel))); err == nil {
+			t.Errorf("deploy artifact %s must not land in the checkout", rel)
+		}
+	}
+}
+
 func TestExtractTarGz_PathTraversalRejected(t *testing.T) {
 	cases := []string{
 		"../evil",

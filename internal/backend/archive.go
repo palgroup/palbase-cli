@@ -177,7 +177,35 @@ func loadPalignore(path string) ([]string, error) {
 // cleaned path escapes dst — i.e. starts with ".." after cleaning — is rejected
 // (CWE-22). Safe to call on bundles from the server; any malformed entry is an
 // error, not a silent skip.
+// isDeployArtifact reports whether a bundle entry is something the DEPLOY
+// produced rather than something the developer wrote.
+//
+// A deployed bundle carries both. `.palbase/` holds the compiled CJS/ESM output
+// and `<controller>.ts.meta.json` holds the route metadata the pod's router
+// reads beside each source file. Both are regenerated from scratch on every
+// deploy and neither is editable input, so unpacking them into a checkout only
+// adds files a developer has to learn to ignore. The pod still gets them — this
+// filter applies to `pull`/`clone`/`create`, not to what the server stores.
+func isDeployArtifact(rel string) bool {
+	slash := filepath.ToSlash(rel)
+	return slash == ".palbase" ||
+		strings.HasPrefix(slash, ".palbase/") ||
+		strings.HasSuffix(slash, ".meta.json")
+}
+
+// extractSourceTree unpacks a deployed bundle into dst, keeping only what the
+// developer authored (see isDeployArtifact).
+func extractSourceTree(dst string, r io.Reader) error {
+	return extractTarGzFiltered(dst, r, isDeployArtifact)
+}
+
 func extractTarGz(dst string, r io.Reader) error {
+	return extractTarGzFiltered(dst, r, nil)
+}
+
+// extractTarGzFiltered is extractTarGz with an optional skip predicate applied
+// to each entry's cleaned relative path.
+func extractTarGzFiltered(dst string, r io.Reader, skip func(string) bool) error {
 	// Resolve dst to an absolute path BEFORE the containment check below uses
 	// it as a prefix. That check compares strings, so a relative dst breaks it:
 	// with dst ".", filepath.Join(".", ".git") is ".git", which is neither
@@ -214,6 +242,11 @@ func extractTarGz(dst string, r io.Reader) error {
 		clean := filepath.Clean(hdr.Name)
 		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("tar entry %q would escape destination (path traversal rejected)", hdr.Name)
+		}
+		// After the traversal guard, so a filtered entry is still validated
+		// rather than waved through on the strength of its name.
+		if skip != nil && skip(clean) {
+			continue
 		}
 
 		target := filepath.Join(dst, clean)
