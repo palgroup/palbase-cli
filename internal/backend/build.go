@@ -6,21 +6,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
-// backendPkg is the SDK a controller imports; its major must match the deploy
-// runtime's vendored major or a deploy of this tree fails at extraction with a
-// cryptic decorator error (the centauri class). `palbase build` catches that
-// skew locally, before the push.
+// backendPkg is the SDK a controller imports. Its major must be one the deploy
+// runtime VENDORS — not necessarily the newest: the runtime keeps every major
+// inside a 12-month window and builds each tenant against the one their lockfile
+// resolved. Which majors those are is server-side knowledge, so the
+// authoritative check is deploy.CheckSDKMajor; this command validates the code,
+// not the version.
 const backendPkg = "@palbase/backend"
 
 // buildTempPrefix is the os.MkdirTemp prefix for the extracted build-check
@@ -35,11 +35,10 @@ var npmRegistryBase = "https://registry.npmjs.org"
 
 // newBuildCmd wires `palbase build` — the local pre-deploy validator. It runs
 // the SAME stage + bundle + extract_meta.js the deploy runs (via build-check.js),
-// plus a fast npm-registry major skew check, so a broken push
-// (e.g. a `@Query("field")` string where a zod schema is required) is caught
-// before it produces a FAILED deploy. Non-interactive, no Studio auth, one
-// best-effort network call (npm GET). Exit 0 = PASSED (or environment couldn't
-// run it — warned); exit 1 = user-code validation error.
+// so a broken push (e.g. a `@Query("field")` string where a zod schema is
+// required) is caught before it produces a FAILED deploy. Non-interactive, no
+// Studio auth, NO network call. Exit 0 = PASSED (or environment couldn't run it —
+// warned); exit 1 = user-code validation error.
 func newBuildCmd(_ Resolvers) *cobra.Command {
 	return &cobra.Command{
 		Use:   "build",
@@ -63,8 +62,8 @@ gates the real deploy).`,
 // runBuild is the `palbase build` body, factored out so `palbase push`
 // (platform arm) can gate on it inline. Returns an error ONLY for a user-code
 // validation failure (exit 1); environment problems (no controllers, npm
-// install failed, registry unreachable) warn and return nil (fail-open — the
-// server gate is the authoritative backstop).
+// install failed) warn and return nil (fail-open — the server gate is the
+// authoritative backstop).
 func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	controllersDir := filepath.Join(cwd, "controllers")
 	if _, err := os.Stat(controllersDir); err != nil {
@@ -92,21 +91,29 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// extractor; without it the header checks degrade (best-effort install).
 	ensureBuildCheckTools(cwd)
 
-	// Layer A skew: local installed major vs npm latest major. A user can only
-	// install a major that npm published, so "local major < npm latest major"
-	// catches every real stale-user case (centauri included). Registry
-	// unreachable → warn + continue (Layer B server gate closes the window).
+	// The installed SDK version, reported but NOT gated here.
+	//
+	// This used to fail the build when the installed major differed from npm's
+	// `latest`, on the premise that "deploys run the latest major and will reject
+	// this tree". That premise stopped being true on 2026-08-04: the runtime now
+	// vendors every SDK major inside a 12-month window and builds each tenant
+	// against the one their lockfile resolved. A ^12 project deploys perfectly
+	// well against a runtime whose newest major is 13 — verified live, serving
+	// traffic, with the artifact manifest recording sdkVersion 12.0.1.
+	//
+	// Keeping the check would have been worse than removing it: it turned a
+	// PASSING deploy into a FAILING local build, and because `palbase push`
+	// installs this as a pre-push hook, it blocked the push before the platform
+	// ever saw it. A gate that answers a question the server no longer asks is not
+	// a safety net; it is a wrong answer delivered with confidence.
+	//
+	// The authoritative check remains server-side (deploy.CheckSDKMajor), which
+	// knows the actual vendored set — something this process cannot know without
+	// asking the platform. Surfacing that set locally is worth doing and is
+	// tracked separately; printing the installed version is the honest subset of
+	// it available here.
 	if installed != "" {
-		latest, lerr := npmLatestMajor(ctx, backendPkg)
-		if lerr != nil {
-			fmt.Fprintf(out, "warning: could not verify %s against the registry (%v) — result may not match the deploy runtime\n", backendPkg, lerr)
-		} else if im := majorOf(installed); im > 0 && im != latest {
-			fmt.Fprintf(out, "✗ %s %s is a major behind the latest %d.x — deploys run the latest major and will reject this tree\n", backendPkg, installed, latest)
-			fmt.Fprintf(out, "  fix: npm install %s@^%d  (then update your code for the new major)\n", backendPkg, latest)
-			return fmt.Errorf("build failed: %s major skew (installed %s, latest %d)", backendPkg, installed, latest)
-		} else {
-			fmt.Fprintf(out, "✓ %s %s (matches latest major %d)\n", backendPkg, installed, latest)
-		}
+		fmt.Fprintf(out, "✓ %s %s\n", backendPkg, installed)
 	}
 
 	// Run the deploy-identical validation via build-check.js.
@@ -230,35 +237,3 @@ func majorOf(version string) int {
 	return n
 }
 
-// npmLatestMajor GETs the `latest` dist-tag major of pkg from the public npm
-// registry — the user's install ceiling. 2s timeout, no auth, no wake. Returns
-// an error the caller downgrades to a non-fatal warning (registry down must not
-// fail a build).
-func npmLatestMajor(ctx context.Context, pkg string) (int, error) {
-	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	url := strings.TrimRight(npmRegistryBase, "/") + "/" + pkg + "/latest"
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := defaultHTTPClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("registry returned %d", resp.StatusCode)
-	}
-	var body struct {
-		Version string `json:"version"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return 0, err
-	}
-	m := majorOf(body.Version)
-	if m == 0 {
-		return 0, fmt.Errorf("registry returned an unparseable version %q", body.Version)
-	}
-	return m, nil
-}

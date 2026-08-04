@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,24 +52,6 @@ func TestInstalledBackendVersion(t *testing.T) {
 	require.Equal(t, "", installedBackendVersion(dir), "garbage → empty")
 }
 
-// fakeRegistry points npmRegistryBase at an httptest server for the run and
-// restores it after. `latest` is the version the /latest route returns; an
-// empty string makes the route 500 (registry-down simulation).
-func fakeRegistry(t *testing.T, latest string) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if latest == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		_, _ = w.Write([]byte(`{"version":"` + latest + `"}`))
-	}))
-	t.Cleanup(srv.Close)
-	prev := npmRegistryBase
-	npmRegistryBase = srv.URL
-	t.Cleanup(func() { npmRegistryBase = prev })
-}
-
 // seedInstalledBackend writes a fake node_modules/@palbase/backend so the skew
 // check has an installed version to compare (no controllers/ needed for the
 // skew branch — but runBuild returns early on missing controllers/, so callers
@@ -92,36 +72,47 @@ func seedInstalledBackend(t *testing.T, dir, version string) {
 // behind the npm latest major fails the build (exit 1) with the fix command,
 // WITHOUT reaching the (slow) local extraction. The installed 8.x vs registry
 // 9.x is the centauri skew.
+// A major that is not the newest must NOT fail the local build.
 //
-// Mutation (M5): change the `im != latest` guard in runBuild to always-false
-// and this goes RED — the skew passes and the build no longer fails.
-func TestRunBuild_SkewMismatchFailsBeforeExtraction(t *testing.T) {
+// This test asserted the opposite until 2026-08-04, on the premise that "deploys
+// run the latest major and will reject this tree". The runtime now vendors every
+// major inside a 12-month window and builds each tenant against the one their
+// lockfile resolved — verified live: a ^12.0.0 project deployed against a runtime
+// whose newest major is 13, serving traffic, its artifact manifest recording
+// sdkVersion 12.0.1.
+//
+// Keeping the old assertion would keep a real regression: `palbase push` installs
+// runBuild as a pre-push hook, so this check blocked the push before the platform
+// ever saw it — a PASSING deploy turned into a FAILING local build. The
+// authoritative decision belongs to deploy.CheckSDKMajor, which knows the actual
+// vendored set; this process does not.
+func TestRunBuild_OlderMajorDoesNotFailTheLocalBuild(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
-	seedInstalledBackend(t, dir, "8.2.0")
-	fakeRegistry(t, "9.0.1")
+	seedInstalledBackend(t, dir, "12.0.1")
 
 	var out bytes.Buffer
 	err := runBuild(context.Background(), dir, &out)
-	require.Error(t, err, "8.x local vs 9.x latest must fail the build")
-	require.Contains(t, out.String(), "major behind the latest 9.x")
-	require.Contains(t, out.String(), "npm install @palbase/backend@^9")
+	require.NoError(t, err, "an older-but-supported major must build locally:\n%s", out.String())
+	require.Contains(t, out.String(), "@palbase/backend 12.0.1",
+		"the installed version is still reported, just not gated on")
+	require.NotContains(t, out.String(), "major behind",
+		"the removed premise must not come back")
 }
 
-// TestRunBuild_RegistryDownWarnsAndContinues locks the fail-open contract: when
-// the registry is unreachable the skew check WARNS but does not fail — the
-// build proceeds (and, with no real SDK to extract, passes). Registry-down must
-// never block a push.
-func TestRunBuild_RegistryDownWarnsAndContinues(t *testing.T) {
+// runBuild no longer contacts the npm registry at all, so an offline developer
+// cannot be blocked by it. The previous version of this test locked a
+// "registry-down warns but continues" contract; not calling the registry is the
+// stronger form of the same guarantee.
+func TestRunBuild_DoesNotContactTheRegistry(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
 	seedInstalledBackend(t, dir, "9.0.0")
-	fakeRegistry(t, "") // 500 → unreachable
 
 	var out bytes.Buffer
 	err := runBuild(context.Background(), dir, &out)
-	require.NoError(t, err, "registry-down must not fail the build")
-	require.Contains(t, out.String(), "could not verify @palbase/backend against the registry")
+	require.NoError(t, err, "no network, no failure:\n%s", out.String())
+	require.NotContains(t, out.String(), "registry")
 }
 
 // TestRunBuild_NoControllersPasses: a project with no controllers/ has nothing
@@ -447,7 +438,6 @@ func TestCheckMode_BrokenSchemaFails(t *testing.T) {
 	// The reported shape: a schema module that exports nothing usable.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte("export {};\n"), 0o644))
 	var out bytes.Buffer
-	fakeRegistry(t, installedBackendVersion(dir))
 	err := runBuild(context.Background(), dir, &out)
 	require.Error(t, err, "a schema with no defineSchema() must fail the build:\n%s", out.String())
 	require.Contains(t, out.String(), "db/schema.ts", "the failure must name the file:\n%s", out.String())
