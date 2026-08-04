@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -215,5 +216,39 @@ func TestParseTRPCError_BatchAndSingle(t *testing.T) {
 				t.Fatalf("want %q in %q", tc.want, err.Error())
 			}
 		})
+	}
+}
+
+// TestJobCallTimeout_OutlivesStudiosJobBudget locks the ordering that a live
+// `db reset` violated: Studio blocks up to 330s on a one-shot Job, and the
+// client's 120s default gave up FIRST — printing "context deadline exceeded"
+// while the Job kept running. On a destructive verb that is worse than slow:
+// the user is told it failed and the obvious response is to run it again.
+//
+// The CLI must never be the component that gives up first, so this must stay
+// above Studio's JOB_TIMEOUT_MS (330s in config-commit/migration-gen.ts).
+func TestJobCallTimeout_OutlivesStudiosJobBudget(t *testing.T) {
+	const studioJobBudget = 330 * time.Second
+	if JobCallTimeout <= studioJobBudget {
+		t.Fatalf("JobCallTimeout=%s must exceed Studio's %s Job budget, or the CLI abandons work that is still running",
+			JobCallTimeout, studioJobBudget)
+	}
+}
+
+// TestWithTimeout_CopiesRatherThanMutates keeps the long timeout scoped to the
+// call that needs it: a shared client silently switched to 360s would let every
+// ordinary command hang six times longer than intended.
+func TestWithTimeout_CopiesRatherThanMutates(t *testing.T) {
+	base := New("https://studio.test", nil, nil)
+	long := base.WithTimeout(JobCallTimeout)
+
+	if base.HTTPClient.Timeout != 120*time.Second {
+		t.Fatalf("the original client's timeout changed: %s", base.HTTPClient.Timeout)
+	}
+	if long.HTTPClient.Timeout != JobCallTimeout {
+		t.Fatalf("the copy's timeout = %s, want %s", long.HTTPClient.Timeout, JobCallTimeout)
+	}
+	if long.BaseURL != base.BaseURL {
+		t.Fatal("the copy must keep the base URL")
 	}
 }

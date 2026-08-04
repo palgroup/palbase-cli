@@ -82,7 +82,9 @@ func readMigrations() ([]resetMigration, error) {
 func dbReset(ctx context.Context, c *studio.Client, ref string, migrations []resetMigration) (resetResult, error) {
 	input := map[string]any{"ref": ref, "migrations": migrations}
 	var resp resetResult
-	if err := c.Mutation(ctx, "backend.dbReset", input, &resp); err != nil {
+	// Studio blocks on the reset Job for up to 330s; the client's 120s default
+	// would abandon a reset that is still running and tell the user it failed.
+	if err := c.WithTimeout(studio.JobCallTimeout).Mutation(ctx, "backend.dbReset", input, &resp); err != nil {
 		return resetResult{}, fmt.Errorf("backend.dbReset: %w", err)
 	}
 	return resp, nil

@@ -150,7 +150,9 @@ func readSchema() (string, error) {
 func migrationSQL(ctx context.Context, c *studio.Client, ref, schema string) (migrationSQLResult, error) {
 	input := map[string]any{"ref": ref, "schema": schema}
 	var resp migrationSQLResult
-	if err := c.Mutation(ctx, "backend.migrationSQL", input, &resp); err != nil {
+	// Same Job rail as db reset: Studio blocks up to 330s on a cold differ, so the
+	// client's 120s default would report a timeout while the Job is still running.
+	if err := c.WithTimeout(studio.JobCallTimeout).Mutation(ctx, "backend.migrationSQL", input, &resp); err != nil {
 		return migrationSQLResult{}, fmt.Errorf("backend.migrationSQL: %w", err)
 	}
 	return resp, nil

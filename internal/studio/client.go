@@ -39,6 +39,25 @@ func New(baseURL string, token func(ctx context.Context) (string, error), proof 
 	}
 }
 
+// WithTimeout returns a COPY of the client whose HTTP timeout is d.
+//
+// The 120s default is right for ordinary tRPC calls, but Studio blocks for up to
+// 330s on the procedures that spawn a one-shot Job (migration-sql, db-reset).
+// Against those, the default client gives up while the SERVER IS STILL WORKING —
+// measured live on `db reset`: the CLI printed "context deadline exceeded" while
+// the Job ran on. Worse than a slow command: the user is told it failed, and the
+// obvious response is to run the destructive verb again.
+func (c *Client) WithTimeout(d time.Duration) *Client {
+	clone := *c
+	clone.HTTPClient = &http.Client{Timeout: d}
+	return &clone
+}
+
+// JobCallTimeout is the client timeout for procedures that block on a one-shot
+// Job. It exceeds Studio's own 330s Job budget so the SERVER's timeout is always
+// the one that fires — the CLI must never be the component that gives up first.
+const JobCallTimeout = 360 * time.Second
+
 // Query runs a tRPC query (GET) against `<router>.<procedure>`. The
 // `out` pointer receives JSON-decoded `result.data.json` on success.
 func (c *Client) Query(ctx context.Context, path string, input any, out any) error {
