@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
@@ -56,7 +57,8 @@ func TestReset_ShipsMigrationsInOrder(t *testing.T) {
 
 	var out strings.Builder
 	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"reset", "--yes"})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
 	cmd.SetOut(&out)
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
@@ -142,7 +144,8 @@ func TestReset_NoMigrationsWarnsTheSchemaWillBeEmpty(t *testing.T) {
 
 	var out strings.Builder
 	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"reset", "--yes"})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
 	cmd.SetOut(&out)
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
@@ -166,7 +169,8 @@ func TestReset_ServerFailureSurfaces(t *testing.T) {
 
 	var out strings.Builder
 	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"reset", "--yes"})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
 	cmd.SetOut(&out)
 	cmd.SilenceUsage = true
 
@@ -226,4 +230,131 @@ func TestCheck_ReportsRLSDrift(t *testing.T) {
 	require.Contains(t, report, "todos", "the table whose RLS drifted must be named")
 	require.Contains(t, report, "todos.pb_owner_all", "a missing policy must be named")
 	require.Contains(t, report, "documents.pb_owner_all", "a changed policy must be named")
+}
+
+// TestReset_ProductionRefusesTheYesFlag keeps the one path that could wipe a live
+// customer database from a script from being a single flag. Automation that
+// genuinely needs it goes through the Management API, where the caller must NAME
+// the environment (confirm_ref) and hold both the database:reset scope and the
+// Project owner role — none of which it inherits from whatever `palbase` had
+// selected.
+//
+// MUTATION GUARD: dropping the isProd && yes branch turns this RED.
+func TestReset_ProductionRefusesTheYesFlag(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({})")
+	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+
+	called := false
+	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		trpcOK(w, resetOKResponse(0, 0))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"reset", "--yes"})
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+
+	err := cmd.Execute()
+	require.Error(t, err, "--yes must not be enough to reset production")
+	require.Contains(t, err.Error(), "production")
+	require.Contains(t, err.Error(), "database:reset", "point the user at the automation path")
+	require.False(t, called, "nothing may be dispatched")
+}
+
+// TestReset_WarnsWhatDiesAndWhatSurvives — "deletes all data" alone reads as
+// "deletes the environment", which is the wrong mental model (the ref, URL and
+// keys survive) and pushes people toward the far more destructive env delete. The
+// prompt has to state both halves, and mark production as production.
+func TestReset_WarnsWhatDiesAndWhatSurvives(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({})")
+	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+
+	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		trpcOK(w, resetOKResponse(1, 1, "20260101T000000_init"))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	report := out.String()
+	require.Contains(t, report, "DESTRUCTIVE")
+	require.Contains(t, report, "PRODUCTION", "a production target must be marked as such")
+	require.Contains(t, report, "Dropped:")
+	require.Contains(t, report, "cannot be undone")
+	require.Contains(t, report, "Kept:")
+	require.Contains(t, report, "API keys", "say the environment itself survives")
+}
+
+// TestReset_SendsConfirmRef — the server REQUIRES confirm_ref to match on
+// production; a CLI that omitted it would fail every production reset with a
+// confusing validation error after the user had already typed the ref.
+func TestReset_SendsConfirmRef(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({})")
+	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+
+	var got map[string]any
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		got = innerInput(t, r)
+		trpcOK(w, resetOKResponse(1, 1, "20260101T000000_init"))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, "app1prod", got["confirmRef"])
+}
+
+// TestReset_ConfirmRefIsWhatTheUserTyped_NotAutoFilled is the anti-spoofing lock.
+// The server's production rule (confirm_ref must equal the ref) is only worth
+// anything if this CLI cannot satisfy it on the user's behalf. Under --yes there
+// is no typed confirmation, so an EMPTY confirm_ref must go on the wire — the
+// server then refuses production regardless of what a patched client believes
+// about is_production.
+//
+// MUTATION GUARD: auto-filling confirmRef with the ref turns this RED.
+func TestReset_ConfirmRefIsWhatTheUserTyped_NotAutoFilled(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({})")
+	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+
+	var got map[string]any
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		got = innerInput(t, r)
+		trpcOK(w, resetOKResponse(1, 1, "20260101T000000_init"))
+	})
+
+	// A NON-production environment, so --yes is allowed to reach the server at all.
+	fake := selectiontest.New(t)
+	fake.Environments["proj_1"] = []selection.Environment{
+		selectiontest.Env("env_dev", "proj_1", "app1dev", "dev", "dev", false),
+	}
+	selectiontest.WriteConfig(t, ".", &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_dev",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
+	resolver := fake.Resolver()
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{
+		Studio:    func() *studio.Client { return c },
+		Selection: func() *selection.Resolver { return resolver },
+	})
+	cmd.SetArgs([]string{"reset", "--yes"})
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, "", got["confirmRef"],
+		"--yes types nothing, so nothing may be claimed as a confirmation")
 }

@@ -79,8 +79,14 @@ func readMigrations() ([]resetMigration, error) {
 }
 
 // dbReset calls Studio's backend.dbReset for ONE environment.
-func dbReset(ctx context.Context, c *studio.Client, ref string, migrations []resetMigration) (resetResult, error) {
-	input := map[string]any{"ref": ref, "migrations": migrations}
+//
+// confirmRef is what the user ACTUALLY TYPED — never a value this CLI filled in
+// for them. On production the server requires it to equal the ref, so the real
+// gate lives there: a patched or spoofed client that skips the local prompt sends
+// no confirmation and the server refuses. Auto-filling it here would have made the
+// server's production rule depend on this binary behaving.
+func dbReset(ctx context.Context, c *studio.Client, ref string, migrations []resetMigration, confirmRef string) (resetResult, error) {
+	input := map[string]any{"ref": ref, "migrations": migrations, "confirmRef": confirmRef}
 	var resp resetResult
 	// Studio blocks on the reset Job for up to 330s; the client's 120s default
 	// would abandon a reset that is still running and tell the user it failed.
@@ -118,27 +124,63 @@ new ones, and reset so the database matches them exactly.`,
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Environment: %s\n", ref)
+			isProd := sel.Environment.IsProduction
+
+			// Spell out BOTH halves — what dies and what survives. "Deletes all
+			// data" alone reads as "deletes the environment", which is the wrong
+			// mental model (the ref, URL and keys are untouched) and pushes people
+			// toward the far more destructive env delete.
+			fmt.Fprintln(out, "⚠  DESTRUCTIVE — this deletes ALL DATA in this environment's own tables.")
+			fmt.Fprintln(out)
+			if isProd {
+				fmt.Fprintf(out, "Environment: %s  ** PRODUCTION **\n", ref)
+			} else {
+				fmt.Fprintf(out, "Environment: %s\n", ref)
+			}
 			if len(migrations) == 0 {
 				fmt.Fprintln(out, "Migrations:  none found in db/migrations — the schema will be left EMPTY")
 			} else {
 				fmt.Fprintf(out, "Migrations:  %d file(s) will be replayed from db/migrations\n", len(migrations))
 			}
-			fmt.Fprintln(out, "This DROPS every table in the environment's public schema and all their rows.")
+			fmt.Fprintln(out)
+			fmt.Fprintln(out, "  Dropped:  every table, view, sequence, routine and enum in the public")
+			fmt.Fprintln(out, "            schema — and every row in them. This cannot be undone.")
+			fmt.Fprintln(out, "  Kept:     the environment itself (same ref, URL and API keys), your auth")
+			fmt.Fprintln(out, "            users, storage objects, and the other module schemas.")
+			fmt.Fprintln(out)
 
+			// Production refuses --yes. This is a nicer error, NOT the gate: the
+			// server independently requires confirm_ref to equal the ref on
+			// production, and this CLI only ever forwards what the user typed — so a
+			// patched client that skips this branch still gets refused server-side.
+			// (is_production itself comes from the server on every Resolve, not from
+			// the local config, which only records WHICH environment is selected.)
+			if isProd && yes {
+				return fmt.Errorf(
+					"refusing --yes on production (%s): resetting production requires typing the ref.\n"+
+						"For automation use the Management API: POST /api/v2/projects/{projectId}/environments/%s/database/reset "+
+						"with a token holding the database:reset scope", ref, ref)
+			}
+
+			// typed is forwarded to the server as confirm_ref. It stays EMPTY under
+			// --yes: off production the server does not ask for it, and on production
+			// an empty confirmation is exactly what must be refused — by the server,
+			// not by this branch.
+			var typed string
 			if !yes {
 				// Typing the ref back — not a bare y/N — because the blast radius is
 				// every row in the environment and the wrong terminal is an easy
 				// mistake to make. This is the same posture `env delete` takes.
 				fmt.Fprintf(out, "Type the environment ref (%s) to confirm: ", ref)
 				line, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-				if strings.TrimSpace(line) != ref {
+				typed = strings.TrimSpace(line)
+				if typed != ref {
 					fmt.Fprintln(out, "Aborted.")
 					return nil
 				}
 			}
 
-			res, err := dbReset(cmd.Context(), r.Studio(), ref, migrations)
+			res, err := dbReset(cmd.Context(), r.Studio(), ref, migrations, typed)
 			if err != nil {
 				return err
 			}
