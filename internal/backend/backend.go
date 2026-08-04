@@ -451,8 +451,16 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 				map[string]any{"ref": sel.EnvironmentRef(), "version": args[0]}, &resp); err != nil {
 				return fmt.Errorf("backend.rollback: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back environment %s to %s (new HEAD: %s)\n",
-				sel.EnvironmentRef(), resp.RolledBackFrom, resp.Version)
+			// version is what was RESTORED; rolled_back_from is what it replaced.
+			// These were printed the other way round, with a deployment UUID
+			// standing in for the version, until 2026-08-04.
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back environment %s to %s (was: %s)\n",
+				sel.EnvironmentRef(), resp.Version, resp.RolledBackFrom)
+			// A rollback moves CODE, not schema. Saying so here is the difference
+			// between a developer understanding a 500 from older code against a
+			// newer table and filing it as a rollback that half-worked.
+			fmt.Fprintln(cmd.OutOrStdout(),
+				"  note: code only — the database schema is unchanged and stays at its current migration.")
 			return nil
 		},
 	}
