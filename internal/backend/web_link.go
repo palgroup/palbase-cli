@@ -246,9 +246,16 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				return fmt.Errorf("fetch artifacts: %w", err)
 			}
 
-			// 4b. First generation via the SDK's generator when it is
-			// installed; otherwise leave the instruction (predev/prebuild
-			// hooks regenerate on every build once @palbase/web is in).
+			// 4b. Install @palbase/web when the project doesn't have it yet —
+			// without the generator there is no palbe.gen.ts, and without that
+			// steps 6-7b all skip, so `link` would have to be run AGAIN after a
+			// manual install. Setup is this command's job; do it here.
+			if _, err := os.Stat(palbeGenBin); err != nil {
+				ensurePalbeWeb(ctx, out)
+			}
+
+			// 4c. First generation via the SDK's generator (predev/prebuild
+			// hooks regenerate on every build from here on).
 			generated, err := runPalbeGen(ctx, outFile, out)
 			if err != nil {
 				return err
@@ -279,14 +286,14 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 					return fmt.Errorf("wire providers.tsx: %w", err)
 				}
 
-				// 7b. For Next.js App Router layouts, ensure middleware.ts exists so
+				// 7b. For Next.js App Router layouts, ensure proxy.ts exists so
 				// the session cookie refreshes BEFORE the RSC tree renders. Server
 				// Components cannot write cookies, so without this every RSC render
 				// re-refreshes from the same stale cookie token; two such refreshes
 				// landing more than palauth's 30s rotation grace apart makes the
 				// reuse detector revoke the whole token family (force logout).
-				if err := wireNextMiddleware(entryFlag, out); err != nil {
-					return fmt.Errorf("wire middleware.ts: %w", err)
+				if err := wireNextProxy(entryFlag, out); err != nil {
+					return fmt.Errorf("wire proxy.ts: %w", err)
 				}
 			} else {
 				// outFile doesn't exist yet (SDK not installed): writing the
@@ -311,15 +318,75 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 // A var so tests can point it at a stub.
 var palbeGenBin = filepath.Join("node_modules", ".bin", "palbe-gen")
 
-// runPalbeGen runs the SDK's generator for the first palbe.gen.ts when
-// @palbase/web is already installed; when it isn't, it prints the follow-up
-// instead of failing the link (npm install → the predev/prebuild hook takes
-// over from there). The returned bool reports whether outFile now exists —
-// callers MUST NOT wire an import to it when it doesn't, or the link "succeeds"
-// while leaving a dangling import the project can't resolve.
+// projectPackageManagers maps a lockfile to the argv that ADDS a dependency in
+// the manager that wrote it. Order matters only for reporting — a project has
+// one lockfile. npm is the fallback for a project that has none yet.
+//
+// Unlike installNodeDeps (backend.go), which may assume npm because it runs in
+// a Palbase-scaffolded project, `web link` runs in the USER's app: running npm
+// in a pnpm workspace would drop a package-lock.json next to pnpm-lock.yaml and
+// desync the tree.
+var projectPackageManagers = []struct {
+	lockfile string
+	argv     []string
+}{
+	{"pnpm-lock.yaml", []string{"pnpm", "add"}},
+	{"yarn.lock", []string{"yarn", "add"}},
+	{"bun.lockb", []string{"bun", "add"}},
+	{"bun.lock", []string{"bun", "add"}},
+	{"package-lock.json", []string{"npm", "install"}},
+}
+
+// addDepArgv picks the install command for the project in the cwd.
+func addDepArgv() []string {
+	for _, pm := range projectPackageManagers {
+		if _, err := os.Stat(pm.lockfile); err == nil {
+			return pm.argv
+		}
+	}
+	return []string{"npm", "install"}
+}
+
+// ensurePalbeWeb installs @palbase/web when the project doesn't have it yet, so
+// `web link` is ONE command instead of link → install → link. Best-effort: a
+// failed install only means the caller falls back to the manual follow-up, so
+// it warns and returns rather than failing the link.
+//
+// `latest` is deliberate, matching how the backend template pins @palbase/backend:
+// a version baked into this binary goes stale the next time the SDK majors.
+//
+// A var so tests can stub it — the real one shells out to a package manager.
+var ensurePalbeWeb = func(ctx context.Context, w io.Writer) {
+	argv := addDepArgv()
+	bin, err := exec.LookPath(argv[0])
+	if err != nil {
+		fmt.Fprintf(w, "  %s not found in PATH — install @palbase/web yourself, then re-run `palbase web link`\n", argv[0])
+		return
+	}
+	fmt.Fprintf(w, "  installing @palbase/web (%s) ...\n", strings.Join(argv, " "))
+	c := exec.CommandContext(ctx, bin, append(argv[1:], webPkg+"@latest")...)
+	c.Stdout = w
+	c.Stderr = w
+	if err := c.Run(); err != nil {
+		fmt.Fprintf(w, "  warning: could not install %s (%v) — install it yourself, then re-run `palbase web link`\n", webPkg, err)
+	}
+}
+
+// webPkg is the client SDK `web link` generates against.
+const webPkg = "@palbase/web"
+
+// runPalbeGen runs the SDK's generator for palbe.gen.ts when @palbase/web is
+// installed; when it isn't, it prints the follow-up instead of failing the
+// caller. The returned bool reports whether outFile now exists — callers MUST
+// NOT wire an import to it when it doesn't, or the command "succeeds" while
+// leaving a dangling import the project can't resolve.
+//
+// Installing the SDK is NOT done here: `web link` (the setup command) does it
+// on its own path. `web use` only flips the target environment, and silently
+// adding a dependency during that is a side effect nobody asked for.
 func runPalbeGen(ctx context.Context, outFile string, w io.Writer) (bool, error) {
 	if _, err := os.Stat(palbeGenBin); err != nil {
-		fmt.Fprintln(w, "  @palbase/web not installed yet — run `npm install @palbase/web` then `npx palbe-gen` to generate the typed client")
+		fmt.Fprintf(w, "  %s not installed — install it, then run `npx palbe-gen`\n", webPkg)
 		return false, nil
 	}
 	c := exec.CommandContext(ctx, palbeGenBin, "--out", outFile)
@@ -1015,31 +1082,31 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 	return nil
 }
 
-// ── Next.js middleware.ts wiring ─────────────────────────────────────────────
+// ── Next.js proxy.ts wiring ──────────────────────────────────────────────────
 
 // webConfigArtifact is the subset of Palbase/palbase-config.json (already
 // committed by webLinkArtifacts, step 4, before this runs) that
-// wireNextMiddleware needs. base_url and api_key are the SAME two published
+// wireNextProxy needs. base_url and api_key are the SAME two published
 // values palbe.gen.ts itself is configured with — api_key is always the
-// publishable (anon) key, never service_role (see @palbase/web/next/middleware's
+// publishable (anon) key, never service_role (see @palbase/web/next/proxy's
 // own doc comment: a service_role key has no business in a request-path bundle).
 type webConfigArtifact struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 }
 
-// middlewarePathFor names the middleware.ts (or .js) file Next.js recognizes
-// by convention: at the project root, or inside src/ when the project uses a
-// src/ layout — NEVER inside app/ (Next's own MIDDLEWARE_LOCATION_REGEXP only
-// matches "(?:src/)?middleware", confirmed against the Next 16.2.9 source:
-// isAtConventionLevel checks normalizedFileDir === '/' || === '/src').
+// proxyPathFor names the proxy.ts (or .js) file Next.js recognizes by
+// convention: at the project root, or inside src/ when the project uses a
+// src/ layout — NEVER inside app/ (confirmed against the Next 16.2.9 source:
+// build/index.js gates PROXY_FILENAME on isAtConventionLevel, i.e.
+// normalizedFileDir === '/' || === '/src').
 // Extension matches entryPath's own, same reasoning as providersFileFor: a
 // .jsx project must not get a file full of TypeScript type syntax it can't
 // parse (import type NextRequest, the request: NextRequest annotation).
-func middlewarePathFor(entryPath string) (path string, typescript bool) {
-	name, typescript := "middleware.ts", true
+func proxyPathFor(entryPath string) (path string, typescript bool) {
+	name, typescript := "proxy.ts", true
 	if strings.HasSuffix(entryPath, ".jsx") {
-		name, typescript = "middleware.js", false
+		name, typescript = "proxy.js", false
 	}
 	if strings.HasPrefix(entryPath, "src/") {
 		return filepath.Join("src", name), typescript
@@ -1047,28 +1114,32 @@ func middlewarePathFor(entryPath string) (path string, typescript bool) {
 	return name, typescript
 }
 
-// existingMiddlewareCandidates are every path Next.js — or a project that
-// already made the Next-16 proxy.ts rename — would recognize as the ONE
-// middleware/proxy handler, at both possible convention levels.
-var existingMiddlewareCandidates = []string{
-	"middleware.ts", "middleware.js",
-	filepath.Join("src", "middleware.ts"), filepath.Join("src", "middleware.js"),
+// existingProxyCandidates are every path Next.js would recognize as the ONE
+// request-interception handler, at both possible convention levels. The
+// deprecated pre-16 `middleware` names are still listed BECAUSE Next still
+// reads them: a project carrying one must not silently end up with two
+// handlers.
+var existingProxyCandidates = []string{
 	"proxy.ts", "proxy.js",
 	filepath.Join("src", "proxy.ts"), filepath.Join("src", "proxy.js"),
+	"middleware.ts", "middleware.js",
+	filepath.Join("src", "middleware.ts"), filepath.Join("src", "middleware.js"),
 }
 
-// wireNextMiddleware writes middleware.ts (or .js) for a Next.js App Router
-// project so the session cookie refreshes BEFORE the RSC tree renders — see
-// @palbase/web/next/middleware's package doc for why this is required, not
+// wireNextProxy writes proxy.ts (or .js) for a Next.js App Router project so
+// the session cookie refreshes BEFORE the RSC tree renders — see
+// @palbase/web/next/proxy's package doc for why this is required, not
 // optional, for any session-bearing RSC app.
 //
-// It NEVER overwrites an existing middleware/proxy file. Unlike
-// providers.tsx, there is no safe auto-merge here: Next reads exactly ONE
-// middleware/default export per file, so splicing palbeMiddleware into
-// unknown existing logic would mean guessing how to combine two response
-// values — instead, an existing file is left byte-identical and the user is
-// told exactly what to add.
-func wireNextMiddleware(entryFlag string, w io.Writer) error {
+// `proxy` is the Next 16 file convention; `middleware` is deprecated and warns
+// on every dev/build, so the generated file never uses it.
+//
+// It NEVER overwrites an existing proxy/middleware file. Unlike providers.tsx,
+// there is no safe auto-merge here: Next reads exactly ONE handler export per
+// file, so splicing palbeProxy into unknown existing logic would mean guessing
+// how to combine two response values — instead, an existing file is left
+// byte-identical and the user is told exactly what to add.
+func wireNextProxy(entryFlag string, w io.Writer) error {
 	entryPath := entryFlag
 	if entryPath == "" {
 		for _, candidate := range autoEntryPaths {
@@ -1082,13 +1153,18 @@ func wireNextMiddleware(entryFlag string, w io.Writer) error {
 		return nil // not an App Router project — nothing to do
 	}
 
-	for _, existing := range existingMiddlewareCandidates {
+	for _, existing := range existingProxyCandidates {
 		if _, err := os.Stat(existing); err == nil {
 			fmt.Fprintf(w, "\nNOTE: %s already exists — Palbase left it untouched.\n", existing)
 			fmt.Fprintf(w, "      Without this, RSC session refresh cannot persist (Server Components\n")
 			fmt.Fprintf(w, "      can't write cookies) and users get force-logged-out everywhere. Wire it\n")
-			fmt.Fprintf(w, "      in by hand — see the @palbase/web/next/middleware package doc for the\n")
-			fmt.Fprintf(w, "      exact call (palbeMiddleware(request, { url, apiKey })).\n\n")
+			fmt.Fprintf(w, "      in by hand — see the @palbase/web/next/proxy package doc for the\n")
+			fmt.Fprintf(w, "      exact call (palbeProxy(request, { url, apiKey })).\n")
+			if strings.HasPrefix(filepath.Base(existing), "middleware.") {
+				fmt.Fprintf(w, "      Next 16 also deprecated that filename: rename it to proxy%s and its\n", filepath.Ext(existing))
+				fmt.Fprintf(w, "      export to `proxy` (`npx @next/codemod middleware-to-proxy .`).\n")
+			}
+			fmt.Fprintln(w)
 			return nil
 		}
 	}
@@ -1103,14 +1179,14 @@ func wireNextMiddleware(entryFlag string, w io.Writer) error {
 		return fmt.Errorf("parse %s: %w", cfgPath, err)
 	}
 
-	middlewarePath, typescript := middlewarePathFor(entryPath)
+	proxyPath, typescript := proxyPathFor(entryPath)
 	requestParam, importType := "request", ""
 	if typescript {
 		requestParam = "request: NextRequest"
 		importType = "import type { NextRequest } from 'next/server';\n"
 	}
 	content := fmt.Sprintf(
-		"import { palbeMiddleware } from '@palbase/web/next/middleware';\n%s\nexport function middleware(%s) {\n  return palbeMiddleware(request, {\n    url: %s,\n    apiKey: %s,\n  });\n}\n\n"+
+		"import { palbeProxy } from '@palbase/web/next/proxy';\n%s\nexport function proxy(%s) {\n  return palbeProxy(request, {\n    url: %s,\n    apiKey: %s,\n  });\n}\n\n"+
 			"// `config` MUST be declared here, in this file: Next reads it off THIS\n"+
 			"// file's AST (export const + literal initializer). A re-exported or\n"+
 			"// imported config is invisible and silently degrades to a catch-all.\n"+
@@ -1118,12 +1194,12 @@ func wireNextMiddleware(entryFlag string, w io.Writer) error {
 		importType, requestParam, encodeJSONString(art.BaseURL), encodeJSONString(art.APIKey),
 	)
 	// MkdirAll(".", …) is a no-op when the project has no src/ layout.
-	if err := os.MkdirAll(filepath.Dir(middlewarePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(proxyPath), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(middlewarePath, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(proxyPath, []byte(content), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "✓ wrote %s — required for RSC session refresh to persist\n", middlewarePath)
+	fmt.Fprintf(w, "✓ wrote %s — required for RSC session refresh to persist\n", proxyPath)
 	return nil
 }

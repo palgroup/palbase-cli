@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -39,8 +40,23 @@ func stubArtifactsFunc() func(context.Context, Resolvers, selection.Selection, b
 // `content` to its --out argument — standing in for @palbase/web's generator,
 // so tests verify the whole "fetch artifacts → run the SDK generator" chain
 // without npm or a real network.
+// stubInstall replaces the real package-manager shell-out with a recorder, so
+// no test ever reaches the network. Returns a pointer to the call count.
+func stubInstall(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	orig := ensurePalbeWeb
+	ensurePalbeWeb = func(_ context.Context, w io.Writer) {
+		calls++
+		fmt.Fprintln(w, "  installing @palbase/web (stub) ...")
+	}
+	t.Cleanup(func() { ensurePalbeWeb = orig })
+	return &calls
+}
+
 func installStubCodegen(t *testing.T, content string) {
 	t.Helper()
+	stubInstall(t)
 	orig := webLinkArtifacts
 	webLinkArtifacts = stubArtifactsFunc()
 	t.Cleanup(func() { webLinkArtifacts = orig })
@@ -1092,14 +1108,14 @@ func TestWebLink_ProvidersJSXAppRouter(t *testing.T) {
 	_, tsxErr := os.Stat("app/providers.tsx")
 	require.True(t, os.IsNotExist(tsxErr), "must not also create a .tsx sibling")
 
-	// middleware.ts wiring (Task 6) follows the same extension-matching rule.
-	mwBody, err := os.ReadFile("middleware.js")
-	require.NoError(t, err, "middleware.js must be created for a .jsx App Router layout")
+	// proxy.ts wiring (Task 6) follows the same extension-matching rule.
+	mwBody, err := os.ReadFile("proxy.js")
+	require.NoError(t, err, "proxy.js must be created for a .jsx App Router layout")
 	mws := string(mwBody)
-	require.Contains(t, mws, "palbeMiddleware")
+	require.Contains(t, mws, "palbeProxy")
 	require.NotContains(t, mws, "NextRequest", "a .jsx project must not get the TypeScript type import/annotation")
-	_, mwTsErr := os.Stat("middleware.ts")
-	require.True(t, os.IsNotExist(mwTsErr), "must not also create a middleware.ts sibling")
+	_, mwTsErr := os.Stat("proxy.ts")
+	require.True(t, os.IsNotExist(mwTsErr), "must not also create a proxy.ts sibling")
 }
 
 // TestWebLink_NoDanglingImportWhenSDKNotInstalled: when @palbase/web's
@@ -1113,14 +1129,18 @@ func TestWebLink_NoDanglingImportWhenSDKNotInstalled(t *testing.T) {
 	orig := webLinkArtifacts
 	webLinkArtifacts = stubArtifactsFunc()
 	t.Cleanup(func() { webLinkArtifacts = orig })
-	// Deliberately do NOT create node_modules/.bin/palbe-gen.
+	// Deliberately do NOT create node_modules/.bin/palbe-gen — and stub the
+	// installer so it stays missing (an install that cannot produce the binary
+	// is exactly the case this test pins).
+	installs := stubInstall(t)
 
 	writePkgJSON(t, minimalPkgJSON())
 	require.NoError(t, os.MkdirAll("app", 0o755))
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
 
 	out := runWebLink(t)
-	require.Contains(t, out, "not installed yet")
+	require.Equal(t, 1, *installs, "link must TRY to install @palbase/web before giving up")
+	require.Contains(t, out, "not installed")
 
 	entryBody, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
@@ -1130,8 +1150,8 @@ func TestWebLink_NoDanglingImportWhenSDKNotInstalled(t *testing.T) {
 	_, providersErr := os.Stat("app/providers.tsx")
 	require.True(t, os.IsNotExist(providersErr), "providers.tsx must not be created either — it would also dangle")
 
-	_, mwErr := os.Stat("middleware.ts")
-	require.True(t, os.IsNotExist(mwErr), "middleware.ts must not be created either — it would also dangle")
+	_, mwErr := os.Stat("proxy.ts")
+	require.True(t, os.IsNotExist(mwErr), "proxy.ts must not be created either — it would also dangle")
 
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
@@ -1178,17 +1198,85 @@ func TestWebLink_EntryImportRelPath(t *testing.T) {
 	}
 }
 
-// ── Task 6 regression tests: middleware.ts generation ─────────────────────────
+// ── @palbase/web auto-install (one command, not three) ───────────────────────
 
-// TestWebLink_MiddlewareCreatedForAppRouter: `web link` writes middleware.ts
+// TestWebLink_InstallsSDKThenGeneratesInOneRun: a project that does not have
+// @palbase/web yet must come out of a SINGLE `palbase web link` fully wired.
+// Before this, link → (user installs) → link was required, because generation
+// was skipped and with it the entry import, providers.tsx and proxy.ts.
+func TestWebLink_InstallsSDKThenGeneratesInOneRun(t *testing.T) {
+	t.Chdir(t.TempDir())
+	origArtifacts := webLinkArtifacts
+	webLinkArtifacts = stubArtifactsFunc()
+	t.Cleanup(func() { webLinkArtifacts = origArtifacts })
+
+	// The installer is what PRODUCES palbe-gen — mirroring a real install.
+	installs := 0
+	origInstall := ensurePalbeWeb
+	ensurePalbeWeb = func(_ context.Context, _ io.Writer) {
+		installs++
+		require.NoError(t, os.MkdirAll(filepath.Dir(palbeGenBin), 0o755))
+		require.NoError(t, os.WriteFile(palbeGenBin,
+			[]byte("#!/bin/sh\nprintf '// gen\\n' > palbe.gen.ts\n"), 0o755))
+	}
+	t.Cleanup(func() { ensurePalbeWeb = origInstall })
+
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	runWebLink(t)
+
+	require.Equal(t, 1, installs, "the missing SDK must be installed exactly once")
+	_, err := os.Stat("palbe.gen.ts")
+	require.NoError(t, err, "the client must be generated in the same run")
+	entry, err := os.ReadFile("app/layout.tsx")
+	require.NoError(t, err)
+	require.Contains(t, string(entry), "palbe.gen", "the entry import must be wired in the same run")
+	_, err = os.Stat("proxy.ts")
+	require.NoError(t, err, "proxy.ts must be written in the same run")
+}
+
+// TestAddDepArgv_FollowsTheProjectsLockfile: `web link` runs in the USER's app,
+// which may not be an npm project. Running npm in a pnpm workspace would drop a
+// package-lock.json beside pnpm-lock.yaml and desync the tree.
+func TestAddDepArgv_FollowsTheProjectsLockfile(t *testing.T) {
+	for _, tc := range []struct {
+		lockfile string
+		want     []string
+	}{
+		{"pnpm-lock.yaml", []string{"pnpm", "add"}},
+		{"yarn.lock", []string{"yarn", "add"}},
+		{"bun.lockb", []string{"bun", "add"}},
+		{"package-lock.json", []string{"npm", "install"}},
+		{"", []string{"npm", "install"}}, // no lockfile yet → npm
+	} {
+		name := tc.lockfile
+		if name == "" {
+			name = "no lockfile"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if tc.lockfile != "" {
+				require.NoError(t, os.WriteFile(tc.lockfile, []byte("\n"), 0o644))
+			}
+			require.Equal(t, tc.want, addDepArgv())
+		})
+	}
+}
+
+// ── Task 6 regression tests: proxy.ts generation ─────────────────────────────
+
+// TestWebLink_ProxyCreatedForAppRouter: `web link` writes proxy.ts
 // for a Next.js App Router project so the session cookie refreshes BEFORE
 // the RSC tree renders. Server Components can't write cookies — without
 // this, every RSC render re-refreshes from the same stale cookie token, and
 // once two such refreshes land more than palauth's 30s rotation grace apart
 // the reuse detector revokes the WHOLE token family (force logout
 // everywhere; modules/auth/internal/token/refresh.go:25,282-287). Content
-// matches @palbase/web/next/middleware's own documented usage exactly.
-func TestWebLink_MiddlewareCreatedForAppRouter(t *testing.T) {
+// matches @palbase/web/next/proxy's own documented usage exactly. `proxy` is
+// the Next 16 convention — `middleware` is deprecated and warns on every build.
+func TestWebLink_ProxyCreatedForAppRouter(t *testing.T) {
 	t.Chdir(t.TempDir())
 	installStubCodegen(t, "// gen")
 	writePkgJSON(t, minimalPkgJSON())
@@ -1197,13 +1285,15 @@ func TestWebLink_MiddlewareCreatedForAppRouter(t *testing.T) {
 
 	runWebLink(t)
 
-	body, err := os.ReadFile("middleware.ts")
-	require.NoError(t, err, "middleware.ts must be created at the project root")
+	body, err := os.ReadFile("proxy.ts")
+	require.NoError(t, err, "proxy.ts must be created at the project root")
 	s := string(body)
-	require.Contains(t, s, "import { palbeMiddleware } from '@palbase/web/next/middleware';")
+	require.Contains(t, s, "import { palbeProxy } from '@palbase/web/next/proxy';")
 	require.Contains(t, s, "import type { NextRequest } from 'next/server';")
-	require.Contains(t, s, "export function middleware(request: NextRequest)")
-	require.Contains(t, s, "palbeMiddleware(request, {")
+	require.Contains(t, s, "export function proxy(request: NextRequest)")
+	require.Contains(t, s, "palbeProxy(request, {")
+	require.NotContains(t, s, "middleware",
+		"the generated file must not use the deprecated Next middleware convention")
 	// stubArtifactsFunc commits base_url:"https://stub" / api_key:"pb_stub" —
 	// the SAME artifact palbe.gen.ts itself was configured from.
 	require.Contains(t, s, `url: "https://stub"`, "must carry the artifact's own url")
@@ -1213,13 +1303,13 @@ func TestWebLink_MiddlewareCreatedForAppRouter(t *testing.T) {
 	require.Contains(t, s, "matcher:")
 }
 
-// TestWebLink_MiddlewareNeverOverwritesExisting: an existing middleware.ts
+// TestWebLink_ProxyNeverOverwritesExisting: an existing proxy.ts
 // (the user's own auth/redirect logic, or one from a prior manual
 // integration) must survive link BYTE-IDENTICAL. Unlike providers.tsx there
-// is no safe splice here — Next reads exactly ONE middleware/default export
+// is no safe splice here — Next reads exactly ONE handler/default export
 // per file, so guessing how to combine two response values would be unsafe;
 // the file is left untouched and the user is told to wire it in by hand.
-func TestWebLink_MiddlewareNeverOverwritesExisting(t *testing.T) {
+func TestWebLink_ProxyNeverOverwritesExisting(t *testing.T) {
 	t.Chdir(t.TempDir())
 	installStubCodegen(t, "// gen")
 	writePkgJSON(t, minimalPkgJSON())
@@ -1227,33 +1317,34 @@ func TestWebLink_MiddlewareNeverOverwritesExisting(t *testing.T) {
 	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
 
 	existing := "import { NextResponse } from 'next/server';\n\n" +
-		"export function middleware(request) {\n  // custom auth check\n  return NextResponse.next();\n}\n\n" +
+		"export function proxy(request) {\n  // custom auth check\n  return NextResponse.next();\n}\n\n" +
 		"export const config = { matcher: '/dashboard/:path*' };\n"
-	require.NoError(t, os.WriteFile("middleware.ts", []byte(existing), 0o644))
+	require.NoError(t, os.WriteFile("proxy.ts", []byte(existing), 0o644))
 
 	out := runWebLink(t)
 
-	body, err := os.ReadFile("middleware.ts")
+	body, err := os.ReadFile("proxy.ts")
 	require.NoError(t, err)
-	require.Equal(t, existing, string(body), "an existing middleware.ts must survive byte-identical")
+	require.Equal(t, existing, string(body), "an existing proxy.ts must survive byte-identical")
 	require.Contains(t, out, "already exists", "the CLI must tell the user it skipped the file")
 }
 
-// TestWebLink_MiddlewarePathDerivedFromSrcLayout: middleware.ts must land at
+// TestWebLink_ProxyPathDerivedFromSrcLayout: proxy.ts must land at
 // the project ROOT for a root App Router (app/layout.tsx), or inside src/
 // for a src/ App Router (src/app/layout.tsx) — Next only recognizes
-// middleware at those exact two convention levels (never inside app/ or
-// src/app/; confirmed against Next 16.2.9's own isAtConventionLevel check —
-// normalizedFileDir === '/' || === '/src' — via Context7, not assumed).
-func TestWebLink_MiddlewarePathDerivedFromSrcLayout(t *testing.T) {
+// the proxy at those exact two convention levels (never inside app/ or
+// src/app/; confirmed against the installed Next 16.2.9's own build/index.js —
+// PROXY_FILENAME is gated on isAtConventionLevel, normalizedFileDir === '/'
+// || === '/src' — read from node_modules, not assumed).
+func TestWebLink_ProxyPathDerivedFromSrcLayout(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		entryDir  string
 		entryFile string
 		wantPath  string
 	}{
-		{"root App Router", "app", "app/layout.tsx", "middleware.ts"},
-		{"src App Router", "src/app", "src/app/layout.tsx", filepath.Join("src", "middleware.ts")},
+		{"root App Router", "app", "app/layout.tsx", "proxy.ts"},
+		{"src App Router", "src/app", "src/app/layout.tsx", filepath.Join("src", "proxy.ts")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
@@ -1265,12 +1356,12 @@ func TestWebLink_MiddlewarePathDerivedFromSrcLayout(t *testing.T) {
 			runWebLink(t)
 
 			_, err := os.Stat(tc.wantPath)
-			require.NoError(t, err, "middleware must land at %s", tc.wantPath)
+			require.NoError(t, err, "the proxy must land at %s", tc.wantPath)
 
 			// It must NOT also land at the OTHER convention level.
-			other := "middleware.ts"
-			if tc.wantPath == "middleware.ts" {
-				other = filepath.Join("src", "middleware.ts")
+			other := "proxy.ts"
+			if tc.wantPath == "proxy.ts" {
+				other = filepath.Join("src", "proxy.ts")
 			}
 			_, otherErr := os.Stat(other)
 			require.True(t, os.IsNotExist(otherErr), "must not also write %s", other)
