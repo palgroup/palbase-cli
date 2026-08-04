@@ -236,3 +236,24 @@ func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
 		})
 	}
 }
+
+// `palbase status` reports the SDK the live artifact was built with and the
+// majors the runtime can build — the answer this process cannot compute itself,
+// because it does not run the runtime image.
+func TestFormatSDK_ReportsVersionAndSupportedSet(t *testing.T) {
+	v := "12.0.1"
+	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 13}})
+
+	require.Contains(t, out, "@palbase/backend 12.0.1")
+	require.Contains(t, out, "major(s) 12, 13",
+		"the SET must be named — 'you are behind 13' is wrong when 12 is supported, "+
+			"and that premise is what made palbase build refuse pushes the platform accepted")
+}
+
+// Not reported ⇒ print nothing. A never-deployed environment, or one whose active
+// artifact predates manifest schema v2, must not be given a default that reads
+// like a supported set.
+func TestFormatSDK_SilentWhenUnreported(t *testing.T) {
+	require.Empty(t, formatSDK(nil))
+	require.Empty(t, formatSDK(&sdkStatus{}))
+}

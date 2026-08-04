@@ -481,6 +481,20 @@ type lastDeploy struct {
 // statusOut is `palbase status --json`. It names the full context — project,
 // environment, endpoint, repository — because "which runtime am I looking at"
 // must never be a guess (UAT CLI-005).
+// sdkStatus mirrors backend.status's `sdk` field: which @palbase/backend the
+// ACTIVE artifact was built with, and which majors that runtime could have built
+// against. Read off the artifact manifest server-side — this process has no other
+// way to know, because it does not run the runtime image.
+//
+// nil when the environment has never deployed, or its active artifact predates
+// manifest schema v2. That is "not reported", NOT "only the newest is supported":
+// rendering the second would resurrect the wrong premise this whole change
+// removed from `palbase build`.
+type sdkStatus struct {
+	Version         *string `json:"version"`
+	SupportedMajors []int   `json:"supportedMajors"`
+}
+
 type statusOut struct {
 	ProjectID          string      `json:"projectId"`
 	EnvironmentID      string      `json:"environmentId"`
@@ -490,6 +504,7 @@ type statusOut struct {
 	Head               *string     `json:"head"`
 	ActiveVersion      *string     `json:"activeVersion"`
 	LastDeploy         *lastDeploy `json:"lastDeploy"`
+	SDK                *sdkStatus  `json:"sdk,omitempty"`
 }
 
 func newStatusCmd(r Resolvers) *cobra.Command {
@@ -507,6 +522,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 				Head          *string     `json:"head"`
 				ActiveVersion *string     `json:"activeVersion"`
 				LastDeploy    *lastDeploy `json:"lastDeploy"`
+				SDK           *sdkStatus  `json:"sdk"`
 			}
 			if err := r.Studio().Query(cmd.Context(), "backend.status",
 				map[string]any{"ref": sel.EnvironmentRef()}, &resp); err != nil {
@@ -521,6 +537,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 				Head:               resp.Head,
 				ActiveVersion:      resp.ActiveVersion,
 				LastDeploy:         resp.LastDeploy,
+				SDK:                resp.SDK,
 			}
 			w := cmd.OutOrStdout()
 			if jsonOut {
@@ -537,6 +554,9 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			if out.ActiveVersion != nil {
 				fmt.Fprintf(w, "active:       %s\n", *out.ActiveVersion)
 			}
+			if line := formatSDK(out.SDK); line != "" {
+				fmt.Fprint(w, line)
+			}
 			if line := formatLastDeploy(out.LastDeploy, time.Now()); line != "" {
 				fmt.Fprint(w, line)
 			}
@@ -545,6 +565,32 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
 	return cmd
+}
+
+// formatSDK renders which SDK the live artifact was built with and which majors
+// the runtime supports. Returns "" when the server did not report it, so a
+// never-deployed environment prints nothing rather than a misleading default.
+//
+// It names the SUPPORTED SET, not just the newest, because "you are behind" is
+// the wrong message when the major in use is fully supported — that premise is
+// exactly what made `palbase build` refuse pushes the platform would have
+// accepted.
+func formatSDK(s *sdkStatus) string {
+	if s == nil || (s.Version == nil && len(s.SupportedMajors) == 0) {
+		return ""
+	}
+	var b strings.Builder
+	if s.Version != nil {
+		b.WriteString(fmt.Sprintf("sdk:          @palbase/backend %s\n", *s.Version))
+	}
+	if len(s.SupportedMajors) > 0 {
+		parts := make([]string, len(s.SupportedMajors))
+		for i, m := range s.SupportedMajors {
+			parts[i] = strconv.Itoa(m)
+		}
+		b.WriteString(fmt.Sprintf("              runtime builds major(s) %s\n", strings.Join(parts, ", ")))
+	}
+	return b.String()
 }
 
 // formatLastDeploy renders the human "last deploy" block for `palbase status`.
