@@ -358,6 +358,15 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			report("+ index      ", resp.Plan.AddIndexes)
 			report("- index      ", resp.Plan.DropIndexes)
 			report("+ foreign key", resp.Plan.AddForeignKeys)
+			// RLS is drift like any other, and empty() already counts it — but these
+			// three were never REPORTED. An RLS-only diff therefore printed the
+			// "schema has drifted" header with NOTHING under it and exited non-zero,
+			// which is the least actionable failure a gate can produce. Observed live
+			// after a db reset, where the committed migrations grant a policy to
+			// fewer roles than db/schema.ts declares.
+			report("+ rls        ", resp.Plan.EnableRLS)
+			report("+ policy     ", resp.Plan.AddPolicies)
+			report("~ policy     ", resp.Plan.ChangePolicies)
 			fmt.Fprintln(errOut, "run `palbase db diff -f <name>` to generate a migration")
 			return fmt.Errorf("schema drift: migration needed")
 		},

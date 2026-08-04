@@ -193,3 +193,37 @@ func TestReset_IsRegisteredUnderDB(t *testing.T) {
 		}
 	}
 }
+
+// TestCheck_ReportsRLSDrift closes a gap seen live: `db check` counts enableRLS /
+// addPolicies / changePolicies in its drift decision but never PRINTED them, so an
+// RLS-only diff produced the "schema has drifted" header with nothing under it and a
+// non-zero exit — the least actionable failure a gate can produce. It showed up right
+// after a db reset, where the committed migrations grant a policy to fewer roles than
+// db/schema.ts declares.
+//
+// MUTATION GUARD: dropping any of the three report() lines turns this RED.
+func TestCheck_ReportsRLSDrift(t *testing.T) {
+	chdirTemp(t, "export default defineSchema({})")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		trpcOK(w, migSQLResponse("ALTER TABLE todos ENABLE ROW LEVEL SECURITY;", map[string][]string{
+			"enableRLS":      {"todos"},
+			"addPolicies":    {"todos.pb_owner_all"},
+			"changePolicies": {"documents.pb_owner_all"},
+		}))
+	})
+
+	var out, errOut strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"check"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SilenceUsage = true
+
+	require.Error(t, cmd.Execute(), "RLS drift must still fail the gate")
+
+	report := errOut.String()
+	require.Contains(t, report, "todos", "the table whose RLS drifted must be named")
+	require.Contains(t, report, "todos.pb_owner_all", "a missing policy must be named")
+	require.Contains(t, report, "documents.pb_owner_all", "a changed policy must be named")
+}
