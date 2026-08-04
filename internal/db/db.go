@@ -3,15 +3,16 @@
 // These commands implement the config-as-code migration workflow. The
 // authoritative schema lives in db/schema.ts; the live database may have
 // drifted from it (someone added a column directly, or a teammate pushed a
-// schema change). `db diff` asks Studio (which proxies the per-project
-// br-pod's POST /internal/migration-sql/{envId}) for the migration SQL that
+// schema change). `db diff` asks Studio (which proxies the orchestrator's
+// POST /internal/migration-sql/{ref}) for the migration SQL that
 // reconciles the live DB to the declared schema, and writes it to
 // db/migrations/<ts>_<name>.sql. `db check` is the read-only gate the
 // pre-push hook keys on: it exits non-zero when the schema has drifted but no
 // migration has been generated yet.
 //
-// The diff is computed SERVER-side: the br-pod is the only thing that can
-// reach the tenant DB, so the CLI never touches the database. It ships the
+// The diff is computed SERVER-side: only the cluster can reach the tenant DB
+// (the orchestrator runs the tenant's own backend-runtime image as a throwaway
+// `--migration-sql` Job), so the CLI never touches the database. It ships the
 // db/schema.ts SOURCE STRING and gets back {sql, plan}. The plan's five
 // string arrays (added/dropped tables+columns, type changes) drive the
 // summary line, the destructive warning, and the check gate's drift report.
