@@ -115,6 +115,7 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase db diff -f <name>   Generate a migration from db/schema.ts vs the live DB.
   palbase db check            Fail (non-zero) if the schema has drifted but no
                               migration was generated yet (pre-push gate).
+  palbase db reset            Drop the schema and replay db/migrations (DESTRUCTIVE).
 
 The diff is computed server-side: db/schema.ts is sent to Palbase, which diffs
 it against the SELECTED environment's database and returns the migration SQL.`,
@@ -122,6 +123,7 @@ it against the SELECTED environment's database and returns the migration SQL.`,
 	cmd.AddCommand(
 		diffCmd(r),
 		checkCmd(r),
+		resetCmd(r),
 	)
 	return cmd
 }
