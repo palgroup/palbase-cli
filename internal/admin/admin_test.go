@@ -335,3 +335,75 @@ func TestNewOperationID_IsAUniqueV4(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// A rotation can COMMIT and still answer with an error — the reply is only the
+// delivery. The server keys the durable mutation off operationId, so resuming
+// with the SAME id joins the rotation that already happened, while a fresh id
+// starts another one and mints a second key.
+func TestRotateKey_ResumesTheSameOperationWhenGivenOne(t *testing.T) {
+	const op = "3f1c6a20-9a1e-4a26-9f0a-2c9a1e4a2690"
+	var seen []any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seen = append(seen, body["operationId"])
+		okData(w, http.StatusOK, map[string]any{
+			"id": "key_new", "environment_ref": "todoappm8p6zm",
+			"scope": "s", "plaintext": "pb_todoappm8p6zm_sABCDEFGHIJKLMNOPQRST",
+		})
+	})
+
+	for i := 0; i < 2; i++ {
+		cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+		cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old",
+			"--operation-id", op, "--json"})
+		cmd.SetOut(&bytes.Buffer{})
+		require.NoError(t, cmd.Execute())
+	}
+
+	require.Equal(t, []any{op, op}, seen,
+		"a resumed rotation must carry the id it was given, not a fresh one")
+}
+
+func TestRotateKey_RejectsANonUUIDOperationID(t *testing.T) {
+	called := false
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		okData(w, http.StatusOK, map[string]any{})
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old",
+		"--operation-id", "not-a-uuid"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be a UUID")
+	require.False(t, called, "a malformed id must not reach the server")
+}
+
+// The id is worthless to the operator if it dies with the request.
+func TestRotateKey_FailureNamesTheOperationToResumeWith(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "mutation_committed_delivery_failed", "request_id": "req_x",
+		})
+	})
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--operation-id ")
+	require.Regexp(t,
+		`--operation-id [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`,
+		err.Error())
+	require.Contains(t, err.Error(), "rotate the key again")
+}

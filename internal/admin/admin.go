@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -201,6 +202,12 @@ func moduleList(list []string) string {
 	return strings.Join(list, "|")
 }
 
+// operationIDPattern is the server's own shape for a durable operation id: it
+// validates the field as a UUID, so a malformed --operation-id is caught here
+// rather than as a 400 after the round trip.
+var operationIDPattern = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 // rotateKeyRequest is the typed POST body for rotate-environment-key. The
 // operationId is a UUID because the server derives the durable mutation id from
 // it: a retry carrying the same value joins the SAME rotation rather than
@@ -224,9 +231,10 @@ type rotateKeyRequest struct {
 // gate, not this command's obscurity.
 func rotateKeyCmd(rest func() REST) *cobra.Command {
 	var (
-		ref     string
-		keyID   string
-		jsonOut bool
+		ref         string
+		keyID       string
+		operationID string
+		jsonOut     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "rotate-key",
@@ -249,10 +257,27 @@ func rotateKeyCmd(rest func() REST) *cobra.Command {
 				Plaintext      string `json:"plaintext"`
 				LookupPrefix   string `json:"lookup_prefix"`
 			}
-			body := rotateKeyRequest{Ref: ref, ID: keyID, OperationID: transport.NewOperationID()}
+			// A fresh id per invocation is right for a NEW rotation, and wrong for
+			// a retry: the server keys the durable mutation off this value, so a
+			// second run with a new id mints a SECOND key. That matters because a
+			// rotation can commit and still answer with an error — the reply is
+			// only the delivery. --operation-id is how the operator resumes the
+			// one that already happened.
+			op := operationID
+			if op == "" {
+				op = transport.NewOperationID()
+			} else if !operationIDPattern.MatchString(op) {
+				return fmt.Errorf("--operation-id must be a UUID, got %q", op)
+			}
+			body := rotateKeyRequest{Ref: ref, ID: keyID, OperationID: op}
 			if err := rest().Do(cmd.Context(), http.MethodPost,
 				"/api/v1/admin/rotate-environment-key", body, &rotated); err != nil {
-				return err
+				// Carry the id out with the failure. Without it the operator has
+				// nothing to resume with and the only available move is a fresh
+				// rotation — which is exactly the wrong one if this call already
+				// committed.
+				return fmt.Errorf("%w\n  retry with --operation-id %s to resume THIS rotation; "+
+					"a new id would rotate the key again", err, op)
 			}
 			if rotated.EnvironmentRef != ref {
 				return fmt.Errorf(
@@ -278,6 +303,8 @@ func rotateKeyCmd(rest func() REST) *cobra.Command {
 	_ = cmd.MarkFlagRequired("ref")
 	cmd.Flags().StringVar(&keyID, "id", "", "Id of the key to rotate")
 	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&operationID, "operation-id", "",
+		"Resume a rotation that already started (UUID). Omit to begin a new one")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
