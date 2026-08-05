@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -74,6 +75,7 @@ func NewCommand(r Resolvers) *cobra.Command {
 	}
 	cmd.AddCommand(migrateAllTenantsCmd(r.REST))
 	cmd.AddCommand(setModuleImageCmd(r.REST))
+	cmd.AddCommand(rotateKeyCmd(r.REST))
 	return cmd
 }
 
@@ -197,4 +199,85 @@ func isValidModule(m string, list []string) bool {
 // error messages (e.g. "palnotify|paldocs|palflags|palauth").
 func moduleList(list []string) string {
 	return strings.Join(list, "|")
+}
+
+// rotateKeyRequest is the typed POST body for rotate-environment-key. The
+// operationId is a UUID because the server derives the durable mutation id from
+// it: a retry carrying the same value joins the SAME rotation rather than
+// minting a second key.
+type rotateKeyRequest struct {
+	Ref         string `json:"ref"`
+	ID          string `json:"id"`
+	OperationID string `json:"operationId"`
+}
+
+// rotateKeyCmd wires `palbase admin rotate-key --ref=X --id=Y`.
+//
+// This is the incident path for a key the CUSTOMER surface cannot touch. The
+// customer rotate filters on scope='c' AND visibility='customer', so a leaked
+// service_role key — the one that bypasses a tenant's RLS — had no remedy at
+// all: not in the CLI, not in the customer API, and deleting the tenant burns
+// its ref permanently. The capability landed in Studio's tRPC first, meaning a
+// browser; this is the same capability where an operator actually is.
+//
+// Platform-admin only. The server 403s everyone else — the allowlist is the
+// gate, not this command's obscurity.
+func rotateKeyCmd(rest func() REST) *cobra.Command {
+	var (
+		ref     string
+		keyID   string
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "rotate-key",
+		Short: "Rotate ANY of an environment's keys, including the internal service_role one",
+		Long: "Rotate one of an environment's API keys as the platform.\n\n" +
+			"Unlike `palbase apikey rotate`, this reaches keys the customer surface\n" +
+			"cannot: the internal service_role key that bypasses the tenant's RLS.\n" +
+			"Use it when such a key leaks — the replacement is minted and the old one\n" +
+			"revoked in a single durable operation, and the well-known KV slot every\n" +
+			"platform consumer reads is republished before the old one is retired.\n\n" +
+			"The new secret is printed ONCE. Platform-admin only (server-side allowlist).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			var rotated struct {
+				ID             string `json:"id"`
+				EnvironmentRef string `json:"environment_ref"`
+				Name           string `json:"name"`
+				Scope          string `json:"scope"`
+				IsDefault      bool   `json:"is_default"`
+				Plaintext      string `json:"plaintext"`
+				LookupPrefix   string `json:"lookup_prefix"`
+			}
+			body := rotateKeyRequest{Ref: ref, ID: keyID, OperationID: transport.NewOperationID()}
+			if err := rest().Do(cmd.Context(), http.MethodPost,
+				"/api/v1/admin/rotate-environment-key", body, &rotated); err != nil {
+				return err
+			}
+			if rotated.EnvironmentRef != ref {
+				return fmt.Errorf(
+					"rotate-key response environment_ref %q does not match the requested environment %q",
+					rotated.EnvironmentRef, ref)
+			}
+			if jsonOut {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(rotated)
+			}
+			if _, err := fmt.Fprintf(out, "✓ rotated %s → %s (%s)\n", keyID, rotated.ID, ref); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "  %s\n", rotated.Plaintext); err != nil {
+				return err
+			}
+			_, err := fmt.Fprintln(out, "  (shown once — the previous secret is revoked)")
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&ref, "ref", "", "Environment ref (e.g. todoappm8p6zm)")
+	_ = cmd.MarkFlagRequired("ref")
+	cmd.Flags().StringVar(&keyID, "id", "", "Id of the key to rotate")
+	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	return cmd
 }

@@ -244,3 +244,94 @@ func TestSetModuleImage_403SurfacesAPIError(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, "forbidden", apiErr.Code)
 }
+
+func TestRotateKey_POSTsRefIDAndAUUIDOperationID(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		okData(w, http.StatusOK, map[string]any{
+			"id": "key_new", "environment_ref": "todoappm8p6zm",
+			"scope": "s", "plaintext": "pb_todoappm8p6zm_sABCDEFGHIJKLMNOPQRST",
+		})
+	})
+
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	require.NoError(t, cmd.Execute())
+
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/api/v1/admin/rotate-environment-key", gotPath)
+	require.Equal(t, "todoappm8p6zm", gotBody["ref"])
+	require.Equal(t, "key_old", gotBody["id"])
+	// The server validates this as a UUID and derives the durable mutation id
+	// from it. Sending the 32-hex idempotency-key shape here would be a 400 —
+	// asserted on the wire because the call site compiles either way.
+	require.Regexp(t,
+		`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+		gotBody["operationId"])
+
+	require.Contains(t, out.String(), "key_new")
+	require.Contains(t, out.String(), "pb_todoappm8p6zm_sABCDEFGHIJKLMNOPQRST")
+}
+
+// A response naming a different environment must fail loudly. Printing it would
+// hand the operator another tenant's service_role secret during an incident —
+// the worst possible moment for a silent swap.
+func TestRotateKey_RejectsAResponseForAnotherEnvironment(t *testing.T) {
+	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		okData(w, http.StatusOK, map[string]any{
+			"id": "key_new", "environment_ref": "otherenvm", "scope": "s",
+			"plaintext": "pb_otherenvm_sABCDEFGHIJKLMNOPQRST",
+		})
+	})
+
+	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match the requested environment")
+	require.NotContains(t, out.String(), "pb_otherenvm", "a foreign secret must never be printed")
+}
+
+func TestRotateKey_RequiresRefAndID(t *testing.T) {
+	for _, args := range [][]string{
+		{"rotate-key", "--id", "key_old"},
+		{"rotate-key", "--ref", "todoappm8p6zm"},
+	} {
+		called := false
+		c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			okData(w, http.StatusOK, map[string]any{})
+		})
+		cmd := NewCommand(Resolvers{REST: func() REST { return c }})
+		cmd.SetArgs(args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SilenceErrors, cmd.SilenceUsage = true, true
+		require.Error(t, cmd.Execute(), "%v must not be accepted", args)
+		require.False(t, called, "an incomplete rotate must never reach the server")
+	}
+}
+
+// NewOperationID must be a real v4 UUID and must not repeat: the server keys the
+// durable rotation off it, so a constant would make two separate incidents share
+// one operation.
+func TestNewOperationID_IsAUniqueV4(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		id := transport.NewOperationID()
+		require.Regexp(t,
+			`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, id)
+		require.False(t, seen[id], "operation id repeated: %s", id)
+		seen[id] = true
+	}
+}

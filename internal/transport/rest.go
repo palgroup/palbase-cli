@@ -55,6 +55,26 @@ func NewIdempotencyKey() string {
 	return hex.EncodeToString(b[:])
 }
 
+// NewOperationID mints a RFC 4122 v4 UUID for one logical durable mutation.
+//
+// Distinct from NewIdempotencyKey (32 hex chars) because the admin key-rotation
+// endpoint validates its operationId as a UUID: the server derives the durable
+// mutation id from it, so a retry carrying the SAME value joins the same
+// rotation instead of minting a second key. crypto/rand for the same reason the
+// idempotency key uses it.
+func NewOperationID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Empty rather than a guessable value: the server rejects it as
+		// invalid_request, which is a visible failure instead of a silent one.
+		return ""
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
 // Client issues DPoP-bound requests to the Management API.
 type Client struct {
 	// BaseURL is the Management API origin (e.g. https://api.dev.palbase.studio).
