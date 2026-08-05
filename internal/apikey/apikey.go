@@ -8,6 +8,7 @@
 //	GET    /api/v2/projects/{projectId}/environments/{environmentRef}/api-keys?reveal=true reveal
 //	POST   /api/v2/projects/{projectId}/environments/{environmentRef}/api-keys             create
 //	DELETE /api/v2/projects/{projectId}/environments/{environmentRef}/api-keys/{keyId}     revoke
+//	POST   .../api-keys/{keyId}/rotate                                                     rotate
 //
 // The Environment is the SELECTED one (`palbase env use`), overridable headlessly
 // with the global --project / --environment.
@@ -51,6 +52,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		createCmd(r),
 		revealCmd(r),
 		revokeCmd(r),
+		rotateCmd(r),
 	)
 	return cmd
 }
@@ -244,6 +246,83 @@ func revokeCmd(r Resolvers) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	return cmd
+}
+
+// rotateCmd is the incident-response command: a leaked key is answered by
+// rotating it, not by revoking it. Until this existed the only way to rotate was
+// the web UI, so the terminal — the fastest surface at the moment a key leaks —
+// could not reach it.
+//
+// What rotate buys you over revoke, verified against the orchestrator: ONE
+// durable operation mints the replacement (same name, scope and app binding) and
+// revokes the source in the SAME transaction, so the replacement exists at the
+// instant the old secret dies. Revoke leaves you with nothing and a second
+// command to run. It does NOT buy you a grace window — there is none, see below.
+func rotateCmd(r Resolvers) *cobra.Command {
+	var (
+		force   bool
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "rotate <keyId>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Rotate an API key: mint a fresh secret and revoke the old one atomically",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			keyID := args[0]
+			sel, err := r.Selection().Resolve(cmd.Context())
+			if err != nil {
+				return err
+			}
+			var rotated struct {
+				ID             string `json:"id"`
+				EnvironmentRef string `json:"environment_ref"`
+				Name           string `json:"name"`
+				Scope          string `json:"scope"`
+				IsDefault      bool   `json:"is_default"`
+				Plaintext      string `json:"plaintext"`
+				LookupPrefix   string `json:"lookup_prefix"`
+			}
+			// Rotation REQUIRES an Idempotency-Key server-side: the durable
+			// mutation id is derived from it, so a retry joins the same rotation
+			// instead of minting a second key. Minted per invocation — one
+			// command is one logical rotation and the CLI does not retry it.
+			if err := r.REST().DoIdempotent(cmd.Context(), http.MethodPost,
+				keysPath(sel.ProjectID, sel.EnvironmentRef(), keyID)+"/rotate",
+				map[string]any{"force": force}, &rotated,
+				transport.NewIdempotencyKey()); err != nil {
+				return err
+			}
+			if err := validateEnvironmentRef("rotate", sel.EnvironmentRef(), rotated.EnvironmentRef); err != nil {
+				return err
+			}
+			// The new secret must belong to the environment we asked about. A
+			// rotate that hands back a credential bound elsewhere is the same
+			// silent cross-environment hazard create/reveal already guard.
+			if err := selection.ValidateRuntimeBinding(sel.EnvironmentRef(), rotated.EnvironmentRef, rotated.Plaintext); err != nil {
+				return fmt.Errorf("apikey rotate returned an invalid credential: %w", err)
+			}
+			if jsonOut {
+				return encodeJSON(cmd.OutOrStdout(), rotated)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ rotated %s → %s\n", keyID, rotated.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", rotated.Plaintext)
+			fmt.Fprintln(cmd.OutOrStdout(), "  (shown once — store it now)")
+			// Measured, not assumed: the rotate commit runs
+			// `UPDATE api_keys SET revoked_at=now()` on the source in the same
+			// transaction that inserts the replacement, and the cleanup deletes
+			// the source's gateway blob right after publishing the new one. The
+			// only overlap is however long that cleanup takes — an implementation
+			// window, NOT a grace period, and nothing may be built on it.
+			fmt.Fprintln(cmd.OutOrStdout(), "  The previous secret is revoked — roll your clients over now.")
+			return nil
+		},
+	}
+	// An app-bound key is compiled into shipped builds, so rotating it
+	// invalidates the secret those builds carry. The server refuses without
+	// this; the flag exists so the caller says it out loud.
+	cmd.Flags().BoolVar(&force, "force", false, "Rotate even when the key is app-bound (breaks shipped builds)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }

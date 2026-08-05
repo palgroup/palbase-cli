@@ -42,7 +42,7 @@ func TestApikeyCmd_Subcommands(t *testing.T) {
 		got = append(got, c.Name())
 	}
 	sort.Strings(got)
-	require.Equal(t, []string{"create", "list", "reveal", "revoke"}, got)
+	require.Equal(t, []string{"create", "list", "reveal", "revoke", "rotate"}, got)
 }
 
 // THE path contract. Every apikey verb must address the ENVIRONMENT under its
@@ -87,6 +87,15 @@ func TestApikey_HitsTheV2EnvironmentScopedPath(t *testing.T) {
 			name: "revoke", args: []string{"revoke", "key_2", "--json"},
 			route: "DELETE " + base + "/key_2",
 			reply: func(f *selectiontest.Fake) { f.OK("DELETE "+base+"/key_2", map[string]any{"ok": true}) },
+		},
+		{
+			name: "rotate", args: []string{"rotate", "key_2", "--json"},
+			route: "POST " + base + "/key_2/rotate",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("POST "+base+"/key_2/rotate", map[string]any{
+					"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
+				})
+			},
 		},
 	}
 
@@ -264,4 +273,83 @@ func TestApikeyList_EnvironmentOverrideRetargetsTheKeys(t *testing.T) {
 	require.True(t, ok, "expected the STAGING keys, got %v", fake.Routes())
 	_, prod := fake.Find("GET /api/v2/projects/proj_1/environments/app1prod/api-keys")
 	require.False(t, prod, "production keys must not be touched")
+}
+
+// Rotation is the answer to a LEAKED key, so the wire shape matters more here
+// than anywhere else in this package: the server derives the durable mutation id
+// from the Idempotency-Key, and without one it 400s — which is how
+// `apikey create` shipped broken in v0.13.0. Asserted on the wire, because the
+// call site compiled fine while sending nothing.
+func TestApikeyRotate_CarriesIdempotencyKeyAndExplicitForce(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	fake := selectiontest.New(t)
+	fake.OK("POST "+base+"/key_2/rotate", map[string]any{
+		"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
+	})
+
+	out, err := run(t, fake, "rotate", "key_2", "--json")
+	require.NoError(t, err)
+
+	req, ok := fake.Find("POST " + base + "/key_2/rotate")
+	require.True(t, ok, "got %v", fake.Routes())
+	require.NotEmpty(t, req.Header.Get("Idempotency-Key"),
+		"apikey rotate MUST carry an Idempotency-Key — the server 400s without one")
+	// force travels EXPLICITLY as false. The route body is .strict() with a
+	// default, so omitting it would still work today; sending it keeps the
+	// dangerous flag visible on the wire instead of implied by absence.
+	require.Equal(t, map[string]any{"force": false}, req.Body)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, "key_3", got["id"])
+}
+
+func TestApikeyRotate_ForceFlagReachesTheWire(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	fake := selectiontest.New(t)
+	fake.OK("POST "+base+"/key_2/rotate", map[string]any{
+		"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
+	})
+
+	_, err := run(t, fake, "rotate", "key_2", "--force", "--json")
+	require.NoError(t, err)
+
+	req, ok := fake.Find("POST " + base + "/key_2/rotate")
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"force": true}, req.Body)
+}
+
+// A rotate that hands back a credential bound somewhere else must fail loudly.
+// Printing it would have the operator paste a foreign environment's secret into
+// their app during an incident — the worst possible moment for a silent swap.
+func TestApikeyRotate_RejectsAForeignCredential(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+
+	tests := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{
+			name: "response names a different environment",
+			body: map[string]any{"id": "key_3", "environment_ref": "otherenv", "plaintext": "pb_otherenv_c01234567890123456789"},
+			want: "does not match selected environment",
+		},
+		{
+			name: "ref matches but the key is bound elsewhere",
+			body: map[string]any{"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_otherenv_c01234567890123456789"},
+			want: "bound to environment",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := selectiontest.New(t)
+			fake.OK("POST "+base+"/key_2/rotate", tc.body)
+
+			out, err := run(t, fake, "rotate", "key_2")
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.want)
+			require.NotContains(t, out, "pb_otherenv", "a foreign secret must never be printed")
+		})
+	}
 }
