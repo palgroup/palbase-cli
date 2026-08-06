@@ -353,3 +353,39 @@ func TestApikeyRotate_RejectsAForeignCredential(t *testing.T) {
 		})
 	}
 }
+
+// The server refuses to revoke an app-bound key unless the request carries
+// force, and its refusal tells the operator to "pass force". Until this flag
+// existed, revoke sent no body at all, so the instruction was unfollowable from
+// a released CLI — and `rotate`, the other way out, had never shipped either.
+// Pins that --force reaches the wire as the body the API contract declares.
+func TestRevokeForceReachesTheWire(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	var gotBody map[string]any
+	fake := selectiontest.New(t)
+	fake.Handle("DELETE "+base+"/key_2", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		selectiontest.WriteOK(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	out, err := run(t, fake, "revoke", "key_2", "--force", "--json")
+	require.NoError(t, err)
+	require.Contains(t, out, "key_2")
+	require.Equal(t, map[string]any{"force": true}, gotBody)
+}
+
+// The default must stay false: an unforced revoke has to keep hitting the
+// app-bound guard rather than quietly bulldozing shipped builds.
+func TestRevokeWithoutForceSendsFalse(t *testing.T) {
+	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
+	var gotBody map[string]any
+	fake := selectiontest.New(t)
+	fake.Handle("DELETE "+base+"/key_2", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		selectiontest.WriteOK(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	_, err := run(t, fake, "revoke", "key_2", "--json")
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"force": false}, gotBody)
+}

@@ -224,7 +224,10 @@ func revealCmd(r Resolvers) *cobra.Command {
 }
 
 func revokeCmd(r Resolvers) *cobra.Command {
-	var jsonOut bool
+	var (
+		force   bool
+		jsonOut bool
+	)
 	cmd := &cobra.Command{
 		Use:   "revoke <keyId>",
 		Args:  cobra.ExactArgs(1),
@@ -236,7 +239,8 @@ func revokeCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 			if err := r.REST().Do(cmd.Context(), http.MethodDelete,
-				keysPath(sel.ProjectID, sel.EnvironmentRef(), keyID), nil, nil); err != nil {
+				keysPath(sel.ProjectID, sel.EnvironmentRef(), keyID),
+				map[string]any{"force": force}, nil); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -246,6 +250,14 @@ func revokeCmd(r Resolvers) *cobra.Command {
 			return nil
 		},
 	}
+	// The server refuses to revoke an app-bound key unless force is set, and its
+	// refusal says so in those words: "Pass force to revoke anyway (do this for a
+	// leaked key…)". The flag did not exist, and neither did a released `rotate`
+	// — so at the one moment the instruction matters, following it was impossible.
+	// Prefer `rotate` when a replacement is wanted; this is the deliberate
+	// no-replacement path.
+	cmd.Flags().BoolVar(&force, "force", false,
+		"revoke even when the key is bound to an app — breaks already-installed builds, which cannot re-fetch it")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
