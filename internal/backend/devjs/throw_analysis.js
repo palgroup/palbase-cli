@@ -547,7 +547,14 @@ function analyzeThrows(sourceText, controllerPath, deps) {
           const ex = d.expression;
           const callee = tsapi.isCallExpression(ex) ? ex.expression : ex;
           const n = callee && callee.getText(fileInfo.sf);
-          return n === 'Get' || n === 'Post' || n === 'Put' || n === 'Patch' || n === 'Delete' || n === 'Query';
+          return n === 'Get' || n === 'Post' || n === 'Put' || n === 'Patch' || n === 'Delete' || n === 'Query'
+          // @Upload is a route like any other: on the wire it is a POST, and its
+          // RETURN TYPE is the completion's response contract. Leaving it out here
+          // meant an @Upload method's return type was never read, so the operation
+          // shipped with NO 200 schema and every generated client got an EMPTY
+          // response struct — the upload worked and the document it returns
+          // (url, variants, caption) was untyped and unreachable from the app.
+          || n === 'Upload';
         });
         if (!isRoute) continue;
 
