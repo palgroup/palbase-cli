@@ -76,19 +76,20 @@ func migSQLResponse(sql string, plan map[string][]string) map[string]any {
 	return map[string]any{
 		"sql": sql,
 		"plan": map[string]any{
-			"addTables":       get("addTables"),
-			"addColumns":      get("addColumns"),
-			"dropColumns":     get("dropColumns"),
-			"dropTables":      get("dropTables"),
-			"typeChanges":     get("typeChanges"),
-			"addConstraints":  get("addConstraints"),
-			"dropConstraints": get("dropConstraints"),
-			"addIndexes":      get("addIndexes"),
-			"dropIndexes":     get("dropIndexes"),
-			"enableRLS":       get("enableRLS"),
-			"addPolicies":     get("addPolicies"),
-			"changePolicies":  get("changePolicies"),
-			"addForeignKeys":  get("addForeignKeys"),
+			"addTables":         get("addTables"),
+			"addColumns":        get("addColumns"),
+			"dropColumns":       get("dropColumns"),
+			"dropTables":        get("dropTables"),
+			"typeChanges":       get("typeChanges"),
+			"addConstraints":    get("addConstraints"),
+			"dropConstraints":   get("dropConstraints"),
+			"addIndexes":        get("addIndexes"),
+			"dropIndexes":       get("dropIndexes"),
+			"enableRLS":         get("enableRLS"),
+			"addPolicies":       get("addPolicies"),
+			"changePolicies":    get("changePolicies"),
+			"addForeignKeys":    get("addForeignKeys"),
+			"unprotectedTables": get("unprotectedTables"),
 		},
 	}
 }
@@ -431,6 +432,57 @@ func TestCheck_NilWhenInSync(t *testing.T) {
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, out.String(), "in sync")
+}
+
+// --- renderCheck (unprotected tables report) ----------------------------
+//
+// A table that exists without row security is invisible to a DIFF — nobody
+// declared a change, so there is nothing to compare. It is exactly the table
+// an upgrade to fail-closed defaults (@palbase/backend 16) leaves behind, and
+// the only reason the tenant would ever learn about it is this report.
+
+func TestCheckReportsUnprotectedTables(t *testing.T) {
+	plan := diffPlan{UnprotectedTables: []string{"todos", "zthreads"}}
+
+	out := renderCheck(plan)
+
+	require.Contains(t, out, "todos")
+	require.Contains(t, out, "zthreads")
+	require.Contains(t, strings.ToLower(out), "row security")
+}
+
+// An empty list must not print a scary heading with nothing under it.
+func TestCheckSaysNothingWhenAllProtected(t *testing.T) {
+	out := renderCheck(diffPlan{})
+	require.NotContains(t, strings.ToLower(out), "row security")
+}
+
+// TestCheck_WarnsAboutUnprotectedTables_EvenWhenSchemaInSync is the actual bug
+// this closes: a table with no row security is invisible to the diff, so the
+// server can report "schema in sync" (empty() is true — unprotectedTables does
+// NOT drive it) while a table sits open. Before this fix `db check` would print
+// only "✓ schema in sync" and exit 0 with no mention of it. It must still exit
+// 0 (an existing unprotected table is not new drift to block a push over) but
+// now names the table on stdout.
+func TestCheck_WarnsAboutUnprotectedTables_EvenWhenSchemaInSync(t *testing.T) {
+	chdirTemp(t, "export default defineSchema({})")
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		resp := migSQLResponse("", nil)
+		resp["plan"].(map[string]any)["unprotectedTables"] = []string{"todos"}
+		trpcOK(w, resp)
+	})
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"check"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	o := out.String()
+	require.Contains(t, o, "in sync")
+	require.Contains(t, o, "todos")
+	require.Contains(t, strings.ToLower(o), "row security")
 }
 
 func TestCheck_ErrorsWhenDrift(t *testing.T) {

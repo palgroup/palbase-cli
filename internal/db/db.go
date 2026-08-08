@@ -73,6 +73,15 @@ type diffPlan struct {
 	// generated ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY SQL (the same class
 	// as the RLS-dropped-in-CLI regression). Tag must match the server DiffPlan.
 	AddForeignKeys []string `json:"addForeignKeys"`
+	// UnprotectedTables — tables that EXIST in the live database with row
+	// security OFF. Not a diff field: nobody declared a change (the table may
+	// not even be in db/schema.ts), so it never makes empty() false — it is a
+	// standing fact about the current database, reported every check whether
+	// or not anything drifted. This is the visibility gap @palbase/backend 16
+	// left: RLS became fail-closed for NEW tables, but a table that already
+	// existed keeps whatever it had, and `db check`/`db diff` had no way to
+	// show that until this field.
+	UnprotectedTables []string `json:"unprotectedTables"`
 }
 
 // empty reports whether the live DB already matches the declared schema.
@@ -333,8 +342,17 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 				return err
 			}
 
+			// Unprotected tables are a standing fact about the live database, not
+			// part of the diff (empty() ignores them) — so they must be reported
+			// in BOTH branches below, not just the drift one. That is the whole
+			// point: before this, a table with no row security produced no diff
+			// and therefore no warning, on every `db check` run.
+			unprotected := renderCheck(resp.Plan)
+
 			if resp.Plan.empty() {
-				fmt.Fprintln(cmd.OutOrStdout(), "✓ schema in sync")
+				out := cmd.OutOrStdout()
+				fmt.Fprintln(out, "✓ schema in sync")
+				fmt.Fprint(out, unprotected)
 				return nil
 			}
 
@@ -367,9 +385,29 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			report("+ rls        ", resp.Plan.EnableRLS)
 			report("+ policy     ", resp.Plan.AddPolicies)
 			report("~ policy     ", resp.Plan.ChangePolicies)
+			fmt.Fprint(errOut, unprotected)
 			fmt.Fprintln(errOut, "run `palbase db diff -f <name>` to generate a migration")
 			return fmt.Errorf("schema drift: migration needed")
 		},
 	}
 	return cmd
+}
+
+// renderCheck renders the `db check` report for tables that exist live
+// without row security — a standing fact read off the live database
+// (diffPlan.UnprotectedTables), independent of whatever else the diff found.
+// Returns "" when the list is empty so callers can print it unconditionally
+// without producing a heading over nothing.
+func renderCheck(p diffPlan) string {
+	if len(p.UnprotectedTables) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nrow security is OFF on these existing tables:\n")
+	for _, t := range p.UnprotectedTables {
+		b.WriteString("  " + t + "\n")
+	}
+	b.WriteString("Any authenticated user can read and write them. Declare `rls: true`\n" +
+		"in db/schema.ts and run `palbase db diff` to generate the migration.\n")
+	return b.String()
 }
