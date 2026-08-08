@@ -236,4 +236,3 @@ func majorOf(version string) int {
 	}
 	return n
 }
-
