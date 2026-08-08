@@ -49,7 +49,7 @@ func TestAppsCmd_Subcommands(t *testing.T) {
 		got = append(got, c.Name())
 	}
 	sort.Strings(got)
-	require.Equal(t, []string{"attest", "config", "create", "delete", "enforce", "list"}, got)
+	require.Equal(t, []string{"attest", "config", "create", "delete", "enforce", "identifier", "list", "team-id"}, got)
 }
 
 // The apps surface splits across the two boundaries: REGISTRATION is
@@ -96,6 +96,30 @@ func TestApps_HitsTheV2Paths(t *testing.T) {
 		},
 		{
 			name: "attest patches the (app x ENVIRONMENT) binding", args: []string{"attest", "--app", "app_ios", "--json"},
+			route: "PATCH /api/v2/apps/app_ios/bindings/app1prod",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("PATCH /api/v2/apps/app_ios/bindings/app1prod", map[string]any{"projectId": "proj_1"})
+			},
+		},
+		{
+			// The identifier is APP-level, not per-Environment: both association
+			// documents are derived from it for every Environment the app is
+			// bound to, so the route must carry no environment ref.
+			name:  "identifier patches the APP, not a binding",
+			args:  []string{"identifier", "--app", "app_ios", "com.demo.palbase", "--json"},
+			route: "PATCH /api/v2/apps/app_ios",
+			reply: func(f *selectiontest.Fake) {
+				f.OK("PATCH /api/v2/apps/app_ios", map[string]any{
+					"projectId": "proj_1", "identifier": "com.demo.palbase",
+				})
+			},
+		},
+		{
+			// team id is BINDING-level (app × Environment) while the bundle id is
+			// APP-level — the two halves of one association entry living in two
+			// places, which is why only this one carries an environment ref.
+			name:  "team-id patches the (app x ENVIRONMENT) binding",
+			args:  []string{"team-id", "--app", "app_ios", "K42P7PK4NT", "--json"},
 			route: "PATCH /api/v2/apps/app_ios/bindings/app1prod",
 			reply: func(f *selectiontest.Fake) {
 				f.OK("PATCH /api/v2/apps/app_ios/bindings/app1prod", map[string]any{"projectId": "proj_1"})

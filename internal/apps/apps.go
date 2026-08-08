@@ -65,6 +65,13 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase apps config --app <appId>             Write a web app's config for the
                                                 selected environment.
   palbase apps enforce                          Require registered apps.
+  palbase apps identifier --app <appId> <value>
+                                                Set the app's platform
+                                                identifier (bundle id,
+                                                applicationId, or web origin).
+  palbase apps team-id --app <appId> <TEAM_ID>
+                                                Set the Apple Team ID on the
+                                                (app x environment) binding.
   palbase apps attest --app <appId>             Require App Attest on the
                                                 selected environment's binding.
 
@@ -78,6 +85,8 @@ All operations go through the Management API (role-gated server-side).`,
 		configCmd(r),
 		enforceCmd(r),
 		attestCmd(r),
+		identifierCmd(r),
+		teamIDCmd(r),
 	)
 	return cmd
 }
@@ -292,6 +301,114 @@ func attestCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
 	cmd.Flags().BoolVar(&disable, "disable", false, "turn App Attest OFF (default: turn it ON)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	_ = cmd.MarkFlagRequired("app")
+	return cmd
+}
+
+// identifierCmd wires `palbase apps identifier --app <appId> <value>`.
+//
+// The identifier is what names the app on its platform, and BOTH passkey
+// association documents are derived from it:
+//
+//	ios / macos → bundle id, published as <TEAM_ID>.<bundle_id> in
+//	              /.well-known/apple-app-site-association
+//	android     → applicationId
+//	web         → the origin the app is served from, published in
+//	              /.well-known/webauthn
+//
+// Without it those documents stay empty and passkeys cannot work on that
+// platform at all — with no error anywhere, because an empty association is a
+// valid document that simply vouches for nobody.
+func identifierCmd(r Resolvers) *cobra.Command {
+	var (
+		appID   string
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "identifier <value>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Set the app's platform identifier (bundle id, applicationId, or web origin)",
+		Long: "Set the identifier that names this app on its platform.\n" +
+			"iOS/macOS: an Apple bundle id (com.example.app).\n" +
+			"Android:   the applicationId.\n" +
+			"Web:       the https origin the app is served from.\n\n" +
+			"Both passkey association documents are derived from this value, so a\n" +
+			"passkey cannot work on a platform whose app has none.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var out struct {
+				ProjectID  string `json:"projectId"`
+				Identifier string `json:"identifier"`
+			}
+			if err := r.REST().Do(cmd.Context(), http.MethodPatch,
+				"/api/v2/apps/"+appID,
+				map[string]any{"identifier": args[0]}, &out); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(cmd.OutOrStdout(), map[string]any{
+					"appId": appID, "identifier": out.Identifier,
+				})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ app %s identifier set to %s\n", appID, out.Identifier)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	_ = cmd.MarkFlagRequired("app")
+	return cmd
+}
+
+// teamIDCmd wires `palbase apps team-id --app <appId> <TEAM_ID>`.
+//
+// The Apple association entry is `<TEAM_ID>.<bundle_id>`, and the two halves
+// live in different places: the bundle id on the APP (`apps identifier`), the
+// team id on the (app × Environment) BINDING — which is why this targets the
+// selected environment while `identifier` does not.
+//
+// Either half missing means the association file lists nothing for that app,
+// and iOS then refuses every passkey ceremony with "not associated with domain"
+// — a device-side error with no server-side trace.
+func teamIDCmd(r Resolvers) *cobra.Command {
+	var (
+		appID   string
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "team-id <TEAM_ID>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Set the Apple Team ID on the (app × environment) binding",
+		Long: "Set the Apple Team ID used to build this app.\n\n" +
+			"It is the first half of the passkey association entry\n" +
+			"<TEAM_ID>.<bundle_id>; the second half is `palbase apps identifier`.\n" +
+			"Find it in Xcode under Signing & Capabilities, or in the Apple\n" +
+			"Developer portal's Membership page.\n\n" +
+			"It acts on the SELECTED environment (override with --environment).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sel, err := r.Selection().Resolve(cmd.Context())
+			if err != nil {
+				return err
+			}
+			var out struct {
+				ProjectID string `json:"projectId"`
+			}
+			if err := r.REST().Do(cmd.Context(), http.MethodPatch,
+				"/api/v2/apps/"+appID+"/bindings/"+sel.EnvironmentRef(),
+				map[string]any{"teamId": args[0]}, &out); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(cmd.OutOrStdout(), map[string]any{
+					"appId": appID, "environment_ref": sel.EnvironmentRef(), "team_id": args[0],
+				})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ team id %s set for app %s on environment %s\n",
+				args[0], appID, sel.EnvironmentRef())
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&appID, "app", "", "App id (required)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
