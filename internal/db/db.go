@@ -74,13 +74,21 @@ type diffPlan struct {
 	// as the RLS-dropped-in-CLI regression). Tag must match the server DiffPlan.
 	AddForeignKeys []string `json:"addForeignKeys"`
 	// UnprotectedTables — tables that EXIST in the live database with row
-	// security OFF. Not a diff field: nobody declared a change (the table may
-	// not even be in db/schema.ts), so it never makes empty() false — it is a
-	// standing fact about the current database, reported every check whether
-	// or not anything drifted. This is the visibility gap @palbase/backend 16
-	// left: RLS became fail-closed for NEW tables, but a table that already
-	// existed keeps whatever it had, and `db check`/`db diff` had no way to
-	// show that until this field.
+	// security OFF, EXCEPT one the server has excluded because db/schema.ts
+	// declares rls:false for it on purpose (a reviewed opt-out). It never
+	// drives empty() — it is a standing database fact, not a diff — so it is
+	// reported in BOTH branches of `db check` below. In today's server
+	// computation a table never arrives here alone: the same table is also
+	// either an orphan (dropped from/never in schema.ts, which shows up as a
+	// "- table" line) or declared rls:true but not yet applied (a "+ rls"
+	// line) — so in practice this surfaces on the drifted branch, naming WHY
+	// the drift matters (the table is currently open), not on the "in sync"
+	// one. It is still checked in both branches on principle: this field's
+	// presence is not supposed to depend on what else the diff happens to
+	// contain, and this is the visibility gap @palbase/backend 16 left — RLS
+	// became fail-closed for NEW tables, but a table that already existed
+	// keeps whatever it had, and `db check`/`db diff` had no way to show that
+	// until this field.
 	UnprotectedTables []string `json:"unprotectedTables"`
 }
 
@@ -343,10 +351,12 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			}
 
 			// Unprotected tables are a standing fact about the live database, not
-			// part of the diff (empty() ignores them) — so they must be reported
-			// in BOTH branches below, not just the drift one. That is the whole
-			// point: before this, a table with no row security produced no diff
-			// and therefore no warning, on every `db check` run.
+			// part of the diff (empty() ignores them), so they are reported in
+			// BOTH branches below rather than assuming they only ever ride along
+			// with the drift branch. Today they always do (see the field's doc
+			// comment in db.go) — but the check must not silently depend on that
+			// staying true forever; before this field existed, `db check` said
+			// nothing about an open table in ANY branch, on every run.
 			unprotected := renderCheck(resp.Plan)
 
 			if resp.Plan.empty() {

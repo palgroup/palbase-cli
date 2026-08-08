@@ -457,13 +457,18 @@ func TestCheckSaysNothingWhenAllProtected(t *testing.T) {
 	require.NotContains(t, strings.ToLower(out), "row security")
 }
 
-// TestCheck_WarnsAboutUnprotectedTables_EvenWhenSchemaInSync is the actual bug
-// this closes: a table with no row security is invisible to the diff, so the
-// server can report "schema in sync" (empty() is true — unprotectedTables does
-// NOT drive it) while a table sits open. Before this fix `db check` would print
-// only "✓ schema in sync" and exit 0 with no mention of it. It must still exit
-// 0 (an existing unprotected table is not new drift to block a push over) but
-// now names the table on stdout.
+// TestCheck_WarnsAboutUnprotectedTables_EvenWhenSchemaInSync locks the CLI
+// side of the fix defensively: even if the server ever sent unprotectedTables
+// with every other field empty, `db check` must still name the table rather
+// than silently swallowing it because empty() is true. In today's real server
+// computation this combination cannot actually occur (see
+// diffPlan.UnprotectedTables's doc comment — a table never arrives here
+// without also tripping DropTables or EnableRLS in the same diff pass), so
+// this test drives the scenario through a hand-built HTTP response rather
+// than a real deploy — the CLI's rendering must not depend on that server
+// invariant holding forever. It must still exit 0 (an existing unprotected
+// table is not new drift to block a push over) but now names the table on
+// stdout regardless of which branch fires.
 func TestCheck_WarnsAboutUnprotectedTables_EvenWhenSchemaInSync(t *testing.T) {
 	chdirTemp(t, "export default defineSchema({})")
 	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
