@@ -456,3 +456,39 @@ func TestRunPullSpec_FreshnessLookupErrorWarnsAndProceeds(t *testing.T) {
 	require.FileExists(t, filepath.Join(dir, "openapi.json"))
 	require.Contains(t, out.String(), "could not verify spec freshness")
 }
+
+// TestRunPullSpec_LegacyDocVersionIsUnverifiableNotStale is the regression this
+// cost a live run to find. A runtime older than the deploy-identity stamp writes
+// the literal "1.0.0" into info.version. Reading that as a stale deploy blocked
+// `palbase spec` outright — observed against a real Environment:
+//
+//	waiting for the origin to serve deploy 8e35fa5f (it is still on 1.0.0)…
+//	… is still serving deploy 1.0.0 but the latest successful deploy is 8e35fa5f
+//
+// The contract was current; the origin simply could not prove it. That is the
+// UNVERIFIED path (write it, say so), never the refuse-to-write one — otherwise
+// every tenant on a pre-stamp artifact loses the command entirely.
+func TestRunPullSpec_LegacyDocVersionIsUnverifiableNotStale(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	calls := 0
+	err := runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			calls++
+			return []byte(`{"info":{"version":"1.0.0"}}`), nil
+		},
+		nil, nil,
+		func(context.Context) (string, error) { return "8e35fa5f", nil },
+		"app1prod", "dev.palbase.studio", dir, "", "", &out)
+
+	require.NoError(t, err, "a contract that cannot prove its freshness must still be written")
+	require.Equal(t, 1, calls, "it must not sit in the wait loop for an identity that never arrives")
+	require.FileExists(t, filepath.Join(dir, "openapi.json"))
+	require.Contains(t, out.String(), "freshness UNVERIFIED")
+	require.NotContains(t, out.String(), "waiting for the origin")
+	require.NotContains(t, out.String(), "deploy 1.0.0",
+		"the success line must not present the placeholder as a real deploy")
+}

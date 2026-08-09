@@ -199,6 +199,25 @@ const specWaitTimeout = 45 * time.Second
 // add noise.
 const specWaitInterval = 2 * time.Second
 
+// legacyDocVersion is the literal the runtime writes into info.version when it
+// has no deploy identity to stamp — the value every artifact built before the
+// stamp existed carries, and the one a runtime older than that stamp still
+// emits today. It is NOT a version anyone can be waiting for: real deploy
+// identities are content SHAs.
+//
+// Treating it as a mismatch is what a live run caught the moment this shipped:
+// every tenant on a pre-stamp artifact got "still serving deploy 1.0.0 but the
+// latest successful deploy is 8e35fa5f" and NOTHING was written — a hard block
+// on `palbase spec` for a contract that was in fact perfectly current. The
+// honest reading is "this origin cannot prove its freshness", which is the
+// UNVERIFIED path, not the stale one.
+const legacyDocVersion = "1.0.0"
+
+// hasDeployIdentity reports whether a served document actually names its deploy.
+func hasDeployIdentity(served string) bool {
+	return served != "" && served != legacyDocVersion
+}
+
 // specDocVersion reads info.version out of an OpenAPI document — the deploy
 // identity the runtime bakes in (openapiSpecFromRoutes). Empty when the document
 // has none: an artifact built before the stamp existed, or an unparseable body.
@@ -260,9 +279,9 @@ func fetchFreshSpec(
 		if expected == "" || served == expected {
 			return specBytes, served, nil
 		}
-		if served == "" {
+		if !hasDeployIdentity(served) {
 			fmt.Fprintln(w, "  note: this origin serves a contract with no deploy identity — freshness UNVERIFIED")
-			return specBytes, served, nil
+			return specBytes, "", nil
 		}
 		if time.Now().After(deadline) {
 			return nil, "", fmt.Errorf(
