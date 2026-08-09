@@ -57,6 +57,17 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.js'), [
   '',
 ].join('\n'));
 
+// A NON-controller file dropped into controllers/. Its top-level `new URL()` on a
+// relative path throws the moment the file is require()d — the exact shape of the
+// reported failure ("DEPLOY WOULD FAIL: controllers/tenancy.test.js — Invalid URL")
+// for a file the DEPLOY never loads, because discoverControllerEntries keys on
+// `.controller.`.
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'tenancy.test.js'), [
+  'const parsed = new URL("/relative");',
+  'export default parsed;',
+  '',
+].join('\n'));
+
 // require()ing build-check.js is side-effect-light because main() is guarded by
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
 const {
@@ -275,4 +286,59 @@ test('TxPlan gate: services/*.ts is scanned too, not just controllers/', () => {
   const result = runBuildCheck(fixtureRoot);
   assert.strictEqual(result.status, 1, `expected exit 1, got ${result.status}\nstdout: ${result.stdout}`);
   assert.match(result.stdout, /invite\.service\.ts:6:/, 'must name the offending file and line inside services/');
+});
+
+// ── controllers/ discovery must match the deploy's ─────────────────────────
+
+// The reported defect: a test file dropped into controllers/ failed the build
+// with "Invalid URL" — a file the DEPLOY never loads. discoverControllerEntries
+// (modules/backend/internal/deploy/bundler.go) keys on `.controller.`, so the
+// build was STRICTER than the deploy and its "DEPLOY WOULD FAIL" claim was
+// false. Mutation: widen CONTROLLER_ENTRY_RE / BUNDLED_CONTROLLER_RE back to
+// /\.(c?js|mjs|ts)$/ and this goes RED on both assertions.
+test('a non-controller file in controllers/ is neither bundled nor loaded', (t) => {
+  if (!esbuildAvailable()) return t.skip('npx esbuild unavailable (offline?)');
+
+  bundleResources();
+  const reg = registerControllers();
+
+  assert.ok(!fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'tenancy.test.js')),
+    'only *.controller.* files are entry points, exactly as on deploy');
+  const offending = (reg.skipped || []).filter((s) => /tenancy\.test/.test(s.file));
+  assert.deepEqual(offending, [],
+    'a file the deploy never loads must not produce a build failure');
+  assert.ok(fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'diag.controller.js')),
+    'the real controller is still bundled');
+});
+
+// Narrowing the scan must NOT cost the silent-failure signal it was guarding:
+// a controllers/ full of source that registers nothing deploys as a SUCCESS
+// serving zero endpoints, which is the whole reason this runner exists.
+test('controllers/ with source but no *.controller.ts fails and names the convention', (t) => {
+  if (!esbuildAvailable()) return t.skip('npx esbuild unavailable (offline?)');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-buildcheck-noentry-'));
+  fs.mkdirSync(path.join(root, 'controllers'), { recursive: true });
+  // Misnamed on purpose: a @Controller class in a file the deploy will never
+  // treat as an entry point.
+  fs.writeFileSync(path.join(root, 'controllers', 'todos.js'),
+    'export default class TodosController {}\n');
+
+  let out = '';
+  let code = 0;
+  try {
+    out = execFileSync('node', [path.join(__dirname, 'build-check.js')], {
+      env: Object.assign({}, process.env, { PALBASE_DEV_ROOT: root }),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    code = err.status;
+    out = String(err.stdout || '') + String(err.stderr || '');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  assert.strictEqual(code, 1, `build must fail; output:\n${out}`);
+  assert.match(out, /only \*\.controller\.ts files register routes/);
 });

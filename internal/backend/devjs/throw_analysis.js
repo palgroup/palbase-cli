@@ -31,6 +31,13 @@
  *   fn(...)                 imported/local function decl (or const fn = …).
  *   this.m(...)             same-class method body.
  *
+ * The THROWN VALUE itself is lowered by resolveThrownExpression, which handles
+ * `throw new X(...)`, `throw <local bound to new X(...)>`, and
+ * `throw <call>` where the callee RETURNS the error (the factory idiom).
+ * NOT resolved: a helper declared as a class PROPERTY (`private m = () => …`),
+ * because classMethod only matches MethodDeclarations — such a call is skipped
+ * silently like any other unresolvable shape.
+ *
  * Transitive walk is depth-bounded (8), cycle-safe via a (file, symbol)
  * visited set, and PROJECT FILES ONLY: relative imports resolve against the
  * REAL project tree (`.ts` / `/index.ts` candidates); bare specifiers other
@@ -476,14 +483,106 @@ function resolveCallTarget(ctx, fileInfo, classNode, callExpr) {
   return null; // dynamic dispatch / computed / IIFE / namespaced → skip
 }
 
-// collectFromBody walks one body subtree: lowers every `throw new X(...)` and
-// recurses into every resolvable call (bounded by MAX_DEPTH + visited).
+// resolveThrownExpression lowers the THROWN VALUE, which is not always a `new`.
+// Three shapes reach a defineError class and only the first used to be handled:
+//
+//   throw new X(...)             the literal form
+//   throw this.mk(...)           an error FACTORY — the helper builds and RETURNS it
+//   const e = new X(); throw e   built into a local first
+//
+// The last two produced an EMPTY error set for the whole route: no 5xx in the
+// spec, no typed class in the generated client, and no diagnostic anywhere —
+// while the code kept throwing the error at runtime, so it "worked" and the gap
+// only showed up as a client that could not name what it caught.
+//
+// The factory case does NOT double-count. collectFromBody's generic call branch
+// recurses into the callee to collect its THROWS under `target.key`; this pass
+// collects the RETURNED constructions under `target.key + '#returns'`, so the
+// two walks are independent and each runs at most once.
+function resolveThrownExpression(ctx, fileInfo, classNode, expr, out, depth, visited) {
+  const tsapi = loadTS();
+  if (tsapi.isNewExpression(expr)) {
+    resolveThrownNew(ctx, fileInfo, expr, out);
+    return;
+  }
+  if (tsapi.isIdentifier(expr)) {
+    const init = localNewInitializer(tsapi, expr);
+    if (init) resolveThrownNew(ctx, fileInfo, init, out);
+    return;
+  }
+  if (tsapi.isCallExpression(expr)) {
+    const target = resolveCallTarget(ctx, fileInfo, classNode, expr);
+    if (!target) return;
+    const key = target.key + '#returns';
+    if (depth + 1 > MAX_DEPTH || visited.has(key)) return;
+    visited.add(key);
+    collectReturnedNew(ctx, target.file, target.classNode, target.body, out, depth + 1, visited);
+  }
+}
+
+// localNewInitializer walks OUT from a thrown identifier to the
+// `const e = new X()` that declared it, stopping at the enclosing function so a
+// same-named local in a sibling scope can't be picked up. Only a DIRECT `new`
+// initializer resolves; a reassigned or conditionally-built local is one of the
+// shapes this analysis skips silently by design.
+function localNewInitializer(tsapi, ident) {
+  const name = ident.text;
+  for (let node = ident.parent; node; node = node.parent) {
+    let found = null;
+    const scan = (child) => {
+      if (found) return;
+      if (
+        tsapi.isVariableDeclaration(child) &&
+        tsapi.isIdentifier(child.name) &&
+        child.name.text === name &&
+        child.initializer &&
+        tsapi.isNewExpression(child.initializer)
+      ) {
+        found = child.initializer;
+        return;
+      }
+      tsapi.forEachChild(child, scan);
+    };
+    tsapi.forEachChild(node, scan);
+    if (found) return found;
+    if (tsapi.isFunctionLike(node) || tsapi.isSourceFile(node)) break;
+  }
+  return null;
+}
+
+// collectReturnedNew collects the error constructions a FACTORY hands back:
+// `return new X(...)`, the concise arrow body `() => new X(...)`, and one more
+// hop for `return this.other()` so a two-level factory still resolves. It walks
+// RETURNS only — a helper that merely constructs an error nobody throws must not
+// become one of the route's declared error responses.
+function collectReturnedNew(ctx, fileInfo, classNode, body, out, depth, visited) {
+  const tsapi = loadTS();
+  // A concise arrow body IS the returned expression — there is no ReturnStatement.
+  if (!tsapi.isBlock(body)) {
+    resolveThrownExpression(ctx, fileInfo, classNode, body, out, depth, visited);
+    return;
+  }
+  const visit = (node) => {
+    if (tsapi.isReturnStatement(node)) {
+      if (node.expression) {
+        resolveThrownExpression(ctx, fileInfo, classNode, node.expression, out, depth, visited);
+      }
+      return; // the returned expression is handled; do not re-walk it
+    }
+    tsapi.forEachChild(node, visit);
+  };
+  tsapi.forEachChild(body, visit);
+}
+
+// collectFromBody walks one body subtree: lowers every throw site (see
+// resolveThrownExpression for the shapes) and recurses into every resolvable
+// call (bounded by MAX_DEPTH + visited).
 function collectFromBody(ctx, fileInfo, classNode, body, out, depth, visited) {
   const tsapi = loadTS();
 
   const visit = (node) => {
-    if (tsapi.isThrowStatement(node) && node.expression && tsapi.isNewExpression(node.expression)) {
-      resolveThrownNew(ctx, fileInfo, node.expression, out);
+    if (tsapi.isThrowStatement(node) && node.expression) {
+      resolveThrownExpression(ctx, fileInfo, classNode, node.expression, out, depth, visited);
     } else if (tsapi.isCallExpression(node)) {
       const target = resolveCallTarget(ctx, fileInfo, classNode, node);
       if (target && depth + 1 <= MAX_DEPTH && !visited.has(target.key)) {

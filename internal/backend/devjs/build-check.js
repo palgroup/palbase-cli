@@ -164,9 +164,14 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
 // bundled; false when srcDir is absent or empty (a clean no-op). Throws on an
 // esbuild error so a syntax error surfaces loudly rather than silently
 // registering 0 routes.
-function bundleSrcDir(srcDir, outDir, externals = []) {
+// `entryFilter`, when given, narrows the entry set further (controllers pass the
+// `.controller.` rule so a sibling file is only ever pulled in through a
+// controller's import graph — exactly how the deploy bundler treats it).
+function bundleSrcDir(srcDir, outDir, externals = [], entryFilter = null) {
   if (!fs.existsSync(srcDir)) return false;
-  const entries = walk(srcDir).filter((f) => /\.(c?js|mjs|tsx?|jsx)$/i.test(path.basename(f)));
+  const entries = walk(srcDir)
+    .filter((f) => /\.(c?js|mjs|tsx?|jsx)$/i.test(path.basename(f)))
+    .filter((f) => (entryFilter ? entryFilter.test(path.basename(f)) : true));
   if (entries.length === 0) return false;
 
   fs.mkdirSync(outDir, { recursive: true });
@@ -214,7 +219,26 @@ function rmBundledTree(outDir) {
   try { fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
-const CONTROLLER_FILE_RE = /\.(c?js|mjs|ts)$/i;
+// The `.controller.` suffix is the ONLY routing convention. The deploy's own
+// discoverControllerEntries (modules/backend/internal/deploy/bundler.go) keys on
+// exactly this and nothing else under controllers/ is ever an entry point there
+// — anything else is reached only if a controller imports it.
+//
+// Matching that here is not a convenience, it is the parity this whole file
+// exists to provide. A broader scan made `palbase build` reject trees the deploy
+// accepts: a `controllers/tenancy.test.js` was require()d + meta-extracted, its
+// top-level code threw, and the build printed
+// "✗ DEPLOY WOULD FAIL: controllers/tenancy.test.js — Invalid URL" about a file
+// no deploy would ever load.
+const CONTROLLER_ENTRY_RE = /\.controller\.(c?ts|tsx|c?js|mjs)$/i;
+// Bundled output is always plain JS (esbuild), so the bundled-side twin of the
+// rule above drops the TypeScript extensions.
+const BUNDLED_CONTROLLER_RE = /\.controller\.(c?js|mjs)$/i;
+// Every source extension the controllers/ tree may legitimately contain. Used
+// only to answer "does this directory hold source at all" when no controller
+// entry was found — the difference between an empty directory (fine) and a
+// directory whose files register nothing (a deploy that serves zero endpoints).
+const CONTROLLER_SOURCE_RE = /\.(c?js|mjs|tsx?|jsx)$/i;
 
 // ── route table ────────────────────────────────────────────────────────
 //
@@ -381,7 +405,7 @@ function registerControllers() {
     // to the shared BUNDLE_ROOT/resources/ copy (bundled by bundleResources
     // BEFORE this runs — main() ordering). Deploy parity: bundler.go sets
     // ExternalResourceImports only for the controllers bundle.
-    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR, CONTROLLER_RESOURCE_EXTERNALS);
+    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR, CONTROLLER_RESOURCE_EXTERNALS, CONTROLLER_ENTRY_RE);
   } catch (err) {
     // A bundle error (syntax error, unresolved import) OR a return-type
     // violation must be LOUD — otherwise the dir scan below finds nothing and
@@ -392,14 +416,25 @@ function registerControllers() {
   }
 
   if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) {
-    log('0 route(s) (no controllers/*.ts found)');
+    // Nothing bundled means no *.controller.ts entry existed. Two very different
+    // situations hide behind that: an empty controllers/ (a project with no
+    // endpoints yet — fine), and a controllers/ full of source that registers
+    // NOTHING, which deploys as a success serving zero endpoints. Narrowing the
+    // scan to `.controller.` must not cost us the second signal.
+    const sourceFiles = walk(CONTROLLERS_DIR).filter((f) => CONTROLLER_SOURCE_RE.test(path.basename(f)));
+    if (sourceFiles.length > 0) {
+      const err = 'only *.controller.ts files register routes; controllers/ has source files but none of them';
+      log(`controllers/ has no *.controller.ts — ${err}`);
+      return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: err };
+    }
+    log('0 route(s) (no controllers/*.controller.ts found)');
     return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped };
   }
 
   let sawControllerFiles = false;
   let staleSDKSignature = false;
   for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
-    if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    if (!BUNDLED_CONTROLLER_RE.test(path.basename(file))) continue;
     sawControllerFiles = true;
     let Ctrl;
     try {
@@ -451,7 +486,7 @@ function deployExtractErrors() {
   if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) return out;
   const extractor = path.join(__dirname, 'extract_meta.js');
   for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
-    if (!CONTROLLER_FILE_RE.test(path.basename(file))) continue;
+    if (!BUNDLED_CONTROLLER_RE.test(path.basename(file))) continue;
     const srcRel = bundledToSrcRel(file);
     let stdout;
     try {
