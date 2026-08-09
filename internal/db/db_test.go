@@ -73,25 +73,34 @@ func migSQLResponse(sql string, plan map[string][]string) map[string]any {
 		}
 		return []string{}
 	}
-	return map[string]any{
-		"sql": sql,
-		"plan": map[string]any{
-			"addTables":         get("addTables"),
-			"addColumns":        get("addColumns"),
-			"dropColumns":       get("dropColumns"),
-			"dropTables":        get("dropTables"),
-			"typeChanges":       get("typeChanges"),
-			"addConstraints":    get("addConstraints"),
-			"dropConstraints":   get("dropConstraints"),
-			"addIndexes":        get("addIndexes"),
-			"dropIndexes":       get("dropIndexes"),
-			"enableRLS":         get("enableRLS"),
-			"addPolicies":       get("addPolicies"),
-			"changePolicies":    get("changePolicies"),
-			"addForeignKeys":    get("addForeignKeys"),
-			"unprotectedTables": get("unprotectedTables"),
-		},
+	body := map[string]any{
+		"addTables":          get("addTables"),
+		"addColumns":         get("addColumns"),
+		"dropColumns":        get("dropColumns"),
+		"dropTables":         get("dropTables"),
+		"typeChanges":        get("typeChanges"),
+		"nullabilityChanges": get("nullabilityChanges"),
+		"addConstraints":     get("addConstraints"),
+		"dropConstraints":    get("dropConstraints"),
+		"addIndexes":         get("addIndexes"),
+		"dropIndexes":        get("dropIndexes"),
+		"enableRLS":          get("enableRLS"),
+		"addPolicies":        get("addPolicies"),
+		"changePolicies":     get("changePolicies"),
+		"addForeignKeys":     get("addForeignKeys"),
+		"unprotectedTables":  get("unprotectedTables"),
 	}
+	// Pass any key the caller supplied that the list above does not name. Without
+	// this the helper SILENTLY DROPS an unknown field, so a test written for a
+	// newly-added plan bucket passes against an empty plan and proves nothing —
+	// the helper would hide exactly the class of bug these tests exist to catch
+	// (a CLI struct missing the server's field).
+	for k, v := range plan {
+		if _, named := body[k]; !named {
+			body[k] = v
+		}
+	}
+	return map[string]any{"sql": sql, "plan": body}
 }
 
 // --- db diff -----------------------------------------------------------------
@@ -517,4 +526,69 @@ func TestCheck_ErrorsWhenDrift(t *testing.T) {
 	require.Contains(t, e, "old.gone")
 	require.Contains(t, e, "users.age")
 	require.Contains(t, e, "palbase db diff")
+}
+
+// TestDiff_WritesMigrationFile_WhenOnlyNullability verifies that a plan with
+// ONLY nullabilityChanges populated is NOT treated as "in sync". A NOT NULL →
+// nullable() edit on an EXISTING column is a real change: the backend now emits
+// the ALTER TABLE ... DROP NOT NULL and populates plan.nullabilityChanges.
+// Before the fix the differ never compared nullability at all, so the plan was
+// EMPTY and `db diff` printed "schema in sync — no migration needed" — the live
+// column kept its NOT NULL and every INSERT that relied on the new nullability
+// failed in production (the reported credit-ledger bug: Stripe took the money,
+// the credit row never inserted). Mutation: drop the
+// len(p.NullabilityChanges)==0 clause from empty() → this test goes RED.
+func TestDiff_WritesMigrationFile_WhenOnlyNullability(t *testing.T) {
+	dir := chdirTemp(t, "export default defineSchema({ credits: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"ALTER TABLE credits ALTER COLUMN palai_project_id DROP NOT NULL;",
+			// nullabilityChanges ALONE — isolating it proves empty() checks THAT
+			// field, and that the JSON tag matches the server's exactly.
+			map[string][]string{"nullabilityChanges": {"credits.palai_project_id"}},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"diff", "-f", "relax_credits"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "nullability-only diff must write a migration file")
+
+	body, _ := os.ReadFile(filepath.Join(dir, "db", "migrations", entries[0].Name()))
+	require.Contains(t, string(body), "DROP NOT NULL")
+
+	require.NotContains(t, out.String(), "in sync")
+	require.Contains(t, out.String(), "1 nullability", "the summary must count it")
+}
+
+// TestCheck_NamesNullabilityDrift locks that `db check` NAMES the drift it
+// exits non-zero for. A gate that prints "schema has drifted" with nothing
+// under it is the least actionable failure it can produce — the same lesson the
+// RLS report lines were added for.
+func TestCheck_NamesNullabilityDrift(t *testing.T) {
+	chdirTemp(t, "export default defineSchema({ credits: {} })")
+
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		trpcOK(w, migSQLResponse(
+			"ALTER TABLE credits ALTER COLUMN meter SET NOT NULL;",
+			map[string][]string{"nullabilityChanges": {"credits.meter"}},
+		))
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"check"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SilenceUsage = true
+	require.Error(t, cmd.Execute(), "drift must exit non-zero")
+	require.Contains(t, out.String(), "~ nullability credits.meter")
 }

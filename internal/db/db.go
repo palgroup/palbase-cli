@@ -13,9 +13,12 @@
 // The diff is computed SERVER-side: only the cluster can reach the tenant DB
 // (the orchestrator runs the tenant's own backend-runtime image as a throwaway
 // `--migration-sql` Job), so the CLI never touches the database. It ships the
-// db/schema.ts SOURCE STRING and gets back {sql, plan}. The plan's five
-// string arrays (added/dropped tables+columns, type changes) drive the
-// summary line, the destructive warning, and the check gate's drift report.
+// db/schema.ts SOURCE STRING and gets back {sql, plan}. The plan's string
+// arrays (added/dropped tables+columns, type and nullability changes,
+// constraints, indexes, FKs, RLS) drive the summary line, the destructive
+// warning, and the check gate's drift report. Every one of them must be
+// decoded here: a field this struct omits is dropped by the JSON unmarshal,
+// which turns a real diff into "schema in sync".
 package db
 
 import (
@@ -52,6 +55,14 @@ type diffPlan struct {
 	DropColumns []string `json:"dropColumns"`
 	DropTables  []string `json:"dropTables"`
 	TypeChanges []string `json:"typeChanges"`
+	// NullabilityChanges — a NOT NULL ⇄ nullable() change on an EXISTING column.
+	// It MUST drive empty(): without this field the JSON unmarshal silently
+	// DROPPED the server's nullabilityChanges, so a nullability-only diff
+	// reported "schema in sync" while the live column kept the old constraint
+	// and every INSERT relying on the new one failed (the same class as the
+	// RLS- and FK-dropped-in-CLI regressions below). Not destructive: neither
+	// direction touches a row. Tag must match the server DiffPlan exactly.
+	NullabilityChanges []string `json:"nullabilityChanges"`
 	// Constraint and index operations — non-data-losing but still require a
 	// migration file. Field tags match the server's DiffPlan JSON exactly.
 	AddConstraints  []string `json:"addConstraints"`
@@ -99,6 +110,7 @@ func (p diffPlan) empty() bool {
 		len(p.DropColumns) == 0 &&
 		len(p.DropTables) == 0 &&
 		len(p.TypeChanges) == 0 &&
+		len(p.NullabilityChanges) == 0 &&
 		len(p.AddConstraints) == 0 &&
 		len(p.DropConstraints) == 0 &&
 		len(p.AddIndexes) == 0 &&
@@ -303,8 +315,9 @@ drops data (columns or tables), a warning is printed — review before pushing.`
 
 			destructive := len(resp.Plan.DropColumns) + len(resp.Plan.DropTables)
 			fmt.Fprintf(out, "✓ wrote %s\n", relPath)
-			fmt.Fprintf(out, "  %d table(s) +, %d column(s) +, %d constraint(s), %d index(es), %d foreign key(s), %d destructive\n",
+			fmt.Fprintf(out, "  %d table(s) +, %d column(s) +, %d nullability, %d constraint(s), %d index(es), %d foreign key(s), %d destructive\n",
 				len(resp.Plan.AddTables), len(resp.Plan.AddColumns),
+				len(resp.Plan.NullabilityChanges),
 				len(resp.Plan.AddConstraints)+len(resp.Plan.DropConstraints),
 				len(resp.Plan.AddIndexes)+len(resp.Plan.DropIndexes),
 				len(resp.Plan.AddForeignKeys),
@@ -379,6 +392,12 @@ changes — run ` + "`palbase db diff -f <name>`" + ` to generate the migration.
 			report("+ table      ", resp.Plan.AddTables)
 			report("+ column     ", resp.Plan.AddColumns)
 			report("~ type       ", resp.Plan.TypeChanges)
+			// Nullability is drift like any other and empty() counts it, so it must
+			// also be NAMED here: a nullability-only diff would otherwise print the
+			// "schema has drifted" header with nothing under it — the least
+			// actionable failure a gate can produce (same lesson as the RLS lines
+			// below).
+			report("~ nullability", resp.Plan.NullabilityChanges)
 			report("- column     ", resp.Plan.DropColumns)
 			report("- table      ", resp.Plan.DropTables)
 			report("+ constraint ", resp.Plan.AddConstraints)
