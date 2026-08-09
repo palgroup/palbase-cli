@@ -3,9 +3,11 @@ package auth
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -57,6 +59,59 @@ func NewClient(cfg Config, output io.Writer) *Client {
 		HttpClient:  &http.Client{Timeout: 30 * time.Second},
 		Output:      output,
 		OpenBrowser: OpenURL,
+	}
+}
+
+//go:embed callback.html
+var callbackPageHTML string
+
+// callbackTmpl renders the browser tab that follows the OAuth redirect. It is
+// html/template rather than fmt on purpose: callbackView.Reason carries the
+// identity provider's error_description straight off the query string, and
+// contextual escaping is what stops a crafted redirect from turning the CLI's
+// own loopback listener into a script host.
+var callbackTmpl = template.Must(template.New("callback").Parse(callbackPageHTML))
+
+// callbackView is the entire browser-facing vocabulary of the login callback.
+// The wording tracks the CLI's own — it says "logged in", so this page does
+// too — so the tab and the terminal name one action, not two.
+type callbackView struct {
+	Status   string // eyebrow and tab title, e.g. "Login complete"
+	Headline string
+	Lede     string
+	Reason   string // what went wrong; omitted on success
+	Meta     []callbackMetaRow
+	Failed   bool // switches the accent from moss to red
+}
+
+type callbackMetaRow struct{ Label, Value string }
+
+// writeCallbackPage renders view into the redirected browser tab. Every
+// outcome carries the mode footer, because that is the one thing the tab
+// cannot otherwise tell you: which credential set the CLI just filled.
+func (c *Client) writeCallbackPage(w http.ResponseWriter, view callbackView) {
+	if c.Cfg.Mode != "" {
+		view.Meta = append(view.Meta, callbackMetaRow{Label: "mode", Value: c.Cfg.Mode})
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// A render failure leaves the user on a blank tab with no idea whether the
+	// CLI got the session, so it belongs in the terminal rather than in /dev/null.
+	if err := callbackTmpl.Execute(w, view); err != nil {
+		fmt.Fprintf(c.Output, "(could not render callback page: %s)\n", err)
+	}
+}
+
+// failedCallback builds the shared failure view. Only the reason differs
+// between the ways a redirect can go wrong; the instruction is always the same,
+// so it is written once here.
+func failedCallback(reason string) callbackView {
+	return callbackView{
+		Failed:   true,
+		Status:   "Login failed",
+		Headline: "Login didn't complete.",
+		Lede:     "Nothing was saved. Return to your terminal and run palbase login again.",
+		Reason:   reason,
 	}
 }
 
@@ -129,29 +184,37 @@ func (c *Client) Login(ctx context.Context) error {
 
 		if errParam := q.Get("error"); errParam != "" {
 			desc := q.Get("error_description")
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>%s</p></body></html>", desc)
+			// error_description is optional (RFC 6749 §4.1.2.1); fall back to the
+			// code so the tab never shows an empty reason box.
+			reason := desc
+			if reason == "" {
+				reason = errParam
+			}
+			c.writeCallbackPage(w, failedCallback(reason))
 			resultCh <- callbackResult{err: fmt.Errorf("auth error: %s — %s", errParam, desc)}
 			return
 		}
 
 		if q.Get("state") != state {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, "<html><body><h2>Login failed</h2><p>Invalid state parameter</p></body></html>")
+			c.writeCallbackPage(w, failedCallback(
+				"State mismatch — this redirect was not started by the terminal that is waiting."))
 			resultCh <- callbackResult{err: fmt.Errorf("state mismatch")}
 			return
 		}
 
 		code := q.Get("code")
 		if code == "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, "<html><body><h2>Login failed</h2><p>No authorization code received</p></body></html>")
+			c.writeCallbackPage(w, failedCallback(
+				"The provider redirected without an authorization code."))
 			resultCh <- callbackResult{err: fmt.Errorf("no authorization code")}
 			return
 		}
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, "<html><body><h2>Login successful!</h2><p>You can close this tab.</p></body></html>")
+		c.writeCallbackPage(w, callbackView{
+			Status:   "Login complete",
+			Headline: "You're logged in.",
+			Lede:     "Your terminal has the session. You can close this tab.",
+		})
 		resultCh <- callbackResult{code: code}
 	})
 
