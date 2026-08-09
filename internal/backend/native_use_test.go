@@ -342,8 +342,11 @@ func TestRunPullSpec_RejectsForeignHostBeforeTenantNetworkOrWrite(t *testing.T) 
 // ── spec freshness (the stale-contract gate) ────────────────────────────────
 
 func TestSpecDocVersion(t *testing.T) {
-	require.Equal(t, "9f1c2ab", specDocVersion([]byte(`{"info":{"version":"9f1c2ab"}}`)))
-	require.Equal(t, "", specDocVersion([]byte(`{"info":{}}`)), "no identity is not an identity")
+	require.Equal(t, "9f1c2ab", specDocVersion([]byte(`{"x-palbase-deploy":"9f1c2ab"}`)))
+	require.Equal(t, "", specDocVersion([]byte(`{"openapi":"3.1.0"}`)),
+		"an omitted extension is no identity — and needs no placeholder to say so")
+	require.Equal(t, "", specDocVersion([]byte(`{"info":{"version":"1.0.0"}}`)),
+		"info.version is NOT the identity; a document carrying only it names no deploy")
 	require.Equal(t, "", specDocVersion([]byte(`not json`)), "an unreadable body must not throw")
 }
 
@@ -354,7 +357,7 @@ func TestSpecDocVersion(t *testing.T) {
 // "✓ success". It must wait for the origin to catch up.
 func TestRunPullSpec_WaitsForTheExpectedDeployThenWrites(t *testing.T) {
 	dir := t.TempDir()
-	served := []string{`{"info":{"version":"old"}}`, `{"info":{"version":"old"}}`, `{"info":{"version":"new"}}`}
+	served := []string{`{"x-palbase-deploy":"old"}`, `{"x-palbase-deploy":"old"}`, `{"x-palbase-deploy":"new"}`}
 	call := 0
 	fetch := func(context.Context, string, string, io.Writer) ([]byte, error) {
 		b := []byte(served[min(call, len(served)-1)])
@@ -389,7 +392,7 @@ func TestRunPullSpec_FailsRatherThanWriteAStaleContract(t *testing.T) {
 			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
 		},
 		func(context.Context, string, string, io.Writer) ([]byte, error) {
-			return []byte(`{"info":{"version":"old"}}`), nil
+			return []byte(`{"x-palbase-deploy":"old"}`), nil
 		},
 		nil, nil,
 		func(context.Context) (string, error) { return "new", nil },
@@ -429,7 +432,7 @@ func TestRunPullSpec_NoSuccessfulDeploySkipsTheCheck(t *testing.T) {
 			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
 		},
 		func(context.Context, string, string, io.Writer) ([]byte, error) {
-			return []byte(`{"info":{"version":"whatever"}}`), nil
+			return []byte(`{"x-palbase-deploy":"whatever"}`), nil
 		},
 		nil, nil,
 		func(context.Context) (string, error) { return "", nil },
@@ -448,7 +451,7 @@ func TestRunPullSpec_FreshnessLookupErrorWarnsAndProceeds(t *testing.T) {
 			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
 		},
 		func(context.Context, string, string, io.Writer) ([]byte, error) {
-			return []byte(`{"info":{"version":"old"}}`), nil
+			return []byte(`{"x-palbase-deploy":"old"}`), nil
 		},
 		nil, nil,
 		func(context.Context) (string, error) { return "", errors.New("studio unreachable") },
@@ -457,18 +460,20 @@ func TestRunPullSpec_FreshnessLookupErrorWarnsAndProceeds(t *testing.T) {
 	require.Contains(t, out.String(), "could not verify spec freshness")
 }
 
-// TestRunPullSpec_LegacyDocVersionIsUnverifiableNotStale is the regression this
-// cost a live run to find. A runtime older than the deploy-identity stamp writes
-// the literal "1.0.0" into info.version. Reading that as a stale deploy blocked
-// `palbase spec` outright — observed against a real Environment:
+// TestRunPullSpec_UnstampedContractIsUnverifiableNotStale is the regression a
+// live run found. A runtime older than the deploy-identity stamp serves a
+// document with no x-palbase-deploy at all, and reading that as a MISMATCH
+// blocked `palbase spec` outright — observed against a real Environment:
 //
 //	waiting for the origin to serve deploy 8e35fa5f (it is still on 1.0.0)…
 //	… is still serving deploy 1.0.0 but the latest successful deploy is 8e35fa5f
 //
-// The contract was current; the origin simply could not prove it. That is the
-// UNVERIFIED path (write it, say so), never the refuse-to-write one — otherwise
-// every tenant on a pre-stamp artifact loses the command entirely.
-func TestRunPullSpec_LegacyDocVersionIsUnverifiableNotStale(t *testing.T) {
+// (that run predates the move to the extension, when the placeholder in
+// info.version was mistaken for a deploy). The contract was current; the origin
+// simply could not prove it. That is the UNVERIFIED path — write it, say so —
+// never the refuse-to-write one, or every tenant on an unstamped artifact loses
+// the command entirely.
+func TestRunPullSpec_UnstampedContractIsUnverifiableNotStale(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	calls := 0
@@ -478,7 +483,7 @@ func TestRunPullSpec_LegacyDocVersionIsUnverifiableNotStale(t *testing.T) {
 		},
 		func(context.Context, string, string, io.Writer) ([]byte, error) {
 			calls++
-			return []byte(`{"info":{"version":"1.0.0"}}`), nil
+			return []byte(`{"openapi":"3.1.0","info":{"version":"1.0.0"}}`), nil
 		},
 		nil, nil,
 		func(context.Context) (string, error) { return "8e35fa5f", nil },
@@ -490,5 +495,5 @@ func TestRunPullSpec_LegacyDocVersionIsUnverifiableNotStale(t *testing.T) {
 	require.Contains(t, out.String(), "freshness UNVERIFIED")
 	require.NotContains(t, out.String(), "waiting for the origin")
 	require.NotContains(t, out.String(), "deploy 1.0.0",
-		"the success line must not present the placeholder as a real deploy")
+		"info.version must never be presented as a deploy identity")
 }

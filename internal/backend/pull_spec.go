@@ -199,39 +199,21 @@ const specWaitTimeout = 45 * time.Second
 // add noise.
 const specWaitInterval = 2 * time.Second
 
-// legacyDocVersion is the literal the runtime writes into info.version when it
-// has no deploy identity to stamp — the value every artifact built before the
-// stamp existed carries, and the one a runtime older than that stamp still
-// emits today. It is NOT a version anyone can be waiting for: real deploy
-// identities are content SHAs.
+// specDocVersion reads the deploy identity out of an OpenAPI document — the
+// x-palbase-deploy extension the runtime stamps in (openapiSpecFromRoutes).
 //
-// Treating it as a mismatch is what a live run caught the moment this shipped:
-// every tenant on a pre-stamp artifact got "still serving deploy 1.0.0 but the
-// latest successful deploy is 8e35fa5f" and NOTHING was written — a hard block
-// on `palbase spec` for a contract that was in fact perfectly current. The
-// honest reading is "this origin cannot prove its freshness", which is the
-// UNVERIFIED path, not the stale one.
-const legacyDocVersion = "1.0.0"
-
-// hasDeployIdentity reports whether a served document actually names its deploy.
-func hasDeployIdentity(served string) bool {
-	return served != "" && served != legacyDocVersion
-}
-
-// specDocVersion reads info.version out of an OpenAPI document — the deploy
-// identity the runtime bakes in (openapiSpecFromRoutes). Empty when the document
-// has none: an artifact built before the stamp existed, or an unparseable body.
-// Both are "cannot verify", never "verified".
+// Empty means the document does not name its deploy: a runtime older than the
+// stamp, or an unparseable body. Both are "cannot verify", never "verified" and
+// never "stale" — the extension is omitted rather than defaulted precisely so
+// absence needs no placeholder to recognise.
 func specDocVersion(b []byte) string {
 	var doc struct {
-		Info struct {
-			Version string `json:"version"`
-		} `json:"info"`
+		Deploy string `json:"x-palbase-deploy"`
 	}
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return ""
 	}
-	return doc.Info.Version
+	return doc.Deploy
 }
 
 // fetchFreshSpec fetches the contract and, when the expected deploy identity is
@@ -279,7 +261,7 @@ func fetchFreshSpec(
 		if expected == "" || served == expected {
 			return specBytes, served, nil
 		}
-		if !hasDeployIdentity(served) {
+		if served == "" {
 			fmt.Fprintln(w, "  note: this origin serves a contract with no deploy identity — freshness UNVERIFIED")
 			return specBytes, "", nil
 		}
