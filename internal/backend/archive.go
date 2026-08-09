@@ -145,7 +145,10 @@ func writeTarFile(tw *tar.Writer, dir, rel string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Read-only: closing can report nothing the io.Copy below has not already
+	// reported. The same holds for the other two read-side closes in this file;
+	// the write side (extractTarGz) checks its Close.
+	defer func() { _ = f.Close() }()
 	_, err = io.Copy(tw, f)
 	return err
 }
@@ -158,7 +161,7 @@ func loadPalignore(path string) ([]string, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var pats []string
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -243,7 +246,7 @@ func extractTarGzFiltered(dst string, r io.Reader, skip func(string) bool) error
 	if err != nil {
 		return fmt.Errorf("open gzip stream: %w", err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	tr := tar.NewReader(zr)
 	for {
@@ -290,10 +293,16 @@ func extractTarGzFiltered(dst string, r io.Reader, skip func(string) bool) error
 				return fmt.Errorf("create file %q: %w", clean, err)
 			}
 			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
+				_ = f.Close()
 				return fmt.Errorf("write file %q: %w", clean, err)
 			}
-			f.Close()
+			// Close is where a full disk or a failed flush finally surfaces —
+			// io.Copy can return a clean count for bytes the kernel has not
+			// committed. The file being unpacked here is a deploy bundle, so a
+			// silently truncated one is worse than a loud failure.
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("close file %q: %w", clean, err)
+			}
 		default:
 			// Skip symlinks, hard links, devices, etc. — same policy as BuildTarball.
 		}

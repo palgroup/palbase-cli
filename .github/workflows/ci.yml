@@ -41,10 +41,10 @@ jobs:
         # preinstalled Node (exec.LookPath("node")).
         run: go test ./... -race -count=1
 
-      # v2.12.2 supports Go 1.26, but the CLI still has pre-existing errcheck
-      # debt. Keep the exact pinned scan visible while vet remains blocking.
+      # Blocking. It was advisory while the CLI carried errcheck debt; the debt
+      # is paid and .golangci.yml now states the policy (uncapped reporting,
+      # two justified exclusions), so anything this reports is a regression.
       - name: Lint
-        continue-on-error: true
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2

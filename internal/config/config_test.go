@@ -135,6 +135,8 @@ func withCleanEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"PALBASE_MODE", "PALBASE_STUDIO_URL", "PALBASE_AUTH_URL", "PALBASE_PLATFORM_URL"} {
 		t.Setenv(k, "")
-		os.Unsetenv(k)
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatalf("unset %s: %v", k, err)
+		}
 	}
 }

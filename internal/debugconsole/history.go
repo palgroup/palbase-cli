@@ -50,7 +50,7 @@ func historyCmd(r Resolvers) *cobra.Command {
 				return errors.New(
 					"pass exactly one of --user or --session.\n" +
 						"--user is the end user's id as your app knows them (the same id the SDK\n" +
-						"reports); --session is one app launch.")
+						"reports); --session is one app launch")
 			}
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {

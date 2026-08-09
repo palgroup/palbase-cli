@@ -178,7 +178,7 @@ func compileSwiftgen(projectRoot string, w io.Writer) (string, error) {
 	cmd := exec.Command("/usr/bin/env", argv...)
 	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
-		os.RemoveAll(dir)
+		removeTemp(dir)
 		return "", fmt.Errorf("compile palbase-swiftgen: %w", err)
 	}
 	return tool, nil

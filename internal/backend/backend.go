@@ -31,7 +31,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 // defaultHTTPClient is reused by the platform `spec`/`link` commands' spec + OAuth-
@@ -202,25 +201,12 @@ type backendTarget struct {
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
-// writeStringFlag is a tiny helper so subcommands can compose without
-// rewriting boilerplate.
-type stringFlag struct {
-	value string
-}
-
-func (s *stringFlag) String() string     { return s.value }
-func (s *stringFlag) Set(v string) error { s.value = v; return nil }
-func (s *stringFlag) Type() string       { return "string" }
-
-// isInteractive returns true when stdin is a TTY. Prompts fire only when
-// interactive; a piped/CI shell must pass the explicit flag instead.
-func isInteractive() bool {
-	// term.IsTerminal, not a ModeCharDevice check: /dev/null IS a char
-	// device, so `palbase ios link </dev/null` used to open the interactive
-	// picker and die on EOF instead of returning the actionable
-	// "pass --group" error (found by the live non-TTY probe).
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
+// removeTemp deletes a scratch directory, best effort. Every caller is either
+// deferring cleanup at the end of a one-shot command or already returning a
+// more important error, so a failed removal has nowhere to go: the worst case
+// is a temp dir the OS sweeps later, and reporting it would displace the error
+// the user actually needs to read.
+func removeTemp(dir string) { _ = os.RemoveAll(dir) }
 
 // extractFS unpacks an embed.FS subtree into target on disk.
 func extractFS(src embed.FS, root, target string) error {
@@ -581,14 +567,14 @@ func formatSDK(s *sdkStatus) string {
 	}
 	var b strings.Builder
 	if s.Version != nil {
-		b.WriteString(fmt.Sprintf("sdk:          @palbase/backend %s\n", *s.Version))
+		fmt.Fprintf(&b, "sdk:          @palbase/backend %s\n", *s.Version)
 	}
 	if len(s.SupportedMajors) > 0 {
 		parts := make([]string, len(s.SupportedMajors))
 		for i, m := range s.SupportedMajors {
 			parts[i] = strconv.Itoa(m)
 		}
-		b.WriteString(fmt.Sprintf("              runtime builds major(s) %s\n", strings.Join(parts, ", ")))
+		fmt.Fprintf(&b, "              runtime builds major(s) %s\n", strings.Join(parts, ", "))
 	}
 	return b.String()
 }
@@ -613,9 +599,9 @@ func formatLastDeploy(d *lastDeploy, now time.Time) string {
 		label = "succeeded with warnings"
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("last deploy: %s%s\n", strings.ToUpper(label), deployMeta(d, now)))
+	fmt.Fprintf(&b, "last deploy: %s%s\n", strings.ToUpper(label), deployMeta(d, now))
 	if d.Error != nil && *d.Error != "" {
-		b.WriteString(fmt.Sprintf("  error: %s\n", *d.Error))
+		fmt.Fprintf(&b, "  error: %s\n", *d.Error)
 	}
 	return b.String()
 }
@@ -976,7 +962,7 @@ func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer removeTemp(tmpDir)
 
 	// Bundle db/schema.ts → temp CJS, keeping @palbase/* external.
 	bundlePath := filepath.Join(tmpDir, "schema.js")

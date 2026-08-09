@@ -194,7 +194,7 @@ func runCheckMode(t *testing.T, dir string) (string, bool) {
 	// deploy ever sees, which is the false-green this whole layer exists to kill.
 	staged, err := stageDeployTree(dir)
 	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(staged) })
+	t.Cleanup(func() { removeTemp(staged) })
 	cmd := exec.Command("node", filepath.Join(tmp, "build-check.js"))
 	cmd.Dir = staged
 	cmd.Env = append(os.Environ(),

@@ -155,7 +155,7 @@ func TestLogin_FullFlow(t *testing.T) {
 			assert.Equal(t, http.MethodGet, claims["htm"])
 			assert.Equal(t, authServer.URL+"/oauth/userinfo", claims["htu"])
 			assert.Equal(t, accessTokenHash("access_123"), claims["ath"])
-			json.NewEncoder(w).Encode(UserInfoResponse{
+			_ = json.NewEncoder(w).Encode(UserInfoResponse{
 				Sub:   "usr_abc",
 				Email: "test@example.com",
 			})
@@ -290,7 +290,7 @@ func TestBindLoopbackSkipsPortOccupiedOnIPv6(t *testing.T) {
 	if err != nil {
 		t.Skipf("IPv6 loopback is unavailable: %v", err)
 	}
-	defer occupied.Close()
+	defer func() { _ = occupied.Close() }()
 	port := occupied.Addr().(*net.TCPAddr).Port
 
 	// The IPv4 side is deliberately free. A callback server that binds only
@@ -348,14 +348,13 @@ func TestLogin_StateMismatch(t *testing.T) {
 
 func TestRefreshTokens(t *testing.T) {
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
 		assert.Equal(t, "refresh_token", r.FormValue("grant_type"))
 		assert.Equal(t, "old_refresh", r.FormValue("refresh_token"))
 		// CLI-11: refresh must carry a DPoP proof so the new access token
 		// stays bound to the keyring key (palauth rebinds cnf.jkt).
 		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
 
-		json.NewEncoder(w).Encode(TokenResponse{
+		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "new_access",
 			RefreshToken: "new_refresh",
 			ExpiresIn:    900,
@@ -456,11 +455,11 @@ func TestWhoami(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_xyz", Email: "salih@example.com"},
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{ClientID: "palbase-cli"}, &output)
@@ -478,11 +477,11 @@ func TestWhoami_NoEmail(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_noemail"},
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{ClientID: "palbase-cli"}, &output)
@@ -497,10 +496,10 @@ func TestGetValidToken_Valid(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken: "my_token",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{ClientID: "palbase-cli"}, &output)
@@ -515,7 +514,7 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 		// CLI-11: refresh path must present a DPoP proof so the new token
 		// stays bound to the keyring key.
 		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
-		json.NewEncoder(w).Encode(TokenResponse{
+		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "refreshed_token",
 			RefreshToken: "new_refresh",
 			ExpiresIn:    900,
@@ -531,11 +530,11 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	_, err := EnsureDPoPKey("prod")
 	require.NoError(t, err)
 
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken:  "expired",
 		RefreshToken: "old_refresh",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute),
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{
@@ -582,7 +581,7 @@ func TestGetFreshToken_RefreshesAhead(t *testing.T) {
 		// Refresh path must present a DPoP proof so the new token stays bound.
 		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
 		assert.Equal(t, "refresh_token", r.FormValue("grant_type"))
-		json.NewEncoder(w).Encode(TokenResponse{
+		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "ahead_refreshed_token",
 			RefreshToken: "new_refresh",
 			ExpiresIn:    900,
@@ -598,11 +597,11 @@ func TestGetFreshToken_RefreshesAhead(t *testing.T) {
 	require.NoError(t, err)
 
 	// Token is NOT yet expired (20s left) — GetValidToken would return it as-is.
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken:  "still_valid_but_soon",
 		RefreshToken: "old_refresh",
 		ExpiresAt:    time.Now().Add(20 * time.Second),
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{
@@ -627,7 +626,7 @@ func TestGetFreshToken_KeepsComfortableToken(t *testing.T) {
 	refreshCalled := false
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		refreshCalled = true
-		json.NewEncoder(w).Encode(TokenResponse{AccessToken: "should_not_be_used", ExpiresIn: 900})
+		_ = json.NewEncoder(w).Encode(TokenResponse{AccessToken: "should_not_be_used", ExpiresIn: 900})
 	}))
 	defer authServer.Close()
 
@@ -635,10 +634,10 @@ func TestGetFreshToken_KeepsComfortableToken(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("PALBASE_NO_KEYRING", "1")
 
-	SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken: "comfortable_token",
 		ExpiresAt:   time.Now().Add(30 * time.Minute),
-	})
+	}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{AuthURL: authServer.URL, ClientID: "palbase-cli"}, &output)

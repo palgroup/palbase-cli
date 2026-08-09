@@ -1,0 +1,37 @@
+version: "2"
+
+# ci.yml runs this gate blocking (no continue-on-error), so this file is the
+# project's lint policy rather than a suggestion box: whatever golangci-lint
+# reports under it is a finding to fix, and there is no accepted backlog.
+#
+# Before this file existed the gate was advisory and reported "45 issues" —
+# with the default caps in place. Uncapped it reported 427. A gate that hides
+# 90% of what it found, and is allowed to fail anyway, measures nothing.
+
+linters:
+  settings:
+    errcheck:
+      # A CLI's job is printing. A failed write to the command's output writer
+      # means EPIPE (`palbase logs | head`) or a full disk — neither is
+      # actionable inside the command, and threading ~370 error checks through
+      # the user-facing output would bury the errors that DO matter. This is
+      # finding, including every temp-dir cleanup.
+      #
+      # (io.ReadCloser).Close is the second and last exclusion: closing a
+      # read side — an HTTP response body, a file opened for reading — can
+      # only report that the peer already went away, which the read itself
+      # has reported first. Closers that were WRITTEN to are a different
+      # matter and stay checked: *os.File, *gzip.Writer and friends resolve
+      # to their concrete type, not to io.ReadCloser, so a dropped Close on
+      # a file we just wrote is still a finding.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (io.ReadCloser).Close
+
+issues:
+  # Report everything. The defaults (50 per linter, 3 per identical message)
+  # silently truncate, which is how the count above stayed wrong for so long.
+  max-issues-per-linter: 0
+  max-same-issues: 0

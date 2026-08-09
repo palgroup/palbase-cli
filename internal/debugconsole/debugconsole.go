@@ -211,7 +211,7 @@ func locateSession(device, bundleID string) (sessionFile, error) {
 			"no Palbe console data found on the simulator.\n" +
 				"Run the app once so the SDK creates a session, and make sure it links a\n" +
 				"Palbe version with pb.debug (the console records from launch; nothing to\n" +
-				"switch on).")
+				"switch on)")
 	}
 	return newest, nil
 }

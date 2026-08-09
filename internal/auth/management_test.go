@@ -135,8 +135,10 @@ func TestManagementToken_ExpiredLogin_RefreshesViaDPoP(t *testing.T) {
 
 	listener, err := newLoopbackListener()
 	require.NoError(t, err)
-	go srv.Serve(listener)
-	defer srv.Close()
+	// Serve always returns an error; ErrServerClosed is the normal path here,
+	// produced by the deferred Close below.
+	go func() { _ = srv.Serve(listener) }()
+	defer func() { _ = srv.Close() }()
 
 	c := newManagementTestClient(t, "http://"+listener.Addr().String())
 	tok, err := c.ManagementToken(context.Background())
@@ -181,8 +183,10 @@ func TestManagementToken_ExpiredLogin_RefreshFailureIsActionable(t *testing.T) {
 
 	listener, err := newLoopbackListener()
 	require.NoError(t, err)
-	go srv.Serve(listener)
-	defer srv.Close()
+	// Serve always returns an error; ErrServerClosed is the normal path here,
+	// produced by the deferred Close below.
+	go func() { _ = srv.Serve(listener) }()
+	defer func() { _ = srv.Close() }()
 
 	c := newManagementTestClient(t, "http://"+listener.Addr().String())
 	_, terr := c.ManagementToken(context.Background())

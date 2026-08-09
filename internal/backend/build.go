@@ -28,11 +28,6 @@ const backendPkg = "@palbase/backend"
 // nothing sweeps this prefix.
 const buildTempPrefix = "palbase-build-"
 
-// npmRegistryBase is the npm registry root the Layer-A skew check queries. A
-// package var (not a const) only so tests can point it at an httptest server;
-// production never changes it.
-var npmRegistryBase = "https://registry.npmjs.org"
-
 // newBuildCmd wires `palbase build` — the local pre-deploy validator. It runs
 // the SAME stage + bundle + extract_meta.js the deploy runs (via build-check.js),
 // so a broken push (e.g. a `@Query("field")` string where a zod schema is
@@ -121,7 +116,7 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer removeTemp(tmpDir)
 	if err := extractFS(buildCheckFS, "devjs", tmpDir); err != nil {
 		return fmt.Errorf("extract the build checker: %w", err)
 	}
@@ -137,7 +132,7 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	if staged, serr := stageDeployTree(cwd); serr != nil {
 		fmt.Fprintf(out, "warning: could not stage the deploy tree (%v) — validating the working directory instead; a bare third-party import may still pass here and fail the deploy\n", serr)
 	} else {
-		defer os.RemoveAll(staged)
+		defer removeTemp(staged)
 		buildRoot = staged
 	}
 
@@ -200,7 +195,7 @@ func stageDeployTree(cwd string) (string, error) {
 		return "", err
 	}
 	if err := extractTarGz(dir, bytes.NewReader(tarball)); err != nil {
-		os.RemoveAll(dir)
+		removeTemp(dir)
 		return "", fmt.Errorf("unpack the project: %w", err)
 	}
 	return dir, nil

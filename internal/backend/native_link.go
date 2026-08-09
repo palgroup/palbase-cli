@@ -196,7 +196,7 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 		return nil, fmt.Errorf("native link platform must be ios, macos, or android")
 	}
 	if opts.platform == "android" && opts.identifier == "" {
-		return nil, fmt.Errorf("Android applicationId is required; pass --package-name")
+		return nil, fmt.Errorf("applicationId is required for Android; pass --package-name")
 	}
 
 	linkedAppID := opts.appID
@@ -407,7 +407,7 @@ func detectAndroidApplicationID(root string) (string, error) {
 			return string(match[1]), nil
 		}
 	}
-	return "", fmt.Errorf("Android applicationId not found; pass --package-name")
+	return "", fmt.Errorf("applicationId not found in the Android Gradle files; pass --package-name")
 }
 
 // printNativeNextSteps prints the platform-specific package/plugin wiring.
