@@ -97,6 +97,7 @@ from .palbase/config.json, falling back to the committed platform slot).`, label
 			if err := runPullSpec(ctx,
 				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
 				studioBindingLister(rest), studioConfigArtifactFetch(rest, r.Endpoints().PublicHost),
+				studioSpecFreshness(rest, sel.ProjectID, sel.EnvironmentRef()),
 				sel.EnvironmentRef(), r.Endpoints().PublicHost, ".palbase", ".palbase/"+platform, appID,
 				out); err != nil {
 				return err

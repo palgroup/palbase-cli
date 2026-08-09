@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -151,6 +153,7 @@ Override the target with the global --project / --environment flags.`,
 					fetchRemoteOpenAPISpec,
 					studioBindingLister(r.REST()),
 					studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
+					studioSpecFreshness(r.REST(), sel.ProjectID, sel.EnvironmentRef()),
 					sel.EnvironmentRef(), r.Endpoints().PublicHost, dir, "", "",
 					out,
 				); err != nil {
@@ -175,6 +178,134 @@ type specTargetLookup func(ctx context.Context, environmentRef string) (backendT
 // remoteSpecFetch fetches the openapi.json bytes from a remote tenant host.
 type remoteSpecFetch func(ctx context.Context, specURL, apiKey string, w io.Writer) ([]byte, error)
 
+// specFreshness resolves the deploy identity the origin is EXPECTED to be
+// serving — the newest deployment the platform records as succeeded. Injected so
+// runPullSpec is testable without Studio; nil disables the check entirely (only
+// tests pass nil — every real caller supplies it, or a contract could be written
+// unverified through a path nobody thought to wire).
+type specFreshness func(ctx context.Context) (string, error)
+
+// specWaitTimeout bounds how long `palbase spec` waits for the origin to serve
+// the deploy it is supposed to be serving. The runtime's own bound is
+// ACTIVE_RECHECK_MS (10s by default) — a warm isolate worker re-reads the ACTIVE
+// pointer once per that window — so this is that window with room for a cold
+// artifact fetch: long enough that the normal case always converges, short
+// enough that a genuinely wedged origin still fails inside a person's attention
+// span.
+const specWaitTimeout = 45 * time.Second
+
+// specWaitInterval paces the re-fetch. Each tick costs one small GET, and the
+// thing being waited for moves on a ~10s boundary, so polling faster would only
+// add noise.
+const specWaitInterval = 2 * time.Second
+
+// specDocVersion reads info.version out of an OpenAPI document — the deploy
+// identity the runtime bakes in (openapiSpecFromRoutes). Empty when the document
+// has none: an artifact built before the stamp existed, or an unparseable body.
+// Both are "cannot verify", never "verified".
+func specDocVersion(b []byte) string {
+	var doc struct {
+		Info struct {
+			Version string `json:"version"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return ""
+	}
+	return doc.Info.Version
+}
+
+// fetchFreshSpec fetches the contract and, when the expected deploy identity is
+// knowable, keeps fetching until the origin actually serves it.
+//
+// Why this exists: a deploy reports success the moment ACTIVE.json flips, but a
+// WARM isolate worker re-reads that pointer only once per ACTIVE_RECHECK_MS
+// window, so for up to ~10s the origin still serves the PREVIOUS artifact — and
+// the previous artifact carries the previous baked contract. Writing that to
+// disk is how codegen silently emitted a client for 28 routes right after a
+// deploy that shipped 29, and reported success doing it.
+//
+// Three outcomes, each honest about what it knows:
+//   - served == expected     → write it.
+//   - served has no identity → write it, and SAY the check could not run.
+//   - still different at the → return an error and write NOTHING. A contract
+//     deadline                 nobody can trust is worse on disk than absent:
+//     on disk it becomes a committed client.
+func fetchFreshSpec(
+	ctx context.Context,
+	fetch remoteSpecFetch,
+	specURL, specKey string,
+	freshness specFreshness,
+	w io.Writer,
+) ([]byte, string, error) {
+	deadline := time.Now().Add(specWaitTimeout)
+	announced := false
+	for {
+		specBytes, err := fetch(ctx, specURL, specKey, w)
+		if err != nil {
+			return nil, "", err
+		}
+		if freshness == nil {
+			return specBytes, specDocVersion(specBytes), nil
+		}
+		// Re-resolved every round on purpose: a deploy that finishes WHILE we
+		// wait moves the expectation forward, and pinning the first answer would
+		// leave us waiting for a version that is already superseded.
+		expected, ferr := freshness(ctx)
+		if ferr != nil {
+			fmt.Fprintf(w, "  warning: could not verify spec freshness (%v) — the written contract may predate your latest deploy\n", ferr)
+			return specBytes, specDocVersion(specBytes), nil
+		}
+		served := specDocVersion(specBytes)
+		if expected == "" || served == expected {
+			return specBytes, served, nil
+		}
+		if served == "" {
+			fmt.Fprintln(w, "  note: this origin serves a contract with no deploy identity — freshness UNVERIFIED")
+			return specBytes, served, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, "", fmt.Errorf(
+				"%s is still serving deploy %s but the latest successful deploy is %s — nothing was written; "+
+					"wait for the rollout to finish and run `palbase spec` again",
+				specURL, served, expected)
+		}
+		if !announced {
+			fmt.Fprintf(w, "  waiting for the origin to serve deploy %s (it is still on %s)…\n", expected, served)
+			announced = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(specWaitInterval):
+		}
+	}
+}
+
+// studioSpecFreshness resolves the newest SUCCEEDED deployment's version from
+// the same deployments route `palbase deploys` reads. The environment's deploy
+// history is the only place that knows which deploy the origin OUGHT to be
+// serving — the origin itself will happily report the previous one.
+func studioSpecFreshness(rest restDoer, projectID, environmentRef string) specFreshness {
+	return func(ctx context.Context) (string, error) {
+		var resp struct {
+			Deployments []deployRow `json:"deployments"`
+		}
+		if err := rest.Do(ctx, http.MethodGet,
+			DeploymentsPath(projectID, environmentRef)+"?limit=20", nil, &resp); err != nil {
+			return "", err
+		}
+		for _, d := range resp.Deployments { // newest first
+			if d.Status == "succeeded" && d.Version != nil && *d.Version != "" {
+				return *d.Version, nil
+			}
+		}
+		// Never deployed (or every attempt failed): there is nothing to compare
+		// against, which is not the same as a mismatch.
+		return "", nil
+	}
+}
+
 // lookupSpecTarget binds the production lookupBackendTarget to the resolvers.
 func lookupSpecTarget(r Resolvers) specTargetLookup {
 	return func(ctx context.Context, environmentRef string) (backendTarget, error) {
@@ -191,6 +322,7 @@ func runPullSpec(
 	fetch remoteSpecFetch,
 	list bindingLister,
 	cfgFetch configArtifactFetch,
+	freshness specFreshness,
 	environmentRef, publicHost, specOutDir, configOutDir, appID string,
 	w io.Writer,
 ) error {
@@ -212,7 +344,7 @@ func runPullSpec(
 		specKey = entry.APIKey
 	}
 
-	specBytes, err := fetch(ctx, specURL, specKey, w)
+	specBytes, servedVersion, err := fetchFreshSpec(ctx, fetch, specURL, specKey, freshness, w)
 	if err != nil {
 		return err
 	}
@@ -226,7 +358,14 @@ func runPullSpec(
 	if err := os.WriteFile(specPath, specBytes, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", specPath, err)
 	}
-	fmt.Fprintf(w, "✓ wrote %s\n", specPath)
+	// Name the deploy on the success line. "wrote openapi.json" alone is what let
+	// a contract from the previous deploy sit on disk looking finished; the
+	// identity is the one thing that makes the line checkable.
+	if servedVersion != "" {
+		fmt.Fprintf(w, "✓ wrote %s (deploy %s)\n", specPath, servedVersion)
+	} else {
+		fmt.Fprintf(w, "✓ wrote %s\n", specPath)
+	}
 
 	if appID != "" {
 		if configOutDir == "" {

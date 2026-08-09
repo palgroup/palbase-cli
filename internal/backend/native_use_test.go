@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -210,6 +212,7 @@ func TestRunPullSpec_WithoutAnApp_WritesOnlyTheContract(t *testing.T) {
 			return []byte(`{"openapi":"3.1.0"}`), nil
 		},
 		nil, nil,
+		nil, // freshness: these cases predate the check and assert the write path
 		"app1prod", "dev.palbase.studio", dir, dir, "", io.Discard)
 	require.NoError(t, err)
 	require.FileExists(t, filepath.Join(dir, "openapi.json"))
@@ -235,6 +238,7 @@ func TestRunPullSpec_UnboundEnvironmentWritesNothing(t *testing.T) {
 			t.Fatal("the artifact must not be fetched for an unbound environment")
 			return apps.ConfigArtifact{}, nil
 		},
+		nil, // freshness: these cases predate the check and assert the write path
 		"app1stg", "dev.palbase.studio", dir, dir, "app_ios", io.Discard)
 	require.ErrorContains(t, err, "not bound to environment \"app1stg\"")
 	require.NoFileExists(t, filepath.Join(dir, "openapi.json"))
@@ -261,6 +265,7 @@ func TestRunPullSpec_AppConfigSeparatesTheOutputs(t *testing.T) {
 				BaseURL: "https://app1prod.dev.palbase.studio", APIKey: "pb_app1prod_c01234567890123456789", Platform: "ios",
 			}, nil
 		},
+		nil, // freshness: these cases predate the check and assert the write path
 		"app1prod", "dev.palbase.studio", specDir, cfgDir, "app_ios", io.Discard)
 	require.NoError(t, err)
 
@@ -297,6 +302,7 @@ func TestRunPullSpec_NonWebCheckout_DoesNotCreateAPalbaseDir(t *testing.T) {
 			return []byte(`{"openapi":"3.1.0"}`), nil
 		},
 		nil, nil,
+		nil, // freshness: these cases predate the check and assert the write path
 		"app1prod", "dev.palbase.studio", specDir, specDir, "", io.Discard)
 	require.NoError(t, err)
 	_, statErr := os.Stat(filepath.Join(projectRoot, "Palbase"))
@@ -324,10 +330,129 @@ func TestRunPullSpec_RejectsForeignHostBeforeTenantNetworkOrWrite(t *testing.T) 
 				APIKey:  "pb_app1prod_c01234567890123456789",
 			}, nil
 		},
+		nil, // freshness: these cases predate the check and assert the write path
 		"app1prod", "dev.palbase.studio", dir, dir, "app_ios", io.Discard)
 
 	require.ErrorContains(t, err, "base_url")
 	require.False(t, fetchCalled, "an untrusted artifact must not select a tenant network target")
 	require.NoFileExists(t, filepath.Join(dir, "openapi.json"))
 	require.NoFileExists(t, filepath.Join(dir, "palbase-config.json"))
+}
+
+// ── spec freshness (the stale-contract gate) ────────────────────────────────
+
+func TestSpecDocVersion(t *testing.T) {
+	require.Equal(t, "9f1c2ab", specDocVersion([]byte(`{"info":{"version":"9f1c2ab"}}`)))
+	require.Equal(t, "", specDocVersion([]byte(`{"info":{}}`)), "no identity is not an identity")
+	require.Equal(t, "", specDocVersion([]byte(`not json`)), "an unreadable body must not throw")
+}
+
+// The reported defect: the origin kept serving the PREVIOUS deploy for ~8s after
+// the deploy reported success (a warm isolate re-reads ACTIVE.json once per
+// ACTIVE_RECHECK_MS window), and `palbase spec` wrote that stale contract to
+// disk without a word — codegen then emitted a client for a deploy ago and said
+// "✓ success". It must wait for the origin to catch up.
+func TestRunPullSpec_WaitsForTheExpectedDeployThenWrites(t *testing.T) {
+	dir := t.TempDir()
+	served := []string{`{"info":{"version":"old"}}`, `{"info":{"version":"old"}}`, `{"info":{"version":"new"}}`}
+	call := 0
+	fetch := func(context.Context, string, string, io.Writer) ([]byte, error) {
+		b := []byte(served[min(call, len(served)-1)])
+		call++
+		return b, nil
+	}
+	var out bytes.Buffer
+	err := runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		fetch, nil, nil,
+		func(context.Context) (string, error) { return "new", nil },
+		"app1prod", "dev.palbase.studio", dir, "", "", &out)
+	require.NoError(t, err)
+	require.Equal(t, 3, call, "it kept fetching until the origin served the expected deploy")
+
+	b, readErr := os.ReadFile(filepath.Join(dir, "openapi.json"))
+	require.NoError(t, readErr)
+	require.Contains(t, string(b), `"new"`, "only the fresh contract reaches disk")
+	require.Contains(t, out.String(), "deploy new", "the success line names what it wrote")
+}
+
+// A contract nobody can trust is worse ON DISK than absent: on disk it becomes a
+// committed client. So the wait ends in an error, not in a write.
+func TestRunPullSpec_FailsRatherThanWriteAStaleContract(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := runPullSpec(ctx,
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			return []byte(`{"info":{"version":"old"}}`), nil
+		},
+		nil, nil,
+		func(context.Context) (string, error) { return "new", nil },
+		"app1prod", "dev.palbase.studio", dir, "", "", io.Discard)
+	require.Error(t, err)
+	require.NoFileExists(t, filepath.Join(dir, "openapi.json"),
+		"a stale contract must never reach disk")
+}
+
+// Absence is not evidence: an artifact built before the deploy stamp existed
+// cannot be checked, and the user must be TOLD that rather than left to assume
+// the check passed.
+func TestRunPullSpec_UnverifiableSpecIsWrittenWithALoudNote(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	require.NoError(t, runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			return []byte(`{"openapi":"3.1.0"}`), nil
+		},
+		nil, nil,
+		func(context.Context) (string, error) { return "new", nil },
+		"app1prod", "dev.palbase.studio", dir, "", "", &out))
+	require.FileExists(t, filepath.Join(dir, "openapi.json"))
+	require.Contains(t, out.String(), "freshness UNVERIFIED")
+}
+
+// An environment that has never deployed successfully has nothing to compare
+// against — that is not a mismatch, and must not block the first link.
+func TestRunPullSpec_NoSuccessfulDeploySkipsTheCheck(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	require.NoError(t, runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			return []byte(`{"info":{"version":"whatever"}}`), nil
+		},
+		nil, nil,
+		func(context.Context) (string, error) { return "", nil },
+		"app1prod", "dev.palbase.studio", dir, "", "", &out))
+	require.FileExists(t, filepath.Join(dir, "openapi.json"))
+	require.NotContains(t, out.String(), "waiting for the origin")
+}
+
+// A Studio hiccup must not block the fetch — but it must not pass silently as a
+// verified one either.
+func TestRunPullSpec_FreshnessLookupErrorWarnsAndProceeds(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	require.NoError(t, runPullSpec(context.Background(),
+		func(context.Context, string) (backendTarget, error) {
+			return backendTarget{URL: "https://app1prod.dev", APIKey: "pb"}, nil
+		},
+		func(context.Context, string, string, io.Writer) ([]byte, error) {
+			return []byte(`{"info":{"version":"old"}}`), nil
+		},
+		nil, nil,
+		func(context.Context) (string, error) { return "", errors.New("studio unreachable") },
+		"app1prod", "dev.palbase.studio", dir, "", "", &out))
+	require.FileExists(t, filepath.Join(dir, "openapi.json"))
+	require.Contains(t, out.String(), "could not verify spec freshness")
 }

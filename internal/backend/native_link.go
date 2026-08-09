@@ -228,6 +228,7 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 	configDir := filepath.Join(".palbase", opts.platform)
 	if err := runPullSpec(
 		ctx, d.lookup, d.fetch, d.list, d.cfgFetch,
+		studioSpecFreshness(d.rest, opts.projectID, opts.environmentRef),
 		opts.environmentRef, d.publicHost, ".palbase", configDir, appID, w,
 	); err != nil {
 		return nil, err
