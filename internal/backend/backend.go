@@ -481,6 +481,21 @@ type sdkStatus struct {
 	SupportedMajors []int   `json:"supportedMajors"`
 }
 
+// statusResponse is what backend.status answers.
+//
+// Named rather than anonymous because it is a WIRE CONTRACT, and an anonymous
+// struct hides that: channelSdkMajors was added to the server and to statusOut
+// but not here, so the value arrived and was dropped one line before the
+// renderer. Nothing failed — the field was simply never there, which looked
+// exactly like a server that had not sent it.
+type statusResponse struct {
+	Head             *string     `json:"head"`
+	ActiveVersion    *string     `json:"activeVersion"`
+	LastDeploy       *lastDeploy `json:"lastDeploy"`
+	SDK              *sdkStatus  `json:"sdk"`
+	ChannelSDKMajors []int       `json:"channelSdkMajors"`
+}
+
 type statusOut struct {
 	ProjectID          string      `json:"projectId"`
 	EnvironmentID      string      `json:"environmentId"`
@@ -509,12 +524,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var resp struct {
-				Head          *string     `json:"head"`
-				ActiveVersion *string     `json:"activeVersion"`
-				LastDeploy    *lastDeploy `json:"lastDeploy"`
-				SDK           *sdkStatus  `json:"sdk"`
-			}
+			var resp statusResponse
 			if err := r.Studio().Query(cmd.Context(), "backend.status",
 				map[string]any{"ref": sel.EnvironmentRef()}, &resp); err != nil {
 				return fmt.Errorf("backend.status: %w", err)
@@ -529,6 +539,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 				ActiveVersion:      resp.ActiveVersion,
 				LastDeploy:         resp.LastDeploy,
 				SDK:                resp.SDK,
+				ChannelSDKMajors:   resp.ChannelSDKMajors,
 			}
 			w := cmd.OutOrStdout()
 			if jsonOut {

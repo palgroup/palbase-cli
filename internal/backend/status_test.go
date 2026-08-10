@@ -284,3 +284,30 @@ func TestFormatSDK_SilentWhenUnreported(t *testing.T) {
 	require.Empty(t, formatSDK(nil, nil, nil))
 	require.Empty(t, formatSDK(&sdkStatus{}, nil, nil))
 }
+
+// The server can send a field the client silently drops, and nothing anywhere
+// says so: channelSdkMajors reached statusOut and the renderer but never the
+// struct the response is decoded into, so `palbase status` looked exactly like a
+// platform that had not sent it. Decode a server-shaped payload and check every
+// field survives the boundary.
+func TestStatusResponse_DecodesEveryFieldTheServerSends(t *testing.T) {
+	const payload = `{
+	  "head": "0f9748ab",
+	  "activeVersion": "0f9748ab",
+	  "lastDeploy": {"status": "succeeded"},
+	  "sdk": {"version": "17.3.0", "supportedMajors": [12, 17]},
+	  "channelSdkMajors": [12, 13, 14, 15, 16, 17]
+	}`
+
+	var resp statusResponse
+	require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+
+	require.Equal(t, "0f9748ab", *resp.Head)
+	require.Equal(t, "0f9748ab", *resp.ActiveVersion)
+	require.NotNil(t, resp.LastDeploy)
+	require.NotNil(t, resp.SDK)
+	require.Equal(t, []int{12, 17}, resp.SDK.SupportedMajors)
+	require.Equal(t, []int{12, 13, 14, 15, 16, 17}, resp.ChannelSDKMajors,
+		"the channel set must survive decoding — it was dropped here once, and the "+
+			"missing line was indistinguishable from a platform that never reported")
+}
