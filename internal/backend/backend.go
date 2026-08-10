@@ -491,6 +491,11 @@ type statusOut struct {
 	ActiveVersion      *string     `json:"activeVersion"`
 	LastDeploy         *lastDeploy `json:"lastDeploy"`
 	SDK                *sdkStatus  `json:"sdk,omitempty"`
+	// ChannelSDKMajors is what the runtime image the fleet pins TODAY can build,
+	// as opposed to SDK.SupportedMajors, which is what the image that ran this
+	// environment's last successful deploy could build. Nil when no deploy has
+	// reported for the pinned image yet.
+	ChannelSDKMajors []int `json:"channelSdkMajors,omitempty"`
 }
 
 func newStatusCmd(r Resolvers) *cobra.Command {
@@ -540,7 +545,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			if out.ActiveVersion != nil {
 				fmt.Fprintf(w, "active:       %s\n", *out.ActiveVersion)
 			}
-			if line := formatSDK(out.SDK); line != "" {
+			if line := formatSDK(out.SDK, out.ChannelSDKMajors, out.ActiveVersion); line != "" {
 				fmt.Fprint(w, line)
 			}
 			if line := formatLastDeploy(out.LastDeploy, time.Now()); line != "" {
@@ -561,7 +566,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 // the wrong message when the major in use is fully supported — that premise is
 // exactly what made `palbase build` refuse pushes the platform would have
 // accepted.
-func formatSDK(s *sdkStatus) string {
+func formatSDK(s *sdkStatus, channelMajors []int, activeVersion *string) string {
 	if s == nil || (s.Version == nil && len(s.SupportedMajors) == 0) {
 		return ""
 	}
@@ -570,13 +575,33 @@ func formatSDK(s *sdkStatus) string {
 		fmt.Fprintf(&b, "sdk:          @palbase/backend %s\n", *s.Version)
 	}
 	if len(s.SupportedMajors) > 0 {
-		parts := make([]string, len(s.SupportedMajors))
-		for i, m := range s.SupportedMajors {
-			parts[i] = strconv.Itoa(m)
+		// ANCHORED to the deploy it came from. This number is read out of that
+		// deploy's artifact manifest, so it describes the image that ran it — and
+		// unlabelled it was taken for a statement about the present: a maintainer
+		// whose last deploy predated the fleet moving to 12-17 read "12-15",
+		// concluded major 17 was unavailable, and planned a downgrade around an
+		// obstacle that did not exist. The fix is the same one Kubernetes settled
+		// on with observedGeneration — say what the observation was made against.
+		where := "your last deploy"
+		if activeVersion != nil {
+			where = "your last deploy (" + *activeVersion + ")"
 		}
-		fmt.Fprintf(&b, "              runtime builds major(s) %s\n", strings.Join(parts, ", "))
+		fmt.Fprintf(&b, "              %s built with major(s) %s\n", where, joinMajors(s.SupportedMajors))
+	}
+	if len(channelMajors) > 0 {
+		// And the question people actually came to ask: what will the NEXT one
+		// build with.
+		fmt.Fprintf(&b, "              the runtime today builds major(s) %s\n", joinMajors(channelMajors))
 	}
 	return b.String()
+}
+
+func joinMajors(majors []int) string {
+	parts := make([]string, len(majors))
+	for i, m := range majors {
+		parts[i] = strconv.Itoa(m)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatLastDeploy renders the human "last deploy" block for `palbase status`.

@@ -242,18 +242,45 @@ func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
 // because it does not run the runtime image.
 func TestFormatSDK_ReportsVersionAndSupportedSet(t *testing.T) {
 	v := "12.0.1"
-	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 13}})
+	active := "86a01cf"
+	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 13}}, nil, &active)
 
 	require.Contains(t, out, "@palbase/backend 12.0.1")
 	require.Contains(t, out, "major(s) 12, 13",
 		"the SET must be named — 'you are behind 13' is wrong when 12 is supported, "+
 			"and that premise is what made palbase build refuse pushes the platform accepted")
+	require.Contains(t, out, "your last deploy (86a01cf)",
+		"the reading comes from that deploy's manifest and must say so — unanchored, "+
+			"it was read as a statement about the present and cost someone a downgrade plan")
+}
+
+// The question people bring to this line is 'can I move to the new major', and
+// the historical set cannot answer it. When the channel has reported, say both.
+func TestFormatSDK_NamesWhatTheRuntimeBuildsToday(t *testing.T) {
+	v := "15.0.0"
+	active := "86a01cf"
+	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 13, 14, 15}},
+		[]int{12, 13, 14, 15, 16, 17}, &active)
+
+	require.Contains(t, out, "your last deploy (86a01cf) built with major(s) 12, 13, 14, 15")
+	require.Contains(t, out, "the runtime today builds major(s) 12, 13, 14, 15, 16, 17")
+}
+
+// An image nothing has deployed with yet has reported no capability. Saying
+// nothing is right; inventing a set, or echoing the historical one as if it were
+// current, is the bug this whole line exists to fix.
+func TestFormatSDK_SilentAboutAnUnreportedChannel(t *testing.T) {
+	v := "15.0.0"
+	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 15}}, nil, nil)
+
+	require.Contains(t, out, "major(s) 12, 15")
+	require.NotContains(t, out, "today builds")
 }
 
 // Not reported ⇒ print nothing. A never-deployed environment, or one whose active
 // artifact predates manifest schema v2, must not be given a default that reads
 // like a supported set.
 func TestFormatSDK_SilentWhenUnreported(t *testing.T) {
-	require.Empty(t, formatSDK(nil))
-	require.Empty(t, formatSDK(&sdkStatus{}))
+	require.Empty(t, formatSDK(nil, nil, nil))
+	require.Empty(t, formatSDK(&sdkStatus{}, nil, nil))
 }
