@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -94,6 +95,14 @@ func selectionResolver() *selection.Resolver { return sel }
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		// A command may ask for a SPECIFIC exit status rather than a failure —
+		// `db plan --detailed-exitcode` reports "there are changes" as 2, which CI
+		// branches on. Such an error carries no message: printing an empty line
+		// above a meaningful status code would read as a crash.
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitCode())
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

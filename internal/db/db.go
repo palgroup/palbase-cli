@@ -141,6 +141,8 @@ func Cmd(r Resolvers) *cobra.Command {
 		Short: "Manage the selected environment's database schema migrations",
 		Long: `Commands to keep db/schema.ts and the live database in sync.
 
+  palbase db plan             Show what it would take to make the live database
+                              match db/schema.ts. Applies nothing.
   palbase db diff -f <name>   Generate a migration from db/schema.ts vs the live DB.
   palbase db check            Fail (non-zero) if the schema has drifted but no
                               migration was generated yet (pre-push gate).
@@ -150,6 +152,7 @@ The diff is computed server-side: db/schema.ts is sent to Palbase, which diffs
 it against the SELECTED environment's database and returns the migration SQL.`,
 	}
 	cmd.AddCommand(
+		planCmd(r),
 		diffCmd(r),
 		checkCmd(r),
 		resetCmd(r),
