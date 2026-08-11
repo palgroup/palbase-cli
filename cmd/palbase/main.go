@@ -242,7 +242,8 @@ func newRootCmd() *cobra.Command {
 		// admin deliberately stays on /api/v1: the fleet-operator routes are not
 		// part of the Project/Environment surface and were not cut over.
 		admin.NewCommand(admin.Resolvers{
-			REST: func() admin.REST { return managementREST() },
+			REST:   func() admin.REST { return managementREST() },
+			Studio: func() admin.Studio { return studioClient },
 		}),
 		testuser.Cmd(testuser.Resolvers{
 			// *studio.Client satisfies testuser.Studio (Query/Mutation).

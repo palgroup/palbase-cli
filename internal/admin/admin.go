@@ -63,6 +63,10 @@ type REST interface {
 // main.go's PersistentPreRunE — mirrors branch.Resolvers' pattern.
 type Resolvers struct {
 	REST func() REST
+	// Studio is the tRPC client. schema-cutover reads an environment's schema
+	// through the same procedure `palbase db plan` uses, so it needs the
+	// project-scoped client rather than the fleet-operator REST one.
+	Studio func() Studio
 }
 
 // NewCommand returns the `palbase admin` parent command. Hidden: it is
@@ -77,6 +81,7 @@ func NewCommand(r Resolvers) *cobra.Command {
 	cmd.AddCommand(migrateAllTenantsCmd(r.REST))
 	cmd.AddCommand(setModuleImageCmd(r.REST))
 	cmd.AddCommand(rotateKeyCmd(r.REST))
+	cmd.AddCommand(schemaCutoverCmd(r))
 	return cmd
 }
 
