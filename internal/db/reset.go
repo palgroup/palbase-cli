@@ -1,18 +1,16 @@
 package db
 
-// reset.go — `palbase db reset`: throw the schema away and replay the committed
-// migrations.
+// reset.go — `palbase db reset`: throw the schema away and rebuild it from
+// db/schema.ts.
 //
-// WHY it exists: migrations here are forward-only (no .down.sql) and the Studio SQL
-// editor is read-only, so a developer who wanted to start their schema over had
-// exactly one option — delete the environment and create a new one. That burns the
-// ref permanently, mints new API keys and re-points every client. This is the verb
-// that was missing.
+// WHY it exists: the Studio SQL editor is read-only, so a developer who wanted to
+// start their schema over had exactly one option — delete the environment and
+// create a new one. That burns the ref permanently, mints new API keys and
+// re-points every client. This is the verb that was missing.
 //
-// The migrations are read from the LOCAL checkout and shipped to the server, mirroring
-// `db diff` (which ships db/schema.ts the same way). That is deliberate: "reset" means
-// "rebuild this database from the migrations I have committed", so the files on disk
-// are the source of truth, not whatever the last deploy happened to apply.
+// The server only empties. What puts the schema back is the declaration, planned
+// against the database that was just cleared — which is what makes that plan
+// purely additive, and never a destructive one to approve.
 
 import (
 	"bufio"
@@ -24,24 +22,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// resetMigration is the wire shape the reset endpoint still accepts. Nothing fills
-// it any more: there are no migration files, and what rebuilds an emptied schema is
-// db/schema.ts, planned against the database the reset just cleared. It stays so the
-// request keeps the shape the server validates.
-//
-// The name is the identity
-// the server records in palbase_schema_migrations, so it travels as the plain
-// <stem>.sql filename — the runtime rejects a path rather than sanitising it.
-type resetMigration struct {
-	Name string `json:"name"`
-	SQL  string `json:"sql"`
-}
-
 // resetResult is what the reset reports back.
 type resetResult struct {
-	DroppedObjects    int      `json:"droppedObjects"`
-	AppliedMigrations int      `json:"appliedMigrations"`
-	Migrations        []string `json:"migrations"`
+	DroppedObjects    int `json:"droppedObjects"`
+	AppliedMigrations int `json:"appliedMigrations"`
+	// Migrations is what the server replayed, and it is always empty: there are no
+	// migration files. Kept because the response shape is the server's, not this
+	// client's, to redefine.
+	Migrations []string `json:"migrations"`
 }
 
 // dbReset calls Studio's backend.dbReset for ONE environment.
@@ -51,8 +39,8 @@ type resetResult struct {
 // gate lives there: a patched or spoofed client that skips the local prompt sends
 // no confirmation and the server refuses. Auto-filling it here would have made the
 // server's production rule depend on this binary behaving.
-func dbReset(ctx context.Context, c *studio.Client, ref string, migrations []resetMigration, confirmRef string) (resetResult, error) {
-	input := map[string]any{"ref": ref, "migrations": migrations, "confirmRef": confirmRef}
+func dbReset(ctx context.Context, c *studio.Client, ref string, confirmRef string) (resetResult, error) {
+	input := map[string]any{"ref": ref, "confirmRef": confirmRef}
 	var resp resetResult
 	// Studio blocks on the reset Job for up to 330s; the client's 120s default
 	// would abandon a reset that is still running and tell the user it failed.
@@ -66,16 +54,16 @@ func resetCmd(r Resolvers) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "reset",
-		Short: "Drop the selected environment's schema and replay its migrations",
-		Long: `Empty the SELECTED environment's public schema and replay db/migrations/*.sql
-from this checkout, in order.
+		Short: "Drop the selected environment's schema and rebuild it from db/schema.ts",
+		Long: `Empty the SELECTED environment's public schema, then rebuild it from
+db/schema.ts.
 
 THIS DELETES ALL DATA in the environment's own tables. Auth users, storage objects
 and the other module schemas are NOT touched, and the environment keeps its ref,
 URL and API keys — this is a schema reset, not a teardown.
 
-Use it when you want to start the schema over: delete the old migrations, write
-new ones, and reset so the database matches them exactly.`,
+Use it when you want to start the schema over: edit db/schema.ts to whatever you
+actually want, then reset so the database matches it exactly.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sel, err := r.Selection().Resolve(cmd.Context())
@@ -141,7 +129,7 @@ new ones, and reset so the database matches them exactly.`,
 			// migration files to replay. What rebuilds it is the declaration —
 			// planned against the now-empty database, which makes the plan purely
 			// additive and therefore never a destructive one to approve.
-			res, err := dbReset(cmd.Context(), r.Studio(), ref, nil, typed)
+			res, err := dbReset(cmd.Context(), r.Studio(), ref, typed)
 			if err != nil {
 				return err
 			}
