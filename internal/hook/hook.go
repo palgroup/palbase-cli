@@ -1,6 +1,13 @@
 // Package hook centralizes the git pre-push hook the CLI installs into a
-// github-mode project: a single v2 body (marker + `palbase build` + `db check`)
-// plus Ensure(), the best-effort retrofit that writes/upgrades it.
+// github-mode project: a single v3 body (marker + `palbase build`) plus Ensure(),
+// the best-effort retrofit that writes/upgrades it.
+//
+// v3 dropped the second half, `palbase db check`. It asked whether db/schema.ts
+// had changes no migration covered — a question with no meaning once the schema is
+// declarative: there are no migration files, and the deploy applies the plan
+// itself. `palbase build` stays because it is not part of that rail; it is the
+// local mirror of the gate that refuses a deploy collecting zero endpoints, and it
+// catches a broken controller in seconds rather than after a push.
 //
 // The hook is a fast LOCAL feedback loop, not the real gate — `command -v
 // palbase || exit 0` makes it a no-op on a CLI-less machine, `--no-verify`
@@ -27,13 +34,13 @@ import (
 
 // Version is the embedded hook body's version. Ensure upgrades any lower/known
 // version to this; bump it (and Body) together when the body changes.
-const Version = 2
+const Version = 3
 
 // Body is the v2 pre-push hook — marker on line 2 so Ensure can identify it,
 // then `palbase build` (the deploy-validation twin) and the db-drift check,
 // both no-ops without the CLI on PATH.
 const Body = `#!/bin/sh
-# palbase-hook: v2
+# palbase-hook: v3
 # Managed by palbase — the CLI updates this file automatically on version bumps (push/serve/clone).
 # Runs the same validation the deploy runs, so a broken push is caught locally.
 # Bypass: git push --no-verify (the server still gates the deploy).
@@ -45,16 +52,6 @@ palbase build || {
   echo "  Fix the errors above and push again. (bypass: git push --no-verify)" >&2
   exit 1
 }
-
-if [ -f db/schema.ts ]; then
-  palbase db check || {
-    echo "" >&2
-    echo "✗ db/schema.ts has changes not covered by a migration." >&2
-    echo "  Run: palbase db diff -f <name>, commit db/migrations, push again." >&2
-    echo "  (bypass: git push --no-verify — the deploy will still gate it)" >&2
-    exit 1
-  }
-fi
 exit 0
 `
 
