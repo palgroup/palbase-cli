@@ -140,7 +140,7 @@ func confirm(in io.Reader, out io.Writer, plan schemaPlan) (bool, error) {
 		lost := int64(0)
 		if plan.Destructive != nil {
 			for _, d := range plan.Destructive.Drops {
-				if d.Kind == "column" && d.NonNull > 0 {
+				if d.Kind == "column" {
 					lost += d.NonNull
 					continue
 				}

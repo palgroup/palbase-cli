@@ -149,8 +149,13 @@ func renderPlan(out io.Writer, plan schemaPlan) {
 			if d.Column != "" {
 				target = d.Table + "." + d.Column
 			}
+			// A column drop destroys the values that are THERE, always — not one per
+			// row, and not conditionally. Falling back to the table's row count when
+			// NonNull is zero is how "nothing is lost" got displayed as "168 rows":
+			// the overstated warning people learn to skip, printed over the server's
+			// correct finding. Measured live on todoapp, 2026-08-11.
 			lost := d.RowCount
-			if d.Kind == "column" && d.NonNull > 0 {
+			if d.Kind == "column" {
 				lost = d.NonNull
 			}
 			if lost > 0 {

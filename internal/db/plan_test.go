@@ -147,3 +147,27 @@ func TestSchemaPlan_EmptyIgnoresWhitespace(t *testing.T) {
 		t.Fatal("a real change was read as empty")
 	}
 }
+
+// A column drop that destroys NOTHING must not be rendered as destroying the whole
+// table. This is the case the earlier test missed — it used a non-zero non-null
+// count, so the conditional fallback never showed itself. Live on todoapp the server
+// correctly said "all 168 rows are already NULL, so no data is lost" while the line
+// above it read "⚠ 168 row(s)".
+func TestRenderPlan_DoesNotOverstateAColumnDropThatLosesNothing(t *testing.T) {
+	var out bytes.Buffer
+	renderPlan(&out, schemaPlan{
+		SQL: `alter table "public"."todos" drop column "uat_applied";`,
+		Destructive: &planDestructive{
+			Drops: []planDrop{{Kind: "column", Table: "todos", Column: "uat_applied", RowCount: 168, NonNull: 0}},
+		},
+		Findings: []planFinding{{Level: "warning", Code: "empty_drop", Message: "column todos.uat_applied is dropped; all 168 rows are already NULL, so no data is lost"}},
+	})
+
+	got := out.String()
+	if strings.Contains(got, "168 row(s)") {
+		t.Fatalf("a drop that loses nothing was rendered as destroying 168 rows:\n%s", got)
+	}
+	if !strings.Contains(got, "uat_applied") {
+		t.Fatalf("the dropped column is missing:\n%s", got)
+	}
+}
