@@ -143,6 +143,7 @@ func Cmd(r Resolvers) *cobra.Command {
 
   palbase db plan             Show what it would take to make the live database
                               match db/schema.ts. Applies nothing.
+  palbase db apply            Apply that plan.
   palbase db diff -f <name>   Generate a migration from db/schema.ts vs the live DB.
   palbase db check            Fail (non-zero) if the schema has drifted but no
                               migration was generated yet (pre-push gate).
@@ -153,6 +154,7 @@ it against the SELECTED environment's database and returns the migration SQL.`,
 	}
 	cmd.AddCommand(
 		planCmd(r),
+		applyCmd(r),
 		diffCmd(r),
 		checkCmd(r),
 		resetCmd(r),
