@@ -81,6 +81,50 @@ With --write the existing file is backed up next to it before being replaced.`,
 	return cmd
 }
 
+// namedExports finds what a schema file exports BESIDES its default.
+//
+// A generated db/schema.ts has exactly one export: the schema. A hand-written one
+// often has more — penny's held CATEGORY_VALUES, the list six modules validated
+// against — and replacing the file takes those with it. The build failure that
+// follows names an import, not a cutover, so the connection is not obvious; and
+// even if the exports were carried across once, the NEXT regeneration would drop
+// them again. The only stable answer is that they do not live in a generated file.
+func namedExports(source string) []string {
+	var found []string
+	for _, line := range strings.Split(source, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "export ") || strings.HasPrefix(line, "export default") {
+			continue
+		}
+		rest := strings.TrimPrefix(line, "export ")
+		// `export { a, b }` and `export * from "..."` re-export without naming a
+		// declaration; report them as written.
+		if strings.HasPrefix(rest, "{") || strings.HasPrefix(rest, "*") {
+			found = append(found, strings.TrimSuffix(line, ";"))
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) < 2 {
+			continue
+		}
+		// export <kind> <name>, with `async function` and `declare` taking one more.
+		name := fields[1]
+		if fields[0] == "async" || fields[0] == "declare" {
+			if len(fields) < 3 {
+				continue
+			}
+			name = fields[2]
+		}
+		if idx := strings.IndexAny(name, "(:=<"); idx > 0 {
+			name = name[:idx]
+		}
+		if name != "" {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
 // writeSchemaFile replaces the declaration, keeping the previous one beside it.
 //
 // The backup is not a convenience: what is being overwritten is the only record of
@@ -95,6 +139,12 @@ func writeSchemaFile(progress io.Writer, path, source string) error {
 	}
 
 	if existing, err := os.ReadFile(path); err == nil {
+		if lost := namedExports(string(existing)); len(lost) > 0 {
+			return fmt.Errorf("%s exports %s besides the schema itself, and the generated file would not — "+
+				"every module importing them breaks, and it breaks again on the next regeneration.\n"+
+				"Move them into their own module and update the imports first, then run this again",
+				path, strings.Join(lost, ", "))
+		}
 		backup := path + ".before-cutover"
 		if err := os.WriteFile(backup, existing, 0o644); err != nil {
 			return fmt.Errorf("back up %s: %w", path, err)

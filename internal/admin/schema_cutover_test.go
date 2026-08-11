@@ -161,3 +161,95 @@ func TestSchemaCutover_CallsTheRenderProcedure(t *testing.T) {
 		t.Fatalf("called %v", studio.calls)
 	}
 }
+
+// A hand-written schema.ts often exports more than the schema. penny's held
+// CATEGORY_VALUES, the list six modules validated against; the generated file has
+// exactly one export, so replacing it took those with it and the build failed
+// naming an import rather than a cutover. Carrying them across once would not help
+// either — the next regeneration drops them again.
+func TestSchemaCutover_RefusesToSwallowTheFilesOtherExports(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "schema.ts")
+	original := `import { defineSchema, enumType } from "@palbase/backend";
+
+export const CATEGORY_VALUES = ["groceries", "dining"] as const;
+
+export default defineSchema({ tables: {} });
+`
+	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, err := runCutover(t, &fakeStudio{source: rendered},
+		"--environment", "pennym", "--out", target, "--write")
+	if err == nil {
+		t.Fatal("the cutover replaced a file whose other exports would be lost")
+	}
+	if !strings.Contains(err.Error(), "CATEGORY_VALUES") {
+		t.Fatalf("the refusal does not name what would be lost: %v (stderr: %s)", err, stderr)
+	}
+
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != original {
+		t.Fatalf("the file was modified despite the refusal:\n%s", got)
+	}
+}
+
+// A file whose only export is the schema is exactly what a cutover replaces.
+func TestSchemaCutover_ReplacesAFileThatOnlyExportsTheSchema(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "schema.ts")
+	if err := os.WriteFile(target, []byte("import { defineSchema } from \"@palbase/backend\";\n\nexport default defineSchema({ tables: {} });\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := runCutover(t, &fakeStudio{source: rendered},
+		"--environment", "pennym", "--out", target, "--write"); err != nil {
+		t.Fatalf("a schema-only file was refused: %v", err)
+	}
+}
+
+func TestNamedExports_FindsEveryFormAndIgnoresTheDefault(t *testing.T) {
+	source := `import { defineSchema } from "@palbase/backend";
+
+export const CATEGORY_VALUES = ["a"] as const;
+export type Category = (typeof CATEGORY_VALUES)[number];
+export function helper() {}
+export async function slowHelper() {}
+export interface Shape { a: string }
+export enum Kind { A }
+export class Thing {}
+export { helper as alias };
+export * from "./other.js";
+
+export default defineSchema({ tables: {} });
+`
+	got := namedExports(source)
+	for _, want := range []string{"CATEGORY_VALUES", "Category", "helper", "slowHelper", "Shape", "Kind", "Thing"} {
+		if !contains(got, want) {
+			t.Errorf("%q was not reported as an export that would be lost: %v", want, got)
+		}
+	}
+	for _, form := range []string{"export { helper as alias }", "export * from \"./other.js\""} {
+		if !contains(got, form) {
+			t.Errorf("%q was not reported: %v", form, got)
+		}
+	}
+	for _, entry := range got {
+		if strings.HasPrefix(entry, "defineSchema") || entry == "default" {
+			t.Errorf("the schema's own default export was reported as a loss: %v", got)
+		}
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
