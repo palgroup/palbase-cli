@@ -2,8 +2,6 @@ package db
 
 import (
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,16 +10,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/stretchr/testify/require"
 )
-
-// writeMigrations drops the given <name>: <sql> pairs into db/migrations under cwd.
-func writeMigrations(t *testing.T, dir string, files map[string]string) {
-	t.Helper()
-	migDir := filepath.Join(dir, "db", "migrations")
-	require.NoError(t, os.MkdirAll(migDir, 0o755))
-	for name, sql := range files {
-		require.NoError(t, os.WriteFile(filepath.Join(migDir, name), []byte(sql), 0o644))
-	}
-}
 
 func resetOKResponse(dropped, applied int, stems ...string) map[string]any {
 	if stems == nil {
@@ -34,53 +22,8 @@ func resetOKResponse(dropped, applied int, stems ...string) map[string]any {
 	}
 }
 
-// TestReset_ShipsMigrationsInOrder is the core contract: every committed migration is
-// sent, with its FILENAME intact and in lexicographic (= chronological, given the
-// timestamped stems) order — the same order the server replays them in. A reordering
-// here would replay an ALTER before its CREATE.
-func TestReset_ShipsMigrationsInOrder(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{
-		"20260202T000000_add_done.sql": "ALTER TABLE todos ADD done bool",
-		"20260101T000000_init.sql":     "CREATE TABLE todos ()",
-		"notes.txt":                    "not a migration",
-	})
-
-	var sent []any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/backend.dbReset", r.URL.Path)
-		in := innerInput(t, r)
-		require.Equal(t, "app1prod", in["ref"])
-		sent, _ = in["migrations"].([]any)
-		trpcOK(w, resetOKResponse(3, 2, "20260101T000000_init", "20260202T000000_add_done"))
-	})
-
-	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"reset"})
-	cmd.SetIn(strings.NewReader("app1prod\n"))
-	cmd.SetOut(&out)
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Len(t, sent, 2, "only .sql files are migrations")
-	first := sent[0].(map[string]any)
-	second := sent[1].(map[string]any)
-	require.Equal(t, "20260101T000000_init.sql", first["name"], "migrations must be ordered by stem")
-	require.Equal(t, "CREATE TABLE todos ()", first["sql"])
-	require.Equal(t, "20260202T000000_add_done.sql", second["name"])
-
-	require.Contains(t, out.String(), "dropped 3 object(s), replayed 2 migration(s)")
-}
-
-// TestReset_WithoutConfirmationSendsNothing is the guard on the destructive prompt:
-// anything other than the exact ref aborts BEFORE the request. A y/N typo on the
-// wrong terminal would otherwise wipe an environment's data.
-//
-// MUTATION GUARD: dropping the confirmation branch turns this RED.
 func TestReset_WithoutConfirmationSendsNothing(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+	chdirTemp(t, "export default defineSchema({})")
 
 	called := false
 	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -108,8 +51,7 @@ func TestReset_WithoutConfirmationSendsNothing(t *testing.T) {
 // TestReset_TypedRefConfirms proves the prompt accepts the real ref — the guard must
 // not be so strict that the command is unusable.
 func TestReset_TypedRefConfirms(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+	chdirTemp(t, "export default defineSchema({})")
 
 	called := false
 	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -129,38 +71,8 @@ func TestReset_TypedRefConfirms(t *testing.T) {
 	require.Contains(t, out.String(), "✓ reset app1prod")
 }
 
-// TestReset_NoMigrationsWarnsTheSchemaWillBeEmpty — resetting a project with no
-// committed migrations is legitimate (that is how you start over), but it leaves an
-// EMPTY schema. Saying so is the difference between a deliberate act and a surprise.
-func TestReset_NoMigrationsWarnsTheSchemaWillBeEmpty(t *testing.T) {
-	chdirTemp(t, "export default defineSchema({})")
-
-	var sent []any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		in := innerInput(t, r)
-		sent, _ = in["migrations"].([]any)
-		trpcOK(w, resetOKResponse(4, 0))
-	})
-
-	var out strings.Builder
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"reset"})
-	cmd.SetIn(strings.NewReader("app1prod\n"))
-	cmd.SetOut(&out)
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Empty(t, sent, "a missing db/migrations must send [] rather than fail")
-	require.Contains(t, out.String(), "the schema will be left EMPTY")
-	require.Contains(t, out.String(), "The schema is now EMPTY")
-}
-
-// TestReset_ServerFailureSurfaces keeps a failed reset an ERROR. Reporting success
-// after a failed replay would tell the user their schema was rebuilt when it may be
-// empty.
 func TestReset_ServerFailureSurfaces(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+	chdirTemp(t, "export default defineSchema({})")
 
 	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -199,8 +111,7 @@ func TestReset_IsRegisteredUnderDB(t *testing.T) {
 }
 
 func TestReset_ProductionRefusesTheYesFlag(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+	chdirTemp(t, "export default defineSchema({})")
 
 	called := false
 	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -226,8 +137,7 @@ func TestReset_ProductionRefusesTheYesFlag(t *testing.T) {
 // keys survive) and pushes people toward the far more destructive env delete. The
 // prompt has to state both halves, and mark production as production.
 func TestReset_WarnsWhatDiesAndWhatSurvives(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
+	chdirTemp(t, "export default defineSchema({})")
 
 	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
 		trpcOK(w, resetOKResponse(1, 1, "20260101T000000_init"))
@@ -250,18 +160,41 @@ func TestReset_WarnsWhatDiesAndWhatSurvives(t *testing.T) {
 	require.Contains(t, report, "API keys", "say the environment itself survives")
 }
 
+// resetRail answers the three calls a reset now makes and records each one's input
+// separately. A fake that answered them all alike handed the test whichever call
+// came last, which is how the confirm_ref assertions started reading the apply's
+// input instead of the reset's.
+func resetRail(t *testing.T, plan map[string]any) (*studio.Client, map[string]map[string]any) {
+	t.Helper()
+	seen := map[string]map[string]any{}
+	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "databaseReset"), strings.Contains(r.URL.Path, "dbReset"):
+			seen["reset"] = innerInput(t, r)
+			trpcOK(w, resetOKResponse(1, 0))
+		case strings.Contains(r.URL.Path, "schemaPlan"):
+			seen["plan"] = innerInput(t, r)
+			trpcOK(w, plan)
+		case strings.Contains(r.URL.Path, "schemaApply"):
+			seen["apply"] = innerInput(t, r)
+			trpcOK(w, map[string]any{"planId": "pl_1", "statementsApplied": 1})
+		default:
+			seen[r.URL.Path] = innerInput(t, r)
+			trpcOK(w, map[string]any{})
+		}
+	})
+	return c, seen
+}
+
+// emptyPlan is what a reset of a project whose declaration is empty produces.
+var emptyPlan = map[string]any{"sql": "", "fromFingerprint": "a", "toFingerprint": "b", "findings": []any{}, "destructive": nil}
+
 // TestReset_SendsConfirmRef — the server REQUIRES confirm_ref to match on
 // production; a CLI that omitted it would fail every production reset with a
 // confusing validation error after the user had already typed the ref.
 func TestReset_SendsConfirmRef(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
-
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		got = innerInput(t, r)
-		trpcOK(w, resetOKResponse(1, 1, "20260101T000000_init"))
-	})
+	chdirTemp(t, "export default defineSchema({})")
+	c, seen := resetRail(t, emptyPlan)
 
 	var out strings.Builder
 	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
@@ -271,7 +204,7 @@ func TestReset_SendsConfirmRef(t *testing.T) {
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
 
-	require.Equal(t, "app1prod", got["confirmRef"])
+	require.Equal(t, "app1prod", seen["reset"]["confirmRef"])
 }
 
 // TestReset_ConfirmRefIsWhatTheUserTyped_NotAutoFilled is the anti-spoofing lock.
@@ -283,14 +216,8 @@ func TestReset_SendsConfirmRef(t *testing.T) {
 //
 // MUTATION GUARD: auto-filling confirmRef with the ref turns this RED.
 func TestReset_ConfirmRefIsWhatTheUserTyped_NotAutoFilled(t *testing.T) {
-	dir := chdirTemp(t, "export default defineSchema({})")
-	writeMigrations(t, dir, map[string]string{"20260101T000000_init.sql": "CREATE TABLE t ()"})
-
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		got = innerInput(t, r)
-		trpcOK(w, resetOKResponse(1, 1, "20260101T000000_init"))
-	})
+	chdirTemp(t, "export default defineSchema({})")
+	c, seen := resetRail(t, emptyPlan)
 
 	// A NON-production environment, so --yes is allowed to reach the server at all.
 	fake := selectiontest.New(t)
@@ -313,6 +240,62 @@ func TestReset_ConfirmRefIsWhatTheUserTyped_NotAutoFilled(t *testing.T) {
 	cmd.SilenceUsage = true
 	require.NoError(t, cmd.Execute())
 
-	require.Equal(t, "", got["confirmRef"],
+	require.Equal(t, "", seen["reset"]["confirmRef"],
 		"--yes types nothing, so nothing may be claimed as a confirmation")
+}
+
+// A reset used to replay db/migrations. There are none, so what rebuilds the schema
+// is the declaration — planned against the database the reset just emptied, which
+// makes the plan purely additive and therefore never one to approve.
+//
+// MUTATION GUARD: dropping the plan+apply after the reset leaves the database EMPTY
+// and turns this RED.
+func TestReset_RebuildsFromTheDeclaration(t *testing.T) {
+	chdirTemp(t, "export default defineSchema({})")
+	c, seen := resetRail(t, map[string]any{
+		"sql":             `create table "public"."todos" (id uuid primary key);`,
+		"fromFingerprint": "a", "toFingerprint": "b",
+		"findings": []any{}, "destructive": nil,
+	})
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	require.NotNil(t, seen["plan"], "the declaration was never planned — the schema would stay empty")
+	require.NotNil(t, seen["apply"], "the plan was never applied — the schema would stay empty")
+
+	// The order is the property: planning before the drop would describe the schema
+	// that is about to be destroyed.
+	require.Contains(t, out.String(), "reset app1prod")
+	require.Contains(t, out.String(), "rebuilding from db/schema.ts")
+
+	// The declaration must be what travels, not a migration list.
+	require.Equal(t, "export default defineSchema({})", seen["plan"]["schema"])
+}
+
+// A reset must never ship migration files: there are none, and a client still
+// sending them would be describing a rail the server no longer has.
+func TestReset_ShipsNoMigrations(t *testing.T) {
+	chdirTemp(t, "export default defineSchema({})")
+	c, seen := resetRail(t, emptyPlan)
+
+	var out strings.Builder
+	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
+	cmd.SetArgs([]string{"reset"})
+	cmd.SetIn(strings.NewReader("app1prod\n"))
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	require.NoError(t, cmd.Execute())
+
+	migrations, present := seen["reset"]["migrations"]
+	if present && migrations != nil {
+		if list, ok := migrations.([]any); ok && len(list) > 0 {
+			t.Fatalf("the reset shipped %d migration(s): %v", len(list), list)
+		}
+	}
 }

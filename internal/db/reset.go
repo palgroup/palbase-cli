@@ -18,16 +18,18 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
 
-// resetMigration is one file on its way to the reset Job. The name is the identity
+// resetMigration is the wire shape the reset endpoint still accepts. Nothing fills
+// it any more: there are no migration files, and what rebuilds an emptied schema is
+// db/schema.ts, planned against the database the reset just cleared. It stays so the
+// request keeps the shape the server validates.
+//
+// The name is the identity
 // the server records in palbase_schema_migrations, so it travels as the plain
 // <stem>.sql filename — the runtime rejects a path rather than sanitising it.
 type resetMigration struct {
@@ -40,42 +42,6 @@ type resetResult struct {
 	DroppedObjects    int      `json:"droppedObjects"`
 	AppliedMigrations int      `json:"appliedMigrations"`
 	Migrations        []string `json:"migrations"`
-}
-
-// readMigrations loads db/migrations/*.sql in lexicographic order — the SAME order
-// the server applies them in (the timestamped stems make that chronological).
-//
-// A missing directory is NOT an error: a project whose schema was never migrated can
-// still be reset (it just replays nothing), and failing here would block the one
-// command that fixes a wedged schema.
-func readMigrations() ([]resetMigration, error) {
-	dir := filepath.Join("db", "migrations")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []resetMigration{}, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", dir, err)
-	}
-
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	sort.Strings(names)
-
-	out := make([]resetMigration, 0, len(names))
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", filepath.Join(dir, name), err)
-		}
-		out = append(out, resetMigration{Name: name, SQL: string(data)})
-	}
-	return out, nil
 }
 
 // dbReset calls Studio's backend.dbReset for ONE environment.
@@ -118,11 +84,6 @@ new ones, and reset so the database matches them exactly.`,
 			}
 			ref := sel.EnvironmentRef()
 
-			migrations, err := readMigrations()
-			if err != nil {
-				return err
-			}
-
 			out := cmd.OutOrStdout()
 			isProd := sel.Environment.IsProduction
 
@@ -137,11 +98,7 @@ new ones, and reset so the database matches them exactly.`,
 			} else {
 				fmt.Fprintf(out, "Environment: %s\n", ref)
 			}
-			if len(migrations) == 0 {
-				fmt.Fprintln(out, "Migrations:  none found in db/migrations — the schema will be left EMPTY")
-			} else {
-				fmt.Fprintf(out, "Migrations:  %d file(s) will be replayed from db/migrations\n", len(migrations))
-			}
+			fmt.Fprintln(out, "Rebuild:     from db/schema.ts, by planning against the emptied database")
 			fmt.Fprintln(out)
 			fmt.Fprintln(out, "  Dropped:  every table, view, sequence, routine and enum in the public")
 			fmt.Fprintln(out, "            schema — and every row in them. This cannot be undone.")
@@ -180,17 +137,38 @@ new ones, and reset so the database matches them exactly.`,
 				}
 			}
 
-			res, err := dbReset(cmd.Context(), r.Studio(), ref, migrations, typed)
+			// The server empties the schema and replays nothing: there are no
+			// migration files to replay. What rebuilds it is the declaration —
+			// planned against the now-empty database, which makes the plan purely
+			// additive and therefore never a destructive one to approve.
+			res, err := dbReset(cmd.Context(), r.Studio(), ref, nil, typed)
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(out, "✓ reset %s — dropped %d object(s)\n", ref, res.DroppedObjects)
 
-			fmt.Fprintf(out, "✓ reset %s\n", ref)
-			fmt.Fprintf(out, "  dropped %d object(s), replayed %d migration(s)\n",
-				res.DroppedObjects, res.AppliedMigrations)
-			if len(migrations) == 0 {
-				fmt.Fprintln(out, "  The schema is now EMPTY — generate a migration with `palbase db diff -f <name>`.")
+			schema, err := readSchema()
+			if err != nil {
+				// A project with no declaration has nothing to rebuild, and saying so
+				// is better than leaving the operator to guess why the schema is empty.
+				fmt.Fprintln(out, "  no db/schema.ts — the schema is now EMPTY")
+				return nil
 			}
+
+			fmt.Fprintln(out, "  rebuilding from db/schema.ts…")
+			plan, err := computeSchemaPlan(cmd.Context(), r.Studio(), ref, schema)
+			if err != nil {
+				return err
+			}
+			if plan.empty() {
+				fmt.Fprintln(out, "  db/schema.ts declares nothing — the schema is now EMPTY")
+				return nil
+			}
+			applied, err := sendApply(cmd.Context(), r.Studio(), ref, schema, plan, newPlanID(plan.ToFingerprint), nil)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "✓ rebuilt from db/schema.ts (%s)\n", applied.PlanID)
 			return nil
 		},
 	}
