@@ -139,7 +139,12 @@ func TestSchemaCutover_RefusesAnEmptyRender(t *testing.T) {
 // The environment is what decides whose schema is read; without it the command
 // has no target and must not guess one.
 func TestSchemaCutover_RequiresAnEnvironment(t *testing.T) {
-	if _, _, err := runCutover(t, &fakeStudio{source: rendered}); err == nil {
+	// --out points into a temp dir even though this must never write: a test that
+	// leaves the default relative path in play writes into the repository the
+	// moment the code under test changes, which is exactly what one mutation run
+	// did (internal/admin/db/schema.ts, 2026-08-11).
+	if _, _, err := runCutover(t, &fakeStudio{source: rendered},
+		"--out", filepath.Join(t.TempDir(), "schema.ts")); err == nil {
 		t.Fatal("a cutover with no environment was accepted")
 	}
 }
@@ -148,7 +153,8 @@ func TestSchemaCutover_RequiresAnEnvironment(t *testing.T) {
 // authorization for reading a tenant's schema already lives.
 func TestSchemaCutover_CallsTheRenderProcedure(t *testing.T) {
 	studio := &fakeStudio{source: rendered}
-	if _, _, err := runCutover(t, studio, "--environment", "centauri6toiom"); err != nil {
+	if _, _, err := runCutover(t, studio, "--environment", "centauri6toiom",
+		"--out", filepath.Join(t.TempDir(), "schema.ts")); err != nil {
 		t.Fatalf("schema-cutover: %v", err)
 	}
 	if len(studio.calls) != 1 || studio.calls[0] != "backend.schemaRender" {
