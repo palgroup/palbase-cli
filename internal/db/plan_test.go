@@ -171,3 +171,50 @@ func TestRenderPlan_DoesNotOverstateAColumnDropThatLosesNothing(t *testing.T) {
 		t.Fatalf("the dropped column is missing:\n%s", got)
 	}
 }
+
+// A rename-only plan has no SQL in it — the planner aligned both sides by name so
+// the diff had nothing to say. Read as "empty", it prints "schema in sync" over a
+// real change the user asked for. Measured live on todoapp, 2026-08-11.
+func TestRenderPlan_ShowsARenameThatCarriesNoSQL(t *testing.T) {
+	var out bytes.Buffer
+	renderPlan(&out, schemaPlan{
+		Renames: []planRename{{Table: "todos", From: "notes", To: "remarks"}},
+	})
+
+	got := out.String()
+	if strings.Contains(got, "schema in sync") {
+		t.Fatalf("a rename was reported as no change:\n%s", got)
+	}
+	if !strings.Contains(got, "todos.remarks") || !strings.Contains(got, "RENAME FROM notes") {
+		t.Fatalf("the rename is not shown:\n%s", got)
+	}
+}
+
+// The rename has to be visible next to the drops, because it is the reason a column
+// disappearing from one name is not data loss.
+func TestRenderPlan_ShowsRenamesBeforeTheRestOfThePlan(t *testing.T) {
+	var out bytes.Buffer
+	renderPlan(&out, schemaPlan{
+		SQL:     `alter table "public"."todos" add column "done" boolean;`,
+		Renames: []planRename{{Table: "todos", From: "notes", To: "remarks"}},
+	})
+
+	got := out.String()
+	rename := strings.Index(got, "RENAME FROM")
+	sql := strings.Index(got, "add column")
+	if rename == -1 || sql == -1 {
+		t.Fatalf("a line is missing (rename=%d sql=%d):\n%s", rename, sql, got)
+	}
+	if rename > sql {
+		t.Errorf("the rename printed after the SQL it explains:\n%s", got)
+	}
+}
+
+// An unchanged schema still has to read as unchanged.
+func TestRenderPlan_StillReportsAnEmptyPlanAsInSync(t *testing.T) {
+	var out bytes.Buffer
+	renderPlan(&out, schemaPlan{})
+	if !strings.Contains(out.String(), "schema in sync") {
+		t.Fatalf("an empty plan was not reported as in sync:\n%s", out.String())
+	}
+}

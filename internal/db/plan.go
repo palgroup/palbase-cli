@@ -17,11 +17,23 @@ import (
 // shadow database and the difference is taken by Postgres itself, so it covers the
 // things a hand-rolled differ cannot model — type changes, triggers, views, policies.
 type schemaPlan struct {
-	SQL             string           `json:"sql"`
+	SQL string `json:"sql"`
+	// Renames are not in the SQL. A diff shown two names for one column emits DROP
+	// and ADD, so the planner aligns the two sides by name first and carries the
+	// rename separately. A plan that renames a column and changes nothing else has
+	// no SQL at all — which is why they have to be read here, or a real change
+	// prints as "schema in sync".
+	Renames         []planRename     `json:"renames"`
 	FromFingerprint string           `json:"fromFingerprint"`
 	ToFingerprint   string           `json:"toFingerprint"`
 	Findings        []planFinding    `json:"findings"`
 	Destructive     *planDestructive `json:"destructive"`
+}
+
+type planRename struct {
+	Table string `json:"table"`
+	From  string `json:"from"`
+	To    string `json:"to"`
 }
 
 type planFinding struct {
@@ -43,7 +55,9 @@ type planDrop struct {
 	NonNull  int64  `json:"nonNull,omitempty"`
 }
 
-func (p schemaPlan) empty() bool { return strings.TrimSpace(p.SQL) == "" }
+func (p schemaPlan) empty() bool {
+	return strings.TrimSpace(p.SQL) == "" && len(p.Renames) == 0
+}
 
 func (p schemaPlan) hasError() bool {
 	for _, f := range p.Findings {
@@ -136,6 +150,23 @@ func renderPlan(out io.Writer, plan schemaPlan) {
 		return
 	}
 
+	// Renames print before everything else because they are what stops the reader
+	// from seeing a DROP and an ADD and concluding their data is about to be thrown
+	// away — the plan says the column is being renamed, so nothing is lost.
+	if len(plan.Renames) > 0 {
+		renames := append([]planRename(nil), plan.Renames...)
+		sort.Slice(renames, func(i, j int) bool {
+			if renames[i].Table != renames[j].Table {
+				return renames[i].Table < renames[j].Table
+			}
+			return renames[i].To < renames[j].To
+		})
+		for _, r := range renames {
+			fmt.Fprintf(out, "  → %-40s RENAME FROM %s\n", r.Table+"."+r.To, r.From)
+		}
+		fmt.Fprintln(out)
+	}
+
 	if plan.Destructive != nil && len(plan.Destructive.Drops) > 0 {
 		drops := append([]planDrop(nil), plan.Destructive.Drops...)
 		sort.Slice(drops, func(i, j int) bool {
@@ -167,8 +198,10 @@ func renderPlan(out io.Writer, plan schemaPlan) {
 		fmt.Fprintln(out)
 	}
 
-	fmt.Fprintln(out, strings.TrimRight(plan.SQL, "\n"))
-	fmt.Fprintln(out)
+	if strings.TrimSpace(plan.SQL) != "" {
+		fmt.Fprintln(out, strings.TrimRight(plan.SQL, "\n"))
+		fmt.Fprintln(out)
+	}
 
 	if len(plan.Findings) > 0 {
 		for _, f := range plan.Findings {
