@@ -242,8 +242,11 @@ func newRootCmd() *cobra.Command {
 		// admin deliberately stays on /api/v1: the fleet-operator routes are not
 		// part of the Project/Environment surface and were not cut over.
 		admin.NewCommand(admin.Resolvers{
-			REST:   func() admin.REST { return managementREST() },
-			Studio: func() admin.Studio { return studioClient },
+			REST: func() admin.REST { return managementREST() },
+			// schema-cutover dispatches a throwaway Job and blocks on it, so it gets
+			// the long client. With the ordinary timeout the CLI gives up while the
+			// Job is still running and the operator is told the render failed.
+			Studio: func() admin.Studio { return studioClient.WithTimeout(studio.JobCallTimeout) },
 		}),
 		testuser.Cmd(testuser.Resolvers{
 			// *studio.Client satisfies testuser.Studio (Query/Mutation).
