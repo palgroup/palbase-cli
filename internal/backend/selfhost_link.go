@@ -124,6 +124,13 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 		return err
 	}
 
+	// Remember the target. `login` and `push` read it, so neither asks for an
+	// address again — and a colleague who clones this repository pushes to the
+	// same stack without being told which one it is.
+	if err := WriteTarget(Target{URL: base, AnonKey: anon, Insecure: o.insecure}); err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", nativeArtifactsDir, err)
 	}
@@ -181,6 +188,7 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 	}
 
 	fmt.Fprintf(w, "\nlinked to %s — commit .palbase/ and Palbase/Generated/\n", base)
+	fmt.Fprintln(w, "next: palbase login   (then palbase push)")
 	return nil
 }
 

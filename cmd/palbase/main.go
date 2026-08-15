@@ -279,15 +279,30 @@ func dbCmdWithTypes() *cobra.Command {
 }
 
 func loginCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Log in to Palbase via browser",
+		Short: "Sign in — to the linked stack, or to Palbase via browser",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// TARGET-RELATIVE (design-management-api.md §10). Someone
+			// self-hosting signs in to THEIR stack; the same verb reaches a
+			// platform account when there is no link. What changes is who
+			// answers, not what the person types.
+			email, _ := cmd.Flags().GetString("email")
+			password, _ := cmd.Flags().GetString("password")
+			if err := backend.StackLogin(cmd.Context(), email, password, cmd.OutOrStdout()); err == nil {
+				return nil
+			} else if !errors.Is(err, backend.ErrNoLinkedStack) {
+				return err
+			}
+
 			fmt.Fprintf(os.Stdout, "Mode: %s (source=%s, studio=%s)\n",
 				resolved.Mode, resolved.Source, resolved.Endpoints.Studio)
 			return authClient.Login(cmd.Context())
 		},
 	}
+	cmd.Flags().String("email", "", "with a linked stack: the account on it")
+	cmd.Flags().String("password", "", "with a linked stack: its password (omit to be prompted)")
+	return cmd
 }
 
 func logoutCmd() *cobra.Command {

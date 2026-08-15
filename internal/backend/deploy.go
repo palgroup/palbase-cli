@@ -516,10 +516,10 @@ func pullBundle(ctx context.Context, r Resolvers, ref, dst string, w io.Writer) 
 // newPushCmd wires `palbase push` — the deploy verb. It always targets the
 // SELECTED Environment; there is no --branch.
 func newPushCmd(r Resolvers) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "push",
 		Args:  cobra.NoArgs,
-		Short: "Deploy the current backend to the selected environment",
+		Short: "Deploy the current backend — to the linked stack, or to the selected environment",
 		Long: `Deploy the backend in the current directory.
 
   repository_provider = palbase: the directory is packaged and uploaded to the
@@ -530,6 +530,24 @@ func newPushCmd(r Resolvers) *cobra.Command {
 
 Override the target with the global --project / --environment flags.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// TARGET-RELATIVE (design-management-api.md §10). A checkout linked
+			// to a stack pushes to THAT stack, which applies its own schema and
+			// activates its own code with no control plane in the path. Without
+			// a link this is the cloud path, which resolves a project and an
+			// environment first.
+			//
+			// One verb either way: a person should not have to remember which
+			// kind of push their project uses — the link they already made is
+			// what decides.
+			if target, err := ReadTarget(); err == nil {
+				token, tokErr := LoadToken(target.URL)
+				if tokErr != nil {
+					return tokErr
+				}
+				accept, _ := cmd.Flags().GetBool("accept-data-loss")
+				return runStackPush(cmd.Context(), target, token, accept, cmd.OutOrStdout())
+			}
+
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
@@ -544,6 +562,13 @@ Override the target with the global --project / --environment flags.`,
 			})
 		},
 	}
+
+	// Declared here so the linked-stack branch can read it. It means nothing
+	// on the cloud path, where a destructive schema change goes through review
+	// rather than through a flag.
+	cmd.Flags().Bool("accept-data-loss", false,
+		"with a linked stack: also run the schema changes that destroy data")
+	return cmd
 }
 
 // newPullCmd wires `palbase pull`.

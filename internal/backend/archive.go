@@ -65,7 +65,25 @@ var defaultIgnoreFiles = []string{
 // BuildTarball walks dir and returns a gzip-compressed tar with paths relative
 // to dir (no wrapper directory), matching what /internal/push expects. It skips
 // defaultIgnoreDirs and any glob in an optional .palignore file at the root.
-func BuildTarball(dir string) ([]byte, error) {
+func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, false) }
+
+// BuildStackTarball is the archive a SELF-HOSTED stack is pushed.
+//
+// It differs in one way that matters: it carries `.palbase/esm` and
+// `.palbase/config.json` — the bundled controllers and the evaluated
+// config-as-code. The cloud builds those server-side from source, so the cloud
+// tarball leaves them out; a stack does not build, it COLLECTS, so leaving them
+// out here means pushing a project with no code in it.
+//
+// What still does not travel: the rest of `.palbase` — which stack this checkout
+// is linked to, the slots an app reads, the fetched spec. None of that is the
+// backend, and the target file in particular describes the machine that pushed.
+func BuildStackTarball(dir string) ([]byte, error) { return buildTarball(dir, true) }
+
+// stackOnlyPalbaseEntries are the `.palbase` paths a stack push carries.
+var stackOnlyPalbaseEntries = []string{".palbase/esm", ".palbase/config.json"}
+
+func buildTarball(dir string, forStack bool) ([]byte, error) {
 	patterns, err := loadPalignore(filepath.Join(dir, ".palignore"))
 	if err != nil {
 		return nil, err
@@ -90,8 +108,17 @@ func BuildTarball(dir string) ([]byte, error) {
 			// Skip an ignored dir at ANY depth (e.g. top-level node_modules AND a
 			// nested web/node_modules) — SkipDir prunes the whole subtree.
 			if hasIgnoredSegment(rel) {
+				// A stack push descends into `.palbase` for the build products.
+				// The entries are filtered below, so nothing else in there rides
+				// along — descending is not the same as including.
+				if forStack && stackWantsPalbase(rel) {
+					return nil
+				}
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if forStack && strings.HasPrefix(filepath.ToSlash(rel), ".palbase/") && !stackWantsPalbase(rel) {
 			return nil
 		}
 		// Never follow symlinks (CWE-61): filepath.Walk uses Lstat, so a symlink
@@ -102,7 +129,10 @@ func BuildTarball(dir string) ([]byte, error) {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil
 		}
-		if hasIgnoredSegment(rel) ||
+		// The ignore check runs for FILES too, and `.palbase` is on that list —
+		// so a stack push has to say, once, that these particular entries are
+		// wanted. Everything else in the tree is judged exactly as before.
+		if (hasIgnoredSegment(rel) && !(forStack && stackWantsPalbase(rel))) ||
 			matchesAny(filepath.ToSlash(rel), defaultIgnoreFiles) ||
 			matchesAny(filepath.ToSlash(rel), patterns) {
 			return nil
@@ -317,6 +347,24 @@ func matchesAny(rel string, patterns []string) bool {
 			return true
 		}
 		if ok, _ := filepath.Match(p, base); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// stackWantsPalbase reports whether a `.palbase` path is a BUILD PRODUCT the
+// stack needs, rather than state about the machine that pushed.
+//
+// The allowlist is the point: `.palbase` also holds which stack this checkout is
+// linked to and the slots an app reads, and a push is not the place for either.
+func stackWantsPalbase(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	if rel == ".palbase" {
+		return true
+	}
+	for _, want := range stackOnlyPalbaseEntries {
+		if rel == want || strings.HasPrefix(rel, want+"/") {
 			return true
 		}
 	}
