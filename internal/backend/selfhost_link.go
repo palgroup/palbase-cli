@@ -1,15 +1,20 @@
 package backend
 
-// selfhost_link.go — `palbase selfhost link` : binding an app to a stack you run.
+// selfhost_link.go — `palbase link <target>` : binding an app to a stack.
 //
-// WHY THIS IS A SEPARATE COMMAND. `palbase ios link` resolves a PROJECT,
-// registers an APP under it, picks an ENVIRONMENT, and asks the Management API
-// for that environment's key. A self-hosted stack has none of those: it is one
-// installation with one identity and one pair of keys, sitting in the `.env`
-// beside it. Bending the cloud path onto it would mean inventing a project id
-// for a thing that is not one — so this command asks for the only two facts that
-// exist (where the stack is, and its keys) and writes exactly the same artifacts
-// every generator downstream already reads.
+// TARGET-RELATIVE, which is the rule the design settled on
+// (docs/paltimate/2026-08-12-v2-faz0-selfhost/design-management-api.md §6, §10):
+// a command that touches ONE tenant works against whatever target it is given,
+// and only who authenticates changes. What you write decides which it is —
+// something carrying a scheme is the target itself and no control plane is
+// asked; a bare environment ref is resolved by ours.
+//
+// This is the direct half. `palbase ios link` still owns the ref half, because
+// that one resolves a project, registers an app and asks the Management API for
+// an environment's key — none of which a self-hosted stack has: it is one
+// installation with one identity and one pair of keys in the .env beside it.
+// The two meet when the management API exists on both sides; until then, the
+// direct half is what makes a self-hosted stack usable at all.
 //
 // It writes the SAME slot files `link` writes, so everything after this point —
 // `palbase spec`, the Swift generator, `palbe-gen` — behaves identically whether
@@ -50,20 +55,14 @@ type selfhostOpts struct {
 	insecure   bool
 }
 
-func newSelfhostCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "selfhost",
-		Short: "Work with a Palbase stack you run yourself",
-	}
-	cmd.AddCommand(newSelfhostLinkCmd())
-	return cmd
-}
+func newSelfhostCmd() *cobra.Command { return newLinkCmd() }
 
-func newSelfhostLinkCmd() *cobra.Command {
+func newLinkCmd() *cobra.Command {
 	var o selfhostOpts
 	cmd := &cobra.Command{
-		Use:   "link",
-		Short: "Point this app at a self-hosted stack and generate its client",
+		Use:   "link <target>",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Bind this app to a stack and generate its client",
 		Long: `Bind this checkout to a Palbase stack you run, and generate the typed client
 for it.
 
@@ -85,7 +84,18 @@ ever pasted into a shell history.
 
 --insecure is for a stack still using the self-signed certificate its first boot
 generated. Drop it the moment you put a real one in front.`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// The target may be written as an argument or as --url; they are the
+			// same thing, and refusing one of them would be a rule to remember
+			// for no reason.
+			if len(args) == 1 && o.url == "" {
+				o.url = args[0]
+			}
+			if o.url != "" && !strings.Contains(o.url, "://") {
+				return fmt.Errorf(
+					"%q has no scheme, so it is an environment ref rather than a stack address — "+
+						"that half is resolved by our cloud: use `palbase ios link` for it", o.url)
+			}
 			return runSelfhostLink(cmd.Context(), o, cmd.OutOrStdout())
 		},
 	}
@@ -96,7 +106,6 @@ generated. Drop it the moment you put a real one in front.`,
 	f.StringVar(&o.serviceKey, "service-key", "", "secret key (fetches the spec); overrides --env-file")
 	f.StringSliceVar(&o.platforms, "platform", []string{"ios"}, "ios, macos, android or web")
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
-	_ = cmd.MarkFlagRequired("url")
 	return cmd
 }
 
