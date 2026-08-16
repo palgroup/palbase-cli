@@ -46,8 +46,6 @@ const projectAppID = "project"
 
 type linkOpts struct {
 	url       string
-	email     string
-	password  string
 	platforms []string
 	insecure  bool
 }
@@ -58,35 +56,29 @@ func newLinkCmd() *cobra.Command {
 		Use:   "link <target>",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bind this app to a stack and generate its client",
-		Long: `Bind this checkout to a Palbase stack you run, and generate the typed client
-for it.
+		Long: `Bind this checkout to a project, and generate the typed client for it.
 
-    palbase link https://my-stack --email you@example.com
+    palbase link http://localhost:54321      something running on this machine
+    palbase link todoapp                     a project in the cloud
 
-The stack says what it is — its publishable key comes from
-/.well-known/palbase.json, which it serves itself — so nothing is pasted into a
-shell and no file has to be found on disk.
-
-The CONTRACT is the one part that needs a person. It lists every route, body and
-error shape of the deployed backend, and this stack keeps it behind its
-management surface rather than serving it to anyone who knows the address — so
---email signs you in while linking and the client is generated on the spot. Drop
-it if you are already signed in, or if you only want the app's config now.
+Linking is something you do AS SOMEBODY. Both the publishable key and the
+contract come from the project over authenticated routes — the public document
+says only what kind of thing answered — so a stranger who knows the address gets
+neither. The credential comes from ` + "`palbase start`" + ` (which writes one for the
+stack it just brought up), from ` + "`palbase login`" + `, or from PALBASE_ACCESS_TOKEN.
 
 It writes:
 
-  .palbase/target.json                      the stack this checkout talks to
+  .palbase/project.json                     the project this checkout belongs to
   .palbase/<platform>/palbase-config.json   the app's URL + publishable key
-  .palbase/openapi.json                     the contract, once you are signed in
+  .palbase/openapi.json                     the contract
   Palbase/Generated/                        (apple) the committed Swift client
 
-The contract is the one part that needs a person: it lists every route and error
-shape, so it comes from the management surface, with your own session. Run
-` + "`palbase login`" + ` and it is fetched and generated on the spot — and again after
-every ` + "`palbase push`" + `, because that is exactly when it changed.
+Run it again after every ` + "`palbase push`" + ` — or just ` + "`palbase spec`" + `, which
+refreshes the contract alone, because that is the part that changed.
 
---insecure is for a stack still using the self-signed certificate its first boot
-generated. Drop it the moment you put a real one in front.`,
+--insecure is for an address still using the self-signed certificate its first
+boot generated.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// The target may be written as an argument or as --url; they are the
 			// same thing, and refusing one of them would be a rule to remember
@@ -104,8 +96,6 @@ generated. Drop it the moment you put a real one in front.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.url, "url", "", "the stack's base URL (e.g. https://127.0.0.1)")
-	f.StringVar(&o.email, "email", "", "sign in as this person while linking, to fetch the contract")
-	f.StringVar(&o.password, "password", "", "skip the prompt (a password on a command line lands in shell history)")
 	f.StringSliceVar(&o.platforms, "platform", []string{"ios"}, "ios, macos, android or web")
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
 	return cmd
@@ -116,17 +106,28 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if base == "" {
 		return errors.New("--url is required: the address the stack serves on")
 	}
-	// The stack says what it is. Nothing to paste, nothing to find on disk.
+	// What is at this address, and does it answer at all. One request, no
+	// credential: the document says WHAT answered and which SDK it runs, and a
+	// project that does not answer is either not a Palbase project or not up.
 	described, err := describeStack(ctx, base, o.insecure)
 	if err != nil {
 		return err
 	}
-	anon := described.AnonKey
+
+	// The publishable key comes from the project, over an authenticated route.
+	// It used to ride on the public document, which meant anyone who knew the
+	// address was handed a working client credential; now linking is something
+	// you do as somebody.
+	target := Target{URL: base, Insecure: o.insecure}
+	anon, err := projectPublishableKey(ctx, target)
+	if err != nil {
+		return err
+	}
 
 	// Remember the target. `login`, `push` and `spec` read it, so none of them
 	// asks for an address again — and a colleague who clones this repository
 	// reaches the same stack without being told which one it is.
-	if err := WriteTarget(Target{URL: base, AnonKey: anon, Insecure: o.insecure}); err != nil {
+	if err := WriteTarget(target); err != nil {
 		return err
 	}
 
@@ -178,24 +179,10 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// the last link leaves a token behind that verifies as nothing, and
 	// "already have a token" would be exactly the wrong reason to skip signing
 	// in — it is the case that needs it most.
-	err = RefreshSpec(ctx, w)
-	if errors.Is(err, ErrNotSignedIn) && o.email != "" {
-		if err := runStackLogin(ctx, Target{URL: base, AnonKey: anon, Insecure: o.insecure},
-			o.email, o.password, w); err != nil {
-			return err
-		}
-		err = RefreshSpec(ctx, w)
-	}
-
-	switch {
-	case err == nil:
-		fmt.Fprintln(w, "commit .palbase/ and Palbase/Generated/")
-	case errors.Is(err, ErrNotSignedIn):
-		fmt.Fprint(w, "the app's config is written; the CONTRACT needs a person — this stack keeps it\n"+
-			"behind its management surface. Re-run with --email, or `palbase login`.\n")
-	default:
+	if err := RefreshSpec(ctx, w); err != nil {
 		return err
 	}
+	fmt.Fprintln(w, "commit .palbase/ and Palbase/Generated/")
 	return nil
 }
 
@@ -232,9 +219,9 @@ func describeStack(ctx context.Context, base string, insecure bool) (stackDescri
 	if err := json.Unmarshal(body, &described); err != nil {
 		return stackDescription{}, fmt.Errorf("%s answered something unexpected: %s", wellKnownPath, trimBody(body))
 	}
-	if described.AnonKey == "" {
+	if described.Hosting == "" {
 		return stackDescription{}, fmt.Errorf(
-			"%s has no publishable key configured — its clients cannot authenticate at all", base)
+			"%s answered %s without saying what it is", base, wellKnownPath)
 	}
 	return described, nil
 }
@@ -247,7 +234,6 @@ const wellKnownPath = "/.well-known/palbase.json"
 // out rather than generated.
 type stackDescription struct {
 	Hosting    string `json:"hosting"`
-	AnonKey    string `json:"anon_key"`
 	SDKVersion string `json:"sdk_version"`
 }
 

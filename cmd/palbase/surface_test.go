@@ -124,10 +124,15 @@ func TestGolden_ProjectSurface(t *testing.T) {
 // the retired `branch` group, and it has NO `switch` (that was the branch verb).
 // `branch` here is the GIT-branch mapping verb, not that resource: it writes the
 // value push/pull and the deploy webhook both route on.
+// TestGolden_EnvSurface — `env` takes a slug and switches; it has no
+// subcommands.
+//
+// Creating, archiving, waking and deleting an environment are control-plane acts
+// with a web surface that does them better (confirmations, membership, billing
+// consequences). What the CLI keeps is the one that belongs in a checkout:
+// WHICH environment this code acts on.
 func TestGolden_EnvSurface(t *testing.T) {
-	require.Equal(t,
-		[]string{"archive", "branch", "create", "delete", "list", "status", "use", "wake"},
-		subcommands(t, "env"))
+	require.Empty(t, subcommands(t, "env"))
 }
 
 func subcommands(t *testing.T, parent string) []string {

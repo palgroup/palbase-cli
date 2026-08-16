@@ -23,9 +23,12 @@ func TestPlatformLinkFollowsTheBoundProject(t *testing.T) {
 	inScratchCheckout(t)
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
-	if err := WriteTarget(Target{URL: srv.URL, AnonKey: "pb_project_cPUBLISHABLE"}); err != nil {
+	if err := WriteTarget(Target{URL: srv.URL}); err != nil {
 		t.Fatal(err)
 	}
+	// Linking is something you do as somebody: both the key and the contract
+	// come from the project over authenticated routes.
+	linkedAs(t, srv.URL, "a-credential")
 
 	// The cloud resolver is deliberately absent: if the command reaches for it,
 	// this fails as a nil dereference or an auth error rather than passing by
@@ -63,7 +66,7 @@ func TestPlatformLinkFollowsTheBoundProject(t *testing.T) {
 // verb, and answering it here would point the app somewhere else entirely.
 func TestPlatformUseRefusesOnABoundProject(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{URL: "https://127.0.0.1", AnonKey: "pb_project_cPUBLISHABLE"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://127.0.0.1"}); err != nil {
 		t.Fatal(err)
 	}
 

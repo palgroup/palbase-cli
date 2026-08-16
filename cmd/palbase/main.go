@@ -17,7 +17,6 @@ import (
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
 	"github.com/palgroup/palbase-cli/internal/debugconsole"
 	"github.com/palgroup/palbase-cli/internal/egress"
-	envcmd "github.com/palgroup/palbase-cli/internal/env"
 	"github.com/palgroup/palbase-cli/internal/flags"
 	"github.com/palgroup/palbase-cli/internal/github"
 	"github.com/palgroup/palbase-cli/internal/logs"
@@ -192,10 +191,6 @@ func newRootCmd() *cobra.Command {
 				return backend.PullBundle(ctx, backendResolvers, environmentRef, dir, out)
 			},
 		}),
-		envcmd.Cmd(envcmd.Resolvers{
-			REST:      func() envcmd.REST { return managementREST() },
-			Selection: selectionResolver,
-		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST:      func() apikey.REST { return managementREST() },
 			Selection: selectionResolver,
@@ -281,27 +276,21 @@ func dbCmdWithTypes() *cobra.Command {
 func loginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Sign in — to the linked stack, or to Palbase via browser",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// TARGET-RELATIVE (design-management-api.md §10). Someone
-			// self-hosting signs in to THEIR stack; the same verb reaches a
-			// platform account when there is no link. What changes is who
-			// answers, not what the person types.
-			email, _ := cmd.Flags().GetString("email")
-			password, _ := cmd.Flags().GetString("password")
-			if err := backend.StackLogin(cmd.Context(), email, password, cmd.OutOrStdout()); err == nil {
-				return nil
-			} else if !errors.Is(err, backend.ErrNoLinkedStack) {
-				return err
-			}
+		Short: "Sign in to Palbase",
+		Long: `Sign in, and keep the session on this machine.
 
+The browser flow (Authorization Code + PKCE, DPoP-bound) is for a person at a
+keyboard. For anything headless — CI, an agent in a container — set
+PALBASE_ACCESS_TOKEN to a Dashboard-issued token instead and skip this entirely.
+
+There is no separate sign-in for a project running on this machine: ` + "`palbase start`" + `
+writes that credential itself.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stdout, "Mode: %s (source=%s, studio=%s)\n",
 				resolved.Mode, resolved.Source, resolved.Endpoints.Studio)
 			return authClient.Login(cmd.Context())
 		},
 	}
-	cmd.Flags().String("email", "", "with a linked stack: the account on it")
-	cmd.Flags().String("password", "", "with a linked stack: its password (omit to be prompted)")
 	return cmd
 }
 

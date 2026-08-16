@@ -36,14 +36,35 @@ func inScratchCheckout(t *testing.T) {
 	t.Setenv("HOME", home)
 }
 
-// stackServing answers as a stack: the well-known document, and whatever else
-// the test wires up.
+// stackServing answers as a project: the public document, the AUTHENTICATED key
+// route, the contract, and whatever else a test wires up.
+//
+// The key route refuses without a bearer, exactly as the real one does — a
+// harness that handed it out unconditionally would let a test pass that a real
+// project fails.
 func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == wellKnownPath {
+		switch r.URL.Path {
+		case wellKnownPath:
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"hosting":"project","anon_key":"` + anonKey + `"}`))
+			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"18.0.0"}`))
+			return
+		case "/v1/management/keys":
+			if r.Header.Get("Authorization") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"publishable":"` + anonKey + `"}`))
+			return
+		case "/v1/management/openapi":
+			if r.Header.Get("Authorization") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
 			return
 		}
 		if extra != nil {
@@ -56,18 +77,26 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 	return srv
 }
 
-func TestTheStackIsAskedRatherThanTheOperator(t *testing.T) {
-	// The publishable key comes from the stack. Nothing is read off disk and
-	// nothing is typed: an operator who has to find a file to link an app is an
-	// operator who pastes a key into a shell instead.
+// linkedAs gives this scratch checkout a credential for one target, the way
+// `palbase start` or `palbase login` would.
+func linkedAs(t *testing.T, url, token string) {
+	t.Helper()
+	t.Setenv(AccessTokenEnv, "")
+	if err := StoreCredential(url, token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTheProjectSaysWhatItIsAndNotWhatOpensIt(t *testing.T) {
+	// The public document says WHAT answered. It used to hand out the
+	// publishable key as well, which meant knowing an address was enough to hold
+	// a working client credential — so the key moved behind an authenticated
+	// route and this document kept the part that is safe to tell a stranger.
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
 	described, err := describeStack(context.Background(), srv.URL, false)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
-	}
-	if described.AnonKey != "pb_project_cPUBLISHABLE" {
-		t.Errorf("the key came back as %q", described.AnonKey)
 	}
 	if described.Hosting != "project" {
 		t.Errorf("hosting came back as %q", described.Hosting)
@@ -93,23 +122,26 @@ func TestSomethingThatIsNotAStackIsSaidToBeOne(t *testing.T) {
 	}
 }
 
-func TestAStackWithNoPublishableKeyIsRefused(t *testing.T) {
+func TestAProjectWithNoPublishableKeyIsRefused(t *testing.T) {
 	// Its clients could not authenticate at all, so writing that config would
 	// produce an app that builds and fails at its first request.
+	inScratchCheckout(t)
 	srv := stackServing(t, "", nil)
+	linkedAs(t, srv.URL, "a-credential")
 
-	_, err := describeStack(context.Background(), srv.URL, false)
+	_, err := projectPublishableKey(context.Background(), Target{URL: srv.URL})
 	if err == nil {
-		t.Fatal("a stack with no publishable key was linked")
+		t.Fatal("a project with no publishable key was linked")
 	}
-	if !strings.Contains(err.Error(), "cannot authenticate") {
-		t.Errorf("the refusal does not say what the consequence is: %v", err)
+	if !strings.Contains(err.Error(), "publishable key") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
 	}
 }
 
 func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	inScratchCheckout(t)
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
 
 	opts := linkOpts{url: srv.URL, platforms: []string{"ios"}}
 	if err := runLink(context.Background(), opts, &strings.Builder{}); err != nil {
@@ -145,24 +177,29 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	}
 }
 
-func TestLinkingWithoutASessionStillWritesTheAppsConfig(t *testing.T) {
-	// The contract needs a person; the app's config does not. Refusing the whole
-	// command because one of its two outputs needs a session would make linking
-	// impossible until somebody signs in — and the config is what a running app
-	// needs.
+func TestLinkingWithoutACredentialWritesNOTHING(t *testing.T) {
+	// This is the reverse of what it used to do, and the reversal is the point.
+	// Both halves of a link now come from the project over authenticated routes
+	// — the key as well as the contract — so a run with no credential has
+	// nothing true to write, and writing "most of it" would leave a checkout
+	// that looks linked and cannot work.
 	inScratchCheckout(t)
+	t.Setenv(AccessTokenEnv, "")
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
 	var out strings.Builder
-	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
-		t.Fatalf("link: %v", err)
+	err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out)
+	if err == nil {
+		t.Fatal("linking succeeded with no credential")
 	}
-	if _, err := os.Stat(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")); err != nil {
-		t.Fatalf("the app's config was not written: %v", err)
+	if _, statErr := os.Stat(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")); statErr == nil {
+		t.Error("a half-linked checkout was written")
 	}
-	// And it says what is missing, in terms of the command that supplies it.
-	if !strings.Contains(out.String(), "--email") {
-		t.Errorf("the output does not name the way to finish:\n%s", out.String())
+	// And the refusal names both ways to fix it.
+	for _, want := range []string{"palbase start", "palbase login"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
 	}
 }
 
@@ -182,7 +219,7 @@ func TestTheContractIsFetchedWithTheSessionAndNoKey(t *testing.T) {
 	defer srv.Close()
 
 	body, err := fetchStackSpec(context.Background(),
-		Target{URL: srv.URL, AnonKey: "pb_project_cPUBLISHABLE"}, "the-session-token")
+		Target{URL: srv.URL}, "the-session-token")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}

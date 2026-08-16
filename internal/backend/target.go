@@ -1,19 +1,25 @@
 package backend
 
-// target.go — the stack this checkout talks to, and the credential for it.
+// target.go — which project this checkout talks to.
 //
-// The CLI is TARGET-RELATIVE: a command that touches one tenant works against
-// whatever it was pointed at, and only who authenticates changes
-// (design-management-api.md §10). So two things have to be written down — where
-// the target is, and who you are to it — and they belong in different places.
+// TWO facts, in two places, because they belong to different people.
 //
-// The TARGET is a fact about the project: it goes in `.palbase/target.json`
-// beside the rest of the checkout's committed configuration, so a colleague who
-// clones the repository pushes to the same stack without being told.
+// The TARGET is a fact about the PROJECT: `.palbase/project.json`, committed, so
+// a colleague who clones the repository reaches the same place without being
+// told which one it is. It names either a cloud project and environment, or a
+// URL for something running on this machine — and nothing else. It used to carry
+// the publishable key as well; that key now comes from the project itself, over
+// an authenticated route, so a committed file no longer hands one out.
 //
-// The CREDENTIAL is a fact about the person: it goes under the user's home
-// directory, keyed by target, and never near the repository. A token committed
-// by accident is a token in every clone and every CI log.
+// The CREDENTIAL is a fact about the PERSON: `~/.palbase/credentials.json`,
+// never near the repository (see credentials.go). A token committed by accident
+// is a token in every clone and every CI log.
+//
+// And there is a third, temporary fact: while `palbase start` is running, the
+// stack in front of you is the target. That lives in `.palbase/local.json`,
+// gitignored, and it wins for as long as it exists — which is what makes "work
+// locally, then push" a two-word switch rather than a re-link.
+
 import (
 	"encoding/json"
 	"errors"
@@ -23,30 +29,42 @@ import (
 	"strings"
 )
 
-// Target is what `palbase link` writes and `login`/`push` read.
+// Target is where a verb acts.
 type Target struct {
-	// URL is the stack's address. Its presence is what makes this a DIRECT
-	// target — nothing resolves it, and no control plane is asked.
-	URL string `json:"url"`
-	// AnonKey is the stack's PUBLISHABLE key. It is recorded because the auth
-	// routes are the customer contract and expect it on every call — signing in
-	// is something an app does, and the CLI signs in the same way. It is not a
-	// secret: it opens only what row-level security lets an anonymous caller
-	// reach, which is why it may sit in a committed file.
-	//
-	// The management routes take the opposite view and want ONLY the person's
-	// token: when a key is present the stack mints the identity from it, and a
-	// person is invisible.
-	AnonKey string `json:"anon_key,omitempty"`
-	// Insecure records that this stack still serves the certificate its first
+	// URL is an address this CLI talks to directly. Set for a project running on
+	// this machine, and resolved from Project/Env for a cloud one.
+	URL string `json:"url,omitempty"`
+	// Project and Env name a cloud project group and one of its environments.
+	// Empty for a direct URL target.
+	Project string `json:"project,omitempty"`
+	Env     string `json:"env,omitempty"`
+	// Insecure records that this address still serves the certificate its first
 	// boot generated. Remembered rather than retyped, because a flag somebody
-	// has to repeat is a flag they will eventually paste at the wrong stack.
+	// has to repeat is a flag they will eventually paste at the wrong project.
 	Insecure bool `json:"insecure,omitempty"`
+	// Local is true when this target came from a running dev stack rather than
+	// from the committed file. Not serialised — it is a fact about right now.
+	Local bool `json:"-"`
 }
 
-func targetPath() string { return filepath.Join(nativeArtifactsDir, "target.json") }
+// Describe is what every verb prints before it acts.
+func (t Target) Describe() string {
+	if t.Local {
+		return t.URL + " (local)"
+	}
+	if t.Project != "" {
+		if t.Env != "" {
+			return t.Project + "/" + t.Env
+		}
+		return t.Project
+	}
+	return t.URL
+}
 
-// WriteTarget records the stack this checkout talks to.
+func projectPath() string { return filepath.Join(nativeArtifactsDir, "project.json") }
+func localPath() string   { return filepath.Join(nativeArtifactsDir, "local.json") }
+
+// WriteTarget records the project this checkout belongs to.
 func WriteTarget(t Target) error {
 	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
 		return err
@@ -55,27 +73,50 @@ func WriteTarget(t Target) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(targetPath(), append(blob, '\n'), 0o644)
+	return os.WriteFile(projectPath(), append(blob, '\n'), 0o644)
 }
 
 // ReadTarget returns the linked stack, or an error naming the command that
 // would fix it. A tool that says "not linked" without saying how to link is a
 // tool that sends people to the documentation for one line.
+// ReadTarget answers where a verb should act.
+//
+// A running dev stack WINS. `palbase start` writes `.palbase/local.json` and
+// `palbase stop` removes it, so "am I working locally right now" is a fact on
+// disk rather than a flag on every command — and every verb prints what it
+// resolved, so nobody has to remember.
 func ReadTarget() (Target, error) {
-	raw, err := os.ReadFile(targetPath())
+	if raw, err := os.ReadFile(localPath()); err == nil {
+		var local Target
+		if err := json.Unmarshal(raw, &local); err != nil {
+			return Target{}, fmt.Errorf("read %s: %w", localPath(), err)
+		}
+		if local.URL != "" {
+			local.Local = true
+			return local, nil
+		}
+	}
+	return readLinkedProject()
+}
+
+func readLinkedProject() (Target, error) {
+	raw, err := os.ReadFile(projectPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return Target{}, errors.New(
-			"this checkout is not linked to a stack — run `palbase link https://your-stack` first")
+			"this checkout is not linked to a project.\n" +
+				"  palbase link <project>        a project in the cloud\n" +
+				"  palbase link <url>            something running on this machine\n" +
+				"  palbase start                 bring one up here and link to it")
 	}
 	if err != nil {
 		return Target{}, err
 	}
 	var t Target
 	if err := json.Unmarshal(raw, &t); err != nil {
-		return Target{}, fmt.Errorf("read %s: %w", targetPath(), err)
+		return Target{}, fmt.Errorf("read %s: %w", projectPath(), err)
 	}
 	if strings.TrimSpace(t.URL) == "" {
-		return Target{}, fmt.Errorf("%s names no stack — run `palbase link` again", targetPath())
+		return Target{}, fmt.Errorf("%s names no stack — run `palbase link` again", projectPath())
 	}
 	return t, nil
 }

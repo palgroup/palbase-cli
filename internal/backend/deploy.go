@@ -578,6 +578,17 @@ func newPullCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Update the local backend to the environment's deployed version",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Look before writing: a pull replaces the backend in this directory
+			// with the one the project is serving, and the moment it hurts is
+			// the moment somebody had unsaved edits.
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := refuseDirtyTree(cwd); err != nil {
+				return err
+			}
+
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
