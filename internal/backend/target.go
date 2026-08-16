@@ -92,4 +92,3 @@ func credentialsPath() (string, error) {
 	}
 	return filepath.Join(home, ".palbase", "credentials.json"), nil
 }
-
