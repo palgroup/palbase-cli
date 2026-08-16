@@ -142,7 +142,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		// Takes no Resolvers: a stack you run has no project to select and no
 		// environment to resolve. It is told where the stack is, once, and asks
 		// the stack itself for the rest.
-		newSelfhostCmd(),
+		newLinkCmd(),
 	}
 }
 

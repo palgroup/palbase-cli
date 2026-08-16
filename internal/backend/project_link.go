@@ -1,6 +1,6 @@
 package backend
 
-// selfhost_link.go — `palbase link <target>` : binding an app to a stack.
+// project_link.go — `palbase link <target>` : binding an app to a project.
 //
 // TARGET-RELATIVE, which is the rule the design settled on
 // (docs/paltimate/2026-08-12-v2-faz0-selfhost/design-management-api.md §6, §10):
@@ -10,11 +10,11 @@ package backend
 // asked; a bare environment ref is resolved by ours.
 //
 // This is the direct half. `palbase ios link` still owns the ref half, because
-// that one resolves a project, registers an app and asks the Management API for
-// an environment's key — none of which a self-hosted stack has: it is one
+// that one resolves a project in the cloud, registers an app and asks for an
+// environment's key — none of which a project somebody runs has: it is one
 // installation with one identity and one pair of keys in the .env beside it.
 // The two meet when the management API exists on both sides; until then, the
-// direct half is what makes a self-hosted stack usable at all.
+// direct half is what makes a project you run usable at all.
 //
 // It writes the SAME slot files `link` writes, so everything after this point —
 // `palbase spec`, the Swift generator, `palbe-gen` — behaves identically whether
@@ -35,13 +35,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// selfhostRef is the identity every self-hosted stack has. It is a constant in
-// the stack too (`migrate.BootEnvironmentRef`), which is why nothing here asks
-// for it: a value the operator could get wrong is a value that should not be
-// asked for.
-const selfhostRef = "selfhost"
+// projectAppID names the app slot a linked checkout writes.
+//
+// A cloud project mints an app id when an app registers; a project somebody runs
+// has no registry to mint one from, and inventing a value would put something in
+// a committed file that means nothing and can never be looked up. The project's
+// own name is the honest answer — and it matches the identity the stack boots
+// with (`migrate.BootStackRef`), which is also what its API key carries.
+const projectAppID = "project"
 
-type selfhostOpts struct {
+type linkOpts struct {
 	url       string
 	email     string
 	password  string
@@ -49,10 +52,8 @@ type selfhostOpts struct {
 	insecure  bool
 }
 
-func newSelfhostCmd() *cobra.Command { return newLinkCmd() }
-
 func newLinkCmd() *cobra.Command {
-	var o selfhostOpts
+	var o linkOpts
 	cmd := &cobra.Command{
 		Use:   "link <target>",
 		Args:  cobra.MaximumNArgs(1),
@@ -98,7 +99,7 @@ generated. Drop it the moment you put a real one in front.`,
 					"%q has no scheme, so it is an environment ref rather than a stack address — "+
 						"that half is resolved by our cloud: use `palbase ios link` for it", o.url)
 			}
-			return runSelfhostLink(cmd.Context(), o, cmd.OutOrStdout())
+			return runLink(cmd.Context(), o, cmd.OutOrStdout())
 		},
 	}
 	f := cmd.Flags()
@@ -110,7 +111,7 @@ generated. Drop it the moment you put a real one in front.`,
 	return cmd
 }
 
-func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
+func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
 	if base == "" {
 		return errors.New("--url is required: the address the stack serves on")
@@ -150,15 +151,12 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 		}
 
 		entry := pullSpecConfigEntry{
-			// The app id a cloud project would mint has no counterpart here, and
-			// inventing one would put a value in a committed file that means
-			// nothing and can never be looked up. The stack's own identity is the
-			// honest answer for both.
-			AppID:          selfhostRef,
-			EnvironmentRef: selfhostRef,
-			Kind:           platform,
-			BaseURL:        base,
-			APIKey:         anon,
+			AppID:   projectAppID,
+			Kind:    platform,
+			BaseURL: base,
+			// The key carries the project's identity, so nothing here writes a
+			// second copy of it — see pullSpecConfigEntry.
+			APIKey: anon,
 		}
 		blob, err := json.MarshalIndent(entry, "", "  ")
 		if err != nil {

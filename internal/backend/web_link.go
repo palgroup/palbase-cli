@@ -54,7 +54,7 @@ const webArtifactsDir = "Palbase"
 // committed files @palbase/web's `palbe-gen` consumes offline:
 //
 //	Palbase/openapi.json          the API contract
-//	Palbase/palbase-config.json   {app_id, environment_ref, base_url, api_key, kind}
+//	Palbase/palbase-config.json   {app_id, base_url, api_key, kind}
 //
 // There is NO `branch` in that config: the base_url and the api_key already
 // identify the Environment, so a branch field would be a second name for the
@@ -102,7 +102,6 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 	}
 	cfg := map[string]any{
 		"app_id":          art.AppID,
-		"environment_ref": art.EnvironmentRef,
 		"base_url":        art.BaseURL,
 		"api_key":         art.APIKey,
 		"kind":            art.Kind,

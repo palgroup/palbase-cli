@@ -60,12 +60,14 @@ func TestWebUse_RetargetsTheEnvironment(t *testing.T) {
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 	require.NoError(t, cmd.Execute())
 
-	// The committed runtime config names staging and carries no branch.
+	// The committed runtime config names staging through its KEY, and carries
+	// neither a branch nor a second copy of the identity.
 	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
-	require.Equal(t, "app1stg", got["environment_ref"])
+	require.NotContains(t, got, "environment_ref")
+	require.Equal(t, "pb_app1stg_c01234567890123456789", got["api_key"])
 	require.Equal(t, "https://app1stg.dev.palbase.studio", got["base_url"])
 	require.NotContains(t, string(raw), "branch")
 

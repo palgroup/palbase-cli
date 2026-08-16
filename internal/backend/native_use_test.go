@@ -123,13 +123,16 @@ func TestNativeUse_RetargetsTheEnvironment(t *testing.T) {
 	require.True(t, ok, "got %v", f.Routes())
 	require.Equal(t, "environment_ref=app1stg", req.Query)
 
-	// The emitted codegen config names the environment and carries no branch.
+	// The emitted codegen config names the environment through the KEY it
+	// carries — `pb_app1stg_c…` — and nothing beside it. A field holding a second
+	// copy is only a way for the two to disagree, which they did live on
+	// 2026-08-16.
 	raw, err := os.ReadFile(filepath.Join(".palbase", "ios", "palbase-config.json"))
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
 	require.Equal(t, map[string]any{
-		"app_id": "app_ios", "environment_ref": "app1stg", "kind": "staging",
+		"app_id": "app_ios", "kind": "staging",
 		"base_url": "https://app1stg.dev.palbase.studio", "api_key": "pb_app1stg_c01234567890123456789",
 	}, got)
 	require.NotContains(t, string(raw), "branch")
@@ -278,7 +281,11 @@ func TestRunPullSpec_AppConfigSeparatesTheOutputs(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
-	require.Equal(t, "app1prod", got["environment_ref"])
+	// The file carries no second copy of the project identity: the key does
+	// (`pb_app1prod_c…`), and a field beside it is only a way for the two to
+	// disagree — which they did, live, on 2026-08-16.
+	require.NotContains(t, got, "environment_ref")
+	require.Contains(t, got["api_key"], "app1prod")
 	require.NotContains(t, got, "branch")
 	require.NotContains(t, got, "env_preset")
 }

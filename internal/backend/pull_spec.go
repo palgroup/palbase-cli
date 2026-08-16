@@ -20,19 +20,21 @@ import (
 // consume (the Swift SPM plugin turns it into Palbase-Info.plist; the Gradle
 // plugin and @palbase/web read it directly).
 //
-// It names the Environment — `environment_ref` — and carries NO branch. The URL
-// and the API key already identify the Environment; a `branch` field would be a
-// second, drift-prone name for the same runtime, and the Palbase branch no
-// longer exists.
+// It carries NO name for the project it points at, and no branch. The API KEY
+// carries the project's identity — `pb_<ref>_<scope><random>` — so a `ref` field
+// beside it would be a copy that has to equal its original, and the SDKs proved
+// what that costs: every one of them read the field and cross-checked it against
+// the key, and on 2026-08-16 `palbase link` wrote "selfhost" while minting a key
+// carrying "project", so the web generator refused to run at all and the iOS
+// realtime client joined a channel nobody published to.
 type pullSpecConfigEntry struct {
-	AppID          string                    `json:"app_id"`
-	EnvironmentRef string                    `json:"environment_ref"`
-	Kind           string                    `json:"kind"`
-	BaseURL        string                    `json:"base_url"`
-	APIKey         string                    `json:"api_key"`
-	OAuth          *oauthConfigJSON          `json:"oauth,omitempty"`
-	Integrity      *apps.IntegrityConfig     `json:"integrity,omitempty"`
-	Notifications  *apps.NotificationsConfig `json:"notifications,omitempty"`
+	AppID         string                    `json:"app_id"`
+	Kind          string                    `json:"kind"`
+	BaseURL       string                    `json:"base_url"`
+	APIKey        string                    `json:"api_key"`
+	OAuth         *oauthConfigJSON          `json:"oauth,omitempty"`
+	Integrity     *apps.IntegrityConfig     `json:"integrity,omitempty"`
+	Notifications *apps.NotificationsConfig `json:"notifications,omitempty"`
 }
 
 // oauthConfigJSON mirrors apps.OAuthConfig field-for-field so the emitted JSON's
@@ -437,7 +439,6 @@ func buildPullSpecConfig(
 	}
 	entry := &pullSpecConfigEntry{
 		AppID:          art.AppID,
-		EnvironmentRef: art.EnvironmentRef,
 		Kind:           art.Kind,
 		BaseURL:        art.BaseURL,
 		APIKey:         art.APIKey,

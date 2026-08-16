@@ -43,7 +43,7 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == wellKnownPath {
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"hosting":"selfhost","anon_key":"` + anonKey + `"}`))
+			_, _ = w.Write([]byte(`{"hosting":"project","anon_key":"` + anonKey + `"}`))
 			return
 		}
 		if extra != nil {
@@ -60,16 +60,16 @@ func TestTheStackIsAskedRatherThanTheOperator(t *testing.T) {
 	// The publishable key comes from the stack. Nothing is read off disk and
 	// nothing is typed: an operator who has to find a file to link an app is an
 	// operator who pastes a key into a shell instead.
-	srv := stackServing(t, "pb_selfhost_cPUBLISHABLE", nil)
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
 	described, err := describeStack(context.Background(), srv.URL, false)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
-	if described.AnonKey != "pb_selfhost_cPUBLISHABLE" {
+	if described.AnonKey != "pb_project_cPUBLISHABLE" {
 		t.Errorf("the key came back as %q", described.AnonKey)
 	}
-	if described.Hosting != "selfhost" {
+	if described.Hosting != "project" {
 		t.Errorf("hosting came back as %q", described.Hosting)
 	}
 }
@@ -109,10 +109,10 @@ func TestAStackWithNoPublishableKeyIsRefused(t *testing.T) {
 
 func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	inScratchCheckout(t)
-	srv := stackServing(t, "pb_selfhost_cPUBLISHABLE", nil)
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
-	opts := selfhostOpts{url: srv.URL, platforms: []string{"ios"}}
-	if err := runSelfhostLink(context.Background(), opts, &strings.Builder{}); err != nil {
+	opts := linkOpts{url: srv.URL, platforms: []string{"ios"}}
+	if err := runLink(context.Background(), opts, &strings.Builder{}); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 
@@ -126,14 +126,22 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	}
 	// THE assertion. This file is committed and ships inside the app, so the key
 	// in it must be the one that is safe to ship.
-	if entry.APIKey != "pb_selfhost_cPUBLISHABLE" {
+	if entry.APIKey != "pb_project_cPUBLISHABLE" {
 		t.Errorf("the app's config carries %q", entry.APIKey)
 	}
 	if entry.BaseURL != srv.URL {
 		t.Errorf("base_url is %q", entry.BaseURL)
 	}
-	if entry.EnvironmentRef != selfhostRef || entry.AppID != selfhostRef {
-		t.Errorf("identity is %q/%q", entry.AppID, entry.EnvironmentRef)
+	if entry.AppID != projectAppID {
+		t.Errorf("the app slot is %q, want %q", entry.AppID, projectAppID)
+	}
+	// And the file carries NO second copy of the project's identity. It used to
+	// write one beside the key, and on 2026-08-16 the two disagreed — "project"
+	// in the field, "project" inside the key — so the web generator refused the
+	// config outright and the iOS realtime client joined a channel nobody
+	// published to. The key is the identity; a copy is only a way to be wrong.
+	if strings.Contains(string(raw), "environment_ref") {
+		t.Errorf("the app's config still carries a second copy of the project identity:\n%s", raw)
 	}
 }
 
@@ -143,10 +151,10 @@ func TestLinkingWithoutASessionStillWritesTheAppsConfig(t *testing.T) {
 	// impossible until somebody signs in — and the config is what a running app
 	// needs.
 	inScratchCheckout(t)
-	srv := stackServing(t, "pb_selfhost_cPUBLISHABLE", nil)
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
 	var out strings.Builder
-	if err := runSelfhostLink(context.Background(), selfhostOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")); err != nil {
@@ -174,7 +182,7 @@ func TestTheContractIsFetchedWithTheSessionAndNoKey(t *testing.T) {
 	defer srv.Close()
 
 	body, err := fetchStackSpec(context.Background(),
-		Target{URL: srv.URL, AnonKey: "pb_selfhost_cPUBLISHABLE"}, "the-session-token")
+		Target{URL: srv.URL, AnonKey: "pb_project_cPUBLISHABLE"}, "the-session-token")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
