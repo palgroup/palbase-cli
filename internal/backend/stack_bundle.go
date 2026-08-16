@@ -61,6 +61,25 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) error {
 		return fmt.Errorf("no *.controller.ts under %s — nothing would answer", controllersDir)
 	}
 
+	// STAGE FIRST: each controller's RETURN TYPE becomes a response schema.
+	//
+	// A route's response schema is derived from the method's TypeScript return
+	// type, and a type exists only in the source — so something has to read it
+	// and write it into the bundle (`recordReturn`, the SDK's own mechanism).
+	// Bundling the raw tree skips that, and the artifact then serves a
+	// specification whose every 200 response is `{}`. Measured on 2026-08-16:
+	// a real app failed to compile against its own project's generated client,
+	// because every response had become an opaque value.
+	//
+	// The staging is the SAME code `palbase build` runs (devjs/return_types.js,
+	// devjs/throw_analysis.js), which is the same code the cloud's deploy stager
+	// runs. One implementation of a contract that has to hold in three places.
+	staged, err := stageControllers(ctx, dir, w)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(staged) }()
+
 	esmDir := filepath.Join(dir, ".palbase", "esm", "controllers")
 	if err := os.MkdirAll(esmDir, 0o755); err != nil {
 		return err
@@ -82,11 +101,14 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) error {
 		return err
 	}
 
-	entry := filepath.Join(controllersDir, ".controllers-entry.ts")
-	if err := os.WriteFile(entry, []byte(bundleEntry(dir, sources)), 0o644); err != nil {
+	stagedSources, err := controllerSources(staged)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(entry) }()
+	entry := filepath.Join(staged, ".controllers-entry.ts")
+	if err := os.WriteFile(entry, []byte(bundleEntry(dir, stagedSources)), 0o644); err != nil {
+		return err
+	}
 
 	if err := run(ctx, dir, "bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out); err != nil {
 		return fmt.Errorf("the bundle did not build: %w", err)
@@ -289,4 +311,111 @@ if (bad.length) {
   );
   process.exit(1);
 }
+`
+
+// stageControllers writes a copy of the project's controllers with each route's
+// return-type schema and inferred throws injected, and returns that directory.
+//
+// The project's own tree is never touched: the injection is machine-written code
+// that belongs in a build, not in somebody's repository. Everything that is not
+// a controller is copied verbatim, so relative imports (`../services`) still
+// resolve from the staged tree.
+func stageControllers(ctx context.Context, dir string, w io.Writer) (string, error) {
+	if _, err := exec.LookPath("node"); err != nil {
+		return "", fmt.Errorf("node is not installed, and it is what reads your controllers' return " +
+			"types (https://nodejs.org). Without it every response in the deployed specification " +
+			"would be untyped, and every generated client with it")
+	}
+
+	tools, err := os.MkdirTemp("", "palbase-stage-tools-*")
+	if err != nil {
+		return "", err
+	}
+	defer removeTemp(tools)
+	if err := extractFS(buildCheckFS, "devjs", tools); err != nil {
+		return "", fmt.Errorf("extract the stager: %w", err)
+	}
+
+	// Staged as a SIBLING of controllers/, which is what makes both kinds of
+	// import resolve. Module resolution walks UP from the file being bundled, so
+	// a staging directory in /tmp cannot see the project's node_modules and the
+	// very first import — the SDK itself — fails; and one nested a level deeper
+	// (.palbase/staged) turns every `../services` in a controller into a path
+	// outside the project. The deploy stager stages a sibling for the same two
+	// reasons.
+	stageDir := filepath.Join(dir, ".palbase-staged-controllers")
+	if err := os.RemoveAll(stageDir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		return "", err
+	}
+
+	script := filepath.Join(tools, "stage-for-push.js")
+	if err := os.WriteFile(script, []byte(stageForPushScript), 0o644); err != nil {
+		return "", err
+	}
+
+	cmd := exec.CommandContext(ctx, "node", script, filepath.Join(dir, "controllers"), stageDir, dir)
+	cmd.Dir = dir
+	// The analyzers need TypeScript's PARSER — the CLI's pinned copy first, then
+	// the project's, because a project may be on TypeScript 7 (whose CommonJS
+	// entry has no compiler API) or have none at all. `require` resolves from the
+	// SCRIPT's directory, which is a temp dir with nothing in it, so the path has
+	// to be said out loud.
+	cmd.Env = append(os.Environ(), "NODE_PATH="+devNodePath(dir, w))
+	blob, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", fmt.Errorf("%s", strings.TrimSpace(trimBody(blob)))
+	}
+	if summary := strings.TrimSpace(string(blob)); summary != "" {
+		fmt.Fprintln(w, summary)
+	}
+	return stageDir, nil
+}
+
+// stageForPushScript drives the SHARED analyzers over one project.
+//
+// Written here rather than added to devjs/ because it is the only part that is
+// specific to this command: `palbase build` stages into its own validation flow
+// and the cloud's deploy stager into its bundler, and all three drive the same
+// two modules underneath.
+const stageForPushScript = `
+const fs = require('fs');
+const path = require('path');
+const returnTypes = require('./return_types.js');
+const throwAnalysis = require('./throw_analysis.js');
+
+const [srcDir, stageDir, projectRoot] = process.argv.slice(2);
+
+function walk(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+let injected = 0;
+for (const file of walk(srcDir)) {
+  const rel = path.relative(srcDir, file);
+  const dest = path.join(stageDir, rel);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  if (/\.controller\.(c?ts|tsx)$/i.test(path.basename(file))) {
+    let out = returnTypes.injectReturnBindings(fs.readFileSync(file, 'utf8'), rel);
+    out = throwAnalysis.injectThrowBindings(out, file, {
+      readFile: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
+      fileExists: (p) => fs.existsSync(p),
+      projectRoot,
+    });
+    fs.writeFileSync(dest, out);
+    injected += 1;
+  } else {
+    fs.copyFileSync(file, dest);
+  }
+}
+console.log('typed ' + injected + ' controller file(s) from their return types');
 `

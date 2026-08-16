@@ -261,3 +261,24 @@ func TestAPackageSwiftLocalDependencyIsFoundToo(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filepath.Clean(generator), filepath.Clean(found))
 }
+
+func TestAnUnquotedPackagePathIsFoundToo(t *testing.T) {
+	// Xcode writes the quotes only when the path needs them. A pattern that
+	// matched the quoted form alone found nothing in exactly the projects that
+	// had been pointed at a local SDK by hand — and then `palbase spec` DELETED
+	// the committed client, because it could not regenerate what it had just
+	// invalidated.
+	root := t.TempDir()
+	generator := filepath.Join(root, "sdk", "Sources", "palbase-swiftgen")
+	require.NoError(t, os.MkdirAll(generator, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(generator, "main.swift"), []byte("// generator"), 0o644))
+
+	project := filepath.Join(root, "App.xcodeproj")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, "project.pbxproj"),
+		[]byte("isa = XCLocalSwiftPackageReference;\n\t\t\trelativePath = sdk;\n"), 0o644))
+
+	found, err := findSwiftgenSources(root)
+	require.NoError(t, err)
+	require.Equal(t, generator, found)
+}

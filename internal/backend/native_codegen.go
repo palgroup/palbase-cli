@@ -248,8 +248,13 @@ func localSwiftgenSources(projectRoot string) []string {
 	return out
 }
 
-// localPackagePath matches `relativePath = "../somewhere";` inside a pbxproj.
-var localPackagePath = regexp.MustCompile(`relativePath = "([^"]+)"`)
+// localPackagePath matches a pbxproj's `relativePath = …;`, quoted or not.
+//
+// Xcode omits the quotes when a path needs none, and a pattern that only
+// matched the quoted form found nothing in exactly the projects that had been
+// pointed at a local SDK by hand — which is when this lookup matters most.
+var localPackagePath = regexp.MustCompile(`relativePath = "?([^";
+]+)"?;`)
 
 // packageByPath matches `.package(path: "../somewhere")` in a Package.swift.
 var packageByPath = regexp.MustCompile(`\.package\(\s*path:\s*"([^"]+)"`)
