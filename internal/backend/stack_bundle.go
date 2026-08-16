@@ -203,7 +203,7 @@ func evaluateConfig(ctx context.Context, dir, configOut string, w io.Writer) err
 
 	var b strings.Builder
 	b.WriteString(bundleEntryHeader + "\n")
-	for _, name := range []string{"storage", "flags", "notifications", "egress", "test-users"} {
+	for _, name := range []string{"storage", "flags", "notifications", "egress", "test-users", "secrets"} {
 		path := filepath.Join(configDir, name+".ts")
 		if !fileExists(path) {
 			continue
