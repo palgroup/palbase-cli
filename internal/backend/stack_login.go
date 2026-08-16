@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -75,6 +76,30 @@ func promptPassword(w io.Writer) (string, error) {
 }
 
 func runStackLogin(ctx context.Context, target Target, email, password string, w io.Writer) error {
+	// The publishable key comes from the PROJECT, every time.
+	//
+	// It is remembered in .palbase/target.json so a colleague who clones the
+	// repository has one, but a remembered key goes stale: a project rebuilt
+	// from nothing mints a new one, and the sign-in then fails with
+	// "invalid_api_key" about a key nobody typed. The document is public and one
+	// request away, so this asks rather than trusts what it wrote last time.
+	if described, err := describeStack(ctx, target.URL, target.Insecure); err == nil {
+		if described.AnonKey != target.AnonKey {
+			target.AnonKey = described.AnonKey
+			if err := WriteTarget(target); err != nil {
+				return err
+			}
+		}
+		// And every app's committed config, checked on ITS OWN — that is where
+		// the key actually SHIPS. Comparing only the CLI's copy left an app
+		// building against a key the project had replaced: the same person's
+		// terminal signed in perfectly while the device answered
+		// "invalid_api_key", which reads as the app being wrong.
+		if err := rewriteAppKeys(described.AnonKey, w); err != nil {
+			return err
+		}
+	}
+
 	if password == "" {
 		var err error
 		if password, err = promptPassword(w); err != nil {
@@ -228,3 +253,44 @@ func stackClient(t Target) *http.Client {
 
 var _ = os.Stdout
 var _ = strings.TrimSpace
+
+// rewriteAppKeys puts a project's CURRENT publishable key into every committed
+// app config in this checkout.
+//
+// The key ships inside the app, so a project rebuilt from nothing — a fresh
+// install, a wiped test rail — leaves every linked app holding one that no
+// longer exists. The failure then lands on the device ("invalid_api_key") while
+// the same person's terminal signs in perfectly, which reads as the app being
+// wrong rather than out of date.
+func rewriteAppKeys(anonKey string, w io.Writer) error {
+	for _, dir := range appConfigDirs() {
+		path := filepath.Join(dir, "palbase-config.json")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var entry pullSpecConfigEntry
+		if err := json.Unmarshal(raw, &entry); err != nil || entry.APIKey == anonKey {
+			continue
+		}
+		entry.APIKey = anonKey
+		blob, err := json.MarshalIndent(entry, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, append(blob, '\n'), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		fmt.Fprintf(w, "✓ %s now carries this project's current key — rebuild the app\n", path)
+	}
+	return nil
+}
+
+// appConfigDirs is every directory a link may have written an app config into.
+func appConfigDirs() []string {
+	dirs := []string{webArtifactsDir}
+	for _, platform := range []string{"ios", "macos", "android"} {
+		dirs = append(dirs, filepath.Join(nativeArtifactsDir, platform))
+	}
+	return dirs
+}

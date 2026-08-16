@@ -14,10 +14,12 @@ package debugconsole
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/spf13/cobra"
 
+	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
@@ -103,6 +106,17 @@ func attachCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// TARGET-RELATIVE, like login, push and spec: a checkout linked to a
+			// project attaches to THAT project, which resolves the pairing code
+			// itself. Without this the command asked our cloud about a code a
+			// device on somebody's own machine had shown — and there is nothing
+			// there to ask.
+			if attached, err := attachToLinkedProject(cmd, code, errorsOnly, asJSON); err != errNoLinkedProject {
+				_ = attached
+				return err
+			}
+
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
@@ -358,9 +372,32 @@ func run(ctx context.Context, out, errOut io.Writer, url, topic, code string, er
 	}
 }
 
+// dialOptions carries the ONE thing a socket to a project you run may need: the
+// certificate that project generated for itself.
+//
+// The choice is not made here — it was made once, at `palbase link --insecure`,
+// and is remembered with the target. A flag repeated on every command is a flag
+// somebody eventually types at the wrong address.
+func dialOptions(url string) *websocket.DialOptions {
+	target, err := backend.ReadTarget()
+	if err != nil || !target.Insecure {
+		return nil
+	}
+	if !strings.HasPrefix(url, "wss://"+strings.TrimPrefix(strings.TrimPrefix(target.URL, "https://"), "http://")) {
+		// A different address than the one the link trusted: the exception does
+		// not travel.
+		return nil
+	}
+	return &websocket.DialOptions{
+		HTTPClient: &http.Client{
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // opt-in at link time
+		},
+	}
+}
+
 // stream runs ONE socket: dial, join, then print records until it drops.
 func stream(ctx context.Context, out, errOut io.Writer, url, topic, code string, errorsOnly, asJSON bool, warned map[int]bool) error {
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	conn, _, err := websocket.Dial(ctx, url, dialOptions(url))
 	if err != nil {
 		return err
 	}
