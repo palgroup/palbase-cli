@@ -95,7 +95,7 @@ func runStackLogin(ctx context.Context, target Target, email, password string, w
 		// building against a key the project had replaced: the same person's
 		// terminal signed in perfectly while the device answered
 		// "invalid_api_key", which reads as the app being wrong.
-		if err := rewriteAppKeys(described.AnonKey, w); err != nil {
+		if err := rewriteAppKeys(target.URL, described.AnonKey, w); err != nil {
 			return err
 		}
 	}
@@ -251,18 +251,23 @@ func stackClient(t Target) *http.Client {
 	return c
 }
 
-var _ = os.Stdout
-var _ = strings.TrimSpace
-
 // rewriteAppKeys puts a project's CURRENT publishable key into every committed
-// app config in this checkout.
+// app config in this checkout THAT POINTS AT THAT PROJECT.
 //
 // The key ships inside the app, so a project rebuilt from nothing — a fresh
 // install, a wiped test rail — leaves every linked app holding one that no
 // longer exists. The failure then lands on the device ("invalid_api_key") while
 // the same person's terminal signs in perfectly, which reads as the app being
 // wrong rather than out of date.
-func rewriteAppKeys(anonKey string, w io.Writer) error {
+//
+// baseURL is what keeps that from becoming a worse failure. A checkout can carry
+// slots for more than one target — an app with a cloud past and a local present
+// has both — and writing this key into a slot whose base_url is somebody else's
+// produces a config that points at one host holding another's credential.
+// Measured on 2026-08-16: the web slot still named a cloud environment while its
+// key had been replaced with a local project's. Stale is obvious; mixed is not.
+func rewriteAppKeys(baseURL, anonKey string, w io.Writer) error {
+	target := strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
 	for _, dir := range appConfigDirs() {
 		path := filepath.Join(dir, "palbase-config.json")
 		raw, err := os.ReadFile(path)
@@ -272,6 +277,9 @@ func rewriteAppKeys(anonKey string, w io.Writer) error {
 		var entry pullSpecConfigEntry
 		if err := json.Unmarshal(raw, &entry); err != nil || entry.APIKey == anonKey {
 			continue
+		}
+		if strings.TrimSuffix(strings.TrimSpace(entry.BaseURL), "/") != target {
+			continue // another target's slot; not this project's to rewrite
 		}
 		entry.APIKey = anonKey
 		blob, err := json.MarshalIndent(entry, "", "  ")
