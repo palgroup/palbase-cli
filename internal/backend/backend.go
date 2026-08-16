@@ -139,9 +139,9 @@ func Commands(r Resolvers) []*cobra.Command {
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
-		// Takes no Resolvers: a self-hosted stack has no project to select, no
-		// environment to resolve and no Management API to ask. It is told where
-		// the stack is and reads the rest from the .env beside it.
+		// Takes no Resolvers: a stack you run has no project to select and no
+		// environment to resolve. It is told where the stack is, once, and asks
+		// the stack itself for the rest.
 		newSelfhostCmd(),
 	}
 }

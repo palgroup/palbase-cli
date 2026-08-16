@@ -115,11 +115,19 @@ base URL + key). That comes from ` + "`palbase <platform> link`" + ` and is re-w
 
 Override the target with the global --project / --environment flags.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+
+			// TARGET-RELATIVE, like login and push: a checkout linked to a stack
+			// refreshes from THAT stack. One verb either way — a person should
+			// not have to remember which kind of project they are standing in.
+			if _, err := ReadTarget(); err == nil {
+				return RefreshSpec(cmd.Context(), out)
+			}
+
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 
 			web, apple, android := linkedPlatforms()
 			if !web && !apple && !android {

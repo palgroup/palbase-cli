@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -189,7 +190,14 @@ func compileSwiftgen(projectRoot string, w io.Writer) (string, error) {
 // code to the SDK version the app pins.
 func findSwiftgenSources(projectRoot string) (string, error) {
 	rel := filepath.Join("checkouts", "palbackend-ios", "Sources", "palbase-swiftgen")
-	candidates := []string{filepath.Join(projectRoot, ".build", rel)}
+
+	// A LOCAL package comes FIRST, because it is what the project says today.
+	// A checkout of the published SDK can outlive the switch to a local one —
+	// DerivedData keeps it — and generating from that stale copy is the exact
+	// drift this lookup exists to prevent: the emitted client would match a
+	// version the app no longer links.
+	candidates := append(localSwiftgenSources(projectRoot),
+		filepath.Join(projectRoot, ".build", rel))
 
 	if home, err := os.UserHomeDir(); err == nil {
 		derived := filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData")
@@ -205,6 +213,55 @@ func findSwiftgenSources(projectRoot string) (string, error) {
 	}
 	return "", fmt.Errorf("the palbackend-ios checkout is not resolved for this project yet — " +
 		"build once in Xcode, or run `xcodebuild -resolvePackageDependencies`")
+}
+
+// localSwiftgenSources returns the generator directory of every SDK package
+// this project links BY PATH.
+//
+// Read from the project's own manifest, because that is the only place a local
+// package is recorded: SwiftPM's workspace state lists what it RESOLVED — remote
+// packages it had to fetch — and a package already on disk is never in it. That
+// absence is easy to mistake for "no local package", which is how a project that
+// had switched to the SDK source kept generating from a leftover checkout of the
+// published one.
+func localSwiftgenSources(projectRoot string) []string {
+	var out []string
+
+	// An Xcode project records it as an XCLocalSwiftPackageReference.
+	projects, _ := filepath.Glob(filepath.Join(projectRoot, "*.xcodeproj", "project.pbxproj"))
+	for _, pbxproj := range projects {
+		blob, err := os.ReadFile(pbxproj)
+		if err != nil {
+			continue
+		}
+		for _, m := range localPackagePath.FindAllStringSubmatch(string(blob), -1) {
+			out = append(out, resolveSwiftgenDir(projectRoot, m[1]))
+		}
+	}
+
+	// A Swift package records it as .package(path:).
+	if blob, err := os.ReadFile(filepath.Join(projectRoot, "Package.swift")); err == nil {
+		for _, m := range packageByPath.FindAllStringSubmatch(string(blob), -1) {
+			out = append(out, resolveSwiftgenDir(projectRoot, m[1]))
+		}
+	}
+	return out
+}
+
+// localPackagePath matches `relativePath = "../somewhere";` inside a pbxproj.
+var localPackagePath = regexp.MustCompile(`relativePath = "([^"]+)"`)
+
+// packageByPath matches `.package(path: "../somewhere")` in a Package.swift.
+var packageByPath = regexp.MustCompile(`\.package\(\s*path:\s*"([^"]+)"`)
+
+// resolveSwiftgenDir turns a manifest's package path into the generator inside
+// it. Paths in a manifest are relative to the project, so they are resolved
+// against it rather than against whatever directory the CLI was run from.
+func resolveSwiftgenDir(projectRoot, packagePath string) string {
+	if !filepath.IsAbs(packagePath) {
+		packagePath = filepath.Join(projectRoot, packagePath)
+	}
+	return filepath.Join(packagePath, "Sources", "palbase-swiftgen")
 }
 
 // derivedDataNames lists the names Xcode may have used for this project's

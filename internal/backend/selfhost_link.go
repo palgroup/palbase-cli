@@ -20,7 +20,6 @@ package backend
 // `palbase spec`, the Swift generator, `palbe-gen` — behaves identically whether
 // the stack is yours or ours. That is the point: one toolchain, two hosts.
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -36,10 +35,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// specPath is where a self-hosted stack answers with what it is serving.
-// service_role only, because the document is the whole API surface.
-const specPath = "/admin/openapi.json"
-
 // selfhostRef is the identity every self-hosted stack has. It is a constant in
 // the stack too (`migrate.BootEnvironmentRef`), which is why nothing here asks
 // for it: a value the operator could get wrong is a value that should not be
@@ -47,12 +42,11 @@ const specPath = "/admin/openapi.json"
 const selfhostRef = "selfhost"
 
 type selfhostOpts struct {
-	url        string
-	envFile    string
-	anonKey    string
-	serviceKey string
-	platforms  []string
-	insecure   bool
+	url       string
+	email     string
+	password  string
+	platforms []string
+	insecure  bool
 }
 
 func newSelfhostCmd() *cobra.Command { return newLinkCmd() }
@@ -66,21 +60,29 @@ func newLinkCmd() *cobra.Command {
 		Long: `Bind this checkout to a Palbase stack you run, and generate the typed client
 for it.
 
-It fetches the stack's OpenAPI document — what it is ACTUALLY serving, built by
-the runtime from the controllers its router took — and writes:
+    palbase link https://my-stack --email you@example.com
 
-  .palbase/openapi.json                     the contract
+The stack says what it is — its publishable key comes from
+/.well-known/palbase.json, which it serves itself — so nothing is pasted into a
+shell and no file has to be found on disk.
+
+The CONTRACT is the one part that needs a person. It lists every route, body and
+error shape of the deployed backend, and this stack keeps it behind its
+management surface rather than serving it to anyone who knows the address — so
+--email signs you in while linking and the client is generated on the spot. Drop
+it if you are already signed in, or if you only want the app's config now.
+
+It writes:
+
+  .palbase/target.json                      the stack this checkout talks to
   .palbase/<platform>/palbase-config.json   the app's URL + publishable key
+  .palbase/openapi.json                     the contract, once you are signed in
   Palbase/Generated/                        (apple) the committed Swift client
 
-Two keys, for two different readers. The SECRET key fetches the document: it
-lists every route and error shape, which is what an integrator needs and what a
-phone must never hold. The PUBLISHABLE key is what gets written into the app.
-
-Point --env-file at the stack's .env and both are read from it, so neither is
-ever pasted into a shell history.
-
-  palbase selfhost link --url https://127.0.0.1 --env-file ../palbase/.env --insecure
+The contract is the one part that needs a person: it lists every route and error
+shape, so it comes from the management surface, with your own session. Run
+` + "`palbase login`" + ` and it is fetched and generated on the spot — and again after
+every ` + "`palbase push`" + `, because that is exactly when it changed.
 
 --insecure is for a stack still using the self-signed certificate its first boot
 generated. Drop it the moment you put a real one in front.`,
@@ -101,9 +103,8 @@ generated. Drop it the moment you put a real one in front.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.url, "url", "", "the stack's base URL (e.g. https://127.0.0.1)")
-	f.StringVar(&o.envFile, "env-file", "", "read the keys from the stack's .env")
-	f.StringVar(&o.anonKey, "anon-key", "", "publishable key (what the app ships); overrides --env-file")
-	f.StringVar(&o.serviceKey, "service-key", "", "secret key (fetches the spec); overrides --env-file")
+	f.StringVar(&o.email, "email", "", "sign in as this person while linking, to fetch the contract")
+	f.StringVar(&o.password, "password", "", "skip the prompt (a password on a command line lands in shell history)")
 	f.StringSliceVar(&o.platforms, "platform", []string{"ios"}, "ios, macos, android or web")
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
 	return cmd
@@ -114,19 +115,16 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 	if base == "" {
 		return errors.New("--url is required: the address the stack serves on")
 	}
-	anon, service, err := resolveSelfhostKeys(o)
+	// The stack says what it is. Nothing to paste, nothing to find on disk.
+	described, err := describeStack(ctx, base, o.insecure)
 	if err != nil {
 		return err
 	}
+	anon := described.AnonKey
 
-	spec, err := fetchSelfhostSpec(ctx, base, service, o.insecure)
-	if err != nil {
-		return err
-	}
-
-	// Remember the target. `login` and `push` read it, so neither asks for an
-	// address again — and a colleague who clones this repository pushes to the
-	// same stack without being told which one it is.
+	// Remember the target. `login`, `push` and `spec` read it, so none of them
+	// asks for an address again — and a colleague who clones this repository
+	// reaches the same stack without being told which one it is.
 	if err := WriteTarget(Target{URL: base, AnonKey: anon, Insecure: o.insecure}); err != nil {
 		return err
 	}
@@ -134,11 +132,6 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", nativeArtifactsDir, err)
 	}
-	specFile := filepath.Join(nativeArtifactsDir, "openapi.json")
-	if err := os.WriteFile(specFile, spec, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", specFile, err)
-	}
-	fmt.Fprintf(w, "wrote %s (%d bytes)\n", specFile, len(spec))
 
 	for _, platform := range o.platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))
@@ -151,9 +144,6 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 			dir = webArtifactsDir
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return fmt.Errorf("create %s: %w", dir, err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "openapi.json"), spec, 0o644); err != nil {
-				return err
 			}
 		} else if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
@@ -181,112 +171,85 @@ func runSelfhostLink(ctx context.Context, o selfhostOpts, w io.Writer) error {
 		fmt.Fprintf(w, "wrote %s\n", cfg)
 	}
 
-	// The same generator `palbase spec` runs, from the same committed slots: a
-	// self-hosted app must not end up with a client built by a second code path.
-	if err := generateAppleClient(nativeArtifactsDir, w); err != nil {
-		return err
+	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
+
+	// The contract, and a sign-in if that is what it takes.
+	//
+	// Asked for rather than assumed: the session is tried FIRST and the sign-in
+	// happens only if it is missing or no longer accepted. A stack rebuilt since
+	// the last link leaves a token behind that verifies as nothing, and
+	// "already have a token" would be exactly the wrong reason to skip signing
+	// in — it is the case that needs it most.
+	err = RefreshSpec(ctx, w)
+	if errors.Is(err, ErrNotSignedIn) && o.email != "" {
+		if err := runStackLogin(ctx, Target{URL: base, AnonKey: anon, Insecure: o.insecure},
+			o.email, o.password, w); err != nil {
+			return err
+		}
+		err = RefreshSpec(ctx, w)
 	}
 
-	fmt.Fprintf(w, "\nlinked to %s — commit .palbase/ and Palbase/Generated/\n", base)
-	fmt.Fprintln(w, "next: palbase login   (then palbase push)")
+	switch {
+	case err == nil:
+		fmt.Fprintln(w, "commit .palbase/ and Palbase/Generated/")
+	case errors.Is(err, ErrNotSignedIn):
+		fmt.Fprint(w, "the app's config is written; the CONTRACT needs a person — this stack keeps it\n"+
+			"behind its management surface. Re-run with --email, or `palbase login`.\n")
+	default:
+		return err
+	}
 	return nil
 }
 
-// resolveSelfhostKeys reads the two keys from the stack's .env unless they were
-// given explicitly.
-func resolveSelfhostKeys(o selfhostOpts) (anon, service string, err error) {
-	anon, service = strings.TrimSpace(o.anonKey), strings.TrimSpace(o.serviceKey)
-	if anon != "" && service != "" {
-		return anon, service, nil
-	}
-	if o.envFile == "" {
-		return "", "", errors.New(
-			"pass --env-file pointing at the stack's .env, or both --anon-key and --service-key")
-	}
-	values, err := readEnvFile(o.envFile)
-	if err != nil {
-		return "", "", err
-	}
-	if anon == "" {
-		anon = values["PALBASE_ANON_KEY"]
-	}
-	if service == "" {
-		service = values["PALBASE_SERVICE_ROLE_KEY"]
-	}
-	if anon == "" || service == "" {
-		return "", "", fmt.Errorf(
-			"%s carries no PALBASE_ANON_KEY / PALBASE_SERVICE_ROLE_KEY — is it the stack's .env?", o.envFile)
-	}
-	return anon, service, nil
-}
-
-// readEnvFile reads KEY=value lines. Deliberately small: it is reading a file
-// this same product generated, not implementing a shell.
-func readEnvFile(path string) (map[string]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	out := map[string]string{}
-	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		out[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"`)
-	}
-	if err := s.Err(); err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	return out, nil
-}
-
-func fetchSelfhostSpec(ctx context.Context, base, serviceKey string, insecure bool) ([]byte, error) {
+// describeStack asks a stack what it is.
+//
+// One request, no credential: the document is public because everything in it
+// is (see the stack's internal/server/wellknown.go). A stack that does not
+// answer is either not a Palbase stack or not up, and saying which is the whole
+// value of asking first.
+func describeStack(ctx context.Context, base string, insecure bool) (stackDescription, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	if insecure {
 		client.Transport = insecureTransport()
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+specPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+wellKnownPath, nil)
 	if err != nil {
-		return nil, err
+		return stackDescription{}, err
 	}
-	req.Header.Set("apikey", serviceKey)
-
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("reach %s: %w\n(a self-signed certificate needs --insecure)", base+specPath, err)
+		return stackDescription{}, fmt.Errorf(
+			"reach %s: %w\n(a self-signed certificate needs --insecure)", base, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return stackDescription{}, err
 	}
-	switch res.StatusCode {
-	case http.StatusOK:
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, fmt.Errorf(
-			"the stack refused the key (%d). %s answers for a SERVICE ROLE key — "+
-				"the publishable one is refused here on purpose", res.StatusCode, specPath)
-	case http.StatusServiceUnavailable:
-		return nil, fmt.Errorf("the stack has nothing to describe yet: %s\n"+
-			"push a backend first (palsvc --schema-apply, then --push)", trimBody(body))
-	default:
-		return nil, fmt.Errorf("%s answered %d: %s", specPath, res.StatusCode, trimBody(body))
+	if res.StatusCode != http.StatusOK {
+		return stackDescription{}, fmt.Errorf(
+			"%s does not look like a Palbase stack: %s answered %d", base, wellKnownPath, res.StatusCode)
 	}
-	if len(body) == 0 {
-		return nil, errors.New("the stack answered 200 with an empty document")
+	var described stackDescription
+	if err := json.Unmarshal(body, &described); err != nil {
+		return stackDescription{}, fmt.Errorf("%s answered something unexpected: %s", wellKnownPath, trimBody(body))
 	}
-	return body, nil
+	if described.AnonKey == "" {
+		return stackDescription{}, fmt.Errorf(
+			"%s has no publishable key configured — its clients cannot authenticate at all", base)
+	}
+	return described, nil
+}
+
+// wellKnownPath is where a stack describes itself.
+const wellKnownPath = "/.well-known/palbase.json"
+
+// stackDescription is that document. It mirrors the stack's own struct; the two
+// are small and the contract between them is three fields, so this is written
+// out rather than generated.
+type stackDescription struct {
+	Hosting string `json:"hosting"`
+	AnonKey string `json:"anon_key"`
 }
 
 func trimBody(b []byte) string {

@@ -223,3 +223,41 @@ func TestCompileSwiftgen_RealToolchain(t *testing.T) {
 	require.Equal(t, tool, again)
 	require.Empty(t, out.String())
 }
+
+func TestALocalSDKPackageIsFoundBeforeAStaleCheckout(t *testing.T) {
+	// The failure this locks out: a project switches from the published SDK to
+	// the SDK source, and keeps generating from the checkout DerivedData still
+	// holds. The emitted client then matches a version the app no longer links —
+	// silently, because both directories contain a working generator.
+	root := t.TempDir()
+	sdk := filepath.Join(root, "sdk-source")
+	generator := filepath.Join(sdk, "Sources", "palbase-swiftgen")
+	require.NoError(t, os.MkdirAll(generator, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(generator, "main.swift"), []byte("// generator"), 0o644))
+
+	project := filepath.Join(root, "App.xcodeproj")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, "project.pbxproj"),
+		[]byte(`isa = XCLocalSwiftPackageReference;
+			relativePath = "sdk-source";`), 0o644))
+
+	found, err := findSwiftgenSources(root)
+	require.NoError(t, err)
+	require.Equal(t, generator, found)
+}
+
+func TestAPackageSwiftLocalDependencyIsFoundToo(t *testing.T) {
+	root := t.TempDir()
+	sdk := filepath.Join(root, "..", "sdk-src")
+	generator := filepath.Join(sdk, "Sources", "palbase-swiftgen")
+	require.NoError(t, os.MkdirAll(generator, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(generator, "main.swift"), []byte("// generator"), 0o644))
+	t.Cleanup(func() { _ = os.RemoveAll(sdk) })
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Package.swift"),
+		[]byte(`.package(path: "../sdk-src"),`), 0o644))
+
+	found, err := findSwiftgenSources(root)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Clean(generator), filepath.Clean(found))
+}

@@ -123,6 +123,14 @@ func runStackPush(ctx context.Context, target Target, token string, acceptDataLo
 			}
 		}
 		fmt.Fprintf(w, "live: %d endpoint(s), %s\n", out.EndpointCount, out.Digest[:12])
+
+		// The contract just changed — this is the moment, and the only moment,
+		// when a committed client can be brought level with the stack without
+		// anybody remembering to. A client one deploy behind is a compile error
+		// at best and a 404 at worst.
+		if err := RefreshSpec(ctx, w); err != nil {
+			return fmt.Errorf("the push landed, but the client could not be regenerated: %w", err)
+		}
 		return nil
 
 	case http.StatusConflict:

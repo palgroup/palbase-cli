@@ -48,13 +48,20 @@ func StackLogin(ctx context.Context, email, password string, w io.Writer) error 
 	if email == "" {
 		return errors.New("--email is required to sign in to " + target.URL)
 	}
-	if password == "" {
-		password, err = promptPassword(w)
-		if err != nil {
-			return err
-		}
+	if err := runStackLogin(ctx, target, email, password, w); err != nil {
+		return err
 	}
-	return runStackLogin(ctx, target, email, password, w)
+
+	// And finish what `link` could not: the contract needs a session, and this
+	// is the first moment there is one. A sign-in that leaves the client
+	// ungenerated makes the next step something a person has to remember.
+	//
+	// A stack with nothing deployed yet has no contract to give, which is a
+	// state and not a fault — say it in one line and stop there.
+	if err := RefreshSpec(ctx, w); err != nil && !errors.Is(err, ErrNotSignedIn) {
+		fmt.Fprintf(w, "note: the contract is not available yet — %v\n", err)
+	}
+	return nil
 }
 
 func promptPassword(w io.Writer) (string, error) {
@@ -68,6 +75,12 @@ func promptPassword(w io.Writer) (string, error) {
 }
 
 func runStackLogin(ctx context.Context, target Target, email, password string, w io.Writer) error {
+	if password == "" {
+		var err error
+		if password, err = promptPassword(w); err != nil {
+			return err
+		}
+	}
 	client := stackClient(target)
 	token, err := signIn(ctx, client, target, email, password)
 	if err != nil {
