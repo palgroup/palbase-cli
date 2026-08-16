@@ -39,7 +39,7 @@ func attachToLinkedProject(cmd *cobra.Command, code string, errorsOnly, asJSON b
 	if err != nil {
 		return false, errNoLinkedProject
 	}
-	token, err := backend.LoadToken(target.URL)
+	token, _, err := backend.Credential(target.URL)
 	if err != nil {
 		return false, fmt.Errorf("not signed in to %s — run `palbase login`", target.URL)
 	}

@@ -111,7 +111,7 @@ func runStackLogin(ctx context.Context, target Target, email, password string, w
 	if err != nil {
 		return err
 	}
-	if err := SaveToken(target.URL, token); err != nil {
+	if err := StoreCredential(target.URL, token); err != nil {
 		return err
 	}
 

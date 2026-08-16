@@ -39,7 +39,7 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	token, err := LoadToken(target.URL)
+	token, _, err := Credential(target.URL)
 	if err != nil {
 		return ErrNotSignedIn
 	}

@@ -43,7 +43,7 @@ included — until you say that is what you mean:
 			if err != nil {
 				return err
 			}
-			token, err := LoadToken(target.URL)
+			token, _, err := Credential(target.URL)
 			if err != nil {
 				return err
 			}
