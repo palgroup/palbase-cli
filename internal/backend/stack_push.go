@@ -84,6 +84,13 @@ func runStackPush(ctx context.Context, target Target, token string, acceptDataLo
 		return err
 	}
 
+	// The SDK this project RUNS, before anything is compiled against it. A
+	// different major produces a bundle the runtime cannot execute, and the
+	// failure arrives as a missing function three layers from its cause.
+	if err := ensureProjectSDK(ctx, dir, target, token, w); err != nil {
+		return err
+	}
+
 	// BUILD FIRST. A stack takes an artifact and cannot make one — bundling needs
 	// this project's own node_modules, which live here. Shipping whatever a
 	// previous build left on disk is how somebody edits a controller, pushes, and

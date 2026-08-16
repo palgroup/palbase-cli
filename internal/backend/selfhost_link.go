@@ -248,8 +248,9 @@ const wellKnownPath = "/.well-known/palbase.json"
 // are small and the contract between them is three fields, so this is written
 // out rather than generated.
 type stackDescription struct {
-	Hosting string `json:"hosting"`
-	AnonKey string `json:"anon_key"`
+	Hosting    string `json:"hosting"`
+	AnonKey    string `json:"anon_key"`
+	SDKVersion string `json:"sdk_version"`
 }
 
 func trimBody(b []byte) string {
