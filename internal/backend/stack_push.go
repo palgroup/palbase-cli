@@ -83,6 +83,15 @@ func runStackPush(ctx context.Context, target Target, token string, acceptDataLo
 	if err != nil {
 		return err
 	}
+
+	// BUILD FIRST. A stack takes an artifact and cannot make one — bundling needs
+	// this project's own node_modules, which live here. Shipping whatever a
+	// previous build left on disk is how somebody edits a controller, pushes, and
+	// deploys yesterday's code under today's commit message.
+	if err := buildStackArtifact(ctx, dir, w); err != nil {
+		return err
+	}
+
 	tarball, err := BuildStackTarball(dir)
 	if err != nil {
 		return err
