@@ -67,6 +67,9 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"flags",
 		"github",
 		"ios",
+		// The direct half of the CLI: `link <url>` binds a checkout to a stack
+		// somebody runs, with no project to select and no control plane to ask.
+		"link",
 		"login",
 		"logout",
 		"logs",
