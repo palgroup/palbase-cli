@@ -101,10 +101,10 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 		return err
 	}
 	cfg := map[string]any{
-		"app_id":          art.AppID,
-		"base_url":        art.BaseURL,
-		"api_key":         art.APIKey,
-		"kind":            art.Kind,
+		"app_id":   art.AppID,
+		"base_url": art.BaseURL,
+		"api_key":  art.APIKey,
+		"kind":     art.Kind,
 	}
 	if art.OAuth != nil {
 		cfg["oauth"] = art.OAuth

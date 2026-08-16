@@ -438,12 +438,12 @@ func buildPullSpecConfig(
 		return nil, err
 	}
 	entry := &pullSpecConfigEntry{
-		AppID:          art.AppID,
-		Kind:           art.Kind,
-		BaseURL:        art.BaseURL,
-		APIKey:         art.APIKey,
-		Integrity:      art.Integrity,
-		Notifications:  art.Notifications,
+		AppID:         art.AppID,
+		Kind:          art.Kind,
+		BaseURL:       art.BaseURL,
+		APIKey:        art.APIKey,
+		Integrity:     art.Integrity,
+		Notifications: art.Notifications,
 	}
 	if art.OAuth != nil {
 		oc := &oauthConfigJSON{}
