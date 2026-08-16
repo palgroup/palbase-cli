@@ -49,6 +49,11 @@ from .palbase/config.json, falling back to the committed platform slot).`, label
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
+			// A project you run has one environment; switching is a cloud verb.
+			if err := refuseUseOnBoundProject(platform); err != nil {
+				return err
+			}
+
 			// The positional arg IS the environment: resolve its exact slug or ref
 			// through the shared resolver.
 			resolver := r.Selection()

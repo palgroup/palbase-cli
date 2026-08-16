@@ -213,6 +213,11 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			ctx := cmd.Context()
 
+			// The target first — see linkToBoundProject.
+			if handled, err := linkToBoundProject(cmd, "web", out); handled {
+				return err
+			}
+
 			outFile := outFlag
 			if outFile == "" {
 				outFile = "palbe.gen.ts"

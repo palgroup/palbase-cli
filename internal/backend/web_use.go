@@ -36,6 +36,10 @@ regenerated client.
 The project must already be linked with 'palbase web link' (its app id is read
 from .palbase/config.json).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A project you run has one environment; switching is a cloud verb.
+			if err := refuseUseOnBoundProject("web"); err != nil {
+				return err
+			}
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 

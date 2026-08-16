@@ -123,6 +123,11 @@ Local project files are left untouched.
 %s`, platform, platform, platform, next),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
+			// The target first: a checkout bound to a project you run links to
+			// THAT project, the same way login, push and spec already do.
+			if handled, err := linkToBoundProject(cmd, platform, cmd.OutOrStdout()); handled {
+				return err
+			}
 			if platform == "android" && packageName == "" {
 				var err error
 				packageName, err = detectAndroidApplicationID(".")
