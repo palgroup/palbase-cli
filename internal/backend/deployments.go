@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"text/tabwriter"
@@ -23,11 +24,18 @@ import (
 )
 
 type projectDeployment struct {
-	Digest        string    `json:"digest"`
+	Digest string `json:"digest"`
+	// EndpointCount is present ONLY when the runtime confirmed it is answering
+	// from this digest. Absent means "not confirmed", which is why it is a
+	// pointer: a zero here would read as "this release served nothing".
 	EndpointCount *int      `json:"endpoint_count"`
 	ActivatedAt   time.Time `json:"activated_at"`
 	SDKVersion    string    `json:"sdk_version"`
 	Active        bool      `json:"active"`
+	// ServingDigest is what the RUNTIME says it is answering from, which for a
+	// few seconds after any activation is not what the pointer says. Empty means
+	// it could not be asked — a third state, and not the same as "behind".
+	ServingDigest string `json:"serving_digest"`
 }
 
 // deploysOfProject lists what a linked project has deployed. Returns false when
@@ -105,16 +113,20 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 		return true, fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
 	}
 
-	// The POINTER moved. That is all this can honestly claim right now: the
-	// runtime re-reads the pointer on its own clock, and `currentDeployment`
-	// pairs the new pointer's digest with whatever count the runtime reports at
-	// that instant — measured live on 2026-08-17, a rollback answered "serving
-	// 37" while the runtime was still serving the previous artifact, and a
-	// number that arrives a beat early reads exactly like confirmation.
-	//
-	// So the count is not printed here. `palbase status` asks the runtime.
 	fmt.Fprintf(out, "▸ %s is active\n", short(full))
-	fmt.Fprintln(out, "  the runtime picks it up within a few seconds — `palbase status` shows what it is serving")
+
+	// WAIT FOR THE RUNTIME to say it is answering from this digest, then report
+	// its count. The pointer moving is not the thing anybody wanted; serving the
+	// old artifact is exactly the state a rollback is trying to leave.
+	//
+	// The project reports `serving_digest` separately from `digest` precisely so
+	// this can be told apart — and it omits the count until the two agree, which
+	// is why a count here can be attributed at all. Before that (2026-08-17) a
+	// rollback answered "serving 37" with the runtime still on the artifact it
+	// had just replaced.
+	if served, ok := awaitServing(ctx, target, cred, full, out); ok && served != nil {
+		fmt.Fprintf(out, "  serving %d endpoint(s)\n", *served)
+	}
 	return true, nil
 }
 
@@ -192,4 +204,30 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// awaitServing polls until the runtime confirms it is answering from digest.
+//
+// Returns (count, true) on confirmation and (nil, false) when the wait ran out —
+// which is reported rather than swallowed, because "the pointer moved and
+// nothing picked it up" is the failure a rollback most needs to hear about.
+func awaitServing(ctx context.Context, target Target, cred Credentials, digest string, out io.Writer) (*int, bool) {
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		status, body, err := managementCall(ctx, target, cred, http.MethodGet,
+			"/v1/management/deployments/current", nil, "")
+		if err == nil && status == http.StatusOK {
+			var current projectDeployment
+			if json.Unmarshal(body, &current) == nil && current.ServingDigest == digest {
+				return current.EndpointCount, true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(time.Second):
+		}
+	}
+	fmt.Fprintln(out, "  the runtime has not picked it up yet — `palbase status` shows what it is serving")
+	return nil, false
 }

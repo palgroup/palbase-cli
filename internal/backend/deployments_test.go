@@ -27,8 +27,14 @@ func deployingProject(t *testing.T, history []projectDeployment) (*httptest.Serv
 			*activated = strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/management/deployments/"), "/activate")
 			w.WriteHeader(http.StatusNoContent)
 		case r.URL.Path == "/v1/management/deployments/current":
-			count := 37
-			_ = json.NewEncoder(w).Encode(projectDeployment{Digest: *activated, EndpointCount: &count})
+			// The project reports what the RUNTIME says it is answering from,
+			// separately from the pointer. Here they agree immediately; the
+			// interesting case (they disagree for a few seconds) is the one the
+			// wait exists for and is covered below.
+			count := 10
+			_ = json.NewEncoder(w).Encode(projectDeployment{
+				Digest: *activated, ServingDigest: *activated, EndpointCount: &count,
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -107,14 +113,10 @@ func TestRollbackTakesTheDigestTheListingPRINTS(t *testing.T) {
 	if *activated != history()[1].Digest {
 		t.Errorf("activated %q", *activated)
 	}
-	// The count is deliberately NOT claimed here: the runtime re-reads the
-	// pointer on its own clock, so a number printed at this instant belongs to
-	// the artifact that is on its way out.
-	if strings.Contains(out.String(), "serving 37 endpoint") {
-		t.Errorf("a count from the outgoing artifact was reported as confirmation:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "palbase status") {
-		t.Errorf("the output does not say where to see what is serving:\n%s", out.String())
+	// The count IS claimed here, because the project confirmed the runtime is
+	// answering from this digest before reporting it.
+	if !strings.Contains(out.String(), "serving 10 endpoint") {
+		t.Errorf("the confirmed count was not reported:\n%s", out.String())
 	}
 }
 
@@ -163,5 +165,54 @@ func TestNothingDeployedIsAStateNotAnError(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "palbase push") {
 		t.Errorf("an empty history does not say what fills it:\n%s", out.String())
+	}
+}
+
+// TestRollbackWaitsForTheRuntimeRatherThanThePointer is the defect this shape
+// exists for: the pointer moves instantly and the runtime re-reads it on its own
+// clock, so for a few seconds `current` reports the NEW digest while the runtime
+// is still answering from the old one. A count printed in that window belongs to
+// the artifact being replaced and reads exactly like confirmation.
+func TestRollbackWaitsForTheRuntimeRatherThanThePointer(t *testing.T) {
+	var reads int
+	target := history()[1].Digest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/management/deployments" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"deployments": history()})
+		case strings.HasSuffix(r.URL.Path, "/activate"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1/management/deployments/current":
+			reads++
+			out := projectDeployment{Digest: target}
+			if reads >= 2 {
+				// Caught up.
+				count := 30
+				out.ServingDigest, out.EndpointCount = target, &count
+			} else {
+				// Still on the outgoing artifact, and the project says so
+				// rather than pairing this digest with that count.
+				out.ServingDigest = history()[0].Digest
+			}
+			_ = json.NewEncoder(w).Encode(out)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	linkedToProject(t, srv.URL)
+
+	var out, errOut bytes.Buffer
+	if _, err := rollbackOnProject(commandIn(t, &out, &errOut), short(target)); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if reads < 2 {
+		t.Errorf("the runtime was asked %d time(s) — it did not wait for the handover", reads)
+	}
+	if !strings.Contains(out.String(), "serving 30 endpoint") {
+		t.Errorf("the count from the artifact that is now serving was not reported:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "serving 37 endpoint") {
+		t.Errorf("the outgoing artifact's count was reported:\n%s", out.String())
 	}
 }
