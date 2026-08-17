@@ -66,6 +66,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"env",
 		"flags",
 		"github",
+		"init",
 		"ios",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
 		// somebody runs, with no project to select and no control plane to ask.
@@ -101,12 +102,20 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 	for _, name := range topLevel(t) {
 		have[name] = true
 	}
-	// `init` scaffolded a SECOND skeleton onto disk while the server had already
-	// deployed the seed template as version 1. The two copies drifted (init's
-	// said `palbase build`, the server's said the retired `palbase serve`), and
-	// pushing init's tree overwrote a v1 the user never saw. `project create`
-	// now materializes the deployed bundle itself, so there is one skeleton.
-	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev", "init"} {
+	// `init` was retired for a real reason and is BACK for a different one, so
+	// the reason is worth keeping: it used to scaffold a SECOND skeleton onto
+	// disk while the server had already deployed its own seed template as
+	// version 1. The two drifted — init's said `palbase build`, the server's
+	// said the retired `palbase serve` — and pushing init's tree overwrote a v1
+	// the user never saw.
+	//
+	// What changed is where the skeleton comes from: it is copied out of the
+	// installed @palbase/backend, so the scaffold and the SDK that compiles it
+	// are the same version by construction and this CLI carries no copy to go
+	// stale. The orchestrator still embeds its own backend_template/ for cloud
+	// project creation; pointing that at the same package is the remaining half
+	// and is in the deviation ledger.
+	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev"} {
 		require.False(t, have[gone],
 			"`palbase %s` must NOT exist after the cutover (no shims, no aliases)", gone)
 	}

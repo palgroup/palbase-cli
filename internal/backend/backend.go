@@ -145,6 +145,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		newLinkCmd(),
 		newEnvCmd(),
 		newPlanCmd(),
+		newInitCmd(),
 		newStartCmd(),
 		newStopCmd(),
 	}
