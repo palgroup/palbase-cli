@@ -63,6 +63,13 @@ func statusOfProject(cmd *cobra.Command) (bool, error) {
 	switch {
 	case err != nil:
 		return true, err
+	case status == http.StatusNotFound && target.Local:
+		// A stack started HERE serves this directory and never follows the deploy
+		// pointer, so "no artifact" is the permanent, correct answer rather than a
+		// state to get out of. The generic line below sent people to `palbase
+		// push`, which refuses on exactly this target — status was advising a
+		// command its own CLI rejects a second later.
+		fmt.Fprintln(out, "deployed:     n/a — this stack serves this directory, and rebuilds when you save")
 	case status == http.StatusNotFound:
 		fmt.Fprintln(out, "deployed:     nothing yet — `palbase push`")
 	case status != http.StatusOK:

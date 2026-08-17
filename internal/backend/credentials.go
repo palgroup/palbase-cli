@@ -130,7 +130,12 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 		return Credentials{Value: v, Kind: KindPerson}, SourceEnv, nil
 	}
 	return Credentials{}, "", fmt.Errorf(
-		"%w: %s.\nFor a project on this machine, run `palbase start` — it writes the credential for you.\n"+
+		// NOT "start writes the credential for you" any more: it does not write
+		// one, and saying so sent people looking for a file that no longer
+		// exists. A stack holds its own key in its state directory and this
+		// resolver reads it from there, so the fix is to have the stack RUNNING,
+		// not to have a copy of its key somewhere.
+		"%w: %s.\nFor a project on this machine, `palbase start` brings its stack up — the stack holds its own key and this reads it from there.\n"+
 			"For a cloud project, run `palbase login`, or set %s to a Dashboard-issued token",
 		ErrNoCredential, url, AccessTokenEnv)
 }
