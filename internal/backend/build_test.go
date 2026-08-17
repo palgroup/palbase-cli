@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -482,4 +483,59 @@ func TestBundleSrcDirKeepsNames(t *testing.T) {
 	}
 	require.Contains(t, fn, "'--keep-names'",
 		"bundleSrcDir esbuild args must include --keep-names (dotted-id parity: Ctrl.name must survive bundle scope-hoisting renames)")
+}
+
+// TestRunBuild_LandsTheTypesInTheCheckout is the T009 lock, and it runs against
+// the REAL SDK: npm-installed @palbase/backend, the real esbuild bundle, the real
+// env-gen bridge. `palbase build` validates the tree a deploy receives — a
+// staging copy — so the generated declaration file used to be written there and
+// thrown away with it. This asserts the artifact reaches the place that makes it
+// useful: the checkout the editor reads.
+func TestRunBuild_LandsTheTypesInTheCheckout(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	useTestParserCache(t)
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte(`
+import { defineSchema, uuid, text, boolean } from "@palbase/backend";
+
+export default defineSchema({
+  tables: {
+    todos: {
+      columns: {
+        id: uuid().defaultRandom(),
+        title: text(),
+        done: boolean().default(false),
+      },
+      primaryKey: ["id"],
+    },
+  },
+});
+`), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuild(ctx, dir, &out), "build:\n%s", out.String())
+
+	body, err := os.ReadFile(filepath.Join(dir, envTypesFile))
+	require.NoError(t, err, "the derived types never reached the checkout:\n%s", out.String())
+	require.Contains(t, string(body), "todos:", "the landed file does not describe db/schema.ts:\n%s", body)
+	require.Contains(t, string(body), `declare module "@palbase/backend/env"`)
+	require.Contains(t, out.String(), envTypesFile, "the build does not say it wrote the file:\n%s", out.String())
+
+	// Run twice: a build that changes nothing must not rewrite the file, because
+	// a checkout that goes dirty on every build is a checkout nobody can read a
+	// `git status` in.
+	before, err := os.Stat(filepath.Join(dir, envTypesFile))
+	require.NoError(t, err)
+	out.Reset()
+	require.NoError(t, runBuild(ctx, dir, &out))
+	after, err := os.Stat(filepath.Join(dir, envTypesFile))
+	require.NoError(t, err)
+	require.Equal(t, before.ModTime(), after.ModTime(), "the second build rewrote an identical file")
+	require.Contains(t, out.String(), "unchanged")
 }

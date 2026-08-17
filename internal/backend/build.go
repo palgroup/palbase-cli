@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,6 +161,18 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		fmt.Fprintf(out, "✗ DEPLOY WOULD FAIL: db/schema.ts — %v\n", err)
 		return fmt.Errorf("build failed")
 	}
+	// …and then it LANDS in the checkout. Generating into the staging tree and
+	// discarding it validated the schema and left the person with nothing: their
+	// editor still typed `Database.tables.*` from whatever `palbase-env.d.ts` was
+	// last written, which is the file's whole reason to exist.
+	//
+	// It is written as soon as the schema is valid, before the controller checks
+	// below can fail the build. The types describe db/schema.ts and nothing else —
+	// a controller with a bad decorator does not make them wrong, and the moment
+	// somebody most needs their editor working is while they are fixing one.
+	if err := landEnvTypes(buildRoot, cwd, out); err != nil {
+		return err
+	}
 
 	node.Stdout = out
 	node.Stderr = out
@@ -172,6 +186,35 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		fmt.Fprintf(out, "warning: could not run local validation (%v) — the deploy will still gate it\n", err)
 		return nil
 	}
+	return nil
+}
+
+// landEnvTypes copies the generated palbase-env.d.ts out of the staging tree and
+// into the checkout, where the project's tsconfig can see it.
+//
+// A no-op in the two cases that are not mistakes: the project has no db/schema.ts
+// (nothing was generated), or staging fell back to the live tree (generation
+// already wrote there).
+func landEnvTypes(buildRoot, cwd string, out io.Writer) error {
+	if buildRoot == cwd {
+		return nil
+	}
+	body, err := os.ReadFile(filepath.Join(buildRoot, envTypesFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dest := filepath.Join(cwd, envTypesFile)
+	if prev, rerr := os.ReadFile(dest); rerr == nil && bytes.Equal(prev, body) {
+		fmt.Fprintf(out, "✓ %s (unchanged)\n", envTypesFile)
+		return nil
+	}
+	if err := os.WriteFile(dest, body, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", envTypesFile, err)
+	}
+	fmt.Fprintf(out, "✓ %s\n", envTypesFile)
 	return nil
 }
 

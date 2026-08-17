@@ -983,6 +983,10 @@ var envGenExternals = []string{"@palbase/backend", "@palbase/core"}
 // (node_modules stripped, exactly like the push tarball) while the bridge still
 // has to require() the real SDK — the same split the pod has between the tenant
 // source and the runtime's global install.
+// envTypesFile is the derived declaration file: it augments the SDK's `Tables`
+// interface so `Database.tables.*` is typed with no import and no generic.
+const envTypesFile = "palbase-env.d.ts"
+
 func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
 	schemaPath := filepath.Join(projectDir, "db", "schema.ts")
 	if _, err := os.Stat(schemaPath); err != nil {
@@ -1021,7 +1025,7 @@ func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error
 		return err
 	}
 
-	outPath := filepath.Join(projectDir, "palbase-env.d.ts")
+	outPath := filepath.Join(projectDir, envTypesFile)
 	if err := runEnvGenBridge(ctx, projectDir, nodeModules, scriptPath, bundlePath, outPath); err != nil {
 		return err
 	}

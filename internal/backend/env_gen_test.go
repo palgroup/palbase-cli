@@ -15,7 +15,12 @@ import (
 //   - column factories return builders carrying their definition on `._def`
 //     (uuid/text/integer/boolean/timestamp/jsonb/enumType + the chainable
 //     primaryKey/notNull/nullable/default/defaultRandom/defaultNow modifiers)
-//   - defineSchema({ tables }) derives each TableDef.name from the object key
+//   - defineSchema({ tables }) derives each TableDef.name from the object key and
+//     reads the columns out of the table's `columns` key — the shape the real
+//     17.4.0 SDK requires. The fixture used to take the table VALUE as the column
+//     map, which the real package rejects with "Cannot convert undefined or null
+//     to object"; a fixture that accepts a shape the SDK refuses is not a lock,
+//     it is two synthetic halves agreeing with each other.
 //   - makeEnvDts(schema) emits the exact `palbase-env.d.ts` text (golden-matched
 //     below) — mirrors src/db/env-gen.ts
 //
@@ -54,7 +59,11 @@ function enumType(name, values) {
 function defineSchema(input) {
   const tables = {};
   for (const name of Object.keys(input.tables)) {
-    tables[name] = { name, columns: input.tables[name] };
+    const table = input.tables[name];
+    if (!table || typeof table.columns !== 'object') {
+      throw new TypeError('table ' + name + ' has no columns');
+    }
+    tables[name] = { name, columns: table.columns, rls: table.rls === true, primaryKey: table.primaryKey };
   }
   return { tables };
 }
@@ -148,10 +157,14 @@ import { defineSchema, uuid, text, boolean, timestamp } from "@palbase/backend";
 export default defineSchema({
   tables: {
     todos: {
-      id: uuid().primaryKey().defaultRandom(),
-      title: text().notNull(),
-      done: boolean().default(false),
-      created_at: timestamp().defaultNow(),
+      columns: {
+        id: uuid().defaultRandom(),
+        title: text().notNull(),
+        done: boolean().default(false),
+        created_at: timestamp().defaultNow(),
+      },
+      primaryKey: ["id"],
+      rls: true,
     },
   },
 });
