@@ -331,6 +331,7 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			var resp struct {
 				Deployments []deployRow `json:"deployments"`
 			}
@@ -433,6 +434,7 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			var resp struct {
 				Status         string `json:"status"`
 				Version        string `json:"version"`
@@ -529,6 +531,7 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			var resp statusResponse
 			if err := r.Studio().Query(cmd.Context(), "backend.status",
 				map[string]any{"ref": sel.EnvironmentRef()}, &resp); err != nil {

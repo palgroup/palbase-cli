@@ -79,6 +79,23 @@ type Selection struct {
 // EnvironmentRef is the selected Environment's wire ref.
 func (s Selection) EnvironmentRef() string { return s.Environment.Ref }
 
+// Describe is the one line a verb prints before it acts on the cloud.
+//
+// The environment's NAME leads, because that is the word the person used when
+// they picked it; the ref follows in parentheses, because that is the word the
+// platform, the logs and every support conversation use. Printing only one of
+// them makes the other unfindable.
+func (s Selection) Describe() string {
+	name := s.Environment.Name
+	if name == "" {
+		name = s.Environment.Slug
+	}
+	if name == "" {
+		return s.Environment.Ref
+	}
+	return name + " (" + s.Environment.Ref + ")"
+}
+
 // Resolver turns (--project, --environment, .palbase/config.json) into a
 // Selection.
 //

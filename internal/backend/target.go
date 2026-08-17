@@ -115,8 +115,13 @@ func readLinkedProject() (Target, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return Target{}, fmt.Errorf("read %s: %w", projectPath(), err)
 	}
-	if strings.TrimSpace(t.URL) == "" {
-		return Target{}, fmt.Errorf("%s names no stack — run `palbase link` again", projectPath())
+	// A target names EITHER a cloud project or a direct address. Demanding an
+	// address of both was wrong the moment `palbase env` started clearing it: the
+	// address of a cloud environment is resolved from (project, env) when a verb
+	// acts, so one cached here would be a second source of truth that goes stale
+	// the first time an environment moves.
+	if strings.TrimSpace(t.URL) == "" && strings.TrimSpace(t.Project) == "" {
+		return Target{}, fmt.Errorf("%s names neither a project nor an address — run `palbase link` again", projectPath())
 	}
 	return t, nil
 }

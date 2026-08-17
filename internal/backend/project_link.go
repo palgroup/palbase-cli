@@ -172,13 +172,8 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
 
-	// The contract, and a sign-in if that is what it takes.
-	//
-	// Asked for rather than assumed: the session is tried FIRST and the sign-in
-	// happens only if it is missing or no longer accepted. A stack rebuilt since
-	// the last link leaves a token behind that verifies as nothing, and
-	// "already have a token" would be exactly the wrong reason to skip signing
-	// in — it is the case that needs it most.
+	// The contract. It needs the same credential the key did, and the link
+	// already refused without one — so by here there is nothing left to ask for.
 	if err := RefreshSpec(ctx, w); err != nil {
 		return err
 	}

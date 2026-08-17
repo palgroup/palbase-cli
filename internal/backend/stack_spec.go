@@ -27,7 +27,9 @@ import (
 // ErrNotSignedIn says the contract could not be fetched because nobody is signed
 // in to this stack yet. A caller decides whether that is a failure: for `link`
 // it is a next step, for `spec` it is the answer.
-var ErrNotSignedIn = errors.New("not signed in to this stack")
+var ErrNotSignedIn = errors.New(
+	"this project no longer accepts this session.\n" +
+		"For one running on this machine, `palbase start` writes a fresh credential; for a cloud project, `palbase login`")
 
 // RefreshSpec fetches the linked stack's contract and regenerates the client.
 //
@@ -35,13 +37,19 @@ var ErrNotSignedIn = errors.New("not signed in to this stack")
 // committed slot files the link wrote, so a fresh clone behaves like the machine
 // that linked it.
 func RefreshSpec(ctx context.Context, w io.Writer) error {
+	// No banner here: RefreshSpec runs INSIDE `push` and `link`, which have
+	// already said where they are acting. Announcing it a second time mid-run
+	// reads as a second destination.
 	target, err := ReadTarget()
 	if err != nil {
 		return err
 	}
+	// The resolver's refusal already names both ways in and which address it
+	// looked for. Flattening it into the sentinel replaced all of that with four
+	// words and left the person to guess.
 	token, _, err := Credential(target.URL)
 	if err != nil {
-		return ErrNotSignedIn
+		return err
 	}
 
 	spec, err := fetchStackSpec(ctx, target, token)

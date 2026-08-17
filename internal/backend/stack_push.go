@@ -79,6 +79,11 @@ type pushRefusal struct {
 }
 
 func runStackPush(ctx context.Context, target Target, token string, acceptDataLoss bool, w io.Writer) error {
+	// Where this is going, before anything goes. Both push paths funnel through
+	// here — the linked-project one and the probe in the cloud command — so one
+	// line here covers both without either being able to forget it.
+	fmt.Fprintf(w, "▸ %s\n", target.Describe())
+
 	dir, err := os.Getwd()
 	if err != nil {
 		return err

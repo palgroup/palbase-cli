@@ -123,6 +123,9 @@ Override the target with the global --project / --environment flags.`,
 			// refreshes from THAT stack. One verb either way — a person should
 			// not have to remember which kind of project they are standing in.
 			if _, err := ReadTarget(); err == nil {
+				if _, err := PrintTargetFor(cmd); err != nil {
+					return err
+				}
 				return RefreshSpec(cmd.Context(), out)
 			}
 
@@ -130,6 +133,7 @@ Override the target with the global --project / --environment flags.`,
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 
 			web, apple, android := linkedPlatforms()
 			if !web && !apple && !android {

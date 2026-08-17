@@ -1,0 +1,110 @@
+package backend
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestPrintTargetNamesTheLocalStack: while a stack is up, that is where the verb
+// acts, and the line says so plainly — `(local)` is the whole warning that this
+// push is not going to the cloud.
+func TestPrintTargetNamesTheLocalStack(t *testing.T) {
+	inScratchCheckout(t)
+	if err := WriteTarget(Target{Project: "todoapp", Env: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPath(), []byte(`{"url":"http://localhost:54321"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	target, err := PrintTarget(&out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "▸ http://localhost:54321 (local)\n" {
+		t.Errorf("banner = %q", got)
+	}
+	if !target.Local {
+		t.Error("the resolved target does not know it is local")
+	}
+}
+
+// TestPrintTargetNamesTheCloudEnvironment: no local stack, so the committed
+// project file decides — and the environment is part of the name, because
+// `todoapp` alone does not distinguish staging from production.
+func TestPrintTargetNamesTheCloudEnvironment(t *testing.T) {
+	inScratchCheckout(t)
+	if err := WriteTarget(Target{Project: "todoapp", Env: "staging"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if _, err := PrintTarget(&out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "▸ todoapp/staging\n" {
+		t.Errorf("banner = %q", got)
+	}
+}
+
+// TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn is FR-008: the refusal has to
+// carry the fix, and there are two of them — a cloud project and something
+// running here — because the person who hit this does not yet know which one
+// they want.
+func TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn(t *testing.T) {
+	inScratchCheckout(t)
+
+	var out bytes.Buffer
+	_, err := PrintTarget(&out)
+	if err == nil {
+		t.Fatal("an unlinked checkout was accepted")
+	}
+	for _, want := range []string{"palbase link <project>", "palbase link <url>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not offer %q: %v", want, err)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("a target was announced before one was resolved: %q", out.String())
+	}
+}
+
+// TestASwitchedEnvironmentStillResolves is the regression this task found:
+// `palbase env staging` clears the cached URL on purpose, and the reader used to
+// demand one — so the switch left every verb after it refusing to run.
+func TestASwitchedEnvironmentStillResolves(t *testing.T) {
+	inScratchCheckout(t)
+	if err := WriteTarget(Target{Project: "todoapp", Env: "main", URL: "https://old.example"}); err != nil {
+		t.Fatal(err)
+	}
+	var sw bytes.Buffer
+	if err := runEnvSwitch("staging", &sw); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	target, err := PrintTarget(&out)
+	if err != nil {
+		t.Fatalf("the checkout stopped resolving after an env switch: %v", err)
+	}
+	if target.Env != "staging" || target.URL != "" {
+		t.Errorf("target after switch = %+v", target)
+	}
+	if got := out.String(); got != "▸ todoapp/staging\n" {
+		t.Errorf("banner = %q", got)
+	}
+
+	// And the file on disk carries no address, so nothing downstream can pick up
+	// the previous environment's.
+	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "old.example") {
+		t.Errorf("the previous environment's address survived the switch:\n%s", raw)
+	}
+}

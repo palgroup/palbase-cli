@@ -552,6 +552,7 @@ Override the target with the global --project / --environment flags.`,
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			return runPush(pushDeps{
 				git:       execGit,
 				gitBranch: currentGitBranch,
@@ -593,6 +594,7 @@ func newPullCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			refetch := func() error {
 				cwd, err := os.Getwd()
 				if err != nil {
