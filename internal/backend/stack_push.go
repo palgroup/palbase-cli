@@ -24,9 +24,15 @@ import (
 )
 
 // pushResult mirrors the contract's PushResult.
+type configApplied struct {
+	Applied     []string `json:"applied"`
+	Unsupported []string `json:"unsupported"`
+}
+
 type pushResult struct {
-	Digest        string `json:"digest"`
-	EndpointCount int    `json:"endpoint_count"`
+	Config        *configApplied `json:"config"`
+	Digest        string         `json:"digest"`
+	EndpointCount int            `json:"endpoint_count"`
 	Schema        struct {
 		Changed bool     `json:"changed"`
 		Summary []string `json:"summary"`
@@ -151,6 +157,18 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 		// short(), not [:12]: this line runs AFTER the code has shipped, so a
 		// stack that answers 200 with a short or empty digest would turn a
 		// successful push into a Go stack trace.
+		// What the DECLARATIONS did, from the project's own answer rather than
+		// from what this side sent. The difference is not pedantic: until
+		// 2026-08-17 the push applied none of them and this line said which
+		// kinds had travelled, which reads as though they had landed.
+		if out.Config != nil {
+			for _, line := range out.Config.Applied {
+				fmt.Fprintf(w, "config: %s\n", line)
+			}
+			for _, line := range out.Config.Unsupported {
+				fmt.Fprintf(w, "config: %s — NOT applied\n", line)
+			}
+		}
 		fmt.Fprintf(w, "live: %d endpoint(s), %s\n", out.EndpointCount, short(out.Digest))
 
 		// The contract just changed — this is the moment, and the only moment,

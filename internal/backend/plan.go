@@ -86,10 +86,10 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 		renderSchemaPlan(out, body)
 	}
 
-	// CONFIG. There is no read-back: the target applies what arrives, and the
-	// declaration in this checkout IS the intent. Saying which kinds would be
-	// applied is the honest amount of information available here — claiming a
-	// diff would mean inventing the other side of it.
+	// CONFIG. There is no read-back — the target has no route that reports what
+	// it currently holds — so this says what would be SENT, not what would
+	// change. The wording matters: "would apply" was read as a promise, and for
+	// a while it was not even true that they were applied at all.
 	fmt.Fprintln(out, "config")
 	kinds, err := declaredConfigKinds(dir)
 	if err != nil {
@@ -98,7 +98,8 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	if len(kinds) == 0 {
 		fmt.Fprintln(out, "  nothing declared")
 	} else {
-		fmt.Fprintf(out, "  would apply: %s\n", strings.Join(kinds, ", "))
+		fmt.Fprintf(out, "  would send: %s\n", strings.Join(kinds, ", "))
+		fmt.Fprintln(out, "  (what each one changes is reported by the push itself)")
 	}
 
 	// SECRETS: names only, always.
