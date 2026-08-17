@@ -36,8 +36,8 @@ func TestTheVendoredComposeMatchesTheRepository(t *testing.T) {
 // somebody had already built it.
 func TestTheVendoredStackPullsItsImages(t *testing.T) {
 	for _, want := range []string{
-		"ghcr.io/palgroup/palbase-palsvc:",
-		"ghcr.io/palgroup/palbase-runtime-dev:",
+		"ghcr.io/palgroup/palbase/palsvc:",
+		"ghcr.io/palgroup/palbase/runtime-dev:",
 	} {
 		if !strings.Contains(string(stackCompose), want) {
 			t.Errorf("no default image at %s — a stranger cannot pull it", want)
@@ -50,7 +50,7 @@ func TestARegistryReferenceIsRecognised(t *testing.T) {
 		image string
 		want  bool
 	}{
-		{"ghcr.io/palgroup/palbase-palsvc:0.29.0", true},
+		{"ghcr.io/palgroup/palbase/palsvc:0.29.1", true},
 		{"localhost:5000/palsvc", true},
 		// Docker Hub's short form: docker does pull it, but the first segment is
 		// an ORG, not a host — and nothing in this stack defaults to one, so
