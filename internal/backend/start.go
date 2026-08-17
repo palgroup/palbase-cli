@@ -156,6 +156,24 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 	}
 
 	fmt.Fprintf(out, "▸ starting %s\n", group)
+
+	// THE DATABASE FIRST, THEN ITS SCHEMA, THEN THE REST.
+	//
+	// palsvc refuses to serve a database that has not been migrated — correctly,
+	// since the alternative is answering requests against half a schema — so a
+	// plain `up -d` leaves it in a restart loop with the answer in a log nobody
+	// is reading. The one-shot below is the same command the shipped stack uses
+	// and it is idempotent, so it runs on every start rather than being
+	// remembered once.
+	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d", "postgres"); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "▸ applying every module's schema")
+	if err := compose(ctx, stackDir, project, envFile, dir, settled, out,
+		"run", "--rm", "--no-deps", "palsvc", "--migrate-only"); err != nil {
+		return fmt.Errorf("migrate the local database: %w", err)
+	}
+
 	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d"); err != nil {
 		return err
 	}
