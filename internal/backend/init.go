@@ -15,12 +15,14 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,30 +48,93 @@ Then:
 			if err != nil {
 				return err
 			}
-			return runInit(cmd.Context(), dir, backendPkg+"@"+scaffoldSDKRange, cmd.OutOrStdout())
+			version, err := newestPublishedSDK(cmd.Context())
+			if err != nil {
+				return err
+			}
+			return runInit(cmd.Context(), dir, backendPkg+"@"+version, cmd.OutOrStdout())
 		},
 	}
 }
 
-// scaffoldSDKRange is the SDK a new backend is built against.
+// newestPublishedSDK ASKS THE REGISTRY which SDK a new backend starts on.
 //
-// NOT `latest`, and the reason is a live constraint rather than taste: `latest`
-// deliberately points at 17.4.0 so that v1 projects — which carry
-// `"@palbase/backend": "latest"` — do not jump a major at their next install
-// against a runtime built for 17. A scaffold that followed `latest` would hand
-// every new project the OLD line, and the first thing it met would be a runtime
-// on 18. The 18.x line is published under the `next` dist-tag; a range resolves
-// across every published version regardless of tag, which is why this is a range
-// and not that tag — a project pinned to a release CHANNEL silently rides
-// whatever lands there next.
+// This binary carries no version, and that is the point: a number here goes
+// stale at the next major and makes every SDK release a CLI release. The same
+// reasoning already governs the scaffold FILES — they are copied out of the
+// package rather than embedded — and the version had no business being the one
+// thing still baked in.
 //
-// It must equal what the package's own template/package.json declares, because
-// init installs this to get the template and then installs what the template
-// declares. TestTheScaffoldAsksForTheSameSDKTheCLIInstalls holds them together.
-// When 19 ships, both move in one commit.
-const scaffoldSDKRange = "^18.0.0"
+// It cannot ask for `latest`. That tag is deliberately held on the v1 line,
+// because v1 projects carry `"@palbase/backend": "latest"` in their own
+// package.json and moving it would jump every one of them a major at their next
+// install. So it asks the question `latest` used to answer: what is the newest
+// version this package has.
+//
+// The version it returns decides only WHICH PACKAGE is fetched. What the new
+// project then declares is the range in that package's own template — so the
+// SDK names its own compatibility and nothing here has to agree with it.
+func newestPublishedSDK(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "npm", "view", backendPkg, "versions", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("could not ask the registry which %s to install (%w) — `npm view %s versions` is the question, and it needs a network",
+			backendPkg, err, backendPkg)
+	}
+	return pickNewestStable(out)
+}
 
-// spec is what npm is asked to install — `@palbase/backend@<scaffoldSDKRange>`
+// pickNewestStable is the pure half, so the choosing is testable without a
+// network: npm answers with a JSON array, or with a bare string when a package
+// has exactly one version.
+func pickNewestStable(raw []byte) (string, error) {
+	var versions []string
+	if err := json.Unmarshal(raw, &versions); err != nil {
+		var single string
+		if err2 := json.Unmarshal(raw, &single); err2 != nil {
+			return "", fmt.Errorf("could not read the registry's version list: %w", err)
+		}
+		versions = []string{single}
+	}
+
+	newest := ""
+	for _, v := range versions {
+		// A prerelease is not something to hand somebody who typed `init`. npm
+		// itself keeps them out of a plain range for the same reason.
+		if strings.Contains(v, "-") {
+			continue
+		}
+		if newest == "" || compareSemver(v, newest) > 0 {
+			newest = v
+		}
+	}
+	if newest == "" {
+		return "", fmt.Errorf("the registry lists no released version of %s", backendPkg)
+	}
+	return newest, nil
+}
+
+// compareSemver orders two released versions. Prereleases are filtered out
+// before this runs, so numeric major.minor.patch is the whole comparison —
+// and a lexical sort is not it: "9.0.0" sorts above "18.0.0".
+func compareSemver(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		x, y := 0, 0
+		if i < len(as) {
+			x, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			y, _ = strconv.Atoi(bs[i])
+		}
+		if x != y {
+			return x - y
+		}
+	}
+	return 0
+}
+
+// spec is what npm is asked to install — `@palbase/backend@<newest released>`
 // from the command, and a locally packed tarball from the test that proves this
 // against a real package build rather than against a fixture.
 func runInit(ctx context.Context, dir, spec string, out io.Writer) error {

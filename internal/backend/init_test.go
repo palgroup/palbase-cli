@@ -234,19 +234,62 @@ func TestInitInsideATreeWithAnAncestorPackageJSON(t *testing.T) {
 	}
 }
 
-// TestTheScaffoldAsksForTheSameSDKTheCLIInstalls holds two numbers in two
-// repositories together.
-//
-// `init` installs scaffoldSDKRange to obtain the package, copies template/ out
-// of it, and then installs what the TEMPLATE's package.json declares. If those
-// two disagree, a scaffold resolves one SDK to get the files and a different one
-// to compile against — and the second is the one the project keeps. The failure
-// is silent at scaffold time and shows up as a decorator that does not exist.
-//
-// It is a real risk right now rather than a hypothetical: `latest` deliberately
-// points at the 17 line for v1's sake, so ANY spec that falls back to it lands a
-// major behind the runtime.
-func TestTheScaffoldAsksForTheSameSDKTheCLIInstalls(t *testing.T) {
+// The CLI carries NO SDK version. It asks the registry, because a number in
+// this binary goes stale at the next major and turns every SDK release into a
+// CLI release — and because `latest`, the tag that used to answer this, is held
+// on the v1 line on purpose.
+func TestPickNewestStable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// The one a lexical sort gets wrong: "9.0.0" sorts above "18.0.1".
+			name: "orders numerically, not as text",
+			raw:  `["9.0.0","17.4.0","18.0.0","18.0.1"]`,
+			want: "18.0.1",
+		},
+		{
+			name: "a prerelease is not what somebody typing init asked for",
+			raw:  `["18.0.1","19.0.0-rc.1","19.0.0-beta.2"]`,
+			want: "18.0.1",
+		},
+		{
+			// npm answers with a bare string when a package has one version.
+			name: "the single-version answer is a string, not an array",
+			raw:  `"1.0.0"`,
+			want: "1.0.0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pickNewestStable([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("pick: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("picked %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPickNewestStableRefusesAnEmptyRegistry(t *testing.T) {
+	// Silence here would install `@palbase/backend@`, which npm reads as
+	// `latest` — the one answer this whole path exists to avoid.
+	if _, err := pickNewestStable([]byte(`[]`)); err == nil {
+		t.Error("an empty version list was accepted")
+	}
+	if _, err := pickNewestStable([]byte(`["19.0.0-rc.1"]`)); err == nil {
+		t.Error("a registry with only prereleases was accepted")
+	}
+}
+
+// TestTheProjectDeclaresWhatTheTEMPLATEDeclares is the property that lets the
+// CLI carry nothing: the version it resolves decides only which package is
+// fetched, and the range the new project keeps comes out of that package.
+// So when 19 ships, its own template says ^19.0.0 and no CLI release happens.
+func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(sdkSourceDir(t), "template", "package.json"))
 	if err != nil {
 		t.Fatalf("the SDK source has no template package.json: %v", err)
@@ -258,11 +301,10 @@ func TestTheScaffoldAsksForTheSameSDKTheCLIInstalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	declared := tmpl.Dependencies[backendPkg]
-	if declared != scaffoldSDKRange {
-		t.Errorf("the CLI installs %s@%s but the scaffold it copies declares %q — a project would resolve one SDK for its files and another to compile against",
-			backendPkg, scaffoldSDKRange, declared)
+	if declared == "" {
+		t.Fatalf("the scaffold declares no dependency on %s", backendPkg)
 	}
-	if declared == "latest" || scaffoldSDKRange == "latest" {
-		t.Error("`latest` is pinned to the v1 line on purpose; a scaffold that follows it starts every new project a major behind the runtime")
+	if declared == "latest" {
+		t.Errorf("the scaffold declares `latest`, which is pinned to the v1 line — every new project would start a major behind the runtime")
 	}
 }
