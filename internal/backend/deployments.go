@@ -52,7 +52,16 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 	}
 	out := cmd.OutOrStdout()
 	if len(deployments) == 0 {
-		fmt.Fprintln(out, "nothing deployed yet — `palbase push`")
+		// Same rule `status` follows: a stack started here serves this directory
+		// and never activates an artifact, so an empty history is its permanent
+		// and correct state — and `palbase push` refuses on exactly this target.
+		// Advising a command the same binary rejects a second later is how a tool
+		// teaches people to stop reading its advice.
+		if target.Local {
+			fmt.Fprintln(out, "no deploy history — this stack serves this directory, and rebuilds when you save")
+		} else {
+			fmt.Fprintln(out, "nothing deployed yet — `palbase push`")
+		}
 		return true, nil
 	}
 

@@ -26,7 +26,16 @@ func TestStatusDoesNotAdviseACommandThatRefusesThisTarget(t *testing.T) {
 	inScratchCheckout(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A dev stack: no artifact was ever activated, and none ever will be.
+		// A dev stack, answering the way one really does: the CURRENT deployment
+		// is a 404 because none was ever activated, and the HISTORY is an empty
+		// list because the route exists and has nothing to report. Making both a
+		// 404 would have been a fixture no stack produces — and it would have hidden
+		// the fact that `deploys` turns a 404 into an error rather than an empty
+		// history.
+		if strings.HasPrefix(r.URL.Path, "/v1/management/deployments") && r.URL.Path != "/v1/management/deployments/current" {
+			_, _ = w.Write([]byte(`{"deployments":[]}`))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
@@ -64,6 +73,19 @@ func TestStatusDoesNotAdviseACommandThatRefusesThisTarget(t *testing.T) {
 
 	if strings.Contains(out.String(), "palbase push") {
 		t.Errorf("status recommends a command that refuses this target (%v):\n%s", pushErr, out.String())
+	}
+
+	// `deploys` reads the same emptiness and used to give the same bad advice.
+	var deployOut, deployErr bytes.Buffer
+	dcmd := &cobra.Command{}
+	dcmd.SetOut(&deployOut)
+	dcmd.SetErr(&deployErr)
+	dcmd.SetContext(context.Background())
+	if handled, err := deploysOfProject(dcmd); !handled || err != nil {
+		t.Fatalf("deploys handled=%v err=%v", handled, err)
+	}
+	if strings.Contains(deployOut.String(), "palbase push") {
+		t.Errorf("deploys recommends a command that refuses this target:\n%s", deployOut.String())
 	}
 	// And it still SAYS something about the deployment line, rather than leaving
 	// a person wondering whether the question was even asked.
