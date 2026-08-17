@@ -124,7 +124,20 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) error {
 	if convErr != nil || n == 0 {
 		return fmt.Errorf("the bundle carries ZERO controllers — nothing would answer")
 	}
-	fmt.Fprintf(w, "built %d controller file(s) → %d controller(s)\n", len(sources), n)
+	// WHICH BUN BUILT IT, said out loud.
+	//
+	// The bundle is byte-identical for a fixed toolchain — measured: two builds
+	// of one tree produce one digest — so the digest a push activates is stable
+	// per machine. Across machines it is not: nothing pins bun, and the digest is
+	// content-addressed to the bytes it produced. Two people pushing the same
+	// commit can therefore activate two digests, and `palbase deploys` shows two
+	// entries for what is one version of the code.
+	//
+	// Printing the version does not close that, and pretending otherwise with a
+	// pin would break every machine whose bun is a patch ahead. What it closes is
+	// the part that actually costs time: "why is my digest different from yours"
+	// is answerable at a glance instead of by bisecting two laptops.
+	fmt.Fprintf(w, "built %d controller file(s) → %d controller(s)  [bun %s]\n", len(sources), n, bunVersion(ctx, dir))
 
 	if err := evaluateConfig(ctx, dir, configOut, w); err != nil {
 		return err
@@ -419,3 +432,13 @@ for (const file of walk(srcDir)) {
 }
 console.log('typed ' + injected + ' controller file(s) from their return types');
 `
+
+// bunVersion is the toolchain that produced the bundle, or "?" when bun answers
+// something unexpected — a build is not worth failing over a version string.
+func bunVersion(ctx context.Context, dir string) string {
+	out, err := output(ctx, dir, "bun", "--version")
+	if err != nil {
+		return "?"
+	}
+	return strings.TrimSpace(out)
+}
