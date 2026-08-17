@@ -342,9 +342,32 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 		return nil
 	}
 
+	// The generator takes one contract, one client and the plist in a single
+	// invocation — all four flags are required — and the plist it writes depends
+	// only on the config files, not on which environment's contract was passed.
+	// So the plist rides along with each environment's client rather than
+	// needing a call of its own, and every write produces the same bytes.
+	plist := filepath.Join(root, generatedDir, "Palbase-Info.plist")
+	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
+		return err
+	}
+	var configFlags []string
+	for _, platform := range []string{"ios", "macos"} {
+		cfg := filepath.Join(nativeArtifactsDir, platform, "palbase-config.json")
+		if isRegularFile(cfg) {
+			configFlags = append(configFlags, "--"+platform+"-config", cfg)
+		}
+	}
+	if len(configFlags) == 0 {
+		return nil // no Apple slot in this checkout
+	}
+
 	for _, env := range envs.names() {
 		spec := specPath(env)
 		if !isRegularFile(spec) {
+			// An environment whose contract has not been fetched — the local
+			// stack while it is down. Its plist entry exists; its client cannot,
+			// and inventing an empty one would compile and then 404.
 			continue
 		}
 		outDir := filepath.Join(root, generatedDir, env)
@@ -352,32 +375,19 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 			return err
 		}
 		out := filepath.Join(outDir, "PalbaseGenerated.swift")
-		cmd := exec.CommandContext(ctx, tool, "--openapi", spec, "--out-swift", out)
+		args := append([]string{
+			"--openapi", spec,
+			"--out-swift", out,
+			"--out-plist", plist,
+		}, configFlags...)
+		cmd := exec.CommandContext(ctx, tool, args...)
 		cmd.Stderr = w
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("palbase-swiftgen (%s): %w", env, err)
 		}
 		fmt.Fprintf(w, "✓ wrote %s\n", out)
 	}
-
-	// One plist, every environment. The SDK reads PALBASE_ENV at boot and picks.
-	plist := filepath.Join(root, generatedDir, "Palbase-Info.plist")
-	args := []string{"--out-plist", plist}
-	for _, platform := range []string{"ios", "macos"} {
-		cfg := filepath.Join(nativeArtifactsDir, platform, "palbase-config.json")
-		if isRegularFile(cfg) {
-			args = append(args, "--"+platform+"-config", cfg)
-		}
-	}
-	if len(args) == 2 {
-		return nil // no Apple slot in this checkout
-	}
-	cmd := exec.CommandContext(ctx, tool, args...)
-	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("palbase-swiftgen (plist): %w", err)
-	}
-	fmt.Fprintf(w, "✓ wrote %s\n", plist)
+	fmt.Fprintf(w, "✓ wrote %s (%s)\n", plist, strings.Join(envs.names(), ", "))
 	return nil
 }
 
