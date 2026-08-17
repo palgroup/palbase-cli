@@ -31,6 +31,8 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
 // Studio is the tRPC transport subset the test-user commands need.
@@ -134,11 +136,27 @@ func createCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Mint test user(s) for the selected environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			// TARGET-RELATIVE FIRST, like every other verb: a checkout linked to a
+			// stack mints against THAT stack. Nobody should have to remember which
+			// kind of project they are standing in.
+			if target, cred, ok := linkedProject(); ok {
+				if _, err := backend.PrintTargetFor(cmd); err != nil {
+					return err
+				}
+				if template == "" && count < 1 {
+					return fmt.Errorf("--count must be at least 1")
+				}
+				if template != "" && cmd.Flags().Changed("count") {
+					return fmt.Errorf("--count cannot be combined with --template (a template mints exactly one user)")
+				}
+				return createOnProject(cmd.Context(), target, cred, count, template, jsonOut, out)
+			}
+
 			ref, err := envRef(cmd, r)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 
 			// --template: mint ONE user + seed their data tree from the declared
 			// template. --count is meaningless here (a template mints exactly one
@@ -201,11 +219,18 @@ func listCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "List the selected environment's test users",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			if target, cred, ok := linkedProject(); ok {
+				if _, err := backend.PrintTargetFor(cmd); err != nil {
+					return err
+				}
+				return listOnProject(cmd.Context(), target, cred, jsonOut, out)
+			}
+
 			ref, err := envRef(cmd, r)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 
 			var res testUserList
 			if err := r.Studio().Query(cmd.Context(), "testData.testUsers", map[string]any{"ref": ref}, &res); err != nil {
@@ -342,6 +367,13 @@ func deleteCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Purge a test user and everything that belongs to them",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if target, cred, ok := linkedProject(); ok {
+				if _, err := backend.PrintTargetFor(cmd); err != nil {
+					return err
+				}
+				return deleteOnProject(cmd.Context(), target, cred, args[0], cmd.OutOrStdout())
+			}
+
 			ref, err := envRef(cmd, r)
 			if err != nil {
 				return err

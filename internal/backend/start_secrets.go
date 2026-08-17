@@ -254,3 +254,16 @@ func writePulled(group string, seen map[string]string) error {
 	}
 	return writeFileAtomic(path, append(blob, '\n'), 0o600)
 }
+
+// CallProject makes ONE authenticated request to the project this checkout is
+// linked to, using the same client, credential and timeout every other
+// target-relative verb uses.
+//
+// Exported because a verb does not have to live in this package to act on the
+// linked project. `test-user` lives in its own, and a second transport there
+// would be a second opinion about TLS trust for a self-signed local stack,
+// about which header carries which kind of credential, and about how long to
+// wait — three things this codebase has already had to make one answer for.
+func CallProject(ctx context.Context, target Target, cred Credentials, method, path string, body []byte, contentType string) (int, []byte, error) {
+	return managementCall(ctx, target, cred, method, path, body, contentType)
+}
