@@ -122,24 +122,89 @@ func TestListAndDeleteReachTheProject(t *testing.T) {
 // A stack cannot seed a template's rows — that needs the project's schema, and
 // the apply path says so when it skips them. Refusing by name beats minting an
 // account and leaving somebody to discover the empty app later.
-func TestATemplateIsRefusedWithTheReasonRatherThanHalfApplied(t *testing.T) {
-	called := false
+// A template is now MINTED here rather than refused. It used to answer with a
+// paragraph explaining that the stack could create the account but not the rows
+// it was declared to own; the stack writes both, so the paragraph is gone and
+// what replaces it is the request that carries the name.
+func TestATemplateIsMintedAtTheProjectsOwnDoor(t *testing.T) {
+	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_1","email":"t@test.invalid","password":"p",
+			"inserted":{"accounts":2,"transactions":3}}]}`))
 	}))
 	defer srv.Close()
 	target, cred := linkedTo(t, srv.URL)
 
-	err := createOnProject(context.Background(), target, cred, 1, "demo", false, &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("a template was accepted; its rows cannot be seeded here")
+	var out bytes.Buffer
+	if err := createOnProject(context.Background(), target, cred, 2, "banking", false, &out); err != nil {
+		t.Fatalf("mint from a template: %v", err)
 	}
-	if called {
-		t.Error("it minted the account anyway — a half-applied fixture is the failure being avoided")
+	if body["template"] != "banking" {
+		t.Errorf("the request did not carry the template name: %v", body)
 	}
-	if !strings.Contains(err.Error(), "demo") || !strings.Contains(err.Error(), "schema") {
-		t.Errorf("the refusal does not say which template or why: %v", err)
+	if body["count"] != float64(2) {
+		t.Errorf("--count did not reach the stack: %v — several instances of one template is an ordinary thing to want", body)
+	}
+	// The ROWS are why a template exists, so they are printed beside the login.
+	if !strings.Contains(out.String(), "2 accounts, 3 transactions") {
+		t.Errorf("the output does not say what the user arrived holding:\n%s", out.String())
+	}
+}
+
+func TestTheTemplateListComesFromTheStack(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_, _ = w.Write([]byte(`{"templates":[{"name":"banking","email":"","tables":["accounts","profiles"]}]}`))
+	}))
+	defer srv.Close()
+	target, cred := linkedTo(t, srv.URL)
+
+	var out bytes.Buffer
+	if err := templatesOnProject(context.Background(), target, cred, false, &out); err != nil {
+		t.Fatalf("list templates: %v", err)
+	}
+	if path != "/admin/test-user-templates" {
+		t.Errorf("it asked %q", path)
+	}
+	for _, want := range []string{"banking", "accounts, profiles"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the list does not show %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestCloneReachesTheProjectWithItsOverrides(t *testing.T) {
+	var path string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_2","email":"c@test.invalid","password":"p","inserted":{"profiles":1}}]}`))
+	}))
+	defer srv.Close()
+	target, cred := linkedTo(t, srv.URL)
+
+	var out bytes.Buffer
+	overrides := map[string]map[string]any{"profiles": {"display_name": "Copy"}}
+	if err := cloneOnProject(context.Background(), target, cred, "usr_1", overrides, false, &out); err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+	if path != "/admin/test-users/clone" {
+		t.Errorf("it asked %q", path)
+	}
+	if body["source_user_id"] != "usr_1" {
+		t.Errorf("the source did not travel: %v", body)
+	}
+	set, ok := body["set"].(map[string]any)
+	if !ok || set["profiles"] == nil {
+		t.Errorf("--set did not reach the stack: %v", body)
+	}
+	if !strings.Contains(out.String(), "1 profiles") {
+		t.Errorf("the output does not say what was copied:\n%s", out.String())
 	}
 }
 

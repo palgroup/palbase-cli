@@ -144,12 +144,12 @@ func createCmd(r Resolvers) *cobra.Command {
 				if _, err := backend.PrintTargetFor(cmd); err != nil {
 					return err
 				}
-				if template == "" && count < 1 {
+				if count < 1 {
 					return fmt.Errorf("--count must be at least 1")
 				}
-				if template != "" && cmd.Flags().Changed("count") {
-					return fmt.Errorf("--count cannot be combined with --template (a template mints exactly one user)")
-				}
+				// --count DOES apply to a template here: several instances of
+				// one declared user is an ordinary thing to want, and each gets
+				// its own copy of the declared rows.
 				return createOnProject(cmd.Context(), target, cred, count, template, jsonOut, out)
 			}
 
@@ -262,11 +262,18 @@ func templatesCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "List the templates declared in config/test-users.ts",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			if target, cred, ok := linkedProject(); ok {
+				if _, err := backend.PrintTargetFor(cmd); err != nil {
+					return err
+				}
+				return templatesOnProject(cmd.Context(), target, cred, jsonOut, out)
+			}
+
 			ref, err := envRef(cmd, r)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 
 			var res []templateEntry
 			if err := r.Studio().Query(cmd.Context(), "testData.listTemplates", map[string]any{"ref": ref}, &res); err != nil {
@@ -317,16 +324,29 @@ table, which is how the clone gets its own name or handle:
 
   palbase test-user clone usr_123 --set profiles.display_name="Copy"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := envRef(cmd, r)
-			if err != nil {
-				return err
-			}
 			out := cmd.OutOrStdout()
-
 			if (email == "") != (password == "") {
 				return fmt.Errorf("--email and --password must be given together, or neither")
 			}
 			overrides, err := parseSets(sets)
+			if err != nil {
+				return err
+			}
+
+			if target, cred, ok := linkedProject(); ok {
+				if _, err := backend.PrintTargetFor(cmd); err != nil {
+					return err
+				}
+				if email != "" {
+					// A stack mints a clone's credentials itself. Naming them
+					// would be a promise this rail cannot keep, and silently
+					// ignoring the flags would be worse.
+					return fmt.Errorf("--email/--password are not available against a local stack: a clone is minted with generated credentials, which the command prints once")
+				}
+				return cloneOnProject(cmd.Context(), target, cred, args[0], overrides, jsonOut, out)
+			}
+
+			ref, err := envRef(cmd, r)
 			if err != nil {
 				return err
 			}

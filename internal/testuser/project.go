@@ -15,11 +15,11 @@ package testuser
 // out of the same door — there is no second implementation of what a test user
 // is.
 //
-// WHAT THE STACK DOES NOT HAVE is the seeding engine: a template's declared
-// rows need the project's schema to know what a `todos` row is, and the apply
-// path says so out loud when it skips them. So --template and `clone` refuse
-// here by name rather than pretending, and the refusal says which half is
-// missing.
+// It has the SEEDING engine too, now. `--template` and `clone` used to refuse
+// here by name — the stack could mint an account but not the rows the project
+// declared it should own — and that refusal is gone: `POST /admin/test-users`
+// takes a template name, `POST /admin/test-users/clone` copies an existing
+// user's tree, and both answer with what landed in each table.
 
 import (
 	"context"
@@ -27,13 +27,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
-// adminTestUsers is the stack route a deploy already uses for the same job.
-const adminTestUsers = "/admin/test-users"
+// The stack routes a deploy already uses for the same jobs.
+const (
+	adminTestUsers     = "/admin/test-users"
+	adminTestUserClone = "/admin/test-users/clone"
+	adminTemplates     = "/admin/test-user-templates"
+)
 
 // linkedProject is the project this checkout is bound to, when it is bound to
 // one. Absent, the caller falls through to the cloud arm — the same shape every
@@ -60,7 +66,21 @@ type stackMinted struct {
 		Email       string `json:"email"`
 		Password    string `json:"password"`
 		AccessToken string `json:"access_token"`
+		// Inserted is how many rows landed in each table. Empty for a plain
+		// mint, which declares no data.
+		Inserted map[string]int `json:"inserted"`
 	} `json:"users"`
+}
+
+// stackTemplates is what GET /admin/test-user-templates answers: the
+// declarations this stack holds, without the definitions — a fixture's carries
+// its password.
+type stackTemplates struct {
+	Templates []struct {
+		Name   string   `json:"name"`
+		Email  string   `json:"email"`
+		Tables []string `json:"tables"`
+	} `json:"templates"`
 }
 
 type stackListed struct {
@@ -108,35 +128,110 @@ func trimBody(raw []byte) string {
 
 func createOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
 	count int, template string, jsonOut bool, out io.Writer) error {
+	body := map[string]any{"count": count, "with_tokens": true}
 	if template != "" {
-		return fmt.Errorf(
-			"this project cannot seed a template's rows.\n"+
-				"  The ACCOUNT can be minted here — `palbase test-user create` without --template does that —\n"+
-				"  but the rows %q declares need the project's schema to know what they are, and that engine\n"+
-				"  lives in the cloud control plane rather than in a stack. A deploy reports the same gap.",
-			template)
+		// The stack looks the declaration up by name and writes the rows it
+		// carries. `count` rides along: several instances of one template is a
+		// normal thing to want, and each gets its own copy of the data.
+		body["template"] = template
 	}
 
 	var res stackMinted
-	if err := callProject(ctx, target, cred, http.MethodPost, adminTestUsers,
-		map[string]any{"count": count, "with_tokens": true}, &res); err != nil {
+	if err := callProject(ctx, target, cred, http.MethodPost, adminTestUsers, body, &res); err != nil {
 		return err
 	}
 	if jsonOut {
 		return encodeJSON(out, res)
 	}
-	fmt.Fprintf(out, "✓ created %d test user(s)\n", len(res.Users))
+	if template != "" {
+		fmt.Fprintf(out, "✓ created %d test user(s) from template %q\n", len(res.Users), template)
+	} else {
+		fmt.Fprintf(out, "✓ created %d test user(s)\n", len(res.Users))
+	}
 	for _, u := range res.Users {
-		fmt.Fprintf(out, "  id:       %s\n", u.UserID)
-		fmt.Fprintf(out, "  email:    %s\n", u.Email)
-		fmt.Fprintf(out, "  password: %s\n", u.Password)
-		if u.AccessToken != "" {
-			fmt.Fprintf(out, "  token:    %s\n", u.AccessToken)
-		}
+		printStackUser(out, u.UserID, u.Email, u.Password, u.AccessToken, u.Inserted)
 	}
 	// The stack returns them ONCE and cannot return them again; saying so is the
 	// difference between a person copying the password and a person re-running
 	// the command expecting it back.
+	fmt.Fprintln(out, "  (creds shown once — store them now)")
+	return nil
+}
+
+// printStackUser is one minted user, credentials first and then what they
+// arrived holding — the rows are the reason a template exists, so they are
+// printed beside the login rather than left for a query to discover.
+func printStackUser(out io.Writer, id, email, password, token string, inserted map[string]int) {
+	fmt.Fprintf(out, "  id:       %s\n", id)
+	fmt.Fprintf(out, "  email:    %s\n", email)
+	fmt.Fprintf(out, "  password: %s\n", password)
+	if token != "" {
+		fmt.Fprintf(out, "  token:    %s\n", token)
+	}
+	if len(inserted) == 0 {
+		return
+	}
+	tables := make([]string, 0, len(inserted))
+	for table := range inserted {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	parts := make([]string, 0, len(tables))
+	for _, table := range tables {
+		parts = append(parts, fmt.Sprintf("%d %s", inserted[table], table))
+	}
+	fmt.Fprintf(out, "  rows:     %s\n", strings.Join(parts, ", "))
+}
+
+// templatesOnProject lists what this stack has been told a test user can be.
+func templatesOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
+	jsonOut bool, out io.Writer) error {
+	var res stackTemplates
+	if err := callProject(ctx, target, cred, http.MethodGet, adminTemplates, nil, &res); err != nil {
+		return err
+	}
+	if jsonOut {
+		return encodeJSON(out, res)
+	}
+	if len(res.Templates) == 0 {
+		fmt.Fprintln(out, "No test users declared. Add them to config/test-users.ts and push.")
+		return nil
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tFIXTURE EMAIL\tSEEDS")
+	for _, t := range res.Templates {
+		email := t.Email
+		if email == "" {
+			email = "-"
+		}
+		seeds := "-"
+		if len(t.Tables) > 0 {
+			seeds = strings.Join(t.Tables, ", ")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", t.Name, email, seeds)
+	}
+	return tw.Flush()
+}
+
+// cloneOnProject copies a test user's rows onto fresh accounts.
+func cloneOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
+	sourceUserID string, overrides map[string]map[string]any, jsonOut bool, out io.Writer) error {
+	body := map[string]any{"source_user_id": sourceUserID, "with_tokens": true}
+	if len(overrides) > 0 {
+		body["set"] = overrides
+	}
+
+	var res stackMinted
+	if err := callProject(ctx, target, cred, http.MethodPost, adminTestUserClone, body, &res); err != nil {
+		return err
+	}
+	if jsonOut {
+		return encodeJSON(out, res)
+	}
+	fmt.Fprintf(out, "✓ cloned %s\n", sourceUserID)
+	for _, u := range res.Users {
+		printStackUser(out, u.UserID, u.Email, u.Password, u.AccessToken, u.Inserted)
+	}
 	fmt.Fprintln(out, "  (creds shown once — store them now)")
 	return nil
 }
