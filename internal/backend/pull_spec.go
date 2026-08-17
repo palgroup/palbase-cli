@@ -122,7 +122,10 @@ Override the target with the global --project / --environment flags.`,
 			// TARGET-RELATIVE, like login and push: a checkout linked to a stack
 			// refreshes from THAT stack. One verb either way — a person should
 			// not have to remember which kind of project they are standing in.
-			if _, err := ReadTarget(); err == nil {
+			if target, err := ReadTarget(); err == nil {
+				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+					return err
+				}
 				if _, err := PrintTargetFor(cmd); err != nil {
 					return err
 				}

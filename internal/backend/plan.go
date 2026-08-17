@@ -41,6 +41,9 @@ itself, which is the same computation the push runs, stopped before it writes.`,
 			if err != nil {
 				return err
 			}
+			if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+				return err
+			}
 			cred, _, err := Credential(target.URL)
 			if err != nil {
 				return err

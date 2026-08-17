@@ -41,6 +41,9 @@ const (
 	SourceEnv CredentialSource = "environment"
 	// SourceStore is ~/.palbase/credentials.json, keyed by target URL.
 	SourceStore CredentialSource = "store"
+	// SourceLocalStack is a stack running on this machine, answering with the
+	// key it generated for itself. Nothing was copied to make this work.
+	SourceLocalStack CredentialSource = "this machine"
 )
 
 // AccessTokenEnv is the variable the cloud CLI already reads. Named here rather
@@ -101,6 +104,19 @@ func (c Credentials) Apply(req *http.Request) {
 // PAT as a Bearer, the stack answered "this stack did not issue that token", and
 // the refusal advised running `palbase start`, which they had just done.
 func Credential(url string) (cred Credentials, source CredentialSource, err error) {
+	// A STACK ON THIS MACHINE ANSWERS FOR ITSELF, from the one file that already
+	// holds its key.
+	//
+	// `palbase start` used to COPY that key into the credential store, which made
+	// a second copy of a secret this design otherwise refuses to duplicate — the
+	// same reason there is no .env and no `secret pull`. Worse, a copy has to be
+	// kept in step: `stop` left it behind, and it survived a `--reset` that gave
+	// the stack a new key. The state directory is the original; reading it is
+	// one line and cannot go stale.
+	if key, ok := localStackKey(url); ok {
+		return Credentials{Value: key, Kind: KindKey}, SourceLocalStack, nil
+	}
+
 	stored, err := readCredential(url)
 	if err != nil {
 		return Credentials{}, "", err
@@ -233,4 +249,27 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(name, path)
+}
+
+// localStackKey answers with the secret key of a stack running on this machine,
+// found by ADDRESS in the register `palbase start` keeps.
+//
+// The register maps a project group to a URL; the key lives in that group's own
+// state directory, written once by the stack's `--init-env`. So the CLI reads
+// what the containers read, and a `--reset` that regenerates the keys is picked
+// up on the next call rather than leaving a stale copy behind.
+func localStackKey(url string) (string, bool) {
+	group, ok := groupOfLocalStack(url)
+	if !ok {
+		return "", false
+	}
+	dir, err := stackStateDir(group)
+	if err != nil {
+		return "", false
+	}
+	key, err := valueFromEnvFile(filepath.Join(dir, ".env"), "PALBASE_SERVICE_ROLE_KEY")
+	if err != nil || strings.TrimSpace(key) == "" {
+		return "", false
+	}
+	return key, true
 }

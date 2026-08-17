@@ -55,6 +55,20 @@ func runEnvSwitch(slug string, w io.Writer) error {
 		return nil
 	}
 
+	// A NAME THIS APP DOES NOT CARRY IS A TYPO, and the answer to a typo is the
+	// list. Accepting it wrote a target nothing could resolve, and the next verb
+	// failed somewhere further away with a worse message.
+	//
+	// Checked against the app's own slot rather than against the cloud: that
+	// file is what `link` wrote and what a build selects from, so it is the same
+	// set of names the person is choosing between.
+	if envs, err := readAppEnvironments("ios"); err == nil && len(envs.Environments) > 0 {
+		if _, ok := envs.Environments[slug]; !ok {
+			return fmt.Errorf("this app carries no environment called %q.\n  %s\nRun `palbase link` if the project has one this checkout has not fetched",
+				slug, strings.Join(envs.names(), "\n  "))
+		}
+	}
+
 	previous := target.Env
 	target.Env = slug
 	// The address is resolved from (project, env) when a verb acts, so nothing

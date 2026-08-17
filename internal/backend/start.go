@@ -197,17 +197,16 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 		return fmt.Errorf("%w\nThe containers are still up — `docker compose -p %s logs` says what happened", err, project)
 	}
 
-	// The credential BEFORE the target: a checkout pointed at a stack it cannot
-	// authenticate against is worse than one that is not pointed at it yet,
-	// because every verb then fails with an auth error rather than a clear
-	// "start it first".
-	key, err := valueFromEnvFile(envFile, "PALBASE_SERVICE_ROLE_KEY")
-	if err != nil {
-		return err
-	}
-	if err := StoreCredential(url, Credentials{Value: key, Kind: KindKey}); err != nil {
-		return err
-	}
+	// NO CREDENTIAL IS WRITTEN HERE, and that is deliberate.
+	//
+	// This used to copy the stack's secret key into ~/.palbase/credentials.json
+	// so every verb could find it. But the key already exists, once, in this
+	// group's state directory — and a copy is a thing to keep in step: `stop`
+	// left it behind, and `--reset` gave the stack a new key while the copy went
+	// on claiming the old one. The resolver reads the original instead
+	// (credentials.go, localStackKey), which is also what makes an app checkout
+	// in another directory work with no extra step: the register says which
+	// group owns this address, and the group's directory holds the key.
 	if err := WriteLocalTarget(Target{URL: url}); err != nil {
 		return err
 	}
@@ -660,4 +659,31 @@ func updateRegistry(change func(*stackRegistry)) error {
 		return err
 	}
 	return writeFileAtomic(path, append(blob, '\n'), 0o600)
+}
+
+// groupOfLocalStack answers which project group serves this address, from the
+// machine register, or false when no stack here does.
+//
+// By ADDRESS rather than by directory: the app checkout asking is usually not
+// the backend checkout that started it, and the address is the one thing they
+// both hold.
+func groupOfLocalStack(url string) (string, bool) {
+	path, err := registryPath()
+	if err != nil {
+		return "", false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	var reg stackRegistry
+	if json.Unmarshal(raw, &reg) != nil {
+		return "", false
+	}
+	for group, stack := range reg.Stacks {
+		if stack.URL == url {
+			return group, true
+		}
+	}
+	return "", false
 }

@@ -323,13 +323,18 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 		Short: "Show the selected environment's deploy history (newest first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// TARGET-RELATIVE, like push and status.
+			if target, err := ReadTarget(); err == nil {
+				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+					return err
+				}
+			}
 			if handled, err := deploysOfProject(cmd); handled {
 				return err
 			}
 
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
-				return err
+				return unlinkedOrCloudError(err)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			var resp struct {
@@ -431,13 +436,18 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 		Short: "Roll back the selected environment to a previous version",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// TARGET-RELATIVE, like push and status.
+			if target, err := ReadTarget(); err == nil {
+				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+					return err
+				}
+			}
 			if handled, err := rollbackOnProject(cmd, args[0]); handled {
 				return err
 			}
 
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
-				return err
+				return unlinkedOrCloudError(err)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			var resp struct {
@@ -534,13 +544,18 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// TARGET-RELATIVE, like push and spec: a checkout linked to a
 			// project reports on THAT project. One verb either way.
+			if target, err := ReadTarget(); err == nil {
+				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+					return err
+				}
+			}
 			if handled, err := statusOfProject(cmd); handled {
 				return err
 			}
 
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
-				return err
+				return unlinkedOrCloudError(err)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			var resp statusResponse

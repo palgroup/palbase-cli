@@ -45,7 +45,8 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 		return ok, err
 	}
 
-	deployments, err := listProjectDeployments(cmd.Context(), target, cred)
+	ctx := cmd.Context()
+	deployments, err := listProjectDeployments(ctx, target, cred)
 	if err != nil {
 		return true, err
 	}
@@ -55,24 +56,36 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 		return true, nil
 	}
 
+	// NO ENDPOINTS COLUMN. A manifest never recorded a count, so only the row the
+	// runtime confirms can carry one — every other line was a dash, and a column
+	// of dashes is a column that teaches people to ignore it. The serving row's
+	// count goes beside its marker instead, where it means something.
 	table := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(table, "\tVERSION\tACTIVATED\tENDPOINTS\tSDK")
+	fmt.Fprintln(table, "\tVERSION\tACTIVATED\tSDK")
 	for _, d := range deployments {
 		marker := " "
 		if d.Active {
 			// The only thing a person is looking for in this list.
 			marker = "▸"
 		}
-		endpoints := "—"
-		if d.EndpointCount != nil {
-			endpoints = fmt.Sprintf("%d", *d.EndpointCount)
-		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n",
 			marker, short(d.Digest), d.ActivatedAt.Local().Format("2006-01-02 15:04"),
-			endpoints, orDash(d.SDKVersion))
+			orDash(d.SDKVersion))
 	}
 	if err := table.Flush(); err != nil {
 		return true, err
+	}
+	// The count comes from `current`, not from the history: a manifest never
+	// recorded one, so the listing cannot carry it, and only the runtime can say
+	// what it is answering with. One extra call, and it is the line a person
+	// reads this list for.
+	if status, body, err := managementCall(ctx, target, cred, http.MethodGet,
+		"/v1/management/deployments/current", nil, ""); err == nil && status == http.StatusOK {
+		var current projectDeployment
+		if json.Unmarshal(body, &current) == nil && current.EndpointCount != nil {
+			fmt.Fprintf(out, "\n▸ %s is serving %d endpoint(s)\n",
+				short(current.ServingDigest), *current.EndpointCount)
+		}
 	}
 	fmt.Fprintf(out, "\n`palbase rollback %s` serves that version again\n", short(deployments[len(deployments)-1].Digest))
 	return true, nil

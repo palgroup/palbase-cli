@@ -391,3 +391,65 @@ func TestTheStoredCredentialBeatsTheAmbientOne(t *testing.T) {
 		t.Errorf("the headless path broke: %q (%s) from %s", cloud.Value, cloud.Kind, source)
 	}
 }
+
+// TestALocalStackAnswersForItselfWithNoCopy is the question this design owes an
+// answer to: why would `palbase start` write a credential at all?
+//
+// It should not. The key already exists once, in the group's state directory,
+// written by the stack's own --init-env. Copying it into the credential store
+// made a second copy of a secret this design otherwise refuses to duplicate —
+// and a copy has to be kept in step: `stop` left it behind, and `--reset` gave
+// the stack a new key while the copy went on claiming the old one.
+func TestALocalStackAnswersForItselfWithNoCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AccessTokenEnv, "")
+
+	const url = "http://127.0.0.1:51234"
+	state, err := stackStateDir("todoapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, ".env"),
+		[]byte("PALBASE_SERVICE_ROLE_KEY=pb_project_sTHEKEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerStack("todoapp", url, "palbase-todoapp", "/somewhere"); err != nil {
+		t.Fatal(err)
+	}
+
+	cred, source, err := Credential(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.Value != "pb_project_sTHEKEY" || cred.Kind != KindKey {
+		t.Errorf("resolved %q (%s)", cred.Value, cred.Kind)
+	}
+	if source != SourceLocalStack {
+		t.Errorf("resolved from %s, want the stack itself", source)
+	}
+
+	// And NOTHING was copied: the credential store does not exist.
+	if _, err := os.Stat(filepath.Join(home, ".palbase", "credentials.json")); !os.IsNotExist(err) {
+		t.Errorf("a copy of the key was written to the credential store (%v)", err)
+	}
+
+	// A NEW key — what `--reset` produces — is picked up on the next call,
+	// which a copy could not do.
+	if err := os.WriteFile(filepath.Join(state, ".env"),
+		[]byte("PALBASE_SERVICE_ROLE_KEY=pb_project_sROTATED\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := Credential(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Value != "pb_project_sROTATED" {
+		t.Errorf("a rotated key was not picked up: %q", again.Value)
+	}
+
+	// An address no stack here serves falls through to the ordinary refusal.
+	if _, _, err := Credential("https://todoapp.palbase.studio"); err == nil {
+		t.Error("a cloud address resolved from the local register")
+	}
+}

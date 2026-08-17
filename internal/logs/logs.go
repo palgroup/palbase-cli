@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/palgroup/palbase-cli/internal/backend"
 	"maps"
 	"strings"
 	"time"
@@ -73,10 +74,25 @@ new lines every 2s — Ctrl-C to stop.
   palbase logs --follow                 tail live`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A LINKED PROJECT HAS NO LOG SURFACE, and saying so beats resolving
+			// a cloud environment nobody asked for. Measured: in a checkout
+			// linked to a project, this silently ignored the link, resolved the
+			// selected cloud environment instead, and printed ITS logs — or
+			// refused with "run palbase project use", which is advice for a
+			// different question entirely.
+			if target, err := backend.ReadTarget(); err == nil {
+				return fmt.Errorf(
+					"%s keeps no logs to fetch: its management surface has no log operation, and the runtime writes to stdout.\n"+
+						"  docker logs <project>-runtime-1   what it is printing now\n"+
+						"  palbase status                    what it is serving",
+					target.Describe())
+			}
+
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
 			ref := sel.EnvironmentRef()
 
 			base := map[string]any{"ref": ref, "limit": limit}
