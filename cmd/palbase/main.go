@@ -221,7 +221,7 @@ func newRootCmd() *cobra.Command {
 			Studio:    func() *studio.Client { return studioClient },
 			Selection: selectionResolver,
 		}),
-		dbCmdWithTypes(),
+		dbcmd.Cmd(),
 		storage.Cmd(),
 		flags.Cmd(flags.Resolvers{
 			// *studio.Client satisfies flags.Studio (Query/Mutation); only the
@@ -260,18 +260,10 @@ func newRootCmd() *cobra.Command {
 	return rootCmd
 }
 
-// dbCmdWithTypes composes the db command group with `db types` (the
-// palbase-env.d.ts generator, owned by the backend package's local Node
-// tooling). Composition happens here in main — the db package stays free of a
-// backend import.
-func dbCmdWithTypes() *cobra.Command {
-	cmd := dbcmd.Cmd(dbcmd.Resolvers{
-		Studio:    func() *studio.Client { return studioClient },
-		Selection: selectionResolver,
-	})
-	cmd.AddCommand(backend.EnvTypesCmd())
-	return cmd
-}
+// dbCmd is the local stack's schema surface. There is no `db types` here any
+// more: palbase-env.d.ts is derived output, and `palbase build` produces
+// everything derived — a second command for one of them was a second thing to
+// remember and a second thing to forget.
 
 func loginCmd() *cobra.Command {
 	cmd := &cobra.Command{

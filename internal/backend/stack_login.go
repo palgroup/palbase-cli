@@ -77,6 +77,10 @@ func appConfigDirs() []string {
 
 // stackClient talks to one project, trusting a self-signed certificate only
 // when the link said to.
+// HTTPClient is how anything talks to a project: `db` and `secret` live in their
+// own packages and must not each decide TLS policy — one target, one client.
+func HTTPClient(t Target) *http.Client { return stackClient(t) }
+
 func stackClient(t Target) *http.Client {
 	c := &http.Client{Timeout: 5 * time.Minute}
 	if t.Insecure {

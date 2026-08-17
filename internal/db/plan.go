@@ -2,228 +2,130 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
-	"strings"
+	"net/http"
 
 	"github.com/spf13/cobra"
-
-	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
-// schemaPlan is the planner's result. The plan is computed server-side against the
-// environment's LIVE database: the declared schema is built for real in a throwaway
-// shadow database and the difference is taken by Postgres itself, so it covers the
-// things a hand-rolled differ cannot model — type changes, triggers, views, policies.
+// schemaPlan is the stack's SchemaPlan: what it would take to make the database
+// match db/schema.ts, and what that would cost.
 type schemaPlan struct {
-	SQL string `json:"sql"`
-	// Renames are not in the SQL. A diff shown two names for one column emits DROP
-	// and ADD, so the planner aligns the two sides by name first and carries the
-	// rename separately. A plan that renames a column and changes nothing else has
-	// no SQL at all — which is why they have to be read here, or a real change
-	// prints as "schema in sync".
-	Renames         []planRename     `json:"renames"`
-	FromFingerprint string           `json:"fromFingerprint"`
-	ToFingerprint   string           `json:"toFingerprint"`
-	Findings        []planFinding    `json:"findings"`
-	Destructive     *planDestructive `json:"destructive"`
+	InSync      bool                `json:"in_sync"`
+	Changes     []string            `json:"changes"`
+	Destructive []destructiveChange `json:"destructive"`
+	Unsupported []string            `json:"unsupported"`
 }
 
-type planRename struct {
-	Table string `json:"table"`
-	From  string `json:"from"`
-	To    string `json:"to"`
+type destructiveChange struct {
+	Kind    string `json:"kind"`
+	Table   string `json:"table"`
+	Column  string `json:"column,omitempty"`
+	Rows    int64  `json:"rows"`
+	NonNull int64  `json:"non_null,omitempty"`
 }
 
-type planFinding struct {
-	Level   string `json:"level"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-type planDestructive struct {
-	Drops       []planDrop `json:"drops"`
-	HasDataLoss bool       `json:"hasDataLoss"`
-}
-
-type planDrop struct {
-	Kind     string `json:"kind"`
-	Table    string `json:"table"`
-	Column   string `json:"column,omitempty"`
-	RowCount int64  `json:"rowCount"`
-	NonNull  int64  `json:"nonNull,omitempty"`
-}
-
-func (p schemaPlan) empty() bool {
-	return strings.TrimSpace(p.SQL) == "" && len(p.Renames) == 0
-}
-
-func (p schemaPlan) hasError() bool {
-	for _, f := range p.Findings {
-		if f.Level == "error" {
-			return true
-		}
-	}
-	return false
-}
-
-// computeSchemaPlan asks Studio to plan the schema against the selected environment.
-func computeSchemaPlan(ctx context.Context, c *studio.Client, ref, schema string) (schemaPlan, error) {
-	input := map[string]any{"ref": ref, "schema": schema}
-	var resp schemaPlan
-	// The planner builds the declared schema in a real database before it can diff
-	// anything, so it runs longer than a plain differ; the client's default timeout
-	// would report a failure while the Job was still working.
-	if err := c.WithTimeout(studio.JobCallTimeout).Mutation(ctx, "backend.schemaPlan", input, &resp); err != nil {
-		return schemaPlan{}, fmt.Errorf("backend.schemaPlan: %w", err)
-	}
-	return resp, nil
-}
-
-// exitCodeChanges is what `--detailed-exitcode` reports when a plan would change
-// something. It mirrors the convention CI pipelines already expect from planners:
-// 0 = no changes, 2 = changes, non-zero-non-2 = the plan could not be produced.
+// exitCodeChanges is what --detailed-exitcode reports when the plan is not
+// empty. 2 rather than 1 is the convention CI pipelines already expect from
+// planners: 0 = in sync, 2 = would change, anything else = could not plan.
 const exitCodeChanges = 2
 
-// changesError carries the detailed exit code out of RunE without printing anything.
 type changesError struct{}
 
 func (changesError) Error() string { return "" }
-
-// ExitCode lets the root command translate this into a process exit status.
 func (changesError) ExitCode() int { return exitCodeChanges }
 
-func planCmd(r Resolvers) *cobra.Command {
+func planCmd() *cobra.Command {
 	var detailedExitCode bool
 	cmd := &cobra.Command{
 		Use:   "plan",
-		Short: "Show what it would take to make the live database match db/schema.ts",
-		Long: `Plan db/schema.ts against the SELECTED environment's live database.
+		Args:  cobra.NoArgs,
+		Short: "Show what it would take to make the local database match db/schema.ts",
+		Long: `Plan db/schema.ts against the local stack's database. Applies nothing.
 
-The plan is computed on the server: your declared schema is built for real in a
-throwaway database and Postgres itself reports the difference, so the plan covers
-everything the schema DSL can express — including type changes and policies.
+The plan is computed by the stack against its database as it is right now, so it
+covers what a text diff cannot: type changes, policies, constraints.
 
-Nothing is applied and nothing is written to your repository.
-
-With --detailed-exitcode the command exits 0 when the schema is in sync and 2 when
-the plan would change something, so CI can branch on it.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sel, err := r.Selection().Resolve(cmd.Context())
+With --detailed-exitcode this exits 0 when the schema is in sync and 2 when the
+plan would change something.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			stack, err := openLocal(cmd)
 			if err != nil {
 				return err
 			}
-			schema, err := readSchema()
-			if err != nil {
-				return err
-			}
-
-			plan, err := computeSchemaPlan(cmd.Context(), r.Studio(), sel.EnvironmentRef(), schema)
+			source, err := readSchema()
 			if err != nil {
 				return err
 			}
 
-			out := cmd.OutOrStdout()
-			renderPlan(out, plan)
-
-			if detailedExitCode && !plan.empty() {
+			plan, err := computePlan(cmd.Context(), stack, source)
+			if err != nil {
+				return err
+			}
+			renderPlan(cmd.OutOrStdout(), plan)
+			if detailedExitCode && !plan.InSync {
 				return changesError{}
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&detailedExitCode, "detailed-exitcode", false,
-		"exit 0 when the schema is in sync and 2 when the plan would change something")
+	cmd.Flags().BoolVar(&detailedExitCode, "detailed-exitcode",
+		false, "exit 0 when in sync and 2 when the plan would change something")
 	return cmd
 }
 
-// renderPlan prints the plan for a person deciding whether to apply it.
+func computePlan(ctx context.Context, stack local, source string) (schemaPlan, error) {
+	status, body, err := stack.post(ctx, "/v1/management/schema/plan", "text/plain", []byte(source))
+	if err != nil {
+		return schemaPlan{}, err
+	}
+	if status != http.StatusOK {
+		return schemaPlan{}, apiError(status, body)
+	}
+	var plan schemaPlan
+	if err := json.Unmarshal(body, &plan); err != nil {
+		return schemaPlan{}, fmt.Errorf("read the plan: %w", err)
+	}
+	return plan, nil
+}
+
+// renderPlan writes the plan for a person about to decide something.
 //
-// The findings come first and the errors are named as such, because the numbers are
-// the decision: "drops notes" and "drops notes, 431 rows" are not the same choice,
-// and a plan whose destructive lines scrolled past the SQL would be approved by
-// someone who never read them.
-func renderPlan(out io.Writer, plan schemaPlan) {
-	if plan.empty() {
-		fmt.Fprintln(out, "✓ schema in sync — nothing to apply")
+// Destructive changes carry their row counts, and that is the whole design: "this
+// drops a column" is a shrug, "this drops a column with 41,908 values in it" is a
+// decision.
+func renderPlan(w io.Writer, plan schemaPlan) {
+	if plan.InSync && len(plan.Changes) == 0 {
+		fmt.Fprintln(w, "✓ the database matches db/schema.ts")
 		return
 	}
-
-	// Renames print before everything else because they are what stops the reader
-	// from seeing a DROP and an ADD and concluding their data is about to be thrown
-	// away — the plan says the column is being renamed, so nothing is lost.
-	if len(plan.Renames) > 0 {
-		renames := append([]planRename(nil), plan.Renames...)
-		sort.Slice(renames, func(i, j int) bool {
-			if renames[i].Table != renames[j].Table {
-				return renames[i].Table < renames[j].Table
-			}
-			return renames[i].To < renames[j].To
-		})
-		for _, r := range renames {
-			fmt.Fprintf(out, "  → %-40s RENAME FROM %s\n", r.Table+"."+r.To, r.From)
+	for _, change := range plan.Changes {
+		fmt.Fprintf(w, "  %s\n", change)
+	}
+	for _, drop := range plan.Destructive {
+		fmt.Fprintf(w, "  ⚠ %s\n", describeDrop(drop))
+	}
+	if len(plan.Unsupported) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "not applied by this rail — change these yourself:")
+		for _, item := range plan.Unsupported {
+			fmt.Fprintf(w, "  %s\n", item)
 		}
-		fmt.Fprintln(out)
 	}
-
-	if plan.Destructive != nil && len(plan.Destructive.Drops) > 0 {
-		drops := append([]planDrop(nil), plan.Destructive.Drops...)
-		sort.Slice(drops, func(i, j int) bool {
-			if drops[i].Table != drops[j].Table {
-				return drops[i].Table < drops[j].Table
-			}
-			return drops[i].Column < drops[j].Column
-		})
-		for _, d := range drops {
-			target := d.Table
-			if d.Column != "" {
-				target = d.Table + "." + d.Column
-			}
-			// A column drop destroys the values that are THERE, always — not one per
-			// row, and not conditionally. Falling back to the table's row count when
-			// NonNull is zero is how "nothing is lost" got displayed as "168 rows":
-			// the overstated warning people learn to skip, printed over the server's
-			// correct finding. Measured live on todoapp, 2026-08-11.
-			lost := d.RowCount
-			if d.Kind == "column" {
-				lost = d.NonNull
-			}
-			if lost > 0 {
-				fmt.Fprintf(out, "  - %-40s DROP  ⚠ %d row(s)\n", target, lost)
-			} else {
-				fmt.Fprintf(out, "  - %-40s DROP\n", target)
-			}
-		}
-		fmt.Fprintln(out)
-	}
-
-	if strings.TrimSpace(plan.SQL) != "" {
-		fmt.Fprintln(out, strings.TrimRight(plan.SQL, "\n"))
-		fmt.Fprintln(out)
-	}
-
-	if len(plan.Findings) > 0 {
-		for _, f := range plan.Findings {
-			marker := "!"
-			if f.Level == "error" {
-				marker = "✗"
-			}
-			fmt.Fprintf(out, "  %s %s\n", marker, f.Message)
-		}
-		fmt.Fprintln(out)
-	}
-
-	fmt.Fprintf(out, "  from %s  to %s\n", short(plan.FromFingerprint), short(plan.ToFingerprint))
-	if plan.hasError() {
-		fmt.Fprintln(out, "  this plan needs approval before it can run in production")
+	if len(plan.Destructive) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "the ⚠ changes take data away — `palbase db apply --approve` runs them too")
 	}
 }
 
-// short renders a fingerprint at a length a person can compare at a glance.
-func short(fingerprint string) string {
-	if len(fingerprint) <= 12 {
-		return fingerprint
+func describeDrop(d destructiveChange) string {
+	if d.Kind == "column" {
+		if d.NonNull > 0 {
+			return fmt.Sprintf("drop %s.%s — %d value(s) in %d row(s)", d.Table, d.Column, d.NonNull, d.Rows)
+		}
+		return fmt.Sprintf("drop %s.%s — %d row(s)", d.Table, d.Column, d.Rows)
 	}
-	return fingerprint[:12] + "…"
+	return fmt.Sprintf("drop table %s — %d row(s)", d.Table, d.Rows)
 }
