@@ -19,41 +19,9 @@ import (
 	"io"
 	"net/http"
 	"os"
-
-	"github.com/spf13/cobra"
+	"slices"
+	"strings"
 )
-
-func newStackPushCmd() *cobra.Command {
-	var acceptDataLoss bool
-	cmd := &cobra.Command{
-		Use:   "push",
-		Short: "Ship this project to the stack it is linked to",
-		Long: `Send this project to the linked stack.
-
-The stack plans and applies the schema its db/schema.ts declares, activates the
-new code, and then CHECKS that it is serving: a push that ends with zero
-endpoints is a failed push, not a successful one.
-
-A schema change that would remove data is refused whole — the additive half
-included — until you say that is what you mean:
-
-    palbase push --accept-data-loss`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			target, err := ReadTarget()
-			if err != nil {
-				return err
-			}
-			cred, _, err := Credential(target.URL)
-			if err != nil {
-				return err
-			}
-			return runStackPush(cmd.Context(), target, cred, acceptDataLoss, cmd.OutOrStdout())
-		},
-	}
-	cmd.Flags().BoolVar(&acceptDataLoss, "accept-data-loss", false,
-		"also run the schema changes that destroy data (the refusal names them)")
-	return cmd
-}
 
 // pushResult mirrors the contract's PushResult.
 type pushResult struct {
@@ -78,7 +46,7 @@ type pushRefusal struct {
 	} `json:"destructive"`
 }
 
-func runStackPush(ctx context.Context, target Target, cred Credentials, acceptDataLoss bool, w io.Writer) error {
+func runStackPush(ctx context.Context, target Target, cred Credentials, approve bool, w io.Writer) error {
 	// Where this is going, before anything goes. Both push paths funnel through
 	// here — the linked-project one and the probe in the cloud command — so one
 	// line here covers both without either being able to forget it.
@@ -104,6 +72,18 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, acceptDa
 		return err
 	}
 
+	// SECRETS BEFORE CODE, and the order is the feature. Code that reads a
+	// credential nobody set deploys green and 500s on its first request — which
+	// is exactly what todoapp's /graph/* routes did — so a declared `required`
+	// secret with no value anywhere stops the push before anything ships.
+	//
+	// What it does NOT do is overwrite. A name already set on the target is left
+	// alone and reported, because the value there is usually the production one
+	// and the value here is usually not.
+	if err := carrySecrets(ctx, dir, target, cred, approve, w); err != nil {
+		return err
+	}
+
 	tarball, err := BuildStackTarball(dir)
 	if err != nil {
 		return err
@@ -111,7 +91,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, acceptDa
 	fmt.Fprintf(w, "sending %s (%d KB)\n", dir, len(tarball)/1024)
 
 	url := target.URL + "/v1/management/push"
-	if acceptDataLoss {
+	if approve {
 		url += "?accept-data-loss=true"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))
@@ -169,7 +149,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, acceptDa
 				fmt.Fprintf(w, "  drop table   %s (%d rows)\n", d.Table, d.Rows)
 			}
 		}
-		return fmt.Errorf("repeat with --accept-data-loss when that is what you mean")
+		return fmt.Errorf("repeat with --approve when that is what you mean")
 
 	case http.StatusUnauthorized:
 		return fmt.Errorf("that stack no longer accepts this session — run `palbase login`")
@@ -178,4 +158,81 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, acceptDa
 	default:
 		return fmt.Errorf("push refused (%d): %s", res.StatusCode, trimBody(body))
 	}
+}
+
+// carrySecrets makes the target hold every secret this project's code declares.
+//
+// FILL, don't replace. The gap is the interesting case — a fresh environment
+// that has never been given a credential — and the already-set case is the
+// dangerous one: the value there is usually production's and the value here is
+// usually not. So a name the target already holds is skipped and reported, and
+// --approve is what replaces it.
+//
+// Values come from the stack running on this machine and from nowhere else.
+// There is no file to read (there are none) and no prompt to answer (a push is
+// not an interview), so a required name with no value anywhere stops the push —
+// before the code ships, because code that reads a credential nobody set
+// deploys green and fails on its first request.
+func carrySecrets(ctx context.Context, dir string, target Target, cred Credentials, approve bool, w io.Writer) error {
+	plan, err := planSecrets(ctx, dir, target, cred)
+	if err != nil {
+		return err
+	}
+	if len(plan.MissingRequired) > 0 {
+		return fmt.Errorf(
+			"%s is required by config/secrets.ts and set nowhere — nothing was sent.\n"+
+				"Set it on the target with `palbase secret set %s --stdin`, or start a local stack and set it there for the push to carry",
+			strings.Join(plan.MissingRequired, ", "), plan.MissingRequired[0])
+	}
+
+	toWrite := plan.Fill
+	if approve {
+		// Replacing is a decision, and --approve is where it is made. The
+		// already-set names are only replaceable when they are ALSO available
+		// here — there is nothing to replace them with otherwise.
+		source, sourceCred, ok := localSource(target)
+		if ok {
+			if available, err := secretNames(ctx, source, sourceCred); err == nil {
+				held := map[string]bool{}
+				for _, name := range available {
+					held[name] = true
+				}
+				for _, name := range plan.Present {
+					if held[name] {
+						toWrite = append(toWrite, name)
+					}
+				}
+			}
+		}
+	}
+	if len(toWrite) == 0 {
+		for _, name := range plan.Present {
+			fmt.Fprintf(w, "secret %s: already set there, left alone\n", name)
+		}
+		return nil
+	}
+
+	source, sourceCred, ok := localSource(target)
+	if !ok {
+		return fmt.Errorf("the values for %s are on the stack this machine runs, and it is not up — `palbase start`",
+			strings.Join(toWrite, ", "))
+	}
+	for _, name := range toWrite {
+		value, err := secretValue(ctx, source, sourceCred, name)
+		if err != nil {
+			return fmt.Errorf("read %s from the local stack: %w", name, err)
+		}
+		if err := putSecret(ctx, target, cred, name, value); err != nil {
+			return fmt.Errorf("set %s on %s: %w", name, target.Describe(), err)
+		}
+		// The NAME. Never the value, and never a length or a prefix either —
+		// those are how somebody confirms a guess.
+		fmt.Fprintf(w, "secret %s: set\n", name)
+	}
+	for _, name := range plan.Present {
+		if !slices.Contains(toWrite, name) {
+			fmt.Fprintf(w, "secret %s: already set there, left alone\n", name)
+		}
+	}
+	return nil
 }

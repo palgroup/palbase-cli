@@ -78,6 +78,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"mode",
 		"notifications",
 		"open",
+		"plan",
 		"project",
 		"pull",
 		"push",

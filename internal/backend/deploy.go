@@ -544,8 +544,8 @@ Override the target with the global --project / --environment flags.`,
 				if tokErr != nil {
 					return tokErr
 				}
-				accept, _ := cmd.Flags().GetBool("accept-data-loss")
-				return runStackPush(cmd.Context(), target, cred, accept, cmd.OutOrStdout())
+				approve, _ := cmd.Flags().GetBool("approve")
+				return runStackPush(cmd.Context(), target, cred, approve, cmd.OutOrStdout())
 			}
 
 			sel, err := r.Selection().Resolve(cmd.Context())
@@ -564,11 +564,12 @@ Override the target with the global --project / --environment flags.`,
 		},
 	}
 
-	// Declared here so the linked-stack branch can read it. It means nothing
-	// on the cloud path, where a destructive schema change goes through review
-	// rather than through a flag.
-	cmd.Flags().Bool("accept-data-loss", false,
-		"with a linked stack: also run the schema changes that destroy data")
+	// ONE flag for every dangerous thing a push can do, because a person facing
+	// a refusal should not have to learn which of several flags this particular
+	// refusal wants. It approves what the plan MARKED: a schema change that
+	// removes data, and replacing a secret the target already holds.
+	cmd.Flags().Bool("approve", false,
+		"apply the changes the plan marked: data-removing schema changes, and replacing a secret already set there")
 	return cmd
 }
 

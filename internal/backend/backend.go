@@ -144,11 +144,11 @@ func Commands(r Resolvers) []*cobra.Command {
 		// the stack itself for the rest.
 		newLinkCmd(),
 		newEnvCmd(),
+		newPlanCmd(),
 		newStartCmd(),
 		newStopCmd(),
 	}
 }
-
 
 // newGenTypesCmd regenerates palbase-env.d.ts from the project's db/schema.ts.
 // It types the project's OWN handlers (`Database.tables.*`) from the local
