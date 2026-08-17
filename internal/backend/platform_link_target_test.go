@@ -50,10 +50,11 @@ func TestPlatformLinkFollowsTheBoundProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no ios slot written: %v\n%s", err, out.String())
 	}
-	var entry pullSpecConfigEntry
-	if err := json.Unmarshal(raw, &entry); err != nil {
+	var slot appEnvironments
+	if err := json.Unmarshal(raw, &slot); err != nil {
 		t.Fatal(err)
 	}
+	entry := slot.Environments[slot.Default]
 	if entry.BaseURL != srv.URL {
 		t.Errorf("the slot names %q, want the project this checkout is bound to (%s)", entry.BaseURL, srv.URL)
 	}

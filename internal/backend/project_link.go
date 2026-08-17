@@ -28,7 +28,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -131,52 +130,43 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 
+	// EVERY environment, not the one being linked. An app that holds only the
+	// environment somebody linked last is an app whose address depends on when
+	// it was built — which is how a TestFlight build ends up pointed at staging.
+	envs, specs, err := gatherEnvironments(ctx, target, anon, w)
+	if err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", nativeArtifactsDir, err)
 	}
-
 	for _, platform := range o.platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))
-		dir := filepath.Join(nativeArtifactsDir, platform)
-		if platform == "web" {
-			// The web SDK reads its slot from Palbase/, not .palbase/ — a
-			// difference the link commands already carry, mirrored here rather
-			// than corrected, because the generators on the other side are what
-			// define it.
-			dir = webArtifactsDir
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create %s: %w", dir, err)
-			}
-		} else if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
-		}
-
-		entry := pullSpecConfigEntry{
-			AppID:   projectAppID,
-			Kind:    platform,
-			BaseURL: base,
-			// The key carries the project's identity, so nothing here writes a
-			// second copy of it — see pullSpecConfigEntry.
-			APIKey: anon,
-		}
-		blob, err := json.MarshalIndent(entry, "", "  ")
+		path, err := writeAppEnvironments(platform, envs)
 		if err != nil {
 			return err
 		}
-		cfg := filepath.Join(dir, "palbase-config.json")
-		if err := os.WriteFile(cfg, append(blob, '\n'), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", cfg, err)
-		}
-		fmt.Fprintf(w, "wrote %s\n", cfg)
+		fmt.Fprintf(w, "wrote %s (%s)\n", path, strings.Join(envs.names(), ", "))
+	}
+
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := writeXcconfigs(root, envs, w); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
 
-	// The contract. It needs the same credential the key did, and the link
-	// already refused without one — so by here there is nothing left to ask for.
-	if err := RefreshSpec(ctx, w); err != nil {
+	// The contract, once per environment: they can differ, and a client merged
+	// across them would compile calls that do not exist where the app points.
+	if err := generateForEnvironments(ctx, envs, w); err != nil {
 		return err
 	}
+	reportContractDrift(specs, w)
+
 	fmt.Fprintln(w, "commit .palbase/ and Palbase/Generated/")
 	return nil
 }

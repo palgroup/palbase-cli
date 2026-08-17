@@ -51,7 +51,10 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"18.0.0"}`))
 			return
 		case "/v1/management/keys":
-			if r.Header.Get("Authorization") == "" {
+			// EITHER credential, because the real gate takes either: a person's
+			// token in Authorization, the operator's key in `apikey`. A harness
+			// that took only one would fail a caller the project accepts.
+			if r.Header.Get("Authorization") == "" && r.Header.Get("apikey") == "" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -59,7 +62,7 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 			_, _ = w.Write([]byte(`{"publishable":"` + anonKey + `"}`))
 			return
 		case "/v1/management/openapi":
-			if r.Header.Get("Authorization") == "" {
+			if r.Header.Get("Authorization") == "" && r.Header.Get("apikey") == "" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -152,9 +155,13 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no slot file: %v", err)
 	}
-	var entry pullSpecConfigEntry
-	if err := json.Unmarshal(raw, &entry); err != nil {
+	var slot appEnvironments
+	if err := json.Unmarshal(raw, &slot); err != nil {
 		t.Fatal(err)
+	}
+	entry, ok := slot.Environments[slot.Default]
+	if !ok {
+		t.Fatalf("the slot has no %q environment: %v", slot.Default, slot.names())
 	}
 	// THE assertion. This file is committed and ships inside the app, so the key
 	// in it must be the one that is safe to ship.
@@ -265,5 +272,114 @@ func TestNothingDeployedYetIsAStateNotAFailure(t *testing.T) {
 	// the message says what to do next rather than what went wrong.
 	if !strings.Contains(err.Error(), "push a backend") {
 		t.Errorf("the message does not say what to do: %v", err)
+	}
+}
+
+// TestTheSlotCarriesEveryEnvironment is FR-050 and FR-055 together: an app that
+// holds only the environment somebody linked last is an app whose address
+// depends on when it was built.
+func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
+	inScratchCheckout(t)
+	t.Setenv("HOME", t.TempDir())
+
+	// A stack running on this machine, registered the way `palbase start` does.
+	local := stackServing(t, "pb_local_cLOCALKEY", nil)
+	dir, _ := os.Getwd()
+	group := sanitiseGroup(filepath.Base(dir))
+	if err := registerStack(group, local.URL, "palbase-"+group, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreCredential(local.URL, Credentials{Value: "local-key", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	// …and the project this checkout is being linked to.
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	var out strings.Builder
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slot appEnvironments
+	if err := json.Unmarshal(raw, &slot); err != nil {
+		t.Fatal(err)
+	}
+	if slot.Default != "main" {
+		t.Errorf("the default environment is %q", slot.Default)
+	}
+	if got := slot.Environments["main"].BaseURL; got != srv.URL {
+		t.Errorf("main points at %q", got)
+	}
+	if got := slot.Environments[localEnvName].BaseURL; got != local.URL {
+		t.Errorf("the local environment points at %q, want %s", got, local.URL)
+	}
+	if got := slot.Environments[localEnvName].APIKey; got != "pb_local_cLOCALKEY" {
+		t.Errorf("the local environment carries %q", got)
+	}
+
+	// One build configuration per environment, each excluding the others' client.
+	for _, name := range []string{"Main.xcconfig", "Local.xcconfig"} {
+		body, err := os.ReadFile(filepath.Join(dir, "Palbase", "Config", name))
+		if err != nil {
+			t.Fatalf("no %s: %v", name, err)
+		}
+		if !strings.Contains(string(body), "PALBASE_ENV = ") {
+			t.Errorf("%s does not name an environment:\n%s", name, body)
+		}
+		if !strings.Contains(string(body), "EXCLUDED_SOURCE_FILE_NAMES") {
+			t.Errorf("%s does not exclude the other environments' client:\n%s", name, body)
+		}
+	}
+	mainCfg, _ := os.ReadFile(filepath.Join(dir, "Palbase", "Config", "Main.xcconfig"))
+	if !strings.Contains(string(mainCfg), "Generated/local/*") {
+		t.Errorf("the main configuration would compile the local client too:\n%s", mainCfg)
+	}
+}
+
+// TestAStoppedLocalStackStillGetsAnEntry is FR-057: a build configuration that
+// disappears because a container was stopped is a configuration whose absence
+// nobody connects to the container.
+func TestAStoppedLocalStackStillGetsAnEntry(t *testing.T) {
+	inScratchCheckout(t)
+	t.Setenv("HOME", t.TempDir())
+
+	dir, _ := os.Getwd()
+	group := sanitiseGroup(filepath.Base(dir))
+	// Registered, but nothing is listening there.
+	if err := registerStack(group, "http://127.0.0.1:1", "palbase-"+group, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreCredential("http://127.0.0.1:1", Credentials{Value: "k", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	var out strings.Builder
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
+
+	raw, _ := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
+	var slot appEnvironments
+	if err := json.Unmarshal(raw, &slot); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := slot.Environments[localEnvName]
+	if !ok {
+		t.Fatal("the local environment was left out because the stack was down")
+	}
+	if entry.APIKey != "" {
+		t.Errorf("a key was invented for a stack that did not answer: %q", entry.APIKey)
+	}
+	if !strings.Contains(out.String(), "palbase start") {
+		t.Errorf("the output does not say how to fill it in:\n%s", out.String())
 	}
 }
