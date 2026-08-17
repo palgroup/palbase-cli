@@ -176,7 +176,12 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 	// is reading. The one-shot below is the same command the shipped stack uses
 	// and it is idempotent, so it runs on every start rather than being
 	// remembered once.
-	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d", "postgres"); err != nil {
+	// --wait, and it is not decoration: `up -d` returns when the container has
+	// STARTED, while the migration below runs with --no-deps and so waits for
+	// nothing. The two raced, and the loser was the migration — postgres was up
+	// and not yet accepting connections. --wait blocks on the healthcheck the
+	// compose file already declares.
+	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d", "--wait", "postgres"); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "▸ applying every module's schema")
