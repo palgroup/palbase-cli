@@ -383,3 +383,70 @@ func TestAStoppedLocalStackStillGetsAnEntry(t *testing.T) {
 		t.Errorf("the output does not say how to fill it in:\n%s", out.String())
 	}
 }
+
+// TestAnExplicitInfoPlistIsToldWhatItNeeds is the silent failure this reports:
+// Xcode merges INFOPLIST_KEY_* only into a plist it GENERATES, so a target with
+// an explicit Info.plist gets PALBASE_ENV computed and thrown away. Measured on
+// a real simulator — a build in the Local configuration signed up against the
+// MAIN environment's address while every build setting still read `local`.
+func TestAnExplicitInfoPlistIsToldWhatItNeeds(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	envs := appEnvironments{
+		Default:      "main",
+		Environments: map[string]appEnvironment{"main": {}, "local": {}},
+	}
+
+	// A target whose plist Xcode generates: nothing to say.
+	var quiet strings.Builder
+	reportInfoPlistRequirement(dir, envs, &quiet)
+	if quiet.Len() != 0 {
+		t.Errorf("a generated-plist target was told to edit a file it does not have:\n%s", quiet.String())
+	}
+
+	// An explicit one, without the key.
+	if err := os.MkdirAll(filepath.Join(dir, "MyApp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plist := filepath.Join(dir, "MyApp", "Info.plist")
+	if err := os.WriteFile(plist, []byte(`<?xml version="1.0"?><plist><dict>
+  <key>CFBundleName</key><string>MyApp</string>
+</dict></plist>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// …and a dependency's copy, which is not the app's business.
+	if err := os.MkdirAll(filepath.Join(dir, "Pods", "SomeLib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Pods", "SomeLib", "Info.plist"), []byte(`<plist/>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	reportInfoPlistRequirement(dir, envs, &out)
+	got := out.String()
+	if !strings.Contains(got, "MyApp/Info.plist") {
+		t.Errorf("the app's plist was not named:\n%s", got)
+	}
+	if strings.Contains(got, "Pods") {
+		t.Errorf("a dependency's plist was named:\n%s", got)
+	}
+	if !strings.Contains(got, "<key>PALBASE_ENV</key>") || !strings.Contains(got, "$(PALBASE_ENV)") {
+		t.Errorf("the exact line to add is missing:\n%s", got)
+	}
+	if !strings.Contains(got, `"main"`) {
+		t.Errorf("it does not say which environment every build would reach instead:\n%s", got)
+	}
+
+	// With the key present, silence.
+	if err := os.WriteFile(plist, []byte(`<?xml version="1.0"?><plist><dict>
+  <key>PALBASE_ENV</key><string>$(PALBASE_ENV)</string>
+</dict></plist>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var after strings.Builder
+	reportInfoPlistRequirement(dir, envs, &after)
+	if after.Len() != 0 {
+		t.Errorf("a plist that already carries the key was told to add it:\n%s", after.String())
+	}
+}

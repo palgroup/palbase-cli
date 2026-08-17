@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -409,4 +410,69 @@ func readAppEnvironments(platform string) (appEnvironments, error) {
 		return appEnvironments{}, fmt.Errorf("read the app's environments: %w", err)
 	}
 	return envs, nil
+}
+
+// reportInfoPlistRequirement says the one thing an xcconfig cannot do by itself.
+//
+// The xcconfig sets PALBASE_ENV and INFOPLIST_KEY_PALBASE_ENV, and the second is
+// how the value was meant to reach the app. Xcode merges INFOPLIST_KEY_* only
+// into a plist it GENERATES (GENERATE_INFOPLIST_FILE = YES); a target with an
+// explicit Info.plist gets the setting computed and thrown away. Measured on a
+// real simulator: a build in the Local configuration signed up against the MAIN
+// environment's address while every build setting still read `local`.
+//
+// That is the worst shape a failure can take here — the app talks to production
+// while everything on screen says otherwise — so it is reported at the moment
+// the configurations are written, with the exact line to add.
+func reportInfoPlistRequirement(root string, envs appEnvironments, w io.Writer) {
+	plists := appInfoPlists(root)
+	if len(plists) == 0 {
+		// A target whose plist Xcode generates: INFOPLIST_KEY_PALBASE_ENV does
+		// reach it, and there is nothing to add.
+		return
+	}
+	var missing []string
+	for _, path := range plists {
+		body, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(body), "PALBASE_ENV") {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				rel = path
+			}
+			missing = append(missing, rel)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	sort.Strings(missing)
+	fmt.Fprintf(w, "\nADD THIS to %s, or every configuration will build against %q:\n",
+		strings.Join(missing, " and "), envs.Default)
+	fmt.Fprintln(w, "    <key>PALBASE_ENV</key>")
+	fmt.Fprintln(w, "    <string>$(PALBASE_ENV)</string>")
+	fmt.Fprintln(w, "  Xcode expands INFOPLIST_KEY_* only into a plist it generates itself; an")
+	fmt.Fprintln(w, "  explicit one has to name the key, and then the build configuration decides.")
+}
+
+// appInfoPlists finds the Info.plist files that belong to this app, skipping the
+// places a dependency's copy lives.
+func appInfoPlists(root string) []string {
+	var found []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", "Pods", ".git", "build", "DerivedData", ".build", "Carthage":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "Info.plist" {
+			found = append(found, path)
+		}
+		return nil
+	})
+	return found
 }

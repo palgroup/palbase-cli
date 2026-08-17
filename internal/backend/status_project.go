@@ -88,6 +88,14 @@ func statusOfProject(cmd *cobra.Command) (bool, error) {
 
 	reportKeyDrift(ctx, target, cred, out)
 	reportCommittedDrift(out)
+
+	// The same warning `link` prints, repeated where somebody looks when the app
+	// is behaving oddly. It is idempotent and silent once the key is there.
+	if envs, err := readAppEnvironments("ios"); err == nil && len(envs.Environments) > 0 {
+		if root, err := os.Getwd(); err == nil {
+			reportInfoPlistRequirement(root, envs, out)
+		}
+	}
 	return true, nil
 }
 

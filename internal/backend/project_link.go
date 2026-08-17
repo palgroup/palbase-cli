@@ -157,6 +157,7 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := writeXcconfigs(root, envs, w); err != nil {
 		return err
 	}
+	reportInfoPlistRequirement(root, envs, w)
 
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
 
