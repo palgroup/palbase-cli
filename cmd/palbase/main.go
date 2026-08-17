@@ -40,7 +40,7 @@ var modeFlag string
 // projectFlag / environmentFlag are the GLOBAL headless overrides (spec §7.3).
 // They are the ONLY context flags: Organization is not a CLI context, and the
 // Palbase branch no longer exists, so there is no --organization and no
-// --branch. An unset flag falls back to `.palbase/config.json`.
+// --branch. An unset flag falls back to `.palbase/selection.json`.
 var projectFlag, environmentFlag string
 
 // sel is the shared selection resolver every context-bound command reads. Built
@@ -170,9 +170,9 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&modeFlag, "mode", "",
 		"environment mode: prod or dev (overrides config + PALBASE_MODE)")
 	rootCmd.PersistentFlags().StringVar(&projectFlag, "project", "",
-		"Project id to act on (overrides .palbase/config.json)")
+		"Project id to act on (overrides .palbase/selection.json)")
 	rootCmd.PersistentFlags().StringVar(&environmentFlag, "environment", "",
-		"Environment slug or ref to act on (overrides .palbase/config.json)")
+		"Environment slug or ref to act on (overrides .palbase/selection.json)")
 
 	// One Resolvers value for every backend-package entry point: the top-level
 	// lifecycle commands below, and `project create`'s Materialize hop, which

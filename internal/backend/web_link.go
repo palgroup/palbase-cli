@@ -410,9 +410,17 @@ func (wc *webCmd) newWebUnlinkCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
 
-			cfgPath := filepath.Join(".palbase", "config.json")
+			// THE SELECTION, not `.palbase/config.json`.
+			//
+			// Those were the same file until the selection moved out of the way of
+			// the EVALUATED CONFIG DOCUMENT — the flags, buckets and secret names
+			// `palbase build` writes there from config/*.ts. This line was left
+			// behind, so `web unlink` deleted a build output: `palbase plan` would
+			// then report "nothing declared" for config and secrets about a project
+			// that declares plenty, which is a wrong answer rather than an error.
+			cfgPath := selection.ConfigPath("")
 			if err := os.Remove(cfgPath); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove project config: %w", err)
+				return fmt.Errorf("remove the selection: %w", err)
 			}
 
 			// Remove .palbase/ if empty.
@@ -421,7 +429,7 @@ func (wc *webCmd) newWebUnlinkCmd() *cobra.Command {
 			}
 
 			// unlink doesn't know the --out the link used, so speak generically.
-			fmt.Fprintln(out, "✓ unlinked — removed .palbase/config.json")
+			fmt.Fprintf(out, "✓ unlinked — removed %s\n", cfgPath)
 			fmt.Fprintln(out, "  left in place (remove manually if you are dropping Palbase for good):")
 			fmt.Fprintln(out, "    - the generated client file and its entry-file import")
 			fmt.Fprintln(out, "    - the predev/prebuild scripts in package.json")

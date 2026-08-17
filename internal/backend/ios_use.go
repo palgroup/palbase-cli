@@ -4,7 +4,7 @@ package backend
 //
 // Point the linked native project at another ENVIRONMENT of the same Project:
 // re-fetch the codegen inputs (openapi.json + palbase-config.json) for it and
-// record the selection in .palbase/config.json.
+// record the selection in .palbase/selection.json.
 //
 // It selects an ENVIRONMENT, never a branch. There is ONE Xcode scheme / Gradle
 // module — switching environments is a config swap the codegen plugin
@@ -41,10 +41,10 @@ selected project.
 
 Writes the shared contract to .palbase/openapi.json, the %s runtime config to
 .palbase/%s/palbase-config.json, and records the environment in
-.palbase/config.json. %s.
+.palbase/selection.json. %s.
 
 The project must already be linked with 'palbase %s link' (its app id is read
-from .palbase/config.json, falling back to the committed platform slot).`, label, label, platform, rebuild, platform),
+from .palbase/selection.json, falling back to the committed platform slot).`, label, label, platform, rebuild, platform),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()

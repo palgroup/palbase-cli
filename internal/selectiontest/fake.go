@@ -259,7 +259,7 @@ func WriteError(w http.ResponseWriter, status int, code, description string) {
 }
 
 // Chdir moves the test into a fresh temp dir and restores the cwd afterwards.
-// The commands read/write `.palbase/config.json` relative to the cwd, so every
+// The commands read/write `.palbase/selection.json` relative to the cwd, so every
 // selection test needs its own directory.
 func Chdir(t *testing.T) string {
 	t.Helper()
@@ -298,7 +298,7 @@ func Selected(t *testing.T) func() *selection.Resolver {
 }
 
 // requireTempCwd refuses to write a selection into a real working tree — a test
-// that forgot to chdir would otherwise drop a .palbase/config.json into the repo.
+// that forgot to chdir would otherwise drop a .palbase/selection.json into the repo.
 func requireTempCwd(t *testing.T) {
 	t.Helper()
 	cwd, err := os.Getwd()
@@ -318,7 +318,7 @@ func requireTempCwd(t *testing.T) {
 	}
 }
 
-// WriteConfig writes a v2 `.palbase/config.json` selecting proj_1 / env_prod.
+// WriteConfig writes a v2 `.palbase/selection.json` selecting proj_1 / env_prod.
 func WriteConfig(t *testing.T, dir string, cfg *selection.Config) {
 	t.Helper()
 	if cfg == nil {
@@ -332,7 +332,7 @@ func WriteConfig(t *testing.T, dir string, cfg *selection.Config) {
 	}
 }
 
-// WriteRawConfig writes arbitrary bytes as `.palbase/config.json`.
+// WriteRawConfig writes arbitrary bytes as `.palbase/selection.json`.
 func WriteRawConfig(t *testing.T, dir, content string) {
 	t.Helper()
 	path := selection.ConfigPath(dir)
@@ -344,7 +344,7 @@ func WriteRawConfig(t *testing.T, dir, content string) {
 	}
 }
 
-// ReadConfig reads back `.palbase/config.json` as raw JSON so a golden test can
+// ReadConfig reads back `.palbase/selection.json` as raw JSON so a golden test can
 // compare the EXACT bytes the CLI wrote.
 func ReadConfig(t *testing.T, dir string) string {
 	t.Helper()

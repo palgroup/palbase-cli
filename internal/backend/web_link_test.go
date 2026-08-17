@@ -1368,3 +1368,39 @@ func TestWebLink_ProxyPathDerivedFromSrcLayout(t *testing.T) {
 		})
 	}
 }
+
+// `web unlink` used to delete `.palbase/config.json`. That was the selection
+// once; since the selection moved to `selection.json` it is the EVALUATED
+// CONFIG DOCUMENT — the flags, buckets and secret names `palbase build` writes
+// there from config/*.ts. Unlinking a web app therefore deleted a backend build
+// output, and the next `palbase plan` answered "nothing declared" about a
+// project that declares plenty. A wrong answer, not an error.
+func TestWebUnlinkLeavesTheEvaluatedConfigAlone(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	if err := os.MkdirAll(filepath.Join(dir, ".palbase"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	evaluated := filepath.Join(dir, ".palbase", "config.json")
+	if err := os.WriteFile(evaluated, []byte(`{"flags":{"flags":[]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sel := selection.ConfigPath(dir)
+	if err := os.WriteFile(sel, []byte(`{"projectId":"proj_1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := (&webCmd{}).newWebUnlinkCmd()
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetContext(context.Background())
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+
+	if _, err := os.Stat(evaluated); err != nil {
+		t.Errorf("unlink deleted the evaluated config document: %v", err)
+	}
+	if _, err := os.Stat(sel); !os.IsNotExist(err) {
+		t.Errorf("unlink left the selection in place (err=%v)", err)
+	}
+}
