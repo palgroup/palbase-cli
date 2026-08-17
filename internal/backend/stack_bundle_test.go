@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"os/exec"
 	"context"
 	"os"
 	"path/filepath"
@@ -60,6 +61,12 @@ func TestTheSchemaTravelsOnlyWhenItExists(t *testing.T) {
 }
 
 func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
+	// buildStackArtifact checks for bun before it counts controllers, so without
+	// it the refusal is about the toolchain and this test would be asserting the
+	// wrong sentence.
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is not installed — the refusal under test is not the one this machine produces")
+	}
 	// The silent-404 class: an artifact that activates and answers nothing. The
 	// stack refuses it too, but by then a person has watched a "successful" push.
 	dir := t.TempDir()

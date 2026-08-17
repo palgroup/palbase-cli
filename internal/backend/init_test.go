@@ -290,9 +290,13 @@ func TestPickNewestStableRefusesAnEmptyRegistry(t *testing.T) {
 // fetched, and the range the new project keeps comes out of that package.
 // So when 19 ships, its own template says ^19.0.0 and no CLI release happens.
 func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
+	// The SDK lives in a SIBLING repository. It is beside this checkout on a
+	// development machine and absent on CI, which checks out this repo alone —
+	// so its absence is "cannot run here", not "the scaffold is wrong". Same
+	// disposition packLocalSDK takes for the same reason.
 	raw, err := os.ReadFile(filepath.Join(sdkSourceDir(t), "template", "package.json"))
 	if err != nil {
-		t.Fatalf("the SDK source has no template package.json: %v", err)
+		t.Skipf("the SDK source is not beside this checkout: %v", err)
 	}
 	var tmpl struct {
 		Dependencies map[string]string `json:"dependencies"`
