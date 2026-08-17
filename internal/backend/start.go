@@ -297,8 +297,22 @@ func imagesPresent(ctx context.Context) error {
 		}
 		// A REGISTRY reference is compose's job — it pulls, and a pull is the
 		// whole reason `palbase start` works on a machine that has never seen
-		// this repository. Refusing here would refuse the ordinary case.
+		// this repository. Already on the machine, nothing to check.
 		if isRegistryImage(image) {
+			if exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil {
+				continue
+			}
+			// Ask the registry BEFORE compose does, because compose's own answer
+			// for an image it may not read is `manifest unknown` — which reads
+			// like the tag is wrong when the tag is fine and the door is shut.
+			if err := exec.CommandContext(ctx, "docker", "manifest", "inspect", image).Run(); err != nil {
+				return fmt.Errorf(
+					"%s cannot be pulled on this machine.\n"+
+						"  If it is private, `docker login ghcr.io` first — or ask for the package to be made public.\n"+
+						"  Building it yourself instead: %s\n"+
+						"  and then: %s=<your tag>",
+					image, want.build, want.env)
+			}
 			continue
 		}
 		cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
