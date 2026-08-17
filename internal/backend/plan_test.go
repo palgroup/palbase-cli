@@ -260,3 +260,26 @@ func TestAnOptionalSecretNobodySetIsNotAnError(t *testing.T) {
 		t.Fatalf("an optional secret blocked the push: %v", err)
 	}
 }
+
+// TestPushRefusesWhileALocalStackIsRunning: the dev runtime serves the DIRECTORY
+// it has mounted and never follows the deploy pointer, so a push there activates
+// a version nothing loads. "I pushed" would be true and "it shipped" would not,
+// which is the kind of failure that has to be refused rather than warned about.
+func TestPushRefusesWhileALocalStackIsRunning(t *testing.T) {
+	inScratchCheckout(t)
+	local := newProjectServer(t, map[string]string{})
+
+	err := runStackPush(context.Background(), Target{URL: local.URL, Local: true},
+		Credentials{Value: "k", Kind: KindKey}, false, &strings.Builder{})
+	if err == nil {
+		t.Fatal("a push to the local stack was accepted")
+	}
+	for _, want := range []string{"palbase stop", "palbase db apply"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not offer %q: %v", want, err)
+		}
+	}
+	if len(local.writesSeen()) != 0 {
+		t.Errorf("it wrote something before refusing: %v", local.writesSeen())
+	}
+}

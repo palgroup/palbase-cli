@@ -52,6 +52,23 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 	// line here covers both without either being able to forget it.
 	fmt.Fprintf(w, "▸ %s\n", target.Describe())
 
+	// A LOCAL STACK IS NOT A PLACE TO PUBLISH TO, and the reason is measured
+	// rather than stylistic: the dev runtime serves the DIRECTORY it has mounted
+	// and never follows the deploy pointer, so a push here builds an artifact
+	// and activates a version nothing will ever load. The code it carries is
+	// already running — that is what `palbase start` did — so the one thing push
+	// exists for has already happened by other means.
+	//
+	// It refuses rather than warning, because the failure it prevents is silent:
+	// "I pushed" would be true, "it shipped" would not, and nothing downstream
+	// would say so.
+	if target.Local {
+		return fmt.Errorf(
+			"this checkout is pointed at the stack running on this machine, which already serves this directory — a push here would activate a version nothing loads.\n" +
+				"  palbase stop       point it back at the project, then push\n" +
+				"  palbase db apply   if it was the schema you wanted applied here")
+	}
+
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
