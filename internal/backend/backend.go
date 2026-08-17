@@ -151,46 +151,6 @@ func Commands(r Resolvers) []*cobra.Command {
 	}
 }
 
-// newGenTypesCmd regenerates palbase-env.d.ts from the project's db/schema.ts.
-// It types the project's OWN handlers (`Database.tables.*`) from the local
-// schema source, and runs from a build/CI step or after editing the schema. No
-// project link, no network — purely local. (NOT client codegen — that is the
-// SDKs' job.)
-func newGenTypesCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "types",
-		Short: "Generate palbase-env.d.ts from db/schema.ts (typed Database.tables.*)",
-		Long: `Generate the project's palbase-env.d.ts from its db/schema.ts so handlers
-get a typed Database.tables.* with no import and no generic.
-
-esbuild-bundles db/schema.ts (with @palbase/* external), evaluates the
-defineSchema() result, and writes palbase-env.d.ts to the project root.
-Requires Node.js + npx. Run it after editing db/schema.ts or from a build step;
-` + "`palbase build`" + ` validates the same schema module on the deploy path.
-
-No-op when the project has no db/schema.ts.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			schemaPath := filepath.Join(cwd, "db", "schema.ts")
-			if _, err := os.Stat(schemaPath); err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					fmt.Fprintln(os.Stdout, "no db/schema.ts — nothing to generate")
-					return nil
-				}
-				return err
-			}
-			if err := generateEnvTypes(cmd.Context(), cwd, filepath.Join(cwd, "node_modules")); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stdout, "✓ wrote %s\n", filepath.Join(cwd, "palbase-env.d.ts"))
-			return nil
-		},
-	}
-}
-
 // backendTarget is the resolved (URL + publishable key) for one ENVIRONMENT's
 // backend. Used by lookupBackendTarget (which the platform `spec` and link
 // commands' artifact fetch share) to address the deployed tenant host.
