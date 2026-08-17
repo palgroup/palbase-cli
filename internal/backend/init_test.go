@@ -233,3 +233,36 @@ func TestInitInsideATreeWithAnAncestorPackageJSON(t *testing.T) {
 		t.Errorf("no scaffold was written: %v\n%s", err, out.String())
 	}
 }
+
+// TestTheScaffoldAsksForTheSameSDKTheCLIInstalls holds two numbers in two
+// repositories together.
+//
+// `init` installs scaffoldSDKRange to obtain the package, copies template/ out
+// of it, and then installs what the TEMPLATE's package.json declares. If those
+// two disagree, a scaffold resolves one SDK to get the files and a different one
+// to compile against — and the second is the one the project keeps. The failure
+// is silent at scaffold time and shows up as a decorator that does not exist.
+//
+// It is a real risk right now rather than a hypothetical: `latest` deliberately
+// points at the 17 line for v1's sake, so ANY spec that falls back to it lands a
+// major behind the runtime.
+func TestTheScaffoldAsksForTheSameSDKTheCLIInstalls(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(sdkSourceDir(t), "template", "package.json"))
+	if err != nil {
+		t.Fatalf("the SDK source has no template package.json: %v", err)
+	}
+	var tmpl struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(raw, &tmpl); err != nil {
+		t.Fatal(err)
+	}
+	declared := tmpl.Dependencies[backendPkg]
+	if declared != scaffoldSDKRange {
+		t.Errorf("the CLI installs %s@%s but the scaffold it copies declares %q — a project would resolve one SDK for its files and another to compile against",
+			backendPkg, scaffoldSDKRange, declared)
+	}
+	if declared == "latest" || scaffoldSDKRange == "latest" {
+		t.Error("`latest` is pinned to the v1 line on purpose; a scaffold that follows it starts every new project a major behind the runtime")
+	}
+}

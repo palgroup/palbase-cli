@@ -46,14 +46,32 @@ Then:
 			if err != nil {
 				return err
 			}
-			return runInit(cmd.Context(), dir, backendPkg+"@latest", cmd.OutOrStdout())
+			return runInit(cmd.Context(), dir, backendPkg+"@"+scaffoldSDKRange, cmd.OutOrStdout())
 		},
 	}
 }
 
-// spec is what npm is asked to install — `@palbase/backend@latest` from the
-// command, and a locally packed tarball from the test that proves this against a
-// real package build rather than against a fixture.
+// scaffoldSDKRange is the SDK a new backend is built against.
+//
+// NOT `latest`, and the reason is a live constraint rather than taste: `latest`
+// deliberately points at 17.4.0 so that v1 projects — which carry
+// `"@palbase/backend": "latest"` — do not jump a major at their next install
+// against a runtime built for 17. A scaffold that followed `latest` would hand
+// every new project the OLD line, and the first thing it met would be a runtime
+// on 18. The 18.x line is published under the `next` dist-tag; a range resolves
+// across every published version regardless of tag, which is why this is a range
+// and not that tag — a project pinned to a release CHANNEL silently rides
+// whatever lands there next.
+//
+// It must equal what the package's own template/package.json declares, because
+// init installs this to get the template and then installs what the template
+// declares. TestTheScaffoldAsksForTheSameSDKTheCLIInstalls holds them together.
+// When 19 ships, both move in one commit.
+const scaffoldSDKRange = "^18.0.0"
+
+// spec is what npm is asked to install — `@palbase/backend@<scaffoldSDKRange>`
+// from the command, and a locally packed tarball from the test that proves this
+// against a real package build rather than against a fixture.
 func runInit(ctx context.Context, dir, spec string, out io.Writer) error {
 	if err := refuseNonEmpty(dir); err != nil {
 		return err
