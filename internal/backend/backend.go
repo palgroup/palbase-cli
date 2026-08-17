@@ -322,6 +322,11 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Show the selected environment's deploy history (newest first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// TARGET-RELATIVE, like push and status.
+			if handled, err := deploysOfProject(cmd); handled {
+				return err
+			}
+
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
@@ -425,6 +430,11 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Roll back the selected environment to a previous version",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// TARGET-RELATIVE, like push and status.
+			if handled, err := rollbackOnProject(cmd, args[0]); handled {
+				return err
+			}
+
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err
