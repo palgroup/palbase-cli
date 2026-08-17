@@ -9,11 +9,74 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+// buildableBackend turns dir into a project a PUSH would accept: the local SDK
+// installed, one controller, and the secret declaration in the form the build
+// actually reads.
+//
+// config/secrets.ts rather than a hand-written .palbase/config.json, because
+// that file is an OUTPUT — `buildStackArtifact` regenerates it from config/*.ts
+// on every run, so a fixture that writes it directly is writing something the
+// code under test is about to overwrite. The published scaffold declares
+// SENTRY_DSN optional; this mirrors it.
+//
+// The local SDK, not the published one: 17.4.0 has no controller registry, so a
+// build against it would prove nothing about the code that ships.
+func buildableBackend(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is not installed — it is the engine a stack push builds with")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	sdk := packLocalSDK(t, ctx)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	if !sdkHasControllerRegistry(t, dir) {
+		t.Skip("the packed SDK exposes no controller registry")
+	}
+	useTestParserCache(t)
+
+	if err := os.MkdirAll(filepath.Join(dir, "controllers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "controllers", "health.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+
+export const HealthResponse = z.object({ status: z.string() });
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
+@Controller("/health", { auth: false })
+class HealthController {
+  @Get("/")
+  async check(): Promise<HealthResponse> {
+    return { status: "ok" };
+  }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config", "secrets.ts"), []byte(`
+import { defineSecrets, secret } from "@palbase/backend";
+
+export default defineSecrets({
+  secrets: [secret("SENTRY_DSN", { required: false })],
+});
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // projectServer answers as a management surface and records every write.
 type projectServer struct {
@@ -130,10 +193,18 @@ func runningLocalStack(t *testing.T, secrets map[string]string) *projectServer {
 // TestPlanWritesNOTHING is FR-035. The schema half is computed by the project,
 // which means a POST — so "writes nothing" cannot be checked by looking at the
 // method. It is checked by what the server was asked to CHANGE.
+//
+// The fixture is a REAL backend, installed against the local SDK, because
+// `plan`'s code bucket now runs buildStackArtifact — the same function `push`
+// runs — and that refuses a directory with no controllers exactly as a push
+// would. It used to be a bare temp dir with a stub config.json, and it passed
+// only because the esbuild path plan used to take said "no controllers/ —
+// nothing to validate" and carried on. A fixture that no push would accept was
+// proving something about a command whose whole job is to predict a push.
 func TestPlanWritesNOTHING(t *testing.T) {
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
-	declaring(t, dir, nil, []string{"SENTRY_DSN"})
+	buildableBackend(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}

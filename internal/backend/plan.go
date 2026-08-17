@@ -62,9 +62,18 @@ itself, which is the same computation the push runs, stopped before it writes.`,
 
 func runPlan(ctx context.Context, dir string, target Target, cred Credentials, out io.Writer) error {
 	// CODE. Building is how "would this even deploy" gets answered here rather
-	// than on the target, and it is the same build the push runs.
+	// than on the target, and it is THE SAME BUILD the push runs — the same
+	// function, not merely a build of the same sources.
+	//
+	// It used to call runBuild, which is the esbuild path `palbase build` and the
+	// cloud deploy take, while a push to a stack goes through buildStackArtifact,
+	// which is bun. The comment here claimed they were the same build and they
+	// were two bundlers with two opinions about how a decorator lowers — which is
+	// the exact difference stack_bundle.go says the bun choice exists to remove.
+	// A plan that goes green on code the push then refuses is worse than no plan:
+	// it is a check whose passing means nothing.
 	fmt.Fprintln(out, "code")
-	if err := runBuild(ctx, dir, indent(out)); err != nil {
+	if err := buildStackArtifact(ctx, dir, indent(out)); err != nil {
 		return err
 	}
 

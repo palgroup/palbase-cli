@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,14 +17,25 @@ import (
 
 // packLocalSDK runs `npm pack` on the SDK source in this monorepo and returns
 // the tarball path. Skips when the source is not beside this checkout.
-func packLocalSDK(t *testing.T, ctx context.Context) string {
+//
+// The location comes from THIS FILE's path, not the working directory. It used
+// to be os.Getwd(), which silently turned every caller that had chdir'd — and a
+// test that wants a scratch checkout has — into a skip: the run stayed green
+// while proving nothing. A source tree's position relative to its own source
+// file is the one thing a test cannot chdir out from under.
+func sdkSourceDir(t *testing.T) string {
 	t.Helper()
-	here, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file")
 	}
 	// internal/backend → sdk/cli → sdk → sdk/palbase-ts/backend
-	sdk := filepath.Join(here, "..", "..", "..", "palbase-ts", "backend")
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "palbase-ts", "backend")
+}
+
+func packLocalSDK(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	sdk := sdkSourceDir(t)
 	if _, err := os.Stat(filepath.Join(sdk, "package.json")); err != nil {
 		t.Skipf("the SDK source is not beside this checkout: %v", err)
 	}
@@ -126,8 +138,7 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	// declares — replaces node_modules with whatever `latest` is on the
 	// registry. That is correct for a real user, where both installs are the
 	// same version, and it is why this assertion reads the source.
-	here, _ := os.Getwd()
-	fromPkg, err := os.ReadFile(filepath.Join(here, "..", "..", "..", "palbase-ts", "backend",
+	fromPkg, err := os.ReadFile(filepath.Join(sdkSourceDir(t),
 		"template", "controllers", "health.controller.ts"))
 	if err != nil {
 		t.Fatalf("the SDK source has no template: %v", err)
