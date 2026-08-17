@@ -722,3 +722,11 @@ func groupOfLocalStack(url string) (string, bool) {
 	}
 	return "", false
 }
+
+// LocalStackProject is the compose project a checkout's stack runs under.
+//
+// Exported because `palbase logs` reads that stack's containers and lives in
+// another package. The name is formed in one place for the reason the group is:
+// two checkouts of one project must reach the SAME stack, and two projects must
+// never reach each other's.
+func LocalStackProject(dir string) string { return "palbase-" + groupName(dir) }

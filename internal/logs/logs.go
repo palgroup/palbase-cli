@@ -8,6 +8,7 @@
 package logs
 
 import (
+	"os"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,12 +81,30 @@ new lines every 2s — Ctrl-C to stop.
 			// selected cloud environment instead, and printed ITS logs — or
 			// refused with "run palbase project use", which is advice for a
 			// different question entirely.
+			// A LINKED STACK'S LOGS ARE ITS CONTAINERS', and this used to say so
+			// and stop — pointing at `docker logs <project>-runtime-1` and
+			// leaving the person to work out which of three containers held what
+			// they came for. The management surface still has no log operation;
+			// that was never the reason to decline, because the containers ARE
+			// the store and this command already knows which stack a checkout
+			// belongs to.
 			if target, err := backend.ReadTarget(); err == nil {
-				return fmt.Errorf(
-					"%s keeps no logs to fetch: its management surface has no log operation, and the runtime writes to stdout.\n"+
-						"  docker logs <project>-runtime-1   what it is printing now\n"+
-						"  palbase status                    what it is serving",
-					target.Describe())
+				if err := dockerAvailable(cmd.Context()); err != nil {
+					return err
+				}
+				dir, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+				return ShowLocal(cmd.Context(), backend.LocalStackProject(dir), LocalOptions{
+					Service: source,
+					Since:   since,
+					Limit:   limit,
+					Query:   query,
+					Levels:  splitLevels(levels),
+					Follow:  follow,
+				}, cmd.OutOrStdout())
 			}
 
 			sel, err := r.Selection().Resolve(cmd.Context())
@@ -241,6 +260,19 @@ func (c *followCursor) fresh(lines []logLine) []logLine {
 		}
 		out = append(out, l)
 		c.observe(l)
+	}
+	return out
+}
+
+// splitLevels turns the comma-separated --level flag into the list the local
+// reader filters on. The cloud arm forwards the string as-is, so the flag keeps
+// one shape and only this side has to know what it means.
+func splitLevels(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
 	}
 	return out
 }
