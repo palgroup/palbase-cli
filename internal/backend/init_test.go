@@ -185,3 +185,40 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 		t.Errorf("the scaffold is not recognised as a backend: %v", err)
 	}
 }
+
+// TestInitInsideATreeWithAnAncestorPackageJSON is the trap npm sets: it walks UP
+// looking for a package.json and installs into whatever it finds. Measured on
+// 2026-08-17 in /tmp — which has one — where `npm install` answered "up to date",
+// wrote nothing, and init then refused with "ships no template", a true sentence
+// pointing at entirely the wrong thing.
+func TestInitInsideATreeWithAnAncestorPackageJSON(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(parent, "package.json"),
+		[]byte(`{"name":"an-unrelated-project","private":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(parent, "child")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	tarball := packLocalSDK(t, ctx)
+
+	var out strings.Builder
+	if err := runInit(ctx, dir, tarball, &out); err != nil {
+		t.Fatalf("init: %v\n%s", err, out.String())
+	}
+
+	// The install landed HERE, not in the ancestor.
+	if _, err := os.Stat(filepath.Join(dir, "node_modules", "@palbase", "backend", "package.json")); err != nil {
+		t.Errorf("the SDK was not installed in the project directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "node_modules")); err == nil {
+		t.Error("npm installed into the ancestor project instead")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "controllers", "health.controller.ts")); err != nil {
+		t.Errorf("no scaffold was written: %v\n%s", err, out.String())
+	}
+}

@@ -62,6 +62,19 @@ func runInit(ctx context.Context, dir, spec string, out io.Writer) error {
 		return fmt.Errorf("npm is not on PATH — a Palbase backend is an npm project, and the scaffold comes from the @palbase/backend package")
 	}
 
+	// A package.json FIRST, before npm is asked for anything.
+	//
+	// npm walks UP looking for one and installs into whatever it finds, so in a
+	// directory with an ancestor package.json — a monorepo, or /tmp on this
+	// machine — `npm install` answered "up to date" and wrote nothing here.
+	// Measured 2026-08-17: init then refused with "ships no template", which is
+	// true and points at the wrong thing entirely. Writing one first makes this
+	// directory the project root, and the template's own package.json replaces
+	// it a moment later.
+	if err := seedPackageJSON(dir); err != nil {
+		return err
+	}
+
 	fmt.Fprintf(out, "▸ installing %s\n", spec)
 	install := exec.CommandContext(ctx, "npm", "install", "--no-audit", "--no-fund", spec)
 	install.Dir = dir
@@ -195,5 +208,15 @@ func writeGitignore(dir string) error {
 		}
 		return os.WriteFile(path, append(existing, []byte("\n"+body)...), 0o644)
 	}
+	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+// seedPackageJSON makes this directory a project root for npm's benefit.
+func seedPackageJSON(dir string) error {
+	path := filepath.Join(dir, "package.json")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	body := fmt.Sprintf("{\n  \"name\": %q,\n  \"private\": true\n}\n", filepath.Base(dir))
 	return os.WriteFile(path, []byte(body), 0o644)
 }
