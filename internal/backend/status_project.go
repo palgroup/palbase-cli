@@ -18,6 +18,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -84,7 +87,37 @@ func statusOfProject(cmd *cobra.Command) (bool, error) {
 	}
 
 	reportKeyDrift(ctx, target, cred, out)
+	reportCommittedDrift(out)
 	return true, nil
+}
+
+// reportCommittedDrift says which endpoints the environments this app holds do
+// not agree on, from the contracts already on disk.
+//
+// It asks no environment anything: the contracts were fetched when they were
+// linked or refreshed, and reaching production from a laptop to answer a status
+// question is a request nobody asked for. What it costs is honesty about
+// freshness — this reports the difference between what was FETCHED, which is
+// also what the app was built against.
+func reportCommittedDrift(out io.Writer) {
+	dir := filepath.Join(nativeArtifactsDir, "openapi")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	specs := map[string][]byte{}
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if e.IsDir() || name == e.Name() {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		specs[name] = body
+	}
+	reportContractDrift(specs, out)
 }
 
 func credentialKindWord(kind Kind) string {
