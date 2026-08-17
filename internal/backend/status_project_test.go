@@ -192,3 +192,50 @@ func TestStatusAsksTheRouteThatEXISTS(t *testing.T) {
 		t.Errorf("the deployment was not reported:\n%s", out.String())
 	}
 }
+
+// TestSpecNamesTheEnvironmentsItDidNotRefresh is the silent half of a refresh:
+// `spec` asks ONE project and regenerates every environment's client from the
+// contracts on disk, so for the others the ✓ says "written" where a reader takes
+// it for "current". Measured — after a route was added to the local stack and
+// `spec` was run, the local client was byte-identical and carried none of it.
+func TestSpecNamesTheEnvironmentsItDidNotRefresh(t *testing.T) {
+	inScratchCheckout(t)
+	envs := appEnvironments{
+		Default: "main",
+		Environments: map[string]appEnvironment{
+			"main":  {BaseURL: "https://main.example"},
+			"local": {BaseURL: "http://127.0.0.1:1"},
+			"dev":   {BaseURL: "https://dev.example"},
+		},
+	}
+	// One of them has a contract on disk; one never had.
+	if err := writeSpec("local", []byte(`{"paths":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	reportStaleContracts("main", envs, &out)
+	got := out.String()
+
+	if strings.Contains(got, "only main was refreshed.\n") && !strings.Contains(got, "local") {
+		t.Errorf("the others were not named:\n%s", got)
+	}
+	for _, want := range []string{"local", "dev", "never fetched", "palbase link"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "main (") {
+		t.Errorf("the refreshed environment was listed as stale:\n%s", got)
+	}
+
+	// One environment: nothing to warn about.
+	var single strings.Builder
+	reportStaleContracts("main", appEnvironments{
+		Default:      "main",
+		Environments: map[string]appEnvironment{"main": {}},
+	}, &single)
+	if single.Len() != 0 {
+		t.Errorf("a single-environment checkout was warned about nothing:\n%s", single.String())
+	}
+}

@@ -450,3 +450,39 @@ func TestAnExplicitInfoPlistIsToldWhatItNeeds(t *testing.T) {
 		t.Errorf("a plist that already carries the key was told to add it:\n%s", after.String())
 	}
 }
+
+// TestTheOldFlatClientIsRemoved is the defect that stopped the real app from
+// building at all: one environment used to mean one
+// Palbase/Generated/PalbaseGenerated.swift, and writing the per-environment ones
+// beside it left both in the target. Xcode 16 compiles every file under a
+// synchronized folder, so the build died with "Multiple commands produce
+// PalbaseGenerated.stringsdata" — measured on the real todoapp app, which built
+// again the moment the old file was deleted by hand.
+func TestTheOldFlatClientIsRemoved(t *testing.T) {
+	inScratchCheckout(t)
+	t.Setenv("HOME", t.TempDir())
+	dir, _ := os.Getwd()
+
+	legacy := filepath.Join(dir, generatedDir, "PalbaseGenerated.swift")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("// the one-environment client"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	var out strings.Builder
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
+
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("the one-environment client survived the link (%v) — the app would not compile", err)
+	}
+	if !strings.Contains(out.String(), "one client per environment") {
+		t.Errorf("the removal was silent:\n%s", out.String())
+	}
+}

@@ -283,7 +283,7 @@ func TestBuildTarball_IncludesFilesExcludesIgnored(t *testing.T) {
 	write("index.ts", "export const x = 1")
 	write("controllers/todo.controller.ts", "// ctrl")
 	write(".git/HEAD", "ref: refs/heads/main")
-	write(".palbase/config.json", `{"ref":"x"}`)
+	write(".palbase/selection.json", `{"ref":"x"}`)
 	write("node_modules/dep/index.js", "module.exports={}")
 	write(".palignore", "secrets.txt\n")
 	write("secrets.txt", "TOPSECRET")

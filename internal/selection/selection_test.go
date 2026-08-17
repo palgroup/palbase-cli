@@ -167,7 +167,7 @@ func TestResolverConfig_RejectsUnsupportedShapeWithoutNetworkOrRewrite(t *testin
 // no request is made.
 
 func TestResolve_UnlinkedDirectoryRefusesBeforeAnyRequest(t *testing.T) {
-	dir := t.TempDir() // deliberately no .palbase/config.json
+	dir := t.TempDir() // deliberately no .palbase/selection.json
 	fake := selectiontest.New(t)
 	r := fake.Resolver()
 	r.Dir = dir
@@ -444,7 +444,7 @@ func TestEnsureGitignored_NarrowsADirectoryWideRule(t *testing.T) {
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	require.Equal(t, []string{"node_modules", ".palbase/config.json"}, lines,
+	require.Equal(t, []string{"node_modules", ".palbase/selection.json"}, lines,
 		"generated artifacts under .palbase must stay trackable")
 }
 

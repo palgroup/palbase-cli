@@ -591,7 +591,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, ".palbase/config.json\n", string(body))
+		require.Equal(t, ".palbase/selection.json\n", string(body))
 	})
 
 	t.Run("appends to an existing .gitignore", func(t *testing.T) {
@@ -604,7 +604,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, "node_modules/\n.palbase/config.json\n", string(body))
+		require.Equal(t, "node_modules/\n.palbase/selection.json\n", string(body))
 	})
 
 	t.Run("does not duplicate on re-link", func(t *testing.T) {
@@ -617,7 +617,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, 1, strings.Count(string(body), ".palbase/config.json"))
+		require.Equal(t, 1, strings.Count(string(body), ".palbase/selection.json"))
 	})
 
 	t.Run("narrows an existing directory rule", func(t *testing.T) {
@@ -630,13 +630,13 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, "node_modules/\n.palbase/config.json\n", string(body))
+		require.Equal(t, "node_modules/\n.palbase/selection.json\n", string(body))
 	})
 }
 
 // TestWebLink_GitignoreWarning: prints a loud warning when .gitignore ignores
 // the gen file. The offending rule is reported, never edited (the only write
-// is the appended .palbase/config.json entry).
+// is the appended .palbase/selection.json entry).
 func TestWebLink_GitignoreWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -658,12 +658,12 @@ func TestWebLink_GitignoreWarning(t *testing.T) {
 			require.Contains(t, outStr, "palbe.gen.ts", "warning should mention the gen file")
 
 			// The offending rule must NOT be rewritten/removed; the only
-			// change is the appended .palbase/config.json entry.
+			// change is the appended .palbase/selection.json entry.
 			body, err := os.ReadFile(".gitignore")
 			require.NoError(t, err)
 			require.True(t, strings.HasPrefix(string(body), tc.content),
 				"existing rules must stay byte-identical, got: %q", string(body))
-			require.Contains(t, string(body), ".palbase/config.json")
+			require.Contains(t, string(body), ".palbase/selection.json")
 		})
 	}
 }
@@ -742,7 +742,7 @@ func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *test
 }
 
 // TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp is the web-link
-// equivalent of the native test of the same shape: a `.palbase/config.json`
+// equivalent of the native test of the same shape: a `.palbase/selection.json`
 // that exists but fails to load (corrupt JSON, an unsupported version) must
 // abort the command BEFORE webLinkArtifacts ever calls resolveWebApp. Before
 // persistedAppIDFor gated on the error, this Load failure was swallowed into
@@ -797,7 +797,7 @@ func TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
 	}
 }
 
-// TestWebUnlink_RemovesConfig: `web unlink` removes .palbase/config.json and
+// TestWebUnlink_RemovesConfig: `web unlink` removes .palbase/selection.json and
 // the .palbase/ dir (when empty), leaves gen file and scripts.
 func TestWebUnlink_RemovesConfig(t *testing.T) {
 	t.Chdir(t.TempDir())

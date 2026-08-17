@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ErrNotSignedIn says the contract could not be fetched because nobody is signed
@@ -85,19 +86,54 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	}
 
 	// Apple is the only platform with no build-time generator of its own. Every
-	// environment is regenerated, not just the refreshed one: the others' specs
-	// are already on disk, and a client missing for a configuration is a build
-	// that fails in whichever configuration nobody was using today.
+	// environment is regenerated, not just the refreshed one: a client missing
+	// for a configuration is a build that fails in whichever configuration
+	// nobody was using today.
 	if _, apple, _ := linkedPlatforms(); apple {
 		envs, err := readAppEnvironments("ios")
 		if err != nil {
 			return err
 		}
 		if len(envs.Environments) > 0 {
-			return generateForEnvironments(ctx, envs, w)
+			if err := generateForEnvironments(ctx, envs, w); err != nil {
+				return err
+			}
+			reportStaleContracts(env, envs, w)
 		}
 	}
 	return nil
+}
+
+// reportStaleContracts names the environments this refresh did NOT reach.
+//
+// `spec` asks ONE project — the one this checkout is pointed at — and
+// regenerates every environment's client from the contracts on disk. For the
+// others that means regenerating from a contract fetched some time ago, and the
+// ✓ beside them says "written", which a reader takes for "current". Measured:
+// after a route was added to the local stack and `spec` run, the local client
+// was byte-identical and carried none of it, while the line above it said the
+// file had been written.
+//
+// So the others are named, with the age of what they were built from, and the
+// verb that refreshes them all.
+func reportStaleContracts(refreshed string, envs appEnvironments, w io.Writer) {
+	var stale []string
+	for _, name := range envs.names() {
+		if name == refreshed {
+			continue
+		}
+		age := "never fetched"
+		if info, err := os.Stat(specPath(name)); err == nil {
+			age = "from " + info.ModTime().Local().Format("2006-01-02 15:04")
+		}
+		stale = append(stale, fmt.Sprintf("%s (%s)", name, age))
+	}
+	if len(stale) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nonly %s was refreshed. The others still describe what they last served:\n  %s\n",
+		refreshed, strings.Join(stale, "\n  "))
+	fmt.Fprintln(w, "  `palbase link` fetches every environment's contract; `palbase env <slug>` then `palbase spec` refreshes one.")
 }
 
 // fetchStackSpec asks the management surface what the stack is serving.

@@ -335,6 +335,25 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 	if err != nil {
 		return err
 	}
+	// THE OLD FLAT CLIENT GOES FIRST.
+	//
+	// One environment used to mean one Palbase/Generated/PalbaseGenerated.swift.
+	// Writing the per-environment ones beside it leaves BOTH in the target —
+	// Xcode 16's synchronized groups compile every file under the folder — and
+	// the app stops building at all: "Multiple commands produce
+	// PalbaseGenerated.stringsdata". Measured on the real todoapp app, which
+	// failed immediately after a relink and built again the moment the old file
+	// was deleted by hand.
+	//
+	// Deleted rather than left for the person to find: it is OUR file, it is
+	// regenerated content, and its only remaining effect is to break the build.
+	legacy := filepath.Join(root, generatedDir, "PalbaseGenerated.swift")
+	if err := os.Remove(legacy); err == nil {
+		fmt.Fprintf(w, "removed %s (one client per environment now)\n", legacy)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
 	tool, err := ensureSwiftgenTool(root, w)
 	if err != nil {
 		// An app checkout without the SDK package resolved yet — the genuine

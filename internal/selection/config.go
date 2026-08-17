@@ -1,7 +1,7 @@
 // Package selection owns the CLI's ONE local context: which Project and which
 // Environment the current directory acts on.
 //
-// The canonical local config is `.palbase/config.json` v2 (spec §4):
+// The canonical local selection is `.palbase/selection.json` (spec §4):
 //
 //	{
 //	  "version": 2,
@@ -38,7 +38,7 @@ const (
 	ProviderGitHub  = "github"
 )
 
-// Config is `.palbase/config.json`.
+// Config is `.palbase/selection.json`.
 //
 // The four canonical fields carry the selection. The `*_app_id` slots are local
 // wiring for `palbase ios|macos|android|web link`: they remember WHICH app
@@ -57,12 +57,22 @@ type Config struct {
 	AndroidAppID string `json:"android_app_id,omitempty"`
 }
 
-// ConfigPath is `<dir>/.palbase/config.json`. dir "" means the cwd.
+// ConfigPath is `<dir>/.palbase/selection.json`. dir "" means the cwd.
+//
+// NOT config.json, and the rename is a collision rather than a preference: the
+// build writes the EVALUATED project configuration — the flags, buckets and
+// notification providers config/*.ts declares — to `.palbase/config.json`,
+// because that is the document a push ships and the stack applies. This file is
+// something else entirely: which cloud project and environment this checkout has
+// selected. Two writers, one path, and the reader here uses
+// DisallowUnknownFields, so a single `palbase build` made every selection-bound
+// command fail with `parse .palbase/config.json: json: unknown field "auth"` —
+// measured on 2026-08-17 with `palbase test-user list`.
 func ConfigPath(dir string) string {
 	if dir == "" {
 		dir = "."
 	}
-	return filepath.Join(dir, ".palbase", "config.json")
+	return filepath.Join(dir, ".palbase", "selection.json")
 }
 
 // ErrNotSelected is returned when the cwd has no config and no --project
@@ -106,7 +116,7 @@ func Load(dir string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes the config to <dir>/.palbase/config.json, always stamping the
+// Save writes the selection to <dir>/.palbase/selection.json, always stamping the
 // current Version so a hand-edited file can never claim to be something else.
 func Save(dir string, cfg *Config) error {
 	if cfg.ProjectID == "" || cfg.EnvironmentID == "" {
@@ -184,7 +194,7 @@ func (c *Config) SetAppID(platform, appID string) error {
 // generated artifacts under .palbase (openapi.json, platform configs)
 // trackable. An existing directory-wide `.palbase` rule is narrowed in place.
 func EnsureGitignored(path string) error {
-	const entry = ".palbase/config.json"
+	const entry = ".palbase/selection.json"
 
 	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
