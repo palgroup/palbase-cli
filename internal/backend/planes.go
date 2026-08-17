@@ -84,15 +84,14 @@ func RequireBackendPlane(dir string) error {
 			"Run this where your controllers live, or `palbase init` to start one", dir)
 }
 
-// RequireAppPlane refuses an app verb outside an app checkout.
-func RequireAppPlane(dir string) error {
-	if PlaneOf(dir).HasApp() {
-		return nil
-	}
-	return fmt.Errorf(
-		"this is not an app checkout: no Xcode project, Gradle build or web package here (%s).\n"+
-			"Run this where your app lives", dir)
-}
+// There is deliberately NO RequireAppPlane.
+//
+// It existed, and nothing called it. The reason is FR-003: a directory can be
+// both planes, and every verb that touches an app — `link`, `spec`, `status` —
+// is run from backend checkouts too (the harness links its backend fixture with
+// --platform ios). A guard with no verb that needs it is a guard somebody
+// eventually wires into the wrong place, so it is gone rather than kept for
+// symmetry. Five lines to bring back the day a genuinely app-only verb exists.
 
 func exists(path string) bool {
 	info, err := os.Stat(path)

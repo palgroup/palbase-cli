@@ -98,10 +98,11 @@ func TestAWrongPlaneVerbSaysWhatItLookedFor(t *testing.T) {
 	backend := t.TempDir()
 	mkdir(t, backend, "controllers")
 	write(t, backend, "db/schema.ts")
-	if err := RequireAppPlane(backend); err == nil {
-		t.Fatal("an app verb was allowed in a backend checkout")
-	}
 	if err := RequireBackendPlane(backend); err != nil {
 		t.Fatalf("a backend verb was refused in a backend checkout: %v", err)
 	}
+	// The app direction has no guard, on purpose: every verb that touches an app
+	// is also run from a backend checkout (the harness links its backend fixture
+	// with --platform ios), so the refusal would have no verb to protect. What
+	// the plane detector answers is still asserted above.
 }

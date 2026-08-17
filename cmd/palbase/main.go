@@ -297,8 +297,24 @@ writes that credential itself.`,
 func logoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Log out and revoke session",
+		Short: "Forget this machine's credentials",
+		Long: `Revoke the cloud session, and forget the credential for the project this
+checkout is linked to.
+
+Both, because "log out" means one thing to a person and this machine holds two
+kinds of credential: the cloud session, and whatever ` + "`palbase start`" + ` or
+` + "`palbase link`" + ` wrote for a project. Leaving the second behind is how a machine
+keeps opening a project its owner believes they signed out of.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// The project's first: it cannot fail for a reason the person needs
+			// to act on, and doing it after a cloud logout that errors would
+			// leave the credential behind with nothing said about it.
+			if target, err := backend.ReadTarget(); err == nil {
+				if err := backend.ForgetCredential(target.URL); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "forgot the credential for %s\n", target.Describe())
+			}
 			return authClient.Logout(cmd.Context())
 		},
 	}
