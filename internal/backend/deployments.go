@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"text/tabwriter"
@@ -100,6 +99,10 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 		return true, err
 	}
 
+	// The project's activate now WAITS for the runtime to confirm it is
+	// answering from this digest, and returns the count it observed — so there
+	// is nothing to poll for here and nothing to attribute by guesswork. It
+	// blocks for about one runtime recheck interval (~10s measured).
 	status, body, err := managementCall(ctx, target, cred, http.MethodPost,
 		"/v1/management/deployments/"+full+"/activate", nil, "")
 	if err != nil {
@@ -109,25 +112,32 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 	case http.StatusOK, http.StatusNoContent:
 	case http.StatusNotFound:
 		return true, fmt.Errorf("%s has no version %s", target.Describe(), short(full))
+	case http.StatusUnprocessableEntity:
+		// The pointer moved and the runtime never came, or came and served
+		// nothing. Refused rather than reported as a rollback, because the state
+		// this leaves is the one a rollback was trying to escape.
+		return true, fmt.Errorf("%s: %s", short(full), describeError(body))
 	default:
 		return true, fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
 	}
 
 	fmt.Fprintf(out, "▸ %s is active\n", short(full))
-
-	// WAIT FOR THE RUNTIME to say it is answering from this digest, then report
-	// its count. The pointer moving is not the thing anybody wanted; serving the
-	// old artifact is exactly the state a rollback is trying to leave.
-	//
-	// The project reports `serving_digest` separately from `digest` precisely so
-	// this can be told apart — and it omits the count until the two agree, which
-	// is why a count here can be attributed at all. Before that (2026-08-17) a
-	// rollback answered "serving 37" with the runtime still on the artifact it
-	// had just replaced.
-	if served, ok := awaitServing(ctx, target, cred, full, out); ok && served != nil {
-		fmt.Fprintf(out, "  serving %d endpoint(s)\n", *served)
+	var confirmed projectDeployment
+	if json.Unmarshal(body, &confirmed) == nil && confirmed.EndpointCount != nil {
+		fmt.Fprintf(out, "  serving %d endpoint(s)\n", *confirmed.EndpointCount)
 	}
 	return true, nil
+}
+
+// describeError reads the stack's error envelope, falling back to the body.
+func describeError(body []byte) string {
+	var env struct {
+		Description string `json:"error_description"`
+	}
+	if json.Unmarshal(body, &env) == nil && env.Description != "" {
+		return env.Description
+	}
+	return trimBody(body)
 }
 
 // resolveDigest turns what a person typed into the digest the project knows.
@@ -204,30 +214,4 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
-}
-
-// awaitServing polls until the runtime confirms it is answering from digest.
-//
-// Returns (count, true) on confirmation and (nil, false) when the wait ran out —
-// which is reported rather than swallowed, because "the pointer moved and
-// nothing picked it up" is the failure a rollback most needs to hear about.
-func awaitServing(ctx context.Context, target Target, cred Credentials, digest string, out io.Writer) (*int, bool) {
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		status, body, err := managementCall(ctx, target, cred, http.MethodGet,
-			"/v1/management/deployments/current", nil, "")
-		if err == nil && status == http.StatusOK {
-			var current projectDeployment
-			if json.Unmarshal(body, &current) == nil && current.ServingDigest == digest {
-				return current.EndpointCount, true
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return nil, false
-		case <-time.After(time.Second):
-		}
-	}
-	fmt.Fprintln(out, "  the runtime has not picked it up yet — `palbase status` shows what it is serving")
-	return nil, false
 }

@@ -49,14 +49,25 @@ import (
 // to ship.
 const StackDirEnv = "PALBASE_STACK_DIR"
 
-const (
-	composeFile = "docker-compose.dev.yml"
-	// palsvcImage and runtimeImage are what the dev compose expects to find
-	// already built. Named here so the refusal can say which one is missing and
-	// what builds it.
-	palsvcImage  = "palbase-palsvc"
-	runtimeImage = "palbase-runtime"
-)
+const composeFile = "docker-compose.dev.yml"
+
+// The images the dev compose expects to find already built, and the variables it
+// reads them from — the same names, with the same defaults, so this refuses for
+// the tag compose will actually look for.
+//
+// The runtime's default is `-dev` and that suffix is load-bearing: the shipped
+// stack builds ITS runtime under the plain name, so writing a dev image over
+// that tag would leave the production stack running a dev image the next time it
+// is recreated. Reading the defaults from the wrong place is not a theoretical
+// risk — this checked `palbase-runtime` while compose used `palbase-runtime-dev`
+// and passed anyway, because another stack on the machine happened to have built
+// the right one.
+var stackImages = []struct{ env, fallback, build string }{
+	{"PALBASE_PALSVC_IMAGE", "palbase-palsvc",
+		"cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
+	{"PALBASE_RUNTIME_IMAGE", "palbase-runtime-dev",
+		"cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
+}
 
 func newStartCmd() *cobra.Command {
 	var reset bool
@@ -273,13 +284,16 @@ func stackDirectory() (string, error) {
 // imagesPresent refuses BEFORE compose does, because compose's own failure for a
 // missing image is a pull error from a registry that was never going to have it.
 func imagesPresent(ctx context.Context) error {
-	for _, image := range []string{palsvcImage, runtimeImage} {
+	for _, want := range stackImages {
+		image := want.fallback
+		if override := strings.TrimSpace(os.Getenv(want.env)); override != "" {
+			image = override
+		}
 		cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf(
-				"the %s image is not on this machine.\n"+
-					"Build it from the palbase repository: DOCKER_BUILDKIT=1 docker build -t %s -f Dockerfile .",
-				image, image)
+				"the %s image is not on this machine.\n  %s",
+				image, want.build)
 		}
 	}
 	return nil
@@ -336,8 +350,12 @@ func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error 
 
 	fmt.Fprintln(out, "▸ generating this stack's keys")
 	dir := filepath.Dir(envFile)
+	palsvc := stackImages[0].fallback
+	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
+		palsvc = override
+	}
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
-		"-v", dir+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvcImage,
+		"-v", dir+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
 		"--init-env", filepath.Base(envFile))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("generate the stack's keys: %w\n%s", err, output)

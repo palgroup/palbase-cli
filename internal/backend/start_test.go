@@ -279,3 +279,31 @@ func TestThePullRecordHoldsNoValues(t *testing.T) {
 		t.Errorf("the record did not survive the round trip: %v", back)
 	}
 }
+
+// TestTheImageCheckAsksForTheTAGCOMPOSEUSES is a bug this test exists because
+// of: the check looked for `palbase-runtime` while the compose file resolves
+// `${PALBASE_RUNTIME_IMAGE:-palbase-runtime-dev}`, and it PASSED anyway, because
+// another stack on the machine had built the right one. On a clean machine it
+// would have waved the start through into a compose pull error for an image no
+// registry has.
+//
+// The `-dev` suffix is not decoration: the shipped stack builds its runtime
+// under the plain name, so a dev image written over that tag leaves the
+// production stack running a dev image the next time it is recreated.
+func TestTheImageCheckAsksForTheTAGCOMPOSEUSES(t *testing.T) {
+	compose, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "v2", "deploy", composeFile))
+	if err != nil {
+		t.Skipf("the dev compose file is not beside this checkout: %v", err)
+	}
+
+	for _, want := range stackImages {
+		// The variable and its default, exactly as the compose file spells them.
+		spelling := "${" + want.env + ":-" + want.fallback + "}"
+		if !strings.Contains(string(compose), spelling) {
+			t.Errorf("the compose file does not resolve %s — this check would look for an image it never pulls", spelling)
+		}
+		if want.build == "" {
+			t.Errorf("%s has no build command, so its refusal cannot say how to fix it", want.env)
+		}
+	}
+}

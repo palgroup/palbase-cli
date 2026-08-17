@@ -25,7 +25,12 @@ func deployingProject(t *testing.T, history []projectDeployment) (*httptest.Serv
 			_ = json.NewEncoder(w).Encode(map[string]any{"deployments": history})
 		case strings.HasSuffix(r.URL.Path, "/activate") && r.Method == http.MethodPost:
 			*activated = strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/management/deployments/"), "/activate")
-			w.WriteHeader(http.StatusNoContent)
+			// The project waits for the runtime and answers with what it
+			// OBSERVED serving — which is what makes the count attributable.
+			count := 10
+			_ = json.NewEncoder(w).Encode(projectDeployment{
+				Digest: *activated, ServingDigest: *activated, EndpointCount: &count, Active: true,
+			})
 		case r.URL.Path == "/v1/management/deployments/current":
 			// The project reports what the RUNTIME says it is answering from,
 			// separately from the pointer. Here they agree immediately; the
@@ -168,33 +173,18 @@ func TestNothingDeployedIsAStateNotAnError(t *testing.T) {
 	}
 }
 
-// TestRollbackWaitsForTheRuntimeRatherThanThePointer is the defect this shape
-// exists for: the pointer moves instantly and the runtime re-reads it on its own
-// clock, so for a few seconds `current` reports the NEW digest while the runtime
-// is still answering from the old one. A count printed in that window belongs to
-// the artifact being replaced and reads exactly like confirmation.
-func TestRollbackWaitsForTheRuntimeRatherThanThePointer(t *testing.T) {
-	var reads int
-	target := history()[1].Digest
+// TestRollbackRefusesWhenTheRuntimeNeverPicksItUp: the project waits for the
+// runtime and answers 422 when it never comes or comes with nothing. Reported as
+// a failure rather than as a rollback, because "the pointer moved and nothing
+// loaded it" is precisely the state a rollback was trying to escape.
+func TestRollbackRefusesWhenTheRuntimeNeverPicksItUp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/management/deployments" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]any{"deployments": history()})
 		case strings.HasSuffix(r.URL.Path, "/activate"):
-			w.WriteHeader(http.StatusNoContent)
-		case r.URL.Path == "/v1/management/deployments/current":
-			reads++
-			out := projectDeployment{Digest: target}
-			if reads >= 2 {
-				// Caught up.
-				count := 30
-				out.ServingDigest, out.EndpointCount = target, &count
-			} else {
-				// Still on the outgoing artifact, and the project says so
-				// rather than pairing this digest with that count.
-				out.ServingDigest = history()[0].Digest
-			}
-			_ = json.NewEncoder(w).Encode(out)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"error":"not_serving","error_description":"the runtime never reported this digest","status":422}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -203,16 +193,11 @@ func TestRollbackWaitsForTheRuntimeRatherThanThePointer(t *testing.T) {
 	linkedToProject(t, srv.URL)
 
 	var out, errOut bytes.Buffer
-	if _, err := rollbackOnProject(commandIn(t, &out, &errOut), short(target)); err != nil {
-		t.Fatalf("rollback: %v", err)
+	_, err := rollbackOnProject(commandIn(t, &out, &errOut), "bbbb11112222")
+	if err == nil {
+		t.Fatal("a rollback nothing picked up was reported as success")
 	}
-	if reads < 2 {
-		t.Errorf("the runtime was asked %d time(s) — it did not wait for the handover", reads)
-	}
-	if !strings.Contains(out.String(), "serving 30 endpoint") {
-		t.Errorf("the count from the artifact that is now serving was not reported:\n%s", out.String())
-	}
-	if strings.Contains(out.String(), "serving 37 endpoint") {
-		t.Errorf("the outgoing artifact's count was reported:\n%s", out.String())
+	if !strings.Contains(err.Error(), "never reported this digest") {
+		t.Errorf("the refusal does not carry the project's reason: %v", err)
 	}
 }
