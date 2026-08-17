@@ -1,6 +1,8 @@
+//go:build !windows
+
 package backend
 
-// credentials_lock.go — one writer at a time on a shared machine.
+// credentials_lock_unix.go — one writer at a time on a shared machine.
 //
 // A developer box runs several of these at once: two agents in two panes, a
 // `start` finishing while a `link` writes, a CI step and a shell. They share one
@@ -11,6 +13,10 @@ package backend
 // flock, not a lock FILE somebody has to clean up: the advisory lock is released
 // by the kernel when the process exits, so a crashed run leaves nothing behind
 // for the next one to wonder about.
+//
+// Split by platform because `unix.Flock` does not exist on Windows and this file
+// carried no build tag — so every Windows build has failed since it was added,
+// and the first release attempt in three days is what said so.
 
 import (
 	"os"
