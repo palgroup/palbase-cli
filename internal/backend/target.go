@@ -126,9 +126,9 @@ func readLinkedProject() (Target, error) {
 	return t, nil
 }
 
-// credentials is the whole store: tokens by target URL.
+// credentials is the whole store: one identity per target URL.
 type credentials struct {
-	Tokens map[string]string `json:"tokens"`
+	Credentials map[string]Credentials `json:"credentials"`
 }
 
 func credentialsPath() (string, error) {

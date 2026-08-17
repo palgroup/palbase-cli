@@ -47,12 +47,12 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	// The resolver's refusal already names both ways in and which address it
 	// looked for. Flattening it into the sentinel replaced all of that with four
 	// words and left the person to guess.
-	token, _, err := Credential(target.URL)
+	cred, _, err := Credential(target.URL)
 	if err != nil {
 		return err
 	}
 
-	spec, err := fetchStackSpec(ctx, target, token)
+	spec, err := fetchStackSpec(ctx, target, cred)
 	if err != nil {
 		return err
 	}
@@ -92,13 +92,13 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 }
 
 // fetchStackSpec asks the management surface what the stack is serving.
-func fetchStackSpec(ctx context.Context, target Target, token string) ([]byte, error) {
+func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		target.URL+"/v1/management/openapi", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	cred.Apply(req)
 
 	res, err := stackClient(target).Do(req)
 	if err != nil {

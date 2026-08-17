@@ -540,12 +540,12 @@ Override the target with the global --project / --environment flags.`,
 			// kind of push their project uses — the link they already made is
 			// what decides.
 			if target, err := ReadTarget(); err == nil {
-				token, _, tokErr := Credential(target.URL)
+				cred, _, tokErr := Credential(target.URL)
 				if tokErr != nil {
 					return tokErr
 				}
 				accept, _ := cmd.Flags().GetBool("accept-data-loss")
-				return runStackPush(cmd.Context(), target, token, accept, cmd.OutOrStdout())
+				return runStackPush(cmd.Context(), target, cred, accept, cmd.OutOrStdout())
 			}
 
 			sel, err := r.Selection().Resolve(cmd.Context())

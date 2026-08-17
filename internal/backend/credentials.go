@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,17 +53,54 @@ const AccessTokenEnv = "PALBASE_ACCESS_TOKEN"
 // own context without matching on wording.
 var ErrNoCredential = errors.New("no credential for this project")
 
+// Kind is WHAT a credential is, because a project accepts its two credentials in
+// two different headers and neither works in the other's place.
+//
+// A person's token is a Bearer. The operator's secret key is an `apikey`, and
+// sending it as a Bearer gets "this stack did not issue that token" — which is
+// true and useless, because the caller was holding a credential the stack
+// accepts and presenting it the one way it does not. So the kind travels with
+// the value instead of being guessed from its shape at each call site.
+type Kind string
+
+const (
+	// KindPerson is a token from the project's own auth module, carrying the
+	// management claim. What `palbase login` and the panel's sign-in produce.
+	KindPerson Kind = "person"
+	// KindKey is the project's secret key — what `palbase start` writes for a
+	// stack it just brought up, because there is nobody to sign in as yet.
+	KindKey Kind = "key"
+)
+
+// Credentials is one identity, and how to present it.
+type Credentials struct {
+	Value string `json:"value"`
+	Kind  Kind   `json:"kind"`
+}
+
+// Apply puts this credential on a request in the form its project accepts.
+func (c Credentials) Apply(req *http.Request) {
+	switch c.Kind {
+	case KindKey:
+		req.Header.Set("apikey", c.Value)
+	default:
+		req.Header.Set("Authorization", "Bearer "+c.Value)
+	}
+}
+
 // Credential resolves the identity to use against one target.
-func Credential(url string) (token string, source CredentialSource, err error) {
+func Credential(url string) (cred Credentials, source CredentialSource, err error) {
+	// A Dashboard-issued PAT is a person's, which is why this needs no kind: the
+	// variable exists for the headless case, and there is no headless key.
 	if v := strings.TrimSpace(os.Getenv(AccessTokenEnv)); v != "" {
-		return v, SourceEnv, nil
+		return Credentials{Value: v, Kind: KindPerson}, SourceEnv, nil
 	}
 	stored, err := readCredential(url)
 	if err != nil {
-		return "", "", err
+		return Credentials{}, "", err
 	}
-	if stored == "" {
-		return "", "", fmt.Errorf(
+	if stored.Value == "" {
+		return Credentials{}, "", fmt.Errorf(
 			"%w: %s.\nFor a project on this machine, run `palbase start` — it writes the credential for you.\n"+
 				"For a cloud project, run `palbase login`, or set %s to a Dashboard-issued token",
 			ErrNoCredential, url, AccessTokenEnv)
@@ -76,7 +114,7 @@ func Credential(url string) (token string, source CredentialSource, err error) {
 // developer machine runs more than one of these at a time: two agents in two
 // panes, or a `start` finishing while a `link` writes. A torn credentials file
 // signs you out of everything at once.
-func StoreCredential(url, token string) error {
+func StoreCredential(url string, cred Credentials) error {
 	path, err := credentialsPath()
 	if err != nil {
 		return err
@@ -91,14 +129,14 @@ func StoreCredential(url, token string) error {
 	}
 	defer unlock()
 
-	store := credentials{Tokens: map[string]string{}}
+	store := credentials{Credentials: map[string]Credentials{}}
 	if raw, readErr := os.ReadFile(path); readErr == nil {
 		_ = json.Unmarshal(raw, &store)
-		if store.Tokens == nil {
-			store.Tokens = map[string]string{}
+		if store.Credentials == nil {
+			store.Credentials = map[string]Credentials{}
 		}
 	}
-	store.Tokens[url] = token
+	store.Credentials[url] = cred
 
 	blob, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
@@ -130,7 +168,7 @@ func ForgetCredential(url string) error {
 	if err := json.Unmarshal(raw, &store); err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	delete(store.Tokens, url)
+	delete(store.Credentials, url)
 
 	blob, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
@@ -139,23 +177,23 @@ func ForgetCredential(url string) error {
 	return writeFileAtomic(path, append(blob, '\n'), 0o600)
 }
 
-func readCredential(url string) (string, error) {
+func readCredential(url string) (Credentials, error) {
 	path, err := credentialsPath()
 	if err != nil {
-		return "", err
+		return Credentials{}, err
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return Credentials{}, nil
 	}
 	if err != nil {
-		return "", err
+		return Credentials{}, err
 	}
 	var store credentials
 	if err := json.Unmarshal(raw, &store); err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return Credentials{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	return store.Tokens[url], nil
+	return store.Credentials[url], nil
 }
 
 // writeFileAtomic writes through a temp file in the same directory, so a reader

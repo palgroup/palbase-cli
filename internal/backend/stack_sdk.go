@@ -32,8 +32,8 @@ import (
 // Minor and patch differences are left alone: they are compatible by
 // definition, and reinstalling on every push would replace a dependency the
 // author chose for a reason.
-func ensureProjectSDK(ctx context.Context, dir string, target Target, token string, w io.Writer) error {
-	running, err := projectSDKVersion(ctx, target, token)
+func ensureProjectSDK(ctx context.Context, dir string, target Target, cred Credentials, w io.Writer) error {
+	running, err := projectSDKVersion(ctx, target, cred)
 	if err != nil || running == "" {
 		// A project that will not say what it runs is not a reason to refuse a
 		// push: the build below either works or fails with its own message.
@@ -47,7 +47,7 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, token stri
 	fmt.Fprintf(w, "this project runs @palbase/backend %s and this checkout has %s — installing the project's\n",
 		running, orNone(installed))
 
-	tarball, err := downloadProjectSDK(ctx, target, token)
+	tarball, err := downloadProjectSDK(ctx, target, cred)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, token stri
 }
 
 // projectSDKVersion asks the project what its runtime is running.
-func projectSDKVersion(ctx context.Context, target Target, token string) (string, error) {
+func projectSDKVersion(ctx context.Context, target Target, cred Credentials) (string, error) {
 	// The version travels on the well-known document, which is public and needs
 	// no session: a checkout that is not signed in yet still has to be able to
 	// see whether its SDK matches.
@@ -75,13 +75,13 @@ func projectSDKVersion(ctx context.Context, target Target, token string) (string
 }
 
 // downloadProjectSDK fetches the tarball and returns the file it wrote.
-func downloadProjectSDK(ctx context.Context, target Target, token string) (string, error) {
+func downloadProjectSDK(ctx context.Context, target Target, cred Credentials) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimSuffix(target.URL, "/")+"/v1/management/sdk", nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	cred.Apply(req)
 
 	res, err := stackClient(target).Do(req)
 	if err != nil {

@@ -43,11 +43,11 @@ included — until you say that is what you mean:
 			if err != nil {
 				return err
 			}
-			token, _, err := Credential(target.URL)
+			cred, _, err := Credential(target.URL)
 			if err != nil {
 				return err
 			}
-			return runStackPush(cmd.Context(), target, token, acceptDataLoss, cmd.OutOrStdout())
+			return runStackPush(cmd.Context(), target, cred, acceptDataLoss, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().BoolVar(&acceptDataLoss, "accept-data-loss", false,
@@ -78,7 +78,7 @@ type pushRefusal struct {
 	} `json:"destructive"`
 }
 
-func runStackPush(ctx context.Context, target Target, token string, acceptDataLoss bool, w io.Writer) error {
+func runStackPush(ctx context.Context, target Target, cred Credentials, acceptDataLoss bool, w io.Writer) error {
 	// Where this is going, before anything goes. Both push paths funnel through
 	// here — the linked-project one and the probe in the cloud command — so one
 	// line here covers both without either being able to forget it.
@@ -92,7 +92,7 @@ func runStackPush(ctx context.Context, target Target, token string, acceptDataLo
 	// The SDK this project RUNS, before anything is compiled against it. A
 	// different major produces a bundle the runtime cannot execute, and the
 	// failure arrives as a missing function three layers from its cause.
-	if err := ensureProjectSDK(ctx, dir, target, token, w); err != nil {
+	if err := ensureProjectSDK(ctx, dir, target, cred, w); err != nil {
 		return err
 	}
 
@@ -119,7 +119,7 @@ func runStackPush(ctx context.Context, target Target, token string, acceptDataLo
 		return err
 	}
 	req.Header.Set("content-type", "application/gzip")
-	req.Header.Set("Authorization", "Bearer "+token)
+	cred.Apply(req)
 
 	res, err := stackClient(target).Do(req)
 	if err != nil {

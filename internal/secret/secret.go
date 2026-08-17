@@ -55,7 +55,7 @@ run on this machine without writing them down anywhere.`,
 // project is one resolved target and the identity to act on it as.
 type project struct {
 	target backend.Target
-	token  string
+	cred   backend.Credentials
 	client *http.Client
 }
 
@@ -65,11 +65,11 @@ func open(cmd *cobra.Command) (project, error) {
 	if err != nil {
 		return project{}, err
 	}
-	token, _, err := backend.Credential(target.URL)
+	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
 		return project{}, err
 	}
-	return project{target: target, token: token, client: backend.HTTPClient(target)}, nil
+	return project{target: target, cred: cred, client: backend.HTTPClient(target)}, nil
 }
 
 func (p project) do(ctx context.Context, method, path, contentType string, body []byte) (int, []byte, error) {
@@ -81,7 +81,7 @@ func (p project) do(ctx context.Context, method, path, contentType string, body 
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
+	p.cred.Apply(req)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}

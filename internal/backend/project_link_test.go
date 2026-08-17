@@ -82,7 +82,7 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 func linkedAs(t *testing.T, url, token string) {
 	t.Helper()
 	t.Setenv(AccessTokenEnv, "")
-	if err := StoreCredential(url, token); err != nil {
+	if err := StoreCredential(url, Credentials{Value: token, Kind: KindPerson}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -219,7 +219,7 @@ func TestTheContractIsFetchedWithTheSessionAndNoKey(t *testing.T) {
 	defer srv.Close()
 
 	body, err := fetchStackSpec(context.Background(),
-		Target{URL: srv.URL}, "the-session-token")
+		Target{URL: srv.URL}, Credentials{Value: "the-session-token", Kind: KindPerson})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestAnExpiredSessionIsReportedAsNotSignedIn(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchStackSpec(context.Background(), Target{URL: srv.URL}, "stale")
+	_, err := fetchStackSpec(context.Background(), Target{URL: srv.URL}, Credentials{Value: "stale", Kind: KindPerson})
 	if !errors.Is(err, ErrNotSignedIn) {
 		t.Fatalf("an expired session came back as %v", err)
 	}
@@ -257,7 +257,7 @@ func TestNothingDeployedYetIsAStateNotAFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchStackSpec(context.Background(), Target{URL: srv.URL}, "token")
+	_, err := fetchStackSpec(context.Background(), Target{URL: srv.URL}, Credentials{Value: "token", Kind: KindPerson})
 	if err == nil {
 		t.Fatal("an empty stack was treated as a contract")
 	}

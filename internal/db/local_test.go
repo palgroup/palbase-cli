@@ -44,7 +44,7 @@ func runningStackAt(t *testing.T, url string) {
 	if err := os.WriteFile(filepath.Join(".palbase", "local.json"), blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.StoreCredential(url, "a-credential"); err != nil {
+	if err := backend.StoreCredential(url, backend.Credentials{Value: "a-credential", Kind: backend.KindPerson}); err != nil {
 		t.Fatal(err)
 	}
 }

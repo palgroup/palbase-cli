@@ -24,7 +24,7 @@ import (
 
 // projectPublishableKey asks the project for the key an app ships.
 func projectPublishableKey(ctx context.Context, target Target) (string, error) {
-	token, _, err := Credential(target.URL)
+	cred, _, err := Credential(target.URL)
 	if err != nil {
 		return "", err
 	}
@@ -34,7 +34,7 @@ func projectPublishableKey(ctx context.Context, target Target) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	cred.Apply(req)
 
 	res, err := stackClient(target).Do(req)
 	if err != nil {

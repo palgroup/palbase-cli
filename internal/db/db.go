@@ -56,7 +56,7 @@ not the thing you are resetting.`,
 // local is one resolved local stack: where it is, and how to be somebody on it.
 type local struct {
 	target backend.Target
-	token  string
+	cred   backend.Credentials
 	client *http.Client
 }
 
@@ -80,12 +80,12 @@ func openLocal(cmd *cobra.Command) (local, error) {
 		)
 	}
 
-	token, _, err := backend.Credential(target.URL)
+	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
 		return local{}, err
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
-	return local{target: target, token: token, client: backend.HTTPClient(target)}, nil
+	return local{target: target, cred: cred, client: backend.HTTPClient(target)}, nil
 }
 
 // post sends one management request and returns the status and body. It does not
@@ -97,7 +97,7 @@ func (l local) post(ctx context.Context, path, contentType string, body []byte) 
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+l.token)
+	l.cred.Apply(req)
 	req.Header.Set("Content-Type", contentType)
 
 	res, err := l.client.Do(req)

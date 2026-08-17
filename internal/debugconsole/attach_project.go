@@ -39,12 +39,12 @@ func attachToLinkedProject(cmd *cobra.Command, code string, errorsOnly, asJSON b
 	if err != nil {
 		return false, errNoLinkedProject
 	}
-	token, _, err := backend.Credential(target.URL)
+	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
 		return false, fmt.Errorf("not signed in to %s — run `palbase login`", target.URL)
 	}
 
-	sessionID, err := resolveSessionOnProject(cmd, target, token, code)
+	sessionID, err := resolveSessionOnProject(cmd, target, cred, code)
 	if err != nil {
 		return false, err
 	}
@@ -67,7 +67,7 @@ const projectStackRef = "project"
 
 // resolveSessionOnProject turns the code a person read off a device into the
 // session id its topic is named after.
-func resolveSessionOnProject(cmd *cobra.Command, target backend.Target, token, code string) (string, error) {
+func resolveSessionOnProject(cmd *cobra.Command, target backend.Target, cred backend.Credentials, code string) (string, error) {
 	body, err := json.Marshal(map[string]string{"code": code})
 	if err != nil {
 		return "", err
@@ -78,7 +78,7 @@ func resolveSessionOnProject(cmd *cobra.Command, target backend.Target, token, c
 		return "", err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	cred.Apply(req)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	if target.Insecure {

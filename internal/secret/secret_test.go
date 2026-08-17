@@ -88,7 +88,7 @@ func linkedCheckout(t *testing.T, url string) string {
 	if err := backend.WriteTarget(backend.Target{URL: url}); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.StoreCredential(url, "a-credential"); err != nil {
+	if err := backend.StoreCredential(url, backend.Credentials{Value: "a-credential", Kind: backend.KindPerson}); err != nil {
 		t.Fatal(err)
 	}
 	return dir
