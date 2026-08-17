@@ -144,17 +144,11 @@ func Commands(r Resolvers) []*cobra.Command {
 		// the stack itself for the rest.
 		newLinkCmd(),
 		newEnvCmd(),
+		newStartCmd(),
+		newStopCmd(),
 	}
 }
 
-// EnvTypesCmd exposes the palbase-env.d.ts generator (db/schema.ts → typed
-// Database.tables.*) so main can register it under `palbase db types` — it
-// types the author's OWN handlers from the local schema source, which is db
-// tooling, not client codegen. (Client codegen is the SDKs' job: the CLI only
-// fetches the artifacts — see `palbase web|ios|macos|android spec`.)
-func EnvTypesCmd() *cobra.Command {
-	return newGenTypesCmd()
-}
 
 // newGenTypesCmd regenerates palbase-env.d.ts from the project's db/schema.ts.
 // It types the project's OWN handlers (`Database.tables.*`) from the local

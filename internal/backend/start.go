@@ -1,0 +1,606 @@
+package backend
+
+// start.go — `palbase start`: a stack in front of you, and every verb pointed at it.
+//
+// This is a DEV SERVER, not a deployment. The distinction is the whole design:
+// a deployment takes a bundle, activates a version and keeps history; this
+// mounts your source and reloads it, so the loop between typing a line and
+// seeing the answer is seconds and involves nobody's registry.
+//
+// What it leaves behind is three files in three different places, and each one
+// is where it is for a reason:
+//
+//	.palbase/local.json          IN the checkout, gitignored — "right now, work
+//	                             here". Every verb reads it, so switching back is
+//	                             `palbase stop` rather than a flag on each command.
+//	~/.palbase/credentials.json  MACHINE-WIDE — the app checkout in another
+//	                             directory needs the same credential, and copying
+//	                             a secret between repositories is how it ends up
+//	                             committed in one of them.
+//	~/.palbase/stacks/<group>/   the boot values the containers need. NOT in the
+//	                             checkout: they are secrets, they are per-machine,
+//	                             and a .env in a repository is a .env somebody
+//	                             commits.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+// StackDirEnv points at the stack this machine boots from: the directory holding
+// docker-compose.dev.yml.
+//
+// It is a variable rather than a download because the local stack is a DEV RAIL
+// rather than a product — the people running it have the repository, and a CLI
+// that fetched a stack from somewhere would be shipping the thing we decided not
+// to ship.
+const StackDirEnv = "PALBASE_STACK_DIR"
+
+const (
+	composeFile = "docker-compose.dev.yml"
+	// palsvcImage and runtimeImage are what the dev compose expects to find
+	// already built. Named here so the refusal can say which one is missing and
+	// what builds it.
+	palsvcImage  = "palbase-palsvc"
+	runtimeImage = "palbase-runtime"
+)
+
+func newStartCmd() *cobra.Command {
+	var reset bool
+	cmd := &cobra.Command{
+		Use:   "start",
+		Args:  cobra.NoArgs,
+		Short: "Bring up a stack on this machine and point this checkout at it",
+		Long: `Run this project on this machine.
+
+Your source is mounted rather than deployed: save a controller and the running
+stack serves the new version, with no build, no artifact and no version history.
+
+Everything after this — push, db, secret, spec, logs — acts on the local stack
+until ` + "`palbase stop`" + `.
+
+    palbase start --reset     throw the database away and build it from db/schema.ts`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := RequireBackendPlane(dir); err != nil {
+				return err
+			}
+			return runStart(cmd.Context(), dir, reset, cmd.OutOrStdout())
+		},
+	}
+	cmd.Flags().BoolVar(&reset, "reset", false,
+		"empty the local database first, then build it from db/schema.ts")
+	return cmd
+}
+
+func newStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Args:  cobra.NoArgs,
+		Short: "Shut the local stack down and point this checkout back at its project",
+		Long: `Stop the stack ` + "`palbase start`" + ` brought up.
+
+The database survives — a stop is not a reset — so starting again finds the data
+you left. Every verb goes back to the project this checkout is linked to.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			return runStop(cmd.Context(), dir, cmd.OutOrStdout())
+		},
+	}
+}
+
+func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error {
+	stackDir, err := stackDirectory()
+	if err != nil {
+		return err
+	}
+	if err := imagesPresent(ctx); err != nil {
+		return err
+	}
+
+	group := groupName(dir)
+	state, err := stackStateDir(group)
+	if err != nil {
+		return err
+	}
+	envFile := filepath.Join(state, ".env")
+	if err := ensureBootValues(ctx, envFile, out); err != nil {
+		return err
+	}
+
+	httpPort, err := freePort()
+	if err != nil {
+		return err
+	}
+	pgPort, err := freePort()
+	if err != nil {
+		return err
+	}
+	// The ports live in the same file as the rest of the boot values, so a
+	// restart lands on the SAME address: a URL written into .palbase/local.json,
+	// a generated client and an iOS build all point at a number, and picking a
+	// fresh one every start would silently break each of them.
+	settled, err := rememberPorts(envFile, httpPort, pgPort)
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d", settled.http)
+
+	project := "palbase-" + group
+	if reset {
+		fmt.Fprintln(out, "▸ removing the local database")
+		// -v takes the volumes with it, which is the reset: the schema comes
+		// back from db/schema.ts on the next boot rather than from a dump.
+		if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "down", "-v"); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintf(out, "▸ starting %s\n", group)
+	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d"); err != nil {
+		return err
+	}
+	if err := waitForStack(ctx, url, 90*time.Second); err != nil {
+		return fmt.Errorf("%w\nThe containers are still up — `docker compose -p %s logs` says what happened", err, project)
+	}
+
+	// The credential BEFORE the target: a checkout pointed at a stack it cannot
+	// authenticate against is worse than one that is not pointed at it yet,
+	// because every verb then fails with an auth error rather than a clear
+	// "start it first".
+	key, err := valueFromEnvFile(envFile, "PALBASE_SERVICE_ROLE_KEY")
+	if err != nil {
+		return err
+	}
+	if err := StoreCredential(url, Credentials{Value: key, Kind: KindKey}); err != nil {
+		return err
+	}
+	if err := WriteLocalTarget(Target{URL: url}); err != nil {
+		return err
+	}
+	if err := ignoreLocalTarget(dir); err != nil {
+		return err
+	}
+	if err := registerStack(group, url, project, dir); err != nil {
+		return err
+	}
+
+	// The secrets LAST: the stack has to be up and this checkout has to be
+	// credentialed before anything can be written into its vault.
+	pullSecrets(ctx, group, Target{URL: url, Local: true}, out)
+
+	fmt.Fprintf(out, "▸ %s (local)\n", url)
+	fmt.Fprintln(out, "  edit a controller and the running stack serves it — no build, no deploy")
+	fmt.Fprintln(out, "  `palbase stop` points this checkout back at its project")
+	return nil
+}
+
+func runStop(ctx context.Context, dir string, out io.Writer) error {
+	group := groupName(dir)
+	project := "palbase-" + group
+
+	stackDir, err := stackDirectory()
+	if err != nil {
+		return err
+	}
+	state, err := stackStateDir(group)
+	if err != nil {
+		return err
+	}
+	envFile := filepath.Join(state, ".env")
+	ports, err := readPorts(envFile)
+	if err != nil {
+		return err
+	}
+
+	// The files come off FIRST. A stop that failed halfway used to leave
+	// local.json behind pointing at a dead address, which every later verb then
+	// tried to reach — and the error it gave was a connection refusal rather
+	// than "there is no local stack".
+	if err := os.Remove(localPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := deregisterStack(group); err != nil {
+		return err
+	}
+
+	// Volumes stay: a stop is not a reset. `palbase start --reset` is the verb
+	// that throws data away, and it says so.
+	if err := compose(ctx, stackDir, project, envFile, dir, ports, out, "down"); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "▸ stopped")
+
+	if target, err := readLinkedProject(); err == nil {
+		fmt.Fprintf(out, "  back to %s\n", target.Describe())
+	}
+	return nil
+}
+
+// stackDirectory finds the compose file this machine boots from.
+func stackDirectory() (string, error) {
+	dir := strings.TrimSpace(os.Getenv(StackDirEnv))
+	if dir == "" {
+		return "", fmt.Errorf(
+			"%s is not set, so there is no stack to start.\n"+
+				"Point it at the directory holding %s (the palbase repository's v2/deploy)",
+			StackDirEnv, composeFile)
+	}
+	path := filepath.Join(dir, composeFile)
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("%s names %s, which has no %s in it", StackDirEnv, dir, composeFile)
+	}
+	return dir, nil
+}
+
+// imagesPresent refuses BEFORE compose does, because compose's own failure for a
+// missing image is a pull error from a registry that was never going to have it.
+func imagesPresent(ctx context.Context) error {
+	for _, image := range []string{palsvcImage, runtimeImage} {
+		cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf(
+				"the %s image is not on this machine.\n"+
+					"Build it from the palbase repository: DOCKER_BUILDKIT=1 docker build -t %s -f Dockerfile .",
+				image, image)
+		}
+	}
+	return nil
+}
+
+// groupName is what this stack is called on this machine: the linked project's
+// group when there is one, and the directory's name otherwise.
+//
+// It keys the compose project, the state directory and the registry, so two
+// checkouts of two projects never share a database — and two checkouts of the
+// SAME project deliberately do.
+func groupName(dir string) string {
+	if target, err := readLinkedProject(); err == nil && target.Project != "" {
+		return sanitiseGroup(target.Project)
+	}
+	return sanitiseGroup(filepath.Base(dir))
+}
+
+var unsafeInName = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+func sanitiseGroup(name string) string {
+	cleaned := unsafeInName.ReplaceAllString(strings.ToLower(name), "-")
+	cleaned = strings.Trim(cleaned, "-")
+	if cleaned == "" {
+		return "project"
+	}
+	return cleaned
+}
+
+func stackStateDir(group string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".palbase", "stacks", group)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// ensureBootValues generates the stack's keys and secrets ONCE per group.
+//
+// The generator is the stack's own `--init-env`, run in its image: a second
+// implementation here would be a second opinion about what a valid key looks
+// like, and the day they disagree is the day a stack boots with a key nothing
+// else accepts.
+func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error {
+	if _, err := os.Stat(envFile); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	fmt.Fprintln(out, "▸ generating this stack's keys")
+	dir := filepath.Dir(envFile)
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+		"-v", dir+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvcImage,
+		"--init-env", filepath.Base(envFile))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("generate the stack's keys: %w\n%s", err, output)
+	}
+	// The generator writes as root inside the container; the operator has to be
+	// able to read their own secrets afterwards.
+	if err := os.Chmod(envFile, 0o600); err != nil {
+		return err
+	}
+	return nil
+}
+
+type ports struct{ http, pg int }
+
+// rememberPorts keeps the first pair this group was given.
+func rememberPorts(envFile string, httpPort, pgPort int) (ports, error) {
+	existing, err := readPorts(envFile)
+	if err != nil {
+		return ports{}, err
+	}
+	if existing.http != 0 && existing.pg != 0 && free(existing.http) {
+		return existing, nil
+	}
+	chosen := ports{http: httpPort, pg: pgPort}
+	if err := appendEnvValues(envFile, map[string]string{
+		"PALBASE_HTTP_PORT": strconv.Itoa(chosen.http),
+		"PALBASE_PG_PORT":   strconv.Itoa(chosen.pg),
+	}); err != nil {
+		return ports{}, err
+	}
+	return chosen, nil
+}
+
+func readPorts(envFile string) (ports, error) {
+	httpPort, err := valueFromEnvFile(envFile, "PALBASE_HTTP_PORT")
+	if err != nil && !os.IsNotExist(err) {
+		return ports{}, nil
+	}
+	pgPort, _ := valueFromEnvFile(envFile, "PALBASE_PG_PORT")
+	h, _ := strconv.Atoi(httpPort)
+	p, _ := strconv.Atoi(pgPort)
+	return ports{http: h, pg: p}, nil
+}
+
+// compose runs one docker compose verb against this group's stack.
+func compose(ctx context.Context, stackDir, project, envFile, projectDir string, p ports, out io.Writer, args ...string) error {
+	full := append([]string{
+		"compose",
+		"-f", filepath.Join(stackDir, composeFile),
+		"-p", project,
+		"--env-file", envFile,
+	}, args...)
+
+	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.Dir = stackDir
+	cmd.Env = append(os.Environ(),
+		"PALBASE_PROJECT_DIR="+projectDir,
+		"PALBASE_HTTP_PORT="+strconv.Itoa(p.http),
+		"PALBASE_PG_PORT="+strconv.Itoa(p.pg),
+	)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &prefixed{w: out, prefix: "  "}
+	return cmd.Run()
+}
+
+// prefixed indents compose's own chatter so it reads as detail under the CLI's
+// line rather than as a competing voice.
+type prefixed struct {
+	w      io.Writer
+	prefix string
+}
+
+func (p *prefixed) Write(b []byte) (int, error) {
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fmt.Fprintf(p.w, "%s%s\n", p.prefix, line)
+	}
+	return len(b), nil
+}
+
+// waitForStack blocks until the stack answers, or says what is still missing.
+func waitForStack(ctx context.Context, url string, limit time.Duration) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(limit)
+	var last string
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/healthz", nil)
+		if err != nil {
+			return err
+		}
+		res, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
+			_ = res.Body.Close()
+			if res.StatusCode < 500 {
+				return nil
+			}
+			last = fmt.Sprintf("%s answered %d", url, res.StatusCode)
+		} else {
+			last = err.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("the stack did not come up within %s (%s)", limit, last)
+}
+
+// freePort asks the operating system for one, then hands it back. The window
+// between that and compose binding it is real but small, and the alternative —
+// a fixed range this CLI scans — collides with whatever else on the machine
+// happens to like the same numbers.
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = l.Close() }()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+func free(port int) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// valueFromEnvFile reads one KEY=value out of a dotenv-shaped file.
+//
+// This is the ONE dotenv reader in the CLI, and it reads a file the CLI itself
+// generated in the user's state directory — not a project's .env, which does not
+// exist (see internal/secret).
+func valueFromEnvFile(path, key string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		name, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if found && name == key {
+			return strings.Trim(value, `"'`), nil
+		}
+	}
+	return "", fmt.Errorf("%s carries no %s", path, key)
+}
+
+func appendEnvValues(path string, values map[string]string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	for key, value := range values {
+		if _, err := fmt.Fprintf(f, "%s=%s\n", key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ignoreLocalTarget keeps the local pointer out of git.
+//
+// It names the file rather than the directory: .palbase/project.json is
+// COMMITTED on purpose, so `.palbase/` in a .gitignore would take the one file a
+// colleague cloning this repository needs.
+func ignoreLocalTarget(dir string) error {
+	const entry = ".palbase/local.json"
+	path := filepath.Join(dir, ".gitignore")
+
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return nil
+		}
+	}
+
+	body := string(raw)
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	body += entry + "\n"
+	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+// ── the machine's register of running stacks ────────────────────────────────
+//
+// An app checkout in another directory has to find the stack a backend checkout
+// started, and it has nothing to go on but the project group's name. So the
+// stack records itself here, machine-wide, and `link` resolves `local` from it.
+
+type localStack struct {
+	URL     string `json:"url"`
+	Project string `json:"compose_project"`
+	Dir     string `json:"directory"`
+	Started string `json:"started_at"`
+}
+
+type stackRegistry struct {
+	Stacks map[string]localStack `json:"stacks"`
+}
+
+func registryPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".palbase", "local-stacks.json"), nil
+}
+
+func registerStack(group, url, project, dir string) error {
+	return updateRegistry(func(reg *stackRegistry) {
+		reg.Stacks[group] = localStack{
+			URL:     url,
+			Project: project,
+			Dir:     dir,
+			Started: time.Now().UTC().Format(time.RFC3339),
+		}
+	})
+}
+
+func deregisterStack(group string) error {
+	return updateRegistry(func(reg *stackRegistry) { delete(reg.Stacks, group) })
+}
+
+// LookupLocalStack answers where a group's local stack is, or "" when none is
+// running. Exported for `link`, which writes a `local` entry for app checkouts.
+func LookupLocalStack(group string) string {
+	path, err := registryPath()
+	if err != nil {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var reg stackRegistry
+	if json.Unmarshal(raw, &reg) != nil {
+		return ""
+	}
+	return reg.Stacks[sanitiseGroup(group)].URL
+}
+
+// updateRegistry does the read-modify-write under the same lock the credential
+// store uses, for the same reason: two `palbase start` runs in two panes are
+// ordinary, and a torn registry loses a stack that is running.
+func updateRegistry(change func(*stackRegistry)) error {
+	path, err := registryPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := lockCredentials(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	reg := stackRegistry{Stacks: map[string]localStack{}}
+	if raw, readErr := os.ReadFile(path); readErr == nil {
+		_ = json.Unmarshal(raw, &reg)
+		if reg.Stacks == nil {
+			reg.Stacks = map[string]localStack{}
+		}
+	}
+	change(&reg)
+
+	blob, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(blob, '\n'), 0o600)
+}

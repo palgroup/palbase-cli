@@ -79,6 +79,24 @@ func WriteTarget(t Target) error {
 // ReadTarget returns the linked stack, or an error naming the command that
 // would fix it. A tool that says "not linked" without saying how to link is a
 // tool that sends people to the documentation for one line.
+// WriteLocalTarget records the stack running in front of this checkout.
+//
+// Separate from WriteTarget because the two files answer different questions and
+// have different lifetimes: project.json is committed and says which project this
+// code belongs to, local.json is gitignored and says where it is running RIGHT
+// NOW. Writing one through the other is how a `palbase start` ends up committing
+// a localhost address into a colleague's checkout.
+func WriteLocalTarget(t Target) error {
+	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
+		return err
+	}
+	blob, err := json.MarshalIndent(t, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(localPath(), append(blob, '\n'), 0o644)
+}
+
 // ReadTarget answers where a verb should act.
 //
 // A running dev stack WINS. `palbase start` writes `.palbase/local.json` and
