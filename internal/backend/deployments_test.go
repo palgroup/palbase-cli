@@ -99,8 +99,10 @@ func TestDeploysMarksTheOneThatIsServing(t *testing.T) {
 	if !strings.Contains(body, "bbbb11112222") {
 		t.Errorf("the older version is missing:\n%s", body)
 	}
-	if !strings.Contains(body, "37") {
-		t.Errorf("the endpoint count is missing:\n%s", body)
+	// No ENDPOINTS column: a manifest never recorded a count, so every row was a
+	// dash. What the RUNTIME confirms is reported on its own line instead.
+	if !strings.Contains(body, "is serving 10 endpoint(s)") {
+		t.Errorf("the serving count was not reported:\n%s", body)
 	}
 }
 
