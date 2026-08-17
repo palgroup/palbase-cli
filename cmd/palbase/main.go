@@ -217,10 +217,8 @@ func newRootCmd() *cobra.Command {
 			Studio:    func() github.Studio { return studioClient },
 			StudioURL: func() string { return resolved.Endpoints.Studio },
 		}),
-		secret.Cmd(secret.Resolvers{
-			Studio:    func() *studio.Client { return studioClient },
-			Selection: selectionResolver,
-		}),
+		secret.Cmd(),
+		secret.RunCmd(),
 		dbcmd.Cmd(),
 		storage.Cmd(),
 		flags.Cmd(flags.Resolvers{

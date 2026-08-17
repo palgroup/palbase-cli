@@ -1,572 +1,263 @@
-// Package secret provides the `palbase secret` subcommand group:
-// set / list / remove / pull / push. They manage the SELECTED ENVIRONMENT's
-// remote env vars via Studio tRPC (user JWT → Studio env.* → control-pg). NOT
-// local to the developer's machine.
+// Package secret is `palbase secret`: what this project holds a credential for.
 //
-// Env vars belong to an Environment, not a Project: staging's DATABASE_URL is
-// not production's. Override the target with the global --project /
-// --environment flags.
+// Two rules shape everything here, and both came from watching the old version
+// work.
+//
+// THE VALUE NEVER LANDS. There is no dotenv file, no `pull` that writes one, and
+// no flag that asks for values on a terminal. The old group's `pull` wrote every
+// decrypted secret to .env.local, which is how a production credential ends up
+// in a screen share, a backup, and eventually a repository. A secret set here is
+// sealed in the project's vault and read by exactly two things: the deployed code
+// at boot, and `palbase run` when it hands a child process its environment.
+//
+// THE PROJECT IS THE TARGET. These verbs act on whatever this checkout is linked
+// to — the stack on this machine while one is running, the linked environment
+// otherwise — through the same management surface as everything else. Secrets
+// belong to an environment: staging's SENTRY_DSN is not production's.
 package secret
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"net/http"
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
-// Resolvers carries the lazily-built Studio client and the shared selection
-// resolver, populated by PersistentPreRunE before any subcommand fires.
-type Resolvers struct {
-	Studio    func() *studio.Client
-	Selection func() *selection.Resolver
-}
-
-// envRef resolves the ENVIRONMENT every secret command acts on.
-func (r Resolvers) envRef(ctx context.Context) (string, error) {
-	sel, err := r.Selection().Resolve(ctx)
-	if err != nil {
-		return "", err
-	}
-	return sel.EnvironmentRef(), nil
-}
-
-// Cmd returns the `palbase secret` parent command.
-func Cmd(r Resolvers) *cobra.Command {
+func Cmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "secret",
-		Short: "Manage the selected environment's remote env vars and secrets",
-		Long: `Commands to manage environment variables for the SELECTED environment.
+		Short: "Manage what this project holds a credential for",
+		Long: `Secrets live in the project's vault and nowhere else.
 
-  palbase secret set KEY=value          Set a plain env var.
-  palbase secret set KEY=value --secret Mark as encrypted secret (value masked in list).
-  palbase secret list                   List all env vars (secrets shown masked).
-  palbase secret remove KEY             Delete an env var.
-  palbase secret pull                   Write the environment's env vars (decrypted) to .env.local.
-  palbase secret push                   Push local .env.local changes back to the environment.
+  palbase secret set NAME --stdin   Read the value from standard input
+  palbase secret set NAME=value     Or give it inline (it lands in your shell history)
+  palbase secret list               Names and when they last changed — never values
+  palbase secret remove NAME        Take one away
 
-Every change applies to the SELECTED environment (override with --environment).`,
+There is no .env file: nothing here reads one and nothing here writes one. The
+deployed code gets these at boot, and ` + "`palbase run`" + ` gives them to a command you
+run on this machine without writing them down anywhere.`,
 	}
-	cmd.AddCommand(
-		setCmd(r),
-		listCmd(r),
-		removeCmd(r),
-		pullCmd(r),
-		pushCmd(r),
-	)
+	cmd.AddCommand(setCmd(), listCmd(), removeCmd())
 	return cmd
 }
 
-// reservedKeyPrefix is the env-var namespace owned by the platform's managed
-// provider secrets (`palbase notifications add` uploads cert/key/api-key secrets
-// under PB_NOTIFICATIONS_*). A hand-set `palbase secret set PB_*` is REFUSED so a
-// user can't shadow or collide with a managed secret — they're meant to be set
-// via the guided `notifications` commands, which derive the exact key.
-const reservedKeyPrefix = "PB_"
+// project is one resolved target and the identity to act on it as.
+type project struct {
+	target backend.Target
+	token  string
+	client *http.Client
+}
 
-// guardReservedKey refuses a key under the reserved PB_ namespace. Returns a
-// clear error pointing the user at the right command.
-func guardReservedKey(key string) error {
-	if strings.HasPrefix(key, reservedKeyPrefix) {
-		return fmt.Errorf("key %q is in the reserved %s* namespace (managed provider secrets) — set provider secrets with `palbase notifications add <provider>`, not `secret set`", key, reservedKeyPrefix)
+// open resolves where a secret verb acts and announces it.
+func open(cmd *cobra.Command) (project, error) {
+	target, err := backend.PrintTargetFor(cmd)
+	if err != nil {
+		return project{}, err
 	}
-	return nil
-}
-
-func setCmd(r Resolvers) *cobra.Command {
-	var (
-		isSecret bool
-		fileFlag string
-		plain    bool
-	)
-	cmd := &cobra.Command{
-		Use:   "set <KEY=value> | set <KEY> --file <path>",
-		Short: "Set an env var (use --secret to mark encrypted; --file for a multi-line cert/key)",
-		Long: `Set an env var on the selected environment. Two forms:
-
-  palbase secret set API_URL=https://...           inline value (plain by default)
-  palbase secret set API_URL=https://... --secret  inline value, marked encrypted
-  palbase secret set APNS_P8 --file AuthKey.p8      value from a file (multi-line
-                                                    certs/keys/JSON), encrypted by
-                                                    default — pass --plain to opt out
-
-The --file form takes a bare KEY arg (no =value) and reads the file's contents
-verbatim as the value, so PEM keys and service-account JSON survive intact. The
-file itself stays local (gitignored); only its encrypted value is uploaded.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var key, value string
-
-			if fileFlag != "" {
-				// --file form: the arg is a bare KEY (no =value), value comes from the file.
-				key = args[0]
-				if strings.Contains(key, "=") {
-					return fmt.Errorf("with --file, pass a bare KEY (got %q) — the value is read from the file", key)
-				}
-				data, err := os.ReadFile(fileFlag)
-				if err != nil {
-					return fmt.Errorf("read --file %q: %w", fileFlag, err)
-				}
-				value = string(data)
-				// A file value (cert/key/JSON) is a secret unless explicitly --plain.
-				if !plain {
-					isSecret = true
-				}
-			} else {
-				// Inline KEY=value form.
-				parts := strings.SplitN(args[0], "=", 2)
-				if len(parts) != 2 {
-					return fmt.Errorf("argument must be in KEY=value format (got %q) — or use --file for a file value", args[0])
-				}
-				key, value = parts[0], parts[1]
-			}
-			if key == "" {
-				return fmt.Errorf("key must not be empty")
-			}
-			if err := guardReservedKey(key); err != nil {
-				return err
-			}
-
-			ref, err := r.envRef(cmd.Context())
-			if err != nil {
-				return err
-			}
-
-			if err := r.Studio().Mutation(cmd.Context(), "env.set", map[string]any{
-				"ref":      ref,
-				"key":      key,
-				"value":    value,
-				"isSecret": isSecret,
-			}, nil); err != nil {
-				return fmt.Errorf("env.set: %w", err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ set %s\n", key)
-			return nil
-		},
+	token, _, err := backend.Credential(target.URL)
+	if err != nil {
+		return project{}, err
 	}
-	cmd.Flags().BoolVar(&isSecret, "secret", false, "Mark value as encrypted secret (masked in list)")
-	cmd.Flags().StringVar(&fileFlag, "file", "", "Read the value from a file (multi-line certs/keys/JSON); encrypted by default")
-	cmd.Flags().BoolVar(&plain, "plain", false, "With --file, store the value as a plain (non-secret) env var")
-	return cmd
+	return project{target: target, token: token, client: backend.HTTPClient(target)}, nil
 }
 
-// envVar mirrors the tRPC env.list output row.
-type envVar struct {
-	Key       string  `json:"key"`
-	IsSecret  bool    `json:"isSecret"`
-	Value     *string `json:"value"`
-	UpdatedAt string  `json:"updatedAt"`
+func (p project) do(ctx context.Context, method, path, contentType string, body []byte) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(p.target.URL, "/")+path, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	res, err := p.client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reach %s: %w", p.target.URL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	return res.StatusCode, raw, err
 }
 
-func listCmd(r Resolvers) *cobra.Command {
-	var jsonOut bool
+const secretsPath = "/v1/management/secrets"
+
+// entry is one row of the listing: a name and when it last changed. There is no
+// value field, and that absence is the design — a struct with one could be
+// filled by a future handler without anybody deciding to expose values.
+type entry struct {
+	Name      string    `json:"name"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func listCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all env vars for the selected environment (secrets shown masked)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := r.envRef(cmd.Context())
+		Args:  cobra.NoArgs,
+		Short: "What this project holds a secret for",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			target, err := open(cmd)
 			if err != nil {
 				return err
 			}
-
-			rows := []envVar{}
-			if err := r.Studio().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &rows); err != nil {
-				return fmt.Errorf("env.list: %w", err)
+			status, body, err := target.do(cmd.Context(), http.MethodGet, secretsPath, "", nil)
+			if err != nil {
+				return err
+			}
+			if status != http.StatusOK {
+				return apiError(status, body)
+			}
+			var answer struct {
+				Secrets []entry `json:"secrets"`
+			}
+			if err := json.Unmarshal(body, &answer); err != nil {
+				return fmt.Errorf("read the listing: %w", err)
 			}
 
 			out := cmd.OutOrStdout()
-			if jsonOut {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(rows)
-			}
-			if len(rows) == 0 {
-				fmt.Fprintln(out, "(no env vars)")
+			if len(answer.Secrets) == 0 {
+				fmt.Fprintln(out, "this project holds no secrets")
 				return nil
 			}
-			return printEnvTable(out, rows)
+			sort.Slice(answer.Secrets, func(i, j int) bool {
+				return answer.Secrets[i].Name < answer.Secrets[j].Name
+			})
+			table := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+			fmt.Fprintln(table, "NAME\tLAST CHANGED")
+			for _, e := range answer.Secrets {
+				fmt.Fprintf(table, "%s\t%s\n", e.Name, e.UpdatedAt.Local().Format("2006-01-02 15:04"))
+			}
+			return table.Flush()
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 
-// PulledVar is one decrypted env var returned by Studio's env.pull.
-type PulledVar struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-// Pull fetches every env var of ONE ENVIRONMENT (plain + decrypted secrets) via
-// Studio's env.pull — the single fetch used by both `palbase secret pull` and
-// the `palbase secret pull` env fetch. ref is the Environment's ref;
-// there is no branch parameter.
-func Pull(ctx context.Context, sc *studio.Client, ref string) ([]PulledVar, error) {
-	var vars []PulledVar
-	if err := sc.Query(ctx, "env.pull", map[string]any{"ref": ref}, &vars); err != nil {
-		return nil, fmt.Errorf("env.pull: %w", err)
-	}
-	return vars, nil
-}
-
-func pullCmd(r Resolvers) *cobra.Command {
-	var (
-		outFlag string
-		force   bool
-	)
+func setCmd() *cobra.Command {
+	var fromStdin bool
 	cmd := &cobra.Command{
-		Use:   "pull",
-		Short: "Write the environment's env vars (decrypted) to .env.local",
-		Long: `Fetch every env var of the selected environment (plain + decrypted secrets) and write
-them to a local dotenv file (default .env.local) for local development.
-
-Existing keys in the file are UPDATED from remote; keys present only locally are
-KEPT (local-only overrides survive a pull). Pass --force to overwrite the file
-with exactly the remote set instead of merging.
-
-The file is gitignored by the scaffold — secrets never enter git.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := r.envRef(cmd.Context())
-			if err != nil {
-				return err
-			}
-			outPath := outFlag
-			if outPath == "" {
-				outPath = ".env.local"
-			}
-
-			remote, err := Pull(cmd.Context(), r.Studio(), ref)
-			if err != nil {
-				return err
-			}
-
-			// Merge into the existing file unless --force. Remote wins on shared
-			// keys; local-only keys are preserved (developer overrides). Order:
-			// existing keys keep their position, new remote keys appended sorted.
-			merged, order := loadDotenv(outPath, force)
-			for _, v := range remote {
-				if _, seen := merged[v.Key]; !seen {
-					order = append(order, v.Key)
-				}
-				merged[v.Key] = v.Value
-			}
-
-			if err := writeDotenv(outPath, merged, order); err != nil {
-				return fmt.Errorf("write %s: %w", outPath, err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ wrote %d var(s) to %s\n", len(remote), outPath)
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&outFlag, "out", "o", "", "Output dotenv file (default .env.local)")
-	cmd.Flags().BoolVar(&force, "force", false, "Overwrite the file with exactly the remote set (no merge)")
-	return cmd
-}
-
-func pushCmd(r Resolvers) *cobra.Command {
-	var (
-		inFlag       string
-		secretKeys   []string
-		plainKeys    []string
-		includeNew   bool
-		forceSecrets bool
-		dryRun       bool
-	)
-	cmd := &cobra.Command{
-		Use:   "push",
-		Short: "Push local .env.local changes back to the selected environment",
-		Long: `Read a local dotenv file (default .env.local) and upsert every var to the
-environment's remote config — the inverse of ` + "`secret pull`" + `.
-
-Only keys whose value DIFFERS from remote (or are new) are written, so a push
-after a pull is a no-op. A key's secret-ness is preserved from remote; mark NEW
-keys as secret with --secret KEY1,KEY2. Push never DELETES remote keys that are
-absent locally (use ` + "`secret remove`" + ` for that).`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := r.envRef(cmd.Context())
-			if err != nil {
-				return err
-			}
-			inPath := inFlag
-			if inPath == "" {
-				inPath = ".env.local"
-			}
-			local, _ := loadDotenv(inPath, false)
-			if len(local) == 0 {
-				return fmt.Errorf("%s has no env vars to push", inPath)
-			}
-
-			// Current remote state: which keys exist + their plain values +
-			// secret-ness. Secret values come back MASKED (value nil), so we
-			// can't diff them — they are NOT re-pushed unless --force-secrets.
-			var remote []envVar
-			if err := r.Studio().Query(cmd.Context(), "env.list", map[string]any{"ref": ref}, &remote); err != nil {
-				return fmt.Errorf("env.list: %w", err)
-			}
-			remotePlain := map[string]string{}
-			remoteSecret := map[string]bool{}
-			for _, r := range remote {
-				remoteSecret[r.Key] = r.IsSecret
-				if r.Value != nil {
-					remotePlain[r.Key] = *r.Value
-				}
-			}
-			// Explicit per-key classification for NEW keys. Empty tokens are
-			// dropped so a stray `--secret ""` can't create a phantom slot.
-			markSecret := toSet(secretKeys)
-			markPlain := toSet(plainKeys)
-			for k := range markSecret {
-				if markPlain[k] {
-					return fmt.Errorf("key %q passed to both --secret and --plain", k)
-				}
-			}
-
-			// Classify every local key into a push plan. SECURITY (review
-			// findings 1+2+3):
-			//   • New keys (not on remote) NEVER auto-upload. They are
-			//     credentials by default: secret unless the user says --plain,
-			//     and they only push when the user opts in (--include-new /
-			//     explicit --secret/--plain classification). This stops a
-			//     local-only var from silently leaking to remote, and stops a
-			//     new credential from being stored in plaintext.
-			//   • Remote SECRET keys are skipped (masked, can't diff) unless
-			//     --force-secrets — so a stale local pull can't clobber a secret
-			//     someone rotated since.
-			//   • Remote PLAIN keys push only when the value actually changed.
-			type plan struct {
-				key      string
-				isSecret bool
-				reason   string // shown in dry-run / confirmation
-			}
-			var toPush []plan
-			var newUnclassified []string
-			var skippedSecrets []string
-			var skippedReserved []string
-			for _, key := range sortedKeys(local) {
-				val := local[key]
-				_, existsRemote := remoteSecret[key]
-
-				// Never push a reserved provider-secret key — it's managed by
-				// `palbase notifications add` (which sets it directly), so a stale
-				// .env.local copy must not clobber it.
-				if guardReservedKey(key) != nil {
-					skippedReserved = append(skippedReserved, key)
-					continue
-				}
-
-				if !existsRemote {
-					// New key. Default secret unless explicitly --plain.
-					classifiedPlain := markPlain[key]
-					classifiedSecret := markSecret[key]
-					if !includeNew && !classifiedPlain && !classifiedSecret {
-						newUnclassified = append(newUnclassified, key)
-						continue
-					}
-					isSecret := !classifiedPlain // default secret; --plain opts out
-					if classifiedSecret {
-						isSecret = true
-					}
-					toPush = append(toPush, plan{key, isSecret, "new"})
-					continue
-				}
-
-				if remoteSecret[key] {
-					// Existing secret — masked, can't diff. Skip unless forced.
-					if !forceSecrets {
-						skippedSecrets = append(skippedSecrets, key)
-						continue
-					}
-					toPush = append(toPush, plan{key, true, "secret (forced)"})
-					continue
-				}
-
-				// Existing plain key — push only if the value changed.
-				if cur, ok := remotePlain[key]; ok && cur == val {
-					continue
-				}
-				toPush = append(toPush, plan{key, false, "changed"})
-			}
-
-			// New keys that weren't classified are a hard stop, not a silent
-			// plaintext upload — surface them and tell the user how to proceed.
-			if len(newUnclassified) > 0 {
-				out := cmd.ErrOrStderr()
-				fmt.Fprintf(out, "Refusing to push %d new key(s) not yet on remote (would be credentials):\n", len(newUnclassified))
-				for _, k := range newUnclassified {
-					fmt.Fprintf(out, "  %s\n", k)
-				}
-				fmt.Fprintln(out, "Classify each, then re-run:")
-				fmt.Fprintln(out, "  --secret KEY[,KEY]   encrypt these new keys")
-				fmt.Fprintln(out, "  --plain  KEY[,KEY]   store these new keys in plaintext")
-				fmt.Fprintln(out, "  --include-new        include all new keys (defaults to SECRET; --plain to opt out per key)")
-				return fmt.Errorf("%d new key(s) need classification", len(newUnclassified))
-			}
-
-			for _, k := range skippedSecrets {
-				fmt.Fprintf(cmd.OutOrStdout(), "· skipped %s (existing secret — masked; pass --force-secrets to overwrite)\n", k)
-			}
-			for _, k := range skippedReserved {
-				fmt.Fprintf(cmd.OutOrStdout(), "· skipped %s (reserved %s* namespace — managed by `palbase notifications add`)\n", k, reservedKeyPrefix)
-			}
-
-			pushed := 0
-			for _, p := range toPush {
-				if dryRun {
-					fmt.Fprintf(cmd.OutOrStdout(), "would push %s%s [%s]\n", p.key, secretTag(p.isSecret), p.reason)
-					pushed++
-					continue
-				}
-				if err := r.Studio().Mutation(cmd.Context(), "env.set", map[string]any{
-					"ref": ref, "key": p.key, "value": local[p.key], "isSecret": p.isSecret,
-				}, nil); err != nil {
-					return fmt.Errorf("env.set %s: %w", p.key, err)
-				}
-				pushed++
-			}
-			verb := "pushed"
-			if dryRun {
-				verb = "would push"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s %d var(s) from %s\n", verb, pushed, inPath)
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&inFlag, "in", "i", "", "Input dotenv file (default .env.local)")
-	cmd.Flags().StringSliceVar(&secretKeys, "secret", nil, "NEW keys to encrypt (comma-separated)")
-	cmd.Flags().StringSliceVar(&plainKeys, "plain", nil, "NEW keys to store in plaintext (comma-separated)")
-	cmd.Flags().BoolVar(&includeNew, "include-new", false, "Include all new (not-on-remote) keys; each defaults to SECRET unless --plain")
-	cmd.Flags().BoolVar(&forceSecrets, "force-secrets", false, "Re-upload existing secret keys (overwrites remote; use after rotating locally)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would change without writing")
-	return cmd
-}
-
-// toSet builds a set from a flag slice, dropping empty/whitespace tokens so a
-// stray `--secret ""` can't create a phantom classification.
-func toSet(items []string) map[string]bool {
-	s := map[string]bool{}
-	for _, it := range items {
-		it = strings.TrimSpace(it)
-		if it != "" {
-			s[it] = true
-		}
-	}
-	return s
-}
-
-func secretTag(isSecret bool) string {
-	if isSecret {
-		return " (secret)"
-	}
-	return ""
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// loadDotenv reads an existing dotenv file into a map + key order. When force is
-// true (or the file is absent) it returns empty, so the caller writes only the
-// remote set. Lines that aren't KEY=value (comments, blanks) are dropped on
-// rewrite — the file is a generated dev artifact, not hand-curated.
-func loadDotenv(path string, force bool) (map[string]string, []string) {
-	vars := map[string]string{}
-	order := []string{}
-	if force {
-		return vars, order
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return vars, order
-	}
-	for line := range strings.SplitSeq(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		eq := strings.IndexByte(line, '=')
-		if eq <= 0 {
-			continue
-		}
-		key := strings.TrimSpace(line[:eq])
-		val := strings.TrimSpace(line[eq+1:])
-		val = strings.Trim(val, `"`)
-		if _, seen := vars[key]; !seen {
-			order = append(order, key)
-		}
-		vars[key] = val
-	}
-	return vars, order
-}
-
-// writeDotenv writes key=value lines in `order`. Values containing whitespace or
-// special chars are double-quoted so dotenv parsers read them back intact.
-func writeDotenv(path string, vars map[string]string, order []string) error {
-	var b strings.Builder
-	b.WriteString("# Generated by `palbase secret pull` — do not commit (gitignored).\n")
-	for _, key := range order {
-		val := vars[key]
-		if strings.ContainsAny(val, " \t\"'#") || val == "" {
-			val = `"` + strings.ReplaceAll(val, `"`, `\"`) + `"`
-		}
-		b.WriteString(key)
-		b.WriteByte('=')
-		b.WriteString(val)
-		b.WriteByte('\n')
-	}
-	return os.WriteFile(path, []byte(b.String()), 0o600)
-}
-
-// printEnvTable writes a tabular view of env vars to w. Secrets are
-// masked; plain values are shown inline.
-func printEnvTable(w io.Writer, rows []envVar) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "KEY\tVALUE\tUPDATED")
-	for _, v := range rows {
-		display := ""
-		if v.IsSecret {
-			display = "(secret)"
-		} else if v.Value != nil {
-			display = *v.Value
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", v.Key, display, v.UpdatedAt)
-	}
-	return tw.Flush()
-}
-
-func removeCmd(r Resolvers) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "remove <KEY>",
-		Short: "Delete an env var",
+		Use:   "set <NAME> --stdin | set <NAME=value>",
 		Args:  cobra.ExactArgs(1),
+		Short: "Store one value, sealed",
+		Long: `Store one secret in the project's vault.
+
+    palbase secret set SENTRY_DSN --stdin < dsn.txt
+    cat key.pem | palbase secret set SIGNING_KEY --stdin
+    palbase secret set SENTRY_DSN=https://…
+
+--stdin is the one that does not end up in your shell history, which is why it
+reads the value whole — trailing newline and all are kept, because a PEM without
+its final newline is a PEM that fails to parse.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
-			ref, err := r.envRef(cmd.Context())
+			name, value, err := readAssignment(cmd, args[0], fromStdin)
 			if err != nil {
 				return err
 			}
-
-			if err := r.Studio().Mutation(cmd.Context(), "env.delete", map[string]any{
-				"ref": ref,
-				"key": key,
-			}, nil); err != nil {
-				return fmt.Errorf("env.delete: %w", err)
+			target, err := open(cmd)
+			if err != nil {
+				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ removed %s\n", key)
+			body, err := json.Marshal(map[string]string{"value": value})
+			if err != nil {
+				return err
+			}
+			status, raw, err := target.do(cmd.Context(), http.MethodPut,
+				secretsPath+"/"+name, "application/json", body)
+			if err != nil {
+				return err
+			}
+			if status != http.StatusOK && status != http.StatusNoContent && status != http.StatusCreated {
+				return apiError(status, raw)
+			}
+			// The name, never the value — this line is going into a terminal
+			// buffer, a CI log and somebody's screen recording.
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s is set\n", name)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the value from standard input")
+	return cmd
+}
+
+// readAssignment turns the two accepted forms into (name, value).
+func readAssignment(cmd *cobra.Command, arg string, fromStdin bool) (string, string, error) {
+	if fromStdin {
+		if strings.Contains(arg, "=") {
+			return "", "", fmt.Errorf("--stdin takes just the name: `palbase secret set %s --stdin`",
+				strings.SplitN(arg, "=", 2)[0])
+		}
+		value, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 64<<10))
+		if err != nil {
+			return "", "", err
+		}
+		if len(value) == 0 {
+			return "", "", fmt.Errorf("nothing arrived on standard input — a secret set to empty is a secret nobody notices is gone")
+		}
+		return arg, string(value), nil
+	}
+
+	name, value, found := strings.Cut(arg, "=")
+	if !found {
+		return "", "", fmt.Errorf("give the value: `palbase secret set %s=<value>`, or `palbase secret set %s --stdin` to keep it out of your shell history", arg, arg)
+	}
+	if value == "" {
+		return "", "", fmt.Errorf("%s= has no value — use --stdin to pipe one in", name)
+	}
+	return name, value, nil
+}
+
+func removeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remove <NAME>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Take one away",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := open(cmd)
+			if err != nil {
+				return err
+			}
+			status, raw, err := target.do(cmd.Context(), http.MethodDelete, secretsPath+"/"+args[0], "", nil)
+			if err != nil {
+				return err
+			}
+			if status != http.StatusNoContent && status != http.StatusOK {
+				return apiError(status, raw)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s is gone\n", args[0])
 			return nil
 		},
 	}
 	return cmd
+}
+
+func apiError(status int, body []byte) error {
+	var env struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	if json.Unmarshal(body, &env) == nil && env.Description != "" {
+		return fmt.Errorf("%s (%d)", env.Description, status)
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return fmt.Errorf("the project answered %d with no detail", status)
+	}
+	if len(trimmed) > 300 {
+		trimmed = trimmed[:300] + "…"
+	}
+	return fmt.Errorf("%s (%d)", trimmed, status)
 }

@@ -1,274 +1,307 @@
 package secret
 
+// secret_test.go — the two rules, asserted: the value never lands, and the child
+// process is the only place it goes.
+
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
-	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
+	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
-// trpcOK writes a tRPC success envelope.
-func trpcOK(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{
-			"data": map[string]any{
-				"json": data,
-			},
-		},
-	})
-}
+const theValue = "sk-live-DO-NOT-LEAK-8f2a"
 
-// studioAgainst spins an httptest server and returns a *studio.Client
-// backed by it. TokenFn returns a static test token.
-func studioAgainst(t *testing.T, h http.HandlerFunc) *studio.Client {
+// projectHolding answers as a project's management surface for the given
+// secrets, and records every path it was asked for.
+func projectHolding(t *testing.T, secrets map[string]string) (*httptest.Server, *[]string) {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	seen := new([]string)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*seen = append(*seen, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.URL.Path == "/v1/management/secrets" && r.Method == http.MethodGet:
+			list := struct {
+				Secrets []entry `json:"secrets"`
+			}{}
+			for name := range secrets {
+				list.Secrets = append(list.Secrets, entry{Name: name})
+			}
+			w.Header().Set("content-type", "application/json")
+			_ = json.NewEncoder(w).Encode(list)
+
+		case strings.HasSuffix(r.URL.Path, "/value") && r.Method == http.MethodGet:
+			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/management/secrets/"), "/value")
+			value, ok := secrets[name]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("content-type", "text/plain")
+			_, _ = w.Write([]byte(value))
+
+		case r.Method == http.MethodPut:
+			var body struct {
+				Value string `json:"value"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			secrets[strings.TrimPrefix(r.URL.Path, "/v1/management/secrets/")] = body.Value
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == http.MethodDelete:
+			delete(secrets, strings.TrimPrefix(r.URL.Path, "/v1/management/secrets/"))
+			w.WriteHeader(http.StatusNoContent)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
 	t.Cleanup(srv.Close)
-	return studio.New(srv.URL, func(_ context.Context) (string, error) {
-		return "test-token", nil
-	}, func(context.Context, string, string, string) (string, error) { return "test-proof", nil })
+	return srv, seen
 }
 
-// innerInput decodes the inner {"json":{...}} payload from a tRPC
-// POST body and returns the inner object.
-func innerInput(t *testing.T, r *http.Request) map[string]any {
+// linkedCheckout puts the test in a scratch directory linked to url, with a
+// credential for it — the state `palbase start` or `palbase link` leaves behind.
+func linkedCheckout(t *testing.T, url string) string {
 	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
 	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&outer))
-	return outer.JSON
-}
-
-// TestSecretSet_Plain tests `secret set KEY=value` without --secret flag.
-func TestSecretSet_Plain(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/trpc/env.set", r.URL.Path)
-		got = innerInput(t, r)
-		trpcOK(w, nil)
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "DATABASE_URL=postgres://localhost/db"})
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "app1prod", got["ref"])
-	require.Equal(t, "DATABASE_URL", got["key"])
-	require.Equal(t, "postgres://localhost/db", got["value"])
-	require.Equal(t, false, got["isSecret"])
-}
-
-// TestSecretSet_Secret tests `secret set KEY=value --secret`.
-func TestSecretSet_Secret(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		got = innerInput(t, r)
-		trpcOK(w, nil)
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "--secret", "API_KEY=super-secret"})
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "app1prod", got["ref"])
-	require.Equal(t, "API_KEY", got["key"])
-	require.Equal(t, "super-secret", got["value"])
-	require.Equal(t, true, got["isSecret"])
-}
-
-// TestSecretSet_ValueContainsEquals ensures KEY=a=b=c parses correctly.
-func TestSecretSet_ValueContainsEquals(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		got = innerInput(t, r)
-		trpcOK(w, nil)
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "KEY=a=b=c"})
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "KEY", got["key"])
-	require.Equal(t, "a=b=c", got["value"])
-}
-
-// TestSecretSet_MissingEquals rejects input without `=`.
-func TestSecretSet_MissingEquals(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call API with invalid input")
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "NOEQUALS"})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	require.Error(t, cmd.Execute())
-}
-
-// TestSecretSet_RefusesReservedKey locks the PB_* reserved-namespace guard:
-// `secret set PB_*` must be refused (managed by `palbase notifications add`) and
-// must NOT call the API.
-func TestSecretSet_RefusesReservedKey(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call API for a reserved key")
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "--secret", "PB_NOTIFICATIONS_APNS_P8=whatever"})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "reserved")
-	require.Contains(t, err.Error(), "notifications add")
-}
-
-// TestGuardReservedKey is a direct unit test of the namespace check.
-func TestGuardReservedKey(t *testing.T) {
-	t.Chdir(t.TempDir())
-	require.Error(t, guardReservedKey("PB_NOTIFICATIONS_APNS_P8"))
-	require.Error(t, guardReservedKey("PB_ANYTHING"))
-	require.NoError(t, guardReservedKey("DATABASE_URL"))
-	require.NoError(t, guardReservedKey("MY_API_KEY"))
-}
-
-// TestSecretList calls env.list and verifies both plain and secret rows.
-func TestSecretList(t *testing.T) {
-	t.Chdir(t.TempDir())
-	secretVal := "hidden"
-	rows := []map[string]any{
-		{"key": "PORT", "isSecret": false, "value": "8080", "updatedAt": "2026-01-01T00:00:00Z"},
-		{"key": "API_KEY", "isSecret": true, "value": secretVal, "updatedAt": "2026-01-02T00:00:00Z"},
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(backend.AccessTokenEnv, "")
+	if err := backend.WriteTarget(backend.Target{URL: url}); err != nil {
+		t.Fatal(err)
 	}
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodGet, r.Method)
-		require.Contains(t, r.URL.Path, "env.list")
-		trpcOK(w, rows)
-	})
+	if err := backend.StoreCredential(url, "a-credential"); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func runSecret(t *testing.T, stdin string, args ...string) (string, string, error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := Cmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(stdin))
+	cmd.SetArgs(args)
+	err := cmd.ExecuteContext(context.Background())
+	return out.String(), errOut.String(), err
+}
+
+// TestNothingReadsOrWritesADotenv is FR-028, and it is checked by looking at the
+// DIRECTORY rather than at the code: the old group's `pull` wrote .env.local,
+// which is how a production credential ends up in a screen share and eventually
+// a repository.
+func TestNothingReadsOrWritesADotenv(t *testing.T) {
+	srv, _ := projectHolding(t, map[string]string{"SENTRY_DSN": theValue})
+	dir := linkedCheckout(t, srv.URL)
+
+	// A dotenv that ALREADY exists must not be read either — if it were, a
+	// stale local file would silently win over the vault.
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SENTRY_DSN=from-the-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := runSecret(t, "", "list"); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if _, _, err := runSecret(t, theValue, "set", "OTHER", "--stdin"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if _, _, err := runSecret(t, "", "remove", "OTHER"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".env") && e.Name() != ".env" {
+			t.Errorf("a dotenv file was written: %s", e.Name())
+		}
+	}
+	// And the pre-existing one is untouched.
+	body, err := os.ReadFile(filepath.Join(dir, ".env"))
+	if err != nil || !strings.Contains(string(body), "from-the-file") {
+		t.Errorf(".env was modified: %q %v", body, err)
+	}
+	// The verbs that used to write one are gone entirely.
+	for _, c := range Cmd().Commands() {
+		if c.Name() == "pull" || c.Name() == "push" {
+			t.Errorf("`secret %s` is back", c.Name())
+		}
+	}
+}
+
+// TestSetReadsTheValueFromStdin is FR-029 — the form that keeps a credential out
+// of shell history — and it keeps the trailing newline, because a PEM without
+// its final newline is a PEM that fails to parse.
+func TestSetReadsTheValueFromStdin(t *testing.T) {
+	held := map[string]string{}
+	srv, _ := projectHolding(t, held)
+	linkedCheckout(t, srv.URL)
+
+	pem := "-----BEGIN EC PRIVATE KEY-----\nMHcCAQ…\n-----END EC PRIVATE KEY-----\n"
+	out, _, err := runSecret(t, pem, "set", "SIGNING_KEY", "--stdin")
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if held["SIGNING_KEY"] != pem {
+		t.Errorf("the project stored %q", held["SIGNING_KEY"])
+	}
+	if strings.Contains(out, "MHcCAQ") {
+		t.Errorf("the value was printed back:\n%s", out)
+	}
+	if !strings.Contains(out, "SIGNING_KEY is set") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+// TestNoOutputEverCarriesAValue is the rule stated as a test: whatever a verb
+// prints, the secret is not in it.
+func TestNoOutputEverCarriesAValue(t *testing.T) {
+	srv, _ := projectHolding(t, map[string]string{"SENTRY_DSN": theValue})
+	linkedCheckout(t, srv.URL)
+
+	for _, args := range [][]string{{"list"}, {"set", "SENTRY_DSN=" + theValue}, {"remove", "SENTRY_DSN"}} {
+		out, errOut, err := runSecret(t, "", args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if strings.Contains(out+errOut, theValue) {
+			t.Errorf("`secret %s` printed the value:\n%s%s", strings.Join(args, " "), out, errOut)
+		}
+	}
+}
+
+// TestListShowsNamesAndWhenTheyChanged is FR-030.
+func TestListShowsNamesAndWhenTheyChanged(t *testing.T) {
+	srv, _ := projectHolding(t, map[string]string{"SENTRY_DSN": theValue, "STRIPE_KEY": "sk_test_x"})
+	linkedCheckout(t, srv.URL)
+
+	out, _, err := runSecret(t, "", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"NAME", "LAST CHANGED", "SENTRY_DSN", "STRIPE_KEY"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the listing is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunGivesTheChildTheValues is FR-031, and it asserts all three halves: the
+// child SEES the value, the parent does NOT, and nothing was written down.
+func TestRunGivesTheChildTheValues(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the child here is a POSIX shell")
+	}
+	srv, _ := projectHolding(t, map[string]string{"SENTRY_DSN": theValue})
+	dir := linkedCheckout(t, srv.URL)
+
+	var out, errOut bytes.Buffer
+	cmd := RunCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"sh", "-c", "printf %s \"$SENTRY_DSN\""})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("run: %v\n%s", err, errOut.String())
+	}
+
+	if out.String() != theValue {
+		t.Errorf("the child did not see the value: %q", out.String())
+	}
+	if os.Getenv("SENTRY_DSN") != "" {
+		t.Error("the value leaked into THIS process, so everything it starts next inherits it")
+	}
+	if strings.Contains(errOut.String(), theValue) {
+		t.Errorf("the value was announced:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "SENTRY_DSN") {
+		t.Errorf("the names were not announced, so nobody can see what the command was given:\n%s", errOut.String())
+	}
+
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".env") {
+			t.Errorf("run wrote %s", e.Name())
+		}
+		if e.IsDir() {
+			continue
+		}
+		body, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		if strings.Contains(string(body), theValue) {
+			t.Errorf("the value was written to %s", e.Name())
+		}
+	}
+}
+
+// TestRunCarriesTheChildsExitStatus: `palbase run -- npm test` that fails must
+// fail, or a green CI step is meaningless.
+func TestRunCarriesTheChildsExitStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the child here is a POSIX shell")
+	}
+	srv, _ := projectHolding(t, map[string]string{})
+	linkedCheckout(t, srv.URL)
+
+	cmd := RunCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"sh", "-c", "exit 3"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("a failing command reported success")
+	}
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) {
+		t.Fatalf("the error carries no exit status: %T", err)
+	}
+	if coded.ExitCode() != 3 {
+		t.Errorf("exit status = %d", coded.ExitCode())
+	}
+	if err.Error() != "" {
+		t.Errorf("a message would print above the child's own output: %q", err.Error())
+	}
+}
+
+// TestRunPassesTheChildsOwnFlagsThrough: everything after `--` is the child's,
+// including flags cobra would otherwise reject.
+func TestRunPassesTheChildsOwnFlagsThrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the child here is a POSIX shell")
+	}
+	srv, _ := projectHolding(t, map[string]string{})
+	linkedCheckout(t, srv.URL)
 
 	var out bytes.Buffer
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"list"})
+	cmd := RunCmd()
 	cmd.SetOut(&out)
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	output := out.String()
-	// Plain var should show value.
-	require.Contains(t, output, "PORT")
-	require.Contains(t, output, "8080")
-	// Secret var should be masked.
-	require.Contains(t, output, "API_KEY")
-	require.NotContains(t, output, secretVal)
-}
-
-// TestSecretRemove calls env.delete with the correct key.
-func TestSecretRemove(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/trpc/env.delete", r.URL.Path)
-		got = innerInput(t, r)
-		trpcOK(w, nil)
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"remove", "DATABASE_URL"})
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "app1prod", got["ref"])
-	require.Equal(t, "DATABASE_URL", got["key"])
-}
-
-// TestSecretRemove_RequiresKey asserts the remove subcommand is rejected
-// when no key is given.
-func TestSecretRemove_RequiresKey(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call API without a key")
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"remove"})
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	require.Error(t, cmd.Execute())
-}
-
-var _ = strings.Contains // keep import used
-
-// TestSecretSet_File uploads a multi-line file (PEM/JSON) as an encrypted secret
-// via `secret set KEY --file <path>`. The KEY is bare (no =value) and the value
-// is the file contents verbatim, secret-by-default.
-func TestSecretSet_File(t *testing.T) {
-	t.Chdir(t.TempDir())
-	dir := t.TempDir()
-	p8 := filepath.Join(dir, "AuthKey_XYZ.p8")
-	pem := "-----BEGIN PRIVATE KEY-----\nMIGTAgEA...\nline2\n-----END PRIVATE KEY-----\n"
-	require.NoError(t, os.WriteFile(p8, []byte(pem), 0o600))
-
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/env.set", r.URL.Path)
-		got = innerInput(t, r)
-		trpcOK(w, nil)
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "APNS_P8", "--file", p8})
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "APNS_P8", got["key"])
-	require.Equal(t, pem, got["value"], "multi-line PEM must survive verbatim")
-	require.Equal(t, true, got["isSecret"], "a --file value is a secret by default")
-}
-
-// TestSecretSet_File_Plain stores a --file value as a non-secret with --plain.
-func TestSecretSet_File_Plain(t *testing.T) {
-	t.Chdir(t.TempDir())
-	dir := t.TempDir()
-	p := filepath.Join(dir, "config.txt")
-	require.NoError(t, os.WriteFile(p, []byte("not-sensitive"), 0o600))
-
-	var got map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		got = innerInput(t, r)
-		trpcOK(w, nil)
-	})
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "CFG", "--file", p, "--plain"})
-	cmd.SilenceUsage = true
-	require.NoError(t, cmd.Execute())
-	require.Equal(t, false, got["isSecret"])
-}
-
-// TestSecretSet_File_RejectsKeyEqualsValue errors when --file is combined with KEY=value.
-func TestSecretSet_File_RejectsKeyEqualsValue(t *testing.T) {
-	t.Chdir(t.TempDir())
-	dir := t.TempDir()
-	p := filepath.Join(dir, "x")
-	require.NoError(t, os.WriteFile(p, []byte("v"), 0o600))
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) { trpcOK(w, nil) })
-	cmd := Cmd(Resolvers{Studio: func() *studio.Client { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"set", "K=v", "--file", p})
-	cmd.SetOut(&strings.Builder{})
-	cmd.SetErr(&strings.Builder{})
-	cmd.SilenceUsage = true
-	require.Error(t, cmd.Execute())
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"sh", "-c", "printf %s \"$1\"", "sh", "--watch"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if out.String() != "--watch" {
+		t.Errorf("the child's flag did not reach it: %q", out.String())
+	}
 }
