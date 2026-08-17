@@ -95,8 +95,25 @@ async function main() {
   }
 
   try {
+    // THE REGISTRY FIRST, the default export second — the order the runtime
+    // uses. `@Controller` records the class as it decorates it, so a controller
+    // file needs no export, and requiring one rejected every file written the
+    // way the SDK documents.
+    let registry = [];
+    try {
+      const sdk = require('@palbase/backend');
+      if (typeof sdk.getRegisteredControllers === 'function') registry = sdk.getRegisteredControllers();
+    } catch { /* older SDK, or not resolvable — the export path answers */ }
+    const before = new Set(registry);
     const mod = require(bundle_path);
-    const Ctrl = mod.default || mod;
+    let registered = [];
+    try {
+      const sdk = require('@palbase/backend');
+      if (typeof sdk.getRegisteredControllers === 'function') {
+        registered = sdk.getRegisteredControllers().filter((c) => !before.has(c));
+      }
+    } catch { /* as above */ }
+    const Ctrl = registered.length > 0 ? registered[registered.length - 1] : (mod.default || mod);
 
     // zod-to-json-schema: bundled inside @palbase/backend (the same converter
     // the OpenAPI generator uses there). Load lazily so the extractor stays

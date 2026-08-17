@@ -359,34 +359,30 @@ export default class TodosController {
 	require.Contains(t, out, "DEPLOY WOULD FAIL")
 }
 
-// TestCheckMode_BareThirdPartyImportFails is the build==deploy parity lock.
+// TestCheckMode_AnImportNOTHINGProvidesFails is what remains of the old
+// bare-third-party lock, and the change is a measurement rather than a
+// relaxation.
 //
-// The deploy bundles the `palbase push` tarball, which strips node_modules, and
-// never runs npm install — so a bare `import { z } from "zod"` dies there with
-// `Could not resolve "zod"`. Check mode used to bundle the WORKING DIRECTORY,
-// where npm has hoisted zod under @palbase/backend, so esbuild resolved it and
-// the command printed "build OK" over a push that could not deploy. This is the
-// live report: `palbase build` green, deploy red.
+// The old rule was "the deploy bundles the tarball and never runs npm install,
+// so any bare third-party import must fail here". That premise stopped being
+// true: `palbase push` builds the artifact LOCALLY, in the project directory
+// with node_modules present, and ships the built bundle — so an import the
+// project has installed is one the push resolves and deploys. Measured on this
+// repository's own fixture on 2026-08-17: `palbase build` failed with
+// `Could not resolve "zod"` on a tree `palbase push` bundles and deploys
+// happily. Two commands in one CLI, disagreeing about the same tree.
 //
-// Both directions on one fixture: the bare import must FAIL, and the identical
-// code taking z from the SDK's re-export (the sanctioned form, kept external by
-// the bundler exactly as the pod's global install provides it) must PASS. Flip
-// the import, flip the exit — a harness that stopped staging would go green on
-// the first case and this test turns red.
-func TestCheckMode_BareThirdPartyImportFails(t *testing.T) {
+// So the staged tree now reaches the project's dependencies, and what is still
+// worth failing is an import NOTHING provides — which is the honest form of the
+// same guard, and the one a deploy would hit too.
+func TestCheckMode_AnImportNOTHINGProvidesFails(t *testing.T) {
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
 	}
-	// zod must really be resolvable on disk, or the test would pass for the
-	// wrong reason (absent dep rather than deploy-shaped staging).
-	require.DirExists(t, filepath.Join(dir, "node_modules", "zod"),
-		"fixture must have zod hoisted in node_modules — otherwise this test proves nothing")
-
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "models"), 0o755))
-	// .parse() keeps the import in a VALUE position: a type-only reference is
-	// erased by esbuild and would never reach the resolver at all.
+
 	const controller = `import { Controller, Get } from "@palbase/backend";
 import { TodoSchema } from "../models/todo";
 
@@ -400,24 +396,27 @@ export default class TodosController {
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "todos.controller.ts"), []byte(controller), 0o644))
 
-	bareZod := `import { z } from "zod";
-export const TodoSchema = z.object({ id: z.string(), title: z.string() });
+	// A package nobody installed and nobody declared.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(`import { z } from "a-package-that-does-not-exist";
+export const TodoSchema = z.object({ id: z.string() });
 export type TodoSchema = z.infer<typeof TodoSchema>;
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(bareZod), 0o644))
+`), 0o644))
 	out, ok := runCheckMode(t, dir)
-	require.False(t, ok, "a bare third-party import must fail check mode — the deploy cannot resolve it:\n%s", out)
-	require.Contains(t, out, `Could not resolve "zod"`,
-		"must fail with the DEPLOY's own resolver error, not a proxy for it:\n%s", out)
+	require.False(t, ok, "an import nothing provides must fail:\n%s", out)
+	require.Contains(t, out, "Could not resolve",
+		"must fail with the bundler's own resolver error:\n%s", out)
 
-	// Mutation twin: same code, SDK re-export. Must pass.
-	sdkZod := `import { z } from "@palbase/backend";
+	// And the INSTALLED one passes, which is the half that used to be wrong: it
+	// is what push ships.
+	require.DirExists(t, filepath.Join(dir, "node_modules", "zod"),
+		"fixture must have zod on disk — otherwise this half proves nothing")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(`import { z } from "zod";
 export const TodoSchema = z.object({ id: z.string(), title: z.string() });
 export type TodoSchema = z.infer<typeof TodoSchema>;
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(sdkZod), 0o644))
+`), 0o644))
 	out, ok = runCheckMode(t, dir)
-	require.True(t, ok, "z re-exported from @palbase/backend is the sanctioned form and must pass:\n%s", out)
+	require.True(t, ok, "an import the project HAS installed must pass — push bundles it:\n%s", out)
+	require.Contains(t, out, "build OK")
 }
 
 // TestCheckMode_BrokenSchemaFails locks the db/schema.ts half of build==deploy.
@@ -581,4 +580,65 @@ export default defineSecrets({
 	require.Contains(t, string(body), "SENTRY_DSN")
 	// The declaration, never a value: this file is what push ships.
 	require.NotContains(t, string(body), "value")
+}
+
+// TestBuildAcceptsAControllerWithNoExport is one of two defects the CLI harness
+// found the first time it ran, against this repository's own fixture.
+//
+// `@Controller` records the class as it decorates it, so a controller file needs
+// no export — the SDK documents that and the runtime reads the registry. The
+// local gate did not follow: it insisted on a default export and refused every
+// file written the current way, on a project `palbase push` deploys happily. A
+// gate that refuses what the deploy accepts is worse than no gate, because it
+// teaches people to stop running it.
+func TestBuildAcceptsAControllerWithNoExport(t *testing.T) {
+	dir := t.TempDir()
+	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelPack()
+	// The LOCAL SDK: the published 17.4.0 has no controller registry, so a test
+	// against it would skip forever and prove nothing about the code that ships.
+	sdk := packLocalSDK(t, ctxPack)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	if !sdkHasControllerRegistry(t, dir) {
+		t.Skip("the packed SDK exposes no controller registry")
+	}
+	useTestParserCache(t)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	// The SDK's own scaffold, verbatim in shape: a named zod schema for the
+	// response, and NO export on the class — the decorator is the registration.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "health.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+
+export const HealthResponse = z.object({ status: z.string() });
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
+@Controller("/health", { auth: false })
+class HealthController {
+  @Get("")
+  check(): HealthResponse {
+    return { status: "ok" };
+  }
+}
+`), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuild(ctx, dir, &out), "an unexported controller was refused:\n%s", out.String())
+	require.Contains(t, out.String(), "build OK")
+	require.Contains(t, out.String(), "/health")
+}
+
+// sdkHasControllerRegistry answers whether the installed SDK exposes the
+// registry the runtime reads. The published 17.4.0 does not.
+func sdkHasControllerRegistry(t *testing.T, dir string) bool {
+	t.Helper()
+	cmd := exec.Command("node", "-e",
+		`process.stdout.write(String(typeof require("@palbase/backend").getRegisteredControllers))`)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return err == nil && string(out) == "function"
 }

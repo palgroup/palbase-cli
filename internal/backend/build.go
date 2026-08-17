@@ -253,6 +253,26 @@ func stageDeployTree(cwd string) (string, error) {
 		removeTemp(dir)
 		return "", fmt.Errorf("unpack the project: %w", err)
 	}
+
+	// …and the project's DEPENDENCIES, reachable from it.
+	//
+	// The tarball carries no node_modules, which is right — that is what a push
+	// ships. But the bundle is then produced from a tree that HAS them: `palbase
+	// push` runs the bundler in the project directory, and so does the stack when
+	// it builds an artifact. A staged tree without them made this command
+	// stricter than the thing it models, and the two disagreed out loud —
+	// measured on the repository's own fixture, where `palbase build` failed with
+	// `Could not resolve "zod"` on a project `palbase push` bundles happily.
+	//
+	// A symlink rather than a copy: node_modules is the largest thing in a
+	// project and nothing here writes to it.
+	modules := filepath.Join(cwd, "node_modules")
+	if _, err := os.Stat(modules); err == nil {
+		if err := os.Symlink(modules, filepath.Join(dir, "node_modules")); err != nil {
+			removeTemp(dir)
+			return "", fmt.Errorf("make the project's dependencies reachable: %w", err)
+		}
+	}
 	return dir, nil
 }
 

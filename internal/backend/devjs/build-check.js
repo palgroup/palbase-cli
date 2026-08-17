@@ -253,17 +253,43 @@ const routes = new Map();
 // (@palbase/backend src/decorators/registry.ts). The runtime reads the SAME
 // symbols (RETURN_BUFFER_SYMBOL + ROUTES_SYMBOL) — keep them in lockstep.
 const ROUTES_SYMBOL = Symbol.for('palbase.backend.routes');
+
+// registeredControllers reads the SDK's own registry — the same function the
+// runtime calls. Empty when the SDK is older than the registry or cannot be
+// resolved, in which case the default-export path below still answers.
+function registeredControllers() {
+  try {
+    const sdk = require('@palbase/backend');
+    return typeof sdk.getRegisteredControllers === 'function'
+      ? sdk.getRegisteredControllers()
+      : [];
+  } catch {
+    return [];
+  }
+}
 const RETURN_BUFFER_SYMBOL = Symbol.for('palbase.backend.returnBuffer');
 const CONTROLLER_META_SYMBOL = Symbol.for('palbase.backend.controllerMeta');
 
-// loadControllerClass require()s a bundled controller file and returns its
-// default-export @Controller CLASS. Throws a clear error when the default export
-// is not a controller class — there is no functional-model fallback, matching
-// extract_meta.js + the runtime.
+// loadControllerClass require()s a bundled controller file and returns the
+// @Controller CLASS it carries.
+//
+// THE REGISTRY FIRST, the default export second — the order the runtime uses.
+// `@Controller` records the class as it decorates it, so a controller file needs
+// no export at all, and the SDK stopped requiring one. This read did not follow:
+// it insisted on a default export and rejected every file written the current
+// way, including this repository's own fixture, with "controllers bundle must
+// default-export a @Controller class" for a project `palbase push` deploys
+// happily. A local gate that refuses what the deploy accepts is worse than no
+// gate — it teaches people to stop running it.
 function loadControllerClass(controllerPath) {
   delete require.cache[require.resolve(controllerPath)];
+
+  // What the SDK had registered BEFORE this file ran, so the diff below is what
+  // THIS file registered rather than everything loaded so far.
+  const before = new Set(registeredControllers());
   const mod = require(controllerPath);
-  const Ctrl = mod.default ?? mod;
+  const registered = registeredControllers().filter((c) => !before.has(c));
+  const Ctrl = registered.length > 0 ? registered[registered.length - 1] : (mod.default ?? mod);
   if (typeof Ctrl !== 'function' || Ctrl.__palbase !== 'controller') {
     const shown = controllerPath.startsWith(BUNDLED_CONTROLLERS_DIR)
       ? bundledToSrcRel(controllerPath)
