@@ -74,6 +74,14 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 		return err
 	}
 
+	// THE PLANE FIRST, before anything is downloaded or written. Run in an app
+	// checkout this used to install the project's SDK into it — node_modules and
+	// all — and only then discover there were no controllers to send. A refusal
+	// that arrives after a side effect is not a refusal.
+	if err := RequireBackendPlane(dir); err != nil {
+		return err
+	}
+
 	// The SDK this project RUNS, before anything is compiled against it. A
 	// different major produces a bundle the runtime cannot execute, and the
 	// failure arrives as a missing function three layers from its cause.

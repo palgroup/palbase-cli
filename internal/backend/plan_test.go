@@ -283,3 +283,33 @@ func TestPushRefusesWhileALocalStackIsRunning(t *testing.T) {
 		t.Errorf("it wrote something before refusing: %v", local.writesSeen())
 	}
 }
+
+// TestPushInAnAppCheckoutWritesNOTHING: the plane check has to come before the
+// SDK install, not after it. Run in an app directory this used to download and
+// install the project's SDK — node_modules and all — and only then notice there
+// were no controllers to send. A refusal that arrives after a side effect is not
+// a refusal.
+func TestPushInAnAppCheckoutWritesNOTHING(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	// An app checkout: something Xcode would open, and no controllers.
+	if err := os.MkdirAll(filepath.Join(dir, "MyApp.xcodeproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	project := newProjectServer(t, map[string]string{})
+	err := runStackPush(context.Background(), Target{URL: project.URL},
+		Credentials{Value: "k", Kind: KindKey}, false, &strings.Builder{})
+	if err == nil {
+		t.Fatal("a push from an app checkout was accepted")
+	}
+	if !strings.Contains(err.Error(), "not a backend checkout") {
+		t.Errorf("the refusal does not name the plane: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "node_modules")); statErr == nil {
+		t.Error("it installed the SDK into an app checkout before refusing")
+	}
+	if len(project.writesSeen()) != 0 {
+		t.Errorf("it reached the project before refusing: %v", project.writesSeen())
+	}
+}
