@@ -63,9 +63,9 @@ const composeFile = "docker-compose.dev.yml"
 // and passed anyway, because another stack on the machine happened to have built
 // the right one.
 var stackImages = []struct{ env, fallback, build string }{
-	{"PALBASE_PALSVC_IMAGE", "ghcr.io/palgroup/palbase-palsvc:0.29.0",
+	{"PALBASE_PALSVC_IMAGE", "ghcr.io/palgroup/palbase-palsvc:0.29.1",
 		"cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
-	{"PALBASE_RUNTIME_IMAGE", "ghcr.io/palgroup/palbase-runtime-dev:0.29.0",
+	{"PALBASE_RUNTIME_IMAGE", "ghcr.io/palgroup/palbase-runtime-dev:0.29.1",
 		"cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
 }
 
@@ -329,7 +329,7 @@ func imagesPresent(ctx context.Context) error {
 //
 // The rule docker itself uses: a name whose first path segment carries a dot or
 // a colon — or is `localhost` — is a registry host. `palbase-palsvc` is a local
-// tag; `ghcr.io/palgroup/palbase-palsvc:0.29.0` is not.
+// tag; `ghcr.io/palgroup/palbase-palsvc:0.29.1` is not.
 func isRegistryImage(image string) bool {
 	head, _, hasSlash := strings.Cut(image, "/")
 	if !hasSlash {
