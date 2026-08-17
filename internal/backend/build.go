@@ -174,6 +174,18 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		return err
 	}
 
+	// config/*.ts, evaluated into the document the push SHIPS. Derived output
+	// like the types above, and produced here for the same reason: `palbase
+	// plan` reads it to say which configuration and which secrets would travel,
+	// and a document that only ever existed inside a discarded staging tree left
+	// it reporting "nothing declared" for a project that declares plenty.
+	//
+	// A config that throws fails the build, where its author is watching.
+	if err := evaluateConfig(ctx, cwd, filepath.Join(cwd, ".palbase", "config.json"), indent(out)); err != nil {
+		fmt.Fprintf(out, "✗ DEPLOY WOULD FAIL: %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+
 	node.Stdout = out
 	node.Stderr = out
 	if err := node.Run(); err != nil {
