@@ -140,7 +140,10 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 				fmt.Fprintf(w, "  %s\n", line)
 			}
 		}
-		fmt.Fprintf(w, "live: %d endpoint(s), %s\n", out.EndpointCount, out.Digest[:12])
+		// short(), not [:12]: this line runs AFTER the code has shipped, so a
+		// stack that answers 200 with a short or empty digest would turn a
+		// successful push into a Go stack trace.
+		fmt.Fprintf(w, "live: %d endpoint(s), %s\n", out.EndpointCount, short(out.Digest))
 
 		// The contract just changed — this is the moment, and the only moment,
 		// when a committed client can be brought level with the stack without

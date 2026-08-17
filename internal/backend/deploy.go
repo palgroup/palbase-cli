@@ -528,7 +528,9 @@ func newPushCmd(r Resolvers) *cobra.Command {
   repository_provider = github: runs ` + "`git push`" + `; the webhook deploys into the
       environment mapped to the pushed Git branch.
 
-Override the target with the global --project / --environment flags.`,
+The global --project / --environment flags select a CLOUD environment. In a
+checkout linked to a project they do not apply, and saying so is the point: a
+flag that is accepted and ignored is worse than one that is refused.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// TARGET-RELATIVE (design-management-api.md §10). A checkout linked
 			// to a stack pushes to THAT stack, which applies its own schema and
@@ -540,6 +542,15 @@ Override the target with the global --project / --environment flags.`,
 			// kind of push their project uses — the link they already made is
 			// what decides.
 			if target, err := ReadTarget(); err == nil {
+				// The global --project/--environment select a CLOUD environment,
+				// and this checkout is bound to a project. Ignoring them here
+				// was silent: somebody who believed the help text could push to
+				// the linked stack while thinking they had picked staging, and
+				// the banner — which exists to catch exactly that — would
+				// confirm the wrong place.
+				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+					return err
+				}
 				cred, _, tokErr := Credential(target.URL)
 				if tokErr != nil {
 					return tokErr

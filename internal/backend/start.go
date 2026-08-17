@@ -370,17 +370,25 @@ func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error 
 
 type ports struct{ http, pg int }
 
-// rememberPorts keeps the first pair this group was given.
+// rememberPorts keeps the first pair this group was given, for as long as this
+// group exists.
+//
+// It does NOT check whether the port is free, and that check is exactly what had
+// to go: the port is occupied precisely when OUR OWN stack is already up, which
+// is every `palbase start` on a running stack — so the stack moved, and every
+// xcconfig, app config and generated client written by an earlier `link` still
+// named the old number. A port genuinely taken by something else surfaces as
+// compose refusing to bind it, with the number in the message.
 func rememberPorts(envFile string, httpPort, pgPort int) (ports, error) {
 	existing, err := readPorts(envFile)
 	if err != nil {
 		return ports{}, err
 	}
-	if existing.http != 0 && existing.pg != 0 && free(existing.http) {
+	if existing.http != 0 && existing.pg != 0 {
 		return existing, nil
 	}
 	chosen := ports{http: httpPort, pg: pgPort}
-	if err := appendEnvValues(envFile, map[string]string{
+	if err := setEnvValues(envFile, map[string]string{
 		"PALBASE_HTTP_PORT": strconv.Itoa(chosen.http),
 		"PALBASE_PG_PORT":   strconv.Itoa(chosen.pg),
 	}); err != nil {
@@ -481,15 +489,6 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-func free(port int) bool {
-	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return false
-	}
-	_ = l.Close()
-	return true
-}
-
 // valueFromEnvFile reads one KEY=value out of a dotenv-shaped file.
 //
 // This is the ONE dotenv reader in the CLI, and it reads a file the CLI itself
@@ -509,18 +508,35 @@ func valueFromEnvFile(path, key string) (string, error) {
 	return "", fmt.Errorf("%s carries no %s", path, key)
 }
 
-func appendEnvValues(path string, values map[string]string) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
+// setEnvValues writes each key ONCE, replacing any line that already sets it.
+//
+// Appending produced a file with two PALBASE_HTTP_PORT lines and two answers to
+// one question: the writer returned the new port while the reader — scanning
+// top-down — kept returning the old one, so `stop` addressed a different stack
+// than `start` had brought up.
+func setEnvValues(path string, values map[string]string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	defer func() { _ = f.Close() }()
-	for key, value := range values {
-		if _, err := fmt.Fprintf(f, "%s=%s\n", key, value); err != nil {
-			return err
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		name, _, found := strings.Cut(strings.TrimSpace(line), "=")
+		if found {
+			if _, replacing := values[name]; replacing {
+				continue
+			}
 		}
+		kept = append(kept, line)
 	}
-	return nil
+	for key, value := range values {
+		kept = append(kept, key+"="+value)
+	}
+	body := strings.Join(kept, "\n")
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return writeFileAtomic(path, []byte(body), 0o600)
 }
 
 // ignoreLocalTarget keeps the local pointer out of git.

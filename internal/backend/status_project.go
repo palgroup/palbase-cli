@@ -51,7 +51,12 @@ func statusOfProject(cmd *cobra.Command) (bool, error) {
 	fmt.Fprintf(out, "address:      %s\n", target.URL)
 	fmt.Fprintf(out, "credential:   %s (%s)\n", source, credentialKindWord(cred.Kind))
 
-	status, body, err := managementCall(ctx, target, cred, http.MethodGet, "/v1/management/deployment", nil, "")
+	// deployments/current, not `deployment`. The singular does not exist, and a
+	// 404 from a route that is not there was being read as "you have not deployed
+	// yet" — so `palbase status` said "nothing yet" about a project that had 37
+	// endpoints live, in the same second `palbase deploys` listed them.
+	status, body, err := managementCall(ctx, target, cred, http.MethodGet,
+		"/v1/management/deployments/current", nil, "")
 	switch {
 	case err != nil:
 		return true, err

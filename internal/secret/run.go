@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -83,7 +84,7 @@ func loadSecrets(cmd *cobra.Command, target project) (map[string]string, error) 
 
 	values := make(map[string]string, len(answer.Secrets))
 	for _, e := range answer.Secrets {
-		status, raw, err := target.do(cmd.Context(), http.MethodGet, secretsPath+"/"+e.Name+"/value", "", nil)
+		status, raw, err := target.do(cmd.Context(), http.MethodGet, secretsPath+"/"+url.PathEscape(e.Name)+"/value", "", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -155,3 +156,7 @@ type exitStatus int
 
 func (exitStatus) Error() string   { return "" }
 func (e exitStatus) ExitCode() int { return int(e) }
+
+// DeliberateExitStatus marks this as a status somebody CHOSE — here, the child's
+// own — told apart from `*exec.ExitError`, which carries one by accident.
+func (exitStatus) DeliberateExitStatus() {}

@@ -37,6 +37,10 @@ type changesError struct{}
 func (changesError) Error() string { return "" }
 func (changesError) ExitCode() int { return exitCodeChanges }
 
+// DeliberateExitStatus marks this as a status somebody CHOSE, told apart from
+// `*exec.ExitError`, which carries one by accident and must still print why.
+func (changesError) DeliberateExitStatus() {}
+
 func planCmd() *cobra.Command {
 	var detailedExitCode bool
 	cmd := &cobra.Command{

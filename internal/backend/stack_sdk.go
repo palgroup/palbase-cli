@@ -16,13 +16,11 @@ package backend
 // the skew impossible rather than reported.
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -39,7 +37,7 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, cred Crede
 		// push: the build below either works or fails with its own message.
 		return nil
 	}
-	installed := installedSDKVersion(dir)
+	installed := installedBackendVersion(dir)
 	if installed != "" && majorOf(installed) != 0 && majorOf(installed) == majorOf(running) {
 		return nil
 	}
@@ -53,7 +51,22 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, cred Crede
 	}
 	defer func() { _ = os.Remove(tarball) }()
 
-	cmd := exec.CommandContext(ctx, "npm", "install", "--no-audit", "--no-fund", "--loglevel=error", tarball)
+	// --no-save, and it is the difference between installing and CORRUPTING.
+	//
+	// npm rewrites the dependency spec when it installs a local tarball:
+	// `"@palbase/backend": "latest"` becomes
+	// `"file:/var/folders/…/T/tmp.XXXX/sdk.tgz"`, in package.json AND in the
+	// lockfile's `resolved`. The tarball is deleted two lines later, so what gets
+	// committed is a path that existed for one second in one person's /tmp — and
+	// the next `npm ci` anywhere fails with ENOENT. Measured with real npm on
+	// 2026-08-17, and it fires on the COMMON path: a fresh clone has no installed
+	// version, so the early return above never triggers.
+	//
+	// The package still lands in node_modules, which is all this needs: it exists
+	// so the bundle compiles against the SDK the project RUNS, not to change what
+	// the project declares.
+	cmd := exec.CommandContext(ctx, "npm", "install", "--no-save",
+		"--no-audit", "--no-fund", "--loglevel=error", tarball)
 	cmd.Dir = dir
 	if blob, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("install the project's SDK: %s", strings.TrimSpace(trimBody(blob)))
@@ -106,23 +119,6 @@ func downloadProjectSDK(ctx context.Context, target Target, cred Credentials) (s
 		return "", err
 	}
 	return file.Name(), nil
-}
-
-// installedSDKVersion reads what this checkout actually has, from the package
-// itself rather than from package.json's RANGE — a range says what is allowed,
-// and only the installed copy says what will be compiled against.
-func installedSDKVersion(dir string) string {
-	raw, err := os.ReadFile(filepath.Join(dir, "node_modules", "@palbase", "backend", "package.json"))
-	if err != nil {
-		return ""
-	}
-	var pkg struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &pkg); err != nil {
-		return ""
-	}
-	return pkg.Version
 }
 
 func orNone(version string) string {

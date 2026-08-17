@@ -12,6 +12,8 @@ package backend
 // `git stash` or a commit, and both are things the person can undo.
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -27,9 +29,24 @@ import (
 func refuseDirtyTree(dir string) error {
 	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil // not a repository, or git is absent — nothing to protect
+		// "Not a repository" is the one failure that means there is nothing to
+		// protect. Everything else — a held index.lock, a permission error, a
+		// broken object store — means this could not LOOK, and answering "clean"
+		// to that is how a pull overwrites the work it exists to guard.
+		message := stderr.String()
+		switch {
+		case strings.Contains(message, "not a git repository"),
+			errors.Is(err, exec.ErrNotFound):
+			return nil
+		}
+		return fmt.Errorf(
+			"could not check this checkout for unsaved changes (%s) — refusing to overwrite it.\n"+
+				"Fix that, or move the directory aside and pull into a fresh one",
+			strings.TrimSpace(firstLine(message+err.Error())))
 	}
 	dirty := make([]string, 0, 8)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

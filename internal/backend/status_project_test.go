@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/spf13/cobra"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,5 +139,56 @@ func TestNoDriftIsSilent(t *testing.T) {
 	reportContractDrift(map[string][]byte{"main": same, "local": same}, &out)
 	if out.Len() != 0 {
 		t.Errorf("identical contracts produced a report:\n%s", out.String())
+	}
+}
+
+// TestStatusAsksTheRouteThatEXISTS: `status` asked `/v1/management/deployment`
+// (singular), which the stack does not serve, and read the 404 as "nothing is
+// deployed" — so it said "nothing yet" about a project with 37 endpoints live,
+// in the same second `palbase deploys` listed them. Nothing tested
+// statusOfProject at all, which is why it shipped.
+func TestStatusAsksTheRouteThatEXISTS(t *testing.T) {
+	inScratchCheckout(t)
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		if r.URL.Path == "/v1/management/deployments/current" {
+			count := 37
+			_ = json.NewEncoder(w).Encode(deploymentState{
+				Digest: "7c232f1484db13acc8b083d905df6ac4d8b00ea8", EndpointCount: &count,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if err := WriteTarget(Target{URL: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreCredential(srv.URL, Credentials{Value: "k", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetContext(context.Background())
+
+	handled, err := statusOfProject(cmd)
+	if !handled || err != nil {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	for _, path := range asked {
+		if path == "/v1/management/deployment" {
+			t.Errorf("it asked the singular route, which no stack serves")
+		}
+	}
+	if strings.Contains(out.String(), "nothing yet") {
+		t.Errorf("a deployed project was reported as undeployed:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "37 endpoint") {
+		t.Errorf("the deployment was not reported:\n%s", out.String())
 	}
 }

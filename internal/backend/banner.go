@@ -12,6 +12,7 @@ package backend
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -38,4 +39,44 @@ func PrintTarget(w io.Writer) (Target, error) {
 	}
 	fmt.Fprintf(w, "▸ %s\n", target.Describe())
 	return target, nil
+}
+
+// refuseCloudSelectionFlags rejects --project/--environment in a checkout that is
+// bound to a project.
+//
+// They resolve a CLOUD project and environment. A checkout with
+// .palbase/project.json already answers that question, so accepting them here
+// means accepting an instruction and doing something else — and the banner,
+// which exists so nobody pushes to the wrong place, would print the place the
+// flags did NOT ask for and look like confirmation.
+func refuseCloudSelectionFlags(cmd *cobra.Command, target Target) error {
+	var named []string
+	for _, flag := range []string{"project", "environment"} {
+		if f := cmd.Flags().Lookup(flag); f != nil && f.Changed {
+			named = append(named, "--"+flag)
+		}
+		if f := cmd.Root().PersistentFlags().Lookup(flag); f != nil && f.Changed {
+			named = append(named, "--"+flag)
+		}
+	}
+	if len(named) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s select a cloud environment, and this checkout is linked to %s.\n"+
+			"  palbase env <slug>   switch which environment this checkout acts on\n"+
+			"  palbase link <…>     bind it somewhere else",
+		strings.Join(dedupe(named), " and "), target.Describe())
+}
+
+func dedupe(items []string) []string {
+	seen := map[string]bool{}
+	out := items[:0]
+	for _, item := range items {
+		if !seen[item] {
+			seen[item] = true
+			out = append(out, item)
+		}
+	}
+	return out
 }

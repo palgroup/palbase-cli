@@ -89,23 +89,34 @@ func (c Credentials) Apply(req *http.Request) {
 }
 
 // Credential resolves the identity to use against one target.
+//
+// THE SPECIFIC CREDENTIAL BEATS THE AMBIENT ONE, which is the same precedence
+// the project's own door settled on: a credential stored FOR THIS ADDRESS was
+// put there deliberately, by `palbase start` or `palbase login`, while
+// PALBASE_ACCESS_TOKEN is exported once and applies to everything.
+//
+// It used to be the other way round, and the result was silent: an agent in a
+// container with a Dashboard token exported ran `palbase start`, start wrote the
+// stack's own key for that address, and nothing used it — every call carried the
+// PAT as a Bearer, the stack answered "this stack did not issue that token", and
+// the refusal advised running `palbase start`, which they had just done.
 func Credential(url string) (cred Credentials, source CredentialSource, err error) {
+	stored, err := readCredential(url)
+	if err != nil {
+		return Credentials{}, "", err
+	}
+	if stored.Value != "" {
+		return stored, SourceStore, nil
+	}
 	// A Dashboard-issued PAT is a person's, which is why this needs no kind: the
 	// variable exists for the headless case, and there is no headless key.
 	if v := strings.TrimSpace(os.Getenv(AccessTokenEnv)); v != "" {
 		return Credentials{Value: v, Kind: KindPerson}, SourceEnv, nil
 	}
-	stored, err := readCredential(url)
-	if err != nil {
-		return Credentials{}, "", err
-	}
-	if stored.Value == "" {
-		return Credentials{}, "", fmt.Errorf(
-			"%w: %s.\nFor a project on this machine, run `palbase start` — it writes the credential for you.\n"+
-				"For a cloud project, run `palbase login`, or set %s to a Dashboard-issued token",
-			ErrNoCredential, url, AccessTokenEnv)
-	}
-	return stored, SourceStore, nil
+	return Credentials{}, "", fmt.Errorf(
+		"%w: %s.\nFor a project on this machine, run `palbase start` — it writes the credential for you.\n"+
+			"For a cloud project, run `palbase login`, or set %s to a Dashboard-issued token",
+		ErrNoCredential, url, AccessTokenEnv)
 }
 
 // StoreCredential records an identity for one target.

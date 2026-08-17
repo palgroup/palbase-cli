@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,5 +107,39 @@ func TestASwitchedEnvironmentStillResolves(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "old.example") {
 		t.Errorf("the previous environment's address survived the switch:\n%s", raw)
+	}
+}
+
+// TestTheCloudSelectionFlagsAreRefusedRatherThanIgnored: the help text called
+// them overrides and the code never read them, so somebody could push to the
+// linked stack believing they had picked staging — with the banner, which exists
+// to catch exactly that, confirming the wrong place.
+func TestTheCloudSelectionFlagsAreRefusedRatherThanIgnored(t *testing.T) {
+	inScratchCheckout(t)
+	target := Target{URL: "https://127.0.0.1"}
+
+	root := &cobra.Command{Use: "palbase"}
+	root.PersistentFlags().String("project", "", "")
+	root.PersistentFlags().String("environment", "", "")
+	child := &cobra.Command{Use: "push"}
+	root.AddCommand(child)
+
+	if err := refuseCloudSelectionFlags(child, target); err != nil {
+		t.Fatalf("an untouched flag was refused: %v", err)
+	}
+
+	if err := root.PersistentFlags().Set("project", "bogus"); err != nil {
+		t.Fatal(err)
+	}
+	err := refuseCloudSelectionFlags(child, target)
+	if err == nil {
+		t.Fatal("--project was accepted and would have been ignored")
+	}
+	if !strings.Contains(err.Error(), "--project") || !strings.Contains(err.Error(), target.Describe()) {
+		t.Errorf("the refusal does not say what was ignored or where it is pointed: %v", err)
+	}
+	// Named once, not twice: the flag lives on both the command and its root.
+	if strings.Count(err.Error(), "--project") != 1 {
+		t.Errorf("the flag is named more than once: %v", err)
 	}
 }

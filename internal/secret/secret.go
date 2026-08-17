@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -176,7 +177,7 @@ its final newline is a PEM that fails to parse.`,
 				return err
 			}
 			status, raw, err := target.do(cmd.Context(), http.MethodPut,
-				secretsPath+"/"+name, "application/json", body)
+				secretsPath+"/"+url.PathEscape(name), "application/json", body)
 			if err != nil {
 				return err
 			}
@@ -230,7 +231,7 @@ func removeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status, raw, err := target.do(cmd.Context(), http.MethodDelete, secretsPath+"/"+args[0], "", nil)
+			status, raw, err := target.do(cmd.Context(), http.MethodDelete, secretsPath+"/"+url.PathEscape(args[0]), "", nil)
 			if err != nil {
 				return err
 			}

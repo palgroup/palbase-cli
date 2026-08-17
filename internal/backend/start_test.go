@@ -4,6 +4,8 @@ package backend
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -305,5 +307,87 @@ func TestTheImageCheckAsksForTheTAGCOMPOSEUSES(t *testing.T) {
 		if want.build == "" {
 			t.Errorf("%s has no build command, so its refusal cannot say how to fix it", want.env)
 		}
+	}
+}
+
+// TestAStartOnARunningStackKeepsItsPort is the defect this shape exists for: the
+// port is occupied precisely when OUR OWN stack is up, so a "is it free" check
+// moved the stack on every restart-while-running — and every xcconfig, app
+// config and generated client written by an earlier `link` still named the old
+// number.
+func TestAStartOnARunningStackKeepsItsPort(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("PALBASE_ANON_KEY=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := rememberPorts(envFile, 51234, 55432)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bind it, which is what a running stack does.
+	held, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", first.http))
+	if err != nil {
+		t.Skipf("could not bind %d to simulate a running stack: %v", first.http, err)
+	}
+	defer func() { _ = held.Close() }()
+
+	second, err := rememberPorts(envFile, 60000, 60001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Errorf("a start on a running stack moved it from %+v to %+v", first, second)
+	}
+
+	// And ONE answer lives in the file: the writer and the reader must not
+	// disagree, which is what a second PALBASE_HTTP_PORT line produced.
+	body, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(body), "PALBASE_HTTP_PORT="); n != 1 {
+		t.Errorf("the env file sets PALBASE_HTTP_PORT %d times:\n%s", n, body)
+	}
+	back, err := readPorts(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back != first {
+		t.Errorf("the reader answers %+v while the writer answered %+v", back, first)
+	}
+}
+
+// TestTheStoredCredentialBeatsTheAmbientOne: the store is keyed by ADDRESS and
+// written deliberately by `palbase start` or `palbase login`; the environment
+// variable is exported once and applies to everything. An agent in a container
+// with a Dashboard token exported used to run `palbase start`, have the right key
+// written, and then have every call carry the PAT instead — with the refusal
+// advising `palbase start`, which they had just run.
+func TestTheStoredCredentialBeatsTheAmbientOne(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "a-dashboard-token")
+
+	const local = "http://127.0.0.1:51234"
+	if err := StoreCredential(local, Credentials{Value: "the-stacks-own-key", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	cred, source, err := Credential(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.Value != "the-stacks-own-key" || cred.Kind != KindKey || source != SourceStore {
+		t.Errorf("resolved %q (%s) from %s", cred.Value, cred.Kind, source)
+	}
+
+	// …and the ambient one still answers for an address nobody stored.
+	cloud, source, err := Credential("https://todoapp.palbase.studio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cloud.Value != "a-dashboard-token" || cloud.Kind != KindPerson || source != SourceEnv {
+		t.Errorf("the headless path broke: %q (%s) from %s", cloud.Value, cloud.Kind, source)
 	}
 }

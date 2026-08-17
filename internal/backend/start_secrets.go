@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,8 +39,18 @@ import (
 func pullSecrets(ctx context.Context, group string, local Target, out io.Writer) {
 	source, err := readLinkedProject()
 	if err != nil || source.Project == "" {
-		// Nothing to pull FROM. A checkout linked directly to an address is
-		// pointed at one stack, and that stack is the one that just started.
+		// NOTHING TO PULL FROM, and this is the ordinary case today rather than
+		// an edge one: a checkout linked to an ADDRESS is pointed at one stack,
+		// and that stack is the one that just started. The source of a pull is a
+		// project GROUP with other environments in it, which is a cloud
+		// concept — `Target.Project` is written by the cloud link, and until
+		// that lands nothing in production sets it.
+		//
+		// Said rather than skipped: a feature that quietly does nothing is a
+		// feature nobody can tell is missing.
+		if err == nil && source.URL != "" {
+			fmt.Fprintln(out, "  secrets: this checkout is linked to an address, so there is no environment to pull from")
+		}
 		return
 	}
 	sourceCred, _, err := Credential(source.URL)
@@ -110,7 +121,11 @@ func changedLocally(ctx context.Context, local Target, cred Credentials, name, p
 	}
 	current, err := secretValue(ctx, local, cred, name)
 	if err != nil {
-		return false
+		// COULD NOT READ IS NOT UNCHANGED. This answers "may I overwrite it",
+		// and the honest answer when the stack is restarting, or answers 500, or
+		// has not materialised that name yet, is no. Saying "unchanged" here
+		// overwrote exactly the value this function exists to protect.
+		return true
 	}
 	return hashOf(current) != pulledHash
 }
@@ -141,7 +156,7 @@ func secretNames(ctx context.Context, target Target, cred Credentials) ([]string
 
 func secretValue(ctx context.Context, target Target, cred Credentials, name string) (string, error) {
 	status, body, err := managementCall(ctx, target, cred, http.MethodGet,
-		"/v1/management/secrets/"+name+"/value", nil, "")
+		"/v1/management/secrets/"+url.PathEscape(name)+"/value", nil, "")
 	if err != nil {
 		return "", err
 	}
@@ -157,7 +172,7 @@ func putSecret(ctx context.Context, target Target, cred Credentials, name, value
 		return err
 	}
 	status, raw, err := managementCall(ctx, target, cred, http.MethodPut,
-		"/v1/management/secrets/"+name, body, "application/json")
+		"/v1/management/secrets/"+url.PathEscape(name), body, "application/json")
 	if err != nil {
 		return err
 	}
