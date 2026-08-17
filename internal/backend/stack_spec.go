@@ -57,36 +57,45 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 		return err
 	}
 
-	web, apple, android := linkedPlatforms()
-	dirs := []string{}
-	if web {
-		dirs = append(dirs, webArtifactsDir)
+	// The environment this checkout is pointed at, by the name the app knows it
+	// by — so a refresh updates the contract for THAT configuration and leaves
+	// the others alone. Refreshing them all would mean reaching every
+	// environment on every push, including production from a laptop.
+	env := defaultEnvName(target)
+	if target.Local {
+		env = localEnvName
 	}
-	if apple || android {
-		dirs = append(dirs, nativeArtifactsDir)
+	if err := writeSpec(env, spec); err != nil {
+		return err
 	}
-	if len(dirs) == 0 {
-		// Linked to a stack but no app platform chosen — a backend-only
-		// checkout. The contract still belongs on disk: it is what `palbase
-		// spec` would have written, and what a client generator will read the
-		// day one is added.
-		dirs = append(dirs, nativeArtifactsDir)
-	}
+	fmt.Fprintf(w, "✓ wrote %s (%d bytes)\n", specPath(env), len(spec))
 
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
+	// The web SDK reads its contract from its own directory, and has no notion
+	// of build configurations to select one with — so it gets the environment
+	// that was just refreshed.
+	if web, _, _ := linkedPlatforms(); web {
+		if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", webArtifactsDir, err)
 		}
-		path := filepath.Join(dir, "openapi.json")
+		path := filepath.Join(webArtifactsDir, "openapi.json")
 		if err := os.WriteFile(path, spec, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
-		fmt.Fprintf(w, "✓ wrote %s (%d bytes)\n", path, len(spec))
+		fmt.Fprintf(w, "✓ wrote %s\n", path)
 	}
 
-	// Apple is the only platform with no build-time generator of its own.
-	if apple {
-		return generateAppleClient(nativeArtifactsDir, w)
+	// Apple is the only platform with no build-time generator of its own. Every
+	// environment is regenerated, not just the refreshed one: the others' specs
+	// are already on disk, and a client missing for a configuration is a build
+	// that fails in whichever configuration nobody was using today.
+	if _, apple, _ := linkedPlatforms(); apple {
+		envs, err := readAppEnvironments("ios")
+		if err != nil {
+			return err
+		}
+		if len(envs.Environments) > 0 {
+			return generateForEnvironments(ctx, envs, w)
+		}
 	}
 	return nil
 }

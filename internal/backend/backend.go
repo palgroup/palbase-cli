@@ -521,6 +521,12 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Show the selected environment's active version + deploy state",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// TARGET-RELATIVE, like push and spec: a checkout linked to a
+			// project reports on THAT project. One verb either way.
+			if handled, err := statusOfProject(cmd); handled {
+				return err
+			}
+
 			sel, err := r.resolve(cmd.Context())
 			if err != nil {
 				return err

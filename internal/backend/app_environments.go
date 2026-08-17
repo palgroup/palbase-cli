@@ -380,3 +380,23 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 	fmt.Fprintf(w, "✓ wrote %s\n", plist)
 	return nil
 }
+
+// readAppEnvironments reads back what the link wrote for one platform.
+func readAppEnvironments(platform string) (appEnvironments, error) {
+	dir := filepath.Join(nativeArtifactsDir, platform)
+	if platform == "web" {
+		dir = webArtifactsDir
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
+	if os.IsNotExist(err) {
+		return appEnvironments{}, nil
+	}
+	if err != nil {
+		return appEnvironments{}, err
+	}
+	var envs appEnvironments
+	if err := json.Unmarshal(raw, &envs); err != nil {
+		return appEnvironments{}, fmt.Errorf("read the app's environments: %w", err)
+	}
+	return envs, nil
+}
