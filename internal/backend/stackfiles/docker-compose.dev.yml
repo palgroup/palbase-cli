@@ -154,7 +154,12 @@ services:
     ports:
       # 127.0.0.1 only — this is the whole address of a stack holding a
       # service_role key. See the header.
-      - "127.0.0.1:${PALBASE_HTTP_PORT:?set PALBASE_HTTP_PORT — this file names no port, so two stacks never collide}:8080"
+      # PALBASE_HTTP_BIND is 127.0.0.1 unless somebody deliberately widened it
+      # (`palbase start --lan`), which is the only way a phone on the same
+      # wifi can reach this. The default stays loopback because the header
+      # above is right: this address serves a stack holding a real database
+      # password, and a laptop is not always on a network you chose.
+      - "${PALBASE_HTTP_BIND:-127.0.0.1}:${PALBASE_HTTP_PORT:?set PALBASE_HTTP_PORT — this file names no port, so two stacks never collide}:8080"
     volumes:
       - artifacts:/var/lib/palbase/artifacts
       - storage:/var/lib/palbase/storage

@@ -65,3 +65,43 @@ func TestARegistryReferenceIsRecognised(t *testing.T) {
 		}
 	}
 }
+
+// `--lan` widens ONE port. The database is not it.
+//
+// A local stack holds a real database password, and the compose file publishes
+// on 127.0.0.1 for that reason. Letting a phone reach the API is a deliberate
+// act with a flag on it; letting the network reach postgres is not something
+// anybody asked for and would arrive silently with the same flag if the bind
+// variable were threaded through both.
+func TestOnlyTheAPIPortCanBeWidened(t *testing.T) {
+	// The PUBLISH lines, not the first textual mention: both variables are named
+	// in the header comment long before anything is published, and a search that
+	// stops at the first match reads the documentation instead of the file.
+	var httpPublish, pgPublish string
+	for _, line := range strings.Split(string(stackCompose), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- \"") || !strings.Contains(trimmed, ":") {
+			continue
+		}
+		if strings.Contains(trimmed, ":8080\"") {
+			httpPublish = trimmed
+		}
+		if strings.Contains(trimmed, ":5432\"") {
+			pgPublish = trimmed
+		}
+	}
+	if httpPublish == "" || pgPublish == "" {
+		t.Fatalf("could not find the publish lines (http=%q pg=%q)", httpPublish, pgPublish)
+	}
+
+	if !strings.Contains(httpPublish, "${"+BindEnv) {
+		t.Errorf("the API port does not read %s — `--lan` would change nothing: %s", BindEnv, httpPublish)
+	}
+	// The database's line names loopback itself, so no variable can move it.
+	if !strings.Contains(pgPublish, "127.0.0.1") {
+		t.Errorf("the database port is not pinned to loopback: %s", pgPublish)
+	}
+	if strings.Contains(pgPublish, "${"+BindEnv) {
+		t.Errorf("the database port reads %s — `--lan` would put the database on the network: %s", BindEnv, pgPublish)
+	}
+}

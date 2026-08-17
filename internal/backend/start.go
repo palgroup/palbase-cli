@@ -71,6 +71,7 @@ var stackImages = []struct{ env, fallback, build string }{
 
 func newStartCmd() *cobra.Command {
 	var reset bool
+	var lan bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Args:  cobra.NoArgs,
@@ -92,11 +93,13 @@ until ` + "`palbase stop`" + `.
 			if err := RequireBackendPlane(dir); err != nil {
 				return err
 			}
-			return runStart(cmd.Context(), dir, reset, cmd.OutOrStdout())
+			return runStart(cmd.Context(), dir, reset, lan, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().BoolVar(&reset, "reset", false,
 		"empty the local database first, then build it from db/schema.ts")
+	cmd.Flags().BoolVar(&lan, "lan", false,
+		"publish the API on this machine's network address, so a phone on the same wifi can reach it")
 	return cmd
 }
 
@@ -119,7 +122,7 @@ you left. Every verb goes back to the project this checkout is linked to.`,
 	}
 }
 
-func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error {
+func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) error {
 	group := groupName(dir)
 	stackDir, err := stackDirectory(group)
 	if err != nil {
@@ -154,14 +157,28 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d", settled.http)
+	// THE ADDRESS THE STACK IS REACHED AT, and with --lan it is not loopback.
+	//
+	// It is written into .palbase/local.json and into the register, which is
+	// where `palbase ios link` reads it — so a phone gets an address it can
+	// actually resolve rather than 127.0.0.1, which on a phone is the phone.
+	host := "127.0.0.1"
+	bind := ""
+	if lan {
+		addr, err := lanAddress()
+		if err != nil {
+			return err
+		}
+		host, bind = addr, "0.0.0.0"
+	}
+	url := fmt.Sprintf("http://%s:%d", host, settled.http)
 
 	project := "palbase-" + group
 	if reset {
 		fmt.Fprintln(out, "▸ removing the local database")
 		// -v takes the volumes with it, which is the reset: the schema comes
 		// back from db/schema.ts on the next boot rather than from a dump.
-		if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "down", "-v"); err != nil {
+		if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, "down", "-v"); err != nil {
 			return err
 		}
 	}
@@ -181,16 +198,16 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 	// nothing. The two raced, and the loser was the migration — postgres was up
 	// and not yet accepting connections. --wait blocks on the healthcheck the
 	// compose file already declares.
-	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d", "--wait", "postgres"); err != nil {
+	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, "up", "-d", "--wait", "postgres"); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "▸ applying every module's schema")
-	if err := compose(ctx, stackDir, project, envFile, dir, settled, out,
+	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out,
 		"run", "--rm", "--no-deps", "palsvc", "--migrate-only"); err != nil {
 		return fmt.Errorf("migrate the local database: %w", err)
 	}
 
-	if err := compose(ctx, stackDir, project, envFile, dir, settled, out, "up", "-d"); err != nil {
+	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, "up", "-d"); err != nil {
 		return err
 	}
 	if err := waitForStack(ctx, url, 90*time.Second); err != nil {
@@ -207,6 +224,10 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 	// (credentials.go, localStackKey), which is also what makes an app checkout
 	// in another directory work with no extra step: the register says which
 	// group owns this address, and the group's directory holds the key.
+	if lan {
+		announceLAN(out, url)
+		deviceSetupNotice(out)
+	}
 	if err := WriteLocalTarget(Target{URL: url}); err != nil {
 		return err
 	}
@@ -258,7 +279,7 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 
 	// Volumes stay: a stop is not a reset. `palbase start --reset` is the verb
 	// that throws data away, and it says so.
-	if err := compose(ctx, stackDir, project, envFile, dir, ports, out, "down"); err != nil {
+	if err := compose(ctx, stackDir, project, envFile, dir, "", ports, out, "down"); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "▸ stopped")
@@ -448,7 +469,7 @@ func readPorts(envFile string) (ports, error) {
 }
 
 // compose runs one docker compose verb against this group's stack.
-func compose(ctx context.Context, stackDir, project, envFile, projectDir string, p ports, out io.Writer, args ...string) error {
+func compose(ctx context.Context, stackDir, project, envFile, projectDir, bind string, p ports, out io.Writer, args ...string) error {
 	full := append([]string{
 		"compose",
 		"-f", filepath.Join(stackDir, composeFile),
@@ -463,6 +484,11 @@ func compose(ctx context.Context, stackDir, project, envFile, projectDir string,
 		"PALBASE_HTTP_PORT="+strconv.Itoa(p.http),
 		"PALBASE_PG_PORT="+strconv.Itoa(p.pg),
 	)
+	// Empty means the compose file's own default, which is loopback. Only
+	// `--lan` widens it, and only for the HTTP port.
+	if bind != "" {
+		cmd.Env = append(cmd.Env, BindEnv+"="+bind)
+	}
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &prefixed{w: out, prefix: "  "}
 	return cmd.Run()
