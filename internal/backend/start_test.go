@@ -14,17 +14,68 @@ import (
 	"testing"
 )
 
-// TestStartRefusesWithoutAStackToBootFrom: the local stack is a dev rail, not a
-// download, so the refusal names the variable rather than inventing a fetch.
-func TestStartRefusesWithoutAStackToBootFrom(t *testing.T) {
+// TestStartNeedsNothingButTheBinary is the rule that replaced "the local stack
+// is a dev rail, not a download".
+//
+// This asserted the opposite: with no PALBASE_STACK_DIR, `stackDirectory`
+// refused and named the variable. That was defensible while the only people
+// starting a stack had the palbase repository — and it stopped being true the
+// day `palbase init` shipped on brew. A person scaffolds a project, types the
+// command the same page prints two lines later, and is told to point an
+// environment variable at a directory they have never heard of. The two commands
+// are one sentence and only the first of them worked.
+//
+// So the binary carries the stack and writes it out. The variable still WINS
+// when set, which the next test covers.
+func TestStartNeedsNothingButTheBinary(t *testing.T) {
 	t.Setenv(StackDirEnv, "")
+	t.Setenv("HOME", t.TempDir())
 
-	_, err := stackDirectory()
-	if err == nil {
-		t.Fatal("a machine with no stack directory was accepted")
+	dir, err := stackDirectory("proofgroup")
+	if err != nil {
+		t.Fatalf("a machine with no stack directory was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), StackDirEnv) {
-		t.Errorf("the refusal does not name the variable: %v", err)
+	written, err := os.ReadFile(filepath.Join(dir, composeFile))
+	if err != nil {
+		t.Fatalf("no %s was written where the stack is brought up from: %v", composeFile, err)
+	}
+	if string(written) != string(stackCompose) {
+		t.Error("what was written is not the document the binary carries")
+	}
+}
+
+// The override exists for one person: somebody editing v2/deploy who wants their
+// edit rather than the copy compiled into whichever CLI they have installed.
+func TestAnExplicitStackDirectoryWins(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, composeFile), []byte("# an edited stack\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(StackDirEnv, repo)
+	t.Setenv("HOME", t.TempDir())
+
+	dir, err := stackDirectory("proofgroup")
+	if err != nil {
+		t.Fatalf("an explicit stack directory was refused: %v", err)
+	}
+	if dir != repo {
+		t.Errorf("start used %s, not the directory it was pointed at (%s)", dir, repo)
+	}
+}
+
+// And a variable pointed at the wrong place still refuses, naming what it looked
+// for — silently falling back to the vendored copy would serve a stack the
+// person believes they are editing.
+func TestAStackDirectoryWithoutAComposeFileIsRefused(t *testing.T) {
+	t.Setenv(StackDirEnv, t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := stackDirectory("proofgroup")
+	if err == nil {
+		t.Fatal("a directory with no compose file was accepted")
+	}
+	if !strings.Contains(err.Error(), composeFile) {
+		t.Errorf("the refusal does not name what it looked for: %v", err)
 	}
 }
 

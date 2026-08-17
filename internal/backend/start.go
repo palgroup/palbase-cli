@@ -63,9 +63,9 @@ const composeFile = "docker-compose.dev.yml"
 // and passed anyway, because another stack on the machine happened to have built
 // the right one.
 var stackImages = []struct{ env, fallback, build string }{
-	{"PALBASE_PALSVC_IMAGE", "palbase-palsvc",
+	{"PALBASE_PALSVC_IMAGE", "ghcr.io/palgroup/palbase-palsvc:0.29.0",
 		"cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
-	{"PALBASE_RUNTIME_IMAGE", "palbase-runtime-dev",
+	{"PALBASE_RUNTIME_IMAGE", "ghcr.io/palgroup/palbase-runtime-dev:0.29.0",
 		"cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
 }
 
@@ -120,7 +120,8 @@ you left. Every verb goes back to the project this checkout is linked to.`,
 }
 
 func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error {
-	stackDir, err := stackDirectory()
+	group := groupName(dir)
+	stackDir, err := stackDirectory(group)
 	if err != nil {
 		return err
 	}
@@ -128,7 +129,6 @@ func runStart(ctx context.Context, dir string, reset bool, out io.Writer) error 
 		return err
 	}
 
-	group := groupName(dir)
 	state, err := stackStateDir(group)
 	if err != nil {
 		return err
@@ -231,7 +231,7 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 	group := groupName(dir)
 	project := "palbase-" + group
 
-	stackDir, err := stackDirectory()
+	stackDir, err := stackDirectory(group)
 	if err != nil {
 		return err
 	}
@@ -270,19 +270,21 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 }
 
 // stackDirectory finds the compose file this machine boots from.
-func stackDirectory() (string, error) {
-	dir := strings.TrimSpace(os.Getenv(StackDirEnv))
-	if dir == "" {
-		return "", fmt.Errorf(
-			"%s is not set, so there is no stack to start.\n"+
-				"Point it at the directory holding %s (the palbase repository's v2/deploy)",
-			StackDirEnv, composeFile)
+//
+// The binary carries one, so `palbase init` followed by `palbase start` works in
+// a directory that has never heard of the palbase repository — which is every
+// directory except the handful on the machines of the people who build this.
+// PALBASE_STACK_DIR still wins when set: somebody editing v2/deploy wants their
+// edit, not the copy compiled into the CLI they happen to have installed.
+func stackDirectory(group string) (string, error) {
+	if dir := strings.TrimSpace(os.Getenv(StackDirEnv)); dir != "" {
+		path := filepath.Join(dir, composeFile)
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("%s names %s, which has no %s in it", StackDirEnv, dir, composeFile)
+		}
+		return dir, nil
 	}
-	path := filepath.Join(dir, composeFile)
-	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("%s names %s, which has no %s in it", StackDirEnv, dir, composeFile)
-	}
-	return dir, nil
+	return writeVendoredStack(group)
 }
 
 // imagesPresent refuses BEFORE compose does, because compose's own failure for a
@@ -293,6 +295,12 @@ func imagesPresent(ctx context.Context) error {
 		if override := strings.TrimSpace(os.Getenv(want.env)); override != "" {
 			image = override
 		}
+		// A REGISTRY reference is compose's job — it pulls, and a pull is the
+		// whole reason `palbase start` works on a machine that has never seen
+		// this repository. Refusing here would refuse the ordinary case.
+		if isRegistryImage(image) {
+			continue
+		}
 		cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf(
@@ -301,6 +309,19 @@ func imagesPresent(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// isRegistryImage says whether docker would go and FETCH this reference.
+//
+// The rule docker itself uses: a name whose first path segment carries a dot or
+// a colon — or is `localhost` — is a registry host. `palbase-palsvc` is a local
+// tag; `ghcr.io/palgroup/palbase-palsvc:0.29.0` is not.
+func isRegistryImage(image string) bool {
+	head, _, hasSlash := strings.Cut(image, "/")
+	if !hasSlash {
+		return false
+	}
+	return strings.ContainsAny(head, ".:") || head == "localhost"
 }
 
 // groupName is what this stack is called on this machine: the linked project's
