@@ -30,10 +30,17 @@ func TestTheVendoredComposeMatchesTheRepository(t *testing.T) {
 	}
 }
 
-// The images must be PULLABLE by default. A local tag as the default is exactly
-// what made `palbase start` require this repository: docker cannot fetch
-// `palbase-palsvc` from anywhere, so the command only worked on a machine where
-// somebody had already built it.
+// The images must be NAMED as registry references by default. A local tag as
+// the default is exactly what made `palbase start` require this repository:
+// docker cannot fetch `palbase-palsvc` from anywhere, so the command only worked
+// on a machine where somebody had already built it.
+//
+// It reads the compose file and nothing else, so it says the default POINTS at a
+// registry — not that the registry will serve it. Worth stating because the two
+// came apart on 2026-08-18: the edge package was created private by ghcr, this
+// test was green, and an anonymous `docker manifest inspect` answered
+// `unauthorized`. Whether a stranger can actually pull is a property of the
+// registry, and the only honest place to assert it is against the registry.
 func TestTheVendoredStackPullsItsImages(t *testing.T) {
 	for _, want := range []string{
 		"ghcr.io/palgroup/palbase/palsvc:",
@@ -43,7 +50,7 @@ func TestTheVendoredStackPullsItsImages(t *testing.T) {
 		"ghcr.io/palgroup/palbase/edge:",
 	} {
 		if !strings.Contains(string(stackCompose), want) {
-			t.Errorf("no default image at %s — a stranger cannot pull it", want)
+			t.Errorf("no default image at %s — the default must name a registry, or `palbase start` needs this repository", want)
 		}
 	}
 }

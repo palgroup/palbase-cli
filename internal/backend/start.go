@@ -533,7 +533,13 @@ func waitForStack(ctx context.Context, url string, limit time.Duration) error {
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
 			_ = res.Body.Close()
-			if res.StatusCode < 500 {
+			// EXACTLY 200. `< 500` was right when this asked /healthz, where a
+			// 404 still meant "something is answering"; it is wrong now. If the
+			// /readyz route ever left the edge's table the request would fall to
+			// the catch-all, the customer's runtime would answer 404, and this
+			// would read that as a ready stack — the precise silence the move to
+			// /readyz was made to end.
+			if res.StatusCode == http.StatusOK {
 				return nil
 			}
 			last = fmt.Sprintf("%s answered %d", url, res.StatusCode)
