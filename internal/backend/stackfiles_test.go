@@ -38,6 +38,9 @@ func TestTheVendoredStackPullsItsImages(t *testing.T) {
 	for _, want := range []string{
 		"ghcr.io/palgroup/palbase/palsvc:",
 		"ghcr.io/palgroup/palbase/runtime-dev:",
+		// The edge is a third image now, and it carries the route table — a
+		// stack that cannot pull it has no door.
+		"ghcr.io/palgroup/palbase/edge:",
 	} {
 		if !strings.Contains(string(stackCompose), want) {
 			t.Errorf("no default image at %s — a stranger cannot pull it", want)
@@ -66,42 +69,39 @@ func TestARegistryReferenceIsRecognised(t *testing.T) {
 	}
 }
 
-// `--lan` widens ONE port. The database is not it.
+// `--lan` widens ONE port, and there is only one to widen.
 //
-// A local stack holds a real database password, and the compose file publishes
-// on 127.0.0.1 for that reason. Letting a phone reach the API is a deliberate
-// act with a flag on it; letting the network reach postgres is not something
-// anybody asked for and would arrive silently with the same flag if the bind
-// variable were threaded through both.
-func TestOnlyTheAPIPortCanBeWidened(t *testing.T) {
-	// The PUBLISH lines, not the first textual mention: both variables are named
-	// in the header comment long before anything is published, and a search that
-	// stops at the first match reads the documentation instead of the file.
-	var httpPublish, pgPublish string
+// A local stack holds a real database password and a service_role key. It used
+// to publish two ports — palsvc's and postgres' — and this test's job was to
+// keep `--lan` away from the second. Now nothing but the edge is published at
+// all, so the test asserts the stronger thing: exactly ONE publish line exists,
+// it is the edge's, it reads the bind variable, and no line anywhere in the
+// file puts the database on the host.
+func TestOnlyTheEdgeIsPublished(t *testing.T) {
+	var publishes []string
 	for _, line := range strings.Split(string(stackCompose), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "- \"") || !strings.Contains(trimmed, ":") {
-			continue
+		// A PUBLISH line, not a mention: the header names both variables in
+		// prose long before anything is published, and a search that stops at
+		// the first match reads the documentation instead of the file.
+		if strings.HasPrefix(trimmed, "- \"") && strings.Contains(trimmed, ":") &&
+			strings.Contains(trimmed, "${PALBASE_") {
+			publishes = append(publishes, trimmed)
 		}
-		if strings.Contains(trimmed, ":8080\"") {
-			httpPublish = trimmed
-		}
-		if strings.Contains(trimmed, ":5432\"") {
-			pgPublish = trimmed
-		}
-	}
-	if httpPublish == "" || pgPublish == "" {
-		t.Fatalf("could not find the publish lines (http=%q pg=%q)", httpPublish, pgPublish)
 	}
 
-	if !strings.Contains(httpPublish, "${"+BindEnv) {
-		t.Errorf("the API port does not read %s — `--lan` would change nothing: %s", BindEnv, httpPublish)
+	if len(publishes) != 1 {
+		t.Fatalf("the stack publishes %d port(s), want exactly one (the edge):\n%s",
+			len(publishes), strings.Join(publishes, "\n"))
 	}
-	// The database's line names loopback itself, so no variable can move it.
-	if !strings.Contains(pgPublish, "127.0.0.1") {
-		t.Errorf("the database port is not pinned to loopback: %s", pgPublish)
+	edge := publishes[0]
+	if !strings.Contains(edge, "${"+BindEnv) {
+		t.Errorf("the published port does not read %s — `--lan` would change nothing: %s", BindEnv, edge)
 	}
-	if strings.Contains(pgPublish, "${"+BindEnv) {
-		t.Errorf("the database port reads %s — `--lan` would put the database on the network: %s", BindEnv, pgPublish)
+	if !strings.HasSuffix(edge, ":8080\"") {
+		t.Errorf("the published port does not reach the edge's 8080: %s", edge)
+	}
+	if strings.Contains(string(stackCompose), ":5432\"") {
+		t.Error("something publishes the database port — a stack's password would be on the host, and `--lan` would put it on the network")
 	}
 }

@@ -1,30 +1,35 @@
-# Palbase while you are writing it — the same product, three containers.
+# Palbase while you are writing it — the same product, four containers.
 #
+#   envoy      the door: it decides which of the two below answers a path
 #   postgres   the stack's one database
-#   palsvc     every module in one process — and, here, the WHOLE ADDRESS
+#   palsvc     every module in one process
 #   runtime    your controllers, built from the directory you are editing
 #
-# ── why there is no envoy, and what took its place ──────────────────────────
+# ── one door, and it is the same door ───────────────────────────────────────
 #
-# The shipped stack (docker-compose.yml) has four containers, and the fourth is
-# an edge that terminates TLS. Here it would be in the way twice over: it needs
-# a certificate, and a certificate you made yourself is one your phone, your
-# browser and every SDK on your machine will refuse — which turns "run the
-# stack" into an afternoon of trust stores. So: plain HTTP, no edge.
+# The outside reaches this stack only through envoy, exactly as in the cloud —
+# and it is not a lookalike: the route table here IS the shipped one, the same
+# routes.yaml, read by a bootstrap that differs from the cloud's in one thing
+# only. envoy publishes; palsvc, the runtime and postgres publish nothing.
 #
-# But envoy was never only TLS. It is the process that decides WHICH of the two
-# below answers a given path: a handful of platform prefixes (/auth, /v1,
-# /realtime, …) go to palsvc, and EVERYTHING ELSE goes to the runtime, because
-# `@Controller("/todos")` has to answer at /todos. Delete the edge and that
-# decision goes with it — leaving a developer holding two ports and an SDK that
-# only knows how to be given one.
+# It used to be otherwise, and the reason it changed is worth keeping. palsvc
+# was the whole address and forwarded what it did not claim to the runtime, its
+# claim list read from its own chi router. That worked — but it meant the CLOUD
+# edge's route table, which is kept by hand, was never exercised until something
+# was deployed. A prefix somebody forgot showed up in production, where the
+# catch-all hands a platform path to a customer's backend. Now the hand-kept
+# table is exercised by every `palbase start`, and a Go test holds it against
+# palsvc's router besides.
 #
-# So palsvc makes it. RUNTIME_PROXY_URL below turns on the fallthrough in
-# internal/server/runtimeproxy.go: a path palsvc claims it serves, and a path it
-# does not it proxies to `runtime`. The claimed list is READ FROM ITS OWN
-# ROUTER, so it cannot drift from what palsvc actually serves — and the rule is
-# the same one envoy applies, down to /auth claiming /auth/... and not /authors.
-# One address, ${PALBASE_HTTP_PORT}, and it behaves like the deployed one.
+# ── still no TLS, and that is deliberate ────────────────────────────────────
+#
+# The bootstrap this file runs (bootstrap.dev.yaml) declares no transport
+# socket, so the edge serves cleartext and needs no certificate. Measured
+# 2026-08-18: a certificate you made yourself is refused by 19 of 19 ATS
+# permutations on iOS, Go on macOS ignores SSL_CERT_FILE so our own CLI could
+# not take it from an environment variable, and Node needs NODE_EXTRA_CA_CERTS
+# in every shell. Ten of eleven comparable products serve plain HTTP locally for
+# the same reason.
 #
 # ── and no deploy ───────────────────────────────────────────────────────────
 #
@@ -118,16 +123,40 @@ services:
   #
   # Unlike the shipped stack this one PUBLISHES its port, because the point of a
   # development stack is that you can look inside it.
+  # ── envoy ──────────────────────────────────────────────────────────────────
+  #
+  # THE WHOLE ADDRESS OF THIS STACK, and the only container that publishes one.
+  # It runs the SAME image the shipped stack runs, with the other bootstrap:
+  # bootstrap.dev.yaml has no transport socket, so it serves cleartext and asks
+  # for no certificate. The route table it reads is the shipped table, from the
+  # same file inside the same image.
+  envoy:
+    image: ${PALBASE_EDGE_IMAGE:-ghcr.io/palgroup/palbase/edge:0.33.0}
+    command: ["-c", "/etc/envoy/bootstrap.dev.yaml"]
+    ports:
+      # PALBASE_HTTP_BIND is 127.0.0.1 unless somebody deliberately widened it
+      # (`palbase start --lan`), which is the only way a phone on the same wifi
+      # can reach this. The default stays loopback: this address serves a stack
+      # holding a real database password and a service_role key, and a laptop is
+      # not always on a network you chose.
+      - "${PALBASE_HTTP_BIND:-127.0.0.1}:${PALBASE_HTTP_PORT:?set PALBASE_HTTP_PORT — this file names no port, so two stacks never collide}:8080"
+    depends_on:
+      - palsvc
+    # `edge` ONLY. The one process reachable from outside must not be able to
+    # open — or even resolve — a database connection.
+    networks: [edge]
+    restart: unless-stopped
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: palbase
       POSTGRES_DB: palbase
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-    ports:
-      # 127.0.0.1 only. See the header: this database has a real password and
-      # binding every interface puts it on whatever network the laptop is on.
-      - "127.0.0.1:${PALBASE_PG_PORT:?set PALBASE_PG_PORT — this file names no port, so two stacks never collide}:5432"
+    # NOT PUBLISHED either. `palbase db query` runs a statement through the
+    # stack, and `docker compose exec postgres psql -U palbase` opens a session
+    # — neither needs a port on the host, and a published one is a database with
+    # a real password sitting on whatever network the laptop is attached to.
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -136,6 +165,8 @@ services:
       timeout: 3s
       retries: 30
       start_period: 5s
+    # `data` ONLY. Nothing that faces the outside shares a network with it.
+    networks: [data]
     restart: unless-stopped
 
   # ── palsvc ─────────────────────────────────────────────────────────────────
@@ -151,26 +182,11 @@ services:
     command:
       - "--modules"
       - "deeplinks,documents,flags,analytics,messaging,db,auth,rt,notify,vault,storage"
-    ports:
-      # 127.0.0.1 only — this is the whole address of a stack holding a
-      # service_role key. See the header.
-      # PALBASE_HTTP_BIND is 127.0.0.1 unless somebody deliberately widened it
-      # (`palbase start --lan`), which is the only way a phone on the same
-      # wifi can reach this. The default stays loopback because the header
-      # above is right: this address serves a stack holding a real database
-      # password, and a laptop is not always on a network you chose.
-      - "${PALBASE_HTTP_BIND:-127.0.0.1}:${PALBASE_HTTP_PORT:?set PALBASE_HTTP_PORT — this file names no port, so two stacks never collide}:8080"
+    # NOT PUBLISHED. The edge is the only way in, here as in the cloud.
     volumes:
       - artifacts:/var/lib/palbase/artifacts
       - storage:/var/lib/palbase/storage
     environment:
-      # ── the edge, in one variable ────────────────────────────────────────
-      #
-      # Unset in the shipped stack, where envoy decides this. Set here, where
-      # nothing else can: a path palsvc does not claim is proxied to `runtime`
-      # instead of answered 404. By compose service name, so the hop stays on
-      # this network.
-      RUNTIME_PROXY_URL: http://runtime:4005
       PALSVC_ARTIFACT_ROOT: /var/lib/palbase/artifacts
       DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
       LOCAL_JWT_PEM: ${LOCAL_JWT_PEM:-}
@@ -202,6 +218,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Both: it answers the edge and it holds the database pool.
+    networks: [edge, data]
     restart: unless-stopped
 
   # ── runtime ────────────────────────────────────────────────────────────────
@@ -251,6 +269,8 @@ services:
     depends_on:
       palsvc:
         condition: service_started
+    # Both: the edge routes to it, and its own SQL reaches postgres.
+    networks: [edge, data]
     restart: unless-stopped
 
 volumes:
@@ -264,11 +284,13 @@ volumes:
   artifacts:
   storage:
 
-# NO `networks:` BLOCK, and that absence is load-bearing.
-#
-# It used to pin `default: name: palbase-dev`, which put EVERY dev stack on ONE
-# network whatever `-p` it was given. Measured 2026-08-17: a second project came
-# up, its palsvc resolved `postgres` to the FIRST project's database and died on
-# SASL auth — and with matching passwords it would not have died, it would have
-# served one project's backend from another project's data. Compose's default is
-# a network per project, which is the isolation the `-p` was for.
+# TWO networks, and NEITHER is named. The absence is load-bearing, and it is the
+# same reason this file never named one: a pinned name put every dev stack on
+# ONE network, and a second project's palsvc resolved `postgres` to the FIRST
+# project's database — measured 2026-08-17, and with matching passwords it would
+# not have failed, it would have served one project's backend from another
+# project's data. Compose prefixes non-external networks with the project name,
+# so the split and the per-project isolation hold together.
+networks:
+  edge:
+  data:
