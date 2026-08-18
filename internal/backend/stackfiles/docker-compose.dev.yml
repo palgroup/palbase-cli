@@ -74,16 +74,22 @@
 # are deliberate: a fixed port collides with the stack you already have running,
 # and a shipped default password is a shipped credential.
 #
-#   PALBASE_HTTP_PORT     the one address — palsvc's port, published to the host
-#   PALBASE_PG_PORT       postgres, published so psql and a GUI can reach it
+#   PALBASE_HTTP_PORT     the one address — the EDGE's port, published to the
+#                         host, and the only published port in this file
 #   PALBASE_PROJECT_DIR   the project to serve (the directory holding
 #                         controllers/, models/, services/, config/, db/)
 #
-# Both ports are published on 127.0.0.1 and nowhere else. A dev stack holds a
+# ONE port, and it belongs to envoy. palsvc, the runtime and postgres publish
+# nothing: outside traffic reaches this stack through the door or not at all,
+# which is the same rule the shipped stack keeps. The database is reached with
+# `docker compose exec postgres psql -U palbase`, not over the host.
+#
+# That one port is published on 127.0.0.1 and nowhere else. A dev stack holds a
 # real database password and a service_role key, and Docker's default
 # `<port>:<port>` binds every interface — which on a laptop means the café wifi.
-# Reaching it from a phone on the same network is a deliberate act (an ssh
-# tunnel, or an explicit `-p 0.0.0.0:…` override), not the default.
+# Reaching it from a phone on the same network is a deliberate act
+# (PALBASE_HTTP_BIND=0.0.0.0, which is what `palbase start --lan` sets), not the
+# default.
 #
 # Everything else is the SAME environment docker-compose.yml reads — one
 # `--env-file` works for both, and there is no secret in this file that is not
@@ -92,8 +98,8 @@
 #   docker compose -f deploy/docker-compose.dev.yml -p palbase-dev \
 #     --env-file .verify/.env up -d
 #
-# with PALBASE_HTTP_PORT / PALBASE_PG_PORT / PALBASE_PROJECT_DIR exported or in
-# that same env file. The database still needs its schema before anything
+# with PALBASE_HTTP_PORT / PALBASE_PROJECT_DIR exported or in that same env
+# file. The database still needs its schema before anything
 # serves, which is the same one-shot the shipped stack uses:
 #
 #   docker compose -f deploy/docker-compose.dev.yml -p palbase-dev \
@@ -113,16 +119,6 @@ name: palbase-dev
 
 services:
 
-  # ── postgres ───────────────────────────────────────────────────────────────
-  #
-  # The same image and the same healthcheck as the shipped stack — including
-  # `-h 127.0.0.1`, which is not a detail: over the unix socket pg_isready
-  # answers "ready" to the TEMPORARY server initdb runs, about a second and a
-  # half before a real one exists, and whatever `service_healthy` releases
-  # connects into that gap.
-  #
-  # Unlike the shipped stack this one PUBLISHES its port, because the point of a
-  # development stack is that you can look inside it.
   # ── envoy ──────────────────────────────────────────────────────────────────
   #
   # THE WHOLE ADDRESS OF THIS STACK, and the only container that publishes one.
@@ -147,6 +143,13 @@ services:
     networks: [edge]
     restart: unless-stopped
 
+  # ── postgres ───────────────────────────────────────────────────────────────
+  #
+  # The same image and the same healthcheck as the shipped stack — including
+  # `-h 127.0.0.1`, which is not a detail: over the unix socket pg_isready
+  # answers "ready" to the TEMPORARY server initdb runs, about a second and a
+  # half before a real one exists, and whatever `service_healthy` releases
+  # connects into that gap.
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -194,7 +197,6 @@ services:
       PEPPER: ${PEPPER:-}
       REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:-palbase}
-      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
       PALBASE_STACK_REF: ${PALBASE_STACK_REF:-project}
       PALBASE_RUNTIME_URL: ${PALBASE_RUNTIME_URL:-http://runtime:4005}
       PALBASE_ANON_KEY: ${PALBASE_ANON_KEY:-}
