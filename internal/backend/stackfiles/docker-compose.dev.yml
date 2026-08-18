@@ -49,10 +49,16 @@
 # buildx 0.17.0 or later"). A `build:` section here would mean the one command
 # this file exists to make possible could not run.
 #
-# So the two images are built with plain BuildKit, which works everywhere:
+# So the images are built with plain BuildKit, which works everywhere:
 #
-#   cd v2         && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile .
-#   cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile .
+#   cd v2            && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile .
+#   cd v2/runtime    && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile .
+#   cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge .
+#
+# THREE, not two — the edge is one of them and it is the one that publishes the
+# only port, so a stack without it has no address at all. It is listed here
+# because this header is what a person follows for a manual `docker compose -f …
+# up -d`; `palbase start` refuses earlier and prints the same three commands.
 #
 # `--target dev` is not optional: the production target carries neither the
 # bundler nor a TypeScript compiler. A runtime started from it REFUSES TO BOOT
