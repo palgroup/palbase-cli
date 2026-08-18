@@ -171,9 +171,9 @@ services:
 
   # ── palsvc ─────────────────────────────────────────────────────────────────
   #
-  # Every module in one process, and here also the edge. Same image as the
-  # shipped stack, same role-mask, same everything except two lines: the port is
-  # published, and RUNTIME_PROXY_URL is set.
+  # Every module in one process — and ONLY that, now. Same image as the shipped
+  # stack, same role-mask, same everything: it is not the edge here either, and
+  # it publishes nothing.
   palsvc:
     # PULLED by default, so `palbase start` works on a machine that has never
     # seen this repository. Building locally? Set PALBASE_PALSVC_IMAGE to your
