@@ -82,33 +82,48 @@ func interfaceIPv4(name string) (string, error) {
 func announceLAN(w io.Writer, url string) {
 	fmt.Fprintf(w, "  reachable on this network at %s\n", url)
 	fmt.Fprintln(w, "  anyone on this network can now reach this stack's API with its publishable key.")
-	fmt.Fprintln(w, "  the database stays on 127.0.0.1, and `palbase start` without --lan puts the API back.")
+	fmt.Fprintln(w, "  the database is not on the host at all — only the edge publishes — and")
+	fmt.Fprintln(w, "  `palbase start` without --lan puts the API back on 127.0.0.1.")
 }
 
-// deviceSetupNotice is what an iOS app needs BEYOND the address.
+// deviceSetupNotice is what an iOS app needs BEYOND the address, and every line
+// of it was MEASURED on 2026-08-18 rather than reasoned about.
 //
-// This used to end with "the simulator needs neither — it shares this machine's
-// loopback". That was wrong, and measured wrong on 2026-08-18: ATS runs in the
-// simulator too, and since iOS 17 it no longer allows cleartext to an IP
-// ADDRESS by default, so NSAllowsLocalNetworking is needed there as well. The
-// sample app carries the key already, which is why nobody noticed.
+// The measurement, on an iOS 26.5 Simulator, with a bundle whose Info.plist
+// carries no ATS keys at all and one that carries NSAllowsLocalNetworking:
 //
-// The second key is a different gate and it is real: local network privacy
-// (iOS 14+) makes an app ASK before it may open a connection to a LAN address
-// at all. Apple's TN3179 says plainly that the simulator does not support it,
-// so that one can only be exercised on a device.
+//	http://192.168.1.119:65305/health   200, BOTH bundles
+//	http://neverssl.com/                -1022 ATS, BOTH bundles
+//
+// So ATS is switched on and enforced — the public-host refusal proves the probe
+// was subject to it — and it does NOT stand between an app and a cleartext
+// address on the private network. The key is what Apple documents for `.local`
+// names; for a LAN IP the Simulator needed nothing.
+//
+// This comment has now been wrong in both directions, which is why the numbers
+// are here. It first said "the simulator needs neither — it shares this
+// machine's loopback": right conclusion, wrong reason (a LAN address is not
+// loopback). It was then "corrected" to say the Simulator needs
+// NSAllowsLocalNetworking too, from a reading of the iOS 17 ATS notes and no
+// measurement — which the probe above refutes.
+//
+// A real DEVICE is a different gate and it is not ATS: local network privacy
+// (iOS 14+) makes the system ASK the person before an app may open a connection
+// to a LAN address, and it reads NSLocalNetworkUsageDescription to say why.
+// Apple's TN3179 states the Simulator does not support local network privacy,
+// so that half cannot be measured here and is reported as what it is.
 //
 // A certificate is not the alternative it looks like: with a locally-trusted CA
-// an app needs no Info.plist key at all, but 19 of 19 ATS permutations fail
+// an app needs no Info.plist key either, but 19 of 19 ATS permutations fail
 // against an UNtrusted root — there is no click-through in URLSession — so the
 // cost moves into every client's trust store instead. Measured; see
 // docs/paltimate/2026-08-18-envoy-everywhere/decisions.md D3.
 func deviceSetupNotice(w io.Writer) {
-	fmt.Fprintln(w, "  the app's Info.plist needs, on iOS 17 and later:")
-	fmt.Fprintln(w, "    NSAppTransportSecurity → NSAllowsLocalNetworking = YES")
-	fmt.Fprintln(w, "      (cleartext to an IP address is blocked without it — in the")
-	fmt.Fprintln(w, "       Simulator as well, not only on a device)")
+	fmt.Fprintln(w, "  from the Simulator this address needs no app configuration:")
+	fmt.Fprintln(w, "    cleartext to a private LAN address is allowed (measured on iOS 26.5);")
+	fmt.Fprintln(w, "    it is cleartext to a PUBLIC host that ATS refuses, key or no key.")
+	fmt.Fprintln(w, "  on a real device, add to the app's own Info.plist:")
 	fmt.Fprintln(w, "    NSLocalNetworkUsageDescription = \"<why your app talks to your Mac>\"")
-	fmt.Fprintln(w, "      (a real device also shows the user a permission alert; the")
-	fmt.Fprintln(w, "       Simulator cannot exercise that gate at all)")
+	fmt.Fprintln(w, "      (local network privacy asks the person once; the Simulator")
+	fmt.Fprintln(w, "       cannot exercise that gate at all — Apple TN3179)")
 }
