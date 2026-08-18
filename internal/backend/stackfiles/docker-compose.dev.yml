@@ -58,7 +58,9 @@
 # THREE, not two — the edge is one of them and it is the one that publishes the
 # only port, so a stack without it has no address at all. It is listed here
 # because this header is what a person follows for a manual `docker compose -f …
-# up -d`; `palbase start` refuses earlier and prints the same three commands.
+# up -d`. `palbase start` refuses earlier, but it stops at the FIRST image it
+# cannot find and prints that one command — so this is the only place all three
+# are written down together.
 #
 # `--target dev` is not optional: the production target carries neither the
 # bundler nor a TypeScript compiler. A runtime started from it REFUSES TO BOOT
