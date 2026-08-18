@@ -35,9 +35,16 @@ type stackService struct {
 // postgres last because it is the one they almost never mean. palsvc sits
 // between: platform errors (a refused key, a module that will not mount) surface
 // there and are worth seeing without asking twice.
+//
+// The EDGE comes after palsvc, and it is not decoration: it is where a request
+// that reached neither of them shows up. A 404 the route table decided, a
+// preflight CORS refused, a 429 from the unauthenticated-auth bucket — none of
+// those touch a controller or a module, so without this source the two a person
+// can read both say nothing happened.
 var stackServices = []stackService{
 	{"runtime", "runtime"},
 	{"palsvc", "palsvc"},
+	{"envoy", "envoy"},
 	{"postgres", "postgres"},
 }
 

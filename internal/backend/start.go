@@ -145,15 +145,15 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	pgPort, err := freePort()
-	if err != nil {
-		return err
-	}
-	// The ports live in the same file as the rest of the boot values, so a
+	// ONE port, because one container publishes. The database used to get one
+	// too; it is not on the host any more, so allocating a number for it would
+	// promise an address the stack does not open.
+	//
+	// The port lives in the same file as the rest of the boot values, so a
 	// restart lands on the SAME address: a URL written into .palbase/local.json,
 	// a generated client and an iOS build all point at a number, and picking a
 	// fresh one every start would silently break each of them.
-	settled, err := rememberPorts(envFile, httpPort, pgPort)
+	settled, err := rememberPort(envFile, httpPort)
 	if err != nil {
 		return err
 	}
@@ -171,7 +171,7 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 		}
 		host, bind = addr, "0.0.0.0"
 	}
-	url := fmt.Sprintf("http://%s:%d", host, settled.http)
+	url := fmt.Sprintf("http://%s:%d", host, settled)
 
 	project := "palbase-" + group
 	if reset {
@@ -261,7 +261,7 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 		return err
 	}
 	envFile := filepath.Join(state, ".env")
-	ports, err := readPorts(envFile)
+	httpPort, err := readPort(envFile)
 	if err != nil {
 		return err
 	}
@@ -279,7 +279,7 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 
 	// Volumes stay: a stop is not a reset. `palbase start --reset` is the verb
 	// that throws data away, and it says so.
-	if err := compose(ctx, stackDir, project, envFile, dir, "", ports, out, "down"); err != nil {
+	if err := compose(ctx, stackDir, project, envFile, dir, "", httpPort, out, "down"); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "▸ stopped")
@@ -428,10 +428,8 @@ func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error 
 	return nil
 }
 
-type ports struct{ http, pg int }
-
-// rememberPorts keeps the first pair this group was given, for as long as this
-// group exists.
+// rememberPort keeps the first address this group was given, for as long as
+// this group exists.
 //
 // It does NOT check whether the port is free, and that check is exactly what had
 // to go: the port is occupied precisely when OUR OWN stack is already up, which
@@ -439,37 +437,33 @@ type ports struct{ http, pg int }
 // xcconfig, app config and generated client written by an earlier `link` still
 // named the old number. A port genuinely taken by something else surfaces as
 // compose refusing to bind it, with the number in the message.
-func rememberPorts(envFile string, httpPort, pgPort int) (ports, error) {
-	existing, err := readPorts(envFile)
+func rememberPort(envFile string, httpPort int) (int, error) {
+	existing, err := readPort(envFile)
 	if err != nil {
-		return ports{}, err
+		return 0, err
 	}
-	if existing.http != 0 && existing.pg != 0 {
+	if existing != 0 {
 		return existing, nil
 	}
-	chosen := ports{http: httpPort, pg: pgPort}
 	if err := setEnvValues(envFile, map[string]string{
-		"PALBASE_HTTP_PORT": strconv.Itoa(chosen.http),
-		"PALBASE_PG_PORT":   strconv.Itoa(chosen.pg),
+		"PALBASE_HTTP_PORT": strconv.Itoa(httpPort),
 	}); err != nil {
-		return ports{}, err
+		return 0, err
 	}
-	return chosen, nil
+	return httpPort, nil
 }
 
-func readPorts(envFile string) (ports, error) {
-	httpPort, err := valueFromEnvFile(envFile, "PALBASE_HTTP_PORT")
+func readPort(envFile string) (int, error) {
+	raw, err := valueFromEnvFile(envFile, "PALBASE_HTTP_PORT")
 	if err != nil && !os.IsNotExist(err) {
-		return ports{}, nil
+		return 0, nil
 	}
-	pgPort, _ := valueFromEnvFile(envFile, "PALBASE_PG_PORT")
-	h, _ := strconv.Atoi(httpPort)
-	p, _ := strconv.Atoi(pgPort)
-	return ports{http: h, pg: p}, nil
+	h, _ := strconv.Atoi(raw)
+	return h, nil
 }
 
 // compose runs one docker compose verb against this group's stack.
-func compose(ctx context.Context, stackDir, project, envFile, projectDir, bind string, p ports, out io.Writer, args ...string) error {
+func compose(ctx context.Context, stackDir, project, envFile, projectDir, bind string, httpPort int, out io.Writer, args ...string) error {
 	full := append([]string{
 		"compose",
 		"-f", filepath.Join(stackDir, composeFile),
@@ -481,8 +475,7 @@ func compose(ctx context.Context, stackDir, project, envFile, projectDir, bind s
 	cmd.Dir = stackDir
 	cmd.Env = append(os.Environ(),
 		"PALBASE_PROJECT_DIR="+projectDir,
-		"PALBASE_HTTP_PORT="+strconv.Itoa(p.http),
-		"PALBASE_PG_PORT="+strconv.Itoa(p.pg),
+		"PALBASE_HTTP_PORT="+strconv.Itoa(httpPort),
 	)
 	// Empty means the compose file's own default, which is loopback. Only
 	// `--lan` widens it, and only for the HTTP port.
@@ -512,12 +505,20 @@ func (p *prefixed) Write(b []byte) (int, error) {
 }
 
 // waitForStack blocks until the stack answers, or says what is still missing.
+//
+// IT ASKS /readyz, NOT /healthz, and the difference is the whole point. The edge
+// answers /healthz ITSELF with a direct_response — it is a liveness route for
+// whatever is in front of the stack, and it returns 200 the moment envoy has a
+// listener, which is before palsvc has connected to a database or applied a
+// migration. Waiting on it would report a stack as ready and hand the person a
+// 503 on their first real request. /readyz routes to the palsvc cluster, so a
+// 200 there is palsvc saying so.
 func waitForStack(ctx context.Context, url string, limit time.Duration) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(limit)
 	var last string
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/healthz", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/readyz", nil)
 		if err != nil {
 			return err
 		}

@@ -217,20 +217,20 @@ func TestTheStackKeepsItsPortAcrossRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := rememberPorts(envFile, 51234, 55432)
+	first, err := rememberPort(envFile, 51234)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.http != 51234 || first.pg != 55432 {
-		t.Fatalf("first run chose %+v", first)
+	if first != 51234 {
+		t.Fatalf("first run chose %d", first)
 	}
 
-	second, err := rememberPorts(envFile, 60000, 60001)
+	second, err := rememberPort(envFile, 60000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second != first {
-		t.Errorf("a restart moved the stack from %+v to %+v", first, second)
+		t.Errorf("a restart moved the stack from %d to %d", first, second)
 	}
 }
 
@@ -372,24 +372,24 @@ func TestAStartOnARunningStackKeepsItsPort(t *testing.T) {
 	if err := os.WriteFile(envFile, []byte("PALBASE_ANON_KEY=x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first, err := rememberPorts(envFile, 51234, 55432)
+	first, err := rememberPort(envFile, 51234)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Bind it, which is what a running stack does.
-	held, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", first.http))
+	held, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", first))
 	if err != nil {
-		t.Skipf("could not bind %d to simulate a running stack: %v", first.http, err)
+		t.Skipf("could not bind %d to simulate a running stack: %v", first, err)
 	}
 	defer func() { _ = held.Close() }()
 
-	second, err := rememberPorts(envFile, 60000, 60001)
+	second, err := rememberPort(envFile, 60000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second != first {
-		t.Errorf("a start on a running stack moved it from %+v to %+v", first, second)
+		t.Errorf("a start on a running stack moved it from %d to %d", first, second)
 	}
 
 	// And ONE answer lives in the file: the writer and the reader must not
@@ -401,12 +401,12 @@ func TestAStartOnARunningStackKeepsItsPort(t *testing.T) {
 	if n := strings.Count(string(body), "PALBASE_HTTP_PORT="); n != 1 {
 		t.Errorf("the env file sets PALBASE_HTTP_PORT %d times:\n%s", n, body)
 	}
-	back, err := readPorts(envFile)
+	back, err := readPort(envFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if back != first {
-		t.Errorf("the reader answers %+v while the writer answered %+v", back, first)
+		t.Errorf("the reader answers %d while the writer answered %d", back, first)
 	}
 }
 

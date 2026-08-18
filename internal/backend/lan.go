@@ -85,14 +85,30 @@ func announceLAN(w io.Writer, url string) {
 	fmt.Fprintln(w, "  the database stays on 127.0.0.1, and `palbase start` without --lan puts the API back.")
 }
 
-// deviceSetupNotice is what an iOS app needs BEYOND the address, because the CLI
-// cannot supply it: ATS is read only from the app's own Info.plist, and a plist
-// this tool generates is inert for that purpose (measured 2026-08-17 on a real
-// device — the identical dict worked in the app's Info.plist and did nothing in
-// a bundled one).
+// deviceSetupNotice is what an iOS app needs BEYOND the address.
+//
+// This used to end with "the simulator needs neither — it shares this machine's
+// loopback". That was wrong, and measured wrong on 2026-08-18: ATS runs in the
+// simulator too, and since iOS 17 it no longer allows cleartext to an IP
+// ADDRESS by default, so NSAllowsLocalNetworking is needed there as well. The
+// sample app carries the key already, which is why nobody noticed.
+//
+// The second key is a different gate and it is real: local network privacy
+// (iOS 14+) makes an app ASK before it may open a connection to a LAN address
+// at all. Apple's TN3179 says plainly that the simulator does not support it,
+// so that one can only be exercised on a device.
+//
+// A certificate is not the alternative it looks like: with a locally-trusted CA
+// an app needs no Info.plist key at all, but 19 of 19 ATS permutations fail
+// against an UNtrusted root — there is no click-through in URLSession — so the
+// cost moves into every client's trust store instead. Measured; see
+// docs/paltimate/2026-08-18-envoy-everywhere/decisions.md D3.
 func deviceSetupNotice(w io.Writer) {
-	fmt.Fprintln(w, "  for a real device, the app's own Info.plist needs:")
+	fmt.Fprintln(w, "  the app's Info.plist needs, on iOS 17 and later:")
 	fmt.Fprintln(w, "    NSAppTransportSecurity → NSAllowsLocalNetworking = YES")
+	fmt.Fprintln(w, "      (cleartext to an IP address is blocked without it — in the")
+	fmt.Fprintln(w, "       Simulator as well, not only on a device)")
 	fmt.Fprintln(w, "    NSLocalNetworkUsageDescription = \"<why your app talks to your Mac>\"")
-	fmt.Fprintln(w, "  (the simulator needs neither — it shares this machine's loopback)")
+	fmt.Fprintln(w, "      (a real device also shows the user a permission alert; the")
+	fmt.Fprintln(w, "       Simulator cannot exercise that gate at all)")
 }
