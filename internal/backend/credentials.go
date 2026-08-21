@@ -75,6 +75,24 @@ const (
 	KindKey Kind = "key"
 )
 
+// keyPrefix is what every Palbase API key starts with: `pb_{ref}_{scope}{random}`.
+// A Bearer token can never begin with it — a JWT starts with its base64url
+// header — so the shape is a decision, not a guess.
+const keyPrefix = "pb_"
+
+// kindOf reads what a credential IS from the value itself.
+//
+// Shape-reading is used HERE and only here, at the one door where the kind is
+// otherwise unknown: a value out of the environment arrives without provenance.
+// Everywhere else the kind is recorded when the credential is stored, and that
+// record wins — see Credential's ordering.
+func kindOf(value string) Kind {
+	if strings.HasPrefix(value, keyPrefix) {
+		return KindKey
+	}
+	return KindPerson
+}
+
 // Credentials is one identity, and how to present it.
 type Credentials struct {
 	Value string `json:"value"`
@@ -124,10 +142,19 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	if stored.Value != "" {
 		return stored, SourceStore, nil
 	}
-	// A Dashboard-issued PAT is a person's, which is why this needs no kind: the
-	// variable exists for the headless case, and there is no headless key.
+	// THE KIND TRAVELS WITH THE VALUE, even out of the environment.
+	//
+	// This used to assume "there is no headless key" — true while the only cloud
+	// was one you signed in to. A v2 project's management surface is opened by
+	// that project's OWN secret key, and an agent holding one has nowhere else to
+	// put it: there is no browser to sign in with and no stack on this machine to
+	// read it from.
+	//
+	// Measured (2026-08-21, live): the same key opens
+	// `https://<ref>.v2.palbase.studio/v1/management/whoami` with `apikey`, and
+	// gets 401 as a Bearer. The credential was right; the PRESENTATION was wrong.
 	if v := strings.TrimSpace(os.Getenv(AccessTokenEnv)); v != "" {
-		return Credentials{Value: v, Kind: KindPerson}, SourceEnv, nil
+		return Credentials{Value: v, Kind: kindOf(v)}, SourceEnv, nil
 	}
 	return Credentials{}, "", fmt.Errorf(
 		// NOT "start writes the credential for you" any more: it does not write

@@ -176,3 +176,57 @@ func TestEachCredentialGoesInTheHeaderItsProjectAccepts(t *testing.T) {
 		}
 	}
 }
+
+// BİR PALBASE ANAHTARI, ORTAM DEĞİŞKENİNDEN GELSE BİLE BİR ANAHTARDIR.
+//
+// Çözümleyicinin yorumu "there is no headless key" diyordu ve v2-cloud'da bu
+// artık DOĞRU DEĞİL: bulut projesinin yönetim yüzeyini açan şey o projenin
+// KENDİ `service_role` anahtarıdır ve hedefe-göreli her komut onunla konuşur.
+//
+// ÖLÇÜLDÜ (2026-08-21, canlı): aynı anahtar `curl -H "apikey: …"` ile
+// `https://<ref>.v2.palbase.studio/v1/management/whoami` uçunu 200 ile açıyor;
+// CLI ise onu `Bearer` olarak yolladığı için 401 alıyordu. Kimlik doğruydu,
+// SUNULUŞU yanlıştı.
+func TestAPalbaseKeyFromTheEnvironmentIsAKeyNotABearer(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv(AccessTokenEnv, "pb_juvuev3mm_sABCDEFGHIJKLMNOPQRSTUV")
+
+	cred, source, err := Credential("https://juvuev3mm.v2.palbase.studio")
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	if source != SourceEnv {
+		t.Fatalf("source = %q, environment beklenirdi", source)
+	}
+	if cred.Kind != KindKey {
+		t.Fatalf("kind = %q — `pb_…` bir Palbase anahtarıdır ve `apikey` başlığında gider; "+
+			"Bearer olarak yollamak 401 demek", cred.Kind)
+	}
+
+	// VE SUNULUŞU DOĞRU OLMALI: kind'ın tek işi bu.
+	req, _ := http.NewRequest("GET", "https://juvuev3mm.v2.palbase.studio/v1/management/whoami", nil)
+	cred.Apply(req)
+	if got := req.Header.Get("apikey"); got != "pb_juvuev3mm_sABCDEFGHIJKLMNOPQRSTUV" {
+		t.Fatalf("apikey başlığı %q — anahtar oraya konmalı", got)
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Fatal("anahtar Authorization'a da konmuş — iki başlık iki kimlik demektir")
+	}
+}
+
+// Dashboard token'ı DEĞİŞMEDEN kalır: bu değişiklik bir ayrım ekliyor, bir
+// davranışı değiştirmiyor.
+func TestANonKeyTokenIsStillABearer(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv(AccessTokenEnv, "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.abc.def")
+
+	cred, _, err := Credential("https://app.example/project")
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	if cred.Kind != KindPerson {
+		t.Fatalf("kind = %q — Dashboard token'ı bir KİŞİnin kimliğidir ve Bearer'da gider", cred.Kind)
+	}
+}
