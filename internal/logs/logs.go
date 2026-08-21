@@ -8,12 +8,12 @@
 package logs
 
 import (
-	"os"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"maps"
+	"os"
 	"strings"
 	"time"
 
@@ -89,6 +89,22 @@ new lines every 2s — Ctrl-C to stop.
 			// the store and this command already knows which stack a checkout
 			// belongs to.
 			if target, err := backend.ReadTarget(); err == nil {
+				// BU MAKİNEDE OLMAYAN BİR YIĞININ KONTEYNERLERİ DE BURADA
+				// DEĞİL. Ayrım yokken bu komut bulut projesinde
+				// "No such container: <proje>-runtime-1" diyordu — hiç var
+				// olmayacak bir konteynerin adını vererek (canlıda ölçüldü
+				// 2026-08-21). Docker'ın hatası, sorunun ne olduğunu SÖYLEMİYOR.
+				//
+				// Uzak yığının yönetim yüzeyinde bir log işlemi HENÜZ YOK
+				// (ölçüldü: /v1/management/logs, /admin/logs → 404). Doğru
+				// davranış, olmayan bir şeyi aramak değil, ne olduğunu söylemek.
+				if !target.OnThisMachine() {
+					return fmt.Errorf(
+						"%s does not run on this machine, so its logs are not here either.\n"+
+							"A remote project's management surface has no log operation yet; "+
+							"`palbase start` brings a stack up here if you want to watch one.",
+						target.Describe())
+				}
 				if err := dockerAvailable(cmd.Context()); err != nil {
 					return err
 				}

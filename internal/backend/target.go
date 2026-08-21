@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,32 @@ type Target struct {
 	// Local is true when this target came from a running dev stack rather than
 	// from the committed file. Not serialised — it is a fact about right now.
 	Local bool `json:"-"`
+}
+
+// OnThisMachine says whether this target's stack runs HERE.
+//
+// The URL field's comment used to promise "a project running on this machine",
+// and that held while `link` could only name a local stack. `palbase link
+// https://<ref>.v2.palbase.studio` writes a REMOTE one, and a verb that reads
+// containers has to tell the two apart: measured 2026-08-21, `palbase logs` in a
+// cloud-linked checkout answered "No such container: palbase-todoapp-runtime-1"
+// — naming a container that was never going to exist.
+//
+// The host is PARSED, not searched for. `https://localhost.example.com` contains
+// "localhost" and is somebody else's machine.
+func (t Target) OnThisMachine() bool {
+	if t.Local {
+		return true
+	}
+	u, err := url.Parse(t.URL)
+	if err != nil {
+		return false
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // Describe is what every verb prints before it acts.
