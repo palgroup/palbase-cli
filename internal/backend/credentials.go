@@ -139,6 +139,9 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 		return Credentials{Value: key, Kind: KindKey}, SourceLocalStack, nil
 	}
 
+	// A HAND-WRITTEN entry wins over asking the cloud, deliberately: somebody
+	// who put a key in this file did so to override, and a resolver that
+	// silently preferred its own answer would make that file a decoration.
 	stored, err := readCredential(url)
 	if err != nil {
 		return Credentials{}, "", err
@@ -191,6 +194,21 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 }
 
 // StoreCredential records an identity for one target.
+//
+// NOTHING IN THIS CLI CALLS IT ANY MORE, and that is the design rather than an
+// oversight. Every credential now has an authority that answers on demand: a
+// stack on this machine holds its own key, a cloud project's key comes from the
+// control plane, and a headless run supplies one in the environment. Writing a
+// COPY of any of them was how a rotation left a machine holding a key it
+// believed was good.
+//
+// The read side stays: `~/.palbase/credentials.json` is the escape hatch for a
+// stack no authority here can be asked about — a self-hosted deployment on
+// somebody else's cloud. That file is maintained by hand, which is exactly why
+// nothing writes it automatically.
+//
+// Kept exported for that file's own tests and for `palbase logout`, which must
+// be able to remove what a person put there.
 //
 // The write is ATOMIC and the read-modify-write is done under a lock, because a
 // developer machine runs more than one of these at a time: two agents in two
