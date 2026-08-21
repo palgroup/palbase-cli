@@ -2,406 +2,141 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
+	"strings"
 	"testing"
-
-	"github.com/palgroup/palbase-cli/internal/transport"
-	"github.com/stretchr/testify/require"
 )
 
-// restAgainst spins an httptest server and returns a real REST transport
-// pointed at it (mirrors branch_test.go).
-func restAgainst(t *testing.T, h http.HandlerFunc) (REST, *httptest.Server) {
+type stubREST struct {
+	method, path string
+	body         any
+	reply        any
+}
+
+func (s *stubREST) Do(_ context.Context, method, path string, body, out any) error {
+	s.method, s.path, s.body = method, path, body
+	if out == nil || s.reply == nil {
+		return nil
+	}
+	raw, err := json.Marshal(s.reply)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func run(t *testing.T, rest *stubREST, stdin string, args ...string) (string, error) {
 	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	return transport.New(srv.URL, "tok_test"), srv
-}
-
-// The control plane answers with the VALUE, not a {"data": …} wrapper.
-func okData(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
-}
-
-func TestMigrateAllTenants_POSTsModule(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "reconcile-migrations-palnotify-1"})
-	})
-
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"migrate-all-tenants", "--module", "palnotify"})
+	cmd := Cmd(Resolvers{REST: func() REST { return rest }})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, http.MethodPost, gotMethod)
-	require.Equal(t, "/api/v1/admin/migrate-tenants", gotPath)
-	require.Equal(t, "palnotify", gotBody["module"])
-	require.Contains(t, out.String(), "reconcile-migrations-palnotify-1")
-}
-
-func TestMigrateAllTenants_JSONOutput(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "reconcile-migrations-paldocs-2"})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"migrate-all-tenants", "--module", "paldocs", "--json"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-	require.Contains(t, out.String(), `"workflowId": "reconcile-migrations-paldocs-2"`)
-}
-
-func TestMigrateAllTenants_InvalidModuleRejectedClientSide(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API for an invalid module")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"migrate-all-tenants", "--module", "bogus"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(stdin))
+	cmd.SetArgs(args)
 	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid --module")
-	// the error lists the valid modules so the user can self-correct
-	require.Contains(t, err.Error(), "palnotify")
-	require.Contains(t, err.Error(), "palauth")
+	return out.String(), err
 }
 
-func TestMigrateAllTenants_ModuleRequired(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API when --module is missing")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"migrate-all-tenants"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "module")
-}
-
-func TestMigrateAllTenants_403SurfacesAPIError(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(403)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": "forbidden", "error_description": "Platform-admin access required.",
-			"status": 403, "request_id": "req_e",
-		})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"migrate-all-tenants", "--module", "palnotify"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	var apiErr *transport.APIError
-	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, "forbidden", apiErr.Code)
-}
-
-func TestSetModuleImage_POSTsModuleAndImage(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "set-module-image-palnotify-1"})
-	})
-
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify", "--image", "registry.example/palnotify:abc123"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, http.MethodPost, gotMethod)
-	require.Equal(t, "/api/v1/admin/set-module-image", gotPath)
-	require.Equal(t, "palnotify", gotBody["module"])
-	require.Equal(t, "registry.example/palnotify:abc123", gotBody["image"])
-	require.Contains(t, out.String(), "set-module-image-palnotify-1")
-}
-
-func TestSetModuleImage_JSONOutput(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "set-module-image-paldocs-2"})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "paldocs", "--image", "registry.example/paldocs:def456", "--json"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-	require.Contains(t, out.String(), `"workflowId": "set-module-image-paldocs-2"`)
-}
-
-func TestSetModuleImage_InvalidModuleRejectedClientSide(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API for an invalid module")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "bogus", "--image", "registry.example/bogus:1"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid --module")
-	// the error lists the valid modules so the user can self-correct
-	require.Contains(t, err.Error(), "palnotify")
-	require.Contains(t, err.Error(), "palauth")
-}
-
-func TestSetModuleImage_EmptyImageRejectedClientSide(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API when --image is empty")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify", "--image", ""})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "image is required")
-}
-
-func TestSetModuleImage_ModuleRequired(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API when --module is missing")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--image", "registry.example/x:1"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "module")
-}
-
-func TestSetModuleImage_ImageRequired(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API when --image is missing")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "image")
-}
-
-// TestSetModuleImage_AcceptsBackendRuntime locks the fix: set-module-image pins
-// CHANNEL-only modules (no migrate-Job), so backend-runtime — the shared-isolate
-// runtime image — must reach the API, not be rejected client-side. Mirrors the
-// mgmt API's broader `moduleImageName` enum. Revert set-module-image to validate
-// against `validModules` and this goes red (the pre-fix bug: could never pin it).
-func TestSetModuleImage_AcceptsBackendRuntime(t *testing.T) {
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusAccepted, map[string]any{"workflowId": "set-module-image-backend-runtime-1"})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "backend-runtime", "--image", "registry.example/backend-runtime:sha-abc@sha256:def"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-	require.Equal(t, "backend-runtime", gotBody["module"])
-	require.Contains(t, out.String(), "set-module-image-backend-runtime-1")
-}
-
-// TestMigrateAllTenants_RejectsBackendRuntime locks the distinction: backend-runtime
-// has NO migrate-Job, so migrate-all-tenants must reject it client-side (only
-// image-pinning accepts it).
-func TestMigrateAllTenants_RejectsBackendRuntime(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("must not call the API — backend-runtime has no migrations")
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"migrate-all-tenants", "--module", "backend-runtime"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid --module")
-}
-
-func TestSetModuleImage_403SurfacesAPIError(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(403)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": "forbidden", "error_description": "Platform-admin access required.",
-			"status": 403, "request_id": "req_e",
-		})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"set-module-image", "--module", "palnotify", "--image", "registry.example/palnotify:1"})
-	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	require.Error(t, err)
-	var apiErr *transport.APIError
-	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, "forbidden", apiErr.Code)
-}
-
-func TestRotateKey_POSTsRefIDAndAUUIDOperationID(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		okData(w, http.StatusOK, map[string]any{
-			"id": "key_new", "environment_ref": "todoappm8p6zm",
-			"scope": "s", "plaintext": "pb_todoappm8p6zm_sABCDEFGHIJKLMNOPQRST",
-		})
-	})
-
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, http.MethodPost, gotMethod)
-	require.Equal(t, "/api/v1/admin/rotate-environment-key", gotPath)
-	require.Equal(t, "todoappm8p6zm", gotBody["ref"])
-	require.Equal(t, "key_old", gotBody["id"])
-	// The server validates this as a UUID and derives the durable mutation id
-	// from it. Sending the 32-hex idempotency-key shape here would be a 400 —
-	// asserted on the wire because the call site compiles either way.
-	require.Regexp(t,
-		`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
-		gotBody["operationId"])
-
-	require.Contains(t, out.String(), "key_new")
-	require.Contains(t, out.String(), "pb_todoappm8p6zm_sABCDEFGHIJKLMNOPQRST")
-}
-
-// A response naming a different environment must fail loudly. Printing it would
-// hand the operator another tenant's service_role secret during an incident —
-// the worst possible moment for a silent swap.
-func TestRotateKey_RejectsAResponseForAnotherEnvironment(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		okData(w, http.StatusOK, map[string]any{
-			"id": "key_new", "environment_ref": "otherenvm", "scope": "s",
-			"plaintext": "pb_otherenvm_sABCDEFGHIJKLMNOPQRST",
-		})
-	})
-
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not match the requested environment")
-	require.NotContains(t, out.String(), "pb_otherenvm", "a foreign secret must never be printed")
-}
-
-func TestRotateKey_RequiresRefAndID(t *testing.T) {
-	for _, args := range [][]string{
-		{"rotate-key", "--id", "key_old"},
-		{"rotate-key", "--ref", "todoappm8p6zm"},
-	} {
-		called := false
-		c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-			called = true
-			okData(w, http.StatusOK, map[string]any{})
-		})
-		cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-		cmd.SetArgs(args)
-		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetErr(&bytes.Buffer{})
-		cmd.SilenceErrors, cmd.SilenceUsage = true, true
-		require.Error(t, cmd.Execute(), "%v must not be accepted", args)
-		require.False(t, called, "an incomplete rotate must never reach the server")
+// A fleet roll is the widest blast radius this CLI has. The confirmation must
+// be something nobody satisfies by reflex: typing the image means having read
+// WHICH image.
+func TestFleetUpgradeRefusesAMismatchedConfirmation(t *testing.T) {
+	rest := &stubREST{}
+	_, err := run(t, rest, "yes\n", "fleet", "upgrade", "acr.example/stack:sha-abc")
+	if err == nil {
+		t.Fatal("a reflex confirmation was accepted")
+	}
+	if rest.method != "" {
+		t.Fatalf("the roll was sent anyway: %s %s", rest.method, rest.path)
 	}
 }
 
-// NewOperationID must be a real v4 UUID and must not repeat: the server keys the
-// durable rotation off it, so a constant would make two separate incidents share
-// one operation.
-func TestNewOperationID_IsAUniqueV4(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 200; i++ {
-		id := transport.NewOperationID()
-		require.Regexp(t,
-			`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, id)
-		require.False(t, seen[id], "operation id repeated: %s", id)
-		seen[id] = true
+func TestFleetUpgradeSendsImageAndParallelism(t *testing.T) {
+	rest := &stubREST{reply: UpgradeAccepted{JobID: "job_1"}}
+	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--yes", "--parallel", "6")
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if rest.method != "POST" || rest.path != "/v1/cloud/fleet/upgrade" {
+		t.Fatalf("wrong call: %s %s", rest.method, rest.path)
+	}
+	sent, _ := rest.body.(map[string]any)
+	if sent["image"] != "acr.example/stack:sha-abc" {
+		t.Fatalf("image did not reach the wire: %#v", rest.body)
+	}
+	if fmt.Sprint(sent["parallel"]) != "6" {
+		t.Fatalf("parallelism did not reach the wire: %#v", rest.body)
+	}
+	if !strings.Contains(out, "job_1") {
+		t.Fatalf("the job id is missing:\n%s", out)
 	}
 }
 
-// A rotation can COMMIT and still answer with an error — the reply is only the
-// delivery. The server keys the durable mutation off operationId, so resuming
-// with the SAME id joins the rotation that already happened, while a fresh id
-// starts another one and mints a second key.
-func TestRotateKey_ResumesTheSameOperationWhenGivenOne(t *testing.T) {
-	const op = "3f1c6a20-9a1e-4a26-9f0a-2c9a1e4a2690"
-	var seen []any
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		seen = append(seen, body["operationId"])
-		okData(w, http.StatusOK, map[string]any{
-			"id": "key_new", "environment_ref": "todoappm8p6zm",
-			"scope": "s", "plaintext": "pb_todoappm8p6zm_sABCDEFGHIJKLMNOPQRST",
-		})
-	})
-
-	for i := 0; i < 2; i++ {
-		cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-		cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old",
-			"--operation-id", op, "--json"})
-		cmd.SetOut(&bytes.Buffer{})
-		require.NoError(t, cmd.Execute())
+// The plane returns a job id and NOTHING else. Printing a tenant count it never
+// sent is how an operator was told "Rolling 0 tenant(s) (0 already there)"
+// while a fleet of fourteen sat there — a lie with a tabwriter.
+func TestFleetUpgradeInventsNoCounts(t *testing.T) {
+	rest := &stubREST{reply: map[string]string{"jobId": "job_2"}}
+	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--yes")
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
 	}
-
-	require.Equal(t, []any{op, op}, seen,
-		"a resumed rotation must carry the id it was given, not a fresh one")
+	if strings.Contains(out, "0 tenant") || strings.Contains(out, "0 already") {
+		t.Fatalf("printed a count the server never sent:\n%s", out)
+	}
 }
 
-func TestRotateKey_RejectsANonUUIDOperationID(t *testing.T) {
-	called := false
-	c, _ := restAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		okData(w, http.StatusOK, map[string]any{})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old",
-		"--operation-id", "not-a-uuid"})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "must be a UUID")
-	require.False(t, called, "a malformed id must not reach the server")
+func TestSweepRefusesAMismatchedConfirmation(t *testing.T) {
+	rest := &stubREST{}
+	if _, err := run(t, rest, "ok\n", "sweep"); err == nil {
+		t.Fatal("a reflex confirmation was accepted")
+	}
+	if rest.method != "" {
+		t.Fatal("the sweep was sent anyway")
+	}
 }
 
-// The id is worthless to the operator if it dies with the request.
-func TestRotateKey_FailureNamesTheOperationToResumeWith(t *testing.T) {
-	c, _ := restAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": "mutation_committed_delivery_failed", "request_id": "req_x",
-		})
-	})
-	cmd := NewCommand(Resolvers{REST: func() REST { return c }})
-	cmd.SetArgs([]string{"rotate-key", "--ref", "todoappm8p6zm", "--id", "key_old"})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+// An empty sweep is the healthy answer and must READ as one — a bare blank line
+// looks like the command failed.
+func TestSweepSaysSoWhenThereIsNothingToDo(t *testing.T) {
+	out, err := run(t, &stubREST{reply: []SweepEntry{}}, "", "sweep", "--yes")
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if !strings.Contains(out, "Nothing to sweep") {
+		t.Fatalf("an empty sweep printed nothing useful:\n%s", out)
+	}
+}
 
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--operation-id ")
-	require.Regexp(t,
-		`--operation-id [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`,
-		err.Error())
-	require.Contains(t, err.Error(), "rotate the key again")
+func TestSweepReportsWhatItDeletedAndWhy(t *testing.T) {
+	rest := &stubREST{reply: []SweepEntry{
+		{Cell: "pbc-cell-01", Ref: "abandoned1", Action: "deleted", Reason: "unknown-ref"},
+		{Cell: "pbc-cell-02", Ref: "keepthis1", Action: "kept", Reason: "raced-create"},
+	}}
+	out, err := run(t, rest, "", "sweep", "--yes")
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	for _, want := range []string{"abandoned1", "deleted", "unknown-ref", "keepthis1", "kept", "raced-create"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("%q missing from:\n%s", want, out)
+		}
+	}
+}
+
+// The v1 verbs are gone: they addressed a plane of many modules with per-module
+// images. v2 runs ONE stack image per tenant, so there is nothing per-module
+// left to point anywhere.
+func TestSurfaceCarriesOnlyTheV2OperatorVerbs(t *testing.T) {
+	cmd := Cmd(Resolvers{})
+	var names []string
+	for _, c := range cmd.Commands() {
+		names = append(names, c.Name())
+	}
+	got := fmt.Sprint(names)
+	if got != "[fleet sweep]" {
+		t.Fatalf("unexpected surface: %s", got)
+	}
 }

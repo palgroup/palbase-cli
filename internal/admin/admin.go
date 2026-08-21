@@ -1,315 +1,176 @@
-// Package admin wires `palbase admin ...` platform-administration
-// subcommands over the Management API REST transport. These are
-// fleet-wide operations, not per-project — the server gates them behind a
-// platform-admin allowlist (PALBASE_PLATFORM_ADMIN_USER_IDS); a
-// non-admin credential gets a 403.
+// Package admin wires `palbase admin` over the v2 cloud's operator surface.
 //
-// migrate-all-tenants re-applies one module's migrations to EVERY active
-// tenant DB, so old tenants don't drift when a module ships a new
-// migration. It POSTs /api/v1/admin/migrate-tenants, which starts the
-// orchestrator's ReconcileTenantMigrationsWorkflow, and prints the
-// returned workflow id. The operation is idempotent (goose /
-// golang-migrate skip already-applied versions) and fail-isolated
-// server-side (one tenant's failure doesn't abort the batch).
+// Two verbs, because the v2 control plane has two operator fiats: roll the
+// fleet onto a new stack image, and delete tenants the ledger does not know
+// about. The v1 verbs this replaced (`migrate-all-tenants`, `schema-cutover`,
+// `set-module-image`, `rotate-key`) belonged to a plane of many modules with
+// per-module images; v2 runs ONE stack image per tenant, so there is nothing
+// per-module left to point anywhere.
+//
+// BOTH ARE GATED SERVER-SIDE and fail closed: the control plane refuses anyone
+// not on its operator list, and refuses EVERYONE when that list is empty. The
+// confirmation prompts here are for the person, not the gate — a verb that
+// replaces every pod in the fleet, or deletes a tenant's disk, should be hard
+// to run by accident even when you are allowed to.
 package admin
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"regexp"
-	"slices"
-	"strings"
+	"text/tabwriter"
 
-	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
-// validModules are the modules the platform actively reconciles — the same set
-// the orchestrator schedules a 6-hourly reconcile for (schedules.reconcileModules).
-// The parent repo's "module reconcile surface parity" check fails when this, the
-// mgmt API's `migrateTenantsInput` enum, and that list disagree.
-//
-// It stopped at palauth while the orchestrator had gained palsvc, so there was
-// NO supported way to reconcile the schemas palsvc owns — including messaging's,
-// after the absorb moved them there. Discovering the fleet was two migrations
-// behind did not help: the command to repair it refused the module.
-//
-// palmessaging is deliberately NOT here even though the orchestrator can map it:
-// its activity runs the standalone messaging-server image, which the absorb
-// stopped building. palsvc reconciles that schema now.
-var validModules = []string{"palauth", "palnotify", "paldocs", "palflags", "palsvc"}
-
-// imageModules are the modules whose container image can be pinned on the
-// module-image channel. A superset of validModules: channel-only modules
-// (backend-runtime, schema-diff-proxy) have no reconcile of their own but DO
-// have a pinnable image. The parity check keeps this and the mgmt API's
-// `moduleImageName` enum identical.
-//
-// palmessaging is NOT pinnable: the absorb deleted the messaging-server build
-// workflow, so no new immutable `sha-<40hex>@sha256:<64hex>` is ever published
-// for it — the only ref the channel accepts. Offering the module would let an
-// operator try to pin an image that cannot exist.
-var imageModules = []string{"palnotify", "paldocs", "palflags", "palauth", "palsvc", "backend-runtime", "schema-diff-proxy"}
-
-// REST is the subset of the Management-API transport the admin commands
-// use. transport.Client satisfies it; tests substitute a stub.
+// REST is the control-plane transport subset these commands use.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
 }
 
-// Resolvers lets the cobra wiring read the lazily-built REST client from
-// main.go's PersistentPreRunE — mirrors branch.Resolvers' pattern.
+// Resolvers carries the lazily-built REST client.
 type Resolvers struct {
 	REST func() REST
-	// Studio is the tRPC client. schema-cutover reads an environment's schema
-	// through the same procedure `palbase db plan` uses, so it needs the
-	// project-scoped client rather than the fleet-operator REST one.
-	Studio func() Studio
 }
 
-// NewCommand returns the `palbase admin` parent command. Hidden: it is
-// platform-admin only (the server 403s everyone else) — no reason to
-// advertise it in every customer's --help.
-func NewCommand(r Resolvers) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:    "admin",
-		Short:  "Platform administration commands (platform-admin only)",
-		Hidden: true,
-	}
-	cmd.AddCommand(migrateAllTenantsCmd(r.REST))
-	cmd.AddCommand(setModuleImageCmd(r.REST))
-	cmd.AddCommand(rotateKeyCmd(r.REST))
-	cmd.AddCommand(schemaCutoverCmd(r))
-	return cmd
-}
-
-// migrateAllTenantsCmd wires `palbase admin migrate-all-tenants --module=X`.
-// It validates the module client-side (fast feedback), then POSTs to the
-// admin endpoint and surfaces the orchestrator workflow id.
-func migrateAllTenantsCmd(rest func() REST) *cobra.Command {
-	var (
-		module  string
-		jsonOut bool
-	)
-	cmd := &cobra.Command{
-		Use:   "migrate-all-tenants",
-		Short: "Re-apply a module's migrations to every existing tenant",
-		Long: "Forward-only, idempotent fleet migration reconcile.\n\n" +
-			"Re-applies the chosen module's latest migrations across every active\n" +
-			"tenant DB so old tenants don't drift behind a newly shipped migration.\n" +
-			"Tenants already at HEAD are a no-op. The work runs server-side as an\n" +
-			"orchestrator workflow; this command starts it and prints its id.\n\n" +
-			"Platform-admin only (server-side allowlist).",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if !isValidModule(module, validModules) {
-				return fmt.Errorf("invalid --module %q (one of: %s)", module, moduleList(validModules))
-			}
-			out := cmd.OutOrStdout()
-
-			var handle struct {
-				WorkflowID string `json:"workflowId"`
-			}
-			body := map[string]string{"module": module}
-			if err := rest().Do(cmd.Context(), http.MethodPost, "/api/v1/admin/migrate-tenants", body, &handle); err != nil {
-				return err
-			}
-
-			if jsonOut {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(handle)
-			}
-			if _, err := fmt.Fprintf(out, "✓ fleet migration reconcile started for %q\n", module); err != nil {
-				return err
-			}
-			_, err := fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
-			return err
-		},
-	}
-	cmd.Flags().StringVar(&module, "module", "", "Module to migrate ("+moduleList(validModules)+")")
-	_ = cmd.MarkFlagRequired("module")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	return cmd
-}
-
-// setModuleImageRequest is the typed POST body for set-module-image:
-// which module to pin and the container image reference to pin it to.
-type setModuleImageRequest struct {
-	Module string `json:"module"`
-	Image  string `json:"image"`
-}
-
-// setModuleImageCmd wires `palbase admin set-module-image --module=X --image=Y`.
-// It validates the module client-side (fast feedback), then POSTs to the
-// admin endpoint and surfaces the orchestrator workflow id.
-func setModuleImageCmd(rest func() REST) *cobra.Command {
-	var (
-		module  string
-		image   string
-		jsonOut bool
-	)
-	cmd := &cobra.Command{
-		Use:   "set-module-image",
-		Short: "Pin a module's container image across the fleet",
-		Long: "Pin a module's container image fleet-wide.\n\n" +
-			"Sets the module's per-tenant migrate-Job image and its system image\n" +
-			"(the control-pg module-image channel) to the given reference, then\n" +
-			"triggers a canary→fleet migration reconcile so every active tenant\n" +
-			"converges onto the pinned image. The work runs server-side as an\n" +
-			"orchestrator workflow; this command starts it and prints its id.\n\n" +
-			"Platform-admin only (server-side allowlist).",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if !isValidModule(module, imageModules) {
-				return fmt.Errorf("invalid --module %q (one of: %s)", module, moduleList(imageModules))
-			}
-			if image == "" {
-				return fmt.Errorf("image is required")
-			}
-			out := cmd.OutOrStdout()
-
-			var handle struct {
-				WorkflowID string `json:"workflowId"`
-			}
-			body := setModuleImageRequest{Module: module, Image: image}
-			if err := rest().Do(cmd.Context(), http.MethodPost, "/api/v1/admin/set-module-image", body, &handle); err != nil {
-				return err
-			}
-
-			if jsonOut {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(handle)
-			}
-			if _, err := fmt.Fprintf(out, "✓ module image pinned for %q → %s\n", module, image); err != nil {
-				return err
-			}
-			_, err := fmt.Fprintf(out, "  workflow: %s\n", handle.WorkflowID)
-			return err
-		},
-	}
-	cmd.Flags().StringVar(&module, "module", "", "Module to pin ("+moduleList(imageModules)+")")
-	_ = cmd.MarkFlagRequired("module")
-	cmd.Flags().StringVar(&image, "image", "", "Container image reference to pin")
-	_ = cmd.MarkFlagRequired("image")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	return cmd
-}
-
-func isValidModule(m string, list []string) bool {
-	return slices.Contains(list, m)
-}
-
-// moduleList renders a module set as a pipe-separated list for help text and
-// error messages (e.g. "palnotify|paldocs|palflags|palauth").
-func moduleList(list []string) string {
-	return strings.Join(list, "|")
-}
-
-// operationIDPattern is the server's own shape for a durable operation id: it
-// validates the field as a UUID, so a malformed --operation-id is caught here
-// rather than as a 400 after the round trip.
-var operationIDPattern = regexp.MustCompile(
-	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-// rotateKeyRequest is the typed POST body for rotate-environment-key. The
-// operationId is a UUID because the server derives the durable mutation id from
-// it: a retry carrying the same value joins the SAME rotation rather than
-// minting a second key.
-type rotateKeyRequest struct {
-	Ref         string `json:"ref"`
-	ID          string `json:"id"`
-	OperationID string `json:"operationId"`
-}
-
-// rotateKeyCmd wires `palbase admin rotate-key --ref=X --id=Y`.
+// UpgradeAccepted is what the plane reports when a roll starts: a job id, and
+// nothing else.
 //
-// This is the incident path for a key the CUSTOMER surface cannot touch. The
-// customer rotate filters on scope='c' AND visibility='customer', so a leaked
-// service_role key — the one that bypasses a tenant's RLS — had no remedy at
-// all: not in the CLI, not in the customer API, and deleting the tenant burns
-// its ref permanently. The capability landed in Studio's tRPC first, meaning a
-// browser; this is the same capability where an operator actually is.
-//
-// Platform-admin only. The server 403s everyone else — the allowlist is the
-// gate, not this command's obscurity.
-func rotateKeyCmd(rest func() REST) *cobra.Command {
-	var (
-		ref         string
-		keyID       string
-		operationID string
-		jsonOut     bool
-	)
+// It once carried Total and Skipped too, and printed them — but the plane never
+// sends either, so they decoded to zero and the CLI told the operator
+// "Rolling 0 tenant(s) (0 already there)" while a fleet of fourteen sat there.
+// Numbers the server did not send are not a summary; they are a lie with a
+// tabwriter.
+type UpgradeAccepted struct {
+	JobID string `json:"jobId"`
+}
+
+// SweepEntry is one tenant the sweeper considered.
+type SweepEntry struct {
+	Cell   string `json:"cell"`
+	Ref    string `json:"ref"`
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+}
+
+// Cmd returns the `palbase admin` parent command.
+func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "rotate-key",
-		Short: "Rotate ANY of an environment's keys, including the internal service_role one",
-		Long: "Rotate one of an environment's API keys as the platform.\n\n" +
-			"Unlike `palbase apikey rotate`, this reaches keys the customer surface\n" +
-			"cannot: the internal service_role key that bypasses the tenant's RLS.\n" +
-			"Use it when such a key leaks — the replacement is minted and the old one\n" +
-			"revoked in a single durable operation, and the well-known KV slot every\n" +
-			"platform consumer reads is republished before the old one is retired.\n\n" +
-			"The new secret is printed ONCE. Platform-admin only (server-side allowlist).",
+		Use:   "admin",
+		Short: "Fleet operations (operator only)",
+	}
+	cmd.AddCommand(fleetCmd(r), sweepCmd(r))
+	return cmd
+}
+
+func fleetCmd(r Resolvers) *cobra.Command {
+	cmd := &cobra.Command{Use: "fleet", Short: "Operate the tenant fleet"}
+	cmd.AddCommand(fleetUpgradeCmd(r))
+	return cmd
+}
+
+func fleetUpgradeCmd(r Resolvers) *cobra.Command {
+	var parallel int
+	var yes bool
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "upgrade <image>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Roll every tenant onto a new stack image",
+		Long: `Roll the fleet onto a new stack image.
+
+One tenant goes first and has to come back healthy before the rest follow; the
+rest roll in batches. Each tenant's pod is replaced — its disk and its identity
+stay — so a tenant is briefly unavailable while its own pod restarts.
+
+The image must come from this fleet's own registry. The plane refuses any other,
+which is the point: a fleet-wide roll is the widest blast radius there is.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			out := cmd.OutOrStdout()
-			var rotated struct {
-				ID             string `json:"id"`
-				EnvironmentRef string `json:"environment_ref"`
-				Name           string `json:"name"`
-				Scope          string `json:"scope"`
-				IsDefault      bool   `json:"is_default"`
-				Plaintext      string `json:"plaintext"`
-				LookupPrefix   string `json:"lookup_prefix"`
+			image := args[0]
+			if !yes {
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"This replaces the pod of EVERY tenant in the fleet with:\n  %s\nType the image to confirm: ", image)
+				var typed string
+				if _, err := fmt.Fscanln(cmd.InOrStdin(), &typed); err != nil {
+					return fmt.Errorf("aborted")
+				}
+				if typed != image {
+					return fmt.Errorf("aborted — %q does not match %q", typed, image)
+				}
 			}
-			// A fresh id per invocation is right for a NEW rotation, and wrong for
-			// a retry: the server keys the durable mutation off this value, so a
-			// second run with a new id mints a SECOND key. That matters because a
-			// rotation can commit and still answer with an error — the reply is
-			// only the delivery. --operation-id is how the operator resumes the
-			// one that already happened.
-			op := operationID
-			if op == "" {
-				op = transport.NewOperationID()
-			} else if !operationIDPattern.MatchString(op) {
-				return fmt.Errorf("--operation-id must be a UUID, got %q", op)
-			}
-			body := rotateKeyRequest{Ref: ref, ID: keyID, OperationID: op}
-			if err := rest().Do(cmd.Context(), http.MethodPost,
-				"/api/v1/admin/rotate-environment-key", body, &rotated); err != nil {
-				// Carry the id out with the failure. Without it the operator has
-				// nothing to resume with and the only available move is a fresh
-				// rotation — which is exactly the wrong one if this call already
-				// committed.
-				return fmt.Errorf("%w\n  retry with --operation-id %s to resume THIS rotation; "+
-					"a new id would rotate the key again", err, op)
-			}
-			if rotated.EnvironmentRef != ref {
-				return fmt.Errorf(
-					"rotate-key response environment_ref %q does not match the requested environment %q",
-					rotated.EnvironmentRef, ref)
+			var out UpgradeAccepted
+			body := map[string]any{"image": image, "parallel": parallel}
+			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/fleet/upgrade", body, &out); err != nil {
+				return err
 			}
 			if jsonOut {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(rotated)
+				return encodeJSON(cmd.OutOrStdout(), out)
 			}
-			if _, err := fmt.Fprintf(out, "✓ rotated %s → %s (%s)\n", keyID, rotated.ID, ref); err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintf(out, "  %s\n", rotated.Plaintext); err != nil {
-				return err
-			}
-			_, err := fmt.Fprintln(out, "  (shown once — the previous secret is revoked)")
-			return err
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"Rolling the fleet onto %s\njob %s\n\nOne tenant goes first and has to come back healthy before the rest follow.\n",
+				image, out.JobID)
+			return nil
 		},
 	}
-	cmd.Flags().StringVar(&ref, "ref", "", "Environment ref (e.g. todoappm8p6zm)")
-	_ = cmd.MarkFlagRequired("ref")
-	cmd.Flags().StringVar(&keyID, "id", "", "Id of the key to rotate")
-	_ = cmd.MarkFlagRequired("id")
-	cmd.Flags().StringVar(&operationID, "operation-id", "",
-		"Resume a rotation that already started (UUID). Omit to begin a new one")
+	cmd.Flags().IntVar(&parallel, "parallel", 4, "how many tenants roll at once after the canary")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
+}
+
+func sweepCmd(r Resolvers) *cobra.Command {
+	var yes bool
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "sweep",
+		Args:  cobra.NoArgs,
+		Short: "Delete tenants the ledger does not know about",
+		Long: `Delete cell tenants that no project in the ledger claims.
+
+These are leftovers: a create that failed after the cell had already been told,
+or a delete that never finished. Sweeping removes the pod AND its disk, so it
+re-checks the ledger for each one immediately before deleting — a project
+created while the sweep was running must not be mistaken for a leftover.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !yes {
+				fmt.Fprint(cmd.OutOrStdout(),
+					"This deletes unclaimed tenants and their disks. Type 'sweep' to confirm: ")
+				var typed string
+				if _, err := fmt.Fscanln(cmd.InOrStdin(), &typed); err != nil {
+					return fmt.Errorf("aborted")
+				}
+				if typed != "sweep" {
+					return fmt.Errorf("aborted")
+				}
+			}
+			var entries []SweepEntry
+			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/sweep", nil, &entries); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(cmd.OutOrStdout(), entries)
+			}
+			if len(entries) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "Nothing to sweep — every tenant in every cell is in the ledger.")
+				return nil
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "CELL\tREF\tACTION\tREASON")
+			for _, e := range entries {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Cell, e.Ref, e.Action, e.Reason)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	return cmd
+}
+
+func encodeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
