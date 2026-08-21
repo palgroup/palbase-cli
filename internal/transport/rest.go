@@ -9,8 +9,7 @@
 //
 // Auth model (D-32 / RFC 9449): every request carries
 //
-//	Authorization: DPoP <pat>
-//	DPoP: <proof JWT signed by the keyring ECDSA P-256 key, fresh per request>
+//	Authorization: Bearer <session token>
 //
 // The PAT is a DPoP-bound Personal Access Token; the proof's htm/htu match
 // the actual request and its `ath` binds to the PAT. palauth (reached by
@@ -38,8 +37,6 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
-
-	"github.com/palgroup/palbase-cli/internal/auth"
 )
 
 // NewIdempotencyKey mints a fresh key for one logical mutation. crypto/rand —
@@ -75,29 +72,26 @@ func NewOperationID() string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
-// Client issues DPoP-bound requests to the Management API.
+// Client issues authenticated requests to the control plane.
 type Client struct {
-	// BaseURL is the Management API origin (e.g. https://api.dev.palbase.studio).
-	// Paths passed to Do are appended verbatim.
+	// BaseURL is the control plane origin (e.g. https://api.v2.palbase.studio).
 	BaseURL string
-	// Key signs each request's DPoP proof. Required.
-	Key *auth.DPoPKey
-	// PAT is the DPoP-bound Personal Access Token presented as the
-	// `Authorization: DPoP <pat>` credential. Empty = not configured;
-	// Do fails closed with an actionable error.
-	PAT string
-	// HTTPClient is overridable for tests; defaults to a 120s-timeout client.
+	// Token is the session bearer token `palbase login` stored. Empty = not
+	// signed in; every request fails closed rather than going out anonymous.
+	Token string
+	// HTTPClient is the transport. Nil uses a default with a sane timeout.
 	HTTPClient *http.Client
 }
 
 // New builds a Client. baseURL is the Management API origin; key is the
 // keyring DPoP key; pat is the DPoP-bound management PAT (may be empty,
 // in which case Do fails closed).
-func New(baseURL string, key *auth.DPoPKey, pat string) *Client {
+// New builds a client for the control plane at baseURL, authenticating with the
+// session bearer token.
+func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:    strings.TrimRight(baseURL, "/"),
-		Key:        key,
-		PAT:        pat,
+		Token:      token,
 		HTTPClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
@@ -117,13 +111,6 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("%s (%d): %s", e.Code, e.Status, e.Description)
 	}
 	return fmt.Sprintf("%s (%d)", e.Code, e.Status)
-}
-
-// okEnvelope is the success wrapper every 200/201/202 emits.
-// The real payload lives under `data`; request_id is correlation only.
-type okEnvelope struct {
-	Data      json.RawMessage `json:"data"`
-	RequestID string          `json:"request_id"`
 }
 
 // errorEnvelope is the failure shape.
@@ -192,54 +179,47 @@ func (c *Client) doWithIdempotency(ctx context.Context, method, path string, bod
 	if out == nil {
 		return nil
 	}
-	var env okEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("decode response envelope: %w (body=%s)", err, truncate(raw, 240))
-	}
-	if len(env.Data) == 0 || string(env.Data) == "null" {
+	// SUCCESS IS THE VALUE ITSELF — there is no `data` wrapper.
+	//
+	// Measured live (2026-08-21): the v2 control plane answers
+	// GET /v1/cloud/projects with a bare `[]`, and a decoder expecting a
+	// wrapper failed with "cannot unmarshal array into okEnvelope". Worse was
+	// the shape that DID parse: `create` returned an object, the wrapper's
+	// absent `data` decoded to nothing, and the command cheerfully printed
+	// "Created  (, cell )" — a success message about a project it never read.
+	//
+	// Failures stay enveloped (error / error_description / status /
+	// request_id); that path is handled above.
+	if string(raw) == "null" {
 		return nil
 	}
-	if err := json.Unmarshal(env.Data, out); err != nil {
-		return fmt.Errorf("decode response data: %w", err)
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("decode response: %w (body=%s)", err, truncate(raw, 240))
 	}
 	return nil
 }
 
-// newSignedRequest builds a Management-API request with the DPoP-bound
-// credential and a fresh per-request proof attached. The proof's htm/htu
-// equal this request's method + URL (RFC 9449 §4.2) and `ath` binds it to
-// the PAT — identical signing for every verb (JSON Do or multipart upload),
-// so the single source of truth for auth lives here. Fails closed when the
-// key or PAT is missing.
+// newSignedRequest builds an authenticated control-plane request.
+//
+// One place, every verb: JSON calls and multipart uploads alike come through
+// here, so "how does this CLI authenticate" has exactly one answer.
+//
+// Fails closed when there is no token. Sending the request anonymously would
+// earn a 401 that reads like a server problem rather than the truth, which is
+// that nobody signed in.
 func (c *Client) newSignedRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	if c.Key == nil {
-		return nil, fmt.Errorf("management API: no dpop key — run `palbase login` to provision one")
-	}
-	if c.PAT == "" {
-		return nil, fmt.Errorf("management API: not authenticated — run `palbase login` " +
-			"(or, for headless use, export PALBASE_ACCESS_TOKEN with a Dashboard-issued " +
-			"DPoP-bound PAT)")
+	if c.Token == "" {
+		return nil, fmt.Errorf("not authenticated — run `palbase login` " +
+			"(or, for headless use, export PALBASE_ACCESS_TOKEN)")
 	}
 
 	method = strings.ToUpper(method)
-	fullURL := c.BaseURL + path
-
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-
-	req.Header.Set("Authorization", "DPoP "+c.PAT)
-	proof, err := c.Key.NewProof(auth.ProofOptions{
-		HTTPMethod:  method,
-		URL:         fullURL,
-		AccessToken: c.PAT,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("sign dpop proof: %w", err)
-	}
-	req.Header.Set("DPoP", proof)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
 	return req, nil
 }
 

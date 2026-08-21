@@ -1,14 +1,17 @@
-// Package project wires `palbase project create|list|use|status|delete` over
-// the Management API v2 (`/api/v2/projects*`, Authorization: DPoP <pat> +
-// per-request proof).
+// Package project wires `palbase project` over the v2 cloud's control plane
+// (`/v1/cloud/projects*`, Authorization: Bearer <session token>).
 //
-// A Project is the SaaS control-plane aggregate and CLI link anchor — members,
-// apps, ONE repository, and its Environment set. It carries no runtime ref,
-// tier, or region: entitlement lives on its Organization and runtime identity
-// lives only on its Environments.
+// A project in the v2 cloud IS a tenant: one microVM, one ref, one address.
+// There is no Organization above it and no Environment set below it — the v1
+// shape carried both, and the CLI's own rules record why that was misleading:
+// the real entity was always the project, and "environment" was a presentation
+// label. A branch that needs its own database is its own project.
 //
-// Organization is NOT a CLI context (spec §7.3): create targets the caller's
-// server-side default Organization, and there is no `--organization`.
+// So the verbs are flat. `create` mints a tenant and hands back the address
+// `palbase link` wants; `list`, `status` and `delete` name it by ref. There is
+// no `use`: the linked target is what a directory acts on, and `palbase link`
+// already writes it. Two mechanisms for "which project is this directory" is
+// how a person ends up pushing to the wrong one.
 package project
 
 import (
@@ -17,48 +20,92 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"text/tabwriter"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
-// REST is the Management-API transport subset the project commands use.
+// REST is the control-plane transport subset these commands use.
 // *transport.Client satisfies it; tests substitute a stub.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
 }
 
-// Resolvers lets the cobra wiring read the lazily-built REST client and the
-// shared selection resolver from main.go's PersistentPreRunE.
-type Resolvers struct {
-	REST      func() REST
-	Selection func() *selection.Resolver
+// Bootstrapper reports the cloud's own facts — used to build a tenant address
+// out of a ref without the CLI hard-coding a domain per environment.
+type Bootstrapper interface {
+	TenantDomain(ctx context.Context) (string, error)
+}
 
-	// Materialize downloads an Environment's deployed bundle into dir. `create`
-	// uses it to bring down the template the server just seeded as version 1,
-	// which is why there is no local scaffolder: the code a new project starts
-	// from is the code that is actually deployed, not a second copy the CLI
-	// carries. Injected (rather than imported) to keep this package off the
-	// backend package's Studio client.
-	Materialize func(ctx context.Context, environmentRef, dir string, out io.Writer) error
+// Resolvers lets the cobra wiring read lazily-built dependencies from main.go's
+// PersistentPreRunE.
+type Resolvers struct {
+	REST  func() REST
+	Cloud func() Bootstrapper
+}
+
+// Project is one tenant as the control plane reports it.
+type Project struct {
+	Ref   string `json:"ref"`
+	Slot  int    `json:"slot"`
+	Cell  string `json:"cell"`
+	Phase string `json:"phase"`
 }
 
 // Cmd returns the `palbase project` parent command.
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
-		Short: "Create, list, select, inspect, and delete Palbase projects",
+		Short: "Create, list, inspect, and delete Palbase cloud projects",
 	}
 	cmd.AddCommand(
 		createCmd(r),
 		listCmd(r),
-		useCmd(r),
 		statusCmd(r),
-		connectRepoCmd(r),
-		disconnectRepoCmd(r),
 		deleteCmd(r),
 	)
+	return cmd
+}
+
+func createCmd(r Resolvers) *cobra.Command {
+	var tier string
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Create a project — one tenant, one address",
+		Long: `Create a project on the Palbase cloud.
+
+Provisioning is synchronous: the command returns once the tenant is running, so
+the address it prints is one you can link immediately.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var p Project
+			body := map[string]any{"name": args[0], "tier": tier}
+			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/projects", body, &p); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(cmd.OutOrStdout(), p)
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Created %s (%s, cell %s)\n", p.Ref, p.Phase, p.Cell)
+
+			// The address is the point of the whole command, so it is built
+			// here rather than left for the person to assemble. The domain
+			// comes from the cloud itself: hard-coding one would make this
+			// binary wrong on every deployment but the one it was built for.
+			domain, err := r.Cloud().TenantDomain(cmd.Context())
+			if err != nil || domain == "" {
+				fmt.Fprintf(out, "\nLink it with: palbase link https://%s.<your-cloud-domain>\n", p.Ref)
+				return nil
+			}
+			fmt.Fprintf(out, "\nLink it with:\n  palbase link https://%s.%s\n", p.Ref, domain)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&tier, "tier", "free", "capacity tier for the new project")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 
@@ -67,28 +114,23 @@ func listCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Args:  cobra.NoArgs,
-		Short: "List the projects you can see",
+		Short: "List the projects you own",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var rows []selection.Project
-			if err := r.REST().Do(cmd.Context(), http.MethodGet, "/api/v2/projects", nil, &rows); err != nil {
+			var rows []Project
+			if err := r.REST().Do(cmd.Context(), http.MethodGet, "/v1/cloud/projects", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), rows)
 			}
 			if len(rows) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No projects yet — create one with `palbase project create`.")
+				fmt.Fprintln(cmd.OutOrStdout(), "No projects yet — create one with `palbase project create <name>`.")
 				return nil
 			}
-			selected, _ := r.Selection().ProjectID(cmd.Context())
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "\tID\tNAME\tCREATED")
+			fmt.Fprintln(tw, "REF\tPHASE\tCELL")
 			for _, p := range rows {
-				marker := " "
-				if p.ID == selected {
-					marker = "*"
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", marker, p.ID, p.Name, day(p.CreatedAt))
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", p.Ref, p.Phase, p.Cell)
 			}
 			return tw.Flush()
 		},
@@ -97,108 +139,26 @@ func listCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-// useCmd selects a Project for this directory and writes config v2. It also
-// selects the Project's production Environment, so a fresh `project use` is
-// immediately usable — a Project always has exactly one production Environment.
-func useCmd(r Resolvers) *cobra.Command {
-	var jsonOut bool
-	cmd := &cobra.Command{
-		Use:   "use <projectId>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Select the project this directory acts on (writes .palbase/config.json)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			projectID := args[0]
-			ctx := cmd.Context()
-
-			detail, err := selection.GetProject(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			envs, err := selection.ListEnvironments(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			target, ok := selection.DefaultEnvironment(envs)
-			if !ok {
-				return fmt.Errorf("project %s has no visible environment yet — it may still be provisioning (`palbase project status %s`)", projectID, projectID)
-			}
-			provider, err := detail.RepositoryProvider()
-			if err != nil {
-				return err
-			}
-
-			cfg, _ := selection.Load("")
-			if cfg == nil {
-				cfg = &selection.Config{}
-			}
-			selection.ApplySelection(cfg, selection.Selection{
-				ProjectID: projectID, Environment: target, RepositoryProvider: provider,
-			})
-			if err := selection.Save("", cfg); err != nil {
-				return err
-			}
-			if err := selection.EnsureGitignored(".gitignore"); err != nil {
-				return fmt.Errorf("update .gitignore: %w", err)
-			}
-			if jsonOut {
-				return encodeJSON(cmd.OutOrStdout(), cfg)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ selected project %s (%s)\n", detail.Name, projectID)
-			fmt.Fprintf(cmd.OutOrStdout(), "  environment: %s (%s)\n", target.Slug, target.Ref)
-			fmt.Fprintf(cmd.OutOrStdout(), "  repository:  %s\n", provider)
-			return nil
-		},
-	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	return cmd
-}
-
-// statusCmd reports the SELECTED project (or --project): the product, its
-// repository, and every Environment under it. It is the "where am I" command.
 func statusCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "status",
-		Args:  cobra.NoArgs,
-		Short: "Show the selected project, its repository, and its environments",
+		Use:   "status <ref>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Show one project's placement and phase",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			projectID, err := r.Selection().ProjectID(ctx)
-			if err != nil {
-				return err
-			}
-			detail, err := selection.GetProject(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			envs, err := selection.ListEnvironments(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			provider, err := detail.RepositoryProvider()
-			if err != nil {
+			var p Project
+			path := "/v1/cloud/projects/" + url.PathEscape(args[0])
+			if err := r.REST().Do(cmd.Context(), http.MethodGet, path, nil, &p); err != nil {
 				return err
 			}
 			if jsonOut {
-				return encodeJSON(cmd.OutOrStdout(), struct {
-					Project      selection.ProjectDetail `json:"project"`
-					Environments []selection.Environment `json:"environments"`
-				}{detail, envs})
+				return encodeJSON(cmd.OutOrStdout(), p)
 			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "project:     %s (%s)\n", detail.Name, detail.ID)
-			fmt.Fprintf(out, "role:        %s\n", detail.Role)
-			fmt.Fprintf(out, "repository:  %s", provider)
-			if detail.GithubRepo != "" {
-				fmt.Fprintf(out, " (%s)", detail.GithubRepo)
-			}
-			fmt.Fprintln(out)
-			fmt.Fprintln(out, "environments:")
-			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "  SLUG\tREF\tKIND\tSTATUS")
-			for _, e := range envs {
-				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", e.Slug, e.Ref, e.Kind, e.Status)
-			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintf(tw, "Ref\t%s\n", p.Ref)
+			fmt.Fprintf(tw, "Phase\t%s\n", p.Phase)
+			fmt.Fprintf(tw, "Cell\t%s\n", p.Cell)
+			fmt.Fprintf(tw, "Slot\t%d\n", p.Slot)
 			return tw.Flush()
 		},
 	}
@@ -206,13 +166,40 @@ func statusCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-// day trims an RFC3339 timestamp to its date. A value we cannot parse is shown
-// verbatim rather than as a bogus zero-date.
-func day(ts string) string {
-	if len(ts) >= 10 {
-		return ts[:10]
+func deleteCmd(r Resolvers) *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "delete <ref>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Permanently delete a project and its data",
+		Long: `Delete a project.
+
+This removes the tenant, its microVM and its disk. There is no undo and no
+grace period, which is why it asks first.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref := args[0]
+			if !yes {
+				// A confirmation nobody can accidentally satisfy: typing the
+				// ref means having read which project this is.
+				fmt.Fprintf(cmd.OutOrStdout(), "This deletes %s and its data permanently.\nType the ref to confirm: ", ref)
+				var typed string
+				if _, err := fmt.Fscanln(cmd.InOrStdin(), &typed); err != nil {
+					return fmt.Errorf("aborted")
+				}
+				if typed != ref {
+					return fmt.Errorf("aborted — %q does not match %q", typed, ref)
+				}
+			}
+			path := "/v1/cloud/projects/" + url.PathEscape(ref)
+			if err := r.REST().Do(cmd.Context(), http.MethodDelete, path, nil, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s\n", ref)
+			return nil
+		},
 	}
-	return ts
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
+	return cmd
 }
 
 func encodeJSON(w io.Writer, v any) error {

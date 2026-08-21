@@ -123,13 +123,19 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 
 // GOLDEN: `palbase project --help` — the canonical Project surface.
 //
-// connect-repo/disconnect-repo are the "bring your own repo" pair: `create
-// --repo` lets Palbase create one, these attach a repository that already
-// exists. Without them a repo Palbase did not create had no way in, and its
-// pushes deployed nothing.
+// Four verbs, because in the v2 cloud a project IS a tenant: one microVM, one
+// ref, one address. What left, and why:
+//
+//   - `use` — the linked target is what a directory acts on, and `palbase link`
+//     already writes it. Two mechanisms for "which project is this directory"
+//     is how somebody pushes to the wrong one.
+//   - `connect-repo` / `disconnect-repo` — repository-driven deploys are a v1
+//     platform feature with no v2 surface behind them. A verb that reaches a
+//     route the cloud does not serve is worse than an absent verb: it fails
+//     late, in the person's terminal, after they believed it worked.
 func TestGolden_ProjectSurface(t *testing.T) {
 	require.Equal(t,
-		[]string{"connect-repo", "create", "delete", "disconnect-repo", "list", "status", "use"},
+		[]string{"create", "delete", "list", "status"},
 		subcommands(t, "project"))
 }
 

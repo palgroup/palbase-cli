@@ -27,31 +27,32 @@ type Endpoints struct {
 	PublicHost string
 }
 
-// All OIDC endpoints live on the Studio apex host. The platform fronts
-// palauth with ingress-nginx + Kong rules that forward /oauth and
-// /.well-known to palauth's cluster-internal service, so the CLI only
-// needs one public host — the same one where users log in. Palauth's
-// OIDC provider is configured with ExternalIssuer matching this origin
-// so JWT `iss` claims and the discovery document agree.
+// THE CLI SERVES THE V2 CLOUD. Both modes name a v2 control plane; there is no
+// v1 target left in this binary.
+//
+// One public host per environment, and that is the design rather than a
+// shortcut: the control plane terminates every surface a client needs — the
+// management API, the stack's own auth module, and OIDC discovery — behind a
+// single door with an explicit allowlist. A second origin would be a second
+// thing to keep in sync, and the day they drifted a client would authenticate
+// against one issuer and call another.
+//
+// PublicHost is the TENANT suffix, not the gateway. A tenant with ref
+// "j06bwtuum" answers at j06bwtuum.v2.palbase.studio while the control plane
+// answers at api.v2.palbase.studio. Collapsing the two would send every
+// management call to a tenant that has never heard of it.
 var endpointsByMode = map[Mode]Endpoints{
 	ModeProd: {
-		Studio:      "https://palbase.studio",
-		Auth:        "https://palbase.studio",
+		Studio:      "https://api.palbase.studio",
+		Auth:        "https://api.palbase.studio",
 		PlatformAPI: "https://api.palbase.studio",
 		PublicHost:  "palbase.studio",
 	},
 	ModeDev: {
-		// Real Studio dev hostname is `app.dev.palbase.studio`; the
-		// `dev.palbase.studio` apex doesn't resolve. palauth (OAuth +
-		// /.well-known) is fronted by the same host so Auth points
-		// there too. The canonical Management API has its own Kong-fronted
-		// origin; keeping PlatformAPI on that host makes dev exercise the same
-		// routing and DPoP `htu` contract as production. Environment endpoints are
-		// at <ref>.dev.palbase.studio.
-		Studio:      "https://app.dev.palbase.studio",
-		Auth:        "https://app.dev.palbase.studio",
-		PlatformAPI: "https://api.dev.palbase.studio",
-		PublicHost:  "dev.palbase.studio",
+		Studio:      "https://api.v2.palbase.studio",
+		Auth:        "https://api.v2.palbase.studio",
+		PlatformAPI: "https://api.v2.palbase.studio",
+		PublicHost:  "v2.palbase.studio",
 	},
 }
 

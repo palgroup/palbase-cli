@@ -1,21 +1,20 @@
 package auth
 
 import (
+	"bufio"
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"html/template"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // Config holds the auth configuration for CLI.
@@ -62,383 +61,181 @@ func NewClient(cfg Config, output io.Writer) *Client {
 	}
 }
 
-//go:embed callback.html
-var callbackPageHTML string
-
-// callbackTmpl renders the browser tab that follows the OAuth redirect. It is
-// html/template rather than fmt on purpose: callbackView.Reason carries the
-// identity provider's error_description straight off the query string, and
-// contextual escaping is what stops a crafted redirect from turning the CLI's
-// own loopback listener into a script host.
-var callbackTmpl = template.Must(template.New("callback").Parse(callbackPageHTML))
-
-// callbackView is the entire browser-facing vocabulary of the login callback.
-// The wording tracks the CLI's own — it says "logged in", so this page does
-// too — so the tab and the terminal name one action, not two.
-type callbackView struct {
-	Status   string // eyebrow and tab title, e.g. "Login complete"
-	Headline string
-	Lede     string
-	Reason   string // what went wrong; omitted on success
-	Meta     []callbackMetaRow
-	Failed   bool // switches the accent from moss to red
-}
-
-type callbackMetaRow struct{ Label, Value string }
-
-// writeCallbackPage renders view into the redirected browser tab. Every
-// outcome carries the mode footer, because that is the one thing the tab
-// cannot otherwise tell you: which credential set the CLI just filled.
-func (c *Client) writeCallbackPage(w http.ResponseWriter, view callbackView) {
-	if c.Cfg.Mode != "" {
-		view.Meta = append(view.Meta, callbackMetaRow{Label: "mode", Value: c.Cfg.Mode})
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// A render failure leaves the user on a blank tab with no idea whether the
-	// CLI got the session, so it belongs in the terminal rather than in /dev/null.
-	if err := callbackTmpl.Execute(w, view); err != nil {
-		fmt.Fprintf(c.Output, "(could not render callback page: %s)\n", err)
-	}
-}
-
-// failedCallback builds the shared failure view. Only the reason differs
-// between the ways a redirect can go wrong; the instruction is always the same,
-// so it is written once here.
-func failedCallback(reason string) callbackView {
-	return callbackView{
-		Failed:   true,
-		Status:   "Login failed",
-		Headline: "Login didn't complete.",
-		Lede:     "Nothing was saved. Return to your terminal and run palbase login again.",
-		Reason:   reason,
-	}
-}
-
-// Login performs browser-based OAuth login with Authorization Code + PKCE.
+// Login signs in to the v2 control plane.
+//
+// The browser flow this replaced (Authorization Code + PKCE, DPoP-bound) spoke
+// to a pre-registered `palbase-cli` OAuth client with five loopback redirect
+// URIs seeded into the v1 platform. The v2 control plane is a Palbase stack in
+// its own right: it HAS an OIDC provider — discovery even advertises a
+// device-authorization endpoint — but no client is registered there, so that
+// door is shut until one is.
+//
+// What is open, and proven end-to-end through the public gateway, is the
+// stack's own /auth/login. Using it keeps a recorded decision intact: the
+// management identity comes from the stack's OWN auth module, never a second
+// identity system.
 func (c *Client) Login(ctx context.Context) error {
-	pkce, err := GeneratePKCE()
+	email, password, err := c.askForCredentials()
 	if err != nil {
-		return fmt.Errorf("generate PKCE: %w", err)
+		return err
 	}
-
-	state, err := GenerateState()
-	if err != nil {
-		return fmt.Errorf("generate state: %w", err)
-	}
-
-	// Provision the DPoP key BEFORE the authorize request: palauth's
-	// AuthorizeDPoPJKTMiddleware (RFC 9449 §10) reads the `dpop_jkt` query
-	// param and pre-binds the issued access token to that thumbprint via
-	// cnf.jkt. The key MUST exist now — minting it after the token exchange
-	// (the old order) left the token unbound, so the Management-API REST
-	// client's DPoP proofs never matched and every call was rejected.
-	// EnsureDPoPKey is load-or-create (idempotent), so a returning user
-	// keeps the same stable jkt their Dashboard PAT is bound to.
-	key, err := EnsureDPoPKey(c.Cfg.Mode)
-	if err != nil {
-		return fmt.Errorf("provision DPoP key: %w", err)
-	}
-
-	// OAuth 2.1 requires exact-match redirect URIs, so the server-side
-	// client must have every loopback port we might bind to pre-registered.
-	// Palauth's palbase-cli client is seeded with 54321..54325; try them
-	// in order and fail the login if all five are in use (which realistically
-	// means five concurrent login flows on one machine — rare).
-	listeners, port, err := bindLoopback(LoopbackCallbackPorts)
-	if err != nil {
-		return fmt.Errorf("start callback server: %w", err)
-	}
-	defer func() {
-		for _, listener := range listeners {
-			_ = listener.Close()
-		}
-	}()
-
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
-
-	authURL := fmt.Sprintf("%s/oauth/authorize?%s",
-		c.Cfg.AuthURL,
-		url.Values{
-			"response_type":         {"code"},
-			"client_id":             {c.Cfg.ClientID},
-			"redirect_uri":          {redirectURI},
-			"code_challenge":        {pkce.Challenge},
-			"code_challenge_method": {"S256"},
-			"state":                 {state},
-			"scope":                 {"openid profile email offline_access"},
-			// Sender-constrain the access token to our DPoP key at issue time.
-			"dpop_jkt": {key.Thumbprint()},
-		}.Encode(),
-	)
-
-	type callbackResult struct {
-		code string
-		err  error
-	}
-	resultCh := make(chan callbackResult, 1)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-
-		if errParam := q.Get("error"); errParam != "" {
-			desc := q.Get("error_description")
-			// error_description is optional (RFC 6749 §4.1.2.1); fall back to the
-			// code so the tab never shows an empty reason box.
-			reason := desc
-			if reason == "" {
-				reason = errParam
-			}
-			c.writeCallbackPage(w, failedCallback(reason))
-			resultCh <- callbackResult{err: fmt.Errorf("auth error: %s — %s", errParam, desc)}
-			return
-		}
-
-		if q.Get("state") != state {
-			c.writeCallbackPage(w, failedCallback(
-				"State mismatch — this redirect was not started by the terminal that is waiting."))
-			resultCh <- callbackResult{err: fmt.Errorf("state mismatch")}
-			return
-		}
-
-		code := q.Get("code")
-		if code == "" {
-			c.writeCallbackPage(w, failedCallback(
-				"The provider redirected without an authorization code."))
-			resultCh <- callbackResult{err: fmt.Errorf("no authorization code")}
-			return
-		}
-
-		c.writeCallbackPage(w, callbackView{
-			Status:   "Login complete",
-			Headline: "You're logged in.",
-			Lede:     "Your terminal has the session. You can close this tab.",
-		})
-		resultCh <- callbackResult{code: code}
-	})
-
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	for _, listener := range listeners {
-		go func() {
-			// ponytail: report, do NOT abort. One login is served by several
-			// loopback listeners (v4 + v6), so failing the whole flow on the
-			// first one's Accept error would kill a login the others could still
-			// complete. Silencing it instead — which is what `_ =` here would
-			// do — turns a dead listener into a 120s wait ending in "timed out",
-			// with nothing saying why. ErrServerClosed is the normal path: the
-			// deferred Close below produces one per listener.
-			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				_, _ = fmt.Fprintf(c.Output, "(callback listener %s stopped: %s)\n", listener.Addr(), err)
-			}
-		}()
-	}
-	defer func() { _ = srv.Close() }()
-
-	fmt.Fprintln(c.Output, "Opening browser for login...")
-	fmt.Fprintf(c.Output, "If your browser doesn't open, visit:\n  %s\n", authURL)
-	if err := c.OpenBrowser(authURL); err != nil {
-		fmt.Fprintf(c.Output, "(could not auto-open browser: %s)\n", err)
-	}
-
-	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			return result.err
-		}
-		creds, err := c.exchangeCode(ctx, result.code, redirectURI, pkce.Verifier, key)
-		if err != nil {
-			return err
-		}
-		if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
-			return err
-		}
-		// Email may be empty (userinfo returns only sub) — fall back to the id.
-		who := creds.User.Email
-		if who == "" {
-			who = creds.User.ID
-		}
-		fmt.Fprintf(c.Output, "✓ Logged in as %s (mode=%s)\n", who, c.Cfg.Mode)
-
-		// The access token is now DPoP-bound to `key` (its jkt went into
-		// Surface the DPoP key thumbprint so the user can see what's been
-		// provisioned. The login token is itself DPoP-bound (the jkt went
-		// into the authorize request above), so it doubles as the
-		// management credential — no PAT is needed for interactive use.
-		// A Dashboard-issued PAT bound to this jkt is still useful for
-		// headless contexts (CI, AI agents, no browser).
-		fmt.Fprintf(c.Output, "  DPoP key ready (jkt=%s)\n", key.Thumbprint())
-		return nil
-
-	case <-time.After(120 * time.Second):
-		return fmt.Errorf("login timed out — no response from browser within 120 seconds")
-
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return c.signIn(ctx, email, password, false)
 }
 
-func (c *Client) exchangeCode(ctx context.Context, code, redirectURI, codeVerifier string, key *DPoPKey) (*Credentials, error) {
-	data := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"client_id":     {c.Cfg.ClientID},
-		"code_verifier": {codeVerifier},
-	}
-
-	tokenURL := c.Cfg.AuthURL + "/oauth/token"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		tokenURL, strings.NewReader(data.Encode()))
+// SignUp creates an account on this control plane and signs in with it.
+//
+// It exists because there is no other door: the v2 cloud has no dashboard yet,
+// so a first account can only be born here.
+func (c *Client) SignUp(ctx context.Context) error {
+	email, password, err := c.askForCredentials()
 	if err != nil {
-		return nil, fmt.Errorf("create token request: %w", err)
+		return err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return c.signIn(ctx, email, password, true)
+}
 
-	// RFC 9449 §10: the authorize request pre-bound this DPoP key
-	// (dpop_jkt query param); the /oauth/token call MUST present a matching
-	// proof or palauth refuses to mint a bound token (storage.go enforces
-	// VerifyBinding). Without this header the access token would come back
-	// without cnf.jkt and silently fail every later DPoP-only API call.
-	// No ATH yet — the access token is what we're asking for.
-	proof, err := key.NewProof(ProofOptions{HTTPMethod: http.MethodPost, URL: tokenURL})
+func (c *Client) signIn(ctx context.Context, email, password string, create bool) error {
+	plane := c.plane()
+
+	boot, err := plane.Bootstrap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dpop proof for token exchange: %w", err)
+		return err
 	}
-	req.Header.Set("DPoP", proof)
 
-	resp, err := c.HttpClient.Do(req)
+	verb := plane.SignIn
+	if create {
+		verb = plane.SignUp
+	}
+	// The gate answers the first attempt with a proof-of-work challenge, so
+	// this call can take a moment. Saying so beats a silent pause the person
+	// reads as a hang.
+	fmt.Fprintf(c.Output, "Signing in to %s…\n", c.Cfg.AuthURL)
+	creds, err := verb(ctx, boot, email, password)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("token exchange failed (%d): %s", resp.StatusCode, string(body))
+		return err
 	}
 
-	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("parse token response: %w", err)
+	if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
+		return fmt.Errorf("save credentials: %w", err)
+	}
+	who := creds.User.Email
+	if who == "" {
+		who = email
+	}
+	fmt.Fprintf(c.Output, "Signed in as %s\n", who)
+	return nil
+}
+
+// plane is this CLI's view of the control plane, speaking through the client's
+// own transport so tests reach their fake and never the network.
+func (c *Client) plane() *CloudClient {
+	return NewCloudClientWith(c.Cfg.AuthURL, c.HttpClient)
+}
+
+// askForCredentials reads an email and password from the terminal.
+//
+// PALBASE_EMAIL / PALBASE_PASSWORD skip the prompt for a headless run. Without
+// them a non-TTY run fails loudly rather than hanging on a read that will never
+// return.
+func (c *Client) askForCredentials() (string, string, error) {
+	email := strings.TrimSpace(os.Getenv("PALBASE_EMAIL"))
+	password := os.Getenv("PALBASE_PASSWORD")
+	if email != "" && password != "" {
+		return email, password, nil
 	}
 
-	userInfo, err := c.fetchUserInfo(ctx, tokenResp.AccessToken, key)
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", "", fmt.Errorf("stdin is not a terminal — set PALBASE_EMAIL and PALBASE_PASSWORD for a headless sign-in")
+	}
+
+	if email == "" {
+		fmt.Fprint(c.Output, "Email: ")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return "", "", fmt.Errorf("read email: %w", err)
+		}
+		email = strings.TrimSpace(line)
+	}
+	if email == "" {
+		return "", "", fmt.Errorf("no email given — aborting")
+	}
+
+	if password == "" {
+		fmt.Fprint(c.Output, "Password: ")
+		raw, err := term.ReadPassword(fd)
+		fmt.Fprintln(c.Output)
+		if err != nil {
+			return "", "", fmt.Errorf("read password: %w", err)
+		}
+		password = strings.TrimRight(string(raw), "\r\n")
+	}
+	if password == "" {
+		return "", "", fmt.Errorf("no password given — aborting")
+	}
+	return email, password, nil
+}
+
+// RefreshTokens trades the stored refresh token for a fresh session.
+//
+// The v2 control plane rotates: POST /auth/token/refresh returns a new access
+// token AND a new refresh token, and the old one stops working. Keeping the
+// previous refresh token on a response that carried a new one would mean the
+// NEXT refresh presents a token the server has already retired — a sign-out
+// that arrives half an hour later for no reason the person can see.
+func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Credentials, error) {
+	if creds.RefreshToken == "" {
+		return nil, fmt.Errorf("no refresh token stored — run: palbase login")
+	}
+
+	boot, err := c.plane().Bootstrap(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Credentials{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-		User:         UserInfo{ID: userInfo.Sub, Email: userInfo.Email},
-	}, nil
-}
-
-func (c *Client) fetchUserInfo(ctx context.Context, accessToken string, key *DPoPKey) (*UserInfoResponse, error) {
-	userinfoURL := c.Cfg.AuthURL + "/oauth/userinfo"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userinfoURL, nil)
+	payload, err := json.Marshal(map[string]string{"refresh_token": creds.RefreshToken})
 	if err != nil {
-		return nil, fmt.Errorf("create userinfo request: %w", err)
+		return nil, err
 	}
-	proof, err := key.NewProof(ProofOptions{
-		HTTPMethod:  http.MethodGet,
-		URL:         userinfoURL,
-		AccessToken: accessToken,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("dpop proof for userinfo: %w", err)
-	}
-	req.Header.Set("Authorization", "DPoP "+accessToken)
-	req.Header.Set("DPoP", proof)
-
-	resp, err := c.HttpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch userinfo: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// A bare "(401)" says nothing and sends the next person reading it
-		// into the server logs. palauth answers here with either a plaintext
-		// OP error ("access token invalid") or an RFC 9449 challenge naming
-		// the exact binding that failed — both belong in the error.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		detail := strings.TrimSpace(string(body))
-		if challenge := resp.Header.Get("WWW-Authenticate"); challenge != "" {
-			detail += " (" + challenge + ")"
-		}
-		return nil, fmt.Errorf("userinfo failed (%d): %s", resp.StatusCode, detail)
-	}
-
-	var info UserInfoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("parse userinfo: %w", err)
-	}
-	return &info, nil
-}
-
-// RefreshTokens refreshes an expired access token. The refreshed access
-// token must remain DPoP-bound to the keyring key, so we present a DPoP
-// proof on the /oauth/token call just like exchangeCode does — palauth
-// carries cnf.jkt forward from the prior token's binding.
-func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Credentials, error) {
-	data := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {creds.RefreshToken},
-		"client_id":     {c.Cfg.ClientID},
-	}
-
-	tokenURL := c.Cfg.AuthURL + "/oauth/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		tokenURL, strings.NewReader(data.Encode()))
+		c.Cfg.AuthURL+"/auth/token/refresh", bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("create refresh request: %w", err)
+		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	// Load the keyring DPoP key so the proof's jkt matches what the original
-	// token was bound to. If the user wiped the keyring after login, refresh
-	// is the right place to fail loudly rather than mint an unbound token.
-	key, err := LoadDPoPKey(c.Cfg.Mode)
-	if err != nil {
-		return nil, fmt.Errorf("load dpop key for refresh: %w", err)
-	}
-	proof, err := key.NewProof(ProofOptions{HTTPMethod: http.MethodPost, URL: tokenURL})
-	if err != nil {
-		return nil, fmt.Errorf("dpop proof for refresh: %w", err)
-	}
-	req.Header.Set("DPoP", proof)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", boot.AnonKey)
 
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("refresh tokens: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK {
-		// Surface the server's OAuth error code (invalid_grant /
-		// invalid_dpop_proof / etc.) so callers like ManagementToken can
-		// tell "refresh token rotated/dead" apart from "DPoP proof was
-		// rejected" — the second masquerading as the first wasted hours of
-		// debugging during CLI-12 smoke. Truncate to keep the line bounded
-		// when the body is HTML from a proxy.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("refresh tokens: %d %s — %s",
-			resp.StatusCode, http.StatusText(resp.StatusCode), strings.TrimSpace(string(body)))
+		// The server's own reason travels: "the session expired" and "the
+		// gateway refused" call for different actions, and collapsing them
+		// into one message costs the person the difference.
+		return nil, fmt.Errorf("refresh tokens: %d — %s", resp.StatusCode, describeFailure(body))
 	}
 
 	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("parse refresh response: %w", err)
+	}
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("the refresh succeeded but returned no token")
 	}
 
 	creds.AccessToken = tokenResp.AccessToken
 	if tokenResp.RefreshToken != "" {
 		creds.RefreshToken = tokenResp.RefreshToken
 	}
-	creds.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	lifetime := time.Duration(tokenResp.ExpiresIn) * time.Second
+	if tokenResp.ExpiresIn <= 0 {
+		lifetime = time.Hour
+	}
+	creds.ExpiresAt = time.Now().Add(lifetime)
 
 	if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
 		return nil, err
@@ -446,64 +243,53 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 	return creds, nil
 }
 
-// Logout deletes local credentials and revokes the token server-side.
+// Logout ends the session on the server and forgets it here.
 func (c *Client) Logout(ctx context.Context) error {
 	creds, err := LoadCredentials(c.Cfg.Mode)
-	if err == nil && creds.RefreshToken != "" {
-		if err := c.revokeToken(ctx, creds.RefreshToken); err != nil {
-			fmt.Fprintf(c.Output, "  ! could not revoke refresh token: %v\n", err)
+	if err == nil && creds.AccessToken != "" {
+		if err := c.revokeSession(ctx, creds.AccessToken); err != nil {
+			// Local credentials are deleted regardless of what the server
+			// says: a person who typed "logout" and got an error would
+			// otherwise be left holding a live token they believe is gone.
+			fmt.Fprintf(c.Output, "  ! the server did not confirm the sign-out: %v\n", err)
 		}
 	}
 
 	if err := DeleteCredentials(c.Cfg.Mode); err != nil {
 		return err
 	}
-	// Purge the keyring DPoP key too — leaving it behind would orphan a
-	// jkt whose paired Dashboard PAT is now unusable. The next login
-	// mints a fresh key.
-	if err := DeleteDPoPKey(c.Cfg.Mode); err != nil {
-		fmt.Fprintf(c.Output, "  ! could not remove DPoP key: %v\n", err)
-	}
 
 	fmt.Fprintf(c.Output, "✓ Logged out (mode=%s)\n", c.Cfg.Mode)
 	return nil
 }
 
-func (c *Client) revokeToken(ctx context.Context, token string) (retErr error) {
-	payload, err := json.Marshal(struct {
-		Token         string `json:"token"`
-		TokenTypeHint string `json:"token_type_hint"`
-	}{
-		Token:         token,
-		TokenTypeHint: "refresh_token",
-	})
+// revokeSession asks the control plane to end this session server-side.
+func (c *Client) revokeSession(ctx context.Context, accessToken string) (retErr error) {
+	boot, err := c.plane().Bootstrap(ctx)
 	if err != nil {
-		return fmt.Errorf("encode revocation request: %w", err)
+		return err
 	}
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		c.Cfg.AuthURL+"/oauth/revoke",
-		bytes.NewReader(payload),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.Cfg.AuthURL+"/auth/logout", bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return fmt.Errorf("create revocation request: %w", err)
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", boot.AnonKey)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("revoke token: %w", err)
+		return fmt.Errorf("reach the control plane: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close revocation response: %w", err)
+			retErr = err
 		}
 	}()
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		return fmt.Errorf("read revocation response: %w", err)
-	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("revoke token: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return fmt.Errorf("%d — %s", resp.StatusCode, describeFailure(body))
 	}
 	return nil
 }
@@ -600,48 +386,3 @@ func OpenURL(u string) error {
 // on the server, so every port listed here must also appear in palauth's
 // palbase-cli client redirect_uris config.
 var LoopbackCallbackPorts = []int{54321, 54322, 54323, 54324, 54325}
-
-// bindLoopback tries each port in turn and returns the first listener it
-// can open. When every port is busy — e.g. five parallel login flows on
-// the same machine — the error surfaces so the user can retry.
-func bindLoopback(ports []int) ([]net.Listener, int, error) {
-	loopbackIPs, err := net.LookupIP("localhost")
-	if err != nil {
-		return nil, 0, fmt.Errorf("resolve localhost: %w", err)
-	}
-
-	var lastErr error
-	for _, p := range ports {
-		listeners := make([]net.Listener, 0, len(loopbackIPs))
-		seen := make(map[string]struct{}, len(loopbackIPs))
-		for _, ip := range loopbackIPs {
-			if !ip.IsLoopback() {
-				continue
-			}
-			address := ip.String()
-			if _, ok := seen[address]; ok {
-				continue
-			}
-			seen[address] = struct{}{}
-
-			network := "tcp6"
-			if ip.To4() != nil {
-				network = "tcp4"
-			}
-			listener, listenErr := net.Listen(network, net.JoinHostPort(address, fmt.Sprint(p)))
-			if listenErr != nil {
-				lastErr = listenErr
-				for _, opened := range listeners {
-					_ = opened.Close()
-				}
-				listeners = nil
-				break
-			}
-			listeners = append(listeners, listener)
-		}
-		if len(listeners) > 0 {
-			return listeners, p, nil
-		}
-	}
-	return nil, 0, fmt.Errorf("no free loopback port in %v: %w", ports, lastErr)
-}

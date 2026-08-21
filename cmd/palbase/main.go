@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -71,20 +70,32 @@ var studioClient *studio.Client
 // transport.Client.Do rather than at wiring time, so `palbase login` /
 // `config` still run without a credential present.
 //
-// The Resolvers callbacks below are `func() REST` — they don't carry the
-// cobra command context. Wiring that through every command package would
-// be a wide refactor for a single side-effect (refresh-token HTTP call);
-// instead we cap the refresh with a short timeout here. Refresh hits
-// /oauth/token on palauth, no streaming, so 30s is generous.
+// The Resolvers callbacks below are `func() REST` — they don't carry the cobra
+// command context. Wiring that through every command package would be a wide
+// refactor for a single side-effect (the refresh-token HTTP call); instead the
+// refresh is capped with a short timeout here.
 func managementREST() *transport.Client {
-	key, _ := auth.LoadDPoPKey(string(resolved.Mode))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// ManagementToken auto-refreshes an expired login token via /oauth/token
-	// (CLI-12); on failure we leave the credential empty and let
-	// transport.Client.Do emit the actionable "run palbase login" error.
-	pat, _ := authClient.ManagementToken(ctx)
-	return transport.New(resolved.Endpoints.PlatformAPI, key, pat)
+	// ManagementToken refreshes an expired session in place; on failure the
+	// credential stays empty and transport emits the actionable
+	// "run palbase login" error rather than a bare 401.
+	token, _ := authClient.ManagementToken(ctx)
+	return transport.New(resolved.Endpoints.PlatformAPI, token)
+}
+
+// cloudFacts answers questions about the cloud itself — the tenant address
+// suffix, today. It reads them from the control plane's bootstrap endpoint
+// rather than a compiled-in constant, so one binary is correct against every
+// deployment instead of only the one it was built for.
+type cloudFacts struct{}
+
+func (cloudFacts) TenantDomain(ctx context.Context) (string, error) {
+	boot, err := auth.NewCloudClient(resolved.Endpoints.PlatformAPI).Bootstrap(ctx)
+	if err != nil {
+		return "", err
+	}
+	return boot.TenantDomain, nil
 }
 
 // selectionResolver hands every command package the ONE resolver built in
@@ -195,11 +206,8 @@ func newRootCmd() *cobra.Command {
 		doctorCmd(),
 		openCmd(),
 		project.Cmd(project.Resolvers{
-			REST:      func() project.REST { return managementREST() },
-			Selection: selectionResolver,
-			Materialize: func(ctx context.Context, environmentRef, dir string, out io.Writer) error {
-				return backend.PullBundle(ctx, backendResolvers, environmentRef, dir, out)
-			},
+			REST:  func() project.REST { return managementREST() },
+			Cloud: func() project.Bootstrapper { return cloudFacts{} },
 		}),
 		apikey.Cmd(apikey.Resolvers{
 			REST:      func() apikey.REST { return managementREST() },
@@ -274,23 +282,32 @@ func newRootCmd() *cobra.Command {
 // remember and a second thing to forget.
 
 func loginCmd() *cobra.Command {
+	var create bool
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Sign in to Palbase",
 		Long: `Sign in, and keep the session on this machine.
 
-The browser flow (Authorization Code + PKCE, DPoP-bound) is for a person at a
-keyboard. For anything headless — CI, an agent in a container — set
-PALBASE_ACCESS_TOKEN to a Dashboard-issued token instead and skip this entirely.
+Signing in asks for the email and password of a Palbase cloud account. For a
+headless run — CI, an agent in a container — set PALBASE_EMAIL and
+PALBASE_PASSWORD, or supply a token directly with PALBASE_ACCESS_TOKEN and skip
+this entirely.
+
+Use --create to open a new account on this cloud and sign in with it.
 
 There is no separate sign-in for a project running on this machine: ` + "`palbase start`" + `
 writes that credential itself.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stdout, "Mode: %s (source=%s, studio=%s)\n",
-				resolved.Mode, resolved.Source, resolved.Endpoints.Studio)
+			fmt.Fprintf(os.Stdout, "Mode: %s (source=%s, cloud=%s)\n",
+				resolved.Mode, resolved.Source, resolved.Endpoints.PlatformAPI)
+			if create {
+				return authClient.SignUp(cmd.Context())
+			}
 			return authClient.Login(cmd.Context())
 		},
 	}
+	cmd.Flags().BoolVar(&create, "create", false,
+		"open a new account on this cloud instead of signing in to an existing one")
 	return cmd
 }
 

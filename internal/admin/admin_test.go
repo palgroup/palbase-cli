@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -18,15 +17,14 @@ func restAgainst(t *testing.T, h http.HandlerFunc) (REST, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	key, err := auth.NewDPoPKey()
-	require.NoError(t, err)
-	return transport.New(srv.URL, key, "pat_test"), srv
+	return transport.New(srv.URL, "tok_test"), srv
 }
 
+// The control plane answers with the VALUE, not a {"data": …} wrapper.
 func okData(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "request_id": "req_x"})
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func TestMigrateAllTenants_POSTsModule(t *testing.T) {

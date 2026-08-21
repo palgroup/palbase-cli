@@ -20,7 +20,7 @@ func TestResolve_Default(t *testing.T) {
 	if r.Source != "default" {
 		t.Fatalf("expected source=default, got %s", r.Source)
 	}
-	if r.Endpoints.Studio != "https://palbase.studio" {
+	if r.Endpoints.Studio != "https://api.palbase.studio" {
 		t.Fatalf("unexpected studio url: %s", r.Endpoints.Studio)
 	}
 }
@@ -36,10 +36,10 @@ func TestResolve_Flag(t *testing.T) {
 	if r.Mode != ModeDev || r.Source != "flag" {
 		t.Fatalf("got %+v", r)
 	}
-	if r.Endpoints.Studio != "https://app.dev.palbase.studio" {
+	if r.Endpoints.Studio != "https://api.v2.palbase.studio" {
 		t.Fatalf("unexpected studio url: %s", r.Endpoints.Studio)
 	}
-	if r.Endpoints.PlatformAPI != "https://api.dev.palbase.studio" {
+	if r.Endpoints.PlatformAPI != "https://api.v2.palbase.studio" {
 		t.Fatalf("unexpected platform API url: %s", r.Endpoints.PlatformAPI)
 	}
 }

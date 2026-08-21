@@ -3,12 +3,9 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,41 +19,6 @@ import (
 )
 
 // --- PKCE Tests ---
-
-func TestGeneratePKCE(t *testing.T) {
-	pkce, err := GeneratePKCE()
-	require.NoError(t, err)
-
-	// Verifier: 43 chars (32 bytes base64url encoded)
-	assert.Len(t, pkce.Verifier, 43)
-
-	// Challenge must be S256 of verifier
-	h := sha256.Sum256([]byte(pkce.Verifier))
-	expected := base64.RawURLEncoding.EncodeToString(h[:])
-	assert.Equal(t, expected, pkce.Challenge)
-}
-
-func TestGeneratePKCE_Uniqueness(t *testing.T) {
-	p1, err := GeneratePKCE()
-	require.NoError(t, err)
-	p2, err := GeneratePKCE()
-	require.NoError(t, err)
-
-	assert.NotEqual(t, p1.Verifier, p2.Verifier)
-	assert.NotEqual(t, p1.Challenge, p2.Challenge)
-}
-
-func TestGenerateState(t *testing.T) {
-	s1, err := GenerateState()
-	require.NoError(t, err)
-	assert.NotEmpty(t, s1)
-
-	s2, err := GenerateState()
-	require.NoError(t, err)
-	assert.NotEqual(t, s1, s2)
-}
-
-// --- Credentials Tests ---
 
 func TestCredentials_IsExpired(t *testing.T) {
 	expired := &Credentials{ExpiresAt: time.Now().Add(-1 * time.Minute)}
@@ -121,239 +83,21 @@ func TestDeleteCredentials(t *testing.T) {
 	require.Error(t, err)
 }
 
-// --- Login Flow Tests ---
-
-func TestLogin_FullFlow(t *testing.T) {
-	// Mock auth server
-	var authServer *httptest.Server
-	authServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/oauth/token":
-			_ = r.ParseForm()
-			assert.Equal(t, "authorization_code", r.FormValue("grant_type"))
-			assert.Equal(t, "palbase-cli", r.FormValue("client_id"))
-			assert.NotEmpty(t, r.FormValue("code_verifier"))
-			assert.Equal(t, "test_code", r.FormValue("code"))
-			// CLI-11: exchange must carry a DPoP proof so palauth mints a
-			// cnf.jkt-bound access token (matches the authorize-time
-			// dpop_jkt). Without this the token would silently come back
-			// unbound and every later DPoP-only API call would 401.
-			assert.NotEmpty(t, r.Header.Get("DPoP"), "exchange must carry DPoP proof")
-
-			_ = json.NewEncoder(w).Encode(TokenResponse{
-				AccessToken:  "access_123",
-				RefreshToken: "refresh_456",
-				ExpiresIn:    900,
-				TokenType:    "Bearer",
-			})
-
-		case "/oauth/userinfo":
-			assert.Equal(t, "DPoP access_123", r.Header.Get("Authorization"))
-			proof := r.Header.Get("DPoP")
-			require.NotEmpty(t, proof)
-			claims := decodeJWTPayload(t, proof)
-			assert.Equal(t, http.MethodGet, claims["htm"])
-			assert.Equal(t, authServer.URL+"/oauth/userinfo", claims["htu"])
-			assert.Equal(t, accessTokenHash("access_123"), claims["ath"])
-			_ = json.NewEncoder(w).Encode(UserInfoResponse{
-				Sub:   "usr_abc",
-				Email: "test@example.com",
-			})
-
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer authServer.Close()
-
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	// Login provisions a keyring DPoP key — isolate to the 0600 file
-	// fallback so the test never touches the host OS keychain (which
-	// would block on a Keychain UI prompt under -race).
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	var output bytes.Buffer
-	client := NewClient(Config{
-		AuthURL:  authServer.URL,
-		ClientID: "palbase-cli",
-	}, &output)
-
-	// Override openBrowser to simulate browser callback. Capture the authorize
-	// URL so we can assert the DPoP jkt binding param was attached.
-	var capturedAuthURL string
-	client.OpenBrowser = func(authURL string) error {
-		capturedAuthURL = authURL
-		// Parse the auth URL to extract state and redirect_uri
-		u, err := parseAuthURL(authURL)
-		if err != nil {
-			return err
-		}
-
-		state := u.Query().Get("state")
-		redirectURI := u.Query().Get("redirect_uri")
-
-		// Simulate browser callback
-		callbackURL := fmt.Sprintf("%s?code=test_code&state=%s", redirectURI, state)
-		resp, err := http.Get(callbackURL)
-		if err != nil {
-			return err
-		}
-		resp.Body.Close()
-		return nil
-	}
-
-	err := client.Login(context.Background())
-	require.NoError(t, err)
-
-	assert.Contains(t, output.String(), "✓ Logged in as test@example.com")
-
-	// Verify credentials were saved
-	creds, err := LoadCredentials("prod")
-	require.NoError(t, err)
-	assert.Equal(t, "access_123", creds.AccessToken)
-	assert.Equal(t, "refresh_456", creds.RefreshToken)
-	assert.Equal(t, "test@example.com", creds.User.Email)
-
-	// Login must provision a keyring DPoP key (S5.2) so subsequent
-	// Management-API calls can sign a proof.
-	key, err := LoadDPoPKey("prod")
-	require.NoError(t, err)
-	assert.NotEmpty(t, key.Thumbprint())
-	assert.Contains(t, output.String(), "DPoP key ready")
-
-	// CLI-8: the authorize request must carry dpop_jkt = the key's
-	// thumbprint (RFC 9449 §10) so palauth binds the issued token to it.
-	// Without this the token is unbound and the Management API rejects the
-	// DPoP-proofed requests the REST client makes.
-	au, err := parseAuthURL(capturedAuthURL)
-	require.NoError(t, err)
-	gotJKT := au.Query().Get("dpop_jkt")
-	assert.NotEmpty(t, gotJKT, "authorize URL must carry dpop_jkt")
-	assert.Equal(t, key.Thumbprint(), gotJKT, "dpop_jkt must equal the provisioned key's thumbprint")
-	// base64url SHA-256: 43 chars, no padding, no +/ chars.
-	assert.Len(t, gotJKT, 43, "jkt should be a 43-char base64url SHA-256 thumbprint")
-	assert.NotContains(t, gotJKT, "=", "base64url thumbprint must be unpadded")
-	assert.NotContains(t, gotJKT, "+", "base64url uses - not +")
-	assert.NotContains(t, gotJKT, "/", "base64url uses _ not /")
-}
-
-func decodeJWTPayload(t *testing.T, raw string) map[string]any {
-	t.Helper()
-	parts := strings.Split(raw, ".")
-	require.Len(t, parts, 3)
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	require.NoError(t, err)
-	var claims map[string]any
-	require.NoError(t, json.Unmarshal(payload, &claims))
-	return claims
-}
-
-func TestLogin_Timeout(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	// Login now provisions the DPoP key up front (before authorize); pin the
-	// file fallback so the test never blocks on a real keychain prompt.
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	var output bytes.Buffer
-	client := NewClient(Config{
-		AuthURL:  "http://localhost:1",
-		ClientID: "palbase-cli",
-	}, &output)
-
-	// Don't open browser — let it timeout
-	client.OpenBrowser = func(u string) error { return nil }
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	err := client.Login(ctx)
-	require.Error(t, err)
-}
-
-func TestBindLoopbackSkipsPortOccupiedOnIPv6(t *testing.T) {
-	ips, err := net.LookupIP("localhost")
-	require.NoError(t, err)
-	hasIPv6 := false
-	for _, ip := range ips {
-		if ip.Equal(net.IPv6loopback) {
-			hasIPv6 = true
-			break
-		}
-	}
-	if !hasIPv6 {
-		t.Skip("localhost has no IPv6 loopback address")
-	}
-
-	occupied, err := net.Listen("tcp6", "[::1]:0")
-	if err != nil {
-		t.Skipf("IPv6 loopback is unavailable: %v", err)
-	}
-	defer func() { _ = occupied.Close() }()
-	port := occupied.Addr().(*net.TCPAddr).Port
-
-	// The IPv4 side is deliberately free. A callback server that binds only
-	// 127.0.0.1 would accept this port even though a browser may resolve
-	// localhost to the occupied IPv6 side.
-	probe, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Skipf("matching IPv4 loopback port is unavailable: %v", err)
-	}
-	_ = probe.Close()
-
-	listeners, _, err := bindLoopback([]int{port})
-	for _, listener := range listeners {
-		_ = listener.Close()
-	}
-	require.Error(t, err)
-}
-
-func TestLogin_StateMismatch(t *testing.T) {
-	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer authServer.Close()
-
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	// Login now provisions the DPoP key up front (before authorize); pin the
-	// file fallback so the test never blocks on a real keychain prompt.
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	var output bytes.Buffer
-	client := NewClient(Config{
-		AuthURL:  authServer.URL,
-		ClientID: "palbase-cli",
-	}, &output)
-
-	client.OpenBrowser = func(authURL string) error {
-		u, _ := parseAuthURL(authURL)
-		redirectURI := u.Query().Get("redirect_uri")
-
-		// Send wrong state
-		callbackURL := fmt.Sprintf("%s?code=test_code&state=wrong_state", redirectURI)
-		resp, err := http.Get(callbackURL)
-		if err != nil {
-			return err
-		}
-		resp.Body.Close()
-		return nil
-	}
-
-	err := client.Login(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "state mismatch")
-}
-
-// --- Refresh Token Tests ---
-
+// Refreshing is JSON against the stack's own endpoint, carrying the anon
+// apikey the auth surface demands — and the ROTATED refresh token must be
+// stored. Keeping the old one would make the NEXT refresh present a token the
+// server has already retired: a sign-out half an hour later, for no reason the
+// person can see.
 func TestRefreshTokens(t *testing.T) {
+	var gotPath, gotAPIKey, gotRefresh string
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "refresh_token", r.FormValue("grant_type"))
-		assert.Equal(t, "old_refresh", r.FormValue("refresh_token"))
-		// CLI-11: refresh must carry a DPoP proof so the new access token
-		// stays bound to the keyring key (palauth rebinds cnf.jkt).
-		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
-
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon", Issuer: "https://plane.test"})
+			return
+		}
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotPath, gotAPIKey, gotRefresh = r.URL.Path, r.Header.Get("apikey"), body["refresh_token"]
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "new_access",
 			RefreshToken: "new_refresh",
@@ -364,65 +108,71 @@ func TestRefreshTokens(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	t.Setenv("PALBASE_NO_KEYRING", "1") // force file fallback under HOME
-
-	// Refresh needs a keyring key to sign its DPoP proof.
-	_, err := EnsureDPoPKey("prod")
-	require.NoError(t, err)
 
 	var output bytes.Buffer
-	client := NewClient(Config{
-		AuthURL:  authServer.URL,
-		ClientID: "palbase-cli",
-	}, &output)
+	client := NewClient(Config{AuthURL: authServer.URL, ClientID: "palbase-cli"}, &output)
 
-	oldCreds := &Credentials{
+	newCreds, err := client.RefreshTokens(context.Background(), &Credentials{
 		AccessToken:  "expired_access",
 		RefreshToken: "old_refresh",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
 		User:         UserInfo{ID: "usr_1", Email: "test@example.com"},
-	}
-
-	newCreds, err := client.RefreshTokens(context.Background(), oldCreds)
+	})
 	require.NoError(t, err)
+
+	assert.Equal(t, "/auth/token/refresh", gotPath)
+	assert.Equal(t, "pb_anon", gotAPIKey, "the auth surface refuses a request without the anon apikey")
+	assert.Equal(t, "old_refresh", gotRefresh)
 	assert.Equal(t, "new_access", newCreds.AccessToken)
-	assert.Equal(t, "new_refresh", newCreds.RefreshToken)
+	assert.Equal(t, "new_refresh", newCreds.RefreshToken, "the rotated refresh token must replace the old one")
+	assert.False(t, newCreds.IsExpired())
+}
+
+// A refresh the server rejects must carry the server's own words: "the session
+// expired" and "the gateway refused" call for different actions.
+func TestRefreshTokensSurfacesTheServersReason(t *testing.T) {
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"The refresh token has been revoked"}`))
+	}))
+	defer authServer.Close()
+	t.Setenv("HOME", t.TempDir())
+
+	var output bytes.Buffer
+	client := NewClient(Config{AuthURL: authServer.URL}, &output)
+	_, err := client.RefreshTokens(context.Background(), &Credentials{RefreshToken: "dead"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "The refresh token has been revoked")
 }
 
 // --- Logout Tests ---
 
 func TestLogout(t *testing.T) {
-	type revocationPayload struct {
-		Token         string `json:"token"`
-		TokenTypeHint string `json:"token_type_hint"`
+	type call struct {
+		path   string
+		apikey string
+		bearer string
 	}
-	type revocationRequest struct {
-		ContentType string
-		Payload     revocationPayload
-		DecodeErr   error
-	}
-	revocations := make(chan revocationRequest, 1)
+	calls := make(chan call, 4)
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/oauth/revoke" {
-			var payload revocationPayload
-			decodeErr := json.NewDecoder(r.Body).Decode(&payload)
-			revocations <- revocationRequest{
-				ContentType: r.Header.Get("Content-Type"),
-				Payload:     payload,
-				DecodeErr:   decodeErr,
-			}
-			w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
+			return
 		}
+		calls <- call{
+			path:   r.URL.Path,
+			apikey: r.Header.Get("apikey"),
+			bearer: r.Header.Get("Authorization"),
+		}
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer authServer.Close()
 
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	// Logout purges the keyring DPoP key — isolate to the file fallback
-	// so the test never touches the host OS keychain.
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	// Save credentials first
+	t.Setenv("HOME", t.TempDir())
 	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken:  "access",
 		RefreshToken: "refresh",
@@ -430,23 +180,41 @@ func TestLogout(t *testing.T) {
 	}))
 
 	var output bytes.Buffer
-	client := NewClient(Config{
-		AuthURL:  authServer.URL,
-		ClientID: "palbase-cli",
-	}, &output)
+	client := NewClient(Config{AuthURL: authServer.URL, ClientID: "palbase-cli"}, &output)
+	require.NoError(t, client.Logout(context.Background()))
 
-	err := client.Logout(context.Background())
-	require.NoError(t, err)
-	revocation := <-revocations
-	require.NoError(t, revocation.DecodeErr)
-	assert.Equal(t, "application/json", revocation.ContentType)
-	assert.Equal(t, "refresh", revocation.Payload.Token)
-	assert.Equal(t, "refresh_token", revocation.Payload.TokenTypeHint)
+	got := <-calls
+	assert.Equal(t, "/auth/logout", got.path)
+	assert.Equal(t, "pb_anon", got.apikey)
+	assert.Equal(t, "Bearer access", got.bearer, "the session is named by its access token")
 	assert.Contains(t, output.String(), "✓ Logged out")
 
-	// Credentials should be gone
-	_, err = LoadCredentials("prod")
-	require.Error(t, err)
+	_, err := LoadCredentials("prod")
+	require.Error(t, err, "the local credential must be gone")
+}
+
+// A server that refuses the sign-out must NOT leave the credential behind: the
+// person typed "logout" and would otherwise keep holding a live token they
+// believe is gone.
+func TestLogoutForgetsLocallyEvenWhenTheServerRefuses(t *testing.T) {
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer authServer.Close()
+
+	t.Setenv("HOME", t.TempDir())
+	require.NoError(t, SaveCredentials("prod", &Credentials{AccessToken: "access"}))
+
+	var output bytes.Buffer
+	client := NewClient(Config{AuthURL: authServer.URL}, &output)
+	require.NoError(t, client.Logout(context.Background()))
+
+	_, err := LoadCredentials("prod")
+	require.Error(t, err, "a server error must not strand a live credential on this machine")
 }
 
 // --- Whoami Tests ---
@@ -511,9 +279,11 @@ func TestGetValidToken_Valid(t *testing.T) {
 
 func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CLI-11: refresh path must present a DPoP proof so the new token
-		// stays bound to the keyring key.
-		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
+			return
+		}
+		assert.Equal(t, "/auth/token/refresh", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "refreshed_token",
 			RefreshToken: "new_refresh",
@@ -525,10 +295,6 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	// Refresh signs a DPoP proof; provision the keyring key first.
-	_, err := EnsureDPoPKey("prod")
-	require.NoError(t, err)
 
 	require.NoError(t, SaveCredentials("prod", &Credentials{
 		AccessToken:  "expired",
@@ -578,9 +344,11 @@ func TestCredentials_ExpiresSoon(t *testing.T) {
 // but it's inside the minRemaining window, so GetFreshToken refreshes proactively.
 func TestGetFreshToken_RefreshesAhead(t *testing.T) {
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Refresh path must present a DPoP proof so the new token stays bound.
-		assert.NotEmpty(t, r.Header.Get("DPoP"), "refresh must carry DPoP proof")
-		assert.Equal(t, "refresh_token", r.FormValue("grant_type"))
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
+			return
+		}
+		assert.Equal(t, "/auth/token/refresh", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "ahead_refreshed_token",
 			RefreshToken: "new_refresh",

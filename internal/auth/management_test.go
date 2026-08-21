@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -89,70 +91,49 @@ func TestManagementToken_UnauthenticatedIsActionable(t *testing.T) {
 	require.Contains(t, err.Error(), "palbase login")
 }
 
-func TestManagementToken_ExpiredLogin_RefreshesViaDPoP(t *testing.T) {
-	// CLI-12: an expired login token must auto-refresh through
-	// /oauth/token rather than force the user to re-login. The refresh
-	// must carry a DPoP proof so palauth keeps cnf.jkt on the renewed
-	// access token — without it ManagementToken would return an unbound
-	// token that the management API rejects at introspection (the exact
-	// regression CLI-11 + CLI-12 close together).
+// An expired session must refresh in place rather than force a fresh sign-in:
+// the access token lives 30 minutes, and a person working through an afternoon
+// would otherwise be asked for their password every half hour.
+func TestManagementTokenRefreshesAnExpiredSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PALBASE_ACCESS_TOKEN", "")
-	t.Setenv("PALBASE_NO_KEYRING", "1")
 
-	// Provision a DPoP key so RefreshTokens can sign a proof.
-	_, err := EnsureDPoPKey("dev")
-	require.NoError(t, err)
-
-	// Stored creds are expired — ManagementToken must refresh, not error.
 	require.NoError(t, SaveCredentials("dev", &Credentials{
 		AccessToken:  "stale_at",
 		RefreshToken: "rt_alive",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
 	}))
 
-	var sawDPoP bool
-	srv := &http.Server{Addr: "127.0.0.1:0"}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, r.ParseForm())
-		assert.Equal(t, "refresh_token", r.PostForm.Get("grant_type"))
-		assert.Equal(t, "rt_alive", r.PostForm.Get("refresh_token"))
-		// The DPoP header is the whole point of this test — without it the
-		// minted access token would silently lose cnf.jkt.
-		if r.Header.Get("DPoP") != "" {
-			sawDPoP = true
+	var refreshPath, sentRefresh string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/cloud/config" {
+			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
+			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		refreshPath, sentRefresh = r.URL.Path, body["refresh_token"]
 		_ = json.NewEncoder(w).Encode(TokenResponse{
-			AccessToken:  "fresh_at_bound",
+			AccessToken:  "fresh_at",
 			RefreshToken: "rt_alive_v2",
 			ExpiresIn:    1800,
-			TokenType:    "DPoP",
 		})
-	})
-	srv.Handler = mux
+	}))
+	defer srv.Close()
 
-	listener, err := newLoopbackListener()
+	var out bytes.Buffer
+	client := NewClient(Config{AuthURL: srv.URL, Mode: "dev"}, &out)
+
+	token, err := client.ManagementToken(context.Background())
 	require.NoError(t, err)
-	// Serve always returns an error; ErrServerClosed is the normal path here,
-	// produced by the deferred Close below.
-	go func() { _ = srv.Serve(listener) }()
-	defer func() { _ = srv.Close() }()
+	assert.Equal(t, "fresh_at", token)
+	assert.Equal(t, "/auth/token/refresh", refreshPath)
+	assert.Equal(t, "rt_alive", sentRefresh)
 
-	c := newManagementTestClient(t, "http://"+listener.Addr().String())
-	tok, err := c.ManagementToken(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "fresh_at_bound", tok)
-	assert.True(t, sawDPoP, "refresh on /oauth/token must carry a DPoP header so cnf.jkt is preserved")
-
-	// Verify the refreshed credentials were persisted — next call should not
-	// re-refresh.
+	// And the rotated pair must be on disk: the NEXT command reads it.
 	stored, err := LoadCredentials("dev")
 	require.NoError(t, err)
-	assert.Equal(t, "fresh_at_bound", stored.AccessToken)
 	assert.Equal(t, "rt_alive_v2", stored.RefreshToken)
-	assert.False(t, stored.IsExpired())
 }
 
 func TestManagementToken_ExpiredLogin_RefreshFailureIsActionable(t *testing.T) {

@@ -19,7 +19,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/transport"
 )
@@ -155,13 +154,9 @@ func (f *Fake) Find(route string) (Request, bool) {
 	return Request{}, false
 }
 
-// REST is a DPoP-signed transport pointed at the fake.
+// REST is an authenticated transport pointed at the fake.
 func (f *Fake) REST() *transport.Client {
-	key, err := auth.NewDPoPKey()
-	if err != nil {
-		f.t.Fatalf("dpop key: %v", err)
-	}
-	return transport.New(f.Server.URL, key, "pat_test")
+	return transport.New(f.Server.URL, "tok_test")
 }
 
 // Resolver builds a selection.Resolver against the fake.
@@ -241,11 +236,12 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	WriteError(w, http.StatusNotFound, "not_found", "no route "+r.Method+" "+r.URL.Path)
 }
 
-// WriteOK emits the Management API's success envelope.
+// WriteOK emits a success response the way the control plane does: the VALUE
+// itself, with no {"data": …} wrapper. Failures stay enveloped (WriteError).
 func WriteOK(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "request_id": "req_test"})
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 // WriteError emits the Management API's error envelope.
