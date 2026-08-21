@@ -176,30 +176,34 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 //
 // One request, no credential: the document is public because everything in it
 // is (see the stack's internal/server/wellknown.go). A stack that does not
-// answer is either not a Palbase stack or not up, and saying which is the whole
-// value of asking first.
+// answer is either not a Palbase stack or NOT UP YET, and saying which is the
+// whole value of asking first — so the two are now actually told apart.
+//
+// They used to be collapsed into one sentence, and the sentence was the wrong
+// one: a project created seconds earlier answers 503 from the cell's edge while
+// it comes up, and `palbase link` told the person who had just created it that
+// their address "does not look like a Palbase stack". The comment above already
+// promised this distinction; only the code was missing it.
 func describeStack(ctx context.Context, base string, insecure bool) (stackDescription, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	if insecure {
 		client.Transport = insecureTransport()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+wellKnownPath, nil)
-	if err != nil {
-		return stackDescription{}, err
-	}
-	res, err := client.Do(req)
+	status, body, err := sendWaitingForReady(ctx, client, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, base+wellKnownPath, nil)
+	}, os.Stderr, stackReadyWait, stackReadyRetryEvery)
 	if err != nil {
 		return stackDescription{}, fmt.Errorf(
 			"reach %s: %w\n(a self-signed certificate needs --insecure)", base, err)
 	}
-	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if err != nil {
-		return stackDescription{}, err
-	}
-	if res.StatusCode != http.StatusOK {
+	if status == http.StatusServiceUnavailable {
 		return stackDescription{}, fmt.Errorf(
-			"%s does not look like a Palbase stack: %s answered %d", base, wellKnownPath, res.StatusCode)
+			"%s did not start serving within %s — it is a Palbase address that is not up yet, "+
+				"so try again rather than changing anything", base, stackReadyWait)
+	}
+	if status != http.StatusOK {
+		return stackDescription{}, fmt.Errorf(
+			"%s does not look like a Palbase stack: %s answered %d", base, wellKnownPath, status)
 	}
 	var described stackDescription
 	if err := json.Unmarshal(body, &described); err != nil {

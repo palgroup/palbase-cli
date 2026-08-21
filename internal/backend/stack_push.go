@@ -21,6 +21,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 )
 
 // pushResult mirrors the contract's PushResult.
@@ -51,6 +52,17 @@ type pushRefusal struct {
 		NonNull int    `json:"non_null"`
 	} `json:"destructive"`
 }
+
+// How long a push waits for a project that is still coming up, and how often it
+// looks. The window measured on a fresh project was under a minute; the budget
+// is several times that so a slow cell is covered, and the interval is long
+// enough that waiting costs a handful of requests rather than a flood.
+// VAR, sabit DEĞİL: yalnız testler kısaltıyor. Bir testin üç dakika beklemesi,
+// ölçtüğü şeyin mesaj olduğu yerde saf israftır.
+var (
+	stackReadyWait       = 3 * time.Minute
+	stackReadyRetryEvery = 6 * time.Second
+)
 
 func runStackPush(ctx context.Context, target Target, cred Credentials, approve bool, w io.Writer) error {
 	// Where this is going, before anything goes. Both push paths funnel through
@@ -125,24 +137,20 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 	if approve {
 		url += "?accept-data-loss=true"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("content-type", "application/gzip")
-	cred.Apply(req)
-
-	res, err := stackClient(target).Do(req)
+	status, body, err := sendWaitingForReady(ctx, stackClient(target), func() (*http.Request, error) {
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))
+		if rerr != nil {
+			return nil, rerr
+		}
+		req.Header.Set("content-type", "application/gzip")
+		cred.Apply(req)
+		return req, nil
+	}, w, stackReadyWait, stackReadyRetryEvery)
 	if err != nil {
 		return fmt.Errorf("reach %s: %w", target.URL, err)
 	}
-	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
-	if err != nil {
-		return err
-	}
 
-	switch res.StatusCode {
+	switch status {
 	case http.StatusOK:
 		var out pushResult
 		if err := json.Unmarshal(body, &out); err != nil {
@@ -202,7 +210,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 	case http.StatusForbidden:
 		return fmt.Errorf("this account may not manage %s — ask whoever runs it for `palsvc --grant-management`", target.URL)
 	default:
-		return fmt.Errorf("push refused (%d): %s", res.StatusCode, trimBody(body))
+		return fmt.Errorf("push refused (%d): %s", status, trimBody(body))
 	}
 }
 
@@ -281,4 +289,60 @@ func carrySecrets(ctx context.Context, dir string, target Target, cred Credentia
 		}
 	}
 	return nil
+}
+
+// sendWaitingForReady sends the request, and treats a 503 as "ask again".
+//
+// A BRAND-NEW PROJECT IS NOT REFUSING — IT IS STILL COMING UP. 503 "no healthy
+// upstream" comes from the cell's edge rather than from the stack, and it means
+// exactly what the status code says. Measured on a fresh project (2026-08-22):
+// the pod reports Ready and the public route still answers 503 for another ~26
+// seconds while the edge converges, and a first push landing in that window
+// failed roughly one time in five.
+//
+// Retrying here is the honest handling rather than a workaround, and two facts
+// make it safe. The push is content-addressed, so sending the same tarball twice
+// is the same deployment. And the wait is BOUNDED and SAID OUT LOUD, so a
+// project that is genuinely unreachable produces a message about that instead of
+// a silent loop.
+//
+// EVERY OTHER STATUS IS ANSWERED ON THE FIRST TRY. A 4xx is a decision — a
+// refusal to overwrite data, a rejected key, an unreadable bundle — and asking
+// again would only make the same answer slower.
+func sendWaitingForReady(
+	ctx context.Context,
+	client *http.Client,
+	newRequest func() (*http.Request, error),
+	w io.Writer,
+	budget time.Duration,
+	every time.Duration,
+) (int, []byte, error) {
+	deadline := time.Now().Add(budget)
+	for attempt := 1; ; attempt++ {
+		req, err := newRequest()
+		if err != nil {
+			return 0, nil, err
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		body, rerr := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+		_ = res.Body.Close()
+		if rerr != nil {
+			return 0, nil, rerr
+		}
+
+		if res.StatusCode != http.StatusServiceUnavailable || !time.Now().Before(deadline) {
+			return res.StatusCode, body, nil
+		}
+		if attempt == 1 {
+			fmt.Fprintf(w, "the project is not serving yet — waiting for it (up to %s)\n", budget)
+		}
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-time.After(every):
+		}
+	}
 }
