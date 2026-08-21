@@ -181,3 +181,46 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 	}
 	return body, nil
 }
+
+// GetManagementJSON reads a JSON path on the linked project's OWN management
+// surface, using whatever credential answers for it.
+//
+// Exported because commands outside this package need the same door: the
+// project's key resolution, its TLS quirks (a stack on this machine may still
+// serve its first-boot certificate), and its error envelope all live here. A
+// second HTTP path would be a second place for those three things to be
+// slightly different.
+func GetManagementJSON(ctx context.Context, target Target, path string, out any) error {
+	cred, _, err := Credential(target.URL)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL+path, nil)
+	if err != nil {
+		return err
+	}
+	cred.Apply(req)
+	req.Header.Set("Accept", "application/json")
+
+	res, err := stackClient(target).Do(req)
+	if err != nil {
+		return fmt.Errorf("reach %s: %w", target.URL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		var env struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &env) == nil && env.Error != "" {
+			return fmt.Errorf("%s: %s — %s", path, env.Error, env.Description)
+		}
+		return fmt.Errorf("%s: HTTP %d", path, res.StatusCode)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(body, out)
+}

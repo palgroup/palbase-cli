@@ -2,390 +2,188 @@ package apikey
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"net/http"
-	"sort"
+	"fmt"
+	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
-// run executes `palbase apikey <args...>` against the fake v2 API with proj_1 /
-// production selected, and returns stdout.
-func run(t *testing.T, fake *selectiontest.Fake, args ...string) (string, error) {
-	t.Helper()
-	dir := selectiontest.Chdir(t)
-	selectiontest.WriteConfig(t, dir, nil)
+type stubREST struct {
+	method, path string
+	reply        any
+	err          error
+}
 
-	rest := fake.REST()
-	resolver := fake.Resolver()
+func (s *stubREST) Do(_ context.Context, method, path string, _, out any) error {
+	s.method, s.path = method, path
+	if s.err != nil {
+		return s.err
+	}
+	if out == nil || s.reply == nil {
+		return nil
+	}
+	raw, err := json.Marshal(s.reply)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+type stubTarget struct {
+	ref      string
+	isCloud  bool
+	describe string
+	gotPath  string
+	reply    any
+	err      error
+}
+
+func (t *stubTarget) Ref() (string, bool) { return t.ref, t.isCloud }
+func (t *stubTarget) Describe() string    { return t.describe }
+func (t *stubTarget) GetJSON(_ context.Context, path string, out any) error {
+	t.gotPath = path
+	if t.err != nil {
+		return t.err
+	}
+	raw, err := json.Marshal(t.reply)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func run(t *testing.T, rest *stubREST, target *stubTarget, stdin string, args ...string) (string, error) {
+	t.Helper()
 	cmd := Cmd(Resolvers{
-		REST:      func() REST { return rest },
-		Selection: func() *selection.Resolver { return resolver },
+		REST:   func() REST { return rest },
+		Target: func() (Target, error) { return target, nil },
 	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetArgs(args)
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 	err := cmd.Execute()
 	return out.String(), err
 }
 
-func TestApikeyCmd_Subcommands(t *testing.T) {
+// `list` asks the PROJECT about itself: the publishable key is not a secret and
+// the project's own surface is the nearest authority for it.
+func TestListReadsTheProjectsOwnSurface(t *testing.T) {
+	target := &stubTarget{
+		ref: "abc123xyz", isCloud: true, describe: "https://abc123xyz.v2.example",
+		reply: map[string]string{"publishable": "pb_project_cPUB"},
+	}
+	out, err := run(t, &stubREST{}, target, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if target.gotPath != "/v1/management/keys" {
+		t.Fatalf("wrong path: %s", target.gotPath)
+	}
+	if !strings.Contains(out, "pb_project_cPUB") {
+		t.Fatalf("the publishable key is missing:\n%s", out)
+	}
+}
+
+// The secret must NOT appear in a verb people run to see what exists: a
+// terminal, a screen share and a scrollback buffer all keep what it prints.
+func TestListNeverPrintsTheSecret(t *testing.T) {
+	target := &stubTarget{
+		ref: "abc123xyz", isCloud: true, describe: "https://abc123xyz.v2.example",
+		reply: map[string]string{
+			"publishable":  "pb_project_cPUB",
+			"serviceRole":  "pb_project_sSECRET",
+			"service_role": "pb_project_sSECRET",
+		},
+	}
+	out, err := run(t, &stubREST{}, target, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(out, "sSECRET") {
+		t.Fatalf("the service-role key leaked into `list`:\n%s", out)
+	}
+}
+
+// `reveal` goes to the CLOUD: the project will not hand out its own secret.
+func TestRevealAsksTheCloud(t *testing.T) {
+	rest := &stubREST{reply: Keys{AnonKey: "pb_project_cPUB", ServiceRoleKey: "pb_project_sSEC"}}
+	target := &stubTarget{ref: "abc123xyz", isCloud: true}
+	out, err := run(t, rest, target, "", "reveal")
+	if err != nil {
+		t.Fatalf("reveal: %v", err)
+	}
+	if rest.method != "GET" || rest.path != "/v1/cloud/projects/abc123xyz/keys" {
+		t.Fatalf("wrong call: %s %s", rest.method, rest.path)
+	}
+	if !strings.Contains(out, "pb_project_sSEC") {
+		t.Fatalf("reveal printed no secret:\n%s", out)
+	}
+}
+
+// A stack on this machine has no cloud ref. Asking the control plane about it
+// would be asking the wrong authority, so the refusal names the reason.
+func TestCloudVerbsRefuseANonCloudTarget(t *testing.T) {
+	rest := &stubREST{}
+	target := &stubTarget{isCloud: false, describe: "https://localhost:8443"}
+	for _, args := range [][]string{{"reveal"}, {"rotate", "--yes"}} {
+		verb := args[0]
+		_, err := run(t, rest, target, "", args...)
+		if err == nil {
+			t.Fatalf("%s accepted a target that is not on this cloud", verb)
+		}
+		if !strings.Contains(err.Error(), "not a project on this cloud") {
+			t.Fatalf("%s gave an unhelpful reason: %v", verb, err)
+		}
+		if rest.method != "" {
+			t.Fatalf("%s called the cloud anyway", verb)
+		}
+	}
+}
+
+// Rotation stops every existing key. The confirmation must be something nobody
+// satisfies by reflex.
+func TestRotateRefusesAMismatchedConfirmation(t *testing.T) {
+	rest := &stubREST{}
+	target := &stubTarget{ref: "abc123xyz", isCloud: true}
+	if _, err := run(t, rest, target, "nope\n", "rotate"); err == nil {
+		t.Fatal("a mismatched confirmation was accepted")
+	}
+	if rest.method != "" {
+		t.Fatalf("the rotation was sent anyway: %s %s", rest.method, rest.path)
+	}
+}
+
+func TestRotateProceedsAndPrintsBothKeys(t *testing.T) {
+	rest := &stubREST{reply: Keys{AnonKey: "pb_project_cNEW", ServiceRoleKey: "pb_project_sNEW"}}
+	target := &stubTarget{ref: "abc123xyz", isCloud: true}
+	out, err := run(t, rest, target, "abc123xyz\n", "rotate")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rest.method != "POST" || rest.path != "/v1/cloud/projects/abc123xyz/keys/rotate" {
+		t.Fatalf("wrong call: %s %s", rest.method, rest.path)
+	}
+	for _, want := range []string{"pb_project_cNEW", "pb_project_sNEW", "restarting"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("%q missing from:\n%s", want, out)
+		}
+	}
+}
+
+// The surface carries only the verbs a two-key project can honour: there is no
+// arbitrary set of named keys here, so `create` and `revoke` would be verbs for
+// a shape that does not exist.
+func TestSurfaceIsListRevealRotate(t *testing.T) {
 	cmd := Cmd(Resolvers{})
-	var got []string
+	var names []string
 	for _, c := range cmd.Commands() {
-		got = append(got, c.Name())
+		names = append(names, c.Name())
 	}
-	sort.Strings(got)
-	require.Equal(t, []string{"create", "list", "reveal", "revoke", "rotate"}, got)
-}
-
-// THE path contract. Every apikey verb must address the ENVIRONMENT under its
-// PROJECT. A stale v1 path (/api/v1/projects/{ref}/api-keys) 404s on the fake,
-// which is exactly the silent failure this table exists to catch.
-func TestApikey_HitsTheV2EnvironmentScopedPath(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-
-	tests := []struct {
-		name  string
-		args  []string
-		route string
-		reply func(f *selectiontest.Fake)
-		query string
-	}{
-		{
-			name: "list", args: []string{"list", "--json"},
-			route: "GET " + base,
-			reply: func(f *selectiontest.Fake) {
-				f.OK("GET "+base, []map[string]any{{"id": "key_1", "scope": "c", "lookup_prefix": "pb_abc123"}})
-			},
-		},
-		{
-			name: "reveal", args: []string{"reveal", "--json"},
-			route: "GET " + base, query: "reveal=true",
-			reply: func(f *selectiontest.Fake) {
-				f.OK("GET "+base, map[string]any{"environment_ref": "app1prod", "publishable_key": "pb_app1prod_c01234567890123456789", "keys": []any{}})
-			},
-		},
-		{
-			name: "create", args: []string{"create", "--name", "ci", "--json"},
-			route: "POST " + base,
-			reply: func(f *selectiontest.Fake) {
-				f.Handle("POST "+base, func(w http.ResponseWriter, _ *http.Request) {
-					selectiontest.WriteOK(w, http.StatusCreated, map[string]any{
-						"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
-					})
-				})
-			},
-		},
-		{
-			name: "revoke", args: []string{"revoke", "key_2", "--json"},
-			route: "DELETE " + base + "/key_2",
-			reply: func(f *selectiontest.Fake) { f.OK("DELETE "+base+"/key_2", map[string]any{"ok": true}) },
-		},
-		{
-			name: "rotate", args: []string{"rotate", "key_2", "--json"},
-			route: "POST " + base + "/key_2/rotate",
-			reply: func(f *selectiontest.Fake) {
-				f.OK("POST "+base+"/key_2/rotate", map[string]any{
-					"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
-				})
-			},
-		},
+	got := fmt.Sprint(names)
+	if got != "[list reveal rotate]" {
+		t.Fatalf("unexpected surface: %s", got)
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := selectiontest.New(t)
-			tc.reply(fake)
-
-			_, err := run(t, fake, tc.args...)
-			require.NoError(t, err)
-
-			req, ok := fake.Find(tc.route)
-			require.True(t, ok, "expected %s, got %v", tc.route, fake.Routes())
-			require.Equal(t, tc.query, req.Query)
-			for _, route := range fake.Routes() {
-				require.NotContains(t, route, "/api/v1/", "no apikey verb may ride v1")
-			}
-		})
-	}
-}
-
-func TestApikeyCreate_SendsOnlyTheName(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	fake := selectiontest.New(t)
-	fake.Handle("POST "+base, func(w http.ResponseWriter, _ *http.Request) {
-		selectiontest.WriteOK(w, http.StatusCreated, map[string]any{
-			"id": "key_2", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
-		})
-	})
-
-	out, err := run(t, fake, "create", "--name", "ci", "--json")
-	require.NoError(t, err)
-
-	req, ok := fake.Find("POST " + base)
-	require.True(t, ok)
-	require.Equal(t, map[string]any{"name": "ci"}, req.Body)
-	// The v2 route REJECTS key creation without this header — 400, every time,
-	// which made `palbase apikey create` unusable on v0.13.0. Asserted on the
-	// wire rather than on the call site, because the call site compiled fine
-	// while sending nothing.
-	require.NotEmpty(t, req.Header.Get("Idempotency-Key"),
-		"apikey create MUST carry an Idempotency-Key")
-	var got map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &got))
-	require.Equal(t, "app1prod", got["environment_ref"])
-	require.NotContains(t, got, "environmentRef")
-}
-
-func TestApikeyReveal_JSONUsesCanonicalFieldNames(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	fake := selectiontest.New(t)
-	fake.OK("GET "+base, map[string]any{
-		"environment_ref": "app1prod",
-		"publishable_key": "pb_app1prod_c01234567890123456789",
-		"keys":            []any{},
-	})
-
-	out, err := run(t, fake, "reveal", "--json")
-	require.NoError(t, err)
-	var got map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &got))
-	require.Equal(t, "app1prod", got["environment_ref"])
-	require.Equal(t, "pb_app1prod_c01234567890123456789", got["publishable_key"])
-	require.NotContains(t, got, "environmentRef")
-	require.NotContains(t, got, "publishableKey")
-}
-
-func TestApikeyCreateAndReveal_RejectWrongResponseEnvironment(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	tests := []struct {
-		name  string
-		args  []string
-		value string
-	}{
-		{name: "create missing", args: []string{"create", "--name", "ci"}},
-		{name: "create mismatch", args: []string{"create", "--name", "ci"}, value: "app1stg"},
-		{name: "reveal missing", args: []string{"reveal"}},
-		{name: "reveal mismatch", args: []string{"reveal"}, value: "app1stg"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := selectiontest.New(t)
-			method := http.MethodGet
-			response := map[string]any{"environment_ref": tc.value, "publishable_key": "pb_app1prod_c01234567890123456789"}
-			if tc.args[0] == "create" {
-				method = http.MethodPost
-				response = map[string]any{"environment_ref": tc.value, "plaintext": "pb_app1prod_c01234567890123456789"}
-			}
-			fake.OK(method+" "+base, response)
-
-			out, err := run(t, fake, tc.args...)
-			require.ErrorContains(t, err, "environment_ref")
-			require.Empty(t, out, "a response for the wrong environment must not emit credentials")
-		})
-	}
-}
-
-func TestApikeyCreateAndReveal_RejectMalformedOrForeignPublishableKeys(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	tests := []struct {
-		name      string
-		operation string
-		key       string
-	}{
-		{name: "create malformed", operation: "create", key: "pb_app1prod_cshort"},
-		{name: "create foreign", operation: "create", key: "pb_app1stg_c01234567890123456789"},
-		{name: "reveal malformed", operation: "reveal", key: "pb_app1prod_cshort"},
-		{name: "reveal foreign", operation: "reveal", key: "pb_app1stg_c01234567890123456789"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := selectiontest.New(t)
-			if tc.operation == "create" {
-				fake.OK("POST "+base, map[string]any{
-					"id": "key_2", "environment_ref": "app1prod", "plaintext": tc.key,
-				})
-			} else {
-				fake.OK("GET "+base, map[string]any{
-					"environment_ref": "app1prod", "publishable_key": tc.key,
-				})
-			}
-
-			args := []string{tc.operation, "--json"}
-			if tc.operation == "create" {
-				args = append(args, "--name", "mobile")
-			}
-			out, err := run(t, fake, args...)
-			require.ErrorContains(t, err, "publishable")
-			require.Empty(t, out, "an unbound credential must not be emitted")
-		})
-	}
-}
-
-func TestApikeyReveal_RejectsAMissingPublishableKey(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	fake := selectiontest.New(t)
-	fake.OK("GET "+base, map[string]any{"environment_ref": "app1prod"})
-
-	out, err := run(t, fake, "reveal", "--json")
-	require.ErrorContains(t, err, "publishable")
-	require.Empty(t, out, "a missing credential must not look like a successful reveal")
-}
-
-func TestApikeyCreate_RequiresName(t *testing.T) {
-	fake := selectiontest.New(t)
-	_, err := run(t, fake, "create")
-	require.ErrorContains(t, err, "--name is required")
-}
-
-// The --environment override targets ANOTHER environment of the same project —
-// this is the headless path (UAT CLI-005: keys are per-environment).
-func TestApikeyList_EnvironmentOverrideRetargetsTheKeys(t *testing.T) {
-	fake := selectiontest.New(t)
-	fake.Environments["proj_1"] = append(fake.Environments["proj_1"],
-		selectiontest.Env("env_stg", "proj_1", "app1stg", "staging", "staging", false))
-	const stagingKeys = "/api/v2/projects/proj_1/environments/app1stg/api-keys"
-	fake.OK("GET "+stagingKeys, []map[string]any{{"id": "key_stg", "scope": "c"}})
-
-	dir := selectiontest.Chdir(t)
-	selectiontest.WriteConfig(t, dir, nil)
-
-	rest := fake.REST()
-	resolver := fake.Resolver()
-	resolver.EnvironmentFlag = "staging"
-	cmd := Cmd(Resolvers{
-		REST:      func() REST { return rest },
-		Selection: func() *selection.Resolver { return resolver },
-	})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"list", "--json"})
-	require.NoError(t, cmd.Execute())
-
-	_, ok := fake.Find("GET " + stagingKeys)
-	require.True(t, ok, "expected the STAGING keys, got %v", fake.Routes())
-	_, prod := fake.Find("GET /api/v2/projects/proj_1/environments/app1prod/api-keys")
-	require.False(t, prod, "production keys must not be touched")
-}
-
-// Rotation is the answer to a LEAKED key, so the wire shape matters more here
-// than anywhere else in this package: the server derives the durable mutation id
-// from the Idempotency-Key, and without one it 400s — which is how
-// `apikey create` shipped broken in v0.13.0. Asserted on the wire, because the
-// call site compiled fine while sending nothing.
-func TestApikeyRotate_CarriesIdempotencyKeyAndExplicitForce(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	fake := selectiontest.New(t)
-	fake.OK("POST "+base+"/key_2/rotate", map[string]any{
-		"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
-	})
-
-	out, err := run(t, fake, "rotate", "key_2", "--json")
-	require.NoError(t, err)
-
-	req, ok := fake.Find("POST " + base + "/key_2/rotate")
-	require.True(t, ok, "got %v", fake.Routes())
-	require.NotEmpty(t, req.Header.Get("Idempotency-Key"),
-		"apikey rotate MUST carry an Idempotency-Key — the server 400s without one")
-	// force travels EXPLICITLY as false. The route body is .strict() with a
-	// default, so omitting it would still work today; sending it keeps the
-	// dangerous flag visible on the wire instead of implied by absence.
-	require.Equal(t, map[string]any{"force": false}, req.Body)
-
-	var got map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &got))
-	require.Equal(t, "key_3", got["id"])
-}
-
-func TestApikeyRotate_ForceFlagReachesTheWire(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	fake := selectiontest.New(t)
-	fake.OK("POST "+base+"/key_2/rotate", map[string]any{
-		"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_app1prod_c01234567890123456789",
-	})
-
-	_, err := run(t, fake, "rotate", "key_2", "--force", "--json")
-	require.NoError(t, err)
-
-	req, ok := fake.Find("POST " + base + "/key_2/rotate")
-	require.True(t, ok)
-	require.Equal(t, map[string]any{"force": true}, req.Body)
-}
-
-// A rotate that hands back a credential bound somewhere else must fail loudly.
-// Printing it would have the operator paste a foreign environment's secret into
-// their app during an incident — the worst possible moment for a silent swap.
-func TestApikeyRotate_RejectsAForeignCredential(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-
-	tests := []struct {
-		name string
-		body map[string]any
-		want string
-	}{
-		{
-			name: "response names a different environment",
-			body: map[string]any{"id": "key_3", "environment_ref": "otherenv", "plaintext": "pb_otherenv_c01234567890123456789"},
-			want: "does not match selected environment",
-		},
-		{
-			name: "ref matches but the key is bound elsewhere",
-			body: map[string]any{"id": "key_3", "environment_ref": "app1prod", "plaintext": "pb_otherenv_c01234567890123456789"},
-			want: "bound to environment",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := selectiontest.New(t)
-			fake.OK("POST "+base+"/key_2/rotate", tc.body)
-
-			out, err := run(t, fake, "rotate", "key_2")
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.want)
-			require.NotContains(t, out, "pb_otherenv", "a foreign secret must never be printed")
-		})
-	}
-}
-
-// The server refuses to revoke an app-bound key unless the request carries
-// force, and its refusal tells the operator to "pass force". Until this flag
-// existed, revoke sent no body at all, so the instruction was unfollowable from
-// a released CLI — and `rotate`, the other way out, had never shipped either.
-// Pins that --force reaches the wire as the body the API contract declares.
-func TestRevokeForceReachesTheWire(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	var gotBody map[string]any
-	fake := selectiontest.New(t)
-	fake.Handle("DELETE "+base+"/key_2", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		selectiontest.WriteOK(w, http.StatusOK, map[string]any{"ok": true})
-	})
-
-	out, err := run(t, fake, "revoke", "key_2", "--force", "--json")
-	require.NoError(t, err)
-	require.Contains(t, out, "key_2")
-	require.Equal(t, map[string]any{"force": true}, gotBody)
-}
-
-// The default must stay false: an unforced revoke has to keep hitting the
-// app-bound guard rather than quietly bulldozing shipped builds.
-func TestRevokeWithoutForceSendsFalse(t *testing.T) {
-	const base = "/api/v2/projects/proj_1/environments/app1prod/api-keys"
-	var gotBody map[string]any
-	fake := selectiontest.New(t)
-	fake.Handle("DELETE "+base+"/key_2", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		selectiontest.WriteOK(w, http.StatusOK, map[string]any{"ok": true})
-	})
-
-	_, err := run(t, fake, "revoke", "key_2", "--json")
-	require.NoError(t, err)
-	require.Equal(t, map[string]any{"force": false}, gotBody)
 }

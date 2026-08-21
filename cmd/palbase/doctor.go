@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/auth"
-	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
 

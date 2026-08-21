@@ -37,10 +37,14 @@ import (
 type CredentialSource string
 
 const (
-	// SourceEnv is PALBASE_ACCESS_TOKEN — a Dashboard-issued, DPoP-bound PAT.
+	// SourceEnv is PALBASE_ACCESS_TOKEN — a token supplied for headless use.
 	SourceEnv CredentialSource = "environment"
 	// SourceStore is ~/.palbase/credentials.json, keyed by target URL.
 	SourceStore CredentialSource = "store"
+	// SourceCloud is the control plane, answering for a project it owns. Not
+	// cached: keys rotate, and a cached copy goes silently wrong the moment
+	// somebody rotates from anywhere else.
+	SourceCloud CredentialSource = "the cloud"
 	// SourceLocalStack is a stack running on this machine, answering with the
 	// key it generated for itself. Nothing was copied to make this work.
 	SourceLocalStack CredentialSource = "this machine"
@@ -171,7 +175,7 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	// one round trip per project per machine.
 	if CloudKeyFetcher != nil {
 		if cred, ok := fetchCloudCredential(url); ok {
-			return cred, SourceStore, nil
+			return cred, SourceCloud, nil
 		}
 	}
 
@@ -333,7 +337,17 @@ func localStackKey(url string) (string, bool) {
 // Nil means "no cloud configured" — every local flow keeps working untouched.
 var CloudKeyFetcher func(tenantURL string) (string, error)
 
-// fetchCloudCredential asks the cloud for a project's key and remembers it.
+// fetchCloudCredential asks the cloud for a project's key.
+//
+// IT IS NOT CACHED, deliberately. Caching it costs one round trip less per
+// command and buys a whole class of failure: keys ROTATE, and a rotation
+// performed anywhere — another machine, the dashboard, a teammate — leaves
+// every cached copy silently wrong. The person then gets 401s from a CLI that
+// is holding a key it believes is good, with no way to correct it short of
+// deleting a file they do not know about.
+//
+// The control plane is the authority on a cloud project's key. Asking it each
+// time is what "authority" means.
 //
 // A failure here is not reported as an error: the caller is about to produce a
 // message that names every way to supply a credential, and "the cloud said no"
@@ -344,9 +358,5 @@ func fetchCloudCredential(url string) (Credentials, bool) {
 	if err != nil || strings.TrimSpace(key) == "" {
 		return Credentials{}, false
 	}
-	cred := Credentials{Value: key, Kind: kindOf(key)}
-	// Remembered so the next command does not pay the round trip. A failed
-	// write is not fatal: the credential in hand is still good for THIS call.
-	_ = StoreCredential(url, cred)
-	return cred, true
+	return Credentials{Value: key, Kind: kindOf(key)}, true
 }

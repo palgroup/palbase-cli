@@ -51,9 +51,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 	require.Equal(t, []string{
 		"admin",
 		"android",
-		"apikey",
-		"apps",
-		"build",
+		"apikey", "build",
 		"clone",
 		"db",
 		"debug",
@@ -62,11 +60,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// egress: config/egress.ts was the one module config surface with no
 		// command — it had to be hand-written, and a host the deploy's fail-closed
 		// validator rejects only surfaced as a failed deploy.
-		"egress",
-		"env",
-		"flags",
-		"github",
-		"init",
+		"egress", "flags", "init",
 		"ios",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
 		// somebody runs, with no project to select and no control plane to ask.
@@ -115,7 +109,14 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 	// stale. The orchestrator still embeds its own backend_template/ for cloud
 	// project creation; pointing that at the same package is the remaining half
 	// and is in the deviation ledger.
-	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev"} {
+	// `apps`, `env` ve `github` v2'de YOK: üçünün de arkasında bir yüzey
+	// bulunmuyor. Bir rotaya vuran ama o rotanın var olmadığı bir fiil, olmayan
+	// bir fiilden KÖTÜDÜR — geç, insanın terminalinde, o çalıştığına inandıktan
+	// sonra düşer.
+	//   env    → v2'de "environment" yok; bir branch KENDİ projesidir.
+	//   github → depo güdümlü deploy'un v2 karşılığı yok.
+	//   apps   → App Attest / uygulama kaydı yüzeyi v2'de hiç doğmadı.
+	for _, gone := range []string{"branch", "groups", "group", "org", "organization", "serve", "dev", "apps", "env", "github"} {
 		require.False(t, have[gone],
 			"`palbase %s` must NOT exist after the cutover (no shims, no aliases)", gone)
 	}
@@ -150,10 +151,6 @@ func TestGolden_ProjectSurface(t *testing.T) {
 // with a web surface that does them better (confirmations, membership, billing
 // consequences). What the CLI keeps is the one that belongs in a checkout:
 // WHICH environment this code acts on.
-func TestGolden_EnvSurface(t *testing.T) {
-	require.Empty(t, subcommands(t, "env"))
-}
-
 func subcommands(t *testing.T, parent string) []string {
 	t.Helper()
 	for _, c := range newRootCmd().Commands() {

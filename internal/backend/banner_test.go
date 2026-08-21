@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"github.com/spf13/cobra"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -74,46 +73,6 @@ func TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn(t *testing.T) {
 	}
 }
 
-// TestASwitchedEnvironmentStillResolves is the regression this task found:
-// `palbase env staging` clears the cached URL on purpose, and the reader used to
-// demand one — so the switch left every verb after it refusing to run.
-func TestASwitchedEnvironmentStillResolves(t *testing.T) {
-	inScratchCheckout(t)
-	if err := WriteTarget(Target{Project: "todoapp", Env: "main", URL: "https://old.example"}); err != nil {
-		t.Fatal(err)
-	}
-	var sw bytes.Buffer
-	if err := runEnvSwitch("staging", &sw); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	target, err := PrintTarget(&out)
-	if err != nil {
-		t.Fatalf("the checkout stopped resolving after an env switch: %v", err)
-	}
-	if target.Env != "staging" || target.URL != "" {
-		t.Errorf("target after switch = %+v", target)
-	}
-	if got := out.String(); got != "▸ todoapp/staging\n" {
-		t.Errorf("banner = %q", got)
-	}
-
-	// And the file on disk carries no address, so nothing downstream can pick up
-	// the previous environment's.
-	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "project.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "old.example") {
-		t.Errorf("the previous environment's address survived the switch:\n%s", raw)
-	}
-}
-
-// TestTheCloudSelectionFlagsAreRefusedRatherThanIgnored: the help text called
-// them overrides and the code never read them, so somebody could push to the
-// linked stack believing they had picked staging — with the banner, which exists
-// to catch exactly that, confirming the wrong place.
 func TestTheCloudSelectionFlagsAreRefusedRatherThanIgnored(t *testing.T) {
 	inScratchCheckout(t)
 	target := Target{URL: "https://127.0.0.1"}

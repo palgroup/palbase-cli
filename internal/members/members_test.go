@@ -4,214 +4,139 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"sort"
+	"fmt"
+	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
-	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
-func studioAgainst(t *testing.T, h http.HandlerFunc) Studio {
-	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	return studio.New(
-		srv.URL,
-		func(_ context.Context) (string, error) { return "test-token", nil },
-		func(context.Context, string, string, string) (string, error) { return "test-proof", nil },
-	)
+type stubREST struct {
+	method, path string
+	body         any
+	reply        any
 }
 
-func trpcOK(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{"data": map[string]any{"json": data}},
-	})
-}
-
-func inner(t *testing.T, r *http.Request) map[string]any {
-	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
+func (s *stubREST) Do(_ context.Context, method, path string, body, out any) error {
+	s.method, s.path, s.body = method, path, body
+	if out == nil || s.reply == nil {
+		return nil
 	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&outer))
-	return outer.JSON
+	raw, err := json.Marshal(s.reply)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
 }
 
-func run(t *testing.T, c Studio, args ...string) error {
+type stubTarget struct {
+	ref      string
+	isCloud  bool
+	describe string
+}
+
+func (t stubTarget) Ref() (string, bool) { return t.ref, t.isCloud }
+func (t stubTarget) Describe() string    { return t.describe }
+
+func run(t *testing.T, rest *stubREST, target stubTarget, args ...string) (string, error) {
 	t.Helper()
-	t.Chdir(t.TempDir())
 	cmd := Cmd(Resolvers{
-		Studio:    func() Studio { return c },
-		Selection: selectiontest.Selected(t),
+		REST:   func() REST { return rest },
+		Target: func() (Target, error) { return target, nil },
 	})
-	cmd.SetOut(&bytes.Buffer{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
 	cmd.SetArgs(args)
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	return cmd.Execute()
+	err := cmd.Execute()
+	return out.String(), err
 }
 
-func TestMembersCmd_Subcommands(t *testing.T) {
-	cmd := Cmd(Resolvers{})
-	var got []string
-	for _, c := range cmd.Commands() {
-		got = append(got, c.Name())
+func TestListShowsOwnerAndMembers(t *testing.T) {
+	rest := &stubREST{reply: []Member{
+		{UserID: "usr_1", Email: "owner@example.test", Role: "owner"},
+		{UserID: "usr_2", Email: "dev@example.test", Role: "member"},
+	}}
+	out, err := run(t, rest, stubTarget{ref: "abc123xyz", isCloud: true}, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
 	}
-	sort.Strings(got)
-	require.Equal(t, []string{"accept", "invitations", "invite", "list", "remove", "role"}, got)
-}
-
-// Membership lives on the PROJECT. The router is `projectMembers.*` and every
-// input is keyed by `projectId` — `groupMembers` / `grpId` are gone, and a call
-// to them would hit a router that no longer exists.
-func TestMembers_CallTheProjectMembersRouter(t *testing.T) {
-	tests := []struct {
-		name      string
-		args      []string
-		procedure string
-		wantBody  map[string]any
-	}{
-		{
-			name: "invite", args: []string{"invite", "dev@example.com", "--role", "admin"},
-			procedure: "/api/trpc/projectMembers.invite",
-			wantBody:  map[string]any{"projectId": "proj_1", "email": "dev@example.com", "role": "admin"},
-		},
-		{
-			name: "role", args: []string{"role", "usr_2", "admin"},
-			procedure: "/api/trpc/projectMembers.changeMemberRole",
-			wantBody:  map[string]any{"projectId": "proj_1", "userId": "usr_2", "role": "admin"},
-		},
-		{
-			name: "remove", args: []string{"remove", "usr_2"},
-			procedure: "/api/trpc/projectMembers.removeMember",
-			wantBody:  map[string]any{"projectId": "proj_1", "userId": "usr_2"},
-		},
-		{
-			name: "accept", args: []string{"accept", "inv_1"},
-			procedure: "/api/trpc/projectMembers.acceptInvitation",
-			wantBody:  map[string]any{"invitationId": "inv_1"},
-		},
+	if rest.path != "/v1/cloud/projects/abc123xyz/members" {
+		t.Fatalf("wrong path: %s", rest.path)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var gotPath string
-			var gotBody map[string]any
-			c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-				gotPath = r.URL.Path
-				gotBody = inner(t, r)
-				trpcOK(w, map[string]any{"id": "inv_1", "ok": true})
-			})
-			require.NoError(t, run(t, c, tc.args...))
-			require.Equal(t, tc.procedure, gotPath)
-			require.Equal(t, tc.wantBody, gotBody)
-			require.NotContains(t, gotBody, "grpId", "groups are gone — membership is Project-scoped")
-		})
-	}
-}
-
-// `members list` reads the WRAPPED camelCase shape, and an admin-only
-// pending-invitations FORBIDDEN must NOT fail the list a plain member can see.
-func TestMembersList_DecodesWrappedCamelCase_AndToleratesForbiddenInvites(t *testing.T) {
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/trpc/projectMembers.members":
-			trpcOK(w, map[string]any{
-				"callerRole": "member",
-				"members": []map[string]any{
-					{"userId": "usr_1", "role": "owner", "joinedAt": "2026-06-24T20:37:17Z", "displayName": nil},
-				},
-			})
-		case "/api/trpc/projectMembers.pendingInvitations":
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":{"json":{"message":"FORBIDDEN"}}}`))
-		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+	for _, want := range []string{"owner", "owner@example.test", "member", "dev@example.test"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("%q missing from:\n%s", want, out)
 		}
-	})
-	require.NoError(t, run(t, c, "list"),
-		"a FORBIDDEN pending-invitations read must not fail members list")
+	}
 }
 
-func TestInvitationsJSON_UsesOnlyEnvironmentRefSnakeCase(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/projectMembers.listMyInvitations", r.URL.Path)
-		trpcOK(w, []map[string]any{
-			{
-				"id":              "inv_1",
-				"projectId":       "proj_1",
-				"projectName":     "Acme",
-				"role":            "member",
-				"createdAt":       "2026-07-15T00:00:00Z",
-				"environment_ref": "acmeprod",
-			},
-		})
-	})
-
-	var out bytes.Buffer
-	cmd := Cmd(Resolvers{
-		Studio:    func() Studio { return c },
-		Selection: selectiontest.Selected(t),
-	})
-	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"invitations", "--json"})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	require.NoError(t, cmd.Execute())
-
-	var rows []map[string]any
-	require.NoError(t, json.Unmarshal(out.Bytes(), &rows))
-	require.Len(t, rows, 1)
-	require.Equal(t, "acmeprod", rows[0]["environment_ref"])
-	require.NotContains(t, rows[0], "environmentRef")
+// An id with no recorded address is still a real person on this project;
+// a blank column would read as a bug rather than as missing data.
+func TestListNamesAMissingAddressRatherThanLeavingItBlank(t *testing.T) {
+	rest := &stubREST{reply: []Member{{UserID: "usr_9", Email: "", Role: "member"}}}
+	out, err := run(t, rest, stubTarget{ref: "abc123xyz", isCloud: true}, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(out, "not recorded") {
+		t.Fatalf("a missing address was printed as emptiness:\n%s", out)
+	}
 }
 
-func TestInvitationsJSON_DoesNotFallbackToCamelCaseEnvironmentRef(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
-		trpcOK(w, []map[string]any{
-			{
-				"id":             "inv_1",
-				"projectId":      "proj_1",
-				"projectName":    "Acme",
-				"role":           "member",
-				"createdAt":      "2026-07-15T00:00:00Z",
-				"environmentRef": "retired-value",
-			},
-		})
-	})
-
-	var out bytes.Buffer
-	cmd := Cmd(Resolvers{
-		Studio:    func() Studio { return c },
-		Selection: selectiontest.Selected(t),
-	})
-	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"invitations", "--json"})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
-	require.NoError(t, cmd.Execute())
-
-	var rows []map[string]any
-	require.NoError(t, json.Unmarshal(out.Bytes(), &rows))
-	require.Len(t, rows, 1)
-	require.Nil(t, rows[0]["environment_ref"])
-	require.NotContains(t, rows[0], "environmentRef")
+func TestAddSendsTheEmail(t *testing.T) {
+	rest := &stubREST{reply: Member{UserID: "usr_2", Email: "dev@example.test", Role: "member"}}
+	out, err := run(t, rest, stubTarget{ref: "abc123xyz", isCloud: true}, "add", "dev@example.test")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if rest.method != "POST" {
+		t.Fatalf("wrong method: %s", rest.method)
+	}
+	sent, _ := rest.body.(map[string]string)
+	if sent["email"] != "dev@example.test" {
+		t.Fatalf("the address did not reach the wire: %#v", rest.body)
+	}
+	if !strings.Contains(out, "Added dev@example.test") {
+		t.Fatalf("no confirmation:\n%s", out)
+	}
 }
 
-func TestMembersInvite_RejectsAnInvalidRoleBeforeTheAPI(t *testing.T) {
-	c := studioAgainst(t, func(http.ResponseWriter, *http.Request) {
-		t.Fatal("must not call the API for an invalid role")
-	})
-	require.ErrorContains(t, run(t, c, "invite", "dev@example.com", "--role", "owner"), "--role must be")
+func TestRemoveTargetsTheMemberPath(t *testing.T) {
+	rest := &stubREST{}
+	if _, err := run(t, rest, stubTarget{ref: "abc123xyz", isCloud: true}, "remove", "usr_2"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if rest.method != "DELETE" || rest.path != "/v1/cloud/projects/abc123xyz/members/usr_2" {
+		t.Fatalf("wrong call: %s %s", rest.method, rest.path)
+	}
 }
 
-// There is no --group flag left anywhere: the project comes from the selection
-// (or the global --project).
-func TestMembers_ExposeNoGroupFlag(t *testing.T) {
-	for _, c := range Cmd(Resolvers{}).Commands() {
-		require.Nil(t, c.Flags().Lookup("group"), "%s must not take --group", c.Name())
+// A stack on this machine has no membership. Saying so beats a 404 from a
+// control plane that has never heard of it.
+func TestRefusesANonCloudTarget(t *testing.T) {
+	rest := &stubREST{}
+	_, err := run(t, rest, stubTarget{isCloud: false, describe: "https://localhost:8443"}, "list")
+	if err == nil {
+		t.Fatal("a local stack was accepted")
+	}
+	if !strings.Contains(err.Error(), "no membership") {
+		t.Fatalf("unhelpful reason: %v", err)
+	}
+	if rest.method != "" {
+		t.Fatal("it called the cloud anyway")
+	}
+}
+
+// No `invite` / `accept` / `invitations`: this cloud cannot send an e-mail, and
+// a verb whose whole purpose is a message that never arrives is worse than no
+// verb at all.
+func TestSurfaceHasNoInvitationVerbs(t *testing.T) {
+	cmd := Cmd(Resolvers{})
+	var names []string
+	for _, c := range cmd.Commands() {
+		names = append(names, c.Name())
+	}
+	got := fmt.Sprint(names)
+	if got != "[add list remove]" {
+		t.Fatalf("unexpected surface: %s", got)
 	}
 }

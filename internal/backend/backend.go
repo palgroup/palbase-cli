@@ -143,7 +143,6 @@ func Commands(r Resolvers) []*cobra.Command {
 		// environment to resolve. It is told where the stack is, once, and asks
 		// the stack itself for the rest.
 		newLinkCmd(),
-		newEnvCmd(),
 		newPlanCmd(),
 		newInitCmd(),
 		newStartCmd(),

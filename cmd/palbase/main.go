@@ -12,7 +12,6 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/admin"
 	"github.com/palgroup/palbase-cli/internal/apikey"
-	"github.com/palgroup/palbase-cli/internal/apps"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
@@ -20,7 +19,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/debugconsole"
 	"github.com/palgroup/palbase-cli/internal/egress"
 	"github.com/palgroup/palbase-cli/internal/flags"
-	"github.com/palgroup/palbase-cli/internal/github"
 	"github.com/palgroup/palbase-cli/internal/logs"
 	"github.com/palgroup/palbase-cli/internal/members"
 	"github.com/palgroup/palbase-cli/internal/notifications"
@@ -143,6 +141,31 @@ func tenantRefOf(tenantURL, publicHost string) (string, bool) {
 		return "", false
 	}
 	return ref, true
+}
+
+// linkedProject adapts the linked target for commands that need to talk to a
+// project — both to the project itself and to the cloud about it.
+type linkedProject struct{ target backend.Target }
+
+func linkedTarget() (linkedProject, error) {
+	t, err := backend.ReadTarget()
+	if err != nil {
+		return linkedProject{}, err
+	}
+	return linkedProject{target: t}, nil
+}
+
+// Ref names the cloud project, or reports false for anything that is not one —
+// a stack on this machine has no cloud ref, and asking the control plane about
+// it would be asking the wrong authority.
+func (p linkedProject) Ref() (string, bool) {
+	return tenantRefOf(p.target.URL, resolved.Endpoints.PublicHost)
+}
+
+func (p linkedProject) Describe() string { return p.target.Describe() }
+
+func (p linkedProject) GetJSON(ctx context.Context, path string, out any) error {
+	return backend.GetManagementJSON(ctx, p.target, path, out)
 }
 
 // cloudFacts answers questions about the cloud itself — the tenant address
@@ -275,13 +298,8 @@ func newRootCmd() *cobra.Command {
 			Cloud: func() project.Bootstrapper { return cloudFacts{} },
 		}),
 		apikey.Cmd(apikey.Resolvers{
-			REST:      func() apikey.REST { return managementREST() },
-			Selection: selectionResolver,
-		}),
-		apps.Cmd(apps.Resolvers{
-			REST:       func() apps.REST { return managementREST() },
-			Selection:  selectionResolver,
-			PublicHost: func() string { return resolved.Endpoints.PublicHost },
+			REST:   func() apikey.REST { return managementREST() },
+			Target: func() (apikey.Target, error) { return linkedTarget() },
 		}),
 		debugconsole.Cmd(debugconsole.Resolvers{
 			Studio:     func() debugconsole.Studio { return studioClient },
@@ -293,12 +311,8 @@ func newRootCmd() *cobra.Command {
 			Selection: selectionResolver,
 		}),
 		members.Cmd(members.Resolvers{
-			Studio:    func() members.Studio { return studioClient },
-			Selection: selectionResolver,
-		}),
-		github.Cmd(github.Resolvers{
-			Studio:    func() github.Studio { return studioClient },
-			StudioURL: func() string { return resolved.Endpoints.Studio },
+			REST:   func() members.REST { return managementREST() },
+			Target: func() (members.Target, error) { return linkedTarget() },
 		}),
 		secret.Cmd(),
 		secret.RunCmd(),
