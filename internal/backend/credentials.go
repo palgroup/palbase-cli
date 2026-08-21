@@ -156,6 +156,25 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	if v := strings.TrimSpace(os.Getenv(AccessTokenEnv)); v != "" {
 		return Credentials{Value: v, Kind: kindOf(v)}, SourceEnv, nil
 	}
+
+	// THE CLOUD ANSWERS FOR ITS OWN PROJECTS — the same shape as a stack on this
+	// machine answering from its state directory, one step up.
+	//
+	// A cloud project's management surface is opened by that project's own
+	// service-role key, and that key lives in the control plane's ledger. Before
+	// this, a person who had signed in and linked a project still got "no
+	// credential" from `status`, `deploys` and `push`: the chain was
+	// login → link → BROKEN → push, and the only way through was to read a key
+	// out of the database by hand.
+	//
+	// The fetch is gated by ownership on the server and cached here, so it costs
+	// one round trip per project per machine.
+	if CloudKeyFetcher != nil {
+		if cred, ok := fetchCloudCredential(url); ok {
+			return cred, SourceStore, nil
+		}
+	}
+
 	return Credentials{}, "", fmt.Errorf(
 		// NOT "start writes the credential for you" any more: it does not write
 		// one, and saying so sent people looking for a file that no longer
@@ -304,4 +323,30 @@ func localStackKey(url string) (string, bool) {
 		return "", false
 	}
 	return key, true
+}
+
+// CloudKeyFetcher resolves a tenant address to that project's service-role key
+// by asking the control plane, or returns an error when the caller does not own
+// it (or is not signed in). Injected from main.go so this package stays off the
+// auth and transport packages.
+//
+// Nil means "no cloud configured" — every local flow keeps working untouched.
+var CloudKeyFetcher func(tenantURL string) (string, error)
+
+// fetchCloudCredential asks the cloud for a project's key and remembers it.
+//
+// A failure here is not reported as an error: the caller is about to produce a
+// message that names every way to supply a credential, and "the cloud said no"
+// is one reason among several — a stack on this machine, a key in the
+// environment, or simply not being signed in are all still valid answers.
+func fetchCloudCredential(url string) (Credentials, bool) {
+	key, err := CloudKeyFetcher(url)
+	if err != nil || strings.TrimSpace(key) == "" {
+		return Credentials{}, false
+	}
+	cred := Credentials{Value: key, Kind: kindOf(key)}
+	// Remembered so the next command does not pay the round trip. A failed
+	// write is not fatal: the credential in hand is still good for THIS call.
+	_ = StoreCredential(url, cred)
+	return cred, true
 }

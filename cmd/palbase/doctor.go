@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/hook"
+	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
@@ -49,15 +49,16 @@ func doctorCmd() *cobra.Command {
 				ok("pat", "not set (fine for interactive use; CI needs a Dashboard-issued PAT)")
 			}
 
-			cfg, cfgErr := selection.Load(".")
-			var notSelected selection.ErrNotSelected
-			switch {
-			case cfgErr == nil:
-				ok("link", fmt.Sprintf("project %s / environment %s via .palbase/config.json", cfg.ProjectID, cfg.EnvironmentID))
-			case errors.As(cfgErr, &notSelected):
-				ok("link", "cwd not linked to a project — run `palbase project use <projectId>` here (or pass --project)")
-			default:
-				bad("link", cfgErr.Error())
+			// The link this CLI acts on is a TARGET: a stack address in
+			// .palbase/project.json, written by `palbase link` (or by
+			// `palbase start` for a stack on this machine). Reporting the v1
+			// project/environment selection instead would send a person to
+			// `palbase project use`, a verb that no longer exists — the v2
+			// cloud has one project per tenant and one address per project.
+			if target, terr := backend.ReadTarget(); terr == nil {
+				ok("link", target.Describe())
+			} else {
+				ok("link", "this directory is not linked — run `palbase link <url>` here")
 			}
 
 			// pre-push deploy-validation hook (report-only). Meaningful only in a

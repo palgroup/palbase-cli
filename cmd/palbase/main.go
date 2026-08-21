@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/admin"
@@ -84,6 +87,64 @@ func managementREST() *transport.Client {
 	return transport.New(resolved.Endpoints.PlatformAPI, token)
 }
 
+// wireCloudKeyFetcher lets the backend package ask the control plane for a
+// project's own key.
+//
+// It closes the chain a signed-in person expects: `login` proves who they are,
+// `link` names a project, and `push` needs that project's service-role key —
+// which lives in the control plane's ledger and nowhere else reachable. Before
+// this, that middle step had no bridge and every target-relative verb answered
+// "no credential" to somebody who had done everything right.
+//
+// Wired here rather than imported there so the backend package stays off the
+// auth and transport packages.
+func wireCloudKeyFetcher() {
+	backend.CloudKeyFetcher = func(tenantURL string) (string, error) {
+		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
+		if !ok {
+			// Not an address on this cloud (a stack on this machine, or another
+			// deployment). Asking our control plane about it would be asking the
+			// wrong authority.
+			return "", fmt.Errorf("%s is not a project on this cloud", tenantURL)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var keys struct {
+			ServiceRoleKey string `json:"serviceRoleKey"`
+		}
+		if err := managementREST().Do(ctx, http.MethodGet,
+			"/v1/cloud/projects/"+url.PathEscape(ref)+"/keys", nil, &keys); err != nil {
+			return "", err
+		}
+		return keys.ServiceRoleKey, nil
+	}
+}
+
+// tenantRefOf extracts the project ref from a tenant address on this cloud.
+//
+// `https://j06bwtuum.v2.palbase.studio` → `j06bwtuum`. Anything not under this
+// cloud's tenant suffix returns false, so a local stack or another deployment's
+// address is never sent to our control plane.
+func tenantRefOf(tenantURL, publicHost string) (string, bool) {
+	if publicHost == "" {
+		return "", false
+	}
+	u, err := url.Parse(tenantURL)
+	if err != nil || u.Hostname() == "" {
+		return "", false
+	}
+	suffix := "." + publicHost
+	host := u.Hostname()
+	if !strings.HasSuffix(host, suffix) {
+		return "", false
+	}
+	ref := strings.TrimSuffix(host, suffix)
+	if ref == "" || strings.Contains(ref, ".") {
+		return "", false
+	}
+	return ref, true
+}
+
 // cloudFacts answers questions about the cloud itself — the tenant address
 // suffix, today. It reads them from the control plane's bootstrap endpoint
 // rather than a compiled-in constant, so one binary is correct against every
@@ -156,6 +217,10 @@ func newRootCmd() *cobra.Command {
 				ClientID: "palbase-cli",
 				Mode:     string(r.Mode),
 			}, os.Stdout)
+			// The bridge from "signed in" to "can open this project": every
+			// target-relative verb resolves a credential, and for a cloud
+			// project that answer lives in the control plane's ledger.
+			wireCloudKeyFetcher()
 			studioClient = studio.New(
 				r.Endpoints.Studio,
 				func(ctx context.Context) (string, error) { return authClient.GetValidToken(ctx) },
