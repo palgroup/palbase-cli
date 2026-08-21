@@ -91,3 +91,66 @@ func TestAProjectThatIsNotABackendSaysSo(t *testing.T) {
 		t.Fatalf("a directory with no controllers/ got %v", err)
 	}
 }
+
+// The SDK-version trap, named where its victim can read it.
+//
+// npm's `latest` tag still points at the 17 line while the cloud runs 18.x.
+// A package.json written the documented way installs the OLDER major, and the
+// bundle then fails deep inside bun with `var controllers = undefined()` — a
+// message about neither the version nor the problem. Measured 2026-08-21
+// against a real project.
+func TestCheckSDKVersionRefusesAMajorTheCLICannotBundle(t *testing.T) {
+	dir := t.TempDir()
+	writeSDK(t, dir, "17.4.0")
+
+	err := checkSDKVersion(dir)
+	if err == nil {
+		t.Fatal("an SDK this CLI cannot bundle was accepted")
+	}
+	for _, want := range []string{"17.4.0", "18", "npm install @palbase/backend@18", "latest"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the message does not say %q:\n%s", want, err)
+		}
+	}
+}
+
+func TestCheckSDKVersionAcceptsTheSupportedMajor(t *testing.T) {
+	for _, v := range []string{"18.0.0", "18.0.1", "19.2.3"} {
+		dir := t.TempDir()
+		writeSDK(t, dir, v)
+		if err := checkSDKVersion(dir); err != nil {
+			t.Fatalf("%s was refused: %v", v, err)
+		}
+	}
+}
+
+// No SDK on disk is NOT this check's business: the bundler's own error about a
+// missing module says more than a guess would.
+func TestCheckSDKVersionStaysQuietWhenThereIsNothingToRead(t *testing.T) {
+	if err := checkSDKVersion(t.TempDir()); err != nil {
+		t.Fatalf("a project with no SDK installed was refused: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "@palbase", "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "node_modules", "@palbase", "backend", "package.json"),
+		[]byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSDKVersion(dir); err != nil {
+		t.Fatalf("an unreadable package.json was turned into a version error: %v", err)
+	}
+}
+
+func writeSDK(t *testing.T, dir, version string) {
+	t.Helper()
+	p := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p, "package.json"),
+		[]byte(`{"name":"@palbase/backend","version":"`+version+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

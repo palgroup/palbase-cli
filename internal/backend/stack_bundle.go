@@ -22,6 +22,7 @@ package backend
 // that built it rather than becoming a quiet 404 later.
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -107,6 +108,13 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) error {
 	}
 	entry := filepath.Join(staged, ".controllers-entry.ts")
 	if err := os.WriteFile(entry, []byte(bundleEntry(dir, stagedSources)), 0o644); err != nil {
+		return err
+	}
+
+	// VERSION BEFORE BUNDLER: an SDK below what this CLI builds against fails
+	// deep inside bun with a message about `undefined`, and the person is left
+	// reading a stack trace instead of a sentence about versions.
+	if err := checkSDKVersion(dir); err != nil {
 		return err
 	}
 
@@ -441,4 +449,48 @@ func bunVersion(ctx context.Context, dir string) string {
 		return "?"
 	}
 	return strings.TrimSpace(out)
+}
+
+// minimumSDKMajor is the @palbase/backend major this CLI can build against.
+//
+// This CLI serves the v2 cloud, and v2 runs 18.x. The 17 line has a different
+// controller shape: bundling against it produces an entry whose controller
+// export resolves to nothing, and the failure surfaces as a bundler stack trace
+// (`var controllers = undefined()`) that names neither the version nor the
+// problem. Measured 2026-08-21 against a real project.
+//
+// The trap is easy to fall into and hard to read: npm's `latest` tag still
+// points at the 17 line, so a package.json written the documented way —
+// `"@palbase/backend": "latest"` — installs a major BELOW what the runtime
+// serves.
+const minimumSDKMajor = 18
+
+// checkSDKVersion refuses a build against an SDK this CLI cannot bundle, and
+// says which version is installed and why it is wrong.
+//
+// It runs BEFORE the bundler so the person reads a sentence about versions
+// instead of a stack trace about `undefined`. An unreadable package.json is not
+// an error here: the bundler's own message is better than a guess.
+func checkSDKVersion(projectDir string) error {
+	raw, err := os.ReadFile(filepath.Join(projectDir, "node_modules", "@palbase", "backend", "package.json"))
+	if err != nil {
+		return nil
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &pkg); err != nil || pkg.Version == "" {
+		return nil
+	}
+	major, err := strconv.Atoi(strings.SplitN(pkg.Version, ".", 2)[0])
+	if err != nil || major >= minimumSDKMajor {
+		return nil
+	}
+	return fmt.Errorf(
+		"@palbase/backend %s is installed, and this CLI builds against %d or newer.\n"+
+			"The cloud runs %d.x; the %d line declares controllers differently, so a bundle built\n"+
+			"against it carries nothing and fails with an error about the bundler rather than the version.\n\n"+
+			"  npm install @palbase/backend@%d\n\n"+
+			"npm's `latest` tag still points at the %d line, so \"latest\" in package.json installs this.",
+		pkg.Version, minimumSDKMajor, minimumSDKMajor, major, minimumSDKMajor, major)
 }
