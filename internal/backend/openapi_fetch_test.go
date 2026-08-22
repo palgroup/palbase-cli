@@ -39,7 +39,7 @@ func TestFetchOpenAPISpec_RetriesOn503ThenSucceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/openapi.json", "k", fetchOpts{
+	body, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/admin/openapi.json", "k", fetchOpts{
 		attemptTimeout: 5 * time.Second,
 		totalBudget:    10 * time.Second,
 		minBackoff:     time.Millisecond,
@@ -61,7 +61,7 @@ func TestFetchOpenAPISpec_RetriesOn502(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/openapi.json", "k", fetchOpts{
+	body, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/admin/openapi.json", "k", fetchOpts{
 		attemptTimeout: 5 * time.Second,
 		totalBudget:    10 * time.Second,
 		minBackoff:     time.Millisecond,
@@ -81,7 +81,7 @@ func TestFetchOpenAPISpec_BudgetExhaustedSurfacesStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/openapi.json", "k", fetchOpts{
+	_, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/admin/openapi.json", "k", fetchOpts{
 		attemptTimeout: 1 * time.Second,
 		totalBudget:    150 * time.Millisecond, // tiny: gives up fast
 		minBackoff:     50 * time.Millisecond,
@@ -100,7 +100,7 @@ func TestFetchOpenAPISpec_NoRetryOn4xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/openapi.json", "k", fetchOpts{
+	_, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/admin/openapi.json", "k", fetchOpts{
 		attemptTimeout: 5 * time.Second,
 		totalBudget:    10 * time.Second,
 		minBackoff:     time.Millisecond,
@@ -135,7 +135,7 @@ func TestFetchOpenAPISpec_WarmPathSingleCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/openapi.json", "k", fetchOpts{
+	body, err := fetchOpenAPISpecOpts(context.Background(), srv.URL+"/admin/openapi.json", "k", fetchOpts{
 		attemptTimeout: 5 * time.Second,
 		totalBudget:    10 * time.Second,
 		minBackoff:     time.Millisecond,
@@ -155,7 +155,7 @@ func TestFetchOpenAPISpec_RespectsContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := fetchOpenAPISpecOpts(ctx, srv.URL+"/openapi.json", "k", fetchOpts{
+	_, err := fetchOpenAPISpecOpts(ctx, srv.URL+"/admin/openapi.json", "k", fetchOpts{
 		attemptTimeout: 5 * time.Second,
 		totalBudget:    10 * time.Second,
 		minBackoff:     time.Millisecond,

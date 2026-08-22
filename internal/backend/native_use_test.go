@@ -53,7 +53,7 @@ func newTenantStub(t *testing.T) string {
 	t.Helper()
 	srv := httptestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/openapi.json":
+		case "/admin/openapi.json":
 			_, _ = w.Write([]byte(`{"openapi":"3.1.0","paths":{}}`))
 		case "/auth/oauth/providers":
 			_, _ = w.Write([]byte(`{"providers":{}}`))
@@ -273,7 +273,7 @@ func TestRunPullSpec_AppConfigSeparatesTheOutputs(t *testing.T) {
 	require.NoError(t, err)
 
 	// An app link fetches the spec with the APP-BOUND key, not the generic one.
-	require.Equal(t, "https://app1prod.dev.palbase.studio/openapi.json", fetchedURL)
+	require.Equal(t, "https://app1prod.dev.palbase.studio/admin/openapi.json", fetchedURL)
 	require.Equal(t, "pb_app1prod_c01234567890123456789", fetchedKey)
 
 	require.FileExists(t, filepath.Join(specDir, "openapi.json"))

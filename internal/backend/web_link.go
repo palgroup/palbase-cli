@@ -90,7 +90,7 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 	if art.Platform != "web" {
 		return fmt.Errorf("app %s is %s, not web", appID, art.Platform)
 	}
-	spec, err := fetchRemoteOpenAPISpec(ctx, strings.TrimRight(art.BaseURL, "/")+"/openapi.json", art.APIKey, w)
+	spec, err := fetchRemoteOpenAPISpec(ctx, strings.TrimRight(art.BaseURL, "/")+contractPath, art.APIKey, w)
 	if err != nil {
 		return err
 	}

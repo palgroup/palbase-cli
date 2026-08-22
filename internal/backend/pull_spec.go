@@ -192,6 +192,20 @@ Override the target with the global --project / --environment flags.`,
 // ENVIRONMENT ref. Injected so runPullSpec is testable without a live server.
 type specTargetLookup func(ctx context.Context, environmentRef string) (backendTarget, error)
 
+// contractPath is where a stack serves its OpenAPI document.
+//
+// NOT `/openapi.json`. That was v1's path and no v2 stack has it — measured
+// live (2026-08-22) against the control plane: `/openapi.json` falls through to
+// the deep-links module and answers `link_not_found`, while
+// `/admin/openapi.json` answers 200 with the real document. So `link` and
+// `spec` were fetching a path that does not exist anywhere, on every stack.
+//
+// It sits behind the admin surface, which is the right place for it: the
+// document names every endpoint this backend serves, and reading it takes the
+// project's key. Locked by contract_path_test.go against a server shaped like
+// a real v2 stack.
+const contractPath = "/admin/openapi.json"
+
 // remoteSpecFetch fetches the openapi.json bytes from a remote tenant host.
 type remoteSpecFetch func(ctx context.Context, specURL, apiKey string, w io.Writer) ([]byte, error)
 
@@ -349,7 +363,7 @@ func runPullSpec(
 		return err
 	}
 
-	specURL := target.URL + "/openapi.json"
+	specURL := target.URL + contractPath
 	specKey := target.APIKey
 	var entry *pullSpecConfigEntry
 	if appID != "" {
@@ -358,7 +372,7 @@ func runPullSpec(
 			return err
 		}
 		// App links fetch with their app-bound key.
-		specURL = strings.TrimRight(entry.BaseURL, "/") + "/openapi.json"
+		specURL = strings.TrimRight(entry.BaseURL, "/") + contractPath
 		specKey = entry.APIKey
 	}
 
