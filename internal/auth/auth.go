@@ -1,27 +1,27 @@
 package auth
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
-
-	"golang.org/x/term"
 )
 
 // Config holds the auth configuration for CLI.
 type Config struct {
-	AuthURL  string
-	ClientID string
-	Mode     string // "prod" or "dev" — determines credentials file
+	AuthURL string
+	// StudioURL is the PANEL's origin, and it is not AuthURL. The gateway
+	// serves the API on api.* and the app on app.*, and a person signing in
+	// goes to the app: the authorize endpoint is a machine surface behind an
+	// apikey header, which a browser navigation cannot carry.
+	StudioURL string
+	ClientID  string
+	Mode      string // "prod" or "dev" — determines credentials file
 }
 
 // TokenResponse represents the OAuth token endpoint response.
@@ -61,66 +61,39 @@ func NewClient(cfg Config, output io.Writer) *Client {
 	}
 }
 
-// Login signs in to the v2 control plane.
+// Login signs in to the cloud, through the browser.
 //
-// The browser flow this replaced (Authorization Code + PKCE, DPoP-bound) spoke
-// to a pre-registered `palbase-cli` OAuth client with five loopback redirect
-// URIs seeded into the v1 platform. The v2 control plane is a Palbase stack in
-// its own right: it HAS an OIDC provider — discovery even advertises a
-// device-authorization endpoint — but no client is registered there, so that
-// door is shut until one is.
+// The email-and-password prompt this replaces was a stopgap: the plane's OIDC
+// provider was mounted but no `palbase-cli` client was registered, so the
+// browser door was shut. It is open now — the client is seeded by the script
+// that builds the installation — and a CLI that never handles a password is
+// the better shape by a distance.
 //
-// What is open, and proven end-to-end through the public gateway, is the
-// stack's own /auth/login. Using it keeps a recorded decision intact: the
-// management identity comes from the stack's OWN auth module, never a second
-// identity system.
+// A headless run does not come through here at all: CI sets
+// PALBASE_ACCESS_TOKEN and every verb resolves it without a sign-in.
+//
+// This is a CLOUD sign-in. A stack you host yourself is a different question
+// with a different answer: `palbase link <url> --token-stdin`.
 func (c *Client) Login(ctx context.Context) error {
-	email, password, err := c.askForCredentials()
-	if err != nil {
-		return err
-	}
-	return c.signIn(ctx, email, password, false)
+	return c.finish(ctx, false)
 }
 
-// SignUp creates an account on this control plane and signs in with it.
-//
-// It exists because there is no other door: the v2 cloud has no dashboard yet,
-// so a first account can only be born here.
+// SignUp opens a new account, through the same browser flow.
 func (c *Client) SignUp(ctx context.Context) error {
-	email, password, err := c.askForCredentials()
-	if err != nil {
-		return err
-	}
-	return c.signIn(ctx, email, password, true)
+	return c.finish(ctx, true)
 }
 
-func (c *Client) signIn(ctx context.Context, email, password string, create bool) error {
-	plane := c.plane()
-
-	boot, err := plane.Bootstrap(ctx)
+func (c *Client) finish(ctx context.Context, create bool) error {
+	creds, err := c.BrowserLogin(ctx, create)
 	if err != nil {
 		return err
 	}
-
-	verb := plane.SignIn
-	if create {
-		verb = plane.SignUp
-	}
-	// The gate answers the first attempt with a proof-of-work challenge, so
-	// this call can take a moment. Saying so beats a silent pause the person
-	// reads as a hang.
-	fmt.Fprintf(c.Output, "Signing in to %s…\n", c.Cfg.AuthURL)
-	creds, err := verb(ctx, boot, email, password)
-	if err != nil {
-		return err
-	}
-
 	if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
 		return fmt.Errorf("save credentials: %w", err)
 	}
 	who := creds.User.Email
 	if who == "" {
-		who = email
+		who = creds.User.ID
 	}
 	fmt.Fprintf(c.Output, "Signed in as %s\n", who)
 	return nil
@@ -130,50 +103,6 @@ func (c *Client) signIn(ctx context.Context, email, password string, create bool
 // own transport so tests reach their fake and never the network.
 func (c *Client) plane() *CloudClient {
 	return NewCloudClientWith(c.Cfg.AuthURL, c.HttpClient)
-}
-
-// askForCredentials reads an email and password from the terminal.
-//
-// PALBASE_EMAIL / PALBASE_PASSWORD skip the prompt for a headless run. Without
-// them a non-TTY run fails loudly rather than hanging on a read that will never
-// return.
-func (c *Client) askForCredentials() (string, string, error) {
-	email := strings.TrimSpace(os.Getenv("PALBASE_EMAIL"))
-	password := os.Getenv("PALBASE_PASSWORD")
-	if email != "" && password != "" {
-		return email, password, nil
-	}
-
-	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) {
-		return "", "", fmt.Errorf("stdin is not a terminal — set PALBASE_EMAIL and PALBASE_PASSWORD for a headless sign-in")
-	}
-
-	if email == "" {
-		fmt.Fprint(c.Output, "Email: ")
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			return "", "", fmt.Errorf("read email: %w", err)
-		}
-		email = strings.TrimSpace(line)
-	}
-	if email == "" {
-		return "", "", fmt.Errorf("no email given — aborting")
-	}
-
-	if password == "" {
-		fmt.Fprint(c.Output, "Password: ")
-		raw, err := term.ReadPassword(fd)
-		fmt.Fprintln(c.Output)
-		if err != nil {
-			return "", "", fmt.Errorf("read password: %w", err)
-		}
-		password = strings.TrimRight(string(raw), "\r\n")
-	}
-	if password == "" {
-		return "", "", fmt.Errorf("no password given — aborting")
-	}
-	return email, password, nil
 }
 
 // RefreshTokens trades the stored refresh token for a fresh session.

@@ -236,9 +236,10 @@ func newRootCmd() *cobra.Command {
 			}
 			resolved = r
 			authClient = auth.NewClient(auth.Config{
-				AuthURL:  r.Endpoints.Auth,
-				ClientID: "palbase-cli",
-				Mode:     string(r.Mode),
+				AuthURL:   r.Endpoints.Auth,
+				StudioURL: r.Endpoints.Studio,
+				ClientID:  "palbase-cli",
+				Mode:      string(r.Mode),
 			}, os.Stdout)
 			// The bridge from "signed in" to "can open this project": every
 			// target-relative verb resolves a credential, and for a cloud
@@ -363,15 +364,19 @@ func loginCmd() *cobra.Command {
 		Short: "Sign in to Palbase",
 		Long: `Sign in, and keep the session on this machine.
 
-Signing in asks for the email and password of a Palbase cloud account. For a
-headless run — CI, an agent in a container — set PALBASE_EMAIL and
-PALBASE_PASSWORD, or supply a token directly with PALBASE_ACCESS_TOKEN and skip
-this entirely.
+This opens a browser. You type your password into the panel, over TLS, on a
+page whose address you can read — never into this terminal. What comes back
+here is a code that is useless without a secret this process generated and
+never sent.
 
-Use --create to open a new account on this cloud and sign in with it.
+Use --create to open a new account instead.
 
-There is no separate sign-in for a project running on this machine: ` + "`palbase start`" + `
-writes that credential itself.`,
+For a headless run — CI, an agent in a container — there is no sign-in at all:
+set PALBASE_ACCESS_TOKEN and every command resolves it.
+
+Two things do NOT come through here:
+  a project running on this machine   ` + "`palbase start`" + ` writes that credential itself
+  a stack you host yourself           ` + "`palbase link <url> --token-stdin`" + ``,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stdout, "Mode: %s (source=%s, cloud=%s)\n",
 				resolved.Mode, resolved.Source, resolved.Endpoints.PlatformAPI)

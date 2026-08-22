@@ -1,16 +1,13 @@
 package auth
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -43,19 +40,6 @@ type Bootstrap struct {
 	AnonKey      string `json:"anonKey"`
 	Issuer       string `json:"issuer"`
 	TenantDomain string `json:"tenantDomain"`
-}
-
-// powChallenge is the server's demand: find a nonce whose digest starts with
-// `Difficulty` zero bits.
-type powChallenge struct {
-	ID         string `json:"id"`
-	Prefix     string `json:"prefix"`
-	Difficulty int    `json:"difficulty"`
-}
-
-type powRejection struct {
-	Error     string       `json:"error"`
-	Challenge powChallenge `json:"challenge"`
 }
 
 type sessionResponse struct {
@@ -116,114 +100,6 @@ func (c *CloudClient) Bootstrap(ctx context.Context) (Bootstrap, error) {
 	return b, nil
 }
 
-// SignIn exchanges an email and password for a session, solving the
-// proof-of-work challenge the gate demands.
-func (c *CloudClient) SignIn(ctx context.Context, boot Bootstrap, email, password string) (*Credentials, error) {
-	return c.authenticate(ctx, "/auth/login", boot, email, password)
-}
-
-// SignUp creates an account and returns its first session.
-func (c *CloudClient) SignUp(ctx context.Context, boot Bootstrap, email, password string) (*Credentials, error) {
-	return c.authenticate(ctx, "/auth/signup", boot, email, password)
-}
-
-func (c *CloudClient) authenticate(ctx context.Context, path string, boot Bootstrap, email, password string) (*Credentials, error) {
-	body, err := json.Marshal(map[string]string{"email": email, "password": password})
-	if err != nil {
-		return nil, err
-	}
-
-	status, raw, err := c.post(ctx, path, body, boot.AnonKey, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// The gate answers the FIRST attempt with a challenge. Replaying the same
-	// request with the solution is the protocol, not a retry: a fresh body
-	// would earn a fresh challenge and the loop would never close.
-	if status == http.StatusForbidden {
-		var rej powRejection
-		if err := json.Unmarshal(raw, &rej); err == nil && rej.Challenge.Prefix != "" {
-			id, nonce := solveProofOfWork(rej.Challenge)
-			status, raw, err = c.post(ctx, path, body, boot.AnonKey, map[string]string{
-				"X-PoW-Challenge-ID": id,
-				"X-PoW-Nonce":        strconv.FormatUint(nonce, 10),
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	if status != http.StatusOK && status != http.StatusCreated {
-		return nil, fmt.Errorf("sign-in failed (HTTP %d): %s", status, describeFailure(raw))
-	}
-
-	var s sessionResponse
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil, fmt.Errorf("the response is not a session: %w", err)
-	}
-	if s.AccessToken == "" {
-		return nil, fmt.Errorf("the server accepted the sign-in but issued no token")
-	}
-
-	// A missing expires_in must not read as "expired at the epoch": every later
-	// call would refuse to use a token that is in fact valid.
-	lifetime := time.Duration(s.ExpiresIn) * time.Second
-	if s.ExpiresIn <= 0 {
-		lifetime = time.Hour
-	}
-	id, mail := s.User.ID, s.User.Email
-	if id == "" {
-		id, mail = subjectOf(s.AccessToken, email)
-	}
-	return &Credentials{
-		AccessToken:  s.AccessToken,
-		RefreshToken: s.RefreshToken,
-		ExpiresAt:    time.Now().Add(lifetime),
-		User:         UserInfo{ID: id, Email: mail},
-	}, nil
-}
-
-func (c *CloudClient) post(ctx context.Context, path string, body []byte, anonKey string, extra map[string]string) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return 0, nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apikey", anonKey)
-	for k, v := range extra {
-		req.Header.Set(k, v)
-	}
-	res, err := c.HTTP.Do(req)
-	if err != nil {
-		return 0, nil, fmt.Errorf("reach %s: %w", c.BaseURL, err)
-	}
-	defer func() { _ = res.Body.Close() }()
-	raw, _ := io.ReadAll(res.Body)
-	return res.StatusCode, raw, nil
-}
-
-// solveProofOfWork finds a nonce whose sha256(prefix+nonce) begins with
-// `Difficulty` zero bits.
-//
-// The comparison reads the first eight bytes as a big-endian integer and shifts
-// away everything below the required prefix. Comparing hex characters instead
-// would only ever express difficulties that are multiples of four — and would
-// silently accept a digest the server rejects for every other value.
-func solveProofOfWork(ch powChallenge) (string, uint64) {
-	if ch.Difficulty <= 0 || ch.Difficulty > 64 {
-		return ch.ID, 0
-	}
-	shift := uint(64 - ch.Difficulty)
-	for nonce := uint64(0); ; nonce++ {
-		sum := sha256.Sum256([]byte(ch.Prefix + strconv.FormatUint(nonce, 10)))
-		if binary.BigEndian.Uint64(sum[:8])>>shift == 0 {
-			return ch.ID, nonce
-		}
-	}
-}
-
 // subjectOf reads the `sub` claim without verifying the signature — the token
 // came straight from the server over TLS, and the claim is used only to label
 // the stored credential.
@@ -264,4 +140,115 @@ func describeFailure(raw []byte) string {
 		return env.Error
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+// BeginAuthorization asks the plane to start an Authorization Code flow and
+// returns the id of the request a person must now stand behind.
+//
+// This leg is machine-to-machine on purpose. The authorize endpoint takes the
+// anon apikey in a header and a browser navigation cannot carry one, so the CLI
+// makes the call itself and hands the person the id instead of the URL. The
+// redirect is NOT followed: its Location is the whole answer.
+func (c *CloudClient) BeginAuthorization(ctx context.Context, boot Bootstrap, redirectURI, challenge, state string) (string, error) {
+	q := url.Values{
+		"client_id":             {"palbase-cli"},
+		"response_type":         {"code"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {authorizeScopes},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"state":                 {state},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/oauth/authorize?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("apikey", boot.AnonKey)
+
+	res, err := c.doNoRedirect(req)
+	if err != nil {
+		return "", fmt.Errorf("reach %s: %w", c.BaseURL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+
+	if res.StatusCode != http.StatusFound && res.StatusCode != http.StatusSeeOther {
+		return "", fmt.Errorf("the plane would not start a sign-in (HTTP %d): %s",
+			res.StatusCode, describeFailure(raw))
+	}
+	loc, err := url.Parse(res.Header.Get("Location"))
+	if err != nil {
+		return "", fmt.Errorf("the plane redirected somewhere unparseable: %w", err)
+	}
+	id := loc.Query().Get("auth_request_id")
+	if id == "" {
+		return "", fmt.Errorf("the plane started a sign-in without naming it: %s", loc.String())
+	}
+	return id, nil
+}
+
+// ExchangeCode redeems the authorization code for a session.
+//
+// The verifier goes here and nowhere else: it is the proof that this process —
+// not whatever else saw the code go by — is the one that asked.
+func (c *CloudClient) ExchangeCode(ctx context.Context, boot Bootstrap, code, redirectURI, verifier string) (*Credentials, error) {
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"client_id":     {"palbase-cli"},
+		"code_verifier": {verifier},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/oauth/token",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("apikey", boot.AnonKey)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reach %s: %w", c.BaseURL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the code could not be exchanged (HTTP %d): %s",
+			res.StatusCode, describeFailure(raw))
+	}
+
+	var s sessionResponse
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("the response is not a session: %w", err)
+	}
+	if s.AccessToken == "" {
+		return nil, fmt.Errorf("the exchange succeeded but issued no token")
+	}
+	lifetime := time.Duration(s.ExpiresIn) * time.Second
+	if s.ExpiresIn <= 0 {
+		lifetime = time.Hour
+	}
+	id, mail := s.User.ID, s.User.Email
+	if id == "" {
+		id, mail = subjectOf(s.AccessToken, "")
+	}
+	return &Credentials{
+		AccessToken:  s.AccessToken,
+		RefreshToken: s.RefreshToken,
+		ExpiresAt:    time.Now().Add(lifetime),
+		User:         UserInfo{ID: id, Email: mail},
+	}, nil
+}
+
+// doNoRedirect sends one request and hands back the redirect instead of
+// following it. The injected transport may be a test's fake, so this cannot
+// reach for http.Client's own CheckRedirect.
+func (c *CloudClient) doNoRedirect(req *http.Request) (*http.Response, error) {
+	if hc, ok := c.HTTP.(*http.Client); ok {
+		clone := *hc
+		clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		return clone.Do(req)
+	}
+	return c.HTTP.Do(req)
 }

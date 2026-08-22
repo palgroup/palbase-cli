@@ -41,15 +41,21 @@ type Endpoints struct {
 // "j06bwtuum" answers at j06bwtuum.v2.palbase.studio while the control plane
 // answers at api.v2.palbase.studio. Collapsing the two would send every
 // management call to a tenant that has never heard of it.
+//
+// Studio is the PANEL, and it is its own origin: the gateway serves the API on
+// api.* and the app on app.*, on separate virtual hosts, because one is an API
+// whose value is a narrow allowlist and the other is an application that needs
+// every path under its root. `palbase open` and the browser sign-in both send a
+// person to the app, never to the API.
 var endpointsByMode = map[Mode]Endpoints{
 	ModeProd: {
-		Studio:      "https://api.palbase.studio",
+		Studio:      "https://app.palbase.studio",
 		Auth:        "https://api.palbase.studio",
 		PlatformAPI: "https://api.palbase.studio",
 		PublicHost:  "palbase.studio",
 	},
 	ModeDev: {
-		Studio:      "https://api.v2.palbase.studio",
+		Studio:      "https://app.v2.palbase.studio",
 		Auth:        "https://api.v2.palbase.studio",
 		PlatformAPI: "https://api.v2.palbase.studio",
 		PublicHost:  "v2.palbase.studio",
