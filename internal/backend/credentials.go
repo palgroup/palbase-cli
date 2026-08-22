@@ -189,6 +189,7 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 		// resolver reads it from there, so the fix is to have the stack RUNNING,
 		// not to have a copy of its key somewhere.
 		"%w: %s.\nFor a project on this machine, `palbase start` brings its stack up — the stack holds its own key and this reads it from there.\n"+
+			"For a stack you host yourself, `palbase link <url> --token-stdin` takes its key and remembers it for that address.\n"+
 			"For a cloud project, run `palbase login`, or set %s to a Dashboard-issued token",
 		ErrNoCredential, url, AccessTokenEnv)
 }

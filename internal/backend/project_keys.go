@@ -51,7 +51,8 @@ func projectPublishableKey(ctx context.Context, target Target) (string, error) {
 		// was rebuilt since.
 		return "", fmt.Errorf(
 			"%s did not accept this credential (%d).\n"+
-				"For a project on this machine, `palbase start` writes a fresh one; for a cloud project, `palbase login`",
+				"For a project on this machine, `palbase start` writes a fresh one; for a cloud project, `palbase login`;\n"+
+				"for a stack you host yourself, `palbase link <url> --token-stdin`",
 			target.Describe(), res.StatusCode)
 	default:
 		return "", fmt.Errorf("%s answered %d when asked for its keys: %s",

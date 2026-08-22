@@ -47,6 +47,7 @@ type linkOpts struct {
 	url       string
 	platforms []string
 	insecure  bool
+	tokenStdin bool
 }
 
 func newLinkCmd() *cobra.Command {
@@ -97,6 +98,8 @@ boot generated.`,
 	f.StringVar(&o.url, "url", "", "the stack's base URL (e.g. https://127.0.0.1)")
 	f.StringSliceVar(&o.platforms, "platform", []string{"ios"}, "ios, macos, android or web")
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
+	f.BoolVar(&o.tokenStdin, "token-stdin", false,
+		"read this stack's key from stdin and remember it for this address (self-hosted stacks)")
 	return cmd
 }
 
@@ -111,6 +114,24 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	described, err := describeStack(ctx, base, o.insecure)
 	if err != nil {
 		return err
+	}
+
+	// A SELF-HOSTED STACK IS TOLD WHO YOU ARE, HERE.
+	//
+	// Nothing else can say: it is not on this machine and it is not in our
+	// ledger. The key goes in through stdin rather than an argument so it stays
+	// out of the shell's history, is checked against the stack before anything
+	// is written, and is then remembered for this address — so `push`, `spec`,
+	// `secret` and the rest need no environment variable.
+	if o.tokenStdin {
+		token, err := readTokenFrom(os.Stdin)
+		if err != nil {
+			return err
+		}
+		if err := storeVerifiedToken(ctx, Target{URL: base, Insecure: o.insecure}, token); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "remembered this stack's key for %s\n", base)
 	}
 
 	// The publishable key comes from the project, over an authenticated route.
