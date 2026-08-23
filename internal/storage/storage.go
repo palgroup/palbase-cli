@@ -17,8 +17,11 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -69,22 +72,56 @@ type bucketDef struct {
 // bucket authoring is purely local file I/O (no Studio / network). Buckets are
 // the only storage config, so the verbs hang directly off `storage` (no
 // intermediate `buckets` level — matches `flags add` / `notifications add`).
-func Cmd() *cobra.Command {
+// REST reaches the linked stack's management surface.
+type REST interface {
+	Do(ctx context.Context, method, path string, body []byte) (int, []byte, error)
+}
+
+// Resolvers carries the lazily-built dependency; resolving announces the target.
+type Resolvers struct {
+	REST func(*cobra.Command) (REST, error)
+}
+
+const bucketsPath = "/v1/management/storage/buckets"
+
+func call(r Resolvers, cmd *cobra.Command, method, path string, body []byte) ([]byte, error) {
+	rest, err := r.REST(cmd)
+	if err != nil {
+		return nil, err
+	}
+	status, raw, err := rest.Do(cmd.Context(), method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		var e struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(raw, &e) == nil && e.Description != "" {
+			return nil, fmt.Errorf("%s: %s", e.Error, e.Description)
+		}
+		return nil, fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
+	}
+	return raw, nil
+}
+
+func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "storage",
-		Short: "Manage storage config-as-code (config/storage.ts buckets)",
-		Long: `Author the project's storage buckets declaratively in config/storage.ts.
+		Short: "Manage this project's storage buckets",
+		Long: `The buckets this project stores files in.
 
-  palbase storage list              Show the buckets declared in config/storage.ts.
-  palbase storage add <name> ...    Add or update a bucket entry.
-  palbase storage remove <name>     Remove a bucket entry.
+  palbase storage list              Show the buckets on this stack.
+  palbase storage add <name> ...    Create or update a bucket.
+  palbase storage remove <name>     Remove a bucket.
 
-config/storage.ts is git-authoritative: commit it and ` + "`git push`" + ` to deploy.
-The deploy creates missing buckets and updates changed ones; it never deletes a
-bucket dropped from the file (removing here leaves the live bucket + its files
-in place — see ` + "`remove`" + `).`,
+They live ON THE STACK. They used to be declared in config/storage.ts and
+reconciled on every push, which meant the panel could not change one without the
+next deploy putting it back — and ` + "`remove`" + ` only edited the file, leaving the
+live bucket and its files in place. Removing here removes.`,
 	}
-	cmd.AddCommand(bucketsListCmd(), bucketsAddCmd(), bucketsRemoveCmd())
+	cmd.AddCommand(bucketsListCmd(r), bucketsAddCmd(r), bucketsRemoveCmd(r))
 	return cmd
 }
 
@@ -136,7 +173,7 @@ func parseSizeLiteral(lit string) (int64, error) {
 	return strconv.ParseInt(lit, 10, 64)
 }
 
-func bucketsAddCmd() *cobra.Command {
+func bucketsAddCmd(r Resolvers) *cobra.Command {
 	var (
 		publicFlag bool
 		maxSize    string
@@ -144,136 +181,115 @@ func bucketsAddCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
-		Short: "Add or update a bucket in config/storage.ts",
-		Long: `Add a bucket entry to config/storage.ts (or update it if it already exists).
+		Short: "Create or update a bucket",
+		Long: `Create a bucket, or update it if it is already there.
 
   palbase storage add avatars --public --max-size 5MB --mime image/png,image/jpeg
 
-Idempotent: running it again with the same name updates the existing entry
-rather than duplicating it. Commit config/storage.ts and ` + "`git push`" + ` to apply.`,
+Idempotent, and it lands on the stack immediately — there is no file to commit
+and no deploy to wait for.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			if !bucketNameRE.MatchString(name) {
 				return fmt.Errorf("invalid bucket name %q — must match %s", name, bucketNameRE.String())
 			}
-
-			def := bucketDef{Name: name, Public: publicFlag}
+			def := map[string]any{"name": name, "public": publicFlag}
 			if maxSize != "" {
 				size, err := parseSize(maxSize)
 				if err != nil {
 					return err
 				}
-				def.FileSizeLimit = &size
+				def["file_size_limit"] = size
 			}
 			if mimeFlag != "" {
 				mimes, err := parseMimes(mimeFlag)
 				if err != nil {
 					return err
 				}
-				def.AllowedMimeTypes = mimes
+				def["allowed_mime_types"] = mimes
 			}
-
-			buckets, err := readConfig()
+			body, err := json.Marshal(def)
 			if err != nil {
 				return err
 			}
-			_, existed := buckets[name]
-			buckets[name] = def
-			if err := writeConfig(buckets); err != nil {
+			if _, err := call(r, cmd, http.MethodPut, bucketsPath+"/"+url.PathEscape(name), body); err != nil {
 				return err
 			}
-
-			out := cmd.OutOrStdout()
-			verb := "added"
-			if existed {
-				verb = "updated"
-			}
-			fmt.Fprintf(out, "✓ %s bucket %q in %s\n", verb, name, configPath)
-			fmt.Fprintf(out, "  %s\n", describe(def))
-			fmt.Fprintf(out, "  commit %s and `git push` to deploy\n", configPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ bucket %q ready\n", name)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&publicFlag, "public", false, "Serve the bucket's files without a signed URL")
-	cmd.Flags().StringVar(&maxSize, "max-size", "", "Per-file size limit, e.g. 5MB, 20MB, 1GB (omit for no limit)")
-	cmd.Flags().StringVar(&mimeFlag, "mime", "", "Comma-separated allowed MIME types, e.g. image/png,image/jpeg (omit to allow any)")
+	cmd.Flags().BoolVar(&publicFlag, "public", false, "anyone with the URL may read it")
+	cmd.Flags().StringVar(&maxSize, "max-size", "", "per-file ceiling, e.g. 5MB")
+	cmd.Flags().StringVar(&mimeFlag, "mime", "", "allowed MIME types, comma-separated")
 	return cmd
 }
 
-func bucketsRemoveCmd() *cobra.Command {
-	cmd := &cobra.Command{
+func bucketsRemoveCmd(r Resolvers) *cobra.Command {
+	return &cobra.Command{
 		Use:   "remove <name>",
-		Short: "Remove a bucket entry from config/storage.ts",
-		Long: `Remove a bucket entry from config/storage.ts.
+		Short: "Remove a bucket",
+		Long: `Remove a bucket from the stack.
 
-This only edits the config file — it does NOT delete the live bucket or its
-files. The deploy never auto-deletes a bucket dropped from config (that would
-lose data); the live bucket is left as an orphan. To actually delete it, remove
-it from the Studio Storage page after pushing.`,
+DESTRUCTIVE: a bucket holds files. This used to edit config/storage.ts and leave
+the live bucket and its objects in place, which made the command look reversible
+while the real state never changed.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			buckets, err := readConfig()
-			if err != nil {
+			if _, err := call(r, cmd, http.MethodDelete, bucketsPath+"/"+url.PathEscape(args[0]), nil); err != nil {
 				return err
 			}
-			if _, ok := buckets[name]; !ok {
-				return fmt.Errorf("no bucket %q declared in %s", name, configPath)
-			}
-			delete(buckets, name)
-			if err := writeConfig(buckets); err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ removed bucket %q from %s\n", name, configPath)
-			fmt.Fprintln(out, "  NOTE: the live bucket and its files are NOT deleted — the deploy leaves")
-			fmt.Fprintln(out, "  it as an orphan (never auto-deletes). Delete it from Studio if intended.")
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ bucket %q removed\n", args[0])
 			return nil
 		},
 	}
-	return cmd
 }
 
-func bucketsListCmd() *cobra.Command {
+func bucketsListCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List the buckets declared in config/storage.ts",
+		Short: "Show the buckets on this stack",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			buckets, err := readConfig()
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := call(r, cmd, http.MethodGet, bucketsPath, nil)
 			if err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			names := make([]string, 0, len(buckets))
-			for n := range buckets {
-				names = append(names, n)
-			}
-			sort.Strings(names)
 			if jsonOut {
-				defs := []bucketDef{}
-				for _, n := range names {
-					defs = append(defs, buckets[n])
-				}
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(defs)
-			}
-			if len(buckets) == 0 {
-				fmt.Fprintf(out, "no buckets declared in %s\n", configPath)
-				fmt.Fprintln(out, "  add one: palbase storage add <name> [--public] [--max-size 5MB] [--mime image/png]")
+				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
 				return nil
 			}
-			fmt.Fprintf(out, "buckets declared in %s:\n", configPath)
-			for _, n := range names {
-				fmt.Fprintf(out, "  %-20s %s\n", n, describe(buckets[n]))
+			var buckets []struct {
+				Name        string `json:"name"`
+				Public      bool   `json:"public"`
+				ObjectCount int    `json:"object_count"`
+				TotalBytes  int64  `json:"total_bytes"`
+			}
+			if err := json.Unmarshal(raw, &buckets); err != nil {
+				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
+				return nil
+			}
+			if len(buckets) == 0 {
+				fmt.Fprintln(out, "this stack has no buckets")
+				fmt.Fprintln(out, "  add one: palbase storage add avatars --public")
+				return nil
+			}
+			sort.Slice(buckets, func(a, b int) bool { return buckets[a].Name < buckets[b].Name })
+			fmt.Fprintln(out, "buckets on this stack:")
+			for _, b := range buckets {
+				vis := "private"
+				if b.Public {
+					vis = "public"
+				}
+				fmt.Fprintf(out, "  %-24s %-8s %d file(s), %d bytes\n", b.Name, vis, b.ObjectCount, b.TotalBytes)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print the stack's answer as JSON")
 	return cmd
 }
 

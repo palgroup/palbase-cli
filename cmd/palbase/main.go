@@ -376,7 +376,7 @@ func newRootCmd() *cobra.Command {
 		secret.Cmd(),
 		secret.RunCmd(),
 		dbcmd.Cmd(),
-		storage.Cmd(),
+		storage.Cmd(storage.Resolvers{REST: func(cmd *cobra.Command) (storage.REST, error) { return openStackManagement(cmd) }}),
 		flags.Cmd(flags.Resolvers{
 			// The DEFINITION half acts on the linked stack; the `flags user`
 			// overrides are a different product and keep their Studio seam.

@@ -2,30 +2,42 @@ package storage
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// chdirTemp moves into a fresh temp dir for the duration of a test so each test
-// gets its own config/storage.ts. Restores cwd on cleanup.
-func chdirTemp(t *testing.T) {
-	t.Helper()
-	orig, err := os.Getwd()
-	require.NoError(t, err)
-	dir := t.TempDir()
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() { _ = os.Chdir(orig) })
+type fakeREST struct {
+	method, path, body string
+	status             int
+	answer             string
 }
 
-// run drives the storage command with args, capturing stdout.
-func run(t *testing.T, args ...string) (string, error) {
+func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+	f.method, f.path, f.body = method, path, string(body)
+	st := f.status
+	if st == 0 {
+		st = http.StatusOK
+	}
+	ans := f.answer
+	if ans == "" {
+		ans = "{}"
+	}
+	return st, []byte(ans), nil
+}
+
+func runStorage(t *testing.T, rest *fakeREST, args ...string) (string, error) {
 	t.Helper()
-	cmd := Cmd()
 	var out bytes.Buffer
+	cmd := Cmd(Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs(args)
@@ -33,140 +45,81 @@ func run(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-func readFile(t *testing.T) string {
-	t.Helper()
-	data, err := os.ReadFile(configPath)
-	require.NoError(t, err)
-	return string(data)
+// TestBucketsLiveOnTheStackNotInAFile is the change this task exists for.
+func TestBucketsLiveOnTheStackNotInAFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	rest := &fakeREST{}
+	if _, err := runStorage(t, rest, "add", "avatars", "--public", "--max-size", "5MB"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config", "storage.ts")); !os.IsNotExist(err) {
+		t.Fatal("a file was written: buckets have one home now, and it is the stack")
+	}
+	if rest.method != http.MethodPut || rest.path != "/v1/management/storage/buckets/avatars" {
+		t.Fatalf("called %s %s", rest.method, rest.path)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(rest.body), &sent); err != nil {
+		t.Fatalf("body is not JSON: %s", rest.body)
+	}
+	if sent["public"] != true {
+		t.Fatalf("--public did not travel: %s", rest.body)
+	}
+	if _, ok := sent["file_size_limit"]; !ok {
+		t.Fatalf("--max-size did not travel: %s", rest.body)
+	}
 }
 
-func TestAdd_WritesConfigFile(t *testing.T) {
-	chdirTemp(t)
-	out, err := run(t, "add", "avatars", "--public", "--max-size", "5MB", "--mime", "image/png,image/jpeg")
-	require.NoError(t, err)
-	assert.Contains(t, out, "added bucket \"avatars\"")
+// TestRemoveActuallyRemoves. It used to edit the file and leave the live bucket
+// and its objects in place, so the command looked reversible while nothing moved.
+func TestRemoveActuallyRemoves(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{status: http.StatusNoContent}
 
-	src := readFile(t)
-	// Valid, importable, typed config.
-	assert.Contains(t, src, `import { defineStorage, bucket } from "@palbase/backend";`)
-	assert.Contains(t, src, "export default defineStorage({")
-	// 5MB -> 5242880 bytes; public + mimes present.
-	assert.Contains(t, src, "avatars: bucket({ public: true, fileSizeLimit: 5242880, allowedMimeTypes: [\"image/png\", \"image/jpeg\"] }),")
-
-	// Re-parsing the generated file yields the same bucket.
-	buckets, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, buckets, "avatars")
-	assert.True(t, buckets["avatars"].Public)
-	require.NotNil(t, buckets["avatars"].FileSizeLimit)
-	assert.Equal(t, int64(5242880), *buckets["avatars"].FileSizeLimit)
-	assert.Equal(t, []string{"image/png", "image/jpeg"}, buckets["avatars"].AllowedMimeTypes)
+	if _, err := runStorage(t, rest, "remove", "avatars"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if rest.method != http.MethodDelete || rest.path != "/v1/management/storage/buckets/avatars" {
+		t.Fatalf("called %s %s, want a DELETE", rest.method, rest.path)
+	}
 }
 
-func TestAdd_BareBucketHasMinimalOpts(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "docs")
-	require.NoError(t, err)
-	src := readFile(t)
-	// All defaults → compact `bucket({})`.
-	assert.Contains(t, src, "docs: bucket({}),")
+// TestListReadsTheStack.
+func TestListReadsTheStack(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{answer: `[{"name":"avatars","public":true,"object_count":3,"total_bytes":900}]`}
+
+	out, err := runStorage(t, rest, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if rest.method != http.MethodGet || rest.path != "/v1/management/storage/buckets" {
+		t.Fatalf("called %s %s", rest.method, rest.path)
+	}
+	if !strings.Contains(out, "avatars") || !strings.Contains(out, "public") {
+		t.Fatalf("the stack's answer did not reach the person:\n%s", out)
+	}
 }
 
-func TestAdd_SecondAddUpdatesNotDuplicates(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "avatars", "--public")
-	require.NoError(t, err)
-	out, err := run(t, "add", "avatars", "--max-size", "10MB")
-	require.NoError(t, err)
-	assert.Contains(t, out, "updated bucket \"avatars\"")
-
-	src := readFile(t)
-	// Exactly ONE avatars entry (no duplicate).
-	assert.Equal(t, 1, strings.Count(src, "avatars: bucket("), "second add must update, not duplicate")
-	// The update replaced the entry: public flag is gone (not passed this time),
-	// the new size is present.
-	buckets, err := readConfig()
-	require.NoError(t, err)
-	assert.False(t, buckets["avatars"].Public, "re-add without --public clears it (full replace)")
-	require.NotNil(t, buckets["avatars"].FileSizeLimit)
-	assert.Equal(t, int64(10*1024*1024), *buckets["avatars"].FileSizeLimit)
-}
-
-func TestAdd_MultipleBucketsCoexist(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "avatars", "--public")
-	require.NoError(t, err)
-	_, err = run(t, "add", "invoices", "--max-size", "20MB", "--mime", "application/pdf")
-	require.NoError(t, err)
-
-	buckets, err := readConfig()
-	require.NoError(t, err)
-	require.Len(t, buckets, 2)
-	assert.True(t, buckets["avatars"].Public)
-	assert.Equal(t, []string{"application/pdf"}, buckets["invoices"].AllowedMimeTypes)
-}
-
-func TestRemove_DropsEntry(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "avatars", "--public")
-	require.NoError(t, err)
-	_, err = run(t, "add", "invoices")
-	require.NoError(t, err)
-
-	out, err := run(t, "remove", "avatars")
-	require.NoError(t, err)
-	assert.Contains(t, out, "removed bucket \"avatars\"")
-	assert.Contains(t, out, "NOT deleted")
-
-	buckets, err := readConfig()
-	require.NoError(t, err)
-	require.Len(t, buckets, 1)
-	assert.NotContains(t, buckets, "avatars")
-	assert.Contains(t, buckets, "invoices")
-}
-
-func TestRemove_UnknownBucketErrors(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "remove", "nope")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no bucket")
-}
-
-func TestList_EmptyAndPopulated(t *testing.T) {
-	chdirTemp(t)
-	// No file yet.
-	out, err := run(t, "list")
-	require.NoError(t, err)
-	assert.Contains(t, out, "no buckets declared")
-
-	_, err = run(t, "add", "avatars", "--public", "--max-size", "5MB")
-	require.NoError(t, err)
-	out, err = run(t, "list")
-	require.NoError(t, err)
-	assert.Contains(t, out, "avatars")
-	assert.Contains(t, out, "public")
-	assert.Contains(t, out, "5MB")
-}
-
-func TestAdd_RejectsBadName(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "Bad Name!")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid bucket name")
-}
-
-func TestAdd_RejectsBadMime(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--mime", "notamime")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid MIME type")
-}
-
-func TestAdd_RejectsBadSize(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--max-size", "5PB")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown --max-size unit")
+// TestAddRefusesLocallyWhatTheStackWouldRefuse keeps the checks that were worth
+// keeping: a bad name, a bad MIME list or an unparseable size never leaves here.
+func TestAddRefusesLocallyWhatTheStackWouldRefuse(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, args := range [][]string{
+		{"add", "Bad Name"},
+		{"add", "ok", "--mime", "notamime"},
+		{"add", "ok", "--max-size", "5 bananas"},
+	} {
+		rest := &fakeREST{}
+		if _, err := runStorage(t, rest, args...); err == nil {
+			t.Fatalf("%v was accepted", args)
+		}
+		if rest.method != "" {
+			t.Fatalf("%v reached the stack before being refused", args)
+		}
+	}
 }
 
 func TestParseSize_BinaryUnits(t *testing.T) {
@@ -182,84 +135,4 @@ func TestParseSize_BinaryUnits(t *testing.T) {
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
 	}
-}
-
-func TestRoundTrip_QuotedKeyName(t *testing.T) {
-	chdirTemp(t)
-	// A name needing quoting as an object key (contains a dash).
-	_, err := run(t, "add", "user-uploads", "--public")
-	require.NoError(t, err)
-	src := readFile(t)
-	assert.Contains(t, src, `"user-uploads": bucket({ public: true }),`)
-	buckets, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, buckets, "user-uploads")
-}
-
-func TestReadConfig_RefusesUnrelatedFile(t *testing.T) {
-	chdirTemp(t)
-	require.NoError(t, os.MkdirAll("config", 0o755))
-	require.NoError(t, os.WriteFile(configPath, []byte("export const x = 1;\n"), 0o644))
-	_, err := readConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not look like a defineStorage")
-}
-
-// TestRoundTrip_HumanSizeLiteralSurvivesRewrite locks the SDK's OTHER valid
-// fileSizeLimit form. The docs (and the SDK's own examples) teach the human
-// string `"25MB"`; the CLI regenerates the whole file on every write, so a
-// parser that only reads digits silently DROPPED the limit — the bucket then
-// deployed unlimited. MUTATION CHECK: narrow sizeFieldRE back to `(\d+)` (or
-// make renderOpts emit the byte count instead of the literal) and this test
-// goes RED.
-func TestRoundTrip_HumanSizeLiteralSurvivesRewrite(t *testing.T) {
-	chdirTemp(t)
-	require.NoError(t, os.MkdirAll("config", 0o755))
-	handWritten := `import { defineStorage, bucket } from "@palbase/backend";
-
-export default defineStorage({
-  buckets: {
-    docs: bucket({
-      public: false,
-      fileSizeLimit: "25MB",
-      allowedMimeTypes: ["application/pdf"],
-    }),
-  },
-});
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(handWritten), 0o644))
-
-	// The string form parses to bytes (25 * 1024^2).
-	buckets, err := readConfig()
-	require.NoError(t, err)
-	require.NotNil(t, buckets["docs"].FileSizeLimit)
-	assert.Equal(t, int64(26214400), *buckets["docs"].FileSizeLimit)
-
-	// Adding an UNRELATED bucket rewrites the file; docs' limit must be intact
-	// and still written as the author's own literal.
-	_, err = run(t, "add", "avatars", "--public")
-	require.NoError(t, err)
-	src := readFile(t)
-	assert.Contains(t, src, `fileSizeLimit: "25MB"`)
-	assert.NotContains(t, src, "fileSizeLimit: 26214400")
-
-	buckets, err = readConfig()
-	require.NoError(t, err)
-	require.NotNil(t, buckets["docs"].FileSizeLimit)
-	assert.Equal(t, int64(26214400), *buckets["docs"].FileSizeLimit)
-	assert.Equal(t, []string{"application/pdf"}, buckets["docs"].AllowedMimeTypes)
-}
-
-// TestReadConfig_RejectsBadSizeLiteral: an unparseable size must ERROR, never
-// silently become "no limit" (the failure mode this whole fix is about).
-func TestReadConfig_RejectsBadSizeLiteral(t *testing.T) {
-	chdirTemp(t)
-	require.NoError(t, os.MkdirAll("config", 0o755))
-	src := `import { defineStorage, bucket } from "@palbase/backend";
-export default defineStorage({ buckets: { docs: bucket({ fileSizeLimit: "25 megs" }) } });
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(src), 0o644))
-	_, err := readConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fileSizeLimit")
 }
