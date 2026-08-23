@@ -185,6 +185,13 @@ func (s stackManagementREST) Do(ctx context.Context, method, path string, body [
 	return res.StatusCode, raw, err
 }
 
+// openStackEgress is the same client under the egress package's own seam. Two
+// tiny interfaces rather than one shared one, because a shared one would make
+// every command package import whichever package declared it.
+func openStackEgress(cmd *cobra.Command) (egress.REST, error) {
+	return openStackManagement(cmd)
+}
+
 // openStackManagement resolves the target, announcing it, and builds the client.
 func openStackManagement(cmd *cobra.Command) (authadmin.REST, error) {
 	target, err := backend.PrintTargetFor(cmd)
@@ -377,7 +384,7 @@ func newRootCmd() *cobra.Command {
 			Selection: selectionResolver,
 		}),
 		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement}),
-		egress.Cmd(),
+		egress.Cmd(egress.Resolvers{REST: openStackEgress}),
 		notifications.Cmd(notifications.Resolvers{
 			Studio:    func() *studio.Client { return studioClient },
 			Selection: selectionResolver,

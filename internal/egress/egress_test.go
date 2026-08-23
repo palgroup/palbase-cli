@@ -2,129 +2,129 @@ package egress
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/spf13/cobra"
 )
 
-func chdirTemp(t *testing.T) {
-	t.Helper()
-	orig, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(t.TempDir()))
-	t.Cleanup(func() { _ = os.Chdir(orig) })
+// fakeREST records the calls a verb makes against the stack's fence.
+type fakeREST struct {
+	calls  []string
+	bodies []string
+	hosts  []string
 }
 
-func run(t *testing.T, args ...string) (string, error) {
+func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+	f.calls = append(f.calls, method+" "+path)
+	f.bodies = append(f.bodies, string(body))
+	if method == http.MethodGet {
+		raw, _ := json.Marshal(map[string]any{"hosts": f.hosts})
+		return http.StatusOK, raw, nil
+	}
+	var in struct {
+		Hosts []string `json:"hosts"`
+	}
+	_ = json.Unmarshal(body, &in)
+	f.hosts = in.Hosts
+	return http.StatusOK, body, nil
+}
+
+func runEgress(t *testing.T, rest *fakeREST, args ...string) string {
 	t.Helper()
-	cmd := Cmd()
 	var out bytes.Buffer
+	cmd := Cmd(Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs(args)
-	return out.String(), func() error { err := cmd.Execute(); return err }()
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("palbase egress %s: %v\n%s", strings.Join(args, " "), err, out.String())
+	}
+	return out.String()
 }
 
-func readFile(t *testing.T) string {
-	t.Helper()
-	data, err := os.ReadFile(configPath)
-	require.NoError(t, err)
-	return string(data)
+// TestTheFenceLivesOnTheStackNotInTheSourceTree is the change this task exists
+// for. The list used to be config/egress.ts, applied on every push — which meant
+// the panel could not change it and the file could silently win over anything
+// that did.
+func TestTheFenceLivesOnTheStackNotInTheSourceTree(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	rest := &fakeREST{}
+	runEgress(t, rest, "add", "api.example.com")
+
+	if _, err := os.Stat(filepath.Join(dir, "config", "egress.ts")); !os.IsNotExist(err) {
+		t.Fatal("a file was written: the fence has one home now, and it is the stack")
+	}
+	if len(rest.calls) != 2 || rest.calls[0] != "GET /v1/management/egress" || rest.calls[1] != "PUT /v1/management/egress" {
+		t.Fatalf("calls = %v, want a read then a write", rest.calls)
+	}
+	if !strings.Contains(rest.bodies[1], "api.example.com") {
+		t.Fatalf("the host did not travel: %s", rest.bodies[1])
+	}
 }
 
-func TestAdd_WritesImportableConfig(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "api.open-meteo.com")
-	require.NoError(t, err)
-
-	src := readFile(t)
-	assert.Contains(t, src, `import { defineEgress } from "@palbase/backend";`)
-	assert.Contains(t, src, "export default defineEgress({")
-	assert.Contains(t, src, `"api.open-meteo.com",`)
-
-	hosts, err := readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, []string{"api.open-meteo.com"}, hosts)
-}
-
+// TestAddRemove_RoundTripsAndSorts keeps the list reviewable: an allowlist a
+// person has to scan for a name is one they stop scanning.
 func TestAddRemove_RoundTripsAndSorts(t *testing.T) {
-	chdirTemp(t)
-	for _, h := range []string{"zenquotes.io", "api.open-meteo.com", ".example.com"} {
-		_, err := run(t, "add", h)
-		require.NoError(t, err)
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{}
+
+	runEgress(t, rest, "add", "b.example.com")
+	runEgress(t, rest, "add", "a.example.com")
+	if got := strings.Join(rest.hosts, ","); got != "a.example.com,b.example.com" {
+		t.Fatalf("hosts = %s, want them sorted", got)
 	}
-	hosts, err := readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, []string{".example.com", "api.open-meteo.com", "zenquotes.io"}, hosts)
 
-	_, err = run(t, "remove", "zenquotes.io")
-	require.NoError(t, err)
-	hosts, err = readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, []string{".example.com", "api.open-meteo.com"}, hosts)
-
-	// Removing something that was never allowed is an error, not a silent no-op —
-	// a typo'd remove must not read as "done".
-	_, err = run(t, "remove", "nope.example.com")
-	require.Error(t, err)
-}
-
-// The whole point of the command: reject locally exactly what the deploy's
-// fail-closed validator rejects, so a bad host is caught at authoring time
-// instead of as a failed deploy. Mirrors modules/backend validateEgressHost.
-// MUTATION CHECK: make validateHost return nil and every case below goes RED.
-func TestAdd_RejectsWhatTheDeployWouldReject(t *testing.T) {
-	cases := []struct{ name, host, wantErr string }{
-		{"url not host", "https://api.example.com", "hostname only"},
-		{"host with port", "api.example.com:8443", "hostname only"},
-		{"host with path", "api.example.com/v1", "hostname only"},
-		{"wildcard", "*.example.com", "hostname only"},
-		{"ip literal", "127.0.0.1", "IP literals not allowed"},
-		{"decimal ip", "2130706433", "single-label"},
-		{"short-form ip", "127.1", "top-level label must be alphabetic"},
-		{"localhost", "localhost", "single-label"},
-		{"cluster internal", "palauth.services-shared.svc", "internal host not allowed"},
-		{"single label", "intranet", "single-label"},
-		{"empty", "   ", "empty host"},
+	runEgress(t, rest, "remove", "b.example.com")
+	if got := strings.Join(rest.hosts, ","); got != "a.example.com" {
+		t.Fatalf("hosts after remove = %s", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			chdirTemp(t)
-			_, err := run(t, "add", tc.host)
-			require.Error(t, err, "host %q must be rejected", tc.host)
-			assert.Contains(t, err.Error(), tc.wantErr)
-			// A rejected host must never reach the file.
-			_, statErr := os.Stat(configPath)
-			assert.True(t, os.IsNotExist(statErr), "no config file should be written for a rejected host")
-		})
+
+	out := runEgress(t, rest, "list")
+	if !strings.Contains(out, "a.example.com") {
+		t.Fatalf("list did not show what the stack holds:\n%s", out)
 	}
 }
 
-func TestReadConfig_RefusesUnrelatedFile(t *testing.T) {
-	chdirTemp(t)
-	require.NoError(t, os.MkdirAll("config", 0o755))
-	require.NoError(t, os.WriteFile(configPath, []byte("export const x = 1;\n"), 0o644))
-	_, err := readConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not look like a defineEgress")
+// TestRemovingTheLastHostSendsAnEmptyLISTNotNull keeps "call nothing" from
+// collapsing into "nobody has said". The two mean opposite things to the
+// runtime, and a deliberately closed fence must not reopen by omission.
+func TestRemovingTheLastHostSendsAnEmptyListNotNull(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{hosts: []string{"only.example.com"}}
+
+	runEgress(t, rest, "remove", "only.example.com")
+
+	last := rest.bodies[len(rest.bodies)-1]
+	if !strings.Contains(last, `"hosts":[]`) {
+		t.Fatalf("sent %s, want an explicit empty list", last)
+	}
 }
 
-// A hand-written config (the only way to author this before the command existed)
-// must round-trip: comments stripped, hosts preserved.
-func TestParseConfig_ReadsHandWrittenFile(t *testing.T) {
-	src := `import { defineEgress } from "@palbase/backend";
-
-export default defineEgress({
-  hosts: [
-    "api.open-meteo.com",         // weather forecast
-    // "disabled.example.com",    commented out on purpose
-    "zenquotes.io",
-  ],
-});
-`
-	hosts, err := parseConfig(src)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"api.open-meteo.com", "zenquotes.io"}, hosts)
+// TestAdd_RejectsWhatTheStackWouldReject keeps the check local as well as
+// remote: an allowlist is never best-effort, and learning the rules from a
+// failed deploy is a bad way to learn them.
+func TestAdd_RejectsWhatTheStackWouldReject(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, bad := range []string{"https://api.example.com", "api.example.com/v1", "api.example.com:8443", "*.example.com"} {
+		rest := &fakeREST{}
+		cmd := Cmd(Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"add", bad})
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("%q was accepted", bad)
+		}
+		if len(rest.calls) != 0 {
+			t.Fatalf("%q reached the stack before being refused: %v", bad, rest.calls)
+		}
+	}
 }

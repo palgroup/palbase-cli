@@ -18,10 +18,11 @@
 package egress
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
+	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -42,25 +43,193 @@ var hostsArrayRE = regexp.MustCompile(`\bhosts\s*:\s*\[([^\]]*)\]`)
 var lineCommentRE = regexp.MustCompile(`(?m)//[^\n]*`)
 
 // Cmd returns the `palbase egress` parent command.
-func Cmd() *cobra.Command {
+// REST reaches the linked stack's management surface.
+type REST interface {
+	Do(ctx context.Context, method, path string, body []byte) (int, []byte, error)
+}
+
+// Resolvers carries the lazily-built dependency; resolving announces the target.
+type Resolvers struct {
+	REST func(*cobra.Command) (REST, error)
+}
+
+const endpoint = "/v1/management/egress"
+
+// fence is the wire shape of the allowlist.
+type fence struct {
+	Hosts     []string `json:"hosts"`
+	TimeoutMs *int     `json:"timeout_ms,omitempty"`
+}
+
+func read(r Resolvers, cmd *cobra.Command) (fence, REST, error) {
+	rest, err := r.REST(cmd)
+	if err != nil {
+		return fence{}, nil, err
+	}
+	status, raw, err := rest.Do(cmd.Context(), http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fence{}, nil, err
+	}
+	if status >= 400 {
+		return fence{}, nil, fmt.Errorf("the stack answered %d reading the fence: %s", status, strings.TrimSpace(string(raw)))
+	}
+	var f fence
+	if len(raw) > 0 && json.Unmarshal(raw, &f) != nil {
+		return fence{}, nil, fmt.Errorf("the stack's fence is not readable: %s", strings.TrimSpace(string(raw)))
+	}
+	return f, rest, nil
+}
+
+func write(rest REST, cmd *cobra.Command, f fence) error {
+	if f.Hosts == nil {
+		// An explicitly empty list is a VALUE — "call nothing" — and must travel
+		// as one. Sending null would read as "nobody has said", which is the
+		// state a deliberately closed fence must not collapse into.
+		f.Hosts = []string{}
+	}
+	body, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	status, raw, err := rest.Do(cmd.Context(), http.MethodPut, endpoint, body)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		var e struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(raw, &e) == nil && e.Description != "" {
+			return fmt.Errorf("%s: %s", e.Error, e.Description)
+		}
+		return fmt.Errorf("the stack refused the fence (%d): %s", status, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+// Cmd builds `palbase egress`.
+func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "egress",
-		Short: "Manage the outbound-HTTP allowlist (config/egress.ts)",
+		Short: "Manage the outbound-HTTP allowlist",
 		Long: `Declare the external hosts your backend may fetch().
 
-  palbase egress list             Show the hosts declared in config/egress.ts.
+  palbase egress list             Show the hosts this stack allows.
   palbase egress add <host>       Allow an external host.
   palbase egress remove <host>    Stop allowing a host.
 
 The backend has NO ambient network: a host that is not on this list is refused at
-runtime, and no config/egress.ts at all means no outbound calls. Hosts are bare
-hostnames — https on :443 only, no scheme, port, path or wildcard. A leading dot
-(".example.com") also covers subdomains.
+runtime. Hosts are bare hostnames — https on :443 only, no scheme, port, path or
+wildcard. A leading dot (".example.com") also covers subdomains.
 
-config/egress.ts is git-authoritative: commit it and ` + "`git push`" + ` to deploy.`,
+THE LIST LIVES ON THE STACK, not in the source tree. It used to be
+config/egress.ts, applied on every push, which meant the panel could not change
+it and two writers could disagree about it. It is set here and stamped into the
+artifact by the next deploy — so a change made now takes effect when you push.`,
 	}
-	cmd.AddCommand(listCmd(), addCmd(), removeCmd())
+	cmd.AddCommand(listCmd(r), addCmd(r), removeCmd(r))
 	return cmd
+}
+
+func listCmd(r Resolvers) *cobra.Command {
+	return &cobra.Command{
+		Use: "list", Args: cobra.NoArgs, Short: "Show the hosts this stack allows",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			f, _, err := read(r, cmd)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(f.Hosts) == 0 {
+				fmt.Fprintln(out, "no outbound hosts allowed (the backend cannot make external calls)")
+				fmt.Fprintln(out, "  allow one: palbase egress add api.example.com")
+				return nil
+			}
+			hosts := append([]string(nil), f.Hosts...)
+			sort.Strings(hosts)
+			fmt.Fprintln(out, "hosts this stack allows:")
+			for _, h := range hosts {
+				suffix := ""
+				if strings.HasPrefix(h, ".") {
+					suffix = "   (and subdomains)"
+				}
+				fmt.Fprintf(out, "  %s%s\n", h, suffix)
+			}
+			return nil
+		},
+	}
+}
+
+func addCmd(r Resolvers) *cobra.Command {
+	return &cobra.Command{
+		Use: "add <host>", Args: cobra.ExactArgs(1), Short: "Allow an external host",
+		Long: `Add a host to the outbound-HTTP allowlist.
+
+  palbase egress add api.example.com     Allow exactly that host.
+  palbase egress add .example.com        Allow it and every subdomain.
+
+It is stored on the stack immediately and stamped into the artifact by the next
+deploy.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			host := strings.ToLower(strings.TrimSpace(args[0]))
+			// Checked HERE as well as on the stack, because a security allowlist
+			// is never best-effort and finding out through a failed deploy is a
+			// bad way to learn the rules.
+			if err := validateHost(host); err != nil {
+				return fmt.Errorf("host %q: %w", args[0], err)
+			}
+			f, rest, err := read(r, cmd)
+			if err != nil {
+				return err
+			}
+			for _, h := range f.Hosts {
+				if h == host {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s is already allowed\n", host)
+					return nil
+				}
+			}
+			f.Hosts = append(f.Hosts, host)
+			sort.Strings(f.Hosts)
+			if err := write(rest, cmd, f); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s allowed — effective on the next deploy\n", host)
+			return nil
+		},
+	}
+}
+
+func removeCmd(r Resolvers) *cobra.Command {
+	return &cobra.Command{
+		Use: "remove <host>", Args: cobra.ExactArgs(1), Short: "Stop allowing a host",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			host := strings.ToLower(strings.TrimSpace(args[0]))
+			f, rest, err := read(r, cmd)
+			if err != nil {
+				return err
+			}
+			kept := make([]string, 0, len(f.Hosts))
+			found := false
+			for _, h := range f.Hosts {
+				if h == host {
+					found = true
+					continue
+				}
+				kept = append(kept, h)
+			}
+			if !found {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s was not allowed\n", host)
+				return nil
+			}
+			f.Hosts = kept
+			if err := write(rest, cmd, f); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s removed — effective on the next deploy\n", host)
+			return nil
+		},
+	}
 }
 
 // validateHost mirrors the backend's validateEgressHost (modules/backend
@@ -110,165 +279,4 @@ func validateHost(h string) error {
 		}
 	}
 	return nil
-}
-
-// readConfig parses config/egress.ts into the declared host list. A missing file
-// is NOT an error — it means "no hosts yet" (add creates the file). A
-// present-but-unparseable file IS an error so we never clobber something we
-// don't understand.
-func readConfig() ([]string, error) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", configPath, err)
-	}
-	return parseConfig(string(data))
-}
-
-func parseConfig(src string) ([]string, error) {
-	if !strings.Contains(src, "defineEgress") {
-		return nil, fmt.Errorf("%s does not look like a defineEgress() config (no defineEgress call found) — refusing to overwrite; remove or fix it manually", configPath)
-	}
-	src = lineCommentRE.ReplaceAllString(src, "")
-	m := hostsArrayRE.FindStringSubmatch(src)
-	if m == nil {
-		return nil, nil
-	}
-	var hosts []string
-	for _, hm := range hostEntryRE.FindAllStringSubmatch(m[1], -1) {
-		hosts = append(hosts, hm[1])
-	}
-	return hosts, nil
-}
-
-func writeConfig(hosts []string) error {
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(configPath), err)
-	}
-	return os.WriteFile(configPath, []byte(generateConfig(hosts)), 0o644)
-}
-
-// generateConfig renders the full config/egress.ts source. Deterministic: hosts
-// sorted, one per line, so a diff shows exactly what changed.
-func generateConfig(hosts []string) string {
-	sorted := append([]string(nil), hosts...)
-	sort.Strings(sorted)
-
-	var b strings.Builder
-	b.WriteString("// Generated + maintained by `palbase egress`. Edit via the CLI, or by hand\n")
-	b.WriteString("// keeping the `defineEgress({ hosts: [...] })` shape. The backend has NO\n")
-	b.WriteString("// ambient network: a host missing here is refused at runtime.\n")
-	b.WriteString("import { defineEgress } from \"@palbase/backend\";\n\n")
-	b.WriteString("export default defineEgress({\n")
-	b.WriteString("  hosts: [\n")
-	for _, h := range sorted {
-		fmt.Fprintf(&b, "    %q,\n", h)
-	}
-	b.WriteString("  ],\n")
-	b.WriteString("});\n")
-	return b.String()
-}
-
-func listCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Args:  cobra.NoArgs,
-		Short: "Show the hosts declared in config/egress.ts",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			hosts, err := readConfig()
-			if err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			if len(hosts) == 0 {
-				fmt.Fprintln(out, "no outbound hosts allowed (the backend cannot make external calls)")
-				fmt.Fprintln(out, "  allow one: palbase egress add api.example.com")
-				return nil
-			}
-			sort.Strings(hosts)
-			fmt.Fprintf(out, "hosts allowed in %s:\n", configPath)
-			for _, h := range hosts {
-				suffix := ""
-				if strings.HasPrefix(h, ".") {
-					suffix = "   (and subdomains)"
-				}
-				fmt.Fprintf(out, "  %s%s\n", h, suffix)
-			}
-			return nil
-		},
-	}
-}
-
-func addCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "add <host>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Allow an external host in config/egress.ts",
-		Long: `Add a host to the outbound-HTTP allowlist.
-
-  palbase egress add api.example.com     Allow exactly that host.
-  palbase egress add .example.com        Allow it and every subdomain.
-
-Commit config/egress.ts and ` + "`git push`" + ` to apply.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			host := strings.ToLower(strings.TrimSpace(args[0]))
-			if err := validateHost(host); err != nil {
-				return fmt.Errorf("host %q: %w", args[0], err)
-			}
-			hosts, err := readConfig()
-			if err != nil {
-				return err
-			}
-			for _, h := range hosts {
-				if h == host {
-					fmt.Fprintf(cmd.OutOrStdout(), "host %q already allowed in %s\n", host, configPath)
-					return nil
-				}
-			}
-			hosts = append(hosts, host)
-			if err := writeConfig(hosts); err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ allowed host %q in %s\n", host, configPath)
-			fmt.Fprintf(out, "  commit %s and `git push` to deploy\n", configPath)
-			return nil
-		},
-	}
-}
-
-func removeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "remove <host>",
-		Args:  cobra.ExactArgs(1),
-		Short: "Stop allowing a host in config/egress.ts",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			host := strings.ToLower(strings.TrimSpace(args[0]))
-			hosts, err := readConfig()
-			if err != nil {
-				return err
-			}
-			kept := make([]string, 0, len(hosts))
-			found := false
-			for _, h := range hosts {
-				if h == host {
-					found = true
-					continue
-				}
-				kept = append(kept, h)
-			}
-			if !found {
-				return fmt.Errorf("host %q is not in %s", host, configPath)
-			}
-			if err := writeConfig(kept); err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ removed host %q from %s\n", host, configPath)
-			fmt.Fprintln(out, "  the backend can no longer call it once you commit + `git push`")
-			return nil
-		},
-	}
 }
