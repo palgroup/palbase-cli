@@ -67,7 +67,7 @@ func TestBucketsLiveOnTheStackNotInAFile(t *testing.T) {
 	if sent["public"] != true {
 		t.Fatalf("--public did not travel: %s", rest.body)
 	}
-	if _, ok := sent["file_size_limit"]; !ok {
+	if _, ok := sent["fileSizeLimit"]; !ok {
 		t.Fatalf("--max-size did not travel: %s", rest.body)
 	}
 }
@@ -134,5 +134,31 @@ func TestParseSize_BinaryUnits(t *testing.T) {
 		got, err := parseSize(in)
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
+	}
+}
+
+// The body has to be in the SPELLING the storage module reads.
+//
+// It was not. The CLI sent `file_size_limit` and `allowed_mime_types`; the
+// module's bucketDeclaration reads `fileSizeLimit` and `allowedMimeTypes`. The
+// management layer forwards raw bytes, so nothing complained — the bucket was
+// created with no size limit and no type list, and the only way to notice was
+// to upload a file that should have been refused.
+func TestTheBucketBodyIsSpelledTheWayTheModuleReadsIt(t *testing.T) {
+	rest := &fakeREST{}
+	if _, err := runStorage(t, rest, "add", "posts", "--public", "--max-size", "10mb",
+		"--mime", "image/png,image/jpeg"); err != nil {
+		t.Fatal(err)
+	}
+	sent := rest.body
+	for _, want := range []string{`"fileSizeLimit"`, `"allowedMimeTypes"`} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("the body does not carry %s — the module will ignore it:\n%s", want, sent)
+		}
+	}
+	for _, gone := range []string{`"file_size_limit"`, `"allowed_mime_types"`} {
+		if strings.Contains(sent, gone) {
+			t.Errorf("the body still uses %s, which nothing reads:\n%s", gone, sent)
+		}
 	}
 }

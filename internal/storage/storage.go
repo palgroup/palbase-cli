@@ -55,11 +55,16 @@ var unitBytes = map[string]int64{
 // bucketDef is the CLI's in-memory model of one bucket — the same normalized
 // shape the SDK's BucketDef serializes (public, fileSizeLimit bytes-or-nil,
 // allowedMimeTypes list-or-nil).
+// The SPELLING is the module's, not a third one. The storage module reads
+// `fileSizeLimit` / `allowedMimeTypes`; this used to send snake_case, the
+// management layer forwards raw bytes, and nothing complained — the bucket was
+// created with no size limit and no type list, and the only way to notice was to
+// upload a file that should have been refused.
 type bucketDef struct {
 	Name             string   `json:"name"`
 	Public           bool     `json:"public"`
-	FileSizeLimit    *int64   `json:"file_size_limit,omitempty"`
-	AllowedMimeTypes []string `json:"allowed_mime_types,omitempty"`
+	FileSizeLimit    *int64   `json:"fileSizeLimit,omitempty"`
+	AllowedMimeTypes []string `json:"allowedMimeTypes,omitempty"`
 
 	// SizeLiteral is the raw TS literal fileSizeLimit was written as in the file
 	// (`"25MB"` or `26214400`), kept so a rewrite re-emits it VERBATIM instead of
@@ -200,14 +205,14 @@ and no deploy to wait for.`,
 				if err != nil {
 					return err
 				}
-				def["file_size_limit"] = size
+				def["fileSizeLimit"] = size
 			}
 			if mimeFlag != "" {
 				mimes, err := parseMimes(mimeFlag)
 				if err != nil {
 					return err
 				}
-				def["allowed_mime_types"] = mimes
+				def["allowedMimeTypes"] = mimes
 			}
 			body, err := json.Marshal(def)
 			if err != nil {
