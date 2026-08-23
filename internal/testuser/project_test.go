@@ -71,8 +71,8 @@ func TestCreateMintsAtTheProjectsOwnDoor(t *testing.T) {
 
 	// The SAME route a deploy calls to materialise config/test-users.ts. Two
 	// doors would be two answers to "what is a test user".
-	if seen.method != http.MethodPost || seen.path != "/admin/test-users" {
-		t.Errorf("asked %s %s, want POST /admin/test-users", seen.method, seen.path)
+	if seen.method != http.MethodPost || seen.path != "/v1/management/test-users" {
+		t.Errorf("asked %s %s, want POST /v1/management/test-users", seen.method, seen.path)
 	}
 	// with_tokens, because a minted user nobody can sign in as is a row, not a
 	// fixture — and the stack returns the credential exactly once.
@@ -111,7 +111,7 @@ func TestListAndDeleteReachTheProject(t *testing.T) {
 	if err := deleteOnProject(context.Background(), target, cred, "usr_1", &out); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	want := []string{"GET /admin/test-users", "DELETE /admin/test-users/usr_1"}
+	want := []string{"GET /v1/management/test-users", "DELETE /v1/management/test-users/usr_1"}
 	for i, w := range want {
 		if i >= len(paths) || paths[i] != w {
 			t.Fatalf("asked %v, want %v", paths, want)
@@ -166,7 +166,7 @@ func TestTheTemplateListComesFromTheStack(t *testing.T) {
 	if err := templatesOnProject(context.Background(), target, cred, false, &out); err != nil {
 		t.Fatalf("list templates: %v", err)
 	}
-	if path != "/admin/test-user-templates" {
+	if path != "/v1/management/test-users/templates" {
 		t.Errorf("it asked %q", path)
 	}
 	for _, want := range []string{"banking", "accounts, profiles"} {
@@ -193,7 +193,7 @@ func TestCloneReachesTheProjectWithItsOverrides(t *testing.T) {
 	if err := cloneOnProject(context.Background(), target, cred, "usr_1", overrides, false, &out); err != nil {
 		t.Fatalf("clone: %v", err)
 	}
-	if path != "/admin/test-users/clone" {
+	if path != "/v1/management/test-users/clone" {
 		t.Errorf("it asked %q", path)
 	}
 	if body["source_user_id"] != "usr_1" {

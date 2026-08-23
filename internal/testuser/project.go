@@ -10,7 +10,7 @@ package testuser
 // followed there.
 //
 // The stack has had the surface all along. `POST /admin/test-users` is what a
-// deploy already calls to materialise the fixtures `config/test-users.ts`
+// the management surface publishes for fixture accounts
 // declares, so the accounts a push carries and the ones this verb mints come
 // out of the same door — there is no second implementation of what a test user
 // is.
@@ -34,11 +34,15 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
-// The stack routes a deploy already uses for the same jobs.
+// The management surface's published paths — the same door the panel uses.
+//
+// They used to be the module's own /admin/* routes, reached directly. Going
+// through /v1/management means one gate decides who may do this, for the panel
+// and for here, instead of two places agreeing by accident.
 const (
-	adminTestUsers     = "/admin/test-users"
-	adminTestUserClone = "/admin/test-users/clone"
-	adminTemplates     = "/admin/test-user-templates"
+	adminTestUsers     = "/v1/management/test-users"
+	adminTestUserClone = "/v1/management/test-users/clone"
+	adminTemplates     = "/v1/management/test-users/templates"
 )
 
 // linkedProject is the project this checkout is bound to, when it is bound to
@@ -194,7 +198,7 @@ func templatesOnProject(ctx context.Context, target backend.Target, cred backend
 		return encodeJSON(out, res)
 	}
 	if len(res.Templates) == 0 {
-		fmt.Fprintln(out, "No test users declared. Add them to config/test-users.ts and push.")
+		fmt.Fprintln(out, "No fixture accounts on this stack. Add one: palbase test-user create <name>")
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

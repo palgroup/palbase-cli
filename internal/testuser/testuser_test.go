@@ -247,7 +247,7 @@ func TestTestUserTemplates_Empty(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	require.NoError(t, cmd.Execute())
-	require.Contains(t, out.String(), "config/test-users.ts")
+	require.Contains(t, out.String(), "No templates on this stack")
 }
 
 // TestTestUserClone forwards the source, the fixed credentials and the parsed

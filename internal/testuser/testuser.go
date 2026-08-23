@@ -61,14 +61,14 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase test-user create --template demo     Mint 1 user + seed their data
                                                tree from a declared template.
   palbase test-user templates                  List templates declared in
-                                               config/test-users.ts.
+                                               this stack.
   palbase test-user list                       List this environment's test users.
   palbase test-user clone <id> --email x@y.z --password ...
                                                Copy a test user's data tree onto
                                                a new user.
   palbase test-user delete <id>                Purge a test user.
 
-Templates are declared in your project's config/test-users.ts and applied on
+Templates live on the stack and take effect on
 deploy — there is no way to author one from here, because git is the source of
 truth for them.
 
@@ -260,7 +260,7 @@ func templatesCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "templates",
 		Args:  cobra.NoArgs,
-		Short: "List the templates declared in config/test-users.ts",
+		Short: "List the fixture-account templates on this stack",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
 			if target, cred, ok := linkedProject(); ok {
@@ -283,7 +283,7 @@ func templatesCmd(r Resolvers) *cobra.Command {
 				return encodeJSON(out, res)
 			}
 			if len(res) == 0 {
-				fmt.Fprintln(out, "No templates declared. Add them to config/test-users.ts and deploy.")
+				fmt.Fprintln(out, "No templates on this stack.")
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
