@@ -51,7 +51,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 	require.Equal(t, []string{
 		"admin",
 		"android",
-		"apikey", "build",
+		"apikey", "auth", "build",
 		"clone",
 		"db",
 		"debug",

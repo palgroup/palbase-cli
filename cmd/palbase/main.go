@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/admin"
 	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/authadmin"
 	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/palgroup/palbase-cli/internal/config"
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
@@ -146,6 +149,54 @@ func tenantRefOf(tenantURL, publicHost string) (string, bool) {
 // linkedProject adapts the linked target for commands that need to talk to a
 // project — both to the project itself and to the cloud about it.
 type linkedProject struct{ target backend.Target }
+
+// stackManagementREST reaches the management surface of the stack this directory
+// is linked to — NOT the cloud control plane.
+//
+// The distinction is the whole point of these verbs: `palbase auth` changes the
+// auth of one project's own stack, and that stack answers for itself whether it
+// runs in our cloud or on somebody's own machine. Sending these through the
+// platform API would make self-host a second, thinner product.
+type stackManagementREST struct {
+	target backend.Target
+	cred   backend.Credentials
+	client *http.Client
+}
+
+func (s stackManagementREST) Do(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(s.target.URL, "/")+path, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	s.cred.Apply(req)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	res, err := s.client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reach %s: %w", s.target.URL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	return res.StatusCode, raw, err
+}
+
+// openStackManagement resolves the target, announcing it, and builds the client.
+func openStackManagement(cmd *cobra.Command) (authadmin.REST, error) {
+	target, err := backend.PrintTargetFor(cmd)
+	if err != nil {
+		return nil, err
+	}
+	cred, _, err := backend.Credential(target.URL)
+	if err != nil {
+		return nil, err
+	}
+	return stackManagementREST{target: target, cred: cred, client: backend.HTTPClient(target)}, nil
+}
 
 func linkedTarget() (linkedProject, error) {
 	t, err := backend.ReadTarget()
@@ -325,6 +376,7 @@ func newRootCmd() *cobra.Command {
 			Studio:    func() flags.Studio { return studioClient },
 			Selection: selectionResolver,
 		}),
+		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement}),
 		egress.Cmd(),
 		notifications.Cmd(notifications.Resolvers{
 			Studio:    func() *studio.Client { return studioClient },
