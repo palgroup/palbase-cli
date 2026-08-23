@@ -76,11 +76,7 @@ func (c *Client) BrowserLogin(ctx context.Context, create bool) (*Credentials, e
 	// The person goes to the PANEL, not to the API: the authorize endpoint is a
 	// machine surface behind an apikey header, and a browser sends no such
 	// header. The panel is where a human signs in, and it carries the id back.
-	page := "/login"
-	if create {
-		page = "/signup"
-	}
-	handoff := strings.TrimRight(c.Cfg.StudioURL, "/") + page + "?auth_request_id=" + url.QueryEscape(authRequestID)
+	handoff := handoffURL(c.Cfg.StudioURL, create, authRequestID)
 	fmt.Fprintf(c.Output, "Opening %s\n", handoff)
 	fmt.Fprintln(c.Output, "Waiting for you to finish in the browser…")
 	if err := c.OpenBrowser(handoff); err != nil {
@@ -199,3 +195,17 @@ const callbackPage = `<!doctype html><meta charset="utf-8"><title>Signed in</tit
 <body style="font:16px/1.5 ui-sans-serif,system-ui;background:#0b0b0d;color:#e7e7ea;display:grid;place-items:center;height:100vh;margin:0">
 <div style="text-align:center"><p style="font-size:20px;margin:0 0 8px">Signed in.</p>
 <p style="opacity:.6;margin:0">You can close this tab and go back to the terminal.</p></div>`
+
+// handoffURL, kişinin gönderileceği panel sayfası.
+//
+// `/auth/login` — "Sign in to authorize" — auth_request_id'yi OKUYAN tek
+// sayfadır. Sıradan `/login` parametreyi görmezden gelir: kişi giriş yapar,
+// proje listesine düşer ve CLI zaman aşımına uğrayana kadar döngüsel adreste
+// bekler. Hiçbir yerde hata görünmez; giriş yalnızca hiç bitmez.
+func handoffURL(studioURL string, create bool, authRequestID string) string {
+	page := "/auth/login"
+	if create {
+		page = "/signup"
+	}
+	return strings.TrimRight(studioURL, "/") + page + "?auth_request_id=" + url.QueryEscape(authRequestID)
+}

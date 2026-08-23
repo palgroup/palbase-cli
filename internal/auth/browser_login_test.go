@@ -126,3 +126,28 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// THE HANDOFF LANDS ON A PAGE THAT UNDERSTANDS THE REQUEST.
+//
+// The person is sent to the panel with an `auth_request_id`, and only one page
+// there reads it: `/auth/login`, the "Sign in to authorize" screen built for
+// this. `/login` is the ordinary sign-in — it ignores the parameter, signs the
+// person in, drops them on the project list, and the CLI waits at the loopback
+// until it times out. Nothing errors; the login simply never finishes.
+func TestHandoffGoesToThePageThatReadsTheRequestID(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		create bool
+		want   string
+	}{
+		{"login", false, "/auth/login?auth_request_id=ar_42"},
+		{"signup", true, "/signup?auth_request_id=ar_42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := handoffURL("https://app.example.test/", tc.create, "ar_42")
+			if got != "https://app.example.test"+tc.want {
+				t.Fatalf("handoff = %q, %q bekleniyordu", got, "https://app.example.test"+tc.want)
+			}
+		})
+	}
+}
