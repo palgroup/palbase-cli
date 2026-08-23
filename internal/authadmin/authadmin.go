@@ -111,7 +111,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		Short: "Configure the auth of the stack this directory is linked to",
 		Long: `Everything a panel does to auth, from here.
 
-  palbase auth settings get|set --json '{...}'
+  palbase auth settings get|set --password-min 10 [--json '{...}']
   palbase auth providers list
   palbase auth providers enable|disable NAME
   palbase auth providers config set NAME --json '{...}'   (server-side merge)
@@ -140,20 +140,113 @@ func settingsCmd(r Resolvers) *cobra.Command {
 			return call(r, cmd, http.MethodGet, base+"/settings", nil)
 		},
 	})
-	var body string
+	var (
+		body    string
+		pwMin   int
+		pwMax   int
+		confirm bool
+		siteURL string
+	)
 	set := &cobra.Command{
 		Use: "set", Short: "Change this project's auth settings", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			b, err := readBody(cmd, body)
+			named := namedSettings(cmd, pwMin, pwMax, confirm, siteURL)
+			// READ FIRST, when the caller named individual settings. The module's
+			// PUT replaces the WHOLE document, so a partial body erases what it
+			// does not mention — measured live: `--password-min 13` alone was
+			// refused with "password_max_length must be between
+			// password_min_length and 64", because the absent maximum arrived as
+			// zero. A person saying "make the minimum 13" is not saying "and
+			// forget everything else".
+			//
+			// A caller who passed the whole document with --json and named
+			// nothing is saying exactly what they mean, and it is sent as-is.
+			current := map[string]any{}
+			if len(named) > 0 {
+				rest, err := r.REST(cmd)
+				if err != nil {
+					return err
+				}
+				status, raw, err := rest.Do(cmd.Context(), http.MethodGet, base+"/settings", nil)
+				if err != nil {
+					return err
+				}
+				if status != http.StatusOK {
+					return fmt.Errorf("could not read the current settings to change one of them (%d): %s",
+						status, strings.TrimSpace(string(raw)))
+				}
+				if err := json.Unmarshal(raw, &current); err != nil {
+					return fmt.Errorf("the current settings did not parse: %w", err)
+				}
+			}
+			b, err := mergeSettings(body, named, current)
 			if err != nil {
 				return err
 			}
 			return call(r, cmd, http.MethodPut, base+"/settings", b)
 		},
 	}
-	set.Flags().StringVar(&body, "json", "", "the settings, as JSON")
+	set.Flags().StringVar(&body, "json", "", "anything the named flags do not cover, as JSON")
+	set.Flags().IntVar(&pwMin, "password-min", 0, "shortest password this project accepts")
+	set.Flags().IntVar(&pwMax, "password-max", 0, "longest password this project accepts")
+	set.Flags().BoolVar(&confirm, "confirm-email", false, "require a confirmed address before sign-in")
+	set.Flags().StringVar(&siteURL, "site-url", "", "the address links in this project's mail point at")
 	c.AddCommand(set)
 	return c
+}
+
+// namedSettings turns the typed flags into the module's own field names.
+//
+// `--json '{"password_min_length":10}'` asks a person to know those names, which
+// is the thing a CLI exists to hide — and getting one wrong is a settings write
+// that silently does nothing, because the module ignores fields it does not read.
+//
+// Only flags the caller CHANGED are sent: this is a PUT over the whole document,
+// so a zero for a flag nobody typed would set the password floor to zero.
+func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL string) map[string]any {
+	out := map[string]any{}
+	if cmd.Flags().Changed("password-min") {
+		out["password_min_length"] = pwMin
+	}
+	if cmd.Flags().Changed("password-max") {
+		out["password_max_length"] = pwMax
+	}
+	if cmd.Flags().Changed("confirm-email") {
+		out["confirm_email_required"] = confirm
+	}
+	if cmd.Flags().Changed("site-url") {
+		out["site_url"] = siteURL
+	}
+	return out
+}
+
+// mergeSettings puts the named flags over the JSON body.
+//
+// Both are accepted rather than one winning silently: a person setting the
+// password floor and a site URL in the same breath should not have to choose
+// which half to write by hand.
+func mergeSettings(inline string, named, current map[string]any) ([]byte, error) {
+	merged := map[string]any{}
+	// The document as it stands, under everything the caller said.
+	for k, v := range current {
+		merged[k] = v
+	}
+	if strings.TrimSpace(inline) != "" {
+		if !json.Valid([]byte(inline)) {
+			return nil, fmt.Errorf("--json is not valid JSON")
+		}
+		if err := json.Unmarshal([]byte(inline), &merged); err != nil {
+			return nil, fmt.Errorf("--json must be a JSON object: %w", err)
+		}
+	}
+	for k, v := range named {
+		merged[k] = v
+	}
+	if len(merged) == 0 {
+		return nil, fmt.Errorf("nothing to send: name a setting (--password-min, --password-max, " +
+			"--confirm-email, --site-url) or pass the whole document with --json")
+	}
+	return json.Marshal(merged)
 }
 
 func providersCmd(r Resolvers) *cobra.Command {

@@ -19,9 +19,11 @@ type fakeREST struct {
 	body         []byte
 	status       int
 	answer       string
+	calls        int
 }
 
 func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+	f.calls++
 	f.method, f.path, f.body = method, path, body
 	st := f.status
 	if st == 0 {
@@ -117,5 +119,86 @@ func TestARefusalIsReportedNotSwallowed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nope") && !strings.Contains(out.String(), "nope") {
 		t.Fatalf("the module's own reason was dropped: %v / %s", err, out.String())
+	}
+}
+
+// A settings change is typed, not hand-written JSON.
+//
+// `--json '{"password_min_length":10}'` asks a person to know the module's exact
+// field names, which is the thing a CLI exists to hide — and getting one wrong is
+// a settings write that silently does nothing, because the module ignores fields
+// it does not read. The named flags compose the body; --json stays for anything
+// they do not cover, and the two merge rather than one winning silently.
+func TestSettingsSetTakesNamedFlagsAndNotOnlyJSON(t *testing.T) {
+	rest := &fakeREST{}
+	run(t, rest, "settings", "set", "--password-min", "10", "--password-max", "48")
+	var sent map[string]any
+	if err := json.Unmarshal(rest.body, &sent); err != nil {
+		t.Fatalf("the body is not JSON: %s", rest.body)
+	}
+	if sent["password_min_length"] != float64(10) || sent["password_max_length"] != float64(48) {
+		t.Errorf("the named flags did not become the module's fields: %s", rest.body)
+	}
+	if rest.method != http.MethodPut || rest.path != "/v1/management/auth/settings" {
+		t.Errorf("%s %s", rest.method, rest.path)
+	}
+}
+
+func TestSettingsSetMergesJSONWithTheNamedFlags(t *testing.T) {
+	rest := &fakeREST{}
+	run(t, rest, "settings", "set", "--password-min", "12", "--json", `{"site_url":"https://example.com"}`)
+	var sent map[string]any
+	_ = json.Unmarshal(rest.body, &sent)
+	if sent["password_min_length"] != float64(12) {
+		t.Errorf("the flag was lost: %s", rest.body)
+	}
+	if sent["site_url"] != "https://example.com" {
+		t.Errorf("the JSON was lost: %s", rest.body)
+	}
+}
+
+func TestSettingsSetWithNothingToSaySaysSo(t *testing.T) {
+	rest := &fakeREST{}
+	cmd := Cmd(Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"settings", "set"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("a settings write with no fields was sent")
+	}
+	if !strings.Contains(err.Error(), "nothing to send") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+}
+
+// A named change is READ-MODIFY-WRITE, because the module's PUT replaces the
+// whole document.
+//
+// Measured against a live stack: `auth settings set --password-min 13` sent
+// {"password_min_length":13} and was refused —
+// "password_max_length must be between password_min_length and 64" — because the
+// absent maximum arrived as zero. A person saying "make the minimum 13" is not
+// saying "and forget everything else".
+func TestSettingsSetReadsBeforeItWrites(t *testing.T) {
+	rest := &fakeREST{answer: `{"password_min_length":8,"password_max_length":64,"confirm_email_required":false,"site_url":"https://kept.example"}`}
+	run(t, rest, "settings", "set", "--password-min", "13")
+
+	if rest.calls < 2 {
+		t.Fatalf("the command wrote without reading: %d call(s)", rest.calls)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(rest.body, &sent); err != nil {
+		t.Fatalf("body is not JSON: %s", rest.body)
+	}
+	if sent["password_min_length"] != float64(13) {
+		t.Errorf("the change did not travel: %s", rest.body)
+	}
+	if sent["password_max_length"] != float64(64) {
+		t.Errorf("the untouched maximum was dropped — the module reads that as zero: %s", rest.body)
+	}
+	if sent["site_url"] != "https://kept.example" {
+		t.Errorf("a field nobody mentioned was erased: %s", rest.body)
 	}
 }
