@@ -2,6 +2,8 @@ package backend
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,7 +75,7 @@ func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "controllers"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := buildStackArtifact(context.Background(), dir, &strings.Builder{})
+	_, err := buildStackArtifact(context.Background(), dir, &strings.Builder{})
 	if err == nil {
 		t.Fatal("a project with no controllers built successfully")
 	}
@@ -86,7 +88,7 @@ func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
 }
 
 func TestAProjectThatIsNotABackendSaysSo(t *testing.T) {
-	err := buildStackArtifact(context.Background(), t.TempDir(), &strings.Builder{})
+	_, err := buildStackArtifact(context.Background(), t.TempDir(), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "controllers") {
 		t.Fatalf("a directory with no controllers/ got %v", err)
 	}
@@ -152,5 +154,63 @@ func writeSDK(t *testing.T, dir, version string) {
 	if err := os.WriteFile(filepath.Join(p, "package.json"),
 		[]byte(`{"name":"@palbase/backend","version":"`+version+`"}`), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The @Upload gate used to compare against config/storage.ts. That file is gone
+// — buckets are created on the stack now — so the gate was pointed at the only
+// source that can answer: the stack's own bucket list. It is a STRONGER gate
+// than the one it replaces, which compared a name against a second declaration
+// of intent rather than against what exists.
+func TestAnUploadToABucketTheStackDoesNotHaveIsRefused(t *testing.T) {
+	uses := []uploadUse{
+		{Where: "Files.avatar", Bucket: "avatars"},
+		{Where: "Files.receipt", Bucket: "recipts"}, // the typo this gate exists for
+	}
+	err := unknownUploadBuckets(uses, []string{"avatars", "receipts"})
+	if err == nil {
+		t.Fatal("a bucket the stack does not have was accepted")
+	}
+	// It has to name the ROUTE, not just the bucket: "recipts does not exist" in
+	// a project with forty controllers is a search, not an answer.
+	for _, want := range []string{"Files.receipt", "recipts", "receipts"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "Files.avatar") {
+		t.Errorf("a bucket that DOES exist was reported as missing: %v", err)
+	}
+}
+
+func TestUploadsThatAllExistPassSilently(t *testing.T) {
+	err := unknownUploadBuckets([]uploadUse{{Where: "Files.avatar", Bucket: "avatars"}}, []string{"avatars", "other"})
+	if err != nil {
+		t.Fatalf("a declared bucket was refused: %v", err)
+	}
+	// No @Upload at all: nothing to check, and NOT an error just because the
+	// stack has no buckets.
+	if err := unknownUploadBuckets(nil, nil); err != nil {
+		t.Fatalf("a project with no uploads was refused: %v", err)
+	}
+}
+
+func TestTheBucketListComesFromTheManagementSurface(t *testing.T) {
+	var asked string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = r.URL.Path
+		_, _ = w.Write([]byte(`{"buckets":[{"name":"avatars"},{"name":"receipts"}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := stackBuckets(context.Background(), Target{URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked != "/v1/management/storage/buckets" {
+		t.Errorf("the bucket list was read from %q", asked)
+	}
+	if len(got) != 2 || got[0] != "avatars" || got[1] != "receipts" {
+		t.Errorf("the stack's buckets did not arrive: %v", got)
 	}
 }

@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -73,8 +72,22 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// A plan that goes green on code the push then refuses is worse than no plan:
 	// it is a check whose passing means nothing.
 	fmt.Fprintln(out, "code")
-	if err := buildStackArtifact(ctx, dir, indent(out)); err != nil {
+	uses, err := buildStackArtifact(ctx, dir, indent(out))
+	if err != nil {
 		return err
+	}
+	// An @Upload naming a bucket the stack does not have is a push that will be
+	// refused, so a plan that stayed quiet about it would be a plan that missed
+	// the one thing it is for.
+	if len(uses) > 0 {
+		have, bucketErr := stackBuckets(ctx, target)
+		if bucketErr != nil {
+			return bucketErr
+		}
+		if bucketErr := unknownUploadBuckets(uses, have); bucketErr != nil {
+			return bucketErr
+		}
+		fmt.Fprintf(indent(out), "%d @Upload route(s), every bucket exists\n", len(uses))
 	}
 
 	// SCHEMA, computed by the project against its own database.
@@ -98,29 +111,16 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 		renderSchemaPlan(out, body)
 	}
 
-	// CONFIG. There is no read-back — the target has no route that reports what
-	// it currently holds — so this says what would be SENT, not what would
-	// change. The wording matters: "would apply" was read as a promise, and for
-	// a while it was not even true that they were applied at all.
-	fmt.Fprintln(out, "config")
-	kinds, err := declaredConfigKinds(dir)
-	if err != nil {
-		return err
-	}
-	if len(kinds) == 0 {
-		fmt.Fprintln(out, "  nothing declared")
-	} else {
-		fmt.Fprintf(out, "  would send: %s\n", strings.Join(kinds, ", "))
-		fmt.Fprintln(out, "  (what each one changes is reported by the push itself)")
-	}
-
-	// SECRETS: names only, always.
-	fmt.Fprintln(out, "secrets")
-	gap, err := planSecrets(ctx, dir, target, cred)
-	if err != nil {
-		return err
-	}
-	renderSecretPlan(out, gap)
+	// NO CONFIG SECTION, and its absence is the point.
+	//
+	// There used to be one, and it could not tell the truth: the target had no
+	// route that reported what it currently held, so the line said what would be
+	// SENT rather than what would CHANGE — and for a while it was not even true
+	// that the sections were applied at all.
+	//
+	// Settings are written directly now, by whoever changes them, so a plan has
+	// nothing to say about them: they are already in effect. What a push carries
+	// is code and schema, and that is what this shows.
 	return nil
 }
 

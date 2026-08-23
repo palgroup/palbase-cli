@@ -226,10 +226,19 @@ func TestPlanWritesNOTHING(t *testing.T) {
 			t.Errorf("plan changed something: %s", write)
 		}
 	}
-	// And it says all four things.
-	for _, bucket := range []string{"code", "schema", "config", "secrets"} {
+	// It says the two things a push actually carries.
+	for _, bucket := range []string{"code", "schema"} {
 		if !strings.Contains(out.String(), bucket) {
 			t.Errorf("the plan does not mention %s:\n%s", bucket, out.String())
+		}
+	}
+	// And NOT the two it used to. The config line could never tell the truth —
+	// the target had no read-back, so it said what would be SENT rather than what
+	// would change — and settings are written directly now, so a plan has nothing
+	// to say about them. A line that claims otherwise is the old lie returning.
+	for _, gone := range []string{"config", "secrets"} {
+		if strings.Contains(out.String(), gone+"\n") || strings.Contains(out.String(), "  would send") {
+			t.Errorf("the plan still has a %s section:\n%s", gone, out.String())
 		}
 	}
 }

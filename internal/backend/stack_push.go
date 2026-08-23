@@ -25,15 +25,13 @@ import (
 )
 
 // pushResult mirrors the contract's PushResult.
-type configApplied struct {
-	Applied     []string `json:"applied"`
-	Unsupported []string `json:"unsupported"`
-}
-
+//
+// There is no `config` field, because the contract has no such field: a push
+// carries code and schema. Mirroring one anyway is how a client keeps reporting
+// a section the server stopped sending.
 type pushResult struct {
-	Config        *configApplied `json:"config"`
-	Digest        string         `json:"digest"`
-	EndpointCount int            `json:"endpoint_count"`
+	Digest        string `json:"digest"`
+	EndpointCount int    `json:"endpoint_count"`
 	Schema        struct {
 		Changed bool     `json:"changed"`
 		Summary []string `json:"summary"`
@@ -111,8 +109,23 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 	// this project's own node_modules, which live here. Shipping whatever a
 	// previous build left on disk is how somebody edits a controller, pushes, and
 	// deploys yesterday's code under today's commit message.
-	if err := buildStackArtifact(ctx, dir, w); err != nil {
+	uses, err := buildStackArtifact(ctx, dir, w)
+	if err != nil {
 		return err
+	}
+
+	// @Upload names a bucket that must EXIST — storage will not create one on
+	// demand, so the route would compile, deploy, activate, and 404 the first
+	// file somebody uploads. The list to compare against is the stack's own:
+	// buckets are created there, by `palbase storage add` or by the panel.
+	if len(uses) > 0 {
+		have, bucketErr := stackBuckets(ctx, target)
+		if bucketErr != nil {
+			return bucketErr
+		}
+		if bucketErr := unknownUploadBuckets(uses, have); bucketErr != nil {
+			return bucketErr
+		}
 	}
 
 	// SECRETS BEFORE CODE, and the order is the feature. Code that reads a
@@ -165,18 +178,10 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 		// short(), not [:12]: this line runs AFTER the code has shipped, so a
 		// stack that answers 200 with a short or empty digest would turn a
 		// successful push into a Go stack trace.
-		// What the DECLARATIONS did, from the project's own answer rather than
-		// from what this side sent. The difference is not pedantic: until
-		// 2026-08-17 the push applied none of them and this line said which
-		// kinds had travelled, which reads as though they had landed.
-		if out.Config != nil {
-			for _, line := range out.Config.Applied {
-				fmt.Fprintf(w, "config: %s\n", line)
-			}
-			for _, line := range out.Config.Unsupported {
-				fmt.Fprintf(w, "config: %s — NOT applied\n", line)
-			}
-		}
+		// There is no config line, because a push carries no configuration. It
+		// used to, and the line reported which KINDS had travelled — which read
+		// as though they had landed, and until 2026-08-17 none of them had.
+		// Settings are written directly now, by whoever changes them.
 		fmt.Fprintf(w, "live: %d endpoint(s), %s\n", out.EndpointCount, short(out.Digest))
 
 		// The contract just changed — this is the moment, and the only moment,

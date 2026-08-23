@@ -539,21 +539,22 @@ export default defineSchema({
 	require.Contains(t, out.String(), "unchanged")
 }
 
-// TestBuildLandsTheEvaluatedConfig: config/*.ts is derived output too — the
-// document `palbase push` ships and `palbase plan` reads to say which
-// configuration and which secrets would travel. Generating it only inside the
-// discarded staging tree left plan reporting "nothing declared" for a project
-// that declares plenty (measured against todoapp).
-func TestBuildLandsTheEvaluatedConfig(t *testing.T) {
+// TestBuildIgnoresAConfigDirectoryEntirely is the inverse of a test that used to
+// live here.
+//
+// It asserted that `palbase build` evaluated config/*.ts into .palbase/config.json,
+// because push shipped that document and plan read it. Neither is true any more:
+// settings and secrets are written directly to the stack by whoever changes them,
+// so a copy in the source tree could only disagree with the live one, and a push
+// that carried it would silently overwrite what somebody set from the panel.
+//
+// The stronger half of this test is that a config/ directory left behind by an
+// older checkout does not fail the build and does not travel. People have these
+// directories on disk right now.
+func TestBuildIgnoresAConfigDirectoryEntirely(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := exec.LookPath("bun"); err != nil {
-		t.Skip("bun is what evaluates config/*.ts")
-	}
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelPack()
-	// The LOCAL SDK, packed: the published 17.4.0 exports no `secret` yet, so
-	// testing against the registry would prove only that a release has not
-	// happened.
 	sdk := packLocalSDK(t, ctxPack)
 	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
 		t.Skip("node/npm unavailable or the install failed")
@@ -561,25 +562,20 @@ func TestBuildLandsTheEvaluatedConfig(t *testing.T) {
 	useTestParserCache(t)
 	writeFixture(t, dir, goodControllerTS)
 
+	// A leftover from before the cutover, including one that would NOT evaluate:
+	// nothing reads it, so nothing can trip over it.
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "secrets.ts"), []byte(`
-import { defineSecrets, secret } from "@palbase/backend";
-
-export default defineSecrets({
-  secrets: [secret("SENTRY_DSN", { required: false, description: "crash reporting" })],
-});
-`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "secrets.ts"),
+		[]byte("this is not valid typescript and it does not matter\n"), 0o644))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	var out bytes.Buffer
-	require.NoError(t, runBuild(ctx, dir, &out), "build:\n%s", out.String())
+	require.NoError(t, runBuild(ctx, dir, &out), "a stale config/ failed the build:\n%s", out.String())
 
-	body, err := os.ReadFile(filepath.Join(dir, ".palbase", "config.json"))
-	require.NoError(t, err, "the evaluated config never reached the checkout:\n%s", out.String())
-	require.Contains(t, string(body), "SENTRY_DSN")
-	// The declaration, never a value: this file is what push ships.
-	require.NotContains(t, string(body), "value")
+	_, err := os.Stat(filepath.Join(dir, ".palbase", "config.json"))
+	require.True(t, os.IsNotExist(err), "the build still produces a config document to ship")
+	require.NotContains(t, out.String(), "config:", "the build still reports configuration it no longer carries")
 }
 
 // TestBuildAcceptsAControllerWithNoExport is one of two defects the CLI harness
