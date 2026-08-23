@@ -57,9 +57,10 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"debug",
 		"deploys",
 		"doctor",
-		// egress: config/egress.ts was the one module config surface with no
-		// command — it had to be hand-written, and a host the deploy's fail-closed
-		// validator rejects only surfaced as a failed deploy.
+		// egress: the outbound allowlist was the one module setting with no
+		// command — it had to be hand-written into a file, and a host the
+		// deploy's fail-closed validator rejects only surfaced as a failed
+		// deploy. It is a management endpoint now, like every other setting.
 		"egress", "flags", "init",
 		"ios",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
@@ -205,4 +206,38 @@ func TestHelpProse_NamesNoRetiredCommand(t *testing.T) {
 	}
 	require.Contains(t, help, "env")
 	require.Contains(t, help, "project")
+}
+
+// FR-037: the surface is the SAME on a self-hosted stack.
+//
+// Every module setting is reachable by command, and every one of those commands
+// calls a management endpoint on whatever stack the checkout is linked to —
+// cloud or somebody's own machine. There is no command that exists only for one
+// of them and no flag that turns one off.
+//
+// This is the assertion that stops the drift the cutover invites. A setting that
+// loses its command does not announce itself: the file it used to live in is
+// gone, so the only thing that would notice is a person looking for a verb that
+// is not there any more.
+func TestGolden_EverySettingIsReachableWithoutAFile(t *testing.T) {
+	have := map[string]bool{}
+	for _, name := range topLevel(t) {
+		have[name] = true
+	}
+	// One command per module whose settings used to live in config/*.ts, plus
+	// the two that never did.
+	for _, verb := range []string{
+		"auth",          // config/auth.json
+		"egress",        // config/egress.ts
+		"flags",         // config/flags.ts
+		"storage",       // config/storage.ts
+		"notifications", // config/notifications.ts
+		"test-user",     // config/test-users.ts
+		"secret",        // never a file, and the reason the rest followed
+		"apikey",
+	} {
+		if !have[verb] {
+			t.Errorf("`palbase %s` is gone — that setting is now reachable only from the panel", verb)
+		}
+	}
 }
