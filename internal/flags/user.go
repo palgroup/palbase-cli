@@ -52,11 +52,16 @@ type Studio interface {
 	Mutation(ctx context.Context, path string, input any, out any) error
 }
 
-// Resolvers carries the lazily-built Studio client + the shared selection
-// resolver, populated by PersistentPreRunE before any subcommand fires. The
-// config-as-code half (list/add/remove) uses neither — it is pure local file
-// authoring — so a zero Resolvers still builds a usable command tree.
+// Resolvers carries the lazily-built clients, populated by PersistentPreRunE
+// before any subcommand fires.
+//
+// REST is the DEFINITION half — list/add/remove, which act on the stack now that
+// config/flags.ts is gone. Studio + Selection are the OVERRIDE half: one
+// person's value in one environment, live, never in git. Two audiences, two
+// seams, and keeping them apart is why `flags user` reads differently from the
+// rest of this command.
 type Resolvers struct {
+	REST      func(*cobra.Command) (REST, error)
 	Studio    func() Studio
 	Selection func() *selection.Resolver
 }

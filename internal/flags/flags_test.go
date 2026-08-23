@@ -2,32 +2,42 @@ package flags
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/spf13/cobra"
 )
 
-// chdirTemp moves into a fresh temp dir for the duration of a test so each test
-// gets its own config/flags.ts. Restores cwd on cleanup.
-func chdirTemp(t *testing.T) {
-	t.Helper()
-	orig, err := os.Getwd()
-	require.NoError(t, err)
-	dir := t.TempDir()
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() { _ = os.Chdir(orig) })
+// fakeREST records what a verb asked the stack for.
+type fakeREST struct {
+	method, path string
+	body         string
+	status       int
+	answer       string
 }
 
-// run drives the flags command with args, capturing stdout.
-func run(t *testing.T, args ...string) (string, error) {
+func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+	f.method, f.path, f.body = method, path, string(body)
+	st := f.status
+	if st == 0 {
+		st = http.StatusOK
+	}
+	ans := f.answer
+	if ans == "" {
+		ans = "{}"
+	}
+	return st, []byte(ans), nil
+}
+
+func runDefs(t *testing.T, rest *fakeREST, args ...string) (string, error) {
 	t.Helper()
-	// Zero Resolvers: list/add/remove are pure local file authoring and touch
-	// neither Studio nor the selection resolver.
-	cmd := Cmd(Resolvers{})
 	var out bytes.Buffer
+	cmd := Cmd(Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }})
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs(args)
@@ -35,373 +45,97 @@ func run(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-func readFile(t *testing.T) string {
-	t.Helper()
-	data, err := os.ReadFile(configPath)
-	require.NoError(t, err)
-	return string(data)
-}
+// TestFlagsLiveOnTheStackNotInAFile is the change this task exists for. The
+// definitions used to be config/flags.ts, upserted on every push — so a flag
+// changed in the panel went back to the file's value on the next deploy, with
+// nothing reporting it. One writer now.
+func TestFlagsLiveOnTheStackNotInAFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
 
-func TestAdd_WritesConfigFile_Boolean(t *testing.T) {
-	chdirTemp(t)
-	out, err := run(t, "add", "new_dashboard", "--type", "boolean", "--default", "false", "--description", "Roll out")
-	require.NoError(t, err)
-	assert.Contains(t, out, "added flag \"new_dashboard\"")
-
-	src := readFile(t)
-	// Valid, importable, typed config.
-	assert.Contains(t, src, `import { defineFlags, flag } from "@palbase/backend";`)
-	assert.Contains(t, src, "export default defineFlags({")
-	assert.Contains(t, src, `new_dashboard: flag({ type: "boolean", default: false, description: "Roll out" }),`)
-
-	// Re-parsing the generated file yields the same flag.
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, declared, "new_dashboard")
-	assert.Equal(t, "boolean", declared["new_dashboard"].Type)
-	assert.Equal(t, "false", declared["new_dashboard"].DefaultLiteral)
-	assert.Equal(t, "Roll out", declared["new_dashboard"].Description)
-}
-
-func TestAdd_Number(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "max_uploads", "--type", "number", "--default", "10")
-	require.NoError(t, err)
-	src := readFile(t)
-	assert.Contains(t, src, `max_uploads: flag({ type: "number", default: 10 }),`)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, "10", declared["max_uploads"].DefaultLiteral)
-}
-
-func TestAdd_StringWithVariants(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "theme", "--type", "string", "--default", "light", "--variants", "light,dark,system")
-	require.NoError(t, err)
-	src := readFile(t)
-	assert.Contains(t, src, `theme: flag({ type: "string", default: "light", variants: ["light", "dark", "system"] }),`)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, `"light"`, declared["theme"].DefaultLiteral)
-	assert.Equal(t, []string{"light", "dark", "system"}, declared["theme"].Variants)
-}
-
-func TestAdd_Json_WritesObjectLiteral(t *testing.T) {
-	chdirTemp(t)
-	out, err := run(t, "add", "limits", "--type", "json", "--default", `{"daily":10}`, "--description", "Per-plan limits")
-	require.NoError(t, err)
-	assert.Contains(t, out, "added flag \"limits\"")
-
-	src := readFile(t)
-	// An object literal, inline — valid TS that @palbase/backend's flag() accepts.
-	assert.Contains(t, src, `limits: flag({ type: "json", default: {"daily":10}, description: "Per-plan limits" }),`)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, declared, "limits")
-	assert.Equal(t, "json", declared["limits"].Type)
-	assert.Equal(t, `{"daily":10}`, declared["limits"].DefaultLiteral)
-	assert.Equal(t, "Per-plan limits", declared["limits"].Description)
-	assert.Empty(t, declared["limits"].Variants)
-}
-
-// The object default is the input most likely to break a hand-written text
-// parser: its commas look like field separators, its braces look like the end of
-// the flag() body, and everything after it in the file is at risk. A sibling flag
-// is declared after it so a body that ran long would visibly swallow the next
-// entry rather than merely mangling its own.
-func TestAdd_Json_NestedBracesAndCommasRoundTrip(t *testing.T) {
-	chdirTemp(t)
-	const nested = `{"daily":10,"burst":{"per_minute":5,"per_hour":{"soft":100,"hard":200}},"tags":["a","b"]}`
-
-	_, err := run(t, "add", "limits", "--type", "json", "--default", nested)
-	require.NoError(t, err)
-	_, err = run(t, "add", "theme", "--type", "string", "--default", "dark", "--variants", "light,dark")
-	require.NoError(t, err)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-
-	// The object survived verbatim...
-	require.Contains(t, declared, "limits")
-	assert.Equal(t, "json", declared["limits"].Type)
-	assert.Equal(t, nested, declared["limits"].DefaultLiteral)
-	// ...and did NOT swallow the flag declared after it.
-	require.Contains(t, declared, "theme", "the object default must not consume the following entry")
-	assert.Equal(t, "string", declared["theme"].Type)
-	assert.Equal(t, []string{"light", "dark"}, declared["theme"].Variants)
-	assert.Len(t, declared, 2)
-
-	// Regenerating from the parsed set is lossless — this is the path that would
-	// silently DELETE the json flag if the parser could not read it back.
-	require.NoError(t, writeConfig(declared))
-	again, err := readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, declared, again)
-}
-
-// A json default can contain the very keys the other fields are named after.
-// Read with a regex over the body text, `{"description":"..."}` becomes the
-// FLAG's description; read as one opaque value, it cannot.
-func TestParseConfig_JsonDefaultKeysAreNotReadAsFlagFields(t *testing.T) {
-	chdirTemp(t)
-	const decoy = `{"description":"decoy","variants":["x"],"type":"boolean","default":false}`
-
-	_, err := run(t, "add", "meta", "--type", "json", "--default", decoy)
-	require.NoError(t, err)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, declared, "meta")
-	got := declared["meta"]
-	assert.Equal(t, "json", got.Type, "the object's own \"type\" key must not become the flag type")
-	assert.Equal(t, decoy, got.DefaultLiteral)
-	assert.Empty(t, got.Description, "the object's own \"description\" key must not become the flag description")
-	assert.Empty(t, got.Variants, "the object's own \"variants\" key must not become the flag variants")
-}
-
-// `//` inside a string is not a comment. It used to be stripped anyway, which for
-// an object default also unbalanced the braces and dropped the entry.
-func TestParseConfig_URLInJSONDefaultSurvivesCommentStripping(t *testing.T) {
-	chdirTemp(t)
-	const withURL = `{"webhook":"https://example.com/hook","note":"see http://docs"}`
-
-	_, err := run(t, "add", "endpoints", "--type", "json", "--default", withURL)
-	require.NoError(t, err)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, declared, "endpoints")
-	assert.Equal(t, withURL, declared["endpoints"].DefaultLiteral)
-}
-
-func TestAdd_Json_RejectsNonObjectDefault(t *testing.T) {
-	cases := []struct {
-		name    string
-		def     string
-		wantErr string
-	}{
-		{"array", `[1,2]`, "must be a JSON object"},
-		{"number", `5`, "must be a JSON object"},
-		{"string", `"dark"`, "must be a JSON object"},
-		{"null", `null`, "not null"},
-		{"invalid JSON", `{nope}`, "must be a JSON object"},
-		{"empty", ``, "must be a JSON object"},
+	rest := &fakeREST{}
+	if _, err := runDefs(t, rest, "add", "new_dashboard", "--type", "boolean", "--default", "false"); err != nil {
+		t.Fatalf("add: %v", err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			chdirTemp(t)
-			_, err := run(t, "add", "x", "--type", "json", "--default", c.def)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), c.wantErr)
-		})
+
+	if _, err := os.Stat(filepath.Join(dir, "config", "flags.ts")); !os.IsNotExist(err) {
+		t.Fatal("a file was written: flag definitions have one home now, and it is the stack")
+	}
+	if rest.method != http.MethodPut || rest.path != "/v1/management/flags/new_dashboard" {
+		t.Fatalf("called %s %s, want PUT /v1/management/flags/new_dashboard", rest.method, rest.path)
 	}
 }
 
-func TestAdd_Json_AcceptsEmptyObject(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--type", "json", "--default", `{}`)
-	require.NoError(t, err)
-	declared, err := readConfig()
-	require.NoError(t, err)
-	assert.Equal(t, `{}`, declared["x"].DefaultLiteral)
-}
+// TestAddSendsTheWholeDefinition is FR-021: the courier wrote type, default,
+// variants and description, so the endpoint that replaced it has to carry all
+// four or the capability shrank while looking replaced.
+func TestAddSendsTheWholeDefinition(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{}
 
-func TestAdd_RejectsVariantsOnJson(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--type", "json", "--default", `{"a":1}`, "--variants", "a,b")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "only valid for --type string")
-}
-
-// A default whose shape contradicts the declared type is refused on READ too —
-// otherwise the CLI would faithfully re-emit a config that @palbase/backend's
-// flag() throws on at deploy time, taking every other flag in the file with it.
-func TestParseConfig_RejectsDefaultShapeMismatch(t *testing.T) {
-	cases := map[string]string{
-		"json type with scalar default":    `x: flag({ type: "json", default: 5 }),`,
-		"json type with array default":     `x: flag({ type: "json", default: ["a"] }),`,
-		"boolean type with object default": `x: flag({ type: "boolean", default: {"a":1} }),`,
-		"string type with object default":  `x: flag({ type: "string", default: {"a":1} }),`,
+	if _, err := runDefs(t, rest, "add", "theme",
+		"--type", "string", "--default", `"system"`,
+		"--variants", "light,dark,system", "--description", "Which theme wins"); err != nil {
+		t.Fatalf("add: %v", err)
 	}
-	for name, entry := range cases {
-		t.Run(name, func(t *testing.T) {
-			src := "import { defineFlags, flag } from \"@palbase/backend\";\nexport default defineFlags({\n  flags: {\n    " + entry + "\n  },\n});\n"
-			_, err := parseConfig(src)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "does not match type")
-		})
+
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(rest.body), &sent); err != nil {
+		t.Fatalf("body is not JSON: %s", rest.body)
 	}
-}
-
-func TestAdd_SecondAddUpdatesNotDuplicates(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "flag_x", "--type", "boolean", "--default", "true")
-	require.NoError(t, err)
-	out, err := run(t, "add", "flag_x", "--type", "number", "--default", "42")
-	require.NoError(t, err)
-	assert.Contains(t, out, "updated flag \"flag_x\"")
-
-	src := readFile(t)
-	// Exactly ONE flag_x entry (no duplicate).
-	assert.Equal(t, 1, strings.Count(src, "flag_x: flag("), "second add must update, not duplicate")
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	// The update fully replaced the entry: now a number=42.
-	assert.Equal(t, "number", declared["flag_x"].Type)
-	assert.Equal(t, "42", declared["flag_x"].DefaultLiteral)
-}
-
-func TestAdd_MultipleFlagsCoexist(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "a", "--type", "boolean", "--default", "true")
-	require.NoError(t, err)
-	_, err = run(t, "add", "b", "--type", "string", "--default", "x")
-	require.NoError(t, err)
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Len(t, declared, 2)
-	assert.Equal(t, "boolean", declared["a"].Type)
-	assert.Equal(t, "string", declared["b"].Type)
-}
-
-func TestRemove_DropsEntry(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "a", "--type", "boolean", "--default", "true")
-	require.NoError(t, err)
-	_, err = run(t, "add", "b", "--type", "boolean", "--default", "false")
-	require.NoError(t, err)
-
-	out, err := run(t, "remove", "a")
-	require.NoError(t, err)
-	assert.Contains(t, out, "removed flag \"a\"")
-	assert.Contains(t, out, "NOT deleted")
-
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Len(t, declared, 1)
-	assert.NotContains(t, declared, "a")
-	assert.Contains(t, declared, "b")
-}
-
-func TestRemove_UnknownFlagErrors(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "remove", "nope")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no flag")
-}
-
-func TestList_EmptyAndPopulated(t *testing.T) {
-	chdirTemp(t)
-	out, err := run(t, "list")
-	require.NoError(t, err)
-	assert.Contains(t, out, "no flags declared")
-
-	_, err = run(t, "add", "theme", "--type", "string", "--default", "dark", "--variants", "light,dark")
-	require.NoError(t, err)
-	out, err = run(t, "list")
-	require.NoError(t, err)
-	assert.Contains(t, out, "theme")
-	assert.Contains(t, out, "string")
-	assert.Contains(t, out, "light, dark")
-}
-
-func TestAdd_RejectsBadKey(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "bad-key", "--type", "boolean", "--default", "true")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid flag key")
-}
-
-// The structured type is spelled `json` on this surface (matching
-// `flags user set --type json`); the server's own name for it, `object`, is not
-// accepted — and the error has to say what is.
-func TestAdd_RejectsUnknownType(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--type", "object", "--default", "1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid --type")
-	assert.Contains(t, err.Error(), "boolean, number, string, or json")
-}
-
-func TestAdd_RejectsBooleanDefaultMismatch(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--type", "boolean", "--default", "yes")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be true or false")
-}
-
-func TestAdd_RejectsNumberDefaultMismatch(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--type", "number", "--default", "ten")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be a number")
-}
-
-func TestAdd_RejectsVariantsOnNonString(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x", "--type", "boolean", "--default", "true", "--variants", "a,b")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "only valid for --type string")
-}
-
-func TestAdd_RejectsDefaultNotInVariants(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "theme", "--type", "string", "--default", "blue", "--variants", "light,dark")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not one of --variants")
-}
-
-func TestAdd_RequiresTypeAndDefault(t *testing.T) {
-	chdirTemp(t)
-	_, err := run(t, "add", "x")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--type is required")
-
-	_, err = run(t, "add", "x", "--type", "boolean")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--default is required")
-}
-
-func TestRoundTrip_QuotedKeyName(t *testing.T) {
-	chdirTemp(t)
-	// A string default containing a comma/quote must round-trip losslessly.
-	_, err := run(t, "add", "greeting", "--type", "string", "--default", `hi, "you"`)
-	require.NoError(t, err)
-	declared, err := readConfig()
-	require.NoError(t, err)
-	require.Contains(t, declared, "greeting")
-	assert.Equal(t, strconvQuote(`hi, "you"`), declared["greeting"].DefaultLiteral)
-}
-
-func TestReadConfig_RefusesUnrelatedFile(t *testing.T) {
-	chdirTemp(t)
-	require.NoError(t, os.MkdirAll("config", 0o755))
-	require.NoError(t, os.WriteFile(configPath, []byte("export const x = 1;\n"), 0o644))
-	_, err := readConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not look like a defineFlags")
-}
-
-// strconvQuote mirrors strconv.Quote for the expected literal in the round-trip
-// test without importing strconv into the test (keeps the assertion explicit).
-func strconvQuote(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			b.WriteString(`\"`)
-		case '\\':
-			b.WriteString(`\\`)
-		default:
-			b.WriteRune(r)
+	for _, want := range []string{"type", "value", "variants", "description"} {
+		if _, ok := sent[want]; !ok {
+			t.Fatalf("the definition lost %q on the way out: %s", want, rest.body)
 		}
 	}
-	b.WriteByte('"')
-	return b.String()
+}
+
+// TestRemoveActuallyRemoves. It used to edit the file and leave the live flag in
+// place, so "removed" and "still there" were both true at once.
+func TestRemoveActuallyRemoves(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{status: http.StatusNoContent}
+
+	out, err := runDefs(t, rest, "remove", "old_flag")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if rest.method != http.MethodDelete || rest.path != "/v1/management/flags/old_flag" {
+		t.Fatalf("called %s %s, want a DELETE", rest.method, rest.path)
+	}
+	if strings.Contains(out, "NOT deleted") {
+		t.Fatal("the command still hedges about the live flag surviving")
+	}
+}
+
+// TestAddRefusesADefaultThatIsNotJSON keeps the check local as well as remote: a
+// string default has to be quoted, and learning that from a stack round-trip is
+// slower than learning it here.
+func TestAddRefusesADefaultThatIsNotJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{}
+
+	if _, err := runDefs(t, rest, "add", "theme", "--type", "string", "--default", "system"); err == nil {
+		t.Fatal("an unquoted string default was accepted")
+	}
+	if rest.method != "" {
+		t.Fatalf("it reached the stack before being refused: %s %s", rest.method, rest.path)
+	}
+}
+
+// TestListReadsTheStack.
+func TestListReadsTheStack(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{answer: `[{"key":"a","type":"boolean","value":true,"description":"first"}]`}
+
+	out, err := runDefs(t, rest, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if rest.method != http.MethodGet || rest.path != "/v1/management/flags" {
+		t.Fatalf("called %s %s", rest.method, rest.path)
+	}
+	if !strings.Contains(out, "a") || !strings.Contains(out, "first") {
+		t.Fatalf("the stack's answer did not reach the person:\n%s", out)
+	}
 }

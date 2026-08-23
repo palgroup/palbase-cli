@@ -378,8 +378,9 @@ func newRootCmd() *cobra.Command {
 		dbcmd.Cmd(),
 		storage.Cmd(),
 		flags.Cmd(flags.Resolvers{
-			// *studio.Client satisfies flags.Studio (Query/Mutation); only the
-			// `flags user` overrides use it.
+			// The DEFINITION half acts on the linked stack; the `flags user`
+			// overrides are a different product and keep their Studio seam.
+			REST:      func(cmd *cobra.Command) (flags.REST, error) { return openStackManagement(cmd) },
 			Studio:    func() flags.Studio { return studioClient },
 			Selection: selectionResolver,
 		}),
