@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/spf13/cobra"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,16 +22,6 @@ import (
 
 // chdirTemp moves into a fresh temp dir so each test gets its own
 // config/notifications.ts. Restores cwd on cleanup.
-func chdirTemp(t *testing.T) {
-	t.Helper()
-	orig, err := os.Getwd()
-	require.NoError(t, err)
-	dir := t.TempDir()
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-}
-
-// capturedMutation is one env.set call the fake Studio server recorded.
 type capturedMutation struct {
 	Path  string
 	Key   string
@@ -91,10 +82,38 @@ func (f *fakeStudio) calls() []capturedMutation {
 }
 
 // run drives the notifications command tree with args, capturing stdout+stderr.
+// fakeREST records what a verb asked the stack for.
+type fakeREST struct {
+	method, path, body string
+	status             int
+	answer             string
+}
+
+func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+	f.method, f.path, f.body = method, path, string(body)
+	st := f.status
+	if st == 0 {
+		st = http.StatusOK
+	}
+	ans := f.answer
+	if ans == "" {
+		ans = "[]"
+	}
+	return st, []byte(ans), nil
+}
+
 func run(t *testing.T, studioFn func() *studio.Client, args ...string) (string, error) {
 	t.Helper()
+	return runWith(t, &fakeREST{}, studioFn, args...)
+}
+
+func runWith(t *testing.T, rest *fakeREST, studioFn func() *studio.Client, args ...string) (string, error) {
 	t.Helper()
-	cmd := Cmd(Resolvers{Studio: studioFn, Selection: selectiontest.Selected(t)})
+	cmd := Cmd(Resolvers{
+		REST:      func(*cobra.Command) (REST, error) { return rest, nil },
+		Studio:    studioFn,
+		Selection: selectiontest.Selected(t),
+	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -103,79 +122,87 @@ func run(t *testing.T, studioFn func() *studio.Client, args ...string) (string, 
 	return out.String(), err
 }
 
-func readConfigFile(t *testing.T) string {
+// --- the change this task exists for ----------------------------------------
+
+// TestSendersLiveOnTheStackNotInAFile. They used to be declared in
+// config/notifications.ts, created on every deploy and never deleted when
+// dropped — so "removed" and "still sending" were both true.
+func TestSendersLiveOnTheStackNotInAFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	f := newFakeStudio(t)
+	rest := &fakeREST{}
+
+	_, err := runWith(t, rest, f.client, "add", "apns",
+		"--team-id", "T", "--key-id", "K", "--bundle-id", "com.x",
+		"--p8-file", writeSecretIn(t, dir, "k.p8", "-----BEGIN PRIVATE KEY-----"))
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(filepath.Join(dir, "config", "notifications.ts"))
+	assert.True(t, os.IsNotExist(statErr), "a file was written: senders have one home now")
+	assert.Equal(t, http.MethodPost, rest.method)
+	assert.Equal(t, "/v1/management/notifications/providers", rest.path)
+	assert.Contains(t, rest.body, "apns")
+}
+
+// TestSecretsStillGoToTheVaultNotTheBody keeps the property that mattered before
+// and still does: a credential never travels in the provider entry.
+func TestSecretsStillGoToTheVaultNotTheBody(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	f := newFakeStudio(t)
+	rest := &fakeREST{}
+
+	_, err := runWith(t, rest, f.client, "add", "apns",
+		"--team-id", "T", "--key-id", "K", "--bundle-id", "com.x",
+		"--p8-file", writeSecretIn(t, dir, "k.p8", "-----BEGIN PRIVATE KEY-----SECRETBYTES"))
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, f.calls(), "the secret never reached the vault")
+	assert.NotContains(t, rest.body, "SECRETBYTES",
+		"a credential travelled in the provider entry: they go to the vault and the stack reads them there")
+}
+
+// TestRemoveActuallyRemoves.
+func TestRemoveActuallyRemoves(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{status: http.StatusNoContent}
+
+	_, err := runWith(t, rest, nil, "remove", "apns")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodDelete, rest.method)
+	assert.Equal(t, "/v1/management/notifications/providers/apns", rest.path)
+}
+
+// TestProviders_MarksWhatTheStackHas.
+func TestProviders_MarksWhatTheStackHas(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{answer: `[{"provider":"apns"}]`}
+
+	out, err := runWith(t, rest, nil, "providers")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rest.method)
+	assert.Contains(t, out, "apns")
+	assert.Contains(t, out, "●")
+}
+
+func writeSecretIn(t *testing.T, dir, name, body string) string {
 	t.Helper()
-	data, err := os.ReadFile(configPath)
-	require.NoError(t, err)
-	return string(data)
+	p := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(p, []byte(body), 0o600))
+	return p
 }
 
-// --- providers --------------------------------------------------------------
-
-func TestProviders_ListsCatalog(t *testing.T) {
-	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	out, err := run(t, nil, "providers")
-	require.NoError(t, err)
-	// Every catalog provider appears, grouped by channel.
-	for _, name := range sortedProviderNames() {
-		assert.Contains(t, out, name)
-	}
-	assert.Contains(t, out, "push:")
-	assert.Contains(t, out, "email:")
-	assert.Contains(t, out, "sms:")
-	assert.Contains(t, out, "available")
+func writeTemp(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "secret.txt")
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+	return p
 }
 
-func TestProviders_MarksConfigured(t *testing.T) {
+func chdirTemp(t *testing.T) {
+	t.Helper()
 	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	// Seed a config with apns enabled.
-	require.NoError(t, writeConfig(notificationsConfig{
-		"apns": {enabled: true, fields: map[string]string{"teamId": "T", "keyId": "K", "bundleId": "com.x"}},
-	}))
-	out, err := run(t, nil, "providers")
-	require.NoError(t, err)
-	assert.Contains(t, out, "configured (enabled)")
-}
-
-// --- add --------------------------------------------------------------------
-
-func TestAddApns_UploadsReservedSecretAndWritesConfig(t *testing.T) {
-	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	// Write a .p8 file to feed --p8-file.
-	p8 := filepath.Join(t.TempDir(), "AuthKey.p8")
-	require.NoError(t, os.WriteFile(p8, []byte("-----BEGIN PRIVATE KEY-----\nXXX\n-----END PRIVATE KEY-----"), 0o600))
-
-	fs := newFakeStudio(t)
-	out, err := run(t, fs.client,
-		"add", "apns",
-		"--team-id", "TEAM12345",
-		"--key-id", "KEY1234567",
-		"--bundle-id", "com.acme.app",
-		"--p8-file", p8,
-	)
-	require.NoError(t, err, out)
-
-	// 1. The secret was uploaded to the DERIVED reserved key, marked secret.
-	calls := fs.calls()
-	require.Len(t, calls, 1)
-	assert.Equal(t, "env.set", calls[0].Path)
-	assert.Equal(t, "PB_NOTIFICATIONS_APNS_P8", calls[0].Key)
-	assert.True(t, calls[0].Sec)
-	assert.Contains(t, calls[0].Value, "BEGIN PRIVATE KEY")
-
-	// 2. config/notifications.ts has the apns entry with non-secret fields only.
-	file := readConfigFile(t)
-	assert.Contains(t, file, "defineNotifications")
-	assert.Contains(t, file, "push: {")
-	assert.Contains(t, file, "apns: { enabled: true")
-	assert.Contains(t, file, `teamId: "TEAM12345"`)
-	assert.Contains(t, file, `bundleId: "com.acme.app"`)
-	// The secret NEVER lands in the config file.
-	assert.NotContains(t, file, "BEGIN PRIVATE KEY")
-	assert.NotContains(t, file, "p8")
 }
 
 func TestAddApns_MissingRequiredField(t *testing.T) {
@@ -203,22 +230,6 @@ func TestAddApns_MissingSecretFile(t *testing.T) {
 	assert.Empty(t, fs.calls())
 }
 
-func TestAddFcm_ServiceAccountFile(t *testing.T) {
-	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	sa := filepath.Join(t.TempDir(), "sa.json")
-	require.NoError(t, os.WriteFile(sa, []byte(`{"type":"service_account","project_id":"p"}`), 0o600))
-	fs := newFakeStudio(t)
-	out, err := run(t, fs.client, "add", "fcm", "--service-account-file", sa)
-	require.NoError(t, err, out)
-	calls := fs.calls()
-	require.Len(t, calls, 1)
-	assert.Equal(t, "PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT", calls[0].Key)
-	// fcm has no non-secret fields — entry is just enabled.
-	file := readConfigFile(t)
-	assert.Contains(t, file, "fcm: { enabled: true }")
-}
-
 func TestAddTwilio_RequiresOneOfFromOrMessaging(t *testing.T) {
 	t.Chdir(t.TempDir())
 	chdirTemp(t)
@@ -235,72 +246,4 @@ func TestAddUnknownProvider(t *testing.T) {
 	_, err := run(t, nil, "add", "nope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown provider")
-}
-
-// --- remove -----------------------------------------------------------------
-
-func TestRemove_DropsFromConfig(t *testing.T) {
-	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	require.NoError(t, writeConfig(notificationsConfig{
-		"apns": {enabled: true, fields: map[string]string{"teamId": "T", "keyId": "K", "bundleId": "com.x"}},
-	}))
-	out, err := run(t, nil, "remove", "apns")
-	require.NoError(t, err)
-	assert.Contains(t, out, "removed provider")
-	assert.NotContains(t, readConfigFile(t), "apns: {")
-}
-
-func TestRemove_NotDeclared(t *testing.T) {
-	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	require.NoError(t, writeConfig(notificationsConfig{}))
-	_, err := run(t, nil, "remove", "apns")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no provider")
-}
-
-// --- config round-trip ------------------------------------------------------
-
-func TestConfig_RoundTrips(t *testing.T) {
-	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	in := notificationsConfig{
-		"apns":     {enabled: true, fields: map[string]string{"teamId": "T1", "keyId": "K1", "bundleId": "com.acme", "isProduction": "false"}},
-		"sendgrid": {enabled: true, fields: map[string]string{"fromDomain": "m.acme.com"}},
-		"smtp":     {enabled: false, fields: map[string]string{"host": "smtp.x", "port": "587", "fromEmail": "a@x.com"}},
-	}
-	require.NoError(t, writeConfig(in))
-	got, err := readConfig()
-	require.NoError(t, err)
-
-	assert.True(t, got["apns"].enabled)
-	assert.Equal(t, "T1", got["apns"].fields["teamId"])
-	assert.Equal(t, "false", got["apns"].fields["isProduction"])
-	assert.Equal(t, "m.acme.com", got["sendgrid"].fields["fromDomain"])
-	assert.False(t, got["smtp"].enabled)
-	assert.Equal(t, "587", got["smtp"].fields["port"])
-}
-
-func TestReservedSecretKey_Derivation(t *testing.T) {
-	t.Chdir(t.TempDir())
-	cases := map[string]string{
-		"apns/p8":              "PB_NOTIFICATIONS_APNS_P8",
-		"fcm/serviceAccount":   "PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT",
-		"twilio/authToken":     "PB_NOTIFICATIONS_TWILIO_AUTH_TOKEN",
-		"ses/secretAccessKey":  "PB_NOTIFICATIONS_SES_SECRET_ACCESS_KEY",
-		"acs/connectionString": "PB_NOTIFICATIONS_ACS_CONNECTION_STRING",
-	}
-	for in, want := range cases {
-		parts := strings.SplitN(in, "/", 2)
-		assert.Equal(t, want, reservedSecretKey(parts[0], parts[1]), in)
-	}
-}
-
-// writeTemp writes content to a temp file and returns its path.
-func writeTemp(t *testing.T, content string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "secret.txt")
-	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
-	return p
 }

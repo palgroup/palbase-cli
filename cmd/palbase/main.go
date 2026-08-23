@@ -387,6 +387,7 @@ func newRootCmd() *cobra.Command {
 		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement}),
 		egress.Cmd(egress.Resolvers{REST: openStackEgress}),
 		notifications.Cmd(notifications.Resolvers{
+			REST:      func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
 			Studio:    func() *studio.Client { return studioClient },
 			Selection: selectionResolver,
 		}),

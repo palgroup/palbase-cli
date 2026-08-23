@@ -16,8 +16,11 @@
 package notifications
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -34,82 +37,119 @@ import (
 // client uploads provider secrets via the env.set mutation (the SAME path
 // `palbase secret set` uses).
 type Resolvers struct {
+	// REST is where the senders live now that config/notifications.ts is gone.
+	REST      func(*cobra.Command) (REST, error)
 	Studio    func() *studio.Client
 	Selection func() *selection.Resolver
 }
 
 // Cmd returns the `palbase notifications` parent command.
+// providerEntry is one sender as the CLI assembles it before sending: whether it
+// is on, and the non-secret fields it needs. Secrets never travel in it — they
+// go to the vault and the stack reads them from there.
+//
+// It moved here when the config-file layer was deleted; this is the only place
+// that builds one now.
+type providerEntry struct {
+	enabled bool
+	fields  map[string]string
+}
+
+// MarshalJSON emits the shape the module reads. Written out rather than relying
+// on struct tags because the fields are unexported — they were never meant to
+// cross a package boundary and still are not.
+func (e providerEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{"enabled": e.enabled, "fields": e.fields})
+}
+
+// REST reaches the linked stack's management surface.
+type REST interface {
+	Do(ctx context.Context, method, path string, body []byte) (int, []byte, error)
+}
+
+const providersPath = "/v1/management/notifications/providers"
+
+func call(r Resolvers, cmd *cobra.Command, method, path string, body []byte) ([]byte, error) {
+	rest, err := r.REST(cmd)
+	if err != nil {
+		return nil, err
+	}
+	status, raw, err := rest.Do(cmd.Context(), method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		var e struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(raw, &e) == nil && e.Description != "" {
+			return nil, fmt.Errorf("%s: %s", e.Error, e.Description)
+		}
+		return nil, fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
+	}
+	return raw, nil
+}
+
 func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "notifications",
-		Short: "Manage notification providers config-as-code (config/notifications.ts)",
-		Long: `Declare the project's push/email/SMS providers in config/notifications.ts.
+		Short: "Manage this project's notification senders",
+		Long: `The push/email/SMS senders this project delivers through.
 
-  palbase notifications providers                 Show the provider catalog + what's configured.
-  palbase notifications add <provider> [flags]    Configure a provider (uploads its secret, writes config).
-  palbase notifications remove <provider>         Disable + drop a provider from config.
+  palbase notifications providers                 Show the catalog and what is configured.
+  palbase notifications add <provider> [flags]    Configure a sender.
+  palbase notifications remove <provider>         Stop delivering through one.
 
-config/notifications.ts is git-authoritative: commit it and ` + "`git push`" + ` to deploy.
-The deploy creates the configured providers; it never deletes a provider dropped
-from the file. Provider SECRETS (cert/key/api-key) are uploaded to reserved
-encrypted env vars — they never enter git.`,
+They live ON THE STACK and take effect immediately. They used to be declared in
+config/notifications.ts, created on every deploy and never deleted when dropped
+from the file — so "removed" and "still sending" were both true.
+
+Provider SECRETS go to the vault, encrypted, and are never read back: the listing
+says WHICH senders are configured, not with what.`,
 	}
-	cmd.AddCommand(providersCmd(), addCmd(r), removeCmd())
+	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r))
 	return cmd
 }
 
 // providersCmd lists the catalog + which providers are configured in config.
-func providersCmd() *cobra.Command {
-	var jsonOut bool
-	cmd := &cobra.Command{
+func providersCmd(r Resolvers) *cobra.Command {
+	return &cobra.Command{
 		Use:   "providers",
-		Short: "List the known providers and which are configured in config/notifications.ts",
+		Short: "Show the catalog and what this stack has configured",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := readConfig()
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := call(r, cmd, http.MethodGet, providersPath, nil)
 			if err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			status := func(name string) string {
-				if entry, ok := cfg[name]; ok {
-					if entry.enabled {
-						return "configured (enabled)"
+			configured := map[string]bool{}
+			var live []struct {
+				Provider string `json:"provider"`
+				Name     string `json:"name"`
+			}
+			if json.Unmarshal(raw, &live) == nil {
+				for _, p := range live {
+					key := p.Provider
+					if key == "" {
+						key = p.Name
 					}
-					return "configured (disabled)"
-				}
-				return "available"
-			}
-			if jsonOut {
-				type row struct {
-					Name    string `json:"name"`
-					Channel string `json:"channel"`
-					Status  string `json:"status"`
-				}
-				rows := []row{}
-				for _, spec := range catalog {
-					rows = append(rows, row{Name: spec.name, Channel: spec.channel, Status: status(spec.name)})
-				}
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(rows)
-			}
-			fmt.Fprintf(out, "Notification providers (configured in %s marked):\n\n", configPath)
-			for _, ch := range []string{"push", "email", "sms"} {
-				fmt.Fprintf(out, "  %s:\n", ch)
-				for _, spec := range catalog {
-					if spec.channel != ch {
-						continue
-					}
-					fmt.Fprintf(out, "    %-10s %s\n", spec.name, status(spec.name))
+					configured[key] = true
 				}
 			}
-			fmt.Fprintf(out, "\nConfigure one: palbase notifications add <provider> [flags]\n")
+			fmt.Fprintln(out, "notification senders (● configured on this stack):")
+			fmt.Fprintln(out)
+			for _, spec := range catalog {
+				mark := " "
+				if configured[spec.name] {
+					mark = "●"
+				}
+				fmt.Fprintf(out, "  %s %-18s %s\n", mark, spec.name, spec.channel)
+			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
-	return cmd
 }
 
 // addCmd configures a single provider: it (1) uploads the provider's secret(s)
@@ -195,22 +235,15 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				fmt.Fprintf(out, "✓ uploaded secret %s (encrypted)\n", reserved)
 			}
 
-			// 3. Write/update the provider entry in config/notifications.ts.
-			cfg, err := readConfig()
+			// 3. Tell the stack. No file, no deploy to wait for.
+			body, err := json.Marshal(map[string]any{"provider": name, "config": entry})
 			if err != nil {
 				return err
 			}
-			_, existed := cfg[name]
-			cfg[name] = entry
-			if werr := writeConfig(cfg); werr != nil {
-				return werr
+			if _, err := call(r, cmd, http.MethodPost, providersPath, body); err != nil {
+				return err
 			}
-			verb := "added"
-			if existed {
-				verb = "updated"
-			}
-			fmt.Fprintf(out, "✓ %s provider %q in %s\n", verb, name, configPath)
-			fmt.Fprintf(out, "  commit %s and `git push` to deploy\n", configPath)
+			fmt.Fprintf(out, "✓ provider %q configured — delivering now\n", name)
 			return nil
 		},
 	}
@@ -306,42 +339,24 @@ func promptHidden(cmd *cobra.Command, label string) (string, error) {
 // provider stays until removed in Studio (the deploy is upsert-only / never
 // auto-deletes). The reserved secret is NOT deleted here (use `palbase secret
 // remove <key>` if you want to purge it).
-func removeCmd() *cobra.Command {
-	cmd := &cobra.Command{
+func removeCmd(r Resolvers) *cobra.Command {
+	return &cobra.Command{
 		Use:   "remove <provider>",
-		Short: "Disable + remove a provider entry from config/notifications.ts",
-		Long: `Remove a provider entry from config/notifications.ts.
+		Short: "Stop delivering through one sender",
+		Long: `Remove a sender from the stack.
 
-This only edits the config file — it does NOT delete the live provider (the
-deploy never auto-deletes; the live provider is left in place until you remove it
-from the Studio Notifications page). The provider's uploaded secret is also left
-in place; purge it with ` + "`palbase secret remove <KEY>`" + ` if you no longer need it.`,
+It stops delivering. This used to drop the entry from config/notifications.ts and
+leave the live provider in place, so "removed" and "still sending" were both true
+at once.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			if specByName(name) == nil {
-				return fmt.Errorf("unknown provider %q — run `palbase notifications providers` to list them", name)
-			}
-			cfg, err := readConfig()
-			if err != nil {
+			if _, err := call(r, cmd, http.MethodDelete, providersPath+"/"+url.PathEscape(args[0]), nil); err != nil {
 				return err
 			}
-			if _, ok := cfg[name]; !ok {
-				return fmt.Errorf("no provider %q declared in %s", name, configPath)
-			}
-			delete(cfg, name)
-			if werr := writeConfig(cfg); werr != nil {
-				return werr
-			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ removed provider %q from %s\n", name, configPath)
-			fmt.Fprintln(out, "  NOTE: the live provider is NOT deleted — the deploy leaves it in place")
-			fmt.Fprintln(out, "  (never auto-deletes). Delete it from Studio if intended. Its reserved")
-			fmt.Fprintf(out, "  secret(s) remain; purge with `palbase secret remove %s`.\n", reservedSecretKey(name, firstSecretName(name)))
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ provider %q removed\n", args[0])
 			return nil
 		},
 	}
-	return cmd
 }
 
 // firstSecretName returns a provider's first secret field name (for the remove
