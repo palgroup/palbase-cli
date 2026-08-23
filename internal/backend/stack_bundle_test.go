@@ -214,3 +214,63 @@ func TestTheBucketListComesFromTheManagementSurface(t *testing.T) {
 		t.Errorf("the stack's buckets did not arrive: %v", got)
 	}
 }
+
+// The tests a deploy runs have to TRAVEL, and they have to travel BUILT.
+//
+// A tenant's suite imports its own models (`../models/todos/shared.js`) and the
+// SDK's test client, and resolving those needs the project's node_modules —
+// which live on this machine, not in the stack's container. So the tests are
+// bundled by the same engine that bundles the controllers, for the same reason:
+// a stack does not build, it collects.
+func TestTheProjectsTestsAreBundledSoTheyCanTravel(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is what bundles a suite")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Two files, one of which imports a sibling — the relative import is the
+	// whole reason bundling happens here rather than in the container.
+	if err := os.WriteFile(filepath.Join(dir, "tests", "helper.ts"),
+		[]byte("export const WHO = \"todos\";\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tests", "todos.test.ts"), []byte(
+		"import { test } from \"node:test\";\nimport { WHO } from \"./helper.ts\";\ntest(WHO, () => {});\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := bundleTests(context.Background(), dir, &strings.Builder{}); err != nil {
+		t.Fatalf("the suite did not bundle: %v", err)
+	}
+
+	built := filepath.Join(dir, ".palbase", "esm", "tests", "todos.test.js")
+	body, err := os.ReadFile(built)
+	if err != nil {
+		t.Fatalf("the bundled suite is not where the artifact collects it: %v", err)
+	}
+	// The sibling's contents must be INSIDE it: a bundle that still imports
+	// ./helper.ts would resolve to nothing in the container that runs it.
+	if !strings.Contains(string(body), "todos") {
+		t.Error("the suite's relative import did not travel with it")
+	}
+	if strings.Contains(string(body), `from "./helper`) {
+		t.Error("the suite still reaches for a file the stack does not have")
+	}
+	// helper.ts is not a suite and must not become one — `bun test` would run it
+	// and report zero tests, which reads as a suite that silently does nothing.
+	if _, err := os.Stat(filepath.Join(dir, ".palbase", "esm", "tests", "helper.js")); err == nil {
+		t.Error("a non-test file was emitted as a suite")
+	}
+}
+
+func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := bundleTests(context.Background(), dir, &strings.Builder{}); err != nil {
+		t.Fatalf("a project that declares no tests was refused: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".palbase", "esm", "tests")); err == nil {
+		t.Error("an empty tests directory was created for a project with none")
+	}
+}

@@ -160,8 +160,75 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 		return nil, err
 	}
 
+	// The project's own tests, bundled so they can travel. A deploy runs them
+	// against the release it just built, in a container that has no node_modules
+	// — so the resolution happens here, where they are.
+	if err := bundleTests(ctx, dir, w); err != nil {
+		return nil, err
+	}
+
 	built = true
 	return uses, nil
+}
+
+// testsDir is where a project keeps the suites a deploy runs, and
+// bundledTestsDir is where their build lands. The artifact collects everything
+// under .palbase/esm, so putting them there is what makes them travel.
+const (
+	testsDir        = "tests"
+	bundledTestsDir = ".palbase/esm/tests"
+)
+
+// bundleTests builds each *.test.ts into a self-contained module.
+//
+// ONE BUNDLE PER SUITE, not one for all of them: `bun test` reports per file,
+// and a single blob would collapse every suite into one name in the output a
+// person reads when their deploy is refused.
+//
+// Only *.test.* files become suites. A helper beside them is pulled IN by the
+// suite that imports it; emitted as its own file it would be run, report zero
+// tests, and read as a suite that silently does nothing.
+func bundleTests(ctx context.Context, dir string, w io.Writer) error {
+	root := filepath.Join(dir, testsDir)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil // A project with no tests is a legitimate project.
+	}
+
+	var suites []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !isTestSource(name) {
+			continue
+		}
+		suites = append(suites, filepath.Join(root, name))
+	}
+	if len(suites) == 0 {
+		return nil
+	}
+	sort.Strings(suites)
+
+	outDir := filepath.Join(dir, filepath.FromSlash(bundledTestsDir))
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+
+	// bun:test and node:test are the RUNNER's, not the bundle's. Inlining them
+	// would give each suite its own copy of a registry the runner owns, and the
+	// run would report zero tests while every file executed.
+	args := append([]string{"build"}, suites...)
+	args = append(args, "--target=bun", "--format=esm", "--outdir="+outDir,
+		"--external=bun:test", "--external=node:test", "--external=node:assert")
+	if err := run(ctx, dir, "bun", args...); err != nil {
+		return fmt.Errorf("the tests did not build: %w", err)
+	}
+	fmt.Fprintf(w, "bundled %d test suite(s)\n", len(suites))
+	return nil
+}
+
+func isTestSource(name string) bool {
+	return strings.HasSuffix(name, ".test.ts") || strings.HasSuffix(name, ".test.js") ||
+		strings.HasSuffix(name, ".test.mts") || strings.HasSuffix(name, ".test.mjs")
 }
 
 // controllerSources lists a project's controllers in a stable order, so two

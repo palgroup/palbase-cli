@@ -69,11 +69,11 @@ func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, false) 
 
 // BuildStackTarball is the archive a SELF-HOSTED stack is pushed.
 //
-// It differs in one way that matters: it carries `.palbase/esm` and
-// `.palbase/config.json` — the bundled controllers and the evaluated
-// config-as-code. The cloud builds those server-side from source, so the cloud
-// tarball leaves them out; a stack does not build, it COLLECTS, so leaving them
-// out here means pushing a project with no code in it.
+// It differs in one way that matters: it carries `.palbase/esm` — the bundled
+// controllers and the bundled test suites. The cloud builds those server-side
+// from source, so the cloud tarball leaves them out; a stack does not build, it
+// COLLECTS, so leaving them out here means pushing a project with no code in it
+// and a deploy with nothing to grade it by.
 //
 // What still does not travel: the rest of `.palbase` — which stack this checkout
 // is linked to, the slots an app reads, the fetched spec. None of that is the
@@ -81,7 +81,11 @@ func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, false) 
 func BuildStackTarball(dir string) ([]byte, error) { return buildTarball(dir, true) }
 
 // stackOnlyPalbaseEntries are the `.palbase` paths a stack push carries.
-var stackOnlyPalbaseEntries = []string{".palbase/esm", ".palbase/config.json"}
+//
+// `.palbase/config.json` used to be here. There is no such file any more:
+// settings reach the stack directly, from whoever changes them, and a copy in a
+// push could only overwrite what somebody set from the panel.
+var stackOnlyPalbaseEntries = []string{".palbase/esm"}
 
 func buildTarball(dir string, forStack bool) ([]byte, error) {
 	patterns, err := loadPalignore(filepath.Join(dir, ".palignore"))

@@ -215,8 +215,33 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 	case http.StatusForbidden:
 		return fmt.Errorf("this account may not manage %s — ask whoever runs it for `palsvc --grant-management`", target.URL)
 	default:
-		return fmt.Errorf("push refused (%d): %s", status, trimBody(body))
+		return renderPushRefusal(w, status, body)
 	}
+}
+
+// readableRefusals are the ones whose whole value is the text they carry.
+//
+// A failing suite's output names the assertion; an incompatible schema names the
+// objects to split a migration on. Both are multi-line and both are what the
+// person does next — so they are printed as themselves rather than as 300
+// characters of escaped JSON, which is what the generic path would show.
+var readableRefusals = map[string]bool{
+	"tests_failed":                true,
+	"tests_timed_out":             true,
+	"schema_incompatible":         true,
+	"candidate_failed":            true,
+	"test_identities_unavailable": true,
+}
+
+func renderPushRefusal(w io.Writer, status int, body []byte) error {
+	var refusal pushRefusal
+	if err := json.Unmarshal(body, &refusal); err == nil && readableRefusals[refusal.Error] {
+		fmt.Fprintln(w, refusal.ErrorDescription)
+		// The live release is untouched in every one of these, and saying so is
+		// the difference between "my deploy failed" and "my site is down".
+		return fmt.Errorf("push refused (%s) — nothing was swapped, the previous release keeps serving", refusal.Error)
+	}
+	return fmt.Errorf("push refused (%d): %s", status, trimBody(body))
 }
 
 // carrySecrets makes the target hold every secret this project's code declares.
