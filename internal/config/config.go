@@ -27,39 +27,53 @@ type Endpoints struct {
 	PublicHost string
 }
 
-// THE CLI SERVES THE V2 CLOUD. Both modes name a v2 control plane; there is no
-// v1 target left in this binary.
+// ONE CLOUD, ONE ADDRESS SET.
 //
-// One public host per environment, and that is the design rather than a
-// shortcut: the control plane terminates every surface a client needs — the
-// management API, the stack's own auth module, and OIDC discovery — behind a
-// single door with an explicit allowlist. A second origin would be a second
-// thing to keep in sync, and the day they drifted a client would authenticate
-// against one issuer and call another.
+// There used to be two: `prod` at `palbase.studio` and `dev` at
+// `v2.palbase.studio`. Only one of them was ever deployed — measured 24.08.2026,
+// `pbc-prod-fleet-rg` does not exist in Azure and never did, and `dig
+// api.palbase.studio` answers NXDOMAIN. `prod` was also the DEFAULT, so a fresh
+// install resolved every command against a host that does not exist and failed
+// with "no such host", which the credential layer then reported as "no
+// credential for this project". Two errors, neither naming the cause.
+//
+// So there is one entry. The mode NAMES are still accepted, because
+// `~/.palbase/config.json` on real machines carries them and a person should not
+// have to edit a file to keep working — but they resolve to the same place,
+// which is the truth about this cloud.
+//
+// THE CUTOVER IS THIS BLOCK. When `palbase.studio` resolves (see
+// v2-cloud/bootstrap/dns/cutover.sh), the four strings below become
+// `https://palbase.studio`, `https://api.palbase.studio`, and `palbase.studio`.
+// Nothing else in this CLI knows a hostname.
+//
+// One public host per surface, and that is the design rather than a shortcut:
+// the control plane terminates everything a client needs — the management API,
+// the stack's own auth module, OIDC discovery — behind a single door with an
+// explicit allowlist. A second origin would be a second thing to keep in sync,
+// and the day they drifted a client would authenticate against one issuer and
+// call another.
 //
 // PublicHost is the TENANT suffix, not the gateway. A tenant with ref
-// "j06bwtuum" answers at j06bwtuum.v2.palbase.studio while the control plane
-// answers at api.v2.palbase.studio. Collapsing the two would send every
-// management call to a tenant that has never heard of it.
+// "j06bwtuum" answers at j06bwtuum.<PublicHost> while the control plane answers
+// at api.<PublicHost>. Collapsing the two would send every management call to a
+// tenant that has never heard of it.
 //
-// Studio is the PANEL, and it is its own origin: the gateway serves the API on
-// api.* and the app on app.*, on separate virtual hosts, because one is an API
-// whose value is a narrow allowlist and the other is an application that needs
-// every path under its root. `palbase open` and the browser sign-in both send a
-// person to the app, never to the API.
+// Studio is the PANEL, and it is its own origin: the gateway serves the API and
+// the app on separate virtual hosts, because one is an API whose value is a
+// narrow allowlist and the other is an application that needs every path under
+// its root. `palbase open` and the browser sign-in both send a person to the
+// app, never to the API.
+var theCloud = Endpoints{
+	Studio:      "https://app.v2.palbase.studio",
+	Auth:        "https://api.v2.palbase.studio",
+	PlatformAPI: "https://api.v2.palbase.studio",
+	PublicHost:  "v2.palbase.studio",
+}
+
 var endpointsByMode = map[Mode]Endpoints{
-	ModeProd: {
-		Studio:      "https://app.palbase.studio",
-		Auth:        "https://api.palbase.studio",
-		PlatformAPI: "https://api.palbase.studio",
-		PublicHost:  "palbase.studio",
-	},
-	ModeDev: {
-		Studio:      "https://app.v2.palbase.studio",
-		Auth:        "https://api.v2.palbase.studio",
-		PlatformAPI: "https://api.v2.palbase.studio",
-		PublicHost:  "v2.palbase.studio",
-	},
+	ModeProd: theCloud,
+	ModeDev:  theCloud,
 }
 
 func (m Mode) Valid() bool {

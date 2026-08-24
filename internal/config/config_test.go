@@ -20,7 +20,9 @@ func TestResolve_Default(t *testing.T) {
 	if r.Source != "default" {
 		t.Fatalf("expected source=default, got %s", r.Source)
 	}
-	if r.Endpoints.Studio != "https://app.palbase.studio" {
+	// ONE CLOUD: the mode name no longer selects an address. It used to, and
+	// `prod` — the default — named a deployment that has never existed.
+	if r.Endpoints.Studio != ModeProd.Endpoints().Studio {
 		t.Fatalf("unexpected studio url: %s", r.Endpoints.Studio)
 	}
 }
@@ -36,7 +38,7 @@ func TestResolve_Flag(t *testing.T) {
 	if r.Mode != ModeDev || r.Source != "flag" {
 		t.Fatalf("got %+v", r)
 	}
-	if r.Endpoints.Studio != "https://app.v2.palbase.studio" {
+	if r.Endpoints.Studio != ModeDev.Endpoints().Studio {
 		t.Fatalf("unexpected studio url: %s", r.Endpoints.Studio)
 	}
 	if r.Endpoints.PlatformAPI != "https://api.v2.palbase.studio" {
@@ -138,5 +140,64 @@ func withCleanEnv(t *testing.T) {
 		if err := os.Unsetenv(k); err != nil {
 			t.Fatalf("unset %s: %v", k, err)
 		}
+	}
+}
+
+// THERE IS ONE CLOUD, AND `--mode prod` MUST REACH IT.
+//
+// `prod` was the DEFAULT and pointed at `palbase.studio`, which has never been
+// deployed — measured 24.08.2026: no `pbc-prod-fleet-rg` in Azure, and
+// `api.palbase.studio` answers NXDOMAIN. So a fresh install failed every command
+// with "no such host", which the credential layer reported as "no credential for
+// this project": two errors, neither naming the cause. A person following the
+// documented default could not use the CLI at all.
+func TestEveryModeReachesTheSameCloud(t *testing.T) {
+	prod := ModeProd.Endpoints()
+	dev := ModeDev.Endpoints()
+
+	if prod != dev {
+		t.Fatalf("prod and dev resolve differently:\n  prod=%+v\n  dev=%+v", prod, dev)
+	}
+	for name, v := range map[string]string{
+		"Studio": prod.Studio, "Auth": prod.Auth,
+		"PlatformAPI": prod.PlatformAPI, "PublicHost": prod.PublicHost,
+	} {
+		if v == "" {
+			t.Errorf("%s is empty — a surface with no address cannot be reached", name)
+		}
+	}
+}
+
+// The DEFAULT is what a fresh install uses, and it must be the cloud that is
+// actually up. This is the assertion that would have caught the trap.
+func TestTheDefaultResolvesToTheLiveCloud(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PALBASE_MODE", "")
+
+	r, err := Resolve("")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if r.Endpoints != ModeProd.Endpoints() {
+		t.Errorf("the default resolved somewhere else: %+v", r.Endpoints)
+	}
+	// The tenant suffix and the API host must not be the same string: every
+	// management call would land on a tenant that has never heard of it.
+	if r.Endpoints.PublicHost == r.Endpoints.PlatformAPI {
+		t.Error("the tenant suffix and the control plane share a host")
+	}
+}
+
+// A mode name still in somebody's ~/.palbase/config.json keeps working. Making a
+// person edit a file to keep using the CLI is a migration, not a simplification.
+func TestALegacyModeNameStillResolves(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{"prod", "dev"} {
+		if _, err := Resolve(name); err != nil {
+			t.Errorf("--mode %s: %v", name, err)
+		}
+	}
+	if _, err := Resolve("staging"); err == nil {
+		t.Error("an unknown mode was accepted — it would resolve to nowhere")
 	}
 }
