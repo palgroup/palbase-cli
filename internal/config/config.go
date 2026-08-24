@@ -20,25 +20,12 @@ type Endpoints struct {
 	PublicHost string
 }
 
-// ONE CLOUD, ONE ADDRESS SET.
+// ONE CLOUD, ONE ADDRESS SET — `palbase.studio`.
 //
-// There used to be two: `prod` at `palbase.studio` and `dev` at
-// `v2.palbase.studio`. Only one of them was ever deployed — measured 24.08.2026,
-// `pbc-prod-fleet-rg` does not exist in Azure and never did, and `dig
-// api.palbase.studio` answers NXDOMAIN. `prod` was also the DEFAULT, so a fresh
-// install resolved every command against a host that does not exist and failed
-// with "no such host", which the credential layer then reported as "no
-// credential for this project". Two errors, neither naming the cause.
-//
-// So there is one entry. The mode NAMES are still accepted, because
-// `~/.palbase/config.json` on real machines carries them and a person should not
-// have to edit a file to keep working — but they resolve to the same place,
-// which is the truth about this cloud.
-//
-// THE CUTOVER IS THIS BLOCK. When `palbase.studio` resolves (see
-// v2-cloud/bootstrap/dns/cutover.sh), the four strings below become
-// `https://palbase.studio`, `https://api.palbase.studio`, and `palbase.studio`.
-// Nothing else in this CLI knows a hostname.
+// There used to be two address sets behind a `--mode`, and only one of them was
+// ever deployed. There is one product and it has one address; the panel lives at
+// the bare domain because `app.` was a prefix a person had to learn for no
+// reason, and `v2.` named a migration that is over.
 //
 // One public host per surface, and that is the design rather than a shortcut:
 // the control plane terminates everything a client needs — the management API,
@@ -58,10 +45,10 @@ type Endpoints struct {
 // its root. `palbase open` and the browser sign-in both send a person to the
 // app, never to the API.
 var theCloud = Endpoints{
-	Studio:      "https://app.v2.palbase.studio",
-	Auth:        "https://api.v2.palbase.studio",
-	PlatformAPI: "https://api.v2.palbase.studio",
-	PublicHost:  "v2.palbase.studio",
+	Studio:      "https://palbase.studio",
+	Auth:        "https://api.palbase.studio",
+	PlatformAPI: "https://api.palbase.studio",
+	PublicHost:  "palbase.studio",
 }
 
 // File is ~/.palbase/config.json.
