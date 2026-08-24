@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -502,5 +503,35 @@ func TestALocalStackAnswersForItselfWithNoCopy(t *testing.T) {
 	// An address no stack here serves falls through to the ordinary refusal.
 	if _, _, err := Credential("https://todoapp.palbase.studio"); err == nil {
 		t.Error("a cloud address resolved from the local register")
+	}
+}
+
+// YEREL YIĞIN DA KENDİ ADRESİNİ BİLMEK ZORUNDA.
+//
+// Bir `@Upload` handler'ı cevabına `getPublicUrl` ile nesne URL'i koyuyor ve o
+// URL cevabın gövdesinden ÇIKIYOR. Yığının içindeki adres (`http://palsvc:8080`)
+// dışarıdan çözülmez; göreli bir yol da çözülmez — ölçüldü canlı 24.08.2026,
+// iOS istemcisi `/v1/files/...` alınca NSURLErrorUnsupportedURL verdi.
+//
+// Bu adresi bilen tek yer BURASI: portu `palbase start` seçiyor.
+func TestTheLocalStackIsToldTheAddressItServesOn(t *testing.T) {
+	env := composeEnv("/tmp/proj", "", 54321)
+
+	want := "PALBASE_PUBLIC_ORIGIN=http://127.0.0.1:54321"
+	if !slices.Contains(env, want) {
+		t.Fatalf("compose ortamında %q yok:\n%s", want, strings.Join(env, "\n"))
+	}
+}
+
+// `--lan` ile bağlanan yığın, TELEFONUN ulaştığı adresi ilan eder.
+//
+// Loopback ilan etseydi aynı wifi'daki telefon dönen nesne URL'ini KENDİ
+// makinesinde arardı: istek 200 döner, resim yüklenmez, hiçbir yerde hata olmaz.
+func TestALanBoundStackAdvertisesTheAddressThePhoneUses(t *testing.T) {
+	env := composeEnv("/tmp/proj", "192.168.1.40", 54321)
+
+	want := "PALBASE_PUBLIC_ORIGIN=http://192.168.1.40:54321"
+	if !slices.Contains(env, want) {
+		t.Fatalf("compose ortamında %q yok:\n%s", want, strings.Join(env, "\n"))
 	}
 }

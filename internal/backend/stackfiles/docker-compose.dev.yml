@@ -206,6 +206,13 @@ services:
       REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:-palbase}
       PALBASE_STACK_REF: ${PALBASE_STACK_REF:-project}
+      # PANELİN KONAĞI — yığının kendi adresi DEĞİL.
+      #
+      # Auth, site_url ilan etmemiş bir yığın için eylem bağlantılarını
+      # (şifre sıfırlama, e-posta doğrulama) buradan kuruyor ve o sayfaları
+      # panel sunuyor. Tenant konağı hiç HTML sunmaz; ikisini birbirinden
+      # türetmek bağlantıyı boş bir yere göndermek olurdu.
+      PALBASE_PUBLIC_HOST: ${PALBASE_PUBLIC_HOST:-}
       PALBASE_RUNTIME_URL: ${PALBASE_RUNTIME_URL:-http://runtime:4005}
       PALBASE_ANON_KEY: ${PALBASE_ANON_KEY:-}
       PALBASE_SERVICE_ROLE_KEY: ${PALBASE_SERVICE_ROLE_KEY:-}
@@ -261,6 +268,17 @@ services:
       DB_POOL_MAX: ${RUNTIME_DB_POOL_MAX:-32}
       AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://palsvc:8080/.well-known/jwks.json}
       MODULE_BASE_URL: ${MODULE_BASE_URL:-http://palsvc:8080}
+      # YIĞININ KENDİ GENEL ADRESİ — ve onu YALNIZ operatör bilir.
+      #
+      # Bir `@Upload` handler'ı cevabına `getPublicUrl` ile nesne URL'i koyuyor
+      # ve o URL cevabın gövdesinden ÇIKIYOR: bir <img>'e, bir e-postaya, başka
+      # bir konaktaki uygulamaya. İç adresten (`http://palsvc:8080`) kurulanı
+      # orada hiçbir şey çözemez, göreli bırakılanı da — ölçüldü canlı
+      # 24.08.2026, iOS istemcisi `/v1/files/...` alıp -1002 verdi.
+      #
+      # Ayarlanmazsa SDK çağrı yerinde ADIYLA reddediyor; sessiz bir varsayılan
+      # uydurmuyoruz çünkü yanlış olduğunu hiçbir hata söylemezdi.
+      PALBASE_PUBLIC_ORIGIN: ${PALBASE_PUBLIC_ORIGIN:-}
       PALBASE_ANON_KEY: ${PALBASE_ANON_KEY:-}
       PALBASE_SERVICE_ROLE_KEY: ${PALBASE_SERVICE_ROLE_KEY:-}
       REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}

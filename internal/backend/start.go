@@ -469,6 +469,37 @@ func readPort(envFile string) (int, error) {
 	return h, nil
 }
 
+// composeEnv, yığının göreceği ortam — ve içinde yığının KENDİ ADRESİ var.
+//
+// `PALBASE_PUBLIC_ORIGIN` burada doğuyor çünkü portu seçen burası. Bir `@Upload`
+// handler'ı cevabına `getPublicUrl` ile nesne URL'i koyuyor ve o URL cevabın
+// gövdesinden ÇIKIYOR: bir <img>'e, bir e-postaya, telefondaki uygulamaya.
+// Yığının içindeki adres (`http://palsvc:8080`) oralarda çözülmez; göreli bir
+// yol da çözülmez — ölçüldü canlı 24.08.2026, iOS istemcisi `/v1/files/...`
+// alınca NSURLErrorUnsupportedURL (-1002) verdi.
+//
+// `--lan` verilmişse İLAN EDİLEN ADRES DE ONDUR. Loopback ilan etmek, aynı
+// wifi'daki telefona kendi makinesinde arayacağı bir URL vermek olurdu: istek
+// 200 döner, resim yüklenmez, hiçbir yerde hata görünmez.
+func composeEnv(projectDir, bind string, httpPort int) []string {
+	host := bind
+	if host == "" {
+		// Compose dosyasının kendi varsayılanı: loopback.
+		host = "127.0.0.1"
+	}
+	env := []string{
+		"PALBASE_PROJECT_DIR=" + projectDir,
+		"PALBASE_HTTP_PORT=" + strconv.Itoa(httpPort),
+		"PALBASE_PUBLIC_ORIGIN=http://" + net.JoinHostPort(host, strconv.Itoa(httpPort)),
+	}
+	// Empty means the compose file's own default, which is loopback. Only
+	// `--lan` widens it, and only for the HTTP port.
+	if bind != "" {
+		env = append(env, BindEnv+"="+bind)
+	}
+	return env
+}
+
 // compose runs one docker compose verb against this group's stack.
 func compose(ctx context.Context, stackDir, project, envFile, projectDir, bind string, httpPort int, out io.Writer, args ...string) error {
 	full := append([]string{
@@ -480,15 +511,7 @@ func compose(ctx context.Context, stackDir, project, envFile, projectDir, bind s
 
 	cmd := exec.CommandContext(ctx, "docker", full...)
 	cmd.Dir = stackDir
-	cmd.Env = append(os.Environ(),
-		"PALBASE_PROJECT_DIR="+projectDir,
-		"PALBASE_HTTP_PORT="+strconv.Itoa(httpPort),
-	)
-	// Empty means the compose file's own default, which is loopback. Only
-	// `--lan` widens it, and only for the HTTP port.
-	if bind != "" {
-		cmd.Env = append(cmd.Env, BindEnv+"="+bind)
-	}
+	cmd.Env = append(os.Environ(), composeEnv(projectDir, bind, httpPort)...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &prefixed{w: out, prefix: "  "}
 	return cmd.Run()
