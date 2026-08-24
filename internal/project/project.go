@@ -46,11 +46,29 @@ type Resolvers struct {
 }
 
 // Project is one tenant as the control plane reports it.
+// Project, bulut düzleminin MÜŞTERİ yüzeyindeki proje şekli.
+//
+// HÜCRE VE YUVA BURADA YOK. İkisi de yerleşimin iç detayı: bir projenin hangi
+// hücrede, hangi yuvada durduğunu bilmek kimseye bir şey yaptırmıyor, ama
+// topolojimizi anlatıyor. Sunucu da artık göndermiyor.
+//
+// AD İNSANIN VERDİĞİ. `ref` kimliktir ve değişmez; ad değişir. Liste yalnız
+// ref basarken sekiz projesi olan biri sekiz opak dizeye bakıyordu.
 type Project struct {
-	Ref   string `json:"ref"`
-	Slot  int    `json:"slot"`
-	Cell  string `json:"cell"`
-	Phase string `json:"phase"`
+	Ref   string  `json:"ref"`
+	Name  *string `json:"name"`
+	Phase string  `json:"phase"`
+}
+
+// displayName, adı olmayan bir projeyi ref'iyle gösterir.
+//
+// Boş bırakmak, tabloda adsız bir sütun boşluğu bırakırdı ve "adı yok" ile
+// "sunucu adı unuttu" aynı görünürdü.
+func (p Project) displayName() string {
+	if p.Name == nil || *p.Name == "" {
+		return "(adsız)"
+	}
+	return *p.Name
 }
 
 // Cmd returns the `palbase project` parent command.
@@ -89,7 +107,7 @@ the address it prints is one you can link immediately.`,
 				return encodeJSON(cmd.OutOrStdout(), p)
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Created %s (%s, cell %s)\n", p.Ref, p.Phase, p.Cell)
+			fmt.Fprintf(out, "Created %s — %s (%s)\n", p.displayName(), p.Ref, p.Phase)
 
 			// The address is the point of the whole command, so it is built
 			// here rather than left for the person to assemble. The domain
@@ -128,9 +146,9 @@ func listCmd(r Resolvers) *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "REF\tPHASE\tCELL")
+			fmt.Fprintln(tw, "NAME\tREF\tPHASE")
 			for _, p := range rows {
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", p.Ref, p.Phase, p.Cell)
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", p.displayName(), p.Ref, p.Phase)
 			}
 			return tw.Flush()
 		},
@@ -144,7 +162,7 @@ func statusCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status <ref>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Show one project's placement and phase",
+		Short: "Show one project's name and phase",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var p Project
 			path := "/v1/cloud/projects/" + url.PathEscape(args[0])
@@ -155,10 +173,9 @@ func statusCmd(r Resolvers) *cobra.Command {
 				return encodeJSON(cmd.OutOrStdout(), p)
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintf(tw, "Name\t%s\n", p.displayName())
 			fmt.Fprintf(tw, "Ref\t%s\n", p.Ref)
 			fmt.Fprintf(tw, "Phase\t%s\n", p.Phase)
-			fmt.Fprintf(tw, "Cell\t%s\n", p.Cell)
-			fmt.Fprintf(tw, "Slot\t%d\n", p.Slot)
 			return tw.Flush()
 		},
 	}

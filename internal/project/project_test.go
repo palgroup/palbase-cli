@@ -63,8 +63,9 @@ func run(t *testing.T, r Resolvers, stdin string, args ...string) (string, error
 // only a ref would leave them to assemble the host themselves — and to guess
 // the domain, which differs per deployment.
 func TestCreatePrintsALinkableAddress(t *testing.T) {
-	rest := &stubREST{reply: Project{Ref: "abc123xyz", Slot: 1702, Cell: "pbc-cell-01", Phase: "Running"}}
-	out, err := run(t, resolvers(rest, stubCloud{domain: "v2.palbase.studio"}), "", "create", "shop")
+	shop := "shop"
+	rest := &stubREST{reply: Project{Ref: "abc123xyz", Name: &shop, Phase: "Running"}}
+	out, err := run(t, resolvers(rest, stubCloud{domain: "palbase.studio"}), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestCreatePrintsALinkableAddress(t *testing.T) {
 	if sent["name"] != "shop" || sent["tier"] != "free" {
 		t.Fatalf("body did not carry the name and default tier: %#v", rest.body)
 	}
-	if !strings.Contains(out, "palbase link https://abc123xyz.v2.palbase.studio") {
+	if !strings.Contains(out, "palbase link https://abc123xyz.palbase.studio") {
 		t.Fatalf("no linkable address in output:\n%s", out)
 	}
 }
@@ -92,15 +93,18 @@ func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
 	if strings.Contains(out, "https://abc123xyz.v2") {
 		t.Fatalf("invented a domain it could not read:\n%s", out)
 	}
-	if !strings.Contains(out, "Created abc123xyz") {
+	// Adsız bir cevapta ref hâlâ görünmeli — ad yoksa satır "(adsız)" der ama
+	// kimliği yutmaz.
+	if !strings.Contains(out, "abc123xyz") || !strings.Contains(out, "Created") {
 		t.Fatalf("did not report the created project:\n%s", out)
 	}
 }
 
 func TestListShowsEveryProject(t *testing.T) {
+	first, second := "centauri", "penny"
 	rest := &stubREST{reply: []Project{
-		{Ref: "aaa", Phase: "Running", Cell: "pbc-cell-01"},
-		{Ref: "bbb", Phase: "Pending", Cell: "pbc-cell-02"},
+		{Ref: "aaa", Name: &first, Phase: "Running"},
+		{Ref: "bbb", Name: &second, Phase: "Pending"},
 	}}
 	out, err := run(t, resolvers(rest, stubCloud{}), "", "list")
 	if err != nil {
@@ -109,7 +113,8 @@ func TestListShowsEveryProject(t *testing.T) {
 	if rest.path != "/v1/cloud/projects" {
 		t.Fatalf("wrong path: %s", rest.path)
 	}
-	for _, want := range []string{"aaa", "Running", "bbb", "pbc-cell-02"} {
+	// AD DA GÖRÜNMELİ, HÜCRE GÖRÜNMEMELİ.
+	for _, want := range []string{"aaa", "Running", "bbb", "centauri", "penny"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("%q missing from:\n%s", want, out)
 		}
@@ -165,8 +170,14 @@ func TestDeleteWithYesSkipsThePrompt(t *testing.T) {
 	}
 }
 
+// YERLEŞİM MÜŞTERİYE GÖSTERİLMEZ.
+//
+// Tablo `REF PHASE CELL` basıyordu. Hücre yerleşimin iç detayı: kimseye bir şey
+// yaptırmıyor, ama topolojiyi anlatıyor. Yerine İNSANIN VERDİĞİ AD geldi — sekiz
+// projesi olan biri sekiz opak ref'e bakıyordu.
 func TestStatusNamesTheProject(t *testing.T) {
-	rest := &stubREST{reply: Project{Ref: "abc123xyz", Slot: 42, Cell: "pbc-cell-01", Phase: "Running"}}
+	name := "centauri"
+	rest := &stubREST{reply: Project{Ref: "abc123xyz", Name: &name, Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{}), "", "status", "abc123xyz")
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -174,7 +185,7 @@ func TestStatusNamesTheProject(t *testing.T) {
 	if rest.path != "/v1/cloud/projects/abc123xyz" {
 		t.Fatalf("wrong path: %s", rest.path)
 	}
-	for _, want := range []string{"abc123xyz", "Running", "pbc-cell-01", "42"} {
+	for _, want := range []string{"abc123xyz", "Running", "centauri"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("%q missing from:\n%s", want, out)
 		}
