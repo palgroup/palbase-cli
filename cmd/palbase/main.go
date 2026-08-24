@@ -320,6 +320,13 @@ func newRootCmd() *cobra.Command {
 			// target-relative verb resolves a credential, and for a cloud
 			// project that answer lives in the control plane's ledger.
 			wireCloudKeyFetcher()
+			// Whether an address is one of OUR projects is a fact about the
+			// address, and it must not depend on a request succeeding — see
+			// backend.isCloudProjectAddress for what happened when it did.
+			backend.CloudProjectAddress = func(tenantURL string) bool {
+				_, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
+				return ok
+			}
 			sel = &selection.Resolver{
 				REST:            func() selection.REST { return managementREST() },
 				ProjectFlag:     projectFlag,

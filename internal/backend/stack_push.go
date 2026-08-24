@@ -140,6 +140,25 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 		return err
 	}
 
+	// THE DECLARED FIXTURES, for the same reason and in the same place.
+	//
+	// A release is GRADED before it is given traffic: the stack mints one
+	// identity per fixture declared in `config/test-users.ts` and runs the
+	// project's suites as them. Nothing shipped those declarations — the PUT that
+	// receives them had no caller anywhere in this CLI — so a stack that had
+	// never been given them refused every push with "no test identity named
+	// ...", forever. Measured 2026-08-24 pushing todoapp to a freshly
+	// provisioned tenant.
+	doc, cfgErr := readEvaluatedConfig(dir)
+	if cfgErr != nil {
+		return cfgErr
+	}
+	if doc != nil {
+		if err := carryTestUsers(ctx, doc.TestUsers, target, cred, w); err != nil {
+			return err
+		}
+	}
+
 	tarball, err := BuildStackTarball(dir)
 	if err != nil {
 		return err

@@ -10,6 +10,7 @@ package backend
 // before the work rather than after it, while stopping still costs nothing.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -24,7 +25,7 @@ import (
 // to skip the banner in JSON mode, because the run that most needs to say where
 // it went is the scripted one.
 func PrintTargetFor(cmd *cobra.Command) (Target, error) {
-	return PrintTarget(cmd.ErrOrStderr())
+	return PrintTarget(cmd.Context(), cmd.ErrOrStderr())
 }
 
 // PrintTarget resolves where this checkout acts and announces it.
@@ -32,8 +33,17 @@ func PrintTargetFor(cmd *cobra.Command) (Target, error) {
 // Returns the resolved target so the caller does not read it twice: two reads
 // could disagree — `palbase stop` in another pane removes the local file between
 // them — and the banner would then name a place the command did not use.
-func PrintTarget(w io.Writer) (Target, error) {
-	target, err := ReadTarget()
+//
+// IT RESOLVES THE SAME WAY THE VERB DOES. It used to call ReadTarget, which
+// knows only the LINK; the verbs around it moved to ResolveTarget, which also
+// knows the SELECTION. So in a checkout with a selection and no link the verb
+// resolved fine and the banner did not — and because the banner runs first and
+// returns its error, the whole command failed with "this checkout is not linked
+// to a project" about a project it had just resolved. Measured 2026-08-24:
+// `palbase test-user list` refused in centauri-ios while `palbase status`, one
+// line different, printed that project's live deployment.
+func PrintTarget(ctx context.Context, w io.Writer) (Target, error) {
+	target, err := ResolveTarget(ctx)
 	if err != nil {
 		return Target{}, err
 	}

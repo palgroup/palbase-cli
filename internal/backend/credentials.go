@@ -210,18 +210,39 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 		ErrNoCredential, url, AccessTokenEnv)
 }
 
+// CloudProjectAddress reports whether an address is a project of THIS cloud,
+// from the address alone.
+//
+// Wired in the command layer, which knows the configured tenant suffix. Nil in
+// tests and in a binary with no cloud configured, and a nil answer is "no" — the
+// same fail-closed default as CloudKeyFetcher.
+var CloudProjectAddress func(url string) bool
+
 // isCloudProjectAddress reports whether the cloud can answer for this address.
 //
-// It asks the SAME resolver the fetch uses, so "the cloud knows this project"
-// and "the cloud will hand me its key" cannot drift apart. No fetcher wired
-// (a unit test, an older binary) means no authority to defer to, and the
-// environment's value stays the answer.
+// IT ASKS THE SHAPE, NOT THE NETWORK — and that distinction is a defect this
+// used to have. It called fetchCloudCredential and read "did the fetch succeed"
+// as "is this a cloud project". So when the broker could not be reached — a
+// plane hiccup, a slow round trip, a 5xx — the answer flipped to "not a cloud
+// project", and the caller fell back to presenting whatever was in
+// PALBASE_ACCESS_TOKEN. That variable usually holds a CONTROL-PLANE session, so
+// a transient failure sent one authority's credential to a different authority,
+// and the tenant answered "this stack did not issue that token" — an error about
+// the token, pointing nowhere near the broker that had actually failed.
+//
+// Measured live 2026-08-24 against todoapp: `palbase push` and `palbase storage
+// list` both failed that way against a project whose ledger key opened it with a
+// plain curl.
+//
+// Whether an address belongs to this cloud is a fact about the ADDRESS —
+// `<ref>.<PublicHost>` — and it cannot depend on whether a request succeeded.
+// Unreachable now means the credential resolution fails LOUDLY at the fetch,
+// which is the fail-closed behaviour a credential path owes its caller.
 func isCloudProjectAddress(url string) bool {
-	if CloudKeyFetcher == nil {
+	if CloudProjectAddress == nil {
 		return false
 	}
-	_, ok := fetchCloudCredential(url)
-	return ok
+	return CloudProjectAddress(url)
 }
 
 // StoreCredential records an identity for one target.

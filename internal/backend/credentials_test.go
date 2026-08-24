@@ -5,6 +5,7 @@ package backend
 
 import (
 	"errors"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -247,9 +248,12 @@ func TestAPlaneSessionDefersToTheCloudForAProjectAddress(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(AccessTokenEnv, "session-not-a-project-key")
 
-	prev := CloudKeyFetcher
+	prev, prevAddr := CloudKeyFetcher, CloudProjectAddress
 	CloudKeyFetcher = func(string) (string, error) { return "pb_project_sfromtheplane", nil }
-	t.Cleanup(func() { CloudKeyFetcher = prev })
+	// WHICH ADDRESSES ARE OURS is now stated, not inferred from whether the
+	// fetch happened to work — see isCloudProjectAddress.
+	CloudProjectAddress = func(string) bool { return true }
+	t.Cleanup(func() { CloudKeyFetcher, CloudProjectAddress = prev, prevAddr })
 
 	cred, source, err := Credential("https://abc1234m.v2.palbase.studio")
 	if err != nil {
@@ -301,4 +305,63 @@ func TestASessionSurvivesForAnAddressTheCloudDoesNotOwn(t *testing.T) {
 	if cred.Value != "session-not-a-project-key" || source != SourceEnv {
 		t.Fatalf("resolved %q from %s", cred.Value, source)
 	}
+}
+
+// A CONTROL-PLANE SESSION MUST NEVER BE SENT TO A TENANT.
+//
+// PALBASE_ACCESS_TOKEN usually holds a plane session, and a tenant's management
+// surface takes that PROJECT's key and nothing else. The decision used to be
+// made by asking the broker for the key and reading "the fetch worked" as "this
+// is a cloud project" — so a broker that could not be reached flipped the answer
+// and the session went to the tenant, which replied "this stack did not issue
+// that token". Measured live 2026-08-24 on todoapp.
+//
+// The address decides now. With the broker unreachable, resolution must FAIL,
+// never fall back to somebody else's credential.
+func TestAPlaneSessionIsNeverPresentedToATenant(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "eyJhbGciOiJIUzI1NiJ9.session.not-a-project-key")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		return "", errors.New("the plane is unreachable")
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	cred, _, err := Credential("https://app1prod.v2.palbase.studio")
+	require.Error(t, err, "an unreachable broker must fail, not fall back")
+	require.NotContains(t, cred.Value, "session",
+		"the plane session was handed to a tenant")
+}
+
+// A PROJECT KEY in the environment is still the answer: an agent holding one has
+// nowhere else to put it, and it is the right credential for this door.
+func TestAProjectKeyInTheEnvironmentStillWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "pb_project_s0123456789012345678901234")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) { return "", errors.New("must not be asked") }
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	cred, src, err := Credential("https://app1prod.v2.palbase.studio")
+	require.NoError(t, err)
+	require.Equal(t, SourceEnv, src)
+	require.Equal(t, KindKey, cred.Kind)
+}
+
+// An address that is NOT one of ours takes the environment's value as before —
+// a self-hosted stack reached headlessly has no broker to defer to.
+func TestAForeignAddressStillTakesTheEnvironmentValue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "eyJhbGciOiJIUzI1NiJ9.session.value")
+
+	CloudProjectAddress = func(string) bool { return false }
+	CloudKeyFetcher = func(string) (string, error) { return "", errors.New("must not be asked") }
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	cred, src, err := Credential("https://stack.example.com")
+	require.NoError(t, err)
+	require.Equal(t, SourceEnv, src)
+	require.NotEmpty(t, cred.Value)
 }

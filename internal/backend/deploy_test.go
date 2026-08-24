@@ -40,6 +40,9 @@ type fakeDeploy struct {
 	// result is what a successful push answers with.
 	digest        string
 	endpointCount int
+	// onCall fires as each call is recorded, so a test can assert ORDER against
+	// something that happens outside this client.
+	onCall func()
 }
 
 type deployCall struct {
@@ -50,6 +53,9 @@ type deployCall struct {
 
 func (f *fakeDeploy) Do(_ context.Context, method, path string, body, out any) error {
 	f.calls = append(f.calls, deployCall{method: method, path: path, body: body})
+	if f.onCall != nil {
+		f.onCall()
+	}
 	if f.apiErr != nil {
 		return f.apiErr
 	}
@@ -404,4 +410,66 @@ func TestDeployVersion_IsShortened(t *testing.T) {
 	shortSHA := "abc1234"
 	require.Equal(t, "abc1234", deployVersion(&shortSHA), "a value already short is left alone")
 	require.Equal(t, "-", deployVersion(nil), "a failed attempt has no version and says so")
+}
+
+// THE DECLARED FIXTURES REACH THE STACK, AND THEY REACH IT FIRST.
+//
+// A release is graded before it gets traffic: the stack mints one identity per
+// DECLARED fixture and runs the project's suites as them. Those declarations
+// live in config/test-users.ts and reach the stack through
+// PUT /v1/management/test-users/templates — which nothing called. Measured
+// 2026-08-24: pushing todoapp to a freshly provisioned tenant was refused with
+// "no test identity named \"demo\" … this run has none", and it would have been
+// refused forever, because templates only ever arrived with a deploy that
+// passed. A project declaring test users could not reach a NEW environment.
+func TestPushShipsTheDeclaredTestUsersBeforeTheArtifact(t *testing.T) {
+	seedBackendDir(t)
+	var order []string
+	f := &fakeDeploy{onCall: func() { order = append(order, "artifact") }}
+	build, pack := stubBundler(nil)
+
+	err := runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: io.Discard,
+		ctx: context.Background(), build: build, pack: pack,
+		shipTestUsers: func(context.Context, string, io.Writer) error {
+			order = append(order, "fixtures")
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"fixtures", "artifact"}, order,
+		"the fixtures must be on the stack BEFORE the release is graded against them")
+}
+
+// A stack that refuses the declaration stops the push. Continuing would send an
+// artifact whose own tests cannot pass, and report the refusal as a test failure
+// — sending somebody to read suites that were never the problem.
+func TestPushStopsWhenTheFixturesAreRefused(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{}
+	build, pack := stubBundler(nil)
+
+	err := runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: io.Discard,
+		ctx: context.Background(), build: build, pack: pack,
+		shipTestUsers: func(context.Context, string, io.Writer) error {
+			return errors.New("the stack refused the declaration")
+		},
+	})
+	require.ErrorContains(t, err, "refused the declaration")
+	require.Empty(t, f.calls, "an artifact was sent after the fixtures were refused")
+}
+
+// A project that declares none says nothing and writes nothing: most projects
+// declare no fixtures, and a line about an empty declaration would be noise on
+// every push.
+func TestShippingIsSilentWhenNothingIsDeclared(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".palbase"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".palbase", "config.json"),
+		[]byte(`{"storage":{"buckets":[]}}`), 0o644))
+
+	var out bytes.Buffer
+	require.NoError(t, shipDeclaredTestUsers(context.Background(), dir, &out))
+	require.Empty(t, out.String())
 }

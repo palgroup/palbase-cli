@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"github.com/spf13/cobra"
 	"os"
 	"strings"
@@ -21,7 +22,7 @@ func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	target, err := PrintTarget(&out)
+	target, err := PrintTarget(context.Background(), &out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestPrintTargetNamesTheCloudEnvironment(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if _, err := PrintTarget(&out); err != nil {
+	if _, err := PrintTarget(context.Background(), &out); err != nil {
 		t.Fatal(err)
 	}
 	if got := out.String(); got != "▸ todoapp/staging\n" {
@@ -59,7 +60,7 @@ func TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn(t *testing.T) {
 	inScratchCheckout(t)
 
 	var out bytes.Buffer
-	_, err := PrintTarget(&out)
+	_, err := PrintTarget(context.Background(), &out)
 	if err == nil {
 		t.Fatal("an unlinked checkout was accepted")
 	}

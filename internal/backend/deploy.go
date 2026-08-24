@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -95,6 +96,9 @@ type pushDeps struct {
 	idempotencyKey string
 	// uploadRetries bounds the same-key retries of a TIMED-OUT upload. Default 2.
 	uploadRetries int
+	// shipTestUsers puts the project's declared fixture accounts on the stack
+	// before the artifact is sent. Nil uses the real one; tests substitute it.
+	shipTestUsers func(ctx context.Context, dir string, out io.Writer) error
 }
 
 // runPush routes `palbase push` by the project's repository provider:
@@ -161,6 +165,26 @@ func runPush(d pushDeps) error {
 	// list and answers `upload_bucket_missing` before anything activates. A
 	// second copy here would be a second place for the two to disagree.
 	_ = uses
+
+	// THE FIXTURES GO FIRST, and the ordering is the whole point.
+	//
+	// A release is GRADED before it is given traffic: the stack mints one
+	// identity per DECLARED fixture and runs the project's suites as them. Those
+	// declarations live in `config/test-users.ts` and reach the stack through
+	// this PUT — which nothing called. Measured 2026-08-24: pushing todoapp to a
+	// freshly provisioned tenant was refused with "no test identity named
+	// \"demo\" … this run has none", and it would have been refused forever,
+	// because the templates only ever arrive with a deploy that passed. A project
+	// that declares test users could not be deployed to a NEW environment at all.
+	//
+	// Before the artifact, not after: after is the same deadlock one step later.
+	ship := d.shipTestUsers
+	if ship == nil {
+		ship = shipDeclaredTestUsers
+	}
+	if err := ship(ctx, cwd, out); err != nil {
+		return err
+	}
 
 	tarball, err := pack(cwd)
 	if err != nil {
@@ -577,4 +601,95 @@ func repoDirFromFullName(fullName string) string {
 		}
 	}
 	return fullName
+}
+
+// testUserTemplatesPath is where a stack's declared fixture accounts are set.
+const testUserTemplatesPath = "/v1/management/test-users/templates"
+
+// shipDeclaredTestUsers puts `config/test-users.ts` on the stack this checkout
+// acts on.
+//
+// Silent when the project declares none — most do not, and a line about an empty
+// declaration would be noise on every push.
+//
+// It talks to the PROJECT, not the plane: fixtures are the stack's own state,
+// the same as its buckets and its secrets, and the plane's push route is a relay
+// that hands an artifact along rather than a place settings live.
+func shipDeclaredTestUsers(ctx context.Context, dir string, out io.Writer) error {
+	doc, err := readEvaluatedConfig(dir)
+	if err != nil || doc == nil || len(doc.TestUsers) == 0 {
+		return err
+	}
+
+	target, err := ResolveTarget(ctx)
+	if err != nil {
+		return err
+	}
+	cred, _, err := Credential(target.URL)
+	if err != nil {
+		return err
+	}
+	return carryTestUsers(ctx, doc.TestUsers, target, cred, out)
+}
+
+// carryTestUsers is the write itself, for a project already resolved.
+//
+// Split out because BOTH push arms need it and they arrive with different things
+// in hand: the cloud arm resolves a target from the selection, the linked arm
+// already holds one. Keeping the write in one place is what stops the two from
+// drifting into "fixtures reach a linked stack but not a cloud project" — which
+// is the shape of every bug this whole change removed.
+func carryTestUsers(ctx context.Context, declared json.RawMessage,
+	target Target, cred Credentials, out io.Writer) error {
+	// The evaluated document is `{__config, users: {name: definition}}`; the
+	// stack's route takes `{templates: {name: definition}}`. Same map, different
+	// key — and sending the document as-is decodes CLEANLY into a request with no
+	// templates, which the stack stores (replacing the set with nothing) and
+	// reports as 200. Measured 2026-08-24: the push printed "declared the
+	// project's test users" while the stack held none.
+	var evaluated struct {
+		Users map[string]json.RawMessage `json:"users"`
+	}
+	if err := json.Unmarshal(declared, &evaluated); err != nil {
+		return fmt.Errorf("read the declared test users: %w", err)
+	}
+	if len(evaluated.Users) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{"templates": evaluated.Users})
+	if err != nil {
+		return err
+	}
+
+	status, body, err := managementCall(ctx, target, cred, http.MethodPut,
+		testUserTemplatesPath, payload, "application/json")
+	if err != nil {
+		return err
+	}
+	switch status {
+	case http.StatusOK, http.StatusNoContent, http.StatusCreated:
+	case http.StatusNotImplemented:
+		// A stack whose role mask leaves auth out has no fixtures to hold. Not an
+		// error: the project simply declared something this stack cannot keep.
+		return nil
+	default:
+		return fmt.Errorf("declare the test users: %s answered %d: %s",
+			target.Describe(), status, trimBody(body))
+	}
+
+	// COUNT WHAT LANDED. A 200 is not evidence here: the route replaces the set
+	// with whatever it could read, so a body it does not understand is stored as
+	// EMPTY and answered as success. That is precisely the failure above, and the
+	// only thing that catches it is comparing what the stack says it kept against
+	// what was sent.
+	var stored struct {
+		Stored int `json:"stored"`
+	}
+	if err := json.Unmarshal(body, &stored); err == nil && stored.Stored != len(evaluated.Users) {
+		return fmt.Errorf(
+			"declared %d test user(s) but %s stored %d — the declaration did not land",
+			len(evaluated.Users), target.Describe(), stored.Stored)
+	}
+	fmt.Fprintf(out, "declared %d test user(s) on the stack\n", len(evaluated.Users))
+	return nil
 }
