@@ -1,96 +1,47 @@
 package notifications
 
+// The senders and their credentials now go through ONE transport.
+//
+// They used to go through two: the sender over REST to the stack, its secret
+// over `env.set` to the Studio — which kept its own copy and handed it back at
+// deploy time. This harness therefore records EVERY call rather than the last
+// one, because "which door did the secret go to" is the question these tests
+// exist to answer.
+
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"github.com/spf13/cobra"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
-// chdirTemp moves into a fresh temp dir so each test gets its own
-// config/notifications.ts. Restores cwd on cleanup.
-type capturedMutation struct {
-	Path  string
-	Key   string
-	Value string
-	Sec   bool
+// stackCall is one request the project received.
+type stackCall struct {
+	Method string
+	Path   string
+	Body   string
 }
 
-// fakeStudio is an httptest.Server that records tRPC env.set mutations and a
-// studio.Client pointed at it.
-type fakeStudio struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	muts []capturedMutation
+// fakeStack records every call and answers each of them.
+type fakeStack struct {
+	mu     sync.Mutex
+	calls  []stackCall
+	status int
+	answer string
 }
 
-func newFakeStudio(t *testing.T) *fakeStudio {
-	t.Helper()
-	f := &fakeStudio{}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// tRPC mutation path: /api/trpc/env.set, body {"json":{ref,key,value,isSecret}}
-		var body struct {
-			JSON struct {
-				Ref      string `json:"ref"`
-				Key      string `json:"key"`
-				Value    string `json:"value"`
-				IsSecret bool   `json:"isSecret"`
-			} `json:"json"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		f.mu.Lock()
-		f.muts = append(f.muts, capturedMutation{
-			Path:  strings.TrimPrefix(r.URL.Path, "/api/trpc/"),
-			Key:   body.JSON.Key,
-			Value: body.JSON.Value,
-			Sec:   body.JSON.IsSecret,
-		})
-		f.mu.Unlock()
-		// tRPC success envelope.
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"result":{"data":{"json":{"key":"` + body.JSON.Key + `","isSecret":true}}}}`))
-	}))
-	t.Cleanup(f.srv.Close)
-	return f
-}
-
-func (f *fakeStudio) client() *studio.Client {
-	return studio.New(
-		f.srv.URL,
-		func(context.Context) (string, error) { return "test-token", nil },
-		func(context.Context, string, string, string) (string, error) { return "test-proof", nil },
-	)
-}
-
-func (f *fakeStudio) calls() []capturedMutation {
+func (f *fakeStack) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]capturedMutation(nil), f.muts...)
-}
-
-// run drives the notifications command tree with args, capturing stdout+stderr.
-// fakeREST records what a verb asked the stack for.
-type fakeREST struct {
-	method, path, body string
-	status             int
-	answer             string
-}
-
-func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
-	f.method, f.path, f.body = method, path, string(body)
+	f.calls = append(f.calls, stackCall{Method: method, Path: path, Body: string(body)})
+	f.mu.Unlock()
 	st := f.status
 	if st == 0 {
 		st = http.StatusOK
@@ -102,18 +53,40 @@ func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int,
 	return st, []byte(ans), nil
 }
 
-func run(t *testing.T, studioFn func() *studio.Client, args ...string) (string, error) {
-	t.Helper()
-	return runWith(t, &fakeREST{}, studioFn, args...)
+func (f *fakeStack) all() []stackCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]stackCall(nil), f.calls...)
 }
 
-func runWith(t *testing.T, rest *fakeREST, studioFn func() *studio.Client, args ...string) (string, error) {
+// last is the call a verb ended on — the provider write, for `add`.
+func (f *fakeStack) last() stackCall {
+	all := f.all()
+	if len(all) == 0 {
+		return stackCall{}
+	}
+	return all[len(all)-1]
+}
+
+// secrets are the calls that wrote into the project's vault.
+func (f *fakeStack) secrets() []stackCall {
+	var out []stackCall
+	for _, c := range f.all() {
+		if strings.HasPrefix(c.Path, "/v1/management/secrets/") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	cmd := Cmd(Resolvers{
-		REST:      func(*cobra.Command) (REST, error) { return rest, nil },
-		Studio:    studioFn,
-		Selection: selectiontest.Selected(t),
-	})
+	return runWith(t, &fakeStack{}, args...)
+}
+
+func runWith(t *testing.T, rest *fakeStack, args ...string) (string, error) {
+	t.Helper()
+	cmd := Cmd(Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -130,58 +103,83 @@ func runWith(t *testing.T, rest *fakeREST, studioFn func() *studio.Client, args 
 func TestSendersLiveOnTheStackNotInAFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	f := newFakeStudio(t)
-	rest := &fakeREST{}
+	rest := &fakeStack{}
 
-	_, err := runWith(t, rest, f.client, "add", "apns",
+	_, err := runWith(t, rest, "add", "apns",
 		"--team-id", "T", "--key-id", "K", "--bundle-id", "com.x",
 		"--p8-file", writeSecretIn(t, dir, "k.p8", "-----BEGIN PRIVATE KEY-----"))
 	require.NoError(t, err)
 
 	_, statErr := os.Stat(filepath.Join(dir, "config", "notifications.ts"))
 	assert.True(t, os.IsNotExist(statErr), "a file was written: senders have one home now")
-	assert.Equal(t, http.MethodPost, rest.method)
-	assert.Equal(t, "/v1/management/notifications/providers", rest.path)
-	assert.Contains(t, rest.body, "apns")
+	assert.Equal(t, http.MethodPost, rest.last().Method)
+	assert.Equal(t, "/v1/management/notifications/providers", rest.last().Path)
+	assert.Contains(t, rest.last().Body, "apns")
 }
 
-// TestSecretsStillGoToTheVaultNotTheBody keeps the property that mattered before
-// and still does: a credential never travels in the provider entry.
-func TestSecretsStillGoToTheVaultNotTheBody(t *testing.T) {
+// The credential goes to the PROJECT'S vault — the same door `palbase secret
+// set` uses — and never travels inside the provider entry.
+//
+// The door is half the assertion. A secret written to the Studio was written
+// where nothing on this plane reads it: the sender would be configured, the
+// upload would report success, and the first send would fail on a credential
+// that was never there.
+func TestSecretsGoToTheProjectsVaultNotTheBody(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	f := newFakeStudio(t)
-	rest := &fakeREST{}
+	rest := &fakeStack{}
 
-	_, err := runWith(t, rest, f.client, "add", "apns",
+	_, err := runWith(t, rest, "add", "apns",
 		"--team-id", "T", "--key-id", "K", "--bundle-id", "com.x",
 		"--p8-file", writeSecretIn(t, dir, "k.p8", "-----BEGIN PRIVATE KEY-----SECRETBYTES"))
 	require.NoError(t, err)
 
-	assert.NotEmpty(t, f.calls(), "the secret never reached the vault")
-	assert.NotContains(t, rest.body, "SECRETBYTES",
+	written := rest.secrets()
+	require.Len(t, written, 1, "the secret did not reach the project's vault")
+	assert.Equal(t, http.MethodPut, written[0].Method)
+	assert.Contains(t, written[0].Path, "/v1/management/secrets/")
+	assert.Contains(t, written[0].Body, "SECRETBYTES")
+	assert.NotContains(t, rest.last().Body, "SECRETBYTES",
 		"a credential travelled in the provider entry: they go to the vault and the stack reads them there")
+}
+
+// The vault FIRST, then the sender. A sender written before its credential is a
+// sender the project will try to use and cannot.
+func TestTheSecretIsWrittenBeforeTheSender(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	rest := &fakeStack{}
+
+	_, err := runWith(t, rest, "add", "apns",
+		"--team-id", "T", "--key-id", "K", "--bundle-id", "com.x",
+		"--p8-file", writeSecretIn(t, dir, "k.p8", "-----BEGIN PRIVATE KEY-----"))
+	require.NoError(t, err)
+
+	all := rest.all()
+	require.GreaterOrEqual(t, len(all), 2)
+	assert.Contains(t, all[0].Path, "/v1/management/secrets/", "the sender was written first")
+	assert.Equal(t, "/v1/management/notifications/providers", all[len(all)-1].Path)
 }
 
 // TestRemoveActuallyRemoves.
 func TestRemoveActuallyRemoves(t *testing.T) {
 	t.Chdir(t.TempDir())
-	rest := &fakeREST{status: http.StatusNoContent}
+	rest := &fakeStack{status: http.StatusNoContent}
 
-	_, err := runWith(t, rest, nil, "remove", "apns")
+	_, err := runWith(t, rest, "remove", "apns")
 	require.NoError(t, err)
-	assert.Equal(t, http.MethodDelete, rest.method)
-	assert.Equal(t, "/v1/management/notifications/providers/apns", rest.path)
+	assert.Equal(t, http.MethodDelete, rest.last().Method)
+	assert.Equal(t, "/v1/management/notifications/providers/apns", rest.last().Path)
 }
 
 // TestProviders_MarksWhatTheStackHas.
 func TestProviders_MarksWhatTheStackHas(t *testing.T) {
 	t.Chdir(t.TempDir())
-	rest := &fakeREST{answer: `[{"provider":"apns"}]`}
+	rest := &fakeStack{answer: `[{"provider":"apns"}]`}
 
-	out, err := runWith(t, rest, nil, "providers")
+	out, err := runWith(t, rest, "providers")
 	require.NoError(t, err)
-	assert.Equal(t, http.MethodGet, rest.method)
+	assert.Equal(t, http.MethodGet, rest.last().Method)
 	assert.Contains(t, out, "apns")
 	assert.Contains(t, out, "●")
 }
@@ -200,50 +198,41 @@ func writeTemp(t *testing.T, content string) string {
 	return p
 }
 
-func chdirTemp(t *testing.T) {
-	t.Helper()
-	t.Chdir(t.TempDir())
-}
-
 func TestAddApns_MissingRequiredField(t *testing.T) {
 	t.Chdir(t.TempDir())
-	chdirTemp(t)
 	p8 := filepath.Join(t.TempDir(), "k.p8")
 	require.NoError(t, os.WriteFile(p8, []byte("key"), 0o600))
-	fs := newFakeStudio(t)
+	rest := &fakeStack{}
 	// Missing --bundle-id.
-	_, err := run(t, fs.client, "add", "apns", "--team-id", "T", "--key-id", "K", "--p8-file", p8)
+	_, err := runWith(t, rest, "add", "apns", "--team-id", "T", "--key-id", "K", "--p8-file", p8)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--bundle-id")
-	// No secret uploaded when validation fails before the upload step.
-	assert.Empty(t, fs.calls())
+	// Nothing is written when validation fails before the upload step.
+	assert.Empty(t, rest.all())
 }
 
 func TestAddApns_MissingSecretFile(t *testing.T) {
 	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	fs := newFakeStudio(t)
+	rest := &fakeStack{}
 	// No --p8-file and stdin is not a TTY in tests → hard error.
-	_, err := run(t, fs.client, "add", "apns", "--team-id", "T", "--key-id", "K", "--bundle-id", "com.x")
+	_, err := runWith(t, rest, "add", "apns", "--team-id", "T", "--key-id", "K", "--bundle-id", "com.x")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--p8-file")
-	assert.Empty(t, fs.calls())
+	assert.Empty(t, rest.all())
 }
 
 func TestAddTwilio_RequiresOneOfFromOrMessaging(t *testing.T) {
 	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	fs := newFakeStudio(t)
-	_, err := run(t, fs.client, "add", "twilio", "--account-sid", "AC1", "--auth-token-file", writeTemp(t, "tok"))
+	rest := &fakeStack{}
+	_, err := runWith(t, rest, "add", "twilio", "--account-sid", "AC1", "--auth-token-file", writeTemp(t, "tok"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--from-number")
-	assert.Empty(t, fs.calls())
+	assert.Empty(t, rest.all())
 }
 
 func TestAddUnknownProvider(t *testing.T) {
 	t.Chdir(t.TempDir())
-	chdirTemp(t)
-	_, err := run(t, nil, "add", "nope")
+	_, err := run(t, "add", "nope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown provider")
 }

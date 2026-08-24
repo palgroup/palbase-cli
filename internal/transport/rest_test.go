@@ -210,6 +210,31 @@ func TestREST_Do_ParsesTheFieldDetailOffTheWire(t *testing.T) {
 	require.Contains(t, err.Error(), "tests_failed")
 }
 
+// AND THE OTHER SHAPE. The control plane's SDK wraps a data-first error, so the
+// same detail lands under `data.fields`. Reading only the flat one dropped the
+// reason for every refusal that came from the plane rather than from a tenant —
+// which is exactly the case that sent somebody to the tenant's log.
+func TestREST_Do_ParsesTheFieldDetailNestedUnderData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "bad_request", "error_description": "Bad request", "status": 400,
+			"request_id": "req_x",
+			"data": map[string]any{
+				"fields": []map[string]string{
+					{"field": "artifact", "message": "the body is not a gzip stream: unexpected EOF"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	err := New(srv.URL, "tok").Do(context.Background(), http.MethodPost, "/v1/cloud/projects/x/push", map[string]any{}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a gzip stream")
+}
+
 // A refusal with no fields must read exactly as it always did — the change adds
 // detail where there is detail, it does not decorate everything else.
 func TestAPIError_WithoutFieldsIsUnchanged(t *testing.T) {

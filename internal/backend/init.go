@@ -279,9 +279,20 @@ func copyTemplate(from, to string) ([]string, error) {
 // `.palbase/local.json` rather than `.palbase/` — project.json is committed on
 // purpose, so a colleague who clones this reaches the same project.
 func writeGitignore(dir string) error {
+	// BOTH STAGING NAMES. The stager writes `.palbase-staged-controllers/`
+	// today and wrote `.palbase-serve-controllers/` before it; the ignore list
+	// followed the rename and the old name did not, so every project that had
+	// ever run the older CLI kept a directory nothing ignored.
+	//
+	// What lands there is generated: each controller with its return-schema
+	// bindings appended. Committed, it is a second copy of the WHOLE controller
+	// tree that reads as source, is read by nothing, and goes stale the moment a
+	// controller changes. Measured 2026-08-24 on a real project: 17 files, 88 KB,
+	// all 17 different from the controllers beside them.
 	const body = `node_modules/
 .palbase/local.json
 .palbase-staged-controllers/
+.palbase-serve-controllers/
 *.log
 `
 	path := filepath.Join(dir, ".gitignore")

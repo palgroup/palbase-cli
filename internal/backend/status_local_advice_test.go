@@ -66,7 +66,7 @@ func TestStatusDoesNotAdviseACommandThatRefusesThisTarget(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetContext(context.Background())
 
-	handled, err := statusOfProject(cmd)
+	handled, err := statusOfProject(cmd, Resolvers{}, false)
 	if !handled || err != nil {
 		t.Fatalf("handled=%v err=%v", handled, err)
 	}

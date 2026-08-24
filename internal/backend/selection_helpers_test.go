@@ -3,9 +3,6 @@ package backend
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,7 +10,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
@@ -26,42 +22,28 @@ var (
 	_ REST         = (*transport.Client)(nil)
 )
 
-// rig is the standard backend-test wiring: the fake v2 Management API + a stub
-// Studio tRPC server, with proj_1 / production selected in a fresh cwd.
+// rig is the standard backend-test wiring: the fake v2 Management API, with
+// proj_1 / production selected in a fresh cwd.
+//
+// It used to carry a stub Studio tRPC server as well, because half these verbs
+// had a second arm that spoke tRPC. They do not: every one reads either the
+// project's own management surface or the plane's REST API, both of which the
+// fake serves.
 type rig struct {
 	Fake     *selectiontest.Fake
 	Dir      string
-	Studio   *studio.Client
 	RESTC    REST
 	Resolver *selection.Resolver
-	// trpc records the tRPC procedure paths the command called, in order.
-	trpc []string
 }
 
-// newRig starts everything. `trpcHandler` answers the tRPC calls (apikey.reveal,
-// backend.status, ...); a nil handler answers every procedure with `{}`.
-func newRig(t *testing.T, trpcHandler http.HandlerFunc) *rig {
+// newRig starts everything.
+func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{
 		Fake: selectiontest.New(t),
 		Dir:  selectiontest.Chdir(t),
 	}
 	selectiontest.WriteConfig(t, r.Dir, nil)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		r.trpc = append(r.trpc, req.URL.Path)
-		if trpcHandler != nil {
-			trpcHandler(w, req)
-			return
-		}
-		trpcOK(w, map[string]any{})
-	}))
-	t.Cleanup(srv.Close)
-	r.Studio = studio.New(
-		srv.URL,
-		func(context.Context) (string, error) { return "tok", nil },
-		func(context.Context, string, string, string) (string, error) { return "proof", nil },
-	)
 	r.Resolver = r.Fake.Resolver()
 	r.RESTC = r.Fake.REST()
 	// ORTAMIN YAYINLANABİLİR ANAHTARI ARTIK YÖNETİM API'SİNDE.
@@ -86,7 +68,6 @@ func newRig(t *testing.T, trpcHandler http.HandlerFunc) *rig {
 func (r *rig) Resolvers() Resolvers {
 	rest := r.RESTC
 	return Resolvers{
-		Studio:    func() *studio.Client { return r.Studio },
 		REST:      func() REST { return rest },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
 		Selection: func() *selection.Resolver { return r.Resolver },
@@ -112,17 +93,6 @@ func (r *rig) Run(t *testing.T, name string, args ...string) (string, error) {
 	return "", nil
 }
 
-// TRPCCalls returns the tRPC procedure paths the command hit.
-func (r *rig) TRPCCalls() []string { return r.trpc }
-
-// trpcOK writes a tRPC-shaped success body.
-func trpcOK(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{"data": map[string]any{"json": data}},
-	})
-}
-
 // requireNoV1 asserts that nothing the command did rode a retired path. This is
 // the anti-silent-404 guard: a leftover /api/v1 or /branches call 404s on the
 // fake, but a command that swallows the error would still "pass" its behaviour
@@ -133,6 +103,7 @@ func requireNoV1(t *testing.T, f *selectiontest.Fake) {
 		require.NotContains(t, route, "/api/v1/", "the CLI must not call v1 (admin excepted, and admin is another package)")
 		require.NotContains(t, route, "/branches", "the Palbase branch is gone as a resource")
 		require.NotContains(t, route, "/groups/", "groups are gone — apps and members hang off the PROJECT")
+		require.NotContains(t, route, "/api/trpc/", "tRPC is gone — every verb speaks REST")
 	}
 }
 
@@ -140,7 +111,7 @@ func TestLookupBackendTarget_RejectsAnUnboundPublishableKey(t *testing.T) {
 	// Anahtar artık YÖNETİM API'sinden okunuyor, Studio'nun tRPC yüzeyinden
 	// değil: headless bir koşumda DPoP'la bağlanmış tarayıcı oturumu yok ve
 	// komut o yolda "acquire token: refresh tokens: 401" ile ölüyordu.
-	r := newRig(t, nil)
+	r := newRig(t)
 	r.Fake.OK("GET /api/v2/environments/app1prod/apikey", map[string]any{
 		"environment_ref": "app1prod",
 		"publishable_key": "pb_app1stg_c01234567890123456789",
@@ -155,7 +126,7 @@ func TestLookupBackendTarget_RejectsAnUnboundPublishableKey(t *testing.T) {
 }
 
 func TestLookupBackendTarget_RejectsInvalidRefBeforeStudioRequest(t *testing.T) {
-	r := newRig(t, nil)
+	r := newRig(t)
 
 	_, err := lookupBackendTarget(
 		context.Background(), r.RESTC,

@@ -5,7 +5,7 @@ package backend
 // `palbase web link` wires a web project (package.json present) to a Palbase
 // project:
 //   1. Verifies package.json exists in the cwd.
-//   2. Uses the SELECTED project + environment (`palbase project use` /
+//   2. Uses the SELECTED project + environment (`palbase link` /
 //      `palbase env use`, overridable with --project / --environment).
 //   3. Ensures .gitignore covers .palbase/config.json (the selection is
 //      per-machine; generated inputs under .palbase remain trackable).

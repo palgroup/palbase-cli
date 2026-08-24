@@ -52,7 +52,7 @@ from .palbase/config.json).`,
 			// through the shared resolver.
 			resolver := wc.r.Selection()
 			if resolver == nil {
-				return fmt.Errorf("no project selected — run `palbase project use <projectId>`")
+				return fmt.Errorf("no project selected — run `palbase link <project>`, or pass --environment <ref>")
 			}
 			cfg, err := selection.Load("")
 			if err != nil {
@@ -60,7 +60,7 @@ from .palbase/config.json).`,
 			}
 			if resolver.ProjectFlag != "" && resolver.ProjectFlag != cfg.ProjectID {
 				return fmt.Errorf(
-					"web use cannot switch projects from %s to %s — run `palbase project use %s` first",
+					"web use cannot switch projects from %s to %s — run `palbase link %s` first",
 					cfg.ProjectID, resolver.ProjectFlag, resolver.ProjectFlag,
 				)
 			}

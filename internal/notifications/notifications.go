@@ -26,21 +26,20 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
-// Resolvers carries the lazily-built Studio client, populated by
-// PersistentPreRunE on the root command before any subcommand fires. The Studio
-// client uploads provider secrets via the env.set mutation (the SAME path
-// `palbase secret set` uses).
+// Resolvers carries the transport these verbs act through.
+//
+// There used to be two: a REST client for the senders and a Studio client that
+// uploaded their secrets over `env.set`. The secrets live in the project's own
+// vault now — the same door `palbase secret set` uses — so both halves of
+// "configure a sender" go to the same authority, and a secret can no longer be
+// written somewhere the stack does not read.
 type Resolvers struct {
 	// REST is where the senders live now that config/notifications.ts is gone.
-	REST      func(*cobra.Command) (REST, error)
-	Studio    func() *studio.Client
-	Selection func() *selection.Resolver
+	REST func(*cobra.Command) (REST, error)
 }
 
 // Cmd returns the `palbase notifications` parent command.
@@ -68,6 +67,12 @@ type REST interface {
 }
 
 const providersPath = "/v1/management/notifications/providers"
+
+// secretPath is where a provider's credential is written: the project's own
+// vault, the same door `palbase secret set` uses.
+func secretPath(name string) string {
+	return "/v1/management/secrets/" + url.PathEscape(name)
+}
 
 func call(r Resolvers, cmd *cobra.Command, method, path string, body []byte) ([]byte, error) {
 	rest, err := r.REST(cmd)
@@ -179,12 +184,6 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				return fmt.Errorf("unknown provider %q — run `palbase notifications providers` to list them", name)
 			}
 
-			sel, err := r.Selection().Resolve(cmd.Context())
-			if err != nil {
-				return err
-			}
-			ref := sel.EnvironmentRef()
-
 			// 1. Collect non-secret fields from flags; validate required ones.
 			entry := providerEntry{enabled: true, fields: map[string]string{}}
 			for _, f := range spec.fields {
@@ -224,12 +223,17 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 					return serr
 				}
 				reserved := reservedSecretKey(name, s.name)
-				if uerr := r.Studio().Mutation(cmd.Context(), "env.set", map[string]any{
-					"ref":      ref,
-					"key":      reserved,
-					"value":    value,
-					"isSecret": true,
-				}, nil); uerr != nil {
+				// THE PROJECT'S OWN VAULT, through the door `palbase secret set`
+				// uses. It used to be an `env.set` mutation on the Studio, which
+				// held a second copy of every secret and handed it to the stack at
+				// deploy time; the stack owns them now, so writing anywhere else
+				// would put a value where nothing reads it.
+				secretBody, merr := json.Marshal(map[string]string{"value": value})
+				if merr != nil {
+					return merr
+				}
+				if _, uerr := call(r, cmd, http.MethodPut,
+					secretPath(reserved), secretBody); uerr != nil {
 					return fmt.Errorf("upload secret %s: %w", reserved, uerr)
 				}
 				fmt.Fprintf(out, "✓ uploaded secret %s (encrypted)\n", reserved)
@@ -336,7 +340,7 @@ func promptHidden(cmd *cobra.Command, label string) (string, error) {
 }
 
 // removeCmd disables + drops a provider from config/notifications.ts. The live
-// provider stays until removed in Studio (the deploy is upsert-only / never
+// provider stays until removed (the deploy is upsert-only / never
 // auto-deletes). The reserved secret is NOT deleted here (use `palbase secret
 // remove <key>` if you want to purge it).
 func removeCmd(r Resolvers) *cobra.Command {

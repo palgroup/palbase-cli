@@ -29,7 +29,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/storage"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/palgroup/palbase-cli/internal/testuser"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
@@ -56,15 +55,6 @@ var resolved config.Resolved
 
 // authClient is built per invocation from the resolved mode/endpoints.
 var authClient *auth.Client
-
-// studioClient is the tRPC client MOST command groups use to talk to Studio —
-// the backend lifecycle verbs (build/push/pull/clone/deploys/rollback/status/
-// spec/web/ios/macos/android), db types, debug console, logs, members,
-// github, secret, flags, notifications, testuser. Built per invocation
-// against resolved.Endpoints.Studio.
-// Retained ONLY until every group has its own Management-API REST route (S5.4
-// decision — see docs/decisions/2026-05-24-s5-cli-pat-provisioning-...).
-var studioClient *studio.Client
 
 // managementREST lazily builds the Management-API REST client used by
 // `palbase project`/`apikey`. It loads the keyring DPoP key + resolves
@@ -205,6 +195,33 @@ func openStackManagement(cmd *cobra.Command) (authadmin.REST, error) {
 	return stackManagementREST{target: target, cred: cred, client: backend.HTTPClient(target)}, nil
 }
 
+// selectedProjectTarget turns the caller's SELECTION into a project address.
+//
+// This is what lets one implementation serve both halves of every
+// target-relative verb. Before it, a command that found no `.palbase/project.json`
+// fell through to a second, tRPC-shaped path against the Studio — a different
+// protocol, a different door, and a different response shape for the same
+// question. There is one door now: the project's own management surface, at
+// `<ref>.<PublicHost>`, opened by the key CloudKeyFetcher brokers.
+//
+// Silent on failure, deliberately. "No project selected" is the SELECTION's
+// error to report, phrased with the advice that fixes it; a target resolver
+// inventing its own wording would be a second, worse copy of that message.
+func selectedProjectTarget(ctx context.Context) (backend.Target, bool) {
+	if sel == nil || resolved.Endpoints.PublicHost == "" {
+		return backend.Target{}, false
+	}
+	s, err := sel.Resolve(ctx)
+	if err != nil {
+		return backend.Target{}, false
+	}
+	ref := s.EnvironmentRef()
+	if ref == "" {
+		return backend.Target{}, false
+	}
+	return backend.Target{URL: "https://" + ref + "." + resolved.Endpoints.PublicHost}, true
+}
+
 func linkedTarget() (linkedProject, error) {
 	t, err := backend.ReadTarget()
 	if err != nil {
@@ -303,24 +320,15 @@ func newRootCmd() *cobra.Command {
 			// target-relative verb resolves a credential, and for a cloud
 			// project that answer lives in the control plane's ledger.
 			wireCloudKeyFetcher()
-			studioClient = studio.New(
-				r.Endpoints.Studio,
-				func(ctx context.Context) (string, error) { return authClient.GetValidToken(ctx) },
-				func(_ context.Context, method, rawURL, token string) (string, error) {
-					key, err := auth.LoadDPoPKey(string(r.Mode))
-					if err != nil {
-						return "", fmt.Errorf("load dpop key: %w", err)
-					}
-					return key.NewProof(auth.ProofOptions{
-						HTTPMethod: method, URL: rawURL, AccessToken: token,
-					})
-				},
-			)
 			sel = &selection.Resolver{
 				REST:            func() selection.REST { return managementREST() },
 				ProjectFlag:     projectFlag,
 				EnvironmentFlag: environmentFlag,
 			}
+			// The second authority for "which project am I acting on" (see
+			// backend.SelectedProject): a checkout with no `link` still has a
+			// selection, and a selection resolves to an address like any other.
+			backend.SelectedProject = selectedProjectTarget
 			return nil
 		},
 	}
@@ -337,7 +345,6 @@ func newRootCmd() *cobra.Command {
 	// reuses the SAME bundle download as clone/pull.
 	backendResolvers := backend.Resolvers{
 		Auth:      func() *auth.Client { return authClient },
-		Studio:    func() *studio.Client { return studioClient },
 		Endpoints: func() config.Endpoints { return resolved.Endpoints },
 		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
 		// project/apikey) for the provider-aware push/pull/clone verbs.
@@ -360,13 +367,9 @@ func newRootCmd() *cobra.Command {
 			REST:   func() apikey.REST { return managementREST() },
 			Target: func() (apikey.Target, error) { return linkedTarget() },
 		}),
-		debugconsole.Cmd(debugconsole.Resolvers{
-			Studio:     func() debugconsole.Studio { return studioClient },
-			Selection:  selectionResolver,
-			PublicHost: func() string { return resolved.Endpoints.PublicHost },
-		}),
+		debugconsole.Cmd(debugconsole.Resolvers{}),
 		logs.Cmd(logs.Resolvers{
-			Studio:    func() logs.Studio { return studioClient },
+			REST:      func() logs.REST { return managementREST() },
 			Selection: selectionResolver,
 		}),
 		members.Cmd(members.Resolvers{
@@ -378,29 +381,23 @@ func newRootCmd() *cobra.Command {
 		dbcmd.Cmd(),
 		storage.Cmd(storage.Resolvers{REST: func(cmd *cobra.Command) (storage.REST, error) { return openStackManagement(cmd) }}),
 		flags.Cmd(flags.Resolvers{
-			// The DEFINITION half acts on the linked stack; the `flags user`
-			// overrides are a different product and keep their Studio seam.
+			// One seam: definitions AND per-user overrides both act on the linked
+			// project over REST. The overrides rode Studio only while nothing could
+			// open their service-role gate.
 			REST:      func(cmd *cobra.Command) (flags.REST, error) { return openStackManagement(cmd) },
-			Studio:    func() flags.Studio { return studioClient },
 			Selection: selectionResolver,
 		}),
 		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement}),
 		egress.Cmd(egress.Resolvers{REST: openStackEgress}),
 		notifications.Cmd(notifications.Resolvers{
-			REST:      func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
-			Studio:    func() *studio.Client { return studioClient },
-			Selection: selectionResolver,
+			REST: func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
 		}),
 		// `admin` speaks the v2 control plane's operator surface: roll the fleet,
 		// sweep unclaimed tenants. Both are gated server-side and fail closed.
 		admin.Cmd(admin.Resolvers{
 			REST: func() admin.REST { return managementREST() },
 		}),
-		testuser.Cmd(testuser.Resolvers{
-			// *studio.Client satisfies testuser.Studio (Query/Mutation).
-			Studio:    func() testuser.Studio { return studioClient },
-			Selection: selectionResolver,
-		}),
+		testuser.Cmd(),
 	)
 
 	// CLI-1 flat redesign: the backend lifecycle commands (build/push/pull/

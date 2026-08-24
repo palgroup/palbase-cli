@@ -312,3 +312,31 @@ func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
 		t.Errorf("the scaffold declares `latest`, which is pinned to the v1 line — every new project would start a major behind the runtime")
 	}
 }
+
+// HER İKİ SAHNELEME ADI DA YOK SAYILIR.
+//
+// The stager writes `.palbase-staged-controllers/` today and wrote
+// `.palbase-serve-controllers/` before it. The ignore list followed the rename;
+// the old name did not — so every project that had ever run the older CLI kept a
+// directory nothing ignored, and it got committed.
+//
+// What lands there is GENERATED: each controller with its return-schema bindings
+// appended. In git it is a second copy of the whole controller tree that reads as
+// source, is read by nothing, and goes stale the moment a controller changes.
+// Measured 2026-08-24 on a real project: 17 files, 88 KB, all 17 different from
+// the controllers beside them.
+func TestGitignoreCoversBothStagingNames(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeGitignore(dir); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, name := range []string{".palbase-staged-controllers/", ".palbase-serve-controllers/"} {
+		if !strings.Contains(string(body), name) {
+			t.Errorf("%s is not ignored:\n%s", name, body)
+		}
+	}
+}

@@ -8,18 +8,20 @@
 // turning `palbase.debug_console` on for the single user they are helping is
 // the reason this exists.
 //
-// Transport: Studio tRPC (`userFlags.users.*`), the same user-JWT
-// `internal/studio` client `test-user` / `secret` / `db` ride. palflags' own
-// `/v1/user-flags/users/{userId}/{key}` routes are tenant-scoped and gated by
-// RequireServiceRole; the Management API (`/api/v2`, internal/transport) has NO
-// user-flags route, so tRPC is the only reachable client — exactly the
-// situation internal/testuser documents. The selection resolver (which DOES
-// ride internal/transport) still supplies --project / --environment.
+// Transport: REST, straight at the project, like every other verb in this CLI.
 //
-// Procedures hit (platform/studio/src/server/trpc/routers/user-flags.ts):
+// It used to be Studio tRPC, and the note here explained why: those routes are
+// gated by RequireServiceRole and "the Management API has NO user-flags route,
+// so tRPC is the only reachable client". The premise stopped being true — a
+// linked project resolves its OWN service-role key (the control plane brokers it
+// for a cloud project, the state directory answers for a local stack), which is
+// exactly the credential those routes want. tRPC was the only reachable client
+// only while nothing could open the door.
 //
-//	userFlags.users.put       mutation {ref,userId,key,value} -> {key,value,source}
-//	userFlags.users.delete    mutation {ref,userId,key}       -> {key,value,source}
+// Routes hit (v2/internal/modules/user-flags/internal/server/router.go):
+//
+//	PUT    /v1/user-flags/users/{userId}/{key}   {value}   -> {key,value,source}
+//	DELETE /v1/user-flags/users/{userId}/{key}             -> {key,value,source}
 //	userFlags.users.deleteAll mutation {ref,userId}           -> {deleted}
 //	userFlags.users.get       query    {ref,userId}           -> {values,fetched_at}
 //	userFlags.system.list     query    {ref}                  -> [{key,value,...}]
@@ -32,9 +34,10 @@ package flags
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -45,24 +48,42 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Studio is the tRPC transport subset the override commands need.
-// *studio.Client satisfies it; tests substitute an httptest-backed client.
-type Studio interface {
-	Query(ctx context.Context, path string, input any, out any) error
-	Mutation(ctx context.Context, path string, input any, out any) error
+// userFlagsPath is one user's override collection; overridePath is one key of
+// it. The user id travels in the PATH and the environment does not travel at
+// all — the project answers for itself, so there is no `ref` to get wrong.
+func userFlagsPath(userID string) string {
+	return "/v1/user-flags/users/" + url.PathEscape(userID)
+}
+
+func overridePath(userID, key string) string {
+	return userFlagsPath(userID) + "/" + url.PathEscape(key)
+}
+
+const systemFlagsPath = "/v1/user-flags/system"
+
+// overrideCall performs one override verb and reads the {key,value,source} the
+// server answers with — the shape PUT and DELETE share.
+func overrideCall(r Resolvers, cmd *cobra.Command, method, path string, body []byte) (overrideResult, error) {
+	raw, err := call(r, cmd, method, path, body)
+	if err != nil {
+		return overrideResult{}, err
+	}
+	var res overrideResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return overrideResult{}, fmt.Errorf("read the answer: %w", err)
+	}
+	return res, nil
 }
 
 // Resolvers carries the lazily-built clients, populated by PersistentPreRunE
 // before any subcommand fires.
 //
-// REST is the DEFINITION half — list/add/remove, which act on the stack now that
-// config/flags.ts is gone. Studio + Selection are the OVERRIDE half: one
-// person's value in one environment, live, never in git. Two audiences, two
-// seams, and keeping them apart is why `flags user` reads differently from the
-// rest of this command.
+// ONE SEAM NOW. The definition half (list/add/remove) and the override half
+// (`flags user …`) both act on the linked project over REST; they were two
+// transports only because the override routes had no reachable client. Selection
+// remains for --project / --environment.
 type Resolvers struct {
 	REST      func(*cobra.Command) (REST, error)
-	Studio    func() Studio
 	Selection func() *selection.Resolver
 }
 
@@ -183,9 +204,12 @@ succeed with the wrong type.`,
 				return err
 			}
 
-			var res overrideResult
-			payload := map[string]any{"ref": ref, "userId": userID, "key": key, "value": raw}
-			if err := r.Studio().Mutation(cmd.Context(), "userFlags.users.put", payload, &res); err != nil {
+			body, err := json.Marshal(map[string]any{"value": raw})
+			if err != nil {
+				return err
+			}
+			res, err := overrideCall(r, cmd, http.MethodPut, overridePath(userID, key), body)
+			if err != nil {
 				return err
 			}
 
@@ -221,9 +245,8 @@ Environment value that now applies is printed back.`,
 				return err
 			}
 
-			var res overrideResult
-			payload := map[string]any{"ref": ref, "userId": userID, "key": key}
-			if err := r.Studio().Mutation(cmd.Context(), "userFlags.users.delete", payload, &res); err != nil {
+			res, err := overrideCall(r, cmd, http.MethodDelete, overridePath(userID, key), nil)
+			if err != nil {
 				return err
 			}
 
@@ -255,10 +278,13 @@ prompt — but check the user id, because it is not undone for you.`,
 				return err
 			}
 
-			var res deleteAllResult
-			payload := map[string]any{"ref": ref, "userId": userID}
-			if err := r.Studio().Mutation(cmd.Context(), "userFlags.users.deleteAll", payload, &res); err != nil {
+			raw, err := call(r, cmd, http.MethodDelete, userFlagsPath(userID), nil)
+			if err != nil {
 				return err
+			}
+			var res deleteAllResult
+			if err := json.Unmarshal(raw, &res); err != nil {
+				return fmt.Errorf("read the answer: %w", err)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ removed %d override(s) for user %s (%s)\n", res.Deleted, userID, ref)
@@ -302,15 +328,21 @@ as the Environment is therefore indistinguishable from no override, and reads as
 				return err
 			}
 
+			rawMerged, err := call(r, cmd, http.MethodGet, userFlagsPath(userID), nil)
+			if err != nil {
+				return err
+			}
 			var merged mergedSnapshot
-			if err := r.Studio().Query(cmd.Context(), "userFlags.users.get",
-				map[string]any{"ref": ref, "userId": userID}, &merged); err != nil {
+			if err := json.Unmarshal(rawMerged, &merged); err != nil {
+				return fmt.Errorf("read the user's flags: %w", err)
+			}
+			rawSystem, err := call(r, cmd, http.MethodGet, systemFlagsPath, nil)
+			if err != nil {
 				return err
 			}
 			var system []systemFlag
-			if err := r.Studio().Query(cmd.Context(), "userFlags.system.list",
-				map[string]any{"ref": ref}, &system); err != nil {
-				return err
+			if err := json.Unmarshal(rawSystem, &system); err != nil {
+				return fmt.Errorf("read the environment's flags: %w", err)
 			}
 
 			envValues := make(map[string]json.RawMessage, len(system))

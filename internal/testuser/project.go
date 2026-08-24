@@ -45,20 +45,30 @@ const (
 	adminTemplates     = "/v1/management/test-users/templates"
 )
 
-// linkedProject is the project this checkout is bound to, when it is bound to
-// one. Absent, the caller falls through to the cloud arm — the same shape every
-// other target-relative verb uses, so `test-user` needs no new rule about which
-// half answers.
-func linkedProject() (backend.Target, backend.Credentials, bool) {
-	target, err := backend.ReadTarget()
-	if err != nil || target.URL == "" {
-		return backend.Target{}, backend.Credentials{}, false
+// resolveProject is the project this verb acts on: the one this checkout is
+// linked to, or the one the caller selected (backend.ResolveTarget knows both).
+//
+// It used to answer a BOOL, and a false sent the caller to a second arm that
+// spoke tRPC to the Studio — a different protocol, a different door, and a
+// different response shape for the same question. That arm is gone. One door
+// means a failure to reach it is a failure to report, not a reason to try
+// somewhere else, so this returns the error that says which of the two ways to
+// name a project is missing.
+func resolveProject(ctx context.Context) (backend.Target, backend.Credentials, error) {
+	target, err := backend.ResolveTarget(ctx)
+	if err != nil {
+		return backend.Target{}, backend.Credentials{}, err
+	}
+	if target.URL == "" {
+		return backend.Target{}, backend.Credentials{}, fmt.Errorf(
+			"%s names no address — run `palbase link` again, or pass --environment <ref>",
+			target.Describe())
 	}
 	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
-		return backend.Target{}, backend.Credentials{}, false
+		return backend.Target{}, backend.Credentials{}, err
 	}
-	return target, cred, true
+	return target, cred, nil
 }
 
 // stackMinted is what POST /admin/test-users answers with. Its field names are
@@ -219,10 +229,19 @@ func templatesOnProject(ctx context.Context, target backend.Target, cred backend
 
 // cloneOnProject copies a test user's rows onto fresh accounts.
 func cloneOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
-	sourceUserID string, overrides map[string]map[string]any, jsonOut bool, out io.Writer) error {
+	sourceUserID, email, password string, overrides map[string]map[string]any,
+	jsonOut bool, out io.Writer) error {
 	body := map[string]any{"source_user_id": sourceUserID, "with_tokens": true}
 	if len(overrides) > 0 {
 		body["set"] = overrides
+	}
+	// NAMED CREDENTIALS, when the caller gave them. This used to be refused here
+	// by name — "not available against a local stack" — because the door did not
+	// ask for them; it does now, so a fixture whose login is written in the test
+	// that uses it is minted the same way everywhere.
+	if email != "" {
+		body["email"] = email
+		body["password"] = password
 	}
 
 	var res stackMinted

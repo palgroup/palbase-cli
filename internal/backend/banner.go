@@ -81,19 +81,20 @@ func dedupe(items []string) []string {
 	return out
 }
 
-// unlinkedOrCloudError turns the cloud arm's "no project selected" into the
-// refusal FR-008 asks for.
+// unlinkedOrCloudError turns "no project selected" into the refusal FR-008 asks
+// for.
 //
-// The cloud resolver's own message advises `palbase project use <projectId>`,
-// which is right for somebody who has a cloud project and wrong for everybody
-// else — and everybody else is who reaches it, because this arm is only entered
-// when the checkout is NOT linked. Measured on push, spec, status and deploys:
-// four verbs sending a person to a command that cannot help them.
+// The resolver's message used to advise a command that DOES NOT EXIST. Verified
+// 2026-08-24 against the built binary: `palbase project` carries create, delete,
+// list and status — there is no `use`. Fourteen places across this CLI sent
+// people to it, and the one line offered to somebody with a cloud project was
+// the only line they could not follow. The four below are the four that work.
 func unlinkedOrCloudError(cause error) error {
 	return fmt.Errorf(
 		"this checkout is not linked to a project, and no cloud project is selected either.\n"+
+			"  palbase link <project>   a project in the cloud\n"+
 			"  palbase link <url>       a project running on this machine\n"+
 			"  palbase start            bring one up here and link to it\n"+
-			"  palbase project use <id> a cloud project (%v)",
+			"  --environment <ref>      act on one without linking (%v)",
 		cause)
 }

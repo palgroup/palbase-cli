@@ -29,7 +29,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 )
 
@@ -77,12 +76,16 @@ type REST interface {
 }
 
 // Resolvers returns lazy accessors for the shared CLI globals, so the
-// `backend` command tree can be wired into cobra at startup without
-// the auth + studio clients having been initialised yet (cobra's
-// PersistentPreRunE on the root command is what populates them).
+// `backend` command tree can be wired into cobra at startup without the auth
+// client having been initialised yet (cobra's PersistentPreRunE on the root
+// command is what populates it).
+//
+// A Studio client used to live here too. Every verb that held one has a REST
+// route now — the project's own management surface for what a project knows,
+// the plane's for what the plane knows — so there is one protocol and one door
+// per question instead of two of each.
 type Resolvers struct {
 	Auth      func() *auth.Client
-	Studio    func() *studio.Client
 	Endpoints func() config.Endpoints
 	// REST returns the authed Management-API client used by push/pull/clone.
 	// Lazy (a func) like the other accessors, and only CALLED at RunE time —
@@ -98,7 +101,7 @@ type Resolvers struct {
 // Resolvers) fails with a clear error instead of a nil dereference.
 func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 	if r.Selection == nil || r.Selection() == nil {
-		return selection.Selection{}, errors.New("no project selected — run `palbase project use <projectId>`")
+		return selection.Selection{}, errors.New("no project selected — run `palbase link <project>`, or pass --environment <ref>")
 	}
 	return r.Selection().Resolve(ctx)
 }
@@ -405,35 +408,8 @@ func newRollbackCmd(r Resolvers) *cobra.Command {
 					return err
 				}
 			}
-			if handled, err := rollbackOnProject(cmd, args[0]); handled {
-				return err
-			}
-
-			sel, err := r.resolve(cmd.Context())
-			if err != nil {
-				return unlinkedOrCloudError(err)
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			var resp struct {
-				Status         string `json:"status"`
-				Version        string `json:"version"`
-				RolledBackFrom string `json:"rolled_back_from"`
-			}
-			if err := r.Studio().Mutation(cmd.Context(), "backend.rollback",
-				map[string]any{"ref": sel.EnvironmentRef(), "version": args[0]}, &resp); err != nil {
-				return fmt.Errorf("backend.rollback: %w", err)
-			}
-			// version is what was RESTORED; rolled_back_from is what it replaced.
-			// These were printed the other way round, with a deployment UUID
-			// standing in for the version, until 2026-08-04.
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back environment %s to %s (was: %s)\n",
-				sel.EnvironmentRef(), resp.Version, resp.RolledBackFrom)
-			// A rollback moves CODE, not schema. Saying so here is the difference
-			// between a developer understanding a 500 from older code against a
-			// newer table and filing it as a rollback that half-worked.
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"  note: code only — the database schema is unchanged and stays at its current migration.")
-			return nil
+			_, err := rollbackOnProject(cmd, args[0])
+			return err
 		},
 	}
 	return cmd
@@ -513,54 +489,8 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 					return err
 				}
 			}
-			if handled, err := statusOfProject(cmd); handled {
-				return err
-			}
-
-			sel, err := r.resolve(cmd.Context())
-			if err != nil {
-				return unlinkedOrCloudError(err)
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			var resp statusResponse
-			if err := r.Studio().Query(cmd.Context(), "backend.status",
-				map[string]any{"ref": sel.EnvironmentRef()}, &resp); err != nil {
-				return fmt.Errorf("backend.status: %w", err)
-			}
-			out := statusOut{
-				ProjectID:          sel.ProjectID,
-				EnvironmentID:      sel.Environment.ID,
-				EnvironmentRef:     sel.EnvironmentRef(),
-				EnvironmentSlug:    sel.Environment.Slug,
-				RepositoryProvider: sel.RepositoryProvider,
-				Head:               resp.Head,
-				ActiveVersion:      resp.ActiveVersion,
-				LastDeploy:         resp.LastDeploy,
-				SDK:                resp.SDK,
-				ChannelSDKMajors:   resp.ChannelSDKMajors,
-			}
-			w := cmd.OutOrStdout()
-			if jsonOut {
-				fmt.Fprintln(w, renderJSON(out))
-				return nil
-			}
-			fmt.Fprintf(w, "project:      %s\n", out.ProjectID)
-			fmt.Fprintf(w, "environment:  %s (%s)\n", out.EnvironmentSlug, out.EnvironmentRef)
-			fmt.Fprintf(w, "endpoint:     https://%s.%s\n", out.EnvironmentRef, r.Endpoints().PublicHost)
-			fmt.Fprintf(w, "repository:   %s\n", out.RepositoryProvider)
-			if out.Head != nil {
-				fmt.Fprintf(w, "head:         %s\n", *out.Head)
-			}
-			if out.ActiveVersion != nil {
-				fmt.Fprintf(w, "active:       %s\n", *out.ActiveVersion)
-			}
-			if line := formatSDK(out.SDK, out.ChannelSDKMajors, out.ActiveVersion); line != "" {
-				fmt.Fprint(w, line)
-			}
-			if line := formatLastDeploy(out.LastDeploy, time.Now()); line != "" {
-				fmt.Fprint(w, line)
-			}
-			return nil
+			_, err := statusOfProject(cmd, r, jsonOut)
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
@@ -678,8 +608,6 @@ func renderJSON(v any) string {
 	}
 	return string(b)
 }
-
-var _ = renderJSON // silence "unused" until --json lands
 
 // lookupBackendTarget resolves an Environment's URL and publishable key directly
 // from its Environment ref.

@@ -4,10 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -16,76 +13,62 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
-	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
-// trpcCall is one recorded request: its method, path, raw query, and the RAW
-// body bytes. Raw, not decoded — the point of these tests is the wire, and a
-// decoded map cannot tell JSON `true` from the string `"true"` once it has been
-// through an `any`.
-type trpcCall struct {
+// stackCall is one recorded request: its method, path, and the RAW body bytes.
+// Raw, not decoded — the point of these tests is the wire, and a decoded map
+// cannot tell JSON `true` from the string `"true"` once it has been through an
+// `any`.
+type stackCall struct {
 	Method string
 	Path   string
-	Query  string
 	Body   string
 }
 
-// fakeTRPC is an httptest-backed Studio tRPC server that records every call and
-// answers each procedure from `replies`. An unexpected procedure FAILS the test
-// rather than being stubbed away — a command that calls the wrong procedure name
-// is exactly the silent 404 this exists to catch.
-type fakeTRPC struct {
+// fakeStack is an httptest-backed PROJECT that records every call and answers
+// each route from `replies`, keyed "METHOD path". An unexpected route FAILS the
+// test rather than being stubbed away — a command that calls the wrong path is
+// exactly the silent 404 this exists to catch.
+type fakeStack struct {
 	t       *testing.T
 	replies map[string]any
-	calls   []trpcCall
-	client  Studio
+	calls   []stackCall
 }
 
-func newFakeTRPC(t *testing.T, replies map[string]any) *fakeTRPC {
+func newFakeStack(t *testing.T, replies map[string]any) *fakeStack {
 	t.Helper()
-	f := &fakeTRPC{t: t, replies: replies}
-	srv := httptest.NewServer(http.HandlerFunc(f.serve))
-	t.Cleanup(srv.Close)
-	f.client = studio.New(
-		srv.URL,
-		func(context.Context) (string, error) { return "test-token", nil },
-		func(context.Context, string, string, string) (string, error) { return "test-proof", nil },
-	)
-	return f
+	return &fakeStack{t: t, replies: replies}
 }
 
-func (f *fakeTRPC) serve(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(r.Body)
-	f.calls = append(f.calls, trpcCall{
-		Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Body: string(raw),
-	})
-	proc := strings.TrimPrefix(r.URL.Path, "/api/trpc/")
-	data, ok := f.replies[proc]
+// Do satisfies flags.REST — the same seam the definition half already used.
+func (f *fakeStack) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+	f.calls = append(f.calls, stackCall{Method: method, Path: path, Body: string(body)})
+	data, ok := f.replies[method+" "+path]
 	if !ok {
-		f.t.Errorf("unexpected tRPC procedure %q", proc)
-		http.Error(w, "no such procedure", http.StatusNotFound)
-		return
+		f.t.Errorf("unexpected route %s %s", method, path)
+		return http.StatusNotFound, []byte(`{"error":"not_found"}`), nil
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{"data": map[string]any{"json": data}},
-	})
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return 0, nil, err
+	}
+	return http.StatusOK, raw, nil
 }
 
 // only returns the single recorded call, failing when there was not exactly one.
-func (f *fakeTRPC) only() trpcCall {
+func (f *fakeStack) only() stackCall {
 	f.t.Helper()
-	require.Len(f.t, f.calls, 1, "expected exactly one tRPC call")
+	require.Len(f.t, f.calls, 1, "expected exactly one call")
 	return f.calls[0]
 }
 
-// runFlags drives `palbase flags <args...>` against the fake tRPC server with
+// runFlags drives `palbase flags <args...>` against the fake project with
 // proj_1 / production selected, and returns stdout.
-func runFlags(t *testing.T, f *fakeTRPC, args ...string) (string, error) {
+func runFlags(t *testing.T, f *fakeStack, args ...string) (string, error) {
 	t.Helper()
 	t.Chdir(t.TempDir())
 	cmd := Cmd(Resolvers{
-		Studio:    func() Studio { return f.client },
+		REST:      func(*cobra.Command) (REST, error) { return f, nil },
 		Selection: selectiontest.Selected(t),
 	})
 	var out bytes.Buffer
@@ -131,6 +114,7 @@ func TestFlagsUserSet_WireBodyPerValueType(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
+		key  string
 		body string
 	}{
 		{
@@ -138,48 +122,55 @@ func TestFlagsUserSet_WireBodyPerValueType(t *testing.T) {
 			// `flags add` rejects it, and that rejection must not reach here.
 			name: "boolean",
 			args: []string{"user", "set", "usr_42", "palbase.debug_console", "--type", "boolean", "--value", "true"},
-			body: `{"json":{"key":"palbase.debug_console","ref":"app1prod","userId":"usr_42","value":true}}`,
+			key:  "palbase.debug_console",
+			body: `{"value":true}`,
 		},
 		{
 			name: "boolean false",
 			args: []string{"user", "set", "usr_42", "palbase.debug_console", "--type", "boolean", "--value", "false"},
-			body: `{"json":{"key":"palbase.debug_console","ref":"app1prod","userId":"usr_42","value":false}}`,
+			key:  "palbase.debug_console",
+			body: `{"value":false}`,
 		},
 		{
 			name: "number",
 			args: []string{"user", "set", "usr_42", "max_uploads", "--type", "number", "--value", "50"},
-			body: `{"json":{"key":"max_uploads","ref":"app1prod","userId":"usr_42","value":50}}`,
+			key:  "max_uploads",
+			body: `{"value":50}`,
 		},
 		{
 			// The one that proves the types are not interchangeable: the SAME
 			// literal `true`, declared a string, must be quoted on the wire.
 			name: "string that looks like a boolean",
 			args: []string{"user", "set", "usr_42", "theme", "--type", "string", "--value", "true"},
-			body: `{"json":{"key":"theme","ref":"app1prod","userId":"usr_42","value":"true"}}`,
+			key:  "theme",
+			body: `{"value":"true"}`,
 		},
 		{
 			name: "string",
 			args: []string{"user", "set", "usr_42", "theme", "--type", "string", "--value", "dark"},
-			body: `{"json":{"key":"theme","ref":"app1prod","userId":"usr_42","value":"dark"}}`,
+			key:  "theme",
+			body: `{"value":"dark"}`,
 		},
 		{
 			name: "json object is compacted, not re-quoted",
 			args: []string{"user", "set", "usr_42", "limits", "--type", "json", "--value", `{"daily": 10}`},
-			body: `{"json":{"key":"limits","ref":"app1prod","userId":"usr_42","value":{"daily":10}}}`,
+			key:  "limits",
+			body: `{"value":{"daily":10}}`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeTRPC(t, map[string]any{
-				"userFlags.users.put": map[string]any{"key": "k", "value": true, "source": "override"},
+			path := "/v1/user-flags/users/usr_42/" + tc.key
+			f := newFakeStack(t, map[string]any{
+				"PUT " + path: map[string]any{"key": "k", "value": true, "source": "override"},
 			})
 			_, err := runFlags(t, f, tc.args...)
 			require.NoError(t, err)
 
 			call := f.only()
-			require.Equal(t, http.MethodPost, call.Method)
-			require.Equal(t, "/api/trpc/userFlags.users.put", call.Path)
+			require.Equal(t, http.MethodPut, call.Method)
+			require.Equal(t, path, call.Path)
 			require.Equal(t, tc.body, strings.TrimSpace(call.Body))
 		})
 	}
@@ -189,7 +180,7 @@ func TestFlagsUserSet_WireBodyPerValueType(t *testing.T) {
 // swap is the mistake that will actually happen. It is refused locally, before
 // any request goes out, and the message names the order.
 func TestFlagsUserSet_RejectsSwappedUserIDAndKey(t *testing.T) {
-	f := newFakeTRPC(t, map[string]any{})
+	f := newFakeStack(t, map[string]any{})
 	_, err := runFlags(t, f,
 		"user", "set", "palbase.debug_console", "550e8400-e29b-41d4-a716-446655440000",
 		"--type", "boolean", "--value", "true")
@@ -233,7 +224,7 @@ func TestFlagsUserSet_RejectsWrongShape(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeTRPC(t, map[string]any{})
+			f := newFakeStack(t, map[string]any{})
 			_, err := runFlags(t, f, tc.args...)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)
@@ -243,8 +234,8 @@ func TestFlagsUserSet_RejectsWrongShape(t *testing.T) {
 }
 
 func TestFlagsUserUnset_Wire(t *testing.T) {
-	f := newFakeTRPC(t, map[string]any{
-		"userFlags.users.delete": map[string]any{
+	f := newFakeStack(t, map[string]any{
+		"DELETE /v1/user-flags/users/usr_42/palbase.debug_console": map[string]any{
 			"key": "palbase.debug_console", "value": false, "source": "system",
 		},
 	})
@@ -252,38 +243,35 @@ func TestFlagsUserUnset_Wire(t *testing.T) {
 	require.NoError(t, err)
 
 	call := f.only()
-	require.Equal(t, http.MethodPost, call.Method)
-	require.Equal(t, "/api/trpc/userFlags.users.delete", call.Path)
-	require.Equal(t,
-		`{"json":{"key":"palbase.debug_console","ref":"app1prod","userId":"usr_42"}}`,
-		strings.TrimSpace(call.Body))
+	require.Equal(t, http.MethodDelete, call.Method)
+	require.Equal(t, "/v1/user-flags/users/usr_42/palbase.debug_console", call.Path)
+	require.Empty(t, strings.TrimSpace(call.Body), "a delete carries no body")
 	// The Environment value that now applies is reported back from the response.
 	require.Contains(t, out, "environment value: false")
 }
 
 func TestFlagsUserClear_Wire(t *testing.T) {
-	f := newFakeTRPC(t, map[string]any{
-		"userFlags.users.deleteAll": map[string]any{"deleted": 3},
+	f := newFakeStack(t, map[string]any{
+		"DELETE /v1/user-flags/users/usr_42": map[string]any{"deleted": 3},
 	})
 	out, err := runFlags(t, f, "user", "clear", "usr_42")
 	require.NoError(t, err)
 
 	call := f.only()
-	require.Equal(t, http.MethodPost, call.Method)
-	require.Equal(t, "/api/trpc/userFlags.users.deleteAll", call.Path)
-	require.Equal(t, `{"json":{"ref":"app1prod","userId":"usr_42"}}`, strings.TrimSpace(call.Body))
+	require.Equal(t, http.MethodDelete, call.Method)
+	require.Equal(t, "/v1/user-flags/users/usr_42", call.Path)
 	require.Contains(t, out, "removed 3 override(s)")
 }
 
 // list is TWO reads: the merged per-user view, plus the Environment's flag list
 // to say which value won. Both are queries (GET, input in the query string).
 func TestFlagsUserList_WireAndInferredSource(t *testing.T) {
-	f := newFakeTRPC(t, map[string]any{
-		"userFlags.users.get": map[string]any{
+	f := newFakeStack(t, map[string]any{
+		"GET /v1/user-flags/users/usr_42": map[string]any{
 			"values":     map[string]any{"palbase.debug_console": true, "theme": "dark"},
 			"fetched_at": "2026-07-29T00:00:00Z",
 		},
-		"userFlags.system.list": []any{
+		"GET /v1/user-flags/system": []any{
 			map[string]any{"key": "palbase.debug_console", "value": false, "value_type": "bool"},
 			map[string]any{"key": "theme", "value": "dark", "value_type": "string"},
 		},
@@ -293,11 +281,9 @@ func TestFlagsUserList_WireAndInferredSource(t *testing.T) {
 
 	require.Len(t, f.calls, 2)
 	require.Equal(t, http.MethodGet, f.calls[0].Method)
-	require.Equal(t, "/api/trpc/userFlags.users.get", f.calls[0].Path)
-	require.Equal(t, `{"json":{"ref":"app1prod","userId":"usr_42"}}`, inputParam(t, f.calls[0].Query))
+	require.Equal(t, "/v1/user-flags/users/usr_42", f.calls[0].Path)
 	require.Equal(t, http.MethodGet, f.calls[1].Method)
-	require.Equal(t, "/api/trpc/userFlags.system.list", f.calls[1].Path)
-	require.Equal(t, `{"json":{"ref":"app1prod"}}`, inputParam(t, f.calls[1].Query))
+	require.Equal(t, "/v1/user-flags/system", f.calls[1].Path)
 
 	var rows []userFlagRow
 	require.NoError(t, json.Unmarshal([]byte(out), &rows))
@@ -314,11 +300,11 @@ func TestFlagsUserList_WireAndInferredSource(t *testing.T) {
 }
 
 func TestFlagsUserList_HumanOutputMarksTheWinner(t *testing.T) {
-	f := newFakeTRPC(t, map[string]any{
-		"userFlags.users.get": map[string]any{
+	f := newFakeStack(t, map[string]any{
+		"GET /v1/user-flags/users/usr_42": map[string]any{
 			"values": map[string]any{"palbase.debug_console": true}, "fetched_at": "x",
 		},
-		"userFlags.system.list": []any{
+		"GET /v1/user-flags/system": []any{
 			map[string]any{"key": "palbase.debug_console", "value": false},
 		},
 	})
@@ -333,8 +319,10 @@ func TestFlagsUserList_HumanOutputMarksTheWinner(t *testing.T) {
 // The override commands are runtime state. Writing config/flags.ts here would
 // put an Environment-specific, per-user value into git.
 func TestFlagsUser_NeverTouchesConfigFile(t *testing.T) {
-	f := newFakeTRPC(t, map[string]any{
-		"userFlags.users.put": map[string]any{"key": "k", "value": true, "source": "override"},
+	f := newFakeStack(t, map[string]any{
+		"PUT /v1/user-flags/users/usr_42/palbase.debug_console": map[string]any{
+			"key": "k", "value": true, "source": "override",
+		},
 	})
 	_, err := runFlags(t, f,
 		"user", "set", "usr_42", "palbase.debug_console", "--type", "boolean", "--value", "true")
@@ -356,12 +344,4 @@ func TestFlagsAdd_StillRejectsDottedKey(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid flag key")
-}
-
-// inputParam pulls the tRPC `input` query parameter out of a recorded GET.
-func inputParam(t *testing.T, rawQuery string) string {
-	t.Helper()
-	q, err := url.ParseQuery(rawQuery)
-	require.NoError(t, err)
-	return q.Get("input")
 }

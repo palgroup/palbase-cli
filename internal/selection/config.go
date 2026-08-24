@@ -15,7 +15,7 @@
 // `organization_id` here, no `palbase org`, and no `--organization`.
 //
 // A Git branch is never a runtime selector. Files using any other schema are
-// rejected and must be replaced with `palbase project use <projectId>`.
+// rejected and must be replaced by linking this checkout again.
 package selection
 
 import (
@@ -81,7 +81,7 @@ func ConfigPath(dir string) string {
 type ErrNotSelected struct{}
 
 func (ErrNotSelected) Error() string {
-	return "no project selected — run `palbase project use <projectId>` in this directory, or pass --project"
+	return "no project selected — run `palbase link <project>` in this directory, or pass --project/--environment"
 }
 
 // Load reads the current config from dir. A missing file yields ErrNotSelected.
@@ -98,17 +98,17 @@ func Load(dir string) (*Config, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w — run `palbase project use <projectId>`", ConfigPath(dir), err)
+		return nil, fmt.Errorf("parse %s: %w — run `palbase link <project>` again", ConfigPath(dir), err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("parse %s: expected one JSON object — run `palbase project use <projectId>`", ConfigPath(dir))
+		return nil, fmt.Errorf("parse %s: expected one JSON object — run `palbase link <project>` again", ConfigPath(dir))
 	}
 	if cfg.Version != Version {
-		return nil, fmt.Errorf("%s has unsupported config version %d (expected %d) — run `palbase project use <projectId>`",
+		return nil, fmt.Errorf("%s has unsupported config version %d (expected %d) — run `palbase link <project>` again",
 			ConfigPath(dir), cfg.Version, Version)
 	}
 	if cfg.ProjectID == "" || cfg.EnvironmentID == "" {
-		return nil, fmt.Errorf("%s must contain project_id and environment_id — run `palbase project use <projectId>`", ConfigPath(dir))
+		return nil, fmt.Errorf("%s must contain project_id and environment_id — run `palbase link <project>` again", ConfigPath(dir))
 	}
 	if err := validateRepositoryProvider(cfg.RepositoryProvider); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ConfigPath(dir), err)

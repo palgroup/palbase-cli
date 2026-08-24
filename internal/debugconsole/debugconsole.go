@@ -92,11 +92,14 @@ func Cmd(r Resolvers) *cobra.Command {
 			"`palbase logs` shows the server's view of a deployment. This shows the\n" +
 			"client's: the request that never left, the 401 nobody surfaced, the body\n" +
 			"that came back empty.\n\n" +
-			"Three views of the same records: `tail` reads a simulator\x27s own files,\n" +
-			"`attach` watches a real device live with a pairing code it shows, and\n" +
-			"`history` reads back what already happened, days later.",
+			"Two views of the same records: `tail` reads a simulator\x27s own files, and\n" +
+			"`attach` watches a real device live with a pairing code it shows.\n\n" +
+			"There is no `history`. It read back records days later, and reading them\n" +
+			"back requires a plane that RETAINS them — this one keeps aggregates, not\n" +
+			"one record per request. The panel says the same thing on the same screen;\n" +
+			"a verb that could only ever answer nothing is worse than an absent one.",
 	}
-	cmd.AddCommand(tailCmd(), attachCmd(r), historyCmd(r))
+	cmd.AddCommand(tailCmd(), attachCmd(r))
 	return cmd
 }
 

@@ -2,7 +2,7 @@ package testuser
 
 // `test-user` was the last verb that could only talk to the cloud. In a checkout
 // linked to a stack — which is what `palbase start` produces — every subcommand
-// answered "no project selected — run `palbase project use <projectId>`", advice
+// answered "no project selected — run `palbase project use <projectId>`" — advice
 // that cannot be followed there and that names a concept the checkout does not
 // have. These tests pin the routing: a linked checkout reaches the PROJECT, at
 // the route a deploy already uses for the same job.
@@ -40,9 +40,9 @@ func linkedTo(t *testing.T, url string) (backend.Target, backend.Credentials) {
 	if err := backend.StoreCredential(url, cred); err != nil {
 		t.Fatal(err)
 	}
-	got, _, ok := linkedProject()
-	if !ok {
-		t.Fatal("a checkout with a local target and a credential did not resolve as linked")
+	got, _, err := resolveProject(context.Background())
+	if err != nil {
+		t.Fatalf("a checkout with a local target and a credential did not resolve: %v", err)
 	}
 	if got.URL != url {
 		t.Fatalf("resolved %q, want %q", got.URL, url)
@@ -190,7 +190,7 @@ func TestCloneReachesTheProjectWithItsOverrides(t *testing.T) {
 
 	var out bytes.Buffer
 	overrides := map[string]map[string]any{"profiles": {"display_name": "Copy"}}
-	if err := cloneOnProject(context.Background(), target, cred, "usr_1", overrides, false, &out); err != nil {
+	if err := cloneOnProject(context.Background(), target, cred, "usr_1", "", "", overrides, false, &out); err != nil {
 		t.Fatalf("clone: %v", err)
 	}
 	if path != "/v1/management/test-users/clone" {

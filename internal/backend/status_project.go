@@ -33,22 +33,59 @@ type deploymentState struct {
 	SDKVersion    string    `json:"sdk_version"`
 }
 
-// statusOfProject reports on the project this checkout is linked to. It returns
-// false when there is no linked project, so the caller can fall through to the
-// cloud arm.
-func statusOfProject(cmd *cobra.Command) (bool, error) {
-	target, err := ReadTarget()
+// statusJSON is `palbase status --json`: what this command can actually check,
+// in the shape a script can read.
+//
+// It names the ADDRESS rather than a project and environment id pair. Those ids
+// were the cloud arm's vocabulary, and that arm is gone; what a status answer
+// has to make unambiguous is WHICH RUNTIME was looked at (UAT CLI-005), and the
+// address is exactly that — for a project on this machine as much as for one in
+// the cloud.
+type statusJSON struct {
+	Project    string           `json:"project"`
+	Address    string           `json:"address"`
+	Credential statusCredential `json:"credential"`
+	// Deployed is nil when nothing has been pushed, or when this stack serves the
+	// directory and never follows the deploy pointer. Reason says which.
+	Deployed *deploymentState `json:"deployed"`
+	Reason   string           `json:"reason,omitempty"`
+	// AppKey is "current", "stale" or "unchecked" — the drift the text output
+	// warns about, in one word a script can branch on.
+	AppKey string `json:"app_key,omitempty"`
+	// LastAttempt is the newest row in the PLANE's push ledger, which is a
+	// different fact from Deployed: a push that never reached the project is not
+	// in the project's history, and that is exactly the failure worth seeing.
+	LastAttempt *deployRow `json:"last_attempt,omitempty"`
+}
+
+type statusCredential struct {
+	Source string `json:"source"`
+	Kind   string `json:"kind"`
+}
+
+// statusOfProject reports on the project this verb acts on: the one this
+// checkout is linked to, or the one the caller selected.
+//
+// The bool it returns used to mean "I handled it" — false sent the caller to a
+// second arm that asked the Studio the same question over tRPC and rendered a
+// different shape. There is one arm now; the bool is kept only so the call site
+// reads the same as the other target-relative verbs.
+func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error) {
+	ctx := cmd.Context()
+	target, err := ResolveTarget(ctx)
 	if err != nil {
-		return false, nil
+		return true, err
 	}
 	cred, source, err := Credential(target.URL)
 	if err != nil {
 		return true, err
 	}
+	if jsonOut {
+		return true, statusAsJSON(ctx, cmd, r, target, cred, string(source))
+	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
 
 	out := cmd.OutOrStdout()
-	ctx := cmd.Context()
 
 	fmt.Fprintf(out, "project:      %s\n", target.Describe())
 	fmt.Fprintf(out, "address:      %s\n", target.URL)
@@ -91,6 +128,17 @@ func statusOfProject(cmd *cobra.Command) (bool, error) {
 			fmt.Fprintf(out, ", SDK %s", deployed.SDKVersion)
 		}
 		fmt.Fprintf(out, "\n              activated %s\n", deployed.ActivatedAt.Local().Format("2006-01-02 15:04"))
+	}
+
+	if attempt := lastPushAttempt(ctx, r); attempt != nil {
+		if line := formatLastDeploy(&lastDeploy{
+			Status:    attempt.Status,
+			Error:     attempt.Error,
+			Version:   attempt.Version,
+			UpdatedAt: &attempt.CreatedAt,
+		}, time.Now()); line != "" {
+			fmt.Fprint(out, line)
+		}
 	}
 
 	reportKeyDrift(ctx, target, cred, out)
@@ -175,4 +223,97 @@ func reportKeyDrift(ctx context.Context, target Target, cred Credentials, out io
 	// difference instead of running the command that fixes it.
 	fmt.Fprintf(out, "app key:      STALE — %s ships a key this project no longer hands out.\n", envs.Default)
 	fmt.Fprintln(out, "              Run `palbase link` to refresh it, then rebuild the app.")
+}
+
+// statusAsJSON answers the same questions the text output does, without the
+// advice: a script cannot follow "run palbase push", and prose inside a JSON
+// document would make it unparseable.
+func statusAsJSON(ctx context.Context, cmd *cobra.Command, r Resolvers, target Target, cred Credentials, source string) error {
+	doc := statusJSON{
+		Project:    target.Describe(),
+		Address:    target.URL,
+		Credential: statusCredential{Source: source, Kind: credentialKindWord(cred.Kind)},
+	}
+
+	status, body, err := managementCall(ctx, target, cred, http.MethodGet,
+		"/v1/management/deployments/current", nil, "")
+	switch {
+	case err != nil:
+		return err
+	case status == http.StatusNotFound && target.Local:
+		doc.Reason = "this stack serves this directory, and rebuilds when you save"
+	case status == http.StatusNotFound:
+		doc.Reason = "nothing deployed yet"
+	case status != http.StatusOK:
+		return fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
+	default:
+		var deployed deploymentState
+		if err := json.Unmarshal(body, &deployed); err != nil {
+			return fmt.Errorf("read the deployment: %w", err)
+		}
+		doc.Deployed = &deployed
+	}
+
+	doc.AppKey = appKeyState(ctx, target)
+	doc.LastAttempt = lastPushAttempt(ctx, r)
+	fmt.Fprintln(cmd.OutOrStdout(), renderJSON(doc))
+	return nil
+}
+
+// appKeyState is reportKeyDrift's finding as one word.
+//
+// "unchecked" covers both "this checkout ships no key" and "the project could
+// not be asked" — a script that must not run against a stale key treats them the
+// same, and calling either of them "current" is the failure this reports.
+func appKeyState(ctx context.Context, target Target) string {
+	envs, err := readAppEnvironments("ios")
+	if err != nil || len(envs.Environments) == 0 {
+		return "unchecked"
+	}
+	entry, ok := envs.Environments[envs.Default]
+	if !ok || entry.APIKey == "" {
+		return "unchecked"
+	}
+	current, err := projectPublishableKey(ctx, target)
+	if err != nil {
+		return "unchecked"
+	}
+	if current == entry.APIKey {
+		return "current"
+	}
+	return "stale"
+}
+
+// lastPushAttempt is the newest row in the PLANE's push ledger for the selected
+// Environment, or nil when there is no selection to ask about.
+//
+// It is a different question from "what is this project serving", and status has
+// to answer both: a push that failed before the artifact ever reached the
+// project leaves the project's own history untouched, so reading only that
+// history reports a healthy, months-old deploy and says nothing about the three
+// failures since. This is the visibility half.
+//
+// Best-effort by design. A checkout linked straight to an address has no project
+// id and therefore no ledger to read, and a plane that cannot be reached is not
+// a reason to refuse a status about the project in front of you — so every
+// failure here is silence, and the deployment block above still answers.
+func lastPushAttempt(ctx context.Context, r Resolvers) *deployRow {
+	if r.Selection == nil || r.REST == nil {
+		return nil
+	}
+	sel, err := r.resolve(ctx)
+	if err != nil || sel.ProjectID == "" || sel.EnvironmentRef() == "" {
+		return nil
+	}
+	var resp struct {
+		Deployments []deployRow `json:"deployments"`
+	}
+	if err := r.REST().Do(ctx, http.MethodGet,
+		DeploymentsPath(sel.ProjectID, sel.EnvironmentRef())+"?limit=1", nil, &resp); err != nil {
+		return nil
+	}
+	if len(resp.Deployments) == 0 {
+		return nil
+	}
+	return &resp.Deployments[0]
 }

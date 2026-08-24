@@ -1,8 +1,17 @@
-// Package logs wires `palbase logs` — tail the SELECTED ENVIRONMENT's deployed
-// backend logs from the terminal. Transport: Studio tRPC `logs.entries.search`
-// (Studio validates membership, then proxies modules/logs' /logs/v1/search).
-// One-shot by default (newest lines, printed oldest-first); --follow polls the
-// same search FORWARD from the last seen timestamp every 2s.
+// Package logs wires `palbase logs` — read the SELECTED ENVIRONMENT's deployed
+// backend logs from the terminal.
+//
+// Transport: the plane's panel surface, over REST —
+// `GET /v1/panel/environments/{ref}/logs`, which reads the same ClickHouse the
+// panel's log screen does. It used to be a tRPC query against the Studio, which
+// proxied a `modules/logs` search this plane does not run; the store, the query
+// and the door are all different now, and there is exactly one of each.
+//
+// WHAT THAT COSTS, said plainly: the store answers a WINDOW, newest first, with
+// no cursor. So `--follow` re-reads the newest lines every 2s and prints what it
+// has not printed before (followCursor), instead of paging forward from a
+// cursor. A line older than the poll window is missed by a follower that was not
+// running — which is what a follower means anyway.
 //
 // Logs belong to an Environment: override the target with --environment.
 package logs
@@ -12,8 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/palgroup/palbase-cli/internal/backend"
-	"maps"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,30 +33,67 @@ import (
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
-// Studio is the tRPC transport subset the logs command needs.
-type Studio interface {
-	Query(ctx context.Context, path string, input any, out any) error
+// REST is the management transport subset the logs command needs.
+type REST interface {
+	Do(ctx context.Context, method, path string, body any, out any) error
 }
 
-// Resolvers carries the lazily-built Studio client + the shared selection
+// Resolvers carries the lazily-built REST client + the shared selection
 // resolver.
 type Resolvers struct {
-	Studio    func() Studio
+	REST      func() REST
 	Selection func() *selection.Resolver
 }
 
-// logLine mirrors the Studio logs router's LogLine wire type.
+// logLine is one line as this command prints it.
 type logLine struct {
-	Timestamp string            `json:"timestamp"`
-	Source    string            `json:"source"`
-	Level     string            `json:"level"`
-	Message   string            `json:"message"`
-	Labels    map[string]string `json:"labels"`
+	Timestamp string `json:"timestamp"`
+	Source    string `json:"source"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
 }
 
-type searchResponse struct {
-	Lines      []logLine `json:"lines"`
-	NextCursor *string   `json:"next_cursor"`
+// logsResponse is the panel surface's answer: newest first.
+type logsResponse struct {
+	Entries []struct {
+		Timestamp string `json:"timestamp"`
+		Severity  string `json:"severity"`
+		Source    string `json:"source"`
+		Body      string `json:"body"`
+	} `json:"entries"`
+}
+
+// logsPath is where an Environment's lines are read.
+func logsPath(ref string) string {
+	return "/v1/panel/environments/" + url.PathEscape(ref) + "/logs"
+}
+
+// defaultWindow is what `--since` defaults to. An hour is the panel's default
+// too, so the two screens answer the same question by default.
+const defaultWindow = time.Hour
+
+// parseWindow turns `--since 15m` into seconds.
+//
+// `d` is accepted on top of Go's units because people write `--since 2d` and
+// time.ParseDuration refuses it — a refusal that reads as "logs are broken"
+// rather than "that unit is not supported".
+func parseWindow(since string) (int, error) {
+	since = strings.TrimSpace(since)
+	if since == "" {
+		return int(defaultWindow.Seconds()), nil
+	}
+	if days, ok := strings.CutSuffix(since, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("--since %q: expected a window like 15m, 2h or 7d", since)
+		}
+		return n * 24 * 3600, nil
+	}
+	d, err := time.ParseDuration(since)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("--since %q: expected a window like 15m, 2h or 7d", since)
+	}
+	return int(d.Seconds()), nil
 }
 
 // followInterval is how often --follow re-polls. A var so tests can shrink it.
@@ -54,14 +102,13 @@ var followInterval = 2 * time.Second
 // Cmd returns the `palbase logs` command.
 func Cmd(r Resolvers) *cobra.Command {
 	var (
-		source    string
-		container string
-		levels    string
-		since     string
-		query     string
-		limit     int
-		follow    bool
-		jsonOut   bool
+		source  string
+		levels  string
+		since   string
+		query   string
+		limit   int
+		follow  bool
+		jsonOut bool
 	)
 	cmd := &cobra.Command{
 		Use:   "logs",
@@ -79,7 +126,8 @@ new lines every 2s — Ctrl-C to stop.
 			// a cloud environment nobody asked for. Measured: in a checkout
 			// linked to a project, this silently ignored the link, resolved the
 			// selected cloud environment instead, and printed ITS logs — or
-			// refused with "run palbase project use", which is advice for a
+			// refused with "run palbase project use" — a command that does not
+			// exist — which is advice for a
 			// different question entirely.
 			// A LINKED STACK'S LOGS ARE ITS CONTAINERS', and this used to say so
 			// and stop — pointing at `docker logs <project>-runtime-1` and
@@ -128,41 +176,22 @@ new lines every 2s — Ctrl-C to stop.
 				return err
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			ref := sel.EnvironmentRef()
 
-			base := map[string]any{"ref": ref, "limit": limit}
-			if source != "" {
-				base["source"] = source
+			windowSec, err := parseWindow(since)
+			if err != nil {
+				return err
 			}
-			if container != "" {
-				base["container"] = container
-			}
-			if levels != "" {
-				base["level"] = strings.Split(levels, ",")
-			}
-			if since != "" {
-				base["since"] = since
-			}
-			if query != "" {
-				base["q"] = query
+			read := func(window int) ([]logLine, error) {
+				return readLines(cmd.Context(), r.REST(), sel.EnvironmentRef(),
+					window, limit, query, levels, source)
 			}
 
 			out := cmd.OutOrStdout()
-			search := func(extra map[string]any) (searchResponse, error) {
-				input := map[string]any{}
-				maps.Copy(input, base)
-				maps.Copy(input, extra)
-				var resp searchResponse
-				err := r.Studio().Query(cmd.Context(), "logs.entries.search", input, &resp)
-				return resp, err
-			}
-
-			// One shot: newest `limit` lines, printed oldest-first.
-			resp, err := search(map[string]any{"direction": "BACKWARD"})
+			// One shot: the newest `limit` lines in the window, oldest-first.
+			lines, err := read(windowSec)
 			if err != nil {
-				return fmt.Errorf("logs.entries.search: %w", err)
+				return err
 			}
-			lines := reverse(resp.Lines)
 			if jsonOut && !follow {
 				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
@@ -176,37 +205,31 @@ new lines every 2s — Ctrl-C to stop.
 				return nil
 			}
 
-			// Follow: poll FORWARD from the last seen timestamp. Lines sharing
-			// the last timestamp are deduped by message so a poll boundary
-			// neither drops nor repeats them.
+			// Follow: re-read the newest lines over a SHORT window and print what
+			// has not been printed. The store answers a window rather than a
+			// cursor, so there is nothing to page forward from; the cursor here
+			// dedupes by timestamp+message, which is what kept equal-timestamp
+			// lines from being dropped or repeated on the old transport too.
+			//
+			// The window is a few polls wide on purpose: exactly one interval
+			// would lose a line to any hiccup between two reads.
 			cursor := newFollowCursor(lines)
+			const followWindow = 60
 			for {
 				select {
 				case <-cmd.Context().Done():
 					return nil
 				case <-time.After(followInterval):
 				}
-				extra := map[string]any{"direction": "FORWARD"}
-				if cursor.lastTS != "" {
-					// modules/logs requires from and to TOGETHER (a lone from is a
-					// 400). `to` slightly in the future is fine — it only bounds the
-					// window; a skewed client clock at worst delays a line to the
-					// next poll, never drops it (from stays at the cursor).
-					extra["from"] = cursor.lastTS
-					extra["to"] = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
-				} else if since == "" {
-					extra["since"] = "1m"
-				}
-				resp, err := search(extra)
+				fresh, err := read(followWindow)
 				if err != nil {
-					return fmt.Errorf("logs.entries.search: %w", err)
+					return err
 				}
-				printLines(out, cursor.fresh(resp.Lines), jsonOut)
+				printLines(out, cursor.fresh(fresh), jsonOut)
 			}
 		},
 	}
 	cmd.Flags().StringVar(&source, "source", "", "Only this source (e.g. backend)")
-	cmd.Flags().StringVar(&container, "container", "", "Only this container")
 	cmd.Flags().StringVar(&levels, "level", "", "Comma-separated levels: debug,info,warn,error")
 	cmd.Flags().StringVar(&since, "since", "", "Look-back window, e.g. 15m, 2h")
 	cmd.Flags().StringVarP(&query, "query", "q", "", "Free-text line filter")
@@ -291,4 +314,44 @@ func splitLevels(raw string) []string {
 		}
 	}
 	return out
+}
+
+// readLines fetches one window's newest lines and returns them oldest-first,
+// which is the order a terminal reads in.
+//
+// The filters travel as query parameters, and every one of them is APPLIED by
+// the store — see buildLogsQuery. A filter the server ignores is worse than no
+// filter: the command answers, the lines look plausible, and nobody learns that
+// `--level error` showed them everything.
+func readLines(ctx context.Context, rest REST, ref string,
+	windowSec, limit int, query, levels, source string) ([]logLine, error) {
+	q := url.Values{}
+	q.Set("window_seconds", strconv.Itoa(windowSec))
+	q.Set("limit", strconv.Itoa(limit))
+	if query != "" {
+		q.Set("search", query)
+	}
+	if levels != "" {
+		q.Set("level", levels)
+	}
+	if source != "" {
+		q.Set("source", source)
+	}
+
+	var resp logsResponse
+	if err := rest.Do(ctx, http.MethodGet, logsPath(ref)+"?"+q.Encode(), nil, &resp); err != nil {
+		return nil, fmt.Errorf("read logs: %w", err)
+	}
+	// Newest first on the wire, oldest first on the screen.
+	lines := make([]logLine, 0, len(resp.Entries))
+	for i := len(resp.Entries) - 1; i >= 0; i-- {
+		e := resp.Entries[i]
+		lines = append(lines, logLine{
+			Timestamp: e.Timestamp,
+			Source:    e.Source,
+			Level:     e.Severity,
+			Message:   e.Body,
+		})
+	}
+	return lines, nil
 }

@@ -21,6 +21,7 @@ package backend
 // locally, then push" a two-word switch rather than a re-link.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,7 +152,8 @@ func readLinkedProject() (Target, error) {
 			"this checkout is not linked to a project.\n" +
 				"  palbase link <project>        a project in the cloud\n" +
 				"  palbase link <url>            something running on this machine\n" +
-				"  palbase start                 bring one up here and link to it")
+				"  palbase start                 bring one up here and link to it\n" +
+				"  --environment <ref>           act on one without linking")
 	}
 	if err != nil {
 		return Target{}, err
@@ -182,4 +184,47 @@ func credentialsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".palbase", "credentials.json"), nil
+}
+
+// SelectedProject answers the address of the project the caller SELECTED, when
+// this checkout is bound to none.
+//
+// The two facts were never the same one. A TARGET is written by `link` into
+// `.palbase/project.json`; a SELECTION is `--environment`, or the project
+// `palbase use` remembered, and it is what every cloud verb already acts on.
+// Commands that only knew targets therefore had a second implementation for the
+// cloud — one that spoke a different protocol to a different door — and the two
+// drifted: `test-user`, `flags`, `logs` and `status` each answered a different
+// shape depending on which half replied.
+//
+// Resolving the selection to an ADDRESS collapses that. A cloud project's
+// address is `<ref>.<PublicHost>` and its credential is brokered by
+// CloudKeyFetcher, so once the address exists, the target-relative half of every
+// verb — the one that talks REST to the project's own management surface — is
+// the ONLY half there needs to be.
+//
+// A func var rather than a parameter because the resolver lives in the command
+// wiring (it needs the control plane's session and the configured host), and
+// threading it through five packages' Resolvers would say the same thing five
+// times. Nil in tests, which is the point: nothing resolves a project by
+// accident.
+var SelectedProject func(ctx context.Context) (Target, bool)
+
+// ResolveTarget is ReadTarget with the selection as a second authority.
+//
+// The file wins. Someone who ran `link` in this checkout named a project on
+// purpose, and a selection quietly overriding it would make that verb a
+// decoration — the same reasoning that puts a hand-written credential ahead of
+// the broker.
+func ResolveTarget(ctx context.Context) (Target, error) {
+	target, err := ReadTarget()
+	if err == nil && target.URL != "" {
+		return target, nil
+	}
+	if SelectedProject != nil {
+		if selected, ok := SelectedProject(ctx); ok {
+			return selected, nil
+		}
+	}
+	return target, err
 }

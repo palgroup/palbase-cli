@@ -85,7 +85,9 @@ func TestSave_RequiresProjectAndEnvironmentIDs(t *testing.T) {
 func TestLoad_MissingFileIsNotSelected(t *testing.T) {
 	_, err := selection.Load(t.TempDir())
 	require.ErrorAs(t, err, &selection.ErrNotSelected{})
-	require.Contains(t, err.Error(), "palbase project use")
+	require.Contains(t, err.Error(), "palbase link")
+	require.NotContains(t, err.Error(), "project use",
+		"`palbase project use` does not exist — advising it sends people nowhere")
 }
 
 func TestLoad_UnknownVersionIsRefused(t *testing.T) {
@@ -152,7 +154,9 @@ func TestResolverConfig_RejectsUnsupportedShapeWithoutNetworkOrRewrite(t *testin
 
 	_, err := r.Config()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "palbase project use")
+	require.Contains(t, err.Error(), "palbase link")
+	require.NotContains(t, err.Error(), "project use",
+		"`palbase project use` does not exist — advising it sends people nowhere")
 	require.Empty(t, fake.Routes())
 	require.Equal(t, raw, selectiontest.ReadConfig(t, dir))
 }
@@ -174,7 +178,9 @@ func TestResolve_UnlinkedDirectoryRefusesBeforeAnyRequest(t *testing.T) {
 
 	_, err := r.Resolve(context.Background())
 	require.ErrorAs(t, err, &selection.ErrNotSelected{})
-	require.Contains(t, err.Error(), "palbase project use")
+	require.Contains(t, err.Error(), "palbase link")
+	require.NotContains(t, err.Error(), "project use",
+		"`palbase project use` does not exist — advising it sends people nowhere")
 	require.Empty(t, fake.Routes(), "an unlinked directory must not reach the API")
 }
 

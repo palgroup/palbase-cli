@@ -5,7 +5,7 @@ package backend
 // Native link wires a platform slot to a Palbase PROJECT without inspecting or
 // modifying platform project files:
 //
-//  1. Use the SELECTED project (`palbase project use`, or --project).
+//  1. Use the SELECTED project (`palbase link`, or --project).
 //  2. Register (or reuse) this checkout's platform app under that Project.
 //     Apps are PROJECT-scoped: `apps.project_id` is singular.
 //  3. Fetch one `.palbase/openapi/<env>.json` per environment plus the platform config at
@@ -115,7 +115,7 @@ func newNativeLinkCmd(r Resolvers, platform string) *cobra.Command {
 		Long: fmt.Sprintf(`Wire a %s app slot to the SELECTED Palbase project.
 Local project files are left untouched.
 
-  1. uses the selected project (palbase project use <projectId>, or --project)
+  1. uses the selected project (palbase link <project>, or --project)
   2. reuses this checkout's linked %s app or registers a new one
   3. writes one .palbase/openapi/<env>.json per environment and the platform config under
      .palbase/%s/palbase-config.json for the SELECTED environment

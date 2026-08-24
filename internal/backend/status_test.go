@@ -32,58 +32,14 @@ func decodeTRPCInput(t *testing.T, r *http.Request) map[string]any {
 	return wrapper.JSON
 }
 
-// `palbase status` names the FULL context — which project, which environment,
-// which endpoint — because "which runtime am I looking at" must never be a guess
-// (UAT CLI-005). And it sends only the ENVIRONMENT ref: there is no branch.
-func TestStatus_NamesTheContextAndSendsOnlyTheRef(t *testing.T) {
-	var gotInput map[string]any
-	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
-		if strings.Contains(req.URL.Path, "backend.status") {
-			gotInput = decodeTRPCInput(t, req)
-			trpcOK(w, map[string]any{
-				"head":          "abc1234",
-				"activeVersion": "abc1234",
-				"lastDeploy": map[string]any{
-					"status": "succeeded", "version": "abc1234",
-					"updatedAt": time.Now().Add(-3 * time.Minute).Format(time.RFC3339),
-				},
-			})
-			return
-		}
-		trpcOK(w, map[string]any{})
-	})
-
-	out, err := r.Run(t, "status")
-	require.NoError(t, err)
-
-	require.Equal(t, map[string]any{"ref": "app1prod"}, gotInput)
-	require.NotContains(t, gotInput, "branch")
-
-	require.Contains(t, out, "project:      proj_1")
-	require.Contains(t, out, "environment:  production (app1prod)")
-	require.Contains(t, out, "endpoint:     https://app1prod.dev.palbase.studio")
-	require.Contains(t, out, "repository:   palbase")
-	require.Contains(t, out, "last deploy: SUCCEEDED (3m ago)")
-	requireNoV1(t, r.Fake)
-}
-
-func TestStatusJSON_CarriesProjectIdAndEnvironmentId(t *testing.T) {
-	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
-		trpcOK(w, map[string]any{"head": "abc", "activeVersion": "abc"})
-	})
-	out, err := r.Run(t, "status", "--json")
-	require.NoError(t, err)
-
-	var got map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &got))
-	// The canonical metadata pair (spec §7.4): projectId names the product,
-	// environmentId names the runtime. No branch identity anywhere.
-	require.Equal(t, "proj_1", got["projectId"])
-	require.Equal(t, "env_prod", got["environmentId"])
-	require.Equal(t, "app1prod", got["environment_ref"])
-	require.NotContains(t, got, "environmentRef")
-	require.NotContains(t, out, "branch")
-}
+// `palbase status` names the FULL context — which project, which address —
+// because "which runtime am I looking at" must never be a guess (UAT CLI-005).
+//
+// It used to ask the Studio over tRPC whenever the checkout was not linked, and
+// these tests pinned the procedure name and the tRPC input. That arm is gone:
+// there is one door, the project's own, and which project it opens comes from
+// the link or the selection. What is worth pinning is therefore the ADDRESS the
+// verb resolved and the deployment it read — see status_project_test.go.
 
 // A succeeded deploy that still carries an error is "succeeded with warnings" —
 // a green-looking deploy that produced zero endpoints must not read as fine.
@@ -156,7 +112,7 @@ func TestHumanizeAgo(t *testing.T) {
 // ── deploys ─────────────────────────────────────────────────────────────────
 
 func TestDeploys_ReadsTheV2EnvironmentHistory(t *testing.T) {
-	r := newRig(t, nil)
+	r := newRig(t)
 	const route = "/api/v2/projects/proj_1/environments/app1prod/deployments"
 	r.Fake.OK("GET "+route, map[string]any{
 		"deployments": []map[string]any{
@@ -185,7 +141,7 @@ func TestDeploys_ReadsTheV2EnvironmentHistory(t *testing.T) {
 }
 
 func TestDeploys_Empty(t *testing.T) {
-	r := newRig(t, nil)
+	r := newRig(t)
 	r.Fake.OK("GET /api/v2/projects/proj_1/environments/app1prod/deployments",
 		map[string]any{"deployments": []any{}})
 	out, err := r.Run(t, "deploys")
@@ -201,22 +157,24 @@ func TestTruncateNote(t *testing.T) {
 
 // ── rollback ────────────────────────────────────────────────────────────────
 
-func TestRollback_TargetsTheEnvironmentNotABranch(t *testing.T) {
-	var gotInput map[string]any
-	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
-		if strings.Contains(req.URL.Path, "backend.rollback") {
-			gotInput = decodeTRPCInput(t, req)
-			trpcOK(w, map[string]any{"status": "ok", "version": "new1", "rolled_back_from": "old1"})
-			return
-		}
-		trpcOK(w, map[string]any{})
-	})
+// `palbase rollback` names the ENVIRONMENT, never a branch — and it acts at the
+// project's own door.
+//
+// This used to assert a tRPC procedure's input. The procedure is gone: rollback
+// activates a version the project already holds, over
+// POST /v1/management/deployments/{digest}/activate, which is the only place
+// that pointer lives. deployments_test.go drives that route; what is left worth
+// pinning here is the REFUSAL when no project is named, because a rollback has
+// no second authority to fall back to.
+func TestRollbackWithoutAProjectRefusesActionably(t *testing.T) {
+	selectiontest.Chdir(t)
+	r := &rig{Fake: selectiontest.New(t)}
+	r.Resolver = r.Fake.Resolver()
 
-	out, err := r.Run(t, "rollback", "old1")
-	require.NoError(t, err)
-	require.Equal(t, map[string]any{"ref": "app1prod", "version": "old1"}, gotInput)
-	require.NotContains(t, gotInput, "branch")
-	require.Contains(t, out, "rolled back environment app1prod")
+	_, err := r.Run(t, "rollback", "old1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--environment",
+		"a person with no link must be told the other way to name a project")
 }
 
 // ── selection failure ───────────────────────────────────────────────────────
@@ -232,7 +190,11 @@ func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
 
 			_, err := r.Run(t, argv[0], argv[1:]...)
 			require.Error(t, err)
-			require.Contains(t, err.Error(), "palbase project use")
+			// `palbase project use` does NOT exist (verified against the built
+			// binary, 2026-08-24) — it was advice nobody could follow. The
+			// message has to name a command that is actually there.
+			require.Contains(t, err.Error(), "palbase link")
+			require.NotContains(t, err.Error(), "project use")
 		})
 	}
 }

@@ -18,7 +18,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/config"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
-	"github.com/palgroup/palbase-cli/internal/studio"
 )
 
 // useRig wires `palbase <platform> use <environment>` against the fake v2 API +
@@ -71,12 +70,8 @@ func useRig(t *testing.T, cfg *selection.Config) (*selectiontest.Fake, Resolvers
 		})
 	}
 
-	// The Studio tRPC client only serves apikey.reveal for the spec target.
-	trpc := newTRPCStub(t)
-
 	rest := f.REST()
 	return f, Resolvers{
-		Studio:    func() *studio.Client { return trpc },
 		REST:      func() REST { return rest },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
 		Selection: func() *selection.Resolver { return f.Resolver() },
@@ -96,28 +91,6 @@ func newTenantStub(t *testing.T) string {
 		}
 	})
 	return srv
-}
-
-func newTRPCStub(t *testing.T) *studio.Client {
-	t.Helper()
-	url := httptestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var input struct {
-			JSON struct {
-				Ref string `json:"ref"`
-			} `json:"json"`
-		}
-		require.NoError(t, json.Unmarshal([]byte(r.URL.Query().Get("input")), &input))
-		ref := input.JSON.Ref
-		trpcOK(w, map[string]any{
-			"environment_ref": ref,
-			"publishable_key": "pb_" + ref + "_c01234567890123456789",
-		})
-	})
-	return studio.New(
-		url,
-		func(context.Context) (string, error) { return "tok", nil },
-		func(context.Context, string, string, string) (string, error) { return "proof", nil },
-	)
 }
 
 // `<platform> use <environment>` re-targets the ENVIRONMENT: it rewrites the
@@ -233,7 +206,9 @@ func TestNativeUse_ProjectOverrideCannotSwitchTheLinkedProject(t *testing.T) {
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 	err := cmd.Execute()
 	require.ErrorContains(t, err, "cannot switch projects")
-	require.ErrorContains(t, err, "palbase project use proj_2")
+	require.ErrorContains(t, err, "palbase link proj_2")
+	require.NotContains(t, err.Error(), "project use",
+		"`palbase project use` does not exist — advising it sends people nowhere")
 	require.Empty(t, f.Routes())
 
 	cfg, loadErr := selection.Load("")

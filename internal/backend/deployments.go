@@ -13,6 +13,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -100,11 +101,17 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 	return true, nil
 }
 
-// rollbackOnProject activates a version the project already has.
+// rollbackOnProject activates a version the project already has. Unlike
+// `deploys` it has no second authority to fall back to — the plane's ledger
+// records what was PUSHED, it does not serve anything — so a checkout that names
+// no project is an error here rather than a fall-through.
 func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 	target, cred, ok, err := openLinked(cmd)
-	if !ok || err != nil {
-		return ok, err
+	if err != nil {
+		return true, err
+	}
+	if !ok {
+		return true, errors.New("no project to roll back: link this checkout, or pass --environment <ref>")
 	}
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
@@ -211,10 +218,15 @@ func listProjectDeployments(ctx context.Context, target Target, cred Credentials
 
 // openLinked resolves the target and credential these two verbs share, and
 // announces where they are acting.
+//
+// The target comes from the link OR the selection (ResolveTarget). A `false`
+// means neither named a project — `deploys` then reads the PLANE's ledger, which
+// is a different authority answering a different question, while `rollback` has
+// nowhere else to go and reports the error ResolveTarget gave.
 func openLinked(cmd *cobra.Command) (Target, Credentials, bool, error) {
-	target, err := ReadTarget()
+	target, err := ResolveTarget(cmd.Context())
 	if err != nil {
-		return Target{}, Credentials{}, false, nil
+		return Target{}, Credentials{}, false, err
 	}
 	cred, _, err := Credential(target.URL)
 	if err != nil {

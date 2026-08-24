@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -310,23 +311,14 @@ func requireMappedGitBranch(sel selection.Selection, resolve gitBranchResolver) 
 	return nil
 }
 
-// pullResponse mirrors the backend.pull tRPC query result:
-//
-//	{ version: string, archive: string /* base64 */, size: number }
-//
-// Studio fetches the deployed bundle from the br-pod, base64-encodes it for
-// JSON-RPC transport, and returns the version SHA. We decode it client-side and
-// extract via extractTarGz.
-type pullResponse struct {
-	Version string `json:"version"`
-	Archive string `json:"archive"` // base64-encoded tar.gz
-	Size    int    `json:"size"`
+// SourcePath is where a project hands back the tree one of its versions was
+// built from. `latest` is the version it is serving right now — the only one a
+// person can name before they have pulled the project once.
+func SourcePath(digest string) string {
+	return "/v1/management/deployments/" + url.PathEscape(digest) + "/source"
 }
 
-// pullBundle fetches the Environment's deployed bundle from Studio
-// (backend.pull), base64-decodes it and extracts it into dst. dst must already
-// exist. `ref` is the ENVIRONMENT ref — the only selector; there is no branch.
-// PullBundle downloads an Environment's ACTIVE deployed bundle into dst,
+// PullBundle downloads an Environment's ACTIVE deployed source into dst,
 // creating dst if needed.
 //
 // Exported for `project create`, which materializes the template provisioning
@@ -340,26 +332,59 @@ func PullBundle(ctx context.Context, r Resolvers, environmentRef, dst string, w 
 	return pullBundle(ctx, r, environmentRef, dst, w)
 }
 
+// pullBundle fetches the Environment's deployed source tree and extracts it into
+// dst, which must already exist. `ref` is the ENVIRONMENT ref — the only
+// selector; there is no branch.
+//
+// It used to ask the Studio for it over tRPC, and the Studio held a copy of
+// every push. This plane keeps no such copy: a push is unpacked, built and the
+// tree deleted. So the project now keeps it beside its artifact and answers for
+// it — which also means this asks the SAME authority that served the code, over
+// the same door as everything else, instead of a second service that had to be
+// told about every deploy to stay right.
 func pullBundle(ctx context.Context, r Resolvers, ref, dst string, w io.Writer) error {
-	var resp pullResponse
-	if err := r.Studio().Query(ctx, "backend.pull", map[string]any{"ref": ref}, &resp); err != nil {
-		return fmt.Errorf("backend.pull: %w", err)
+	host := r.Endpoints().PublicHost
+	if host == "" {
+		return errors.New("this CLI has no tenant host configured, so a project cannot be reached by ref")
 	}
-	if resp.Archive == "" {
-		return fmt.Errorf("backend.pull: server returned empty archive")
-	}
-	decoded, err := base64.StdEncoding.DecodeString(resp.Archive)
+	target := Target{URL: "https://" + ref + "." + host}
+	cred, _, err := Credential(target.URL)
 	if err != nil {
-		return fmt.Errorf("decode bundle: %w", err)
+		return err
 	}
-	if err := extractSourceTree(dst, bytes.NewReader(decoded)); err != nil {
+	return fetchDeployedSource(ctx, target, cred, ref, dst, w)
+}
+
+// fetchDeployedSource is the transfer itself, given a project already resolved.
+//
+// Split from pullBundle because the two do different jobs: one decides WHICH
+// project, the other reads it. Keeping them together meant the read could only
+// be exercised through an address built from a configured host — which is to say
+// it could not be exercised at all.
+func fetchDeployedSource(ctx context.Context, target Target, cred Credentials, name, dst string, w io.Writer) error {
+	status, body, err := managementCall(ctx, target, cred, http.MethodGet, SourcePath("latest"), nil, "")
+	if err != nil {
+		return err
+	}
+	switch status {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		// The project answered and has nothing — either it has never deployed, or
+		// its live version predates source retention. Both are states, and saying
+		// which is the difference between waiting and acting.
+		return fmt.Errorf("%s has no source to pull: %s", name, describeError(body))
+	default:
+		return fmt.Errorf("%s answered %d: %s", name, status, trimBody(body))
+	}
+	if len(body) == 0 {
+		// An empty archive extracts into an empty directory and reports success —
+		// a pull that silently replaced a project with nothing.
+		return fmt.Errorf("%s returned an empty archive", name)
+	}
+	if err := extractSourceTree(dst, bytes.NewReader(body)); err != nil {
 		return fmt.Errorf("extract bundle: %w", err)
 	}
-	version := resp.Version
-	if version == "" {
-		version = "(unknown)"
-	}
-	fmt.Fprintf(w, "✓ pulled environment %s (version %s)\n", ref, version)
+	fmt.Fprintf(w, "✓ pulled environment %s (%d bytes)\n", name, len(body))
 	return nil
 }
 

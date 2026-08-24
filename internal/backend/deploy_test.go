@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -319,24 +319,65 @@ func TestRepoURLFromFullName(t *testing.T) {
 	require.Equal(t, "repo", repoDirFromFullName("org/repo"))
 }
 
-// pullBundle asks Studio for the ENVIRONMENT's bundle by ref — one input, no
-// branch.
-func TestPullBundle_SendsOnlyTheEnvironmentRef(t *testing.T) {
-	var gotInput map[string]any
-	r := newRig(t, func(w http.ResponseWriter, req *http.Request) {
-		if strings.Contains(req.URL.Path, "backend.pull") {
-			gotInput = decodeTRPCInput(t, req)
-			trpcOK(w, map[string]any{"version": "abc", "archive": base64.StdEncoding.EncodeToString(tinyTarGz(t)), "size": 1})
-			return
-		}
-		trpcOK(w, map[string]any{})
-	})
+// `palbase pull` brings back the SOURCE the project deployed, from the project.
+//
+// It used to ask the Studio over tRPC, and the Studio kept a copy of every push.
+// This plane keeps none — a push is unpacked, built, and the tree deleted — so
+// the project stores it beside its artifact and answers for it. `latest` is what
+// is asked for: nobody knows their digest before they have pulled once.
+func TestPullReadsTheSourceTheProjectServes(t *testing.T) {
+	var asked string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		asked = req.URL.Path
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(tinyTarGz(t))
+	}))
+	defer srv.Close()
 
 	dst := t.TempDir()
-	require.NoError(t, pullBundle(context.Background(), r.Resolvers(), "app1prod", dst, io.Discard))
-	require.Equal(t, map[string]any{"ref": "app1prod"}, gotInput)
-	require.NotContains(t, gotInput, "branch")
+	err := fetchDeployedSource(context.Background(), Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, "app1prod", dst, io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, "/v1/management/deployments/latest/source", asked)
 	require.FileExists(t, filepath.Join(dst, "hello.txt"))
+}
+
+// A project with nothing stored says so, and the CLI relays it. Reporting
+// success here would replace a checkout with an empty directory.
+func TestPullRefusesWhenTheProjectKeptNoSource(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found","error_description":"no source is kept for d1"}`))
+	}))
+	defer srv.Close()
+
+	dst := t.TempDir()
+	err := fetchDeployedSource(context.Background(), Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, "app1prod", dst, io.Discard)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no source is kept")
+	require.Empty(t, dirEntries(t, dst), "a refused pull wrote into the checkout")
+}
+
+// A 200 with no body is the worst answer of the three: it extracts cleanly into
+// nothing and reports a successful pull.
+func TestPullRefusesAnEmptyArchive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dst := t.TempDir()
+	err := fetchDeployedSource(context.Background(), Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, "app1prod", dst, io.Discard)
+	require.ErrorContains(t, err, "empty archive")
+}
+
+func dirEntries(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	return entries
 }
 
 func tinyTarGz(t *testing.T) []byte {

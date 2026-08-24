@@ -58,7 +58,7 @@ from .palbase/selection.json, falling back to the committed platform slot).`, la
 			// through the shared resolver.
 			resolver := r.Selection()
 			if resolver == nil {
-				return fmt.Errorf("no project selected — run `palbase project use <projectId>`")
+				return fmt.Errorf("no project selected — run `palbase link <project>`, or pass --environment <ref>")
 			}
 			cfg, err := selection.Load("")
 			if err != nil {
@@ -66,7 +66,7 @@ from .palbase/selection.json, falling back to the committed platform slot).`, la
 			}
 			if resolver.ProjectFlag != "" && resolver.ProjectFlag != cfg.ProjectID {
 				return fmt.Errorf(
-					"%s use cannot switch projects from %s to %s — run `palbase project use %s` first",
+					"%s use cannot switch projects from %s to %s — run `palbase link %s` first",
 					platform, cfg.ProjectID, resolver.ProjectFlag, resolver.ProjectFlag,
 				)
 			}

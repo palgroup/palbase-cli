@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/spf13/cobra"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -176,7 +177,7 @@ func TestStatusAsksTheRouteThatEXISTS(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetContext(context.Background())
 
-	handled, err := statusOfProject(cmd)
+	handled, err := statusOfProject(cmd, Resolvers{}, false)
 	if !handled || err != nil {
 		t.Fatalf("handled=%v err=%v", handled, err)
 	}
@@ -237,5 +238,100 @@ func TestSpecNamesTheEnvironmentsItDidNotRefresh(t *testing.T) {
 	}, &single)
 	if single.Len() != 0 {
 		t.Errorf("a single-environment checkout was warned about nothing:\n%s", single.String())
+	}
+}
+
+// `--json` was declared for a year and never wired: the flag existed on the
+// command, the renderer existed in the package, and the only path that read
+// either was the cloud arm — which a linked checkout never took. So `palbase
+// status --json` in a linked project printed the human table and a script
+// parsing it got a syntax error, not a status.
+func TestStatusJSONIsARealDocument(t *testing.T) {
+	inScratchCheckout(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/management/deployments/current" {
+			count := 37
+			_ = json.NewEncoder(w).Encode(deploymentState{
+				Digest:        "7c232f1484db13acc8b083d905df6ac4d8b00ea8",
+				EndpointCount: &count,
+				SDKVersion:    "21.0.1",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if err := WriteTarget(Target{URL: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreCredential(srv.URL, Credentials{Value: "k", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if _, err := statusOfProject(cmd, Resolvers{}, true); err != nil {
+		t.Fatalf("status --json: %v", err)
+	}
+
+	var doc statusJSON
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("--json did not emit JSON (%v):\n%s", err, out.String())
+	}
+	if doc.Address != srv.URL {
+		t.Errorf("address %q, want %q", doc.Address, srv.URL)
+	}
+	if doc.Deployed == nil || doc.Deployed.SDKVersion != "21.0.1" {
+		t.Errorf("the deployment did not travel: %+v", doc.Deployed)
+	}
+	if doc.Deployed.EndpointCount == nil || *doc.Deployed.EndpointCount != 37 {
+		t.Errorf("the endpoint count did not travel: %+v", doc.Deployed)
+	}
+	// No prose in the document: the human output's advice lines cannot be parsed
+	// and their absence is the whole point of the flag.
+	if strings.Contains(out.String(), "palbase push") {
+		t.Errorf("advice leaked into the JSON:\n%s", out.String())
+	}
+}
+
+// A project that has never been pushed is a STATE, not an error, and a script
+// has to be able to tell it from a deployed one without reading English.
+func TestStatusJSONSaysNothingDeployedYet(t *testing.T) {
+	inScratchCheckout(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if err := WriteTarget(Target{URL: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreCredential(srv.URL, Credentials{Value: "k", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if _, err := statusOfProject(cmd, Resolvers{}, true); err != nil {
+		t.Fatalf("status --json: %v", err)
+	}
+	var doc statusJSON
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("--json did not emit JSON (%v):\n%s", err, out.String())
+	}
+	if doc.Deployed != nil {
+		t.Errorf("an undeployed project reported a deployment: %+v", doc.Deployed)
+	}
+	if doc.Reason == "" {
+		t.Error("a nil deployment with no reason cannot be told from a failure")
 	}
 }

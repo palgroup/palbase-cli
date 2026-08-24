@@ -1,54 +1,67 @@
 package testuser
 
+// The COMMANDS, end to end, against a project that answers on the wire.
+//
+// These used to run against a fake Studio and assert tRPC procedure names —
+// which proved the CLI could speak a protocol nothing serves any more, and
+// proved nothing about the door it actually knocks on. Every case here drives
+// the real cobra command in a checkout linked to an httptest project, so what
+// is pinned is the METHOD, the PATH and the BODY a person's flags turn into.
+//
+// project_test.go covers the same routes one layer down, at the helpers. Both
+// are worth having: a helper can be right while nothing calls it.
+
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
-// trpcOK writes a tRPC success envelope ({result:{data:{json:...}}}).
-func trpcOK(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"result": map[string]any{"data": map[string]any{"json": data}},
-	})
+// seenCall is one request the project received.
+type seenCall struct {
+	method string
+	path   string
+	body   map[string]any
 }
 
-// studioAgainst spins an httptest server and returns a *studio.Client backed
-// by it (mirrors apps_test.go / secret_test.go).
-func studioAgainst(t *testing.T, h http.HandlerFunc) Studio {
+// runCmd drives `test-user <args...>` in a checkout linked to a project that
+// answers with `reply`, and hands back what the project was asked.
+func runCmd(t *testing.T, reply string, args ...string) (seenCall, string, error) {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	var seen seenCall
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.method, seen.path = r.Method, r.URL.Path
+		if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
+			_ = json.Unmarshal(raw, &seen.body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(reply))
+	}))
 	t.Cleanup(srv.Close)
-	return studio.New(srv.URL, func(_ context.Context) (string, error) {
-		return "test-token", nil
-	}, func(context.Context, string, string, string) (string, error) { return "test-proof", nil })
+	linkedTo(t, srv.URL)
+
+	var out bytes.Buffer
+	cmd := Cmd()
+	cmd.SetArgs(args)
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	return seen, out.String(), err
 }
 
-// innerInput decodes the inner {"json":{...}} payload from a tRPC POST body.
-func innerInput(t *testing.T, r *http.Request) map[string]any {
-	t.Helper()
-	var outer struct {
-		JSON map[string]any `json:"json"`
-	}
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&outer))
-	return outer.JSON
-}
-
-// TestTestUserSurface pins the subcommand set and the create flags. The command
-// group is the whole lifecycle now, not just minting.
+// TestTestUserSurface pins the subcommand set and the flags. The command group
+// is the whole lifecycle, not just minting.
 func TestTestUserSurface(t *testing.T) {
 	t.Chdir(t.TempDir())
-	parent := Cmd(Resolvers{Studio: func() Studio { return nil }})
+	parent := Cmd()
 	require.Equal(t, "test-user", parent.Name())
 
 	subs := map[string]*cobra.Command{}
@@ -71,292 +84,136 @@ func TestTestUserSurface(t *testing.T) {
 	}
 }
 
-// TestTestUserCreate_PlainJSON proves the no-template path calls
-// testData.testUserCreate and that --json emits the creds+token.
-func TestTestUserCreate_PlainJSON(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/trpc/testData.testUserCreate", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{
-			"users": []map[string]any{
-				{"id": "usr_1", "email": "t1@x.dev", "password": "pw1", "accessToken": "tok1"},
-			},
-		})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"create", "--json"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	// The plain path sends count (default 1) + withTokens.
-	require.EqualValues(t, 1, body["count"])
-	require.Equal(t, true, body["withTokens"])
-	// The mint targets the SELECTED ENVIRONMENT by ref, and carries no branch:
-	// each environment verifies tokens against its OWN auth, so the environment
-	// IS the isolation boundary a minted token is scoped to.
-	require.Equal(t, "app1prod", body["ref"])
-	require.NotContains(t, body, "branch", "the Palbase branch is gone — the environment is the target")
-
-	// --json emits the creds+token verbatim (scriptable).
-	var got struct {
-		Users []struct {
-			ID          string `json:"id"`
-			Email       string `json:"email"`
-			Password    string `json:"password"`
-			AccessToken string `json:"accessToken"`
-		} `json:"users"`
-	}
-	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
-	require.Len(t, got.Users, 1)
-	require.Equal(t, "usr_1", got.Users[0].ID)
-	require.Equal(t, "tok1", got.Users[0].AccessToken)
+func TestCreateAsksTheProjectToMint(t *testing.T) {
+	seen, out, err := runCmd(t,
+		`{"users":[{"user_id":"usr_1","email":"t1@test.invalid","password":"pw1","access_token":"tok1"}]}`,
+		"create", "--json")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPost, seen.method)
+	require.Equal(t, "/v1/management/test-users", seen.path)
+	require.EqualValues(t, 1, seen.body["count"])
+	require.Equal(t, true, seen.body["with_tokens"])
+	require.Contains(t, out, "tok1", "--json must carry the token")
 }
 
-// TestTestUserCreate_PlainCountFlag proves --count is forwarded to the mint.
-func TestTestUserCreate_PlainCountFlag(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/testData.testUserCreate", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{"users": []map[string]any{
-			{"id": "usr_1", "email": "a@x.dev", "password": "pw", "accessToken": ""},
-			{"id": "usr_2", "email": "b@x.dev", "password": "pw", "accessToken": ""},
-			{"id": "usr_3", "email": "c@x.dev", "password": "pw", "accessToken": ""},
-		}})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"create", "--count", "3"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-	require.EqualValues(t, 3, body["count"])
+func TestCreateCountTravels(t *testing.T) {
+	seen, _, err := runCmd(t, `{"users":[]}`, "create", "--count", "3")
+	require.NoError(t, err)
+	require.EqualValues(t, 3, seen.body["count"])
 }
 
-// TestTestUserCreate_CountAndTemplateMutuallyExclusive asserts that combining
-// --count with --template is rejected before any network call is made.
-func TestTestUserCreate_CountAndTemplateMutuallyExclusive(t *testing.T) {
-	t.Chdir(t.TempDir())
-	called := false
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		trpcOK(w, map[string]any{})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"create", "--template", "demo", "--count", "2"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	err := cmd.Execute()
+// --count AND --template together is an ordinary thing to want: several
+// instances of one declared user, each with its own copy of the declared rows.
+// The old tRPC arm refused the combination because its procedure minted exactly
+// one; the project's door does not, so the refusal went with the arm.
+func TestCountAndTemplateTravelTogether(t *testing.T) {
+	seen, _, err := runCmd(t, `{"users":[]}`, "create", "--count", "2", "--template", "demo")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, seen.body["count"])
+	require.Equal(t, "demo", seen.body["template"])
+}
+
+func TestCreateRefusesACountBelowOne(t *testing.T) {
+	_, _, err := runCmd(t, `{}`, "create", "--count", "0")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--count cannot be combined with --template")
-	require.False(t, called, "transport must not be called when flag validation fails")
+	require.Contains(t, err.Error(), "--count must be at least 1")
 }
 
-// TestTestUserCreate_TemplateJSON proves the --template path calls
-// testData.createFromTemplate and emits the minted user's creds+token plus the
-// per-table inserted summary.
-func TestTestUserCreate_TemplateJSON(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/trpc/testData.createFromTemplate", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{
-			"user": map[string]any{
-				"id": "usr_s", "email": "s@x.dev", "password": "pws", "accessToken": "toks",
-			},
-			"inserted": map[string]any{"lists": 2, "todos": 4},
-			"existing": false,
-		})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"create", "--template", "demo", "--json"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "demo", body["name"])
-	require.Equal(t, "app1prod", body["ref"])
-
-	var got materializeResult
-	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
-	require.Equal(t, "usr_s", got.User.ID)
-	require.Equal(t, "toks", got.User.AccessToken)
-	require.Equal(t, 2, got.Inserted["lists"])
-	require.Equal(t, 4, got.Inserted["todos"])
+func TestListReadsTheProject(t *testing.T) {
+	seen, out, err := runCmd(t,
+		`{"users":[{"id":"usr_1","email":"a@test.invalid","email_verified":true}]}`, "list")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, seen.method)
+	require.Equal(t, "/v1/management/test-users", seen.path)
+	require.Contains(t, out, "usr_1")
+	require.Contains(t, out, "a@test.invalid")
 }
 
-// TestTestUserList queries the environment's test users.
-func TestTestUserList(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Contains(t, r.URL.Path, "testData.testUsers")
-		trpcOK(w, map[string]any{"users": []map[string]any{
-			{"id": "usr_1", "email": "a@test.invalid"},
-			{"id": "usr_2", "email": nil},
-		}})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"list"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Contains(t, out.String(), "usr_1")
-	require.Contains(t, out.String(), "a@test.invalid")
-	// A user with no readable e-mail still lists, with a placeholder.
-	require.Contains(t, out.String(), "usr_2")
+func TestTemplatesReadTheProject(t *testing.T) {
+	seen, out, err := runCmd(t,
+		`{"templates":[{"name":"demo","email":"demo@test.invalid","tables":["profiles"]}]}`, "templates")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, seen.method)
+	require.Equal(t, "/v1/management/test-users/templates", seen.path)
+	require.Contains(t, out, "demo")
+	require.Contains(t, out, "profiles")
 }
 
-// TestTestUserTemplates lists what config/test-users.ts declares.
-func TestTestUserTemplates(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Contains(t, r.URL.Path, "testData.listTemplates")
-		trpcOK(w, []map[string]any{
-			{"name": "demo", "email": "demo@test.local", "tables": []string{"lists", "todos"}},
-			{"name": "heavy", "email": nil, "tables": []string{}},
-		})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"templates"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Contains(t, out.String(), "demo")
-	require.Contains(t, out.String(), "demo@test.local")
-	require.Contains(t, out.String(), "lists, todos")
-	require.Contains(t, out.String(), "heavy")
+// The named-credentials pair reaches the project now. It used to be refused
+// here by name — "not available against a local stack" — because the door did
+// not take them; it does, so the flags mean what the help says they mean.
+func TestCloneCarriesFixedCredentials(t *testing.T) {
+	seen, _, err := runCmd(t,
+		`{"users":[{"user_id":"usr_2","email":"fixed@test.invalid","password":"pw"}]}`,
+		"clone", "usr_1", "--email", "fixed@test.invalid", "--password", "kUzey-4271-orman")
+	require.NoError(t, err)
+	require.Equal(t, "/v1/management/test-users/clone", seen.path)
+	require.Equal(t, "usr_1", seen.body["source_user_id"])
+	require.Equal(t, "fixed@test.invalid", seen.body["email"])
+	require.Equal(t, "kUzey-4271-orman", seen.body["password"])
 }
 
-// TestTestUserTemplates_EmptyPointsAtConfig: with nothing declared, the CLI
-// says where templates come from rather than printing an empty table.
-func TestTestUserTemplates_Empty(t *testing.T) {
-	t.Chdir(t.TempDir())
-	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
-		trpcOK(w, []map[string]any{})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"templates"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-	require.Contains(t, out.String(), "No templates on this stack")
+func TestCloneWithoutCredentialsSendsNone(t *testing.T) {
+	seen, _, err := runCmd(t,
+		`{"users":[{"user_id":"usr_2","email":"gen@test.invalid","password":"pw"}]}`,
+		"clone", "usr_1")
+	require.NoError(t, err)
+	require.NotContains(t, seen.body, "email", "an unasked-for e-mail must not be invented")
+	require.NotContains(t, seen.body, "password")
 }
 
-// TestTestUserClone forwards the source, the fixed credentials and the parsed
-// --set overrides.
-func TestTestUserClone(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/testData.cloneTestUser", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{
-			"user":     map[string]any{"id": "usr_c", "email": "c@x.dev", "password": "pw", "accessToken": "tok"},
-			"inserted": map[string]any{"lists": 1},
-			"existing": false,
-		})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{
-		"clone", "usr_src",
-		"--email", "clone@test.local",
-		"--password", "clone-password-1",
-		"--set", "profiles.display_name=Copy",
-		"--set", "profiles.age=41",
-		"--set", "lists.archived_at=null",
-	})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.Equal(t, "usr_src", body["sourceUserId"])
-	require.Equal(t, "clone@test.local", body["email"])
-	require.Equal(t, "clone-password-1", body["password"])
-
-	overrides, ok := body["overrides"].(map[string]any)
-	require.True(t, ok, "overrides must be sent as a table→column map")
-	profiles := overrides["profiles"].(map[string]any)
-	require.Equal(t, "Copy", profiles["display_name"])
-	// A numeric value must arrive typed, not as the string "41".
-	require.EqualValues(t, 41, profiles["age"])
-	// And `null` must arrive as JSON null, so the column is actually cleared.
-	lists := overrides["lists"].(map[string]any)
-	require.Contains(t, lists, "archived_at")
-	require.Nil(t, lists["archived_at"])
-}
-
-// TestTestUserClone_NoCredentials omits both fields so the server generates a
-// pair, rather than sending empty strings it would try to mint with.
-func TestTestUserClone_NoCredentials(t *testing.T) {
-	t.Chdir(t.TempDir())
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{
-			"user":     map[string]any{"id": "usr_c", "email": "c@x.dev", "password": "pw", "accessToken": ""},
-			"inserted": map[string]any{},
-			"existing": false,
-		})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"clone", "usr_src"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
-
-	require.NotContains(t, body, "email")
-	require.NotContains(t, body, "password")
-	require.NotContains(t, body, "overrides")
-}
-
-// TestTestUserClone_HalfCredentialPair rejects before the network call.
-func TestTestUserClone_HalfCredentialPair(t *testing.T) {
-	t.Chdir(t.TempDir())
-	called := false
-	c := studioAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
-		called = true
-		trpcOK(w, map[string]any{})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"clone", "usr_src", "--email", "x@test.local"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	err := cmd.Execute()
+func TestCloneRefusesHalfACredentialPair(t *testing.T) {
+	_, _, err := runCmd(t, `{}`, "clone", "usr_1", "--email", "only@test.invalid")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must be given together")
-	require.False(t, called, "transport must not be called when flag validation fails")
 }
 
-// TestTestUserDelete purges by id.
-func TestTestUserDelete(t *testing.T) {
+func TestDeletePurgesAtTheProject(t *testing.T) {
+	seen, out, err := runCmd(t, `{}`, "delete", "usr_9")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodDelete, seen.method)
+	require.Equal(t, "/v1/management/test-users/usr_9", seen.path)
+	require.Contains(t, out, "usr_9")
+}
+
+// A project that refuses explains itself, and the explanation is the whole
+// value of relaying it: "request failed" would send a person to the logs for
+// something the answer already said.
+func TestAProjectsRefusalReachesThePerson(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"test_user_cap","error_description":"This project allows at most 50 test users."}`))
+	}))
+	defer srv.Close()
+	linkedTo(t, srv.URL)
+
+	cmd := Cmd()
+	cmd.SetArgs([]string{"create"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.True(t, strings.Contains(err.Error(), "at most 50 test users"),
+		"the project's own explanation was dropped: %v", err)
+}
+
+// With neither a link nor a selection there is nothing to act on, and the error
+// has to name BOTH ways to fix it — a person who never ran `link` and a person
+// who meant to pass --environment need different advice.
+func TestWithNoProjectTheAdviceNamesBothDoors(t *testing.T) {
 	t.Chdir(t.TempDir())
-	var body map[string]any
-	c := studioAgainst(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/trpc/testData.deleteTestUser", r.URL.Path)
-		body = innerInput(t, r)
-		trpcOK(w, map[string]any{"ok": true})
-	})
-	cmd := Cmd(Resolvers{Studio: func() Studio { return c }, Selection: selectiontest.Selected(t)})
-	cmd.SetArgs([]string{"delete", "usr_gone"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	require.NoError(t, cmd.Execute())
+	t.Setenv("HOME", t.TempDir())
 
-	require.Equal(t, "usr_gone", body["userId"])
-	require.Equal(t, "app1prod", body["ref"])
-	require.Contains(t, out.String(), "usr_gone")
+	cmd := Cmd()
+	cmd.SetArgs([]string{"list"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "palbase link")
+	require.Contains(t, err.Error(), "--environment")
 }
 
-// TestParseSets covers the --set grammar directly, including the malformed
-// forms that must be rejected rather than silently dropped.
 func TestParseSets(t *testing.T) {
 	t.Run("groups by table and types values", func(t *testing.T) {
 		got, err := parseSets([]string{

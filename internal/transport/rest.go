@@ -1,8 +1,14 @@
 // Package transport is the CLI's REST client for the Palbase Management
-// API (`/api/v2/*` on api.palbase.studio). It is the single transport for the
-// project / env / apikey / apps command families; `backend *` still rides the
-// tRPC `internal/studio` client for the procedures that have no v2 route
-// (logs, env vars, migrations, test data).
+// API (`/api/v2/*` on api.palbase.studio). It is now the ONLY transport this
+// CLI has to the control plane.
+//
+// It used to be one of two. `backend *`, `logs`, `flags`, `test-user`,
+// `notifications` and `debug` each carried a second arm that spoke tRPC to the
+// Studio for procedures with no v2 route — two protocols answering the same
+// questions through two gates, returning two shapes. Every one of those
+// procedures has a REST route now: the PROJECT's own management surface for what
+// a project knows, this one for what the plane knows. `internal/studio` is
+// deleted.
 //
 // `/api/v1` survives ONLY for `palbase admin *` — the fleet-operator routes
 // deliberately stay on v1.
@@ -154,12 +160,30 @@ func (e *APIError) Error() string {
 }
 
 // errorEnvelope is the failure shape.
+// errorEnvelope is the failure shape.
+//
+// `fields` ARRIVES IN TWO PLACES, and both are real. A tenant's own surface puts
+// it at the top level; the control plane's SDK wraps a data-first error, so it
+// lands under `data`. Reading only one of them silently drops the reason for
+// half the refusals a person can hit — measured 2026-08-24, when the plane's
+// push refusal parsed to nothing and the flat shape parsed fine.
 type errorEnvelope struct {
 	Code        string          `json:"error"`
 	Description string          `json:"error_description"`
 	Status      int             `json:"status"`
 	RequestID   string          `json:"request_id"`
 	Fields      []APIErrorField `json:"fields"`
+	Data        struct {
+		Fields []APIErrorField `json:"fields"`
+	} `json:"data"`
+}
+
+// fields returns whichever of the two shapes carried the detail.
+func (e errorEnvelope) fields() []APIErrorField {
+	if len(e.Fields) > 0 {
+		return e.Fields
+	}
+	return e.Data.Fields
 }
 
 // Do performs one Management-API request. method is the HTTP verb; path
@@ -343,7 +367,7 @@ func parseError(raw []byte, status int) error {
 			Description: env.Description,
 			Status:      st,
 			RequestID:   env.RequestID,
-			Fields:      env.Fields,
+			Fields:      env.fields(),
 		}
 	}
 	return &APIError{

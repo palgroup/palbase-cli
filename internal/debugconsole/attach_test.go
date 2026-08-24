@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,8 +12,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/spf13/cobra"
 
-	"github.com/palgroup/palbase-cli/internal/studio"
+	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
 // The frames below are REAL bytes, not hand-authored shapes:
@@ -362,194 +362,96 @@ func TestNormalizeCode(t *testing.T) {
 	}
 }
 
-func TestTopicAndURL(t *testing.T) {
+func TestTopicNamesTheStackAndTheSession(t *testing.T) {
 	if got, want := topicFor("todoappm8p6zm", "018f4c2a"), "debug:todoappm8p6zm:018f4c2a"; got != want {
 		t.Errorf("topicFor = %q, want %q", got, want)
 	}
-	got := websocketURL("todoappm8p6zm", "dev.palbase.studio")
-	want := "wss://todoappm8p6zm.dev.palbase.studio/realtime/v1/websocket?vsn=2.0.0"
-	if got != want {
-		t.Errorf("websocketURL = %q, want %q", got, want)
-	}
-	// The pairing code is the credential; it must never ride a URL, which is
-	// where palsvc's own comment says tokens leak from (proxy + access logs).
-	if strings.Contains(got, "apikey") || strings.Contains(got, "code") {
-		t.Errorf("the handshake URL carries a credential: %s", got)
+	// The pairing code is the credential; it must never appear in a topic name,
+	// which is where palsvc's own comment says tokens leak from (proxy + access
+	// logs).
+	if strings.Contains(topicFor("todoappm8p6zm", "018f4c2a"), "K7M4P2QX") {
+		t.Error("the topic carries the pairing code")
 	}
 }
 
 // MARK: - Resolving a code to a session (contract §1b)
+//
+// The code is resolved by the PROJECT, over
+// POST /rt/v1/debug/sessions/resolve. It used to go to our cloud over tRPC for
+// a checkout that was not linked — asking a service that holds no such session,
+// and unable to answer at all for a stack on somebody's own machine.
 
-// fakeStudio records one tRPC call. It implements Mutation and NOT Query, so a
-// future change that puts the pairing code in a URL fails to compile.
-type fakeStudio struct {
-	path  string
-	input any
-	out   string // session_id to hand back
-	err   error
+// resolveAgainst drives the resolver against a project that answers with
+// `status` and `body`.
+func resolveAgainst(t *testing.T, status int, body string) (string, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rt/v1/debug/sessions/resolve" {
+			t.Errorf("asked %s %s", r.Method, r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("the pairing code is a capability and must not ride a URL: %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	return resolveSessionOnProject(cmd, backend.Target{URL: srv.URL},
+		backend.Credentials{Value: "k", Kind: backend.KindKey}, "K7M4P2QX")
 }
 
-// Query is present only to satisfy the interface: `attach` must never resolve a
-// code through it, because tRPC puts a query's input in the URL.
-func (f *fakeStudio) Query(_ context.Context, path string, _ any, _ any) error {
-	f.path = path
-	return errors.New("attach must not put the pairing code in a URL")
-}
-
-func (f *fakeStudio) Mutation(_ context.Context, path string, input any, out any) error {
-	f.path, f.input = path, input
-	if f.err != nil {
-		return f.err
-	}
-	target, ok := out.(*struct {
-		SessionID string `json:"session_id"`
-	})
-	if !ok {
-		return errors.New("unexpected out type")
-	}
-	target.SessionID = f.out
-	return nil
-}
-
-func TestResolveSession(t *testing.T) {
-	tests := []struct {
-		name      string
-		studio    *fakeStudio
-		wantID    string
-		wantWords []string
-	}{
-		{
-			name:   "resolved",
-			studio: &fakeStudio{out: "018f4c2a-6b1d-7a3e-9c55-2b7f0e1d4a88"},
-			wantID: "018f4c2a-6b1d-7a3e-9c55-2b7f0e1d4a88",
-		},
-		// Studio's reason passes through untouched. `unknown_session` and
-		// `expired` need different fixes, so collapsing them into one friendly
-		// sentence is the failure mode to avoid.
-		{
-			name:      "no such session",
-			studio:    &fakeStudio{err: errors.New("unknown_session")},
-			wantWords: []string{"debug.resolveSession", "unknown_session"},
-		},
-		{
-			name:      "expired",
-			studio:    &fakeStudio{err: errors.New("expired")},
-			wantWords: []string{"debug.resolveSession", "expired"},
-		},
-		{
-			name:      "answered without a session id",
-			studio:    &fakeStudio{out: ""},
-			wantWords: []string{"without a session_id"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveSession(context.Background(), tc.studio, "todoappm8p6zm", "K7M4P2QX")
-
-			if len(tc.wantWords) > 0 {
-				if err == nil {
-					t.Fatalf("resolveSession = %q, want an error", got)
-				}
-				for _, word := range tc.wantWords {
-					if !strings.Contains(err.Error(), word) {
-						t.Errorf("error is missing %q:\n%v", word, err)
-					}
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("resolveSession: %v", err)
-			}
-			if got != tc.wantID {
-				t.Errorf("session id = %q, want %q", got, tc.wantID)
-			}
-		})
-	}
-}
-
-// Studio validates membership on the Environment it is told about, so the ref
-// has to be in the call — and the code has to be the NORMALIZED one, because a
-// server that normalizes again still cannot repair a code we mangled.
-func TestResolveSendsTheRefAndTheNormalizedCode(t *testing.T) {
-	studio := &fakeStudio{out: "s1"}
-	code, err := normalizeCode("k7m4-p2qx")
+func TestResolveReturnsTheSessionTheProjectNames(t *testing.T) {
+	got, err := resolveAgainst(t, http.StatusOK,
+		`{"session_id":"018f4c2a-6b1d-7a3e-9c55-2b7f0e1d4a88"}`)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("resolve: %v", err)
 	}
-	if _, err := resolveSession(context.Background(), studio, "todoappm8p6zm", code); err != nil {
-		t.Fatal(err)
-	}
-
-	if studio.path != "debug.resolveSession" {
-		t.Errorf("tRPC path = %q", studio.path)
-	}
-	input, ok := studio.input.(map[string]any)
-	if !ok {
-		t.Fatalf("input is %T, want a map", studio.input)
-	}
-	if input["ref"] != "todoappm8p6zm" {
-		t.Errorf("ref = %v — Studio checks membership on the selected Environment", input["ref"])
-	}
-	if input["code"] != "K7M4P2QX" {
-		t.Errorf("code = %v, want the normalized form", input["code"])
+	if got != "018f4c2a-6b1d-7a3e-9c55-2b7f0e1d4a88" {
+		t.Errorf("session id = %q", got)
 	}
 }
 
-// Resolution is authenticated, so an unwired Studio must fail HERE with an
-// instruction, not as a nil dereference.
-func TestResolveWithoutAStudioSaysWhatToDo(t *testing.T) {
-	_, err := resolveSession(context.Background(), nil, "todoappm8p6zm", "K7M4P2QX")
-	if err == nil || !strings.Contains(err.Error(), "palbase login") {
-		t.Errorf("err = %v, want it to point at `palbase login`", err)
-	}
-}
-
-// Studio sets the tRPC message to palsvc's reason VERBATIM so this CLI can tell
-// the failures apart. That promise spans three hops — palsvc's reason, Studio's
-// error envelope, studio.Client's rendering — and every one of them is a place
-// someone could "tidy" the reason away. So drive the REAL client against the
-// REAL superjson envelope Studio emits, and assert on the string a user reads.
-func TestStudioErrorReasonsSurviveToTheTerminal(t *testing.T) {
-	tests := []struct {
-		name, reason, trpcCode string
-		status                 int
+// THREE REFUSALS, THREE FIXES. A wrong code, an expired session and too many
+// tries need different things done about them, and collapsing any two into one
+// sentence sends somebody looking for a code that was right all along.
+func TestEveryRefusalStaysTellableApart(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   string
 	}{
-		{"no such session", "unknown_session", "NOT_FOUND", 404},
-		// tRPC has no GONE, so expired travels as PRECONDITION_FAILED — the
-		// precondition being a live session.
-		{"expired", "expired", "PRECONDITION_FAILED", 412},
-		{"rate limited", "rate_limited", "TOO_MANY_REQUESTS", 429},
+		{"no such session", http.StatusNotFound, "no device is showing that code"},
+		{"expired", http.StatusGone, "expired"},
+		{"rate limited", http.StatusTooManyRequests, "too many attempts"},
+		{"not signed in", http.StatusUnauthorized, "palbase login"},
 	}
-
 	seen := map[string]bool{}
-	for _, tc := range tests {
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tc.status)
-				// tRPC + superjson: the real fields nest under `json`.
-				_, _ = fmt.Fprintf(w,
-					`{"error":{"json":{"message":%q,"code":-32001,"data":{"code":%q,"httpStatus":%d}}}}`,
-					tc.reason, tc.trpcCode, tc.status)
-			}))
-			defer srv.Close()
-
-			_, err := resolveSession(context.Background(),
-				studio.New(srv.URL, nil, nil), "todoappm8p6zm", "K7M4P2QX")
+			_, err := resolveAgainst(t, tc.status, `{"error":"refused"}`)
 			if err == nil {
 				t.Fatal("want an error")
 			}
-			for _, want := range []string{"debug.resolveSession", tc.trpcCode, tc.reason} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("the message a user reads is missing %q:\n%s", want, err)
-				}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the message a user reads is missing %q:\n%s", tc.want, err)
 			}
 			if seen[err.Error()] {
 				t.Errorf("this failure is indistinguishable from an earlier one: %s", err)
 			}
 			seen[err.Error()] = true
 		})
+	}
+}
+
+// A 200 carrying no session is not a session. Returning "" would name a topic
+// like `debug:project:` and the join would fail with something unrelated.
+func TestAnAnswerWithoutASessionIsRefused(t *testing.T) {
+	if _, err := resolveAgainst(t, http.StatusOK, `{}`); err == nil {
+		t.Error("an empty answer was accepted as a session")
 	}
 }
 

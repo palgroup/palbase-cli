@@ -28,7 +28,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
-	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
 // schemaVersion is the ONE console envelope version this CLI renders. A record
@@ -66,24 +65,11 @@ var (
 // exactly the record someone is attached to see.
 const readLimit = 8 << 20
 
-// Studio is the tRPC transport subset this package needs.
-//
-// `attach` resolves a pairing code with Mutation and NOT Query, because tRPC
-// puts a query's input in the URL and the code is a capability — the same
-// reason §D2 keeps it out of the topic name. `history` reads with Query: its
-// inputs (an end user id, a window) are not capabilities.
-type Studio interface {
-	Query(ctx context.Context, path string, input any, out any) error
-	Mutation(ctx context.Context, path string, input any, out any) error
-}
-
-// Resolvers carries what `attach` needs from main. `tail` needs none of it — it
-// reads this machine's disk.
-type Resolvers struct {
-	Studio     func() Studio
-	Selection  func() *selection.Resolver
-	PublicHost func() string
-}
+// Resolvers used to carry a Studio client and a selection resolver, because
+// `attach` had a second arm that asked our cloud to resolve a pairing code. It
+// does not: a code is armed on the project and resolved there. Nothing is left
+// to inject, and `tail` never needed anything — it reads this machine's disk.
+type Resolvers struct{}
 
 func attachCmd(r Resolvers) *cobra.Command {
 	var (
@@ -107,29 +93,13 @@ func attachCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 
-			// TARGET-RELATIVE, like login, push and spec: a checkout linked to a
-			// project attaches to THAT project, which resolves the pairing code
-			// itself. Without this the command asked our cloud about a code a
-			// device on somebody's own machine had shown — and there is nothing
-			// there to ask.
-			if attached, err := attachToLinkedProject(cmd, code, errorsOnly, asJSON); err != errNoLinkedProject {
-				_ = attached
-				return err
-			}
-
-			sel, err := r.Selection().Resolve(cmd.Context())
-			if err != nil {
-				return err
-			}
-			ref := sel.EnvironmentRef()
-			sessionID, err := resolveSession(cmd.Context(), r.Studio(), ref, code)
-			if err != nil {
-				return err
-			}
-			topic := topicFor(ref, sessionID)
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s · attaching to %s\n", ref, topic)
-			return run(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				websocketURL(ref, r.PublicHost()), topic, code, errorsOnly, asJSON)
+			// TARGET-RELATIVE, always: a device arms its session on a PROJECT, and
+			// the project is the only thing that can turn the code it showed into
+			// a topic. This used to fall through to our cloud for a checkout that
+			// was not linked, which asked a service holding no such session —
+			// and could never answer for a stack on somebody's own machine.
+			_, err = attachToProject(cmd, code, errorsOnly, asJSON)
+			return err
 		},
 	}
 
@@ -145,19 +115,6 @@ func attachCmd(r Resolvers) *cobra.Command {
 // about how a viewer learns `session_id` costs one line to settle.
 func topicFor(environmentRef, sessionID string) string {
 	return "debug:" + environmentRef + ":" + sessionID
-}
-
-// tenantOrigin is the Environment's own host.
-func tenantOrigin(environmentRef, publicHost string) string {
-	return environmentRef + "." + publicHost
-}
-
-// websocketURL points at the Environment's realtime endpoint. The handshake
-// carries NO credential: palsvc tenants the request by Host and upgrades, then
-// authorizes at phx_join against the pairing code (rt/hub.go ServeWS). So the
-// code is the only thing a viewer presents, and it never rides in a URL.
-func websocketURL(environmentRef, publicHost string) string {
-	return "wss://" + tenantOrigin(environmentRef, publicHost) + "/realtime/v1/websocket?vsn=2.0.0"
 }
 
 // codeAlphabet is Crockford base32: no I, L, O or U, so a code read aloud over
@@ -206,37 +163,7 @@ func normalizeCode(raw string) (string, error) {
 // is keyed by. The device shows ONLY the code — it never displays its session
 // id — so this call is the only way a viewer can build the topic.
 //
-// It goes through Studio, not palsvc, for the same reason `palbase logs` does:
-// the viewer is a PERSON, and "is this person allowed to see this Environment"
-// is a membership question only Studio can answer. palsvc-rt authenticates
-// devices (palauth JWKS) and br-pods (per-tenant HS256) and nothing else.
-//
-// It is NOT the security boundary. What authorizes the watch is the code,
-// verified against its argon2id hash at phx_join; a session id learned here
-// buys nothing without it. So resolving and THEN being refused at the join is a
-// normal flow, not a contradiction — the join's own reason is what surfaces.
-//
-// Studio's error is passed through unwrapped: `unknown_session` and `expired`
-// have to stay tellable apart, and rewording them here is how two failures
-// with different fixes turn into one unhelpful sentence.
-func resolveSession(ctx context.Context, studio Studio, environmentRef, code string) (string, error) {
-	if studio == nil {
-		return "", errors.New("not authenticated — run `palbase login`")
-	}
-	var out struct {
-		SessionID string `json:"session_id"`
-	}
-	input := map[string]any{"ref": environmentRef, "code": code}
-	if err := studio.Mutation(ctx, "debug.resolveSession", input, &out); err != nil {
-		return "", fmt.Errorf("debug.resolveSession: %w", err)
-	}
-	if out.SessionID == "" {
-		return "", errors.New("debug.resolveSession: Studio answered without a session_id")
-	}
-	return out.SessionID, nil
-}
-
-// MARK: - Phoenix v2 frames
+/// MARK: - Phoenix v2 frames
 
 // A frame is the 5-slot array [join_ref, ref, topic, event, payload]. join_ref
 // and ref only matter to a client matching pending pushes; this one has exactly

@@ -24,20 +24,18 @@ import (
 	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
-// errNoLinkedProject says this checkout is not bound to a project, so the caller
-// should take the cloud path. A sentinel rather than a string: a caller matching
-// on wording is a caller that breaks when the wording improves.
-var errNoLinkedProject = errors.New("no linked project")
-
-// attachToLinkedProject streams a device's console from the linked project.
+// attachToProject streams a device's console from the project this verb acts on
+// — the one this checkout is linked to, or the one the caller selected.
 //
-// It answers errNoLinkedProject when there is none — the ONLY case the caller
-// falls through on. Every other failure is this project's answer and belongs to
-// the person who asked.
-func attachToLinkedProject(cmd *cobra.Command, code string, errorsOnly, asJSON bool) (bool, error) {
-	target, err := backend.ReadTarget()
+// It used to fall through to a tRPC arm that asked our cloud to resolve the
+// pairing code. That arm answered for cloud projects only, and it asked a
+// service that does not hold the session: a code is armed on the PROJECT, and
+// the project is the only thing that can turn it into a topic. One door now, and
+// it is the right one either way.
+func attachToProject(cmd *cobra.Command, code string, errorsOnly, asJSON bool) (bool, error) {
+	target, err := backend.ResolveTarget(cmd.Context())
 	if err != nil {
-		return false, errNoLinkedProject
+		return false, err
 	}
 	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
@@ -99,6 +97,12 @@ func resolveSessionOnProject(cmd *cobra.Command, target backend.Target, cred bac
 		return "", errors.New("that session has expired — the device can arm a new one")
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return "", fmt.Errorf("%s did not accept this session — run `palbase login`", target.URL)
+	case http.StatusTooManyRequests:
+		// Named rather than left to the generic line below. Three refusals reach
+		// this switch and each has a different fix — wrong code, expired session,
+		// too many tries — and collapsing one of them into "the project answered
+		// 429" sends somebody looking for a code that was right all along.
+		return "", errors.New("too many attempts on that code — wait a moment, or have the device arm a fresh one")
 	default:
 		return "", fmt.Errorf("the project answered %d: %s", res.StatusCode, strings.TrimSpace(string(answer)))
 	}
