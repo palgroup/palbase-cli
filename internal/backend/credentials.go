@@ -160,8 +160,24 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	// Measured (2026-08-21, live): the same key opens
 	// `https://<ref>.v2.palbase.studio/v1/management/whoami` with `apikey`, and
 	// gets 401 as a Bearer. The credential was right; the PRESENTATION was wrong.
+	//
+	// BUT A PLANE SESSION IS NOT A TENANT CREDENTIAL, and presenting one as if it
+	// were is how a person who did everything right gets a 401 from the project
+	// they just created. The SAME variable is the documented headless credential
+	// for the CONTROL PLANE ("set PALBASE_ACCESS_TOKEN and every command resolves
+	// it"), so it holds a plane session far more often than a project key — and a
+	// tenant's management surface takes that PROJECT's service key, nothing else.
+	//
+	// Measured 2026-08-24: with the variable set to a plane session,
+	// `palbase link https://<ref>.v2.palbase.studio` answered
+	// "did not accept this credential (401)" while the cloud could have brokered
+	// the right key on the next line. The value's KIND already tells the two
+	// apart — a project key is `pb_…`, a session is not — so a session falls
+	// through to the authority that can answer for this address.
 	if v := strings.TrimSpace(os.Getenv(AccessTokenEnv)); v != "" {
-		return Credentials{Value: v, Kind: kindOf(v)}, SourceEnv, nil
+		if k := kindOf(v); k == KindKey || !isCloudProjectAddress(url) {
+			return Credentials{Value: v, Kind: k}, SourceEnv, nil
+		}
 	}
 
 	// THE CLOUD ANSWERS FOR ITS OWN PROJECTS — the same shape as a stack on this
@@ -192,6 +208,20 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 			"For a stack you host yourself, `palbase link <url> --token-stdin` takes its key and remembers it for that address.\n"+
 			"For a cloud project, run `palbase login`, or set %s to a Dashboard-issued token",
 		ErrNoCredential, url, AccessTokenEnv)
+}
+
+// isCloudProjectAddress reports whether the cloud can answer for this address.
+//
+// It asks the SAME resolver the fetch uses, so "the cloud knows this project"
+// and "the cloud will hand me its key" cannot drift apart. No fetcher wired
+// (a unit test, an older binary) means no authority to defer to, and the
+// environment's value stays the answer.
+func isCloudProjectAddress(url string) bool {
+	if CloudKeyFetcher == nil {
+		return false
+	}
+	_, ok := fetchCloudCredential(url)
+	return ok
 }
 
 // StoreCredential records an identity for one target.

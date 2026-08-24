@@ -4,6 +4,7 @@ package backend
 // can write at once.
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -228,5 +229,76 @@ func TestANonKeyTokenIsStillABearer(t *testing.T) {
 	}
 	if cred.Kind != KindPerson {
 		t.Fatalf("kind = %q — Dashboard token'ı bir KİŞİnin kimliğidir ve Bearer'da gider", cred.Kind)
+	}
+}
+
+// BİR DÜZLEM OTURUMU, TENANT'IN KİMLİĞİ DEĞİLDİR.
+//
+// `PALBASE_ACCESS_TOKEN` is the documented headless credential for the CONTROL
+// PLANE — "set it and every command resolves it" — so it holds a plane session
+// far more often than a project key. A tenant's management surface takes that
+// PROJECT's service key and nothing else, so handing it the session earns a 401
+// from the project the person just created.
+//
+// Measured 2026-08-24: `palbase link https://<ref>.v2.palbase.studio` answered
+// "did not accept this credential (401)" while the cloud could have brokered the
+// right key on the very next line. The value's KIND already separates the two.
+func TestAPlaneSessionDefersToTheCloudForAProjectAddress(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "session-not-a-project-key")
+
+	prev := CloudKeyFetcher
+	CloudKeyFetcher = func(string) (string, error) { return "pb_project_sfromtheplane", nil }
+	t.Cleanup(func() { CloudKeyFetcher = prev })
+
+	cred, source, err := Credential("https://abc1234m.v2.palbase.studio")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cred.Value != "pb_project_sfromtheplane" {
+		t.Fatalf("resolved %q from %s — the session was presented to the tenant", cred.Value, source)
+	}
+	if cred.Kind != KindKey {
+		t.Errorf("a project key must travel as a key, got %q", cred.Kind)
+	}
+}
+
+// AND A PROJECT KEY IN THE ENVIRONMENT STILL WINS. An agent holding the
+// project's own secret key has nowhere else to put it, and asking the cloud
+// instead would ignore what it was given.
+func TestAProjectKeyInTheEnvironmentIsNotOverridden(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "pb_project_sfromtheenvironment")
+
+	prev := CloudKeyFetcher
+	CloudKeyFetcher = func(string) (string, error) { return "pb_project_sfromtheplane", nil }
+	t.Cleanup(func() { CloudKeyFetcher = prev })
+
+	cred, _, err := Credential("https://abc1234m.v2.palbase.studio")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cred.Value != "pb_project_sfromtheenvironment" {
+		t.Fatalf("the environment's own project key was overridden: %q", cred.Value)
+	}
+}
+
+// AND AN ADDRESS THE CLOUD CANNOT ANSWER FOR KEEPS THE SESSION. A stack somebody
+// hosts themselves is not this cloud's to speak for, so the environment stays
+// the answer rather than becoming "no credential".
+func TestASessionSurvivesForAnAddressTheCloudDoesNotOwn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "session-not-a-project-key")
+
+	prev := CloudKeyFetcher
+	CloudKeyFetcher = func(string) (string, error) { return "", errors.New("not a project on this cloud") }
+	t.Cleanup(func() { CloudKeyFetcher = prev })
+
+	cred, source, err := Credential("https://stack.example.com")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cred.Value != "session-not-a-project-key" || source != SourceEnv {
+		t.Fatalf("resolved %q from %s", cred.Value, source)
 	}
 }
