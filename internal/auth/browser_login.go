@@ -132,15 +132,13 @@ func printSignInBanner(w io.Writer, handoff string, create bool) {
 	}
 }
 
-// printDeployment names the deployment being signed in to, and ONLY when it is
-// not the default one.
-//
-// Signing in to the wrong deployment looks identical afterwards — the same
-// commands, the same project names, a different world — so a non-default one is
-// worth a line. The default is worth none: a line every person sees on every
-// sign-in teaches them to stop reading.
 // PrintDeployment announces the cloud being signed in to, when it is NOT the
 // one this binary is built for.
+//
+// Signing in to the wrong cloud looks identical afterwards — the same commands,
+// the same project names, a different world — so a non-default one is worth a
+// line. The default is worth none: a line every person sees on every sign-in
+// teaches them to stop reading.
 //
 // It used to take a MODE and stay silent for "prod". There is one cloud now and
 // no mode to compare against, so the question it answers changed: the only way
