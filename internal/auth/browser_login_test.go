@@ -151,3 +151,54 @@ func TestHandoffGoesToThePageThatReadsTheRequestID(t *testing.T) {
 		})
 	}
 }
+
+// What a person sees while signing in.
+//
+// It read like a debug trace: `Mode: dev (source=config, cloud=https://…)` then
+// a raw URL with a UUID query parameter. Neither line is for the person in front
+// of it — where the configuration came from is this process's business, and the
+// request id is a machine's.
+//
+// What they need is three things: that a browser is opening, what to do if it
+// does not, and that the terminal is waiting on them.
+func TestTheSignInSaysWhatAPersonNeedsAndNoMore(t *testing.T) {
+	var out strings.Builder
+	printSignInBanner(&out, "https://app.example.test/auth/login?auth_request_id=ar_01a0", false)
+	got := out.String()
+
+	for _, want := range []string{
+		"browser",                    // something is opening
+		"app.example.test",           // where they are going, so they can trust it
+		"Waiting",                    // the terminal is not stuck
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the sign-in does not say %q:\n%s", want, got)
+		}
+	}
+	// NOT this: the parameter is a machine's business, and a person reading a
+	// UUID in their terminal learns nothing they can act on.
+	if strings.Contains(got, "auth_request_id=") && !strings.Contains(got, "\n") {
+		t.Errorf("the request id is the loudest thing on the line:\n%s", got)
+	}
+	for _, unwanted := range []string{"source=", "cloud=", "Mode:"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("%q is this process's business, not the person's:\n%s", unwanted, got)
+		}
+	}
+}
+
+// A person signing in to something OTHER than the default deployment has to be
+// told, because signing in to the wrong one looks identical afterwards.
+func TestASignInToANonDefaultDeploymentNamesIt(t *testing.T) {
+	var out strings.Builder
+	printDeployment(&out, "dev", "https://api.v2.palbase.studio")
+	if !strings.Contains(out.String(), "dev") {
+		t.Errorf("a non-default deployment was not named: %q", out.String())
+	}
+
+	var quiet strings.Builder
+	printDeployment(&quiet, "prod", "https://api.palbase.studio")
+	if quiet.String() != "" {
+		t.Errorf("the default deployment announced itself: %q", quiet.String())
+	}
+}

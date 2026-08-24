@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -77,12 +78,11 @@ func (c *Client) BrowserLogin(ctx context.Context, create bool) (*Credentials, e
 	// machine surface behind an apikey header, and a browser sends no such
 	// header. The panel is where a human signs in, and it carries the id back.
 	handoff := handoffURL(c.Cfg.StudioURL, create, authRequestID)
-	fmt.Fprintf(c.Output, "Opening %s\n", handoff)
-	fmt.Fprintln(c.Output, "Waiting for you to finish in the browser…")
+	printSignInBanner(c.Output, handoff, create)
 	if err := c.OpenBrowser(handoff); err != nil {
-		// A headless machine has no browser and that is not a failure: print
-		// the URL so it can be opened somewhere that does.
-		fmt.Fprintf(c.Output, "Could not open a browser (%v). Open the link above.\n", err)
+		// A headless machine has no browser and that is not a failure: the link
+		// is already printed above, so say only what changed.
+		fmt.Fprintf(c.Output, "  (this terminal could not open a browser — use the link)\n")
 	}
 
 	code, err := awaitCallback(ctx, ln, state)
@@ -90,6 +90,47 @@ func (c *Client) BrowserLogin(ctx context.Context, create bool) (*Credentials, e
 		return nil, err
 	}
 	return plane.ExchangeCode(ctx, boot, code, redirectURI, verifier)
+}
+
+// printSignInBanner is what a person sees while signing in.
+//
+// It used to read like a debug trace: the resolved mode, where the
+// configuration came from, the cloud address, then a raw URL carrying a UUID.
+// None of that is for the person in front of it — where the config came from is
+// this process's business, and the request id is a machine's.
+//
+// Three things are theirs: that a browser is opening, what to do if it does not,
+// and that the terminal is waiting on them rather than stuck.
+// PrintSignInBannerForDemo exposes the banner for a doc/demo caller.
+func PrintSignInBannerForDemo(w io.Writer, handoff string, create bool) {
+	printSignInBanner(w, handoff, create)
+}
+
+func printSignInBanner(w io.Writer, handoff string, create bool) {
+	what := "Signing in to Palbase"
+	if create {
+		what = "Creating your Palbase account"
+	}
+	fmt.Fprintf(w, "\n  %s\n\n", what)
+	fmt.Fprintf(w, "  Opening your browser. If it does not open, use this link:\n")
+	fmt.Fprintf(w, "  %s\n\n", handoff)
+	fmt.Fprintf(w, "  Waiting for you to finish…\n")
+}
+
+// printDeployment names the deployment being signed in to, and ONLY when it is
+// not the default one.
+//
+// Signing in to the wrong deployment looks identical afterwards — the same
+// commands, the same project names, a different world — so a non-default one is
+// worth a line. The default is worth none: a line every person sees on every
+// sign-in teaches them to stop reading.
+func PrintDeployment(w io.Writer, mode, cloud string) { printDeployment(w, mode, cloud) }
+
+func printDeployment(w io.Writer, mode, cloud string) {
+	if mode == "prod" {
+		return
+	}
+	fmt.Fprintf(w, "  %s deployment · %s\n", mode, cloud)
 }
 
 // newPKCE returns a verifier and its S256 challenge. The verifier never leaves

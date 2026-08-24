@@ -439,8 +439,8 @@ Two things do NOT come through here:
   a project running on this machine   ` + "`palbase start`" + ` writes that credential itself
   a stack you host yourself           ` + "`palbase link <url> --token-stdin`" + ``,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stdout, "Mode: %s (source=%s, cloud=%s)\n",
-				resolved.Mode, resolved.Source, resolved.Endpoints.PlatformAPI)
+			// Only a NON-default deployment announces itself. See printDeployment.
+			auth.PrintDeployment(os.Stdout, string(resolved.Mode), resolved.Endpoints.PlatformAPI)
 			if create {
 				return authClient.SignUp(cmd.Context())
 			}
