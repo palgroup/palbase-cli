@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/palgroup/palbase-cli/internal/config"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // What `palbase link <url>` must get right.
@@ -485,4 +489,49 @@ func TestTheOldFlatClientIsRemoved(t *testing.T) {
 	if !strings.Contains(out.String(), "one client per environment") {
 		t.Errorf("the removal was silent:\n%s", out.String())
 	}
+}
+
+// BİR REF, BU BULUTUN BİLDİĞİ BİR ADRESTİR — ve yardım metni bunu hep vaat etti.
+//
+// `palbase link` documents "palbase link <project> — a project in the cloud", and
+// the code refused anything without a scheme, sending people to `palbase ios
+// link` — which links an iOS APP and is no use at all to a backend checkout. So a
+// backend had no way to reach a cloud project by name, which is exactly the step
+// between `login` and `secret set`. The only thing missing was the suffix, and
+// the configured cloud carries it.
+func TestLink_ResolvesABareRefToItsAddress(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := newLinkCmd(Resolvers{
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "v2.palbase.studio"} },
+	})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"na1m7lt2m"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	err := cmd.Execute()
+	// It cannot finish here — there is no stack at that address in a unit test —
+	// but the ERROR proves the ref became the address instead of being refused
+	// for having no scheme.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "na1m7lt2m.v2.palbase.studio")
+	require.NotContains(t, err.Error(), "has no scheme")
+}
+
+// Ve ref'e BENZEMEYEN bir şey hâlâ reddedilir: her şeyi adrese çevirmek, yazım
+// hatasını "o adrese ulaşamadım" diye raporlamak olurdu.
+func TestLink_RefusesSomethingThatIsNeitherAddressNorRef(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cmd := newLinkCmd(Resolvers{
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "v2.palbase.studio"} },
+	})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"Not A Ref"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	require.ErrorContains(t, cmd.Execute(), "neither a stack address nor an environment ref")
 }

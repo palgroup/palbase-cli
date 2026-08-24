@@ -139,10 +139,11 @@ func Commands(r Resolvers) []*cobra.Command {
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
-		// Takes no Resolvers: a stack you run has no project to select and no
-		// environment to resolve. It is told where the stack is, once, and asks
+		// Takes the resolvers for ONE reason: a bare Environment ref has to become
+		// an address, and only the configured cloud knows the suffix. Everything
+		// after that is unchanged — it is told where the stack is, once, and asks
 		// the stack itself for the rest.
-		newLinkCmd(),
+		newLinkCmd(r),
 		newPlanCmd(),
 		newInitCmd(),
 		newStartCmd(),

@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
@@ -44,13 +45,13 @@ import (
 const projectAppID = "project"
 
 type linkOpts struct {
-	url       string
-	platforms []string
-	insecure  bool
+	url        string
+	platforms  []string
+	insecure   bool
 	tokenStdin bool
 }
 
-func newLinkCmd() *cobra.Command {
+func newLinkCmd(r Resolvers) *cobra.Command {
 	var o linkOpts
 	cmd := &cobra.Command{
 		Use:   "link <target>",
@@ -86,10 +87,23 @@ boot generated.`,
 			if len(args) == 1 && o.url == "" {
 				o.url = args[0]
 			}
+			// A BARE REF IS AN ADDRESS THIS CLOUD KNOWS, and the help above has
+			// promised so all along: "palbase link <project> — a project in the
+			// cloud". The code refused it and sent people to `palbase ios link`,
+			// which links an iOS APP — no use at all to a backend checkout, which
+			// then had no way to reach a cloud project by name. The only thing
+			// missing was the suffix, and the configured cloud carries it.
 			if o.url != "" && !strings.Contains(o.url, "://") {
-				return fmt.Errorf(
-					"%q has no scheme, so it is an environment ref rather than a stack address — "+
-						"that half is resolved by our cloud: use `palbase ios link` for it", o.url)
+				if !selection.IsCanonicalEnvironmentRef(o.url) {
+					return fmt.Errorf(
+						"%q is neither a stack address nor an environment ref "+
+							"(a ref is 4-24 lowercase letters and digits)", o.url)
+				}
+				host := r.Endpoints().PublicHost
+				if host == "" {
+					return fmt.Errorf("this CLI has no tenant host configured, so %q cannot be resolved to an address", o.url)
+				}
+				o.url = "https://" + o.url + "." + host
 			}
 			return runLink(cmd.Context(), o, cmd.OutOrStdout())
 		},
