@@ -8,7 +8,7 @@ package backend
 //  1. Use the SELECTED project (`palbase project use`, or --project).
 //  2. Register (or reuse) this checkout's platform app under that Project.
 //     Apps are PROJECT-scoped: `apps.project_id` is singular.
-//  3. Fetch the shared `.palbase/openapi.json` plus the platform config at
+//  3. Fetch one `.palbase/openapi/<env>.json` per environment plus the platform config at
 //     `.palbase/<platform>/palbase-config.json` for the SELECTED ENVIRONMENT.
 //  4. Print the platform-specific SDK wiring steps.
 //
@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
@@ -51,8 +52,7 @@ type nativeLinkSummary struct {
 // without a live Management API or tenant host.
 type nativeLinkDeps struct {
 	rest     restDoer
-	lookup   specTargetLookup
-	fetch    remoteSpecFetch
+	fetch    specFetch
 	list     bindingLister
 	cfgFetch configArtifactFetch
 	// publicHost binds config artifacts to the configured tenant DNS suffix.
@@ -117,7 +117,7 @@ Local project files are left untouched.
 
   1. uses the selected project (palbase project use <projectId>, or --project)
   2. reuses this checkout's linked %s app or registers a new one
-  3. writes shared .palbase/openapi.json and the platform config under
+  3. writes one .palbase/openapi/<env>.json per environment and the platform config under
      .palbase/%s/palbase-config.json for the SELECTED environment
 
 %s`, platform, platform, platform, next),
@@ -161,8 +161,7 @@ Local project files are left untouched.
 
 			deps := nativeLinkDeps{
 				rest:       rest,
-				lookup:     lookupSpecTarget(r),
-				fetch:      fetchRemoteOpenAPISpec,
+				fetch:      managedSpecFetch(rest),
 				list:       studioBindingLister(rest),
 				cfgFetch:   studioConfigArtifactFetch(rest, r.Endpoints().PublicHost),
 				publicHost: r.Endpoints().PublicHost,
@@ -231,17 +230,22 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 	}
 
 	configDir := filepath.Join(".palbase", opts.platform)
-	if err := runPullSpec(
-		ctx, d.lookup, d.fetch, d.list, d.cfgFetch,
-		studioSpecFreshness(d.rest, opts.projectID, opts.environmentRef),
-		opts.environmentRef, d.publicHost, ".palbase", configDir, appID, w,
-	); err != nil {
-		return nil, err
+	// EVERY environment, not the one being linked — the same rule the direct
+	// half has followed since app_environments.go was written. An app that holds
+	// only the environment somebody linked last is an app whose address depends
+	// on WHEN it was built, which is how a TestFlight build ends up pointed at
+	// staging. The build configuration decides instead, and it cannot be
+	// forgotten at run time.
+	deps := cloudEnvDeps{
+		fetch:      d.fetch,
+		list:       d.list,
+		cfgFetch:   d.cfgFetch,
+		freshness:  studioSpecFreshness(d.rest, opts.projectID, opts.environmentRef),
+		publicHost: d.publicHost,
 	}
-	// Emit the committed Swift client from the spec+config just written. A no-op
-	// on an Android-only checkout (no Apple slot), where the Gradle plugin
-	// generates instead.
-	if err := generateAppleClient(".palbase", w); err != nil {
+	if err := linkNativeEnvironments(
+		ctx, deps, opts.platform, appID, opts.environmentRef, opts.projectID, w,
+	); err != nil {
 		return nil, err
 	}
 
@@ -262,13 +266,39 @@ func appIDFromPlatformSlot(platform string) string {
 	if err != nil {
 		return ""
 	}
+	// TWO SHAPES, ONE ANSWER. The web slot is a flat object with `app_id`; a
+	// native slot carries every environment and each names the app. Reading only
+	// the flat field made a fresh clone look UNLINKED after the native config
+	// went multi-environment — and an unlinked clone registers a SECOND app for
+	// the same project and rewrites the committed key.
 	var slot struct {
-		AppID string `json:"app_id"`
+		AppID        string                    `json:"app_id"`
+		Default      string                    `json:"default_environment"`
+		Environments map[string]appEnvironment `json:"environments"`
 	}
 	if err := json.Unmarshal(data, &slot); err != nil {
 		return ""
 	}
-	return slot.AppID
+	if slot.AppID != "" {
+		return slot.AppID
+	}
+	if e, ok := slot.Environments[slot.Default]; ok && e.AppID != "" && e.AppID != projectAppID {
+		return e.AppID
+	}
+	// The default may be the LOCAL stack, whose app id is the stack's own
+	// identity rather than a registration in the cloud. Deterministic order so
+	// two runs of the same checkout never disagree.
+	names := make([]string, 0, len(slot.Environments))
+	for name := range slot.Environments {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if e := slot.Environments[name]; e.AppID != "" && e.AppID != projectAppID {
+			return e.AppID
+		}
+	}
+	return ""
 }
 
 // persistedAppIDFor returns the locally-remembered app registration for
@@ -423,7 +453,7 @@ func printNativeNextSteps(w io.Writer, platform, outDir string) {
 next steps (Android app):
   1. add implementation("io.palbase:palbe:<version>")
   2. apply plugin id("io.palbase.codegen")
-  3. commit .palbase/openapi.json and %s/palbase-config.json
+  3. commit .palbase/openapi/ and %s/palbase-config.json
   4. call Palbase.initialize(this), then import io.palbase.pb
 `, outDir)
 		return
@@ -434,7 +464,7 @@ next steps (%s Xcode target):
   2. Add the "Palbe" library to your app target
   3. Drag the Palbase folder into your app target (folder reference) — its
      PalbaseGenerated.swift compiles and Palbase-Info.plist ships as a resource
-  4. Commit .palbase/openapi.json, %s/palbase-config.json and Palbase/Generated/
+  4. Commit .palbase/openapi/, %s/palbase-config.json, Palbase/Config/ and Palbase/Generated/
 Then `+"`import Palbe`"+` and use `+"`pb`"+`. Re-run `+"`palbase %[1]s spec`"+` after every deploy to regenerate.
 `, platform, outDir)
 }

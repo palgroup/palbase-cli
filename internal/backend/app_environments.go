@@ -356,10 +356,16 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 
 	tool, err := ensureSwiftgenTool(root, w)
 	if err != nil {
-		// An app checkout without the SDK package resolved yet — the genuine
-		// first link. Nothing generated, nothing stale to delete.
-		fmt.Fprintf(w, "%v\n", err)
-		return nil
+		// SPEC REFRESHED, GENERATOR UNAVAILABLE. On a genuine first link there is
+		// nothing generated and this is a note; on a RE-link the clients on disk
+		// were emitted from the previous contract and they still COMPILE, so the
+		// drift stays invisible until a call 404s on a device. Every one of them
+		// goes, and the command fails loudly.
+		stale := []string{filepath.Join(root, generatedDir, "Palbase-Info.plist")}
+		for _, env := range envs.names() {
+			stale = append(stale, filepath.Join(root, generatedDir, env, "PalbaseGenerated.swift"))
+		}
+		return discardStaleGenerated(err, w, stale...)
 	}
 
 	// The two halves are requested separately: one client per environment, and

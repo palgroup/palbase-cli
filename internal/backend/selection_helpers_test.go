@@ -32,6 +32,7 @@ type rig struct {
 	Fake     *selectiontest.Fake
 	Dir      string
 	Studio   *studio.Client
+	RESTC    REST
 	Resolver *selection.Resolver
 	// trpc records the tRPC procedure paths the command called, in order.
 	trpc []string
@@ -62,12 +63,28 @@ func newRig(t *testing.T, trpcHandler http.HandlerFunc) *rig {
 		func(context.Context, string, string, string) (string, error) { return "proof", nil },
 	)
 	r.Resolver = r.Fake.Resolver()
+	r.RESTC = r.Fake.REST()
+	// ORTAMIN YAYINLANABİLİR ANAHTARI ARTIK YÖNETİM API'SİNDE.
+	//
+	// Her rig'e varsayılan olarak kuruluyor çünkü bu yüzey artık standart:
+	// `link`, `spec` ve `use` hepsi onu okuyor. Anahtar ref'e BAĞLI olmak
+	// zorunda — istemci bağı doğruluyor ve bağsız bir anahtarı reddediyor.
+	r.Fake.OK("GET /api/v2/environments/app1prod/apikey", map[string]any{
+		"environment_ref": "app1prod",
+		"publishable_key": "pb_app1prod_c01234567890123456789",
+	})
+	// Sözleşme de aynı yüzeyden: tenant belgeyi yalnız `service_role`'a sunuyor.
+	for _, ref := range []string{"app1prod", "app1stg"} {
+		r.Fake.OK("GET /api/v2/environments/"+ref+"/openapi", map[string]any{
+			"openapi": "3.1.0", "paths": map[string]any{},
+		})
+	}
 	return r
 }
 
 // Resolvers wires the rig into the backend command tree.
 func (r *rig) Resolvers() Resolvers {
-	rest := r.Fake.REST()
+	rest := r.RESTC
 	return Resolvers{
 		Studio:    func() *studio.Client { return r.Studio },
 		REST:      func() REST { return rest },
@@ -120,15 +137,17 @@ func requireNoV1(t *testing.T, f *selectiontest.Fake) {
 }
 
 func TestLookupBackendTarget_RejectsAnUnboundPublishableKey(t *testing.T) {
-	r := newRig(t, func(w http.ResponseWriter, _ *http.Request) {
-		trpcOK(w, map[string]any{
-			"environment_ref": "app1prod",
-			"publishable_key": "pb_app1stg_c01234567890123456789",
-		})
+	// Anahtar artık YÖNETİM API'sinden okunuyor, Studio'nun tRPC yüzeyinden
+	// değil: headless bir koşumda DPoP'la bağlanmış tarayıcı oturumu yok ve
+	// komut o yolda "acquire token: refresh tokens: 401" ile ölüyordu.
+	r := newRig(t, nil)
+	r.Fake.OK("GET /api/v2/environments/app1prod/apikey", map[string]any{
+		"environment_ref": "app1prod",
+		"publishable_key": "pb_app1stg_c01234567890123456789",
 	})
 
 	target, err := lookupBackendTarget(
-		context.Background(), r.Studio,
+		context.Background(), r.RESTC,
 		config.Endpoints{PublicHost: "dev.palbase.studio"}, "app1prod",
 	)
 	require.ErrorContains(t, err, "publishable")
@@ -136,17 +155,12 @@ func TestLookupBackendTarget_RejectsAnUnboundPublishableKey(t *testing.T) {
 }
 
 func TestLookupBackendTarget_RejectsInvalidRefBeforeStudioRequest(t *testing.T) {
-	r := newRig(t, func(w http.ResponseWriter, _ *http.Request) {
-		trpcOK(w, map[string]any{
-			"environment_ref": "bad-ref",
-			"publishable_key": "pb_bad-ref_c01234567890123456789",
-		})
-	})
+	r := newRig(t, nil)
 
 	_, err := lookupBackendTarget(
-		context.Background(), r.Studio,
+		context.Background(), r.RESTC,
 		config.Endpoints{PublicHost: "dev.palbase.studio"}, "bad-ref",
 	)
 	require.ErrorContains(t, err, "environment ref")
-	require.Empty(t, r.TRPCCalls(), "an invalid runtime ref must fail before a network request")
+	require.Empty(t, r.Fake.Requests(), "an invalid runtime ref must fail before a network request")
 }

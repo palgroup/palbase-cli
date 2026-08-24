@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -33,19 +34,33 @@ done
 }
 
 // linkedProject lays out a checkout as the fetch path leaves it: .palbase with
-// the spec plus the requested platform slots.
+// ONE CONTRACT PER ENVIRONMENT plus the requested platform slots. It also makes
+// that checkout the working directory, because generateForEnvironments emits
+// relative to it — the same way every real invocation runs.
 func linkedProject(t *testing.T, platforms ...string) string {
 	t.Helper()
 	root := t.TempDir()
+	t.Chdir(root)
 	palbaseDir := filepath.Join(root, ".palbase")
 	require.NoError(t, os.MkdirAll(palbaseDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(palbaseDir, "openapi.json"), []byte(`{"openapi":"3.1.0"}`), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(palbaseDir, "openapi"), 0o755))
+	require.NoError(t, os.WriteFile(specPath("main"), []byte(`{"openapi":"3.1.0"}`), 0o644))
 	for _, p := range platforms {
 		dir := filepath.Join(palbaseDir, p)
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "palbase-config.json"), []byte(`{}`), 0o644))
 	}
 	return root
+}
+
+// oneEnvironment is the environment set a linkedProject carries.
+func oneEnvironment() appEnvironments {
+	return appEnvironments{
+		Default: "main",
+		Environments: map[string]appEnvironment{
+			"main": {AppID: "app_ios", BaseURL: "https://app1prod.dev.palbase.studio", APIKey: "pb_project_c0"},
+		},
+	}
 }
 
 // errNoCheckout stands for the real "SDK package not resolved yet" failure.
@@ -59,38 +74,41 @@ func useStub(t *testing.T, tool string, err error) {
 	t.Cleanup(func() { ensureSwiftgenTool = prev })
 }
 
-func TestGenerateAppleClient_NoAppleSlotIsNoop(t *testing.T) {
+func TestGenerateForEnvironments_NoAppleSlotWritesNoPlist(t *testing.T) {
 	root := linkedProject(t, "android")
-	useStub(t, "/nonexistent/should-never-run", nil)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 
 	var out bytes.Buffer
-	require.NoError(t, generateAppleClient(filepath.Join(root, ".palbase"), &out))
+	require.NoError(t, generateForEnvironments(context.Background(), oneEnvironment(), &out))
 
-	// Android and web generate from their own toolchains; the CLI must not
-	// invent an Apple client for them.
-	require.NoDirExists(t, filepath.Join(root, "Palbase"))
-	require.Empty(t, out.String())
+	// Android generates its client from the Gradle plugin and has no plist: the
+	// CLI must not invent an Apple envelope for it.
+	require.NoFileExists(t, filepath.Join(root, "Palbase", "Generated", "Palbase-Info.plist"))
 }
 
-func TestGenerateAppleClient_PassesEverySlotAndWritesCommittedOutput(t *testing.T) {
+// THE TWO HALVES ARE REQUESTED SEPARATELY, and that is the contract the
+// generator publishes: one client PER ENVIRONMENT, one plist ONCE for all of
+// them. Asking for the plist alongside every client would write the same bytes N
+// times and read as though the environment mattered to it.
+func TestGenerateForEnvironments_ClientPerEnvironmentAndOnePlist(t *testing.T) {
 	root := linkedProject(t, "ios", "macos")
 	argvLog := filepath.Join(t.TempDir(), "argv")
 	useStub(t, stubSwiftgen(t, argvLog), nil)
 
 	var out bytes.Buffer
-	require.NoError(t, generateAppleClient(filepath.Join(root, ".palbase"), &out))
+	require.NoError(t, generateForEnvironments(context.Background(), oneEnvironment(), &out))
 
 	argv, err := os.ReadFile(argvLog)
 	require.NoError(t, err)
 	got := strings.Split(strings.TrimSpace(string(argv)), "\n")
-	outSwift := filepath.Join(root, "Palbase", "Generated", "PalbaseGenerated.swift")
+	outSwift := filepath.Join(root, "Palbase", "Generated", "main", "PalbaseGenerated.swift")
 	outPlist := filepath.Join(root, "Palbase", "Generated", "Palbase-Info.plist")
 	require.Equal(t, []string{
-		"--openapi", filepath.Join(root, ".palbase", "openapi.json"),
+		"--openapi", specPath("main"),
 		"--out-swift", outSwift,
 		"--out-plist", outPlist,
-		"--ios-config", filepath.Join(root, ".palbase", "ios", "palbase-config.json"),
-		"--macos-config", filepath.Join(root, ".palbase", "macos", "palbase-config.json"),
+		"--ios-config", filepath.Join(".palbase", "ios", "palbase-config.json"),
+		"--macos-config", filepath.Join(".palbase", "macos", "palbase-config.json"),
 	}, got)
 
 	// Committed, not DerivedData: the whole point is that this is diffable.
@@ -98,12 +116,12 @@ func TestGenerateAppleClient_PassesEverySlotAndWritesCommittedOutput(t *testing.
 	require.FileExists(t, outPlist)
 }
 
-func TestGenerateAppleClient_OnlyLinkedSlotIsPassed(t *testing.T) {
-	root := linkedProject(t, "ios")
+func TestGenerateForEnvironments_OnlyLinkedSlotIsPassed(t *testing.T) {
+	linkedProject(t, "ios")
 	argvLog := filepath.Join(t.TempDir(), "argv")
 	useStub(t, stubSwiftgen(t, argvLog), nil)
 
-	require.NoError(t, generateAppleClient(filepath.Join(root, ".palbase"), &bytes.Buffer{}))
+	require.NoError(t, generateForEnvironments(context.Background(), oneEnvironment(), &bytes.Buffer{}))
 
 	argv, err := os.ReadFile(argvLog)
 	require.NoError(t, err)
@@ -111,15 +129,15 @@ func TestGenerateAppleClient_OnlyLinkedSlotIsPassed(t *testing.T) {
 	require.NotContains(t, string(argv), "--macos-config")
 }
 
-func TestGenerateAppleClient_StaleOutputIsDeletedAndReported(t *testing.T) {
+func TestGenerateForEnvironments_StaleOutputIsDeletedAndReported(t *testing.T) {
 	root := linkedProject(t, "ios")
-	genDir := filepath.Join(root, "Palbase", "Generated")
+	genDir := filepath.Join(root, "Palbase", "Generated", "main")
 	require.NoError(t, os.MkdirAll(genDir, 0o755))
 	stale := filepath.Join(genDir, "PalbaseGenerated.swift")
 	require.NoError(t, os.WriteFile(stale, []byte("// generated from yesterday's spec"), 0o644))
 	useStub(t, "", errNoCheckout)
 
-	err := generateAppleClient(filepath.Join(root, ".palbase"), &bytes.Buffer{})
+	err := generateForEnvironments(context.Background(), oneEnvironment(), &bytes.Buffer{})
 
 	// Stale generated code still COMPILES, so silently keeping it hides the
 	// drift until a call 404s at runtime. It must be gone and the run must fail.
@@ -128,15 +146,15 @@ func TestGenerateAppleClient_StaleOutputIsDeletedAndReported(t *testing.T) {
 	require.Contains(t, err.Error(), "no longer matches the spec")
 }
 
-func TestGenerateAppleClient_FirstLinkWithoutSDKIsNotAnError(t *testing.T) {
-	root := linkedProject(t, "ios")
+func TestGenerateForEnvironments_FirstLinkWithoutSDKIsNotAnError(t *testing.T) {
+	linkedProject(t, "ios")
 	useStub(t, "", errNoCheckout)
 
 	var out bytes.Buffer
 	// The very first `palbase ios link` runs BEFORE the SDK package is added, so
 	// there is no checkout yet and nothing generated to go stale. The spec fetch
 	// must still succeed.
-	require.NoError(t, generateAppleClient(filepath.Join(root, ".palbase"), &out))
+	require.NoError(t, generateForEnvironments(context.Background(), oneEnvironment(), &out))
 	require.Contains(t, out.String(), "no Swift client generated yet")
 }
 

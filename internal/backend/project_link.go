@@ -71,7 +71,7 @@ It writes:
 
   .palbase/project.json                     the project this checkout belongs to
   .palbase/<platform>/palbase-config.json   the app's URL + publishable key
-  .palbase/openapi.json                     the contract
+  .palbase/openapi/<env>.json               the contract, one per environment
   Palbase/Generated/                        (apple) the committed Swift client
 
 Run it again after every ` + "`palbase push`" + ` — or just ` + "`palbase spec`" + `, which

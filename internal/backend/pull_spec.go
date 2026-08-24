@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/apps"
+	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
 // pullSpecConfigEntry is the single-ENVIRONMENT config the SDK code generators
@@ -55,7 +55,7 @@ type oauthGoogleJSON struct {
 }
 
 // nativeArtifactsDir is the committed directory the NATIVE SDK generators read:
-// the shared openapi.json plus one per-platform slot (.palbase/ios, /macos,
+// the per-environment contracts under openapi/ plus one per-platform slot (.palbase/ios, /macos,
 // /android). The web SDK reads its own directory instead — webArtifactsDir.
 const nativeArtifactsDir = ".palbase"
 
@@ -153,34 +153,58 @@ Override the target with the global --project / --environment flags.`,
 				}
 			}
 
-			// One fetch, written to each linked platform's directory. Native
-			// platforms share one directory, so this is at most two writes.
-			dirs := []string{}
-			if web {
-				dirs = append(dirs, webArtifactsDir)
+			deps := cloudEnvDeps{
+				fetch:      managedSpecFetch(r.REST()),
+				list:       studioBindingLister(r.REST()),
+				cfgFetch:   studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
+				freshness:  studioSpecFreshness(r.REST(), sel.ProjectID, sel.EnvironmentRef()),
+				publicHost: r.Endpoints().PublicHost,
 			}
+
+			// NATIVE: EVERY environment refreshes, not just the selected one.
+			//
+			// The checkout carries them all and the build configuration picks
+			// one, so refreshing only the selected environment would leave the
+			// OTHER configurations compiling against a contract from whenever
+			// they were last linked — and the person building them has no way to
+			// tell. `spec` still does not touch the runtime config; it rewrites
+			// contracts and re-emits the clients built from them.
 			if apple || android {
-				dirs = append(dirs, nativeArtifactsDir)
-			}
-			for _, dir := range dirs {
-				// spec fetches the API contract ONLY (empty appID → no config).
-				if err := runPullSpec(
-					cmd.Context(),
-					lookupSpecTarget(r),
-					fetchRemoteOpenAPISpec,
-					studioBindingLister(r.REST()),
-					studioConfigArtifactFetch(r.REST(), r.Endpoints().PublicHost),
-					studioSpecFreshness(r.REST(), sel.ProjectID, sel.EnvironmentRef()),
-					sel.EnvironmentRef(), r.Endpoints().PublicHost, dir, "", "",
-					out,
+				platform := "ios"
+				if !apple {
+					platform = "android"
+				}
+				// The COMMITTED slot names the app, so a fresh clone refreshes
+				// without ever having run `link` on this machine. The local
+				// selection is only the fallback.
+				appID := appIDFromPlatformSlot(platform)
+				if appID == "" {
+					cfg, err := selection.Load("")
+					if err != nil {
+						return err
+					}
+					appID = cfg.AppID(platform)
+				}
+				if appID == "" {
+					return fmt.Errorf("no %s app linked — run `palbase %s link` first", platform, platform)
+				}
+				if err := linkNativeEnvironments(
+					cmd.Context(), deps, platform, appID, sel.EnvironmentRef(), sel.ProjectID, out,
 				); err != nil {
 					return err
 				}
 			}
 
-			// Apple is the only platform with no build-time generator of its own.
-			if apple {
-				return generateAppleClient(nativeArtifactsDir, out)
+			// WEB reads ONE contract from its own directory: `palbe-gen` takes a
+			// single openapi.json and the web SDK has no per-environment build
+			// configuration to select between them.
+			if web {
+				if err := runPullSpec(
+					cmd.Context(), deps.fetch, deps.freshness,
+					sel.EnvironmentRef(), webArtifactsDir, out,
+				); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -188,26 +212,15 @@ Override the target with the global --project / --environment flags.`,
 	return cmd
 }
 
-// specTargetLookup resolves a backend target (URL + publishable key) for an
-// ENVIRONMENT ref. Injected so runPullSpec is testable without a live server.
-type specTargetLookup func(ctx context.Context, environmentRef string) (backendTarget, error)
-
-// contractPath is where a stack serves its OpenAPI document.
+// specFetch reads an Environment's OpenAPI contract.
 //
-// NOT `/openapi.json`. That was v1's path and no v2 stack has it — measured
-// live (2026-08-22) against the control plane: `/openapi.json` falls through to
-// the deep-links module and answers `link_not_found`, while
-// `/admin/openapi.json` answers 200 with the real document. So `link` and
-// `spec` were fetching a path that does not exist anywhere, on every stack.
-//
-// It sits behind the admin surface, which is the right place for it: the
-// document names every endpoint this backend serves, and reading it takes the
-// project's key. Locked by contract_path_test.go against a server shaped like
-// a real v2 stack.
-const contractPath = "/admin/openapi.json"
+// THE REF IS THE WHOLE SELECTOR. It used to be a URL plus a key, built from the
+// tenant origin — and that could not work on v2: a stack serves its document at
+// `/admin/openapi.json` for a `service_role` key ONLY, while the CLI holds the
+// publishable one. The contract now comes from the Management API, which holds
+// the service credential and never hands it out (see managed_spec.go).
 
-// remoteSpecFetch fetches the openapi.json bytes from a remote tenant host.
-type remoteSpecFetch func(ctx context.Context, specURL, apiKey string, w io.Writer) ([]byte, error)
+type specFetch func(ctx context.Context, environmentRef string, w io.Writer) ([]byte, error)
 
 // specFreshness resolves the deploy identity the origin is EXPECTED to be
 // serving — the newest deployment the platform records as succeeded. Injected so
@@ -265,15 +278,15 @@ func specDocVersion(b []byte) string {
 //     on disk it becomes a committed client.
 func fetchFreshSpec(
 	ctx context.Context,
-	fetch remoteSpecFetch,
-	specURL, specKey string,
+	fetch specFetch,
+	environmentRef string,
 	freshness specFreshness,
 	w io.Writer,
 ) ([]byte, string, error) {
 	deadline := time.Now().Add(specWaitTimeout)
 	announced := false
 	for {
-		specBytes, err := fetch(ctx, specURL, specKey, w)
+		specBytes, err := fetch(ctx, environmentRef, w)
 		if err != nil {
 			return nil, "", err
 		}
@@ -298,9 +311,9 @@ func fetchFreshSpec(
 		}
 		if time.Now().After(deadline) {
 			return nil, "", fmt.Errorf(
-				"%s is still serving deploy %s but the latest successful deploy is %s — nothing was written; "+
+				"environment %s is still serving deploy %s but the latest successful deploy is %s — nothing was written; "+
 					"wait for the rollout to finish and run `palbase spec` again",
-				specURL, served, expected)
+				environmentRef, served, expected)
 		}
 		if !announced {
 			fmt.Fprintf(w, "  waiting for the origin to serve deploy %s (it is still on %s)…\n", expected, served)
@@ -338,94 +351,41 @@ func studioSpecFreshness(rest restDoer, projectID, environmentRef string) specFr
 	}
 }
 
-// lookupSpecTarget binds the production lookupBackendTarget to the resolvers.
-func lookupSpecTarget(r Resolvers) specTargetLookup {
-	return func(ctx context.Context, environmentRef string) (backendTarget, error) {
-		return lookupBackendTarget(ctx, r.Studio(), r.Endpoints(), environmentRef)
-	}
-}
-
-// runPullSpec is the testable core: resolve the Environment's remote target,
-// fetch openapi.json (wake-aware, REMOTE only), write it, and with a non-empty
-// appID also emit that app's palbase-config.json for the SAME Environment.
+// runPullSpec writes ONE Environment's contract into dir.
+//
+// THE WEB HALF. A native checkout carries every environment and picks one at
+// build time (cloud_environments.go); the web SDK has no build configuration to
+// select between them and `palbe-gen` takes a single openapi.json, so for the
+// web the selected Environment IS the contract.
 func runPullSpec(
 	ctx context.Context,
-	lookup specTargetLookup,
-	fetch remoteSpecFetch,
-	list bindingLister,
-	cfgFetch configArtifactFetch,
+	fetch specFetch,
 	freshness specFreshness,
-	environmentRef, publicHost, specOutDir, configOutDir, appID string,
+	environmentRef, outDir string,
 	w io.Writer,
 ) error {
-	target, err := lookup(ctx, environmentRef)
+	specBytes, servedVersion, err := fetchFreshSpec(ctx, fetch, environmentRef, freshness, w)
 	if err != nil {
 		return err
 	}
-
-	specURL := target.URL + contractPath
-	specKey := target.APIKey
-	var entry *pullSpecConfigEntry
-	if appID != "" {
-		entry, err = buildPullSpecConfig(ctx, list, cfgFetch, appID, environmentRef, publicHost)
-		if err != nil {
-			return err
-		}
-		// App links fetch with their app-bound key.
-		specURL = strings.TrimRight(entry.BaseURL, "/") + contractPath
-		specKey = entry.APIKey
+	if outDir == "" {
+		outDir = "./.palbase"
 	}
-
-	specBytes, servedVersion, err := fetchFreshSpec(ctx, fetch, specURL, specKey, freshness, w)
-	if err != nil {
-		return err
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
-	if specOutDir == "" {
-		specOutDir = "./.palbase"
-	}
-	if err := os.MkdirAll(specOutDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", specOutDir, err)
-	}
-	specPath := filepath.Join(specOutDir, "openapi.json")
-	if err := os.WriteFile(specPath, specBytes, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", specPath, err)
+	path := filepath.Join(outDir, "openapi.json")
+	if err := os.WriteFile(path, specBytes, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	// Name the deploy on the success line. "wrote openapi.json" alone is what let
 	// a contract from the previous deploy sit on disk looking finished; the
 	// identity is the one thing that makes the line checkable.
 	if servedVersion != "" {
-		fmt.Fprintf(w, "✓ wrote %s (deploy %s)\n", specPath, servedVersion)
+		fmt.Fprintf(w, "✓ wrote %s (deploy %s)\n", path, servedVersion)
 	} else {
-		fmt.Fprintf(w, "✓ wrote %s\n", specPath)
+		fmt.Fprintf(w, "✓ wrote %s\n", path)
 	}
-
-	if appID != "" {
-		if configOutDir == "" {
-			configOutDir = specOutDir
-		}
-		if err := os.MkdirAll(configOutDir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", configOutDir, err)
-		}
-
-		// SINGLE-environment config: the ONE active target the CLI selected. The
-		// SDK reads a flat {environment_ref, base_url, api_key, ...} object.
-		data, err := json.MarshalIndent(entry, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal palbase-config.json: %w", err)
-		}
-		cfgPath := filepath.Join(configOutDir, "palbase-config.json")
-		if err := os.WriteFile(cfgPath, append(data, '\n'), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", cfgPath, err)
-		}
-		fmt.Fprintf(w, "✓ wrote %s (%s)\n", cfgPath, entry.BaseURL)
-	}
-
-	// Client generation is NOT done here: this core is platform-agnostic, and
-	// each platform's spec/link/use command owns the regeneration that follows
-	// it (generateAppleClient for Apple, palbe-gen for web, the Gradle plugin
-	// for Android). Every one of those callers regenerates right after this
-	// returns, so none of them leaves a spec on disk that the committed client
-	// no longer reflects.
 	return nil
 }
 

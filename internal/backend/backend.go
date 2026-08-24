@@ -678,7 +678,7 @@ var _ = renderJSON // silence "unused" until --json lands
 
 // lookupBackendTarget resolves an Environment's URL and publishable key directly
 // from its Environment ref.
-func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints config.Endpoints, ref string) (backendTarget, error) {
+func lookupBackendTarget(ctx context.Context, rest selection.REST, endpoints config.Endpoints, ref string) (backendTarget, error) {
 	if !selection.IsCanonicalEnvironmentRef(ref) {
 		return backendTarget{}, fmt.Errorf("environment ref %q is non-canonical", ref)
 	}
@@ -686,8 +686,21 @@ func lookupBackendTarget(ctx context.Context, sc *studio.Client, endpoints confi
 		EnvironmentRef string `json:"environment_ref"`
 		PublishableKey string `json:"publishable_key"`
 	}
-	if err := sc.Query(ctx, "apikey.reveal", map[string]any{"ref": ref}, &resp); err != nil {
-		return backendTarget{}, fmt.Errorf("apikey.reveal: %w", err)
+	// YÖNETİM API'SİNDEN, STUDIO'NUN tRPC YÜZEYİNDEN DEĞİL.
+	//
+	// Eskiden `apikey.reveal` Studio'ya DPoP'la bağlanmış bir TARAYICI oturumu
+	// istiyordu. Headless bir koşumda öyle bir oturum yok ve komut
+	// "acquire token: refresh tokens: 401 — invalid_token" ile ölüyordu — oysa
+	// bu CLI'ın kendi yardım metni şunu söylüyor: "For a headless run — CI, an
+	// agent in a container — there is no sign-in at all: set
+	// PALBASE_ACCESS_TOKEN and every command resolves it." O söz, `link` ve
+	// `spec` için tutulmuyordu.
+	//
+	// REST istemcisi headless token'ı zaten çözüyor, ve bu uç yalnız
+	// YAYINLANABİLİR anahtarı döndürüyor — bir checkout'u bağlamak için gereken
+	// tam olarak o.
+	if err := rest.Do(ctx, http.MethodGet, "/api/v2/environments/"+ref+"/apikey", nil, &resp); err != nil {
+		return backendTarget{}, fmt.Errorf("read environment key: %w", err)
 	}
 	if err := selection.ValidateRuntimeBinding(ref, resp.EnvironmentRef, resp.PublishableKey); err != nil {
 		return backendTarget{}, fmt.Errorf("apikey.reveal returned an invalid Environment binding: %w", err)
@@ -815,16 +828,6 @@ var defaultFetchOpts = fetchOpts{
 	attemptTimeout: 120 * time.Second,
 	totalBudget:    150 * time.Second,
 	minBackoff:     2 * time.Second,
-}
-
-// fetchRemoteOpenAPISpec is the wake-aware fetch used for REMOTE tenant hosts
-// (https://<ref>.dev.palbase.studio), where a Free-tier pod may be idle-paused
-// and Kong holds the request while it cold-wakes. It prints "backend waking…"
-// progress to w so a long first build after idle doesn't look like a hang.
-func fetchRemoteOpenAPISpec(ctx context.Context, specURL, apiKey string, w io.Writer) ([]byte, error) {
-	opts := defaultFetchOpts
-	opts.progress = w
-	return fetchOpenAPISpecOpts(ctx, specURL, apiKey, opts)
 }
 
 // fetchOpenAPISpecOpts is the wake-aware core. It retries ONLY on signals that

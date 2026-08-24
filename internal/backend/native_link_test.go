@@ -24,18 +24,20 @@ import (
 // and ENVIRONMENT REF (not a branch, not a bare project ref).
 func stubPullSeams(t *testing.T, wantApp, wantEnvRef, platform string) nativeLinkDeps {
 	t.Helper()
+	// The machine's own local-stack register must not leak a `local` environment
+	// into a test's expectations.
+	t.Setenv("HOME", t.TempDir())
 	return nativeLinkDeps{
 		publicHost: "dev.palbase.studio",
-		lookup: func(_ context.Context, ref string) (backendTarget, error) {
+		// Sözleşme SEÇİLEN ortam için okunur: ref tek seçicidir ve yanlış
+		// ortamın belgesini yazmak, istemciyi başka bir arka uca göre üretmektir.
+		fetch: func(_ context.Context, ref string, _ io.Writer) ([]byte, error) {
 			require.Equal(t, wantEnvRef, ref)
-			return backendTarget{URL: "https://" + ref + ".dev.palbase.studio", APIKey: "pb_generic"}, nil
-		},
-		fetch: func(context.Context, string, string, io.Writer) ([]byte, error) {
 			return []byte(`{"openapi":"3.1.0","paths":{}}`), nil
 		},
 		list: func(_ context.Context, appID string) ([]AppBinding, error) {
 			require.Equal(t, wantApp, appID)
-			return []AppBinding{{EnvironmentRef: wantEnvRef, Kind: "production"}}, nil
+			return []AppBinding{{EnvironmentRef: wantEnvRef, EnvironmentName: "main", Kind: "production"}}, nil
 		},
 		cfgFetch: func(_ context.Context, appID, envRef string) (apps.ConfigArtifact, error) {
 			require.Equal(t, wantApp, appID)
@@ -89,7 +91,9 @@ func TestNativeLink_RegistersOnTheProjectAndConfiguresTheEnvironment(t *testing.
 	require.Equal(t, "ios", body["platform"])
 	require.NotContains(t, body, "name", "the v2 body is STRICT: it is displayName, not name")
 
-	require.FileExists(t, filepath.Join(".palbase", "openapi.json"))
+	// One contract PER ENVIRONMENT: the checkout carries them all and the build
+	// configuration picks one, so there is no single `.palbase/openapi.json`.
+	require.FileExists(t, specPath("main"))
 	require.FileExists(t, filepath.Join(".palbase", "ios", "palbase-config.json"))
 	requireNoV1(t, f)
 }
@@ -233,7 +237,7 @@ func TestNativeLink_PersistsTheNewAppBeforeFetching(t *testing.T) {
 	f := appsFake(t, nil, map[string]any{"id": "app_ios", "platform": "ios"}, nil)
 	deps := stubPullSeams(t, "app_ios", "app1prod", "ios")
 	deps.rest = f.REST()
-	deps.fetch = func(context.Context, string, string, io.Writer) ([]byte, error) {
+	deps.fetch = func(context.Context, string, io.Writer) ([]byte, error) {
 		return nil, context.DeadlineExceeded
 	}
 

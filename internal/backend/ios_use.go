@@ -3,7 +3,7 @@ package backend
 // ios_use.go — `palbase ios|android use <environment>`
 //
 // Point the linked native project at another ENVIRONMENT of the same Project:
-// re-fetch the codegen inputs (openapi.json + palbase-config.json) for it and
+// re-fetch the codegen inputs (one contract per environment + palbase-config.json) and
 // record the selection in .palbase/selection.json.
 //
 // It selects an ENVIRONMENT, never a branch. There is ONE Xcode scheme / Gradle
@@ -39,7 +39,7 @@ func newNativeUseCmd(r Resolvers, platform string) *cobra.Command {
 		Long: fmt.Sprintf(`Re-target the linked %s project at <environment> (a slug or ref) of the
 selected project.
 
-Writes the shared contract to .palbase/openapi.json, the %s runtime config to
+Writes one contract per environment to .palbase/openapi/, the %s runtime config to
 .palbase/%s/palbase-config.json, and records the environment in
 .palbase/selection.json. %s.
 
@@ -99,17 +99,19 @@ from .palbase/selection.json, falling back to the committed platform slot).`, la
 				return err
 			}
 
-			if err := runPullSpec(ctx,
-				lookupSpecTarget(r), fetchRemoteOpenAPISpec,
-				studioBindingLister(rest), studioConfigArtifactFetch(rest, r.Endpoints().PublicHost),
-				studioSpecFreshness(rest, sel.ProjectID, sel.EnvironmentRef()),
-				sel.EnvironmentRef(), r.Endpoints().PublicHost, ".palbase", ".palbase/"+platform, appID,
-				out); err != nil {
-				return err
+			// `use` moves the DEFAULT, and rewrites every environment beside it:
+			// the checkout carries them all, so the answer to "which one does a
+			// plain build get" is the only thing that changes here.
+			deps := cloudEnvDeps{
+				fetch:      managedSpecFetch(rest),
+				list:       studioBindingLister(rest),
+				cfgFetch:   studioConfigArtifactFetch(rest, r.Endpoints().PublicHost),
+				freshness:  studioSpecFreshness(rest, sel.ProjectID, sel.EnvironmentRef()),
+				publicHost: r.Endpoints().PublicHost,
 			}
-			// The config just moved to another Environment, so the committed
-			// Swift client (which embeds it) must be re-emitted from it.
-			if err := generateAppleClient(".palbase", out); err != nil {
+			if err := linkNativeEnvironments(
+				ctx, deps, platform, appID, sel.EnvironmentRef(), sel.ProjectID, out,
+			); err != nil {
 				return err
 			}
 

@@ -79,53 +79,6 @@ func preflightAppleGenerator(palbaseDir string) error {
 	return nil
 }
 
-// generateAppleClient regenerates Palbase/Generated from the spec and platform
-// slots under palbaseDir. It is a no-op for checkouts with no Apple slot —
-// Android generates from its Gradle plugin and @palbase/web from palbe-gen.
-func generateAppleClient(palbaseDir string, w io.Writer) error {
-	iosCfg := filepath.Join(palbaseDir, "ios", "palbase-config.json")
-	macCfg := filepath.Join(palbaseDir, "macos", "palbase-config.json")
-	hasIOS, hasMacOS := isRegularFile(iosCfg), isRegularFile(macCfg)
-	if !hasIOS && !hasMacOS {
-		return nil
-	}
-
-	projectRoot := filepath.Dir(palbaseDir)
-	outDir := filepath.Join(projectRoot, "Palbase", "Generated")
-	outSwift := filepath.Join(outDir, "PalbaseGenerated.swift")
-	outPlist := filepath.Join(outDir, "Palbase-Info.plist")
-
-	tool, err := ensureSwiftgenTool(projectRoot, w)
-	if err != nil {
-		return discardStaleGenerated(err, w, outSwift, outPlist)
-	}
-
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", outDir, err)
-	}
-	args := []string{
-		"--openapi", filepath.Join(palbaseDir, "openapi.json"),
-		"--out-swift", outSwift,
-		"--out-plist", outPlist,
-	}
-	// Every available slot is passed: one plist envelope carries both, and the
-	// compiled SDK selects its own platform at runtime.
-	if hasIOS {
-		args = append(args, "--ios-config", iosCfg)
-	}
-	if hasMacOS {
-		args = append(args, "--macos-config", macCfg)
-	}
-	cmd := exec.Command(tool, args...)
-	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("palbase-swiftgen: %w", err)
-	}
-	fmt.Fprintf(w, "✓ wrote %s\n", outSwift)
-	fmt.Fprintf(w, "✓ wrote %s\n", outPlist)
-	return nil
-}
-
 // discardStaleGenerated handles "spec refreshed, generator unavailable". Leaving
 // yesterday's generated code beside today's spec is the one outcome worse than
 // having none: it still compiles, so the drift stays invisible until a call

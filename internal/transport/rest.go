@@ -106,6 +106,11 @@ type APIError struct {
 	RequestID   string
 }
 
+// StatusCode exposes the HTTP status so callers can classify a failure without
+// importing this package's concrete type — a "the tenant is still waking" 503
+// is retryable while a 404 is not, and the difference is a status, not a string.
+func (e *APIError) StatusCode() int { return e.Status }
+
 func (e *APIError) Error() string {
 	if e.Description != "" {
 		return fmt.Sprintf("%s (%d): %s", e.Code, e.Status, e.Description)

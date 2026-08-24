@@ -73,7 +73,7 @@ func TestWebUse_RetargetsTheEnvironment(t *testing.T) {
 
 	// Web artifacts land in Palbase/ — never in the native .palbase/ tree.
 	require.FileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
-	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+	require.NoFileExists(t, specPath("main"))
 
 	// The SELECTION followed the config: a build made now connects to staging,
 	// so the two must not disagree.
@@ -130,8 +130,14 @@ func TestWebUse_RequiresALinkedApp(t *testing.T) {
 func writeSlot(t *testing.T, dir string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "palbase-config.json"),
-		[]byte(`{"environment_ref":"app1prod","base_url":"https://app1prod.dev.palbase.studio","api_key":"pb_stub"}`+"\n"), 0o600))
+	body := `{"environment_ref":"app1prod","base_url":"https://app1prod.dev.palbase.studio","api_key":"pb_stub"}`
+	// A NATIVE slot carries every environment and names the app — that is what
+	// `link` writes and what a fresh clone reads to know it is linked at all.
+	if filepath.Base(dir) != filepath.Base(webArtifactsDir) {
+		body = `{"default_environment":"main","environments":{"main":` +
+			`{"app_id":"app_ios","base_url":"https://app1prod.dev.palbase.studio","api_key":"pb_stub"}}}`
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "palbase-config.json"), []byte(body+"\n"), 0o600))
 }
 
 // stubSwiftgenSources makes the Apple preflight pass without a resolved SwiftPM
@@ -160,7 +166,7 @@ func TestSpec_WebLinked_WritesOnlyTheWebContract(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 
 	require.FileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
-	require.NoFileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+	require.NoFileExists(t, specPath("main"))
 }
 
 func TestSpec_NativeLinked_WritesOnlyTheNativeContract(t *testing.T) {
@@ -174,7 +180,8 @@ func TestSpec_NativeLinked_WritesOnlyTheNativeContract(t *testing.T) {
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 	require.NoError(t, cmd.Execute())
 
-	require.FileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+	// One contract per environment — the checkout carries them all.
+	require.FileExists(t, specPath("main"))
 	require.NoFileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
 }
 
@@ -194,7 +201,7 @@ func TestSpec_WebAndNativeLinked_WritesBoth(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 
 	require.FileExists(t, filepath.Join(webArtifactsDir, "openapi.json"))
-	require.FileExists(t, filepath.Join(nativeArtifactsDir, "openapi.json"))
+	require.FileExists(t, specPath("main"))
 }
 
 // With no slot at all there is nothing to refresh and no directory to invent:
