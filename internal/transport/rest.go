@@ -104,6 +104,15 @@ type APIError struct {
 	Description string
 	Status      int
 	RequestID   string
+	// Fields carries the per-field detail a validation refusal puts in the
+	// envelope. See Error() — it is where the actual reason lives.
+	Fields []APIErrorField
+}
+
+// APIErrorField is one entry of the envelope's `fields` array.
+type APIErrorField struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
 }
 
 // StatusCode exposes the HTTP status so callers can classify a failure without
@@ -111,19 +120,46 @@ type APIError struct {
 // is retryable while a 404 is not, and the difference is a status, not a string.
 func (e *APIError) StatusCode() int { return e.Status }
 
+// Error renders the envelope INCLUDING its per-field detail.
+//
+// THE REASON IS IN `fields`, AND IT WAS BEING THROWN AWAY. A validation refusal
+// answers `{"error":"bad_request","error_description":"Bad request","fields":[…]}`
+// — the description is a category and the fields are the sentence. Printing only
+// the description gave `bad_request (400): Bad request`, which says nothing at
+// all. Measured 2026-08-24: a push refused because the project's own tests failed
+// reported exactly that, and the reason had to be read out of the tenant's log.
 func (e *APIError) Error() string {
+	head := fmt.Sprintf("%s (%d)", e.Code, e.Status)
 	if e.Description != "" {
-		return fmt.Sprintf("%s (%d): %s", e.Code, e.Status, e.Description)
+		head += ": " + e.Description
 	}
-	return fmt.Sprintf("%s (%d)", e.Code, e.Status)
+	if len(e.Fields) == 0 {
+		return head
+	}
+	parts := make([]string, 0, len(e.Fields))
+	for _, f := range e.Fields {
+		switch {
+		case f.Field != "" && f.Message != "":
+			parts = append(parts, f.Field+": "+f.Message)
+		case f.Message != "":
+			parts = append(parts, f.Message)
+		case f.Field != "":
+			parts = append(parts, f.Field)
+		}
+	}
+	if len(parts) == 0 {
+		return head
+	}
+	return head + "\n  " + strings.Join(parts, "\n  ")
 }
 
 // errorEnvelope is the failure shape.
 type errorEnvelope struct {
-	Code        string `json:"error"`
-	Description string `json:"error_description"`
-	Status      int    `json:"status"`
-	RequestID   string `json:"request_id"`
+	Code        string          `json:"error"`
+	Description string          `json:"error_description"`
+	Status      int             `json:"status"`
+	RequestID   string          `json:"request_id"`
+	Fields      []APIErrorField `json:"fields"`
 }
 
 // Do performs one Management-API request. method is the HTTP verb; path
@@ -307,6 +343,7 @@ func parseError(raw []byte, status int) error {
 			Description: env.Description,
 			Status:      st,
 			RequestID:   env.RequestID,
+			Fields:      env.Fields,
 		}
 	}
 	return &APIError{

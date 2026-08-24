@@ -159,3 +159,62 @@ func TestREST_Do_NullDataOk(t *testing.T) {
 	c := New(srv.URL, "pat_x")
 	require.NoError(t, c.Do(context.Background(), http.MethodDelete, "/api/v1/projects/x/api-keys/1", nil, nil))
 }
+
+// THE REASON IS IN `fields`, AND IT USED TO BE THROWN AWAY.
+//
+// A validation refusal answers `{"error":"bad_request","error_description":"Bad
+// request","fields":[…]}` — the description is a CATEGORY and the fields are the
+// SENTENCE. Rendering only the description produced `bad_request (400): Bad
+// request`, which says nothing a person can act on. Measured 2026-08-24: a push
+// refused because the project's own tests failed reported exactly that, and the
+// reason had to be read out of the tenant's log instead.
+func TestAPIError_RendersTheFieldDetail(t *testing.T) {
+	err := &APIError{
+		Code: "bad_request", Status: 400, Description: "Bad request",
+		Fields: []APIErrorField{
+			{Field: "artifact", Message: "push refused (tests_failed) — the previous release keeps serving"},
+		},
+	}
+	got := err.Error()
+	if !strings.Contains(got, "tests_failed") {
+		t.Fatalf("the reason is missing:\n%s", got)
+	}
+	if !strings.Contains(got, "artifact") {
+		t.Fatalf("the field name is missing:\n%s", got)
+	}
+}
+
+// AND THE FIELDS MUST SURVIVE THE PARSE. Rendering them is half the job; the
+// other half is reading them off the wire, and only a real response proves it.
+func TestREST_Do_ParsesTheFieldDetailOffTheWire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "bad_request", "error_description": "Bad request", "status": 400,
+			"request_id": "req_x",
+			"fields": []map[string]string{
+				{"field": "artifact", "message": "push refused (tests_failed)"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	err := New(srv.URL, "tok").Do(context.Background(), http.MethodPost, "/v1/cloud/projects/x/push", map[string]any{}, nil)
+	require.Error(t, err)
+
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr))
+	require.Len(t, apiErr.Fields, 1)
+	require.Equal(t, "artifact", apiErr.Fields[0].Field)
+	require.Contains(t, err.Error(), "tests_failed")
+}
+
+// A refusal with no fields must read exactly as it always did — the change adds
+// detail where there is detail, it does not decorate everything else.
+func TestAPIError_WithoutFieldsIsUnchanged(t *testing.T) {
+	err := &APIError{Code: "not_found", Status: 404, Description: "no such project"}
+	if got, want := err.Error(), "not_found (404): no such project"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
