@@ -2,8 +2,19 @@
 // list / add / remove. These commands are GUIDED authoring for the storage
 // config-as-code surface — they read/write config/storage.ts (the typed DSL
 // from @palbase/backend), so an author declares buckets without hand-writing
-// TypeScript. On `git push`, the deploy evals config/storage.ts and reconciles
-// the buckets against the tenant (create missing, update changed).
+// TypeScript.
+//
+// THE DEPLOY DOES NOT RECONCILE THEM, and this comment used to say it did.
+// Buckets live ON THE STACK: the declaration applier was retired deliberately
+// (v2 S-005 — "settings have one door, and a second one is how the two
+// disagree"), so `git push` evals nothing here and creates nothing. The push
+// only CHECKS: an `@Upload` naming a bucket the stack does not hold is refused,
+// because storage will not create one on demand.
+//
+// The stale sentence had a cost. A project whose config/storage.ts declared
+// three webp variants was pushed to a fresh stack, deployed green, and held no
+// buckets at all; the first upload would have 404'd (measured on `centauri`,
+// 2026-08-24).
 //
 // The CLI is the SOLE author of config/storage.ts: every write regenerates the
 // whole file from the current bucket set (deterministic template), and reads
