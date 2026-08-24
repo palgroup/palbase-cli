@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -472,4 +473,36 @@ func TestShippingIsSilentWhenNothingIsDeclared(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, shipDeclaredTestUsers(context.Background(), dir, &out))
 	require.Empty(t, out.String())
+}
+
+// TEST KULLANICISI BİLDİRMEYEN BİR PROJE DE PUSH EDİLEBİLMELİ.
+//
+// Çoğu proje hiç bildirmez: `.palbase/config.json` içinde `testusers` anahtarı
+// YOKTUR ve `json.RawMessage` nil kalır. `json.Unmarshal(nil, …)` "unexpected
+// end of JSON input" der, ve o hata push'u DURDURUYORDU — yani bu düzeltmenin
+// kendisi, dokunmadığı projeleri kırdı.
+//
+// Ölçüldü 24.08.2026: palaicloud'un push'u tam burada düştü, hiç fixture
+// bildirmediği hâlde.
+func TestAProjectThatDeclaresNoTestUsersStillPushes(t *testing.T) {
+	for _, declared := range []json.RawMessage{
+		nil,                             // anahtar hiç yok
+		json.RawMessage("null"),         // anahtar var, değeri null
+		json.RawMessage(`{}`),           // boş belge
+		json.RawMessage(`{"users":{}}`), // bildirilmiş ama boş
+	} {
+		var out bytes.Buffer
+		err := carryTestUsers(context.Background(), declared,
+			Target{URL: "https://unreachable.invalid"}, Credentials{}, &out)
+		require.NoErrorf(t, err, "declared=%s", string(declared))
+		require.Emptyf(t, out.String(), "declared=%s: sessiz olmalıydı", string(declared))
+	}
+}
+
+// Ama BOZUK bir bildirim sessizce geçmemeli: yazılmış bir şeyin okunamaması,
+// hiç yazılmamış olmasıyla aynı şey değildir.
+func TestAMalformedDeclarationIsRefused(t *testing.T) {
+	err := carryTestUsers(context.Background(), json.RawMessage(`{"users":`),
+		Target{URL: "https://unreachable.invalid"}, Credentials{}, io.Discard)
+	require.ErrorContains(t, err, "read the declared test users")
 }

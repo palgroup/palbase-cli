@@ -647,6 +647,18 @@ func carryTestUsers(ctx context.Context, declared json.RawMessage,
 	// templates, which the stack stores (replacing the set with nothing) and
 	// reports as 200. Measured 2026-08-24: the push printed "declared the
 	// project's test users" while the stack held none.
+	// HİÇ BİLDİRMEMEK GEÇERLİ BİR HÂLDİR, ve çoğu proje öyledir: anahtar
+	// `.palbase/config.json` içinde YOKTUR ve RawMessage nil kalır.
+	// `json.Unmarshal(nil, …)` "unexpected end of JSON input" der ve push'u
+	// durdururdu — yani bu özellik, dokunmadığı projeleri kırardı. Ölçüldü
+	// 24.08.2026: palaicloud'un push'u tam burada düştü, hiç fixture
+	// bildirmediği hâlde.
+	//
+	// BOZUK bir bildirim yine reddedilir: yazılmış bir şeyin okunamaması, hiç
+	// yazılmamış olmasıyla aynı şey değildir.
+	if len(declared) == 0 {
+		return nil
+	}
 	var evaluated struct {
 		Users map[string]json.RawMessage `json:"users"`
 	}
