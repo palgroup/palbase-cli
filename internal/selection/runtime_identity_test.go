@@ -32,8 +32,13 @@ func TestCanonicalEnvironmentRefEnvelope(t *testing.T) {
 
 func TestValidateRuntimeBinding(t *testing.T) {
 	const random = "01234567890123456789"
+	// The v2 body is 32 characters and the stack segment is the tenant-stack
+	// constant, not the Environment — every live cloud tenant holds this shape.
+	const cloudRandom = "01234567890123456789012345678901"
 	for _, ref := range []string{"abcd", "abcdefghijklmnopqrstuvwx"} {
 		require.NoError(t, selection.ValidateRuntimeBinding(ref, ref, "pb_"+ref+"_c"+random))
+		require.NoError(t, selection.ValidateRuntimeBinding(ref, ref, "pb_project_c"+cloudRandom),
+			"a v2 tenant key names the stack it boots as, and the Environment is that stack's address")
 	}
 
 	tests := []struct {
@@ -48,6 +53,7 @@ func TestValidateRuntimeBinding(t *testing.T) {
 		{name: "short key ref", expected: "app1prod", returned: "app1prod", key: "pb_abc_c" + random},
 		{name: "long key ref", expected: "app1prod", returned: "app1prod", key: "pb_abcdefghijklmnopqrstuvwxy_c" + random},
 		{name: "foreign key ref", expected: "app1prod", returned: "app1prod", key: "pb_app1stg_c" + random},
+		{name: "foreign cloud-shaped key ref", expected: "app1prod", returned: "app1prod", key: "pb_app1stg_c" + random + random[:12]},
 		{name: "service key", expected: "app1prod", returned: "app1prod", key: "pb_app1prod_s" + random},
 		{name: "malformed key", expected: "app1prod", returned: "app1prod", key: "pb_app1prod_cshort"},
 	}
