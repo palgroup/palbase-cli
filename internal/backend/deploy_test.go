@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -22,67 +21,53 @@ import (
 	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
-// ── the v2 deploy paths ─────────────────────────────────────────────────────
+// ── the deploy paths ────────────────────────────────────────────────────────
 
 func TestDeployPaths_AreEnvironmentScoped(t *testing.T) {
-	require.Equal(t,
-		"/api/v2/projects/proj_1/environments/app1prod/deploy",
-		DeployPath("proj_1", "app1prod"))
+	// The push route names the Environment and nothing else: on this plane an
+	// Environment IS a tenant.
+	require.Equal(t, "/v1/cloud/projects/app1prod/push", PushPath("app1prod"))
 	require.Equal(t,
 		"/api/v2/projects/proj_1/environments/app1prod/deployments",
 		DeploymentsPath("proj_1", "app1prod"))
-	require.Equal(t,
-		"/api/v2/projects/proj_1/environments/app1prod/deployments/dep_1",
-		DeploymentPath("proj_1", "app1prod", "dep_1"))
 }
 
-// fakeDeploy records every upload and status poll.
+// fakeDeploy records every call the push makes.
 type fakeDeploy struct {
-	uploads  []upload
-	statuses []string
-	// fail makes the FIRST n uploads fail with a transport-level error (a lost
-	// response), so the retry can be observed.
-	failFirst int
-	// apiErr, when set, is returned instead: a server VERDICT, not a lost response.
+	calls []deployCall
+	// apiErr, when set, is what the push call returns.
 	apiErr error
-	reply  string
-	// status is what the poll returns.
-	status string
+	// result is what a successful push answers with.
+	digest        string
+	endpointCount int
 }
 
-type upload struct {
-	path           string
-	fields         map[string]string
-	idempotencyKey string
+type deployCall struct {
+	method string
+	path   string
+	body   any
 }
 
-func (f *fakeDeploy) PostMultipart(_ context.Context, path string, _ []byte, fields map[string]string, key string) ([]byte, error) {
-	f.uploads = append(f.uploads, upload{path: path, fields: fields, idempotencyKey: key})
+func (f *fakeDeploy) Do(_ context.Context, method, path string, body, out any) error {
+	f.calls = append(f.calls, deployCall{method: method, path: path, body: body})
 	if f.apiErr != nil {
-		return nil, f.apiErr
+		return f.apiErr
 	}
-	if len(f.uploads) <= f.failFirst {
-		return nil, errors.New("Post: context deadline exceeded (Client.Timeout)")
-	}
-	reply := f.reply
-	if reply == "" {
-		reply = `{"data":{"workflowId":"wf","runId":"r","deploymentId":"dep_1"},"request_id":"req"}`
-	}
-	return []byte(reply), nil
-}
-
-func (f *fakeDeploy) Do(_ context.Context, _, path string, _, out any) error {
-	f.statuses = append(f.statuses, path)
-	st, ok := out.(*deploymentStatus)
+	res, ok := out.(*struct {
+		Digest        string `json:"digest"`
+		EndpointCount int    `json:"endpointCount"`
+	})
 	if !ok {
 		return nil
 	}
-	status := f.status
-	if status == "" {
-		status = "succeeded"
+	res.Digest = f.digest
+	if res.Digest == "" {
+		res.Digest = "abc1234def5678"
 	}
-	st.Status = status
-	st.Version = "abc1234"
+	res.EndpointCount = f.endpointCount
+	if res.EndpointCount == 0 {
+		res.EndpointCount = 47
+	}
 	return nil
 }
 
@@ -95,9 +80,7 @@ func palbaseProject(t *testing.T) selection.Selection {
 	}
 }
 
-// seedBackendDir makes the cwd look like a deployable backend so runBuild's
-// no-op path is taken (no controllers/ → nothing to validate) and BuildTarball
-// has something to package.
+// seedBackendDir makes the cwd look like a deployable backend.
 func seedBackendDir(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -105,77 +88,91 @@ func seedBackendDir(t *testing.T) {
 	t.Chdir(dir)
 }
 
-// THE deploy contract. The upload must go to the SELECTED ENVIRONMENT's v2
-// ingress, and it MUST carry an Idempotency-Key — that header is the only thing
-// standing between a timed-out push and a second deploy.
-func TestPush_PalbaseProvider_PostsToV2WithAnIdempotencyKey(t *testing.T) {
+// stubBundler substitutes the bundling seam: production builds this project with
+// its own node_modules and Bun, which a unit test has neither of.
+func stubBundler(built *bool) (func(context.Context, string, io.Writer) ([]uploadUse, error), func(string) ([]byte, error)) {
+	return func(context.Context, string, io.Writer) ([]uploadUse, error) {
+			if built != nil {
+				*built = true
+			}
+			return nil, nil
+		}, func(string) ([]byte, error) {
+			return []byte("gzip-artifact-bytes"), nil
+		}
+}
+
+// THE PUSH CONTRACT. The CLIENT bundles and hands the plane an ARTIFACT.
+//
+// Where the bundler lives is decided by where the source enters the system:
+// through the CLI it enters here. The plane's push route is a relay to the
+// tenant's own management surface and has no builder to offer — this arm used to
+// upload SOURCE to an ingress that would build it, and that ingress does not
+// exist on this plane (measured live: 404).
+func TestPush_PalbaseProvider_SendsTheBuiltArtifact(t *testing.T) {
 	seedBackendDir(t)
 	f := &fakeDeploy{}
+	build, pack := stubBundler(nil)
 	var out bytes.Buffer
 
 	require.NoError(t, runPush(pushDeps{
 		rest: f, sel: palbaseProject(t), out: &out,
-		ctx: context.Background(), pollInterval: time.Millisecond,
+		ctx: context.Background(), build: build, pack: pack,
 	}))
 
-	require.Len(t, f.uploads, 1)
-	require.Equal(t, "/api/v2/projects/proj_1/environments/app1prod/deploy", f.uploads[0].path)
-	require.NotEmpty(t, f.uploads[0].idempotencyKey, "the deploy upload MUST carry an Idempotency-Key")
-	// The multipart form carries only the message: the Environment is in the URL,
-	// and there is no `branch` field left to send.
-	require.Equal(t, map[string]string{"message": "deploy via cli"}, f.uploads[0].fields)
+	require.Len(t, f.calls, 1)
+	require.Equal(t, http.MethodPost, f.calls[0].method)
+	require.Equal(t, "/v1/cloud/projects/app1prod/push", f.calls[0].path)
 
-	require.Equal(t, []string{"/api/v2/projects/proj_1/environments/app1prod/deployments/dep_1"}, f.statuses)
-	require.Contains(t, out.String(), "deploy succeeded (version abc1234)")
+	body, ok := f.calls[0].body.(map[string]any)
+	require.True(t, ok, "the artifact travels as JSON, base64-encoded")
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("gzip-artifact-bytes")), body["artifact"])
+
+	// ZERO ENDPOINTS IS A SILENT FAILURE, so the count is on the success line:
+	// "pushed" alone is what let an artifact that serves nothing read as done.
+	require.Contains(t, out.String(), "47 endpoint(s)")
+	require.Contains(t, out.String(), "app1prod")
 }
 
-// A TIMED-OUT upload is retried on the SAME key. Minting a fresh key per attempt
-// is exactly the bug that deploys twice.
-func TestPush_TimedOutUpload_RetriesWithTheSameKey(t *testing.T) {
+// A BUILD FAILURE SENDS NOTHING. Shipping a tree that does not compile is how a
+// broken controller reaches a tenant and 500s on its first request.
+func TestPush_BuildFailure_UploadsNothing(t *testing.T) {
 	seedBackendDir(t)
-	f := &fakeDeploy{failFirst: 1}
+	f := &fakeDeploy{}
+	var out bytes.Buffer
 
-	require.NoError(t, runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: io.Discard,
-		ctx: context.Background(), pollInterval: time.Millisecond, uploadRetries: 2,
-	}))
-
-	require.Len(t, f.uploads, 2, "the lost upload must be retried")
-	require.Equal(t, f.uploads[0].idempotencyKey, f.uploads[1].idempotencyKey,
-		"the retry MUST reuse the first key — a new key is a second deploy")
-	require.NotEmpty(t, f.uploads[0].idempotencyKey)
+	err := runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: &out,
+		ctx: context.Background(),
+		build: func(context.Context, string, io.Writer) ([]uploadUse, error) {
+			return nil, errors.New("controllers/todo.controller.ts: return type must be a NAMED zod schema")
+		},
+		pack: func(string) ([]byte, error) {
+			t.Fatal("nothing may be packed after a failed build")
+			return nil, nil
+		},
+	})
+	require.ErrorContains(t, err, "NAMED zod schema")
+	require.Empty(t, f.calls, "a failed build must not reach the plane")
+	require.Contains(t, out.String(), "nothing was pushed")
 }
 
-// A server VERDICT (any *APIError, including the 409 in-progress) is NOT a lost
-// response: retrying it would be pointless at best and confusing at worst.
-func TestPush_ServerError_IsNotRetried(t *testing.T) {
+// The plane's verdict reaches the caller AS IS: `upload_bucket_missing` names
+// the bucket somebody has to create, and swallowing it would leave a route that
+// deploys green and 404s the first file.
+func TestPush_PlaneVerdict_IsSurfaced(t *testing.T) {
 	seedBackendDir(t)
 	f := &fakeDeploy{apiErr: &transport.APIError{
-		Code: "idempotency_key_in_progress", Status: http.StatusConflict,
-		Description: "a request with this key is still running",
+		Code: "upload_bucket_missing", Status: http.StatusBadRequest,
+		Description: "@Upload names bucket \"avatars\", which does not exist",
 	}}
+	build, pack := stubBundler(nil)
 
 	err := runPush(pushDeps{
 		rest: f, sel: palbaseProject(t), out: io.Discard,
-		ctx: context.Background(), uploadRetries: 2,
+		ctx: context.Background(), build: build, pack: pack,
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "idempotency_key_in_progress")
-	require.Len(t, f.uploads, 1, "a server verdict must not be retried")
-}
-
-func TestPush_EachInvocationMintsItsOwnKey(t *testing.T) {
-	seedBackendDir(t)
-	first := &fakeDeploy{}
-	second := &fakeDeploy{}
-	for _, f := range []*fakeDeploy{first, second} {
-		require.NoError(t, runPush(pushDeps{
-			rest: f, sel: palbaseProject(t), out: io.Discard,
-			ctx: context.Background(), pollInterval: time.Millisecond,
-		}))
-	}
-	require.NotEqual(t, first.uploads[0].idempotencyKey, second.uploads[0].idempotencyKey,
-		"two separate deploys are two separate mutations")
+	require.ErrorContains(t, err, "upload_bucket_missing")
+	require.Len(t, f.calls, 1)
 }
 
 func TestNewIdempotencyKey_IsRandomAndHex(t *testing.T) {
@@ -183,19 +180,6 @@ func TestNewIdempotencyKey_IsRandomAndHex(t *testing.T) {
 	require.NotEqual(t, a, b)
 	require.Len(t, a, 32)
 	require.NotContains(t, a, "-")
-}
-
-// A failed deploy exits NON-ZERO carrying the server's reason — a silently
-// broken deploy that scripts read as success is the failure mode this guards.
-func TestPush_FailedDeploy_ExitsNonZero(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{status: "failed"}
-
-	err := runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: io.Discard,
-		ctx: context.Background(), pollInterval: time.Millisecond,
-	})
-	require.ErrorContains(t, err, "deploy failed")
 }
 
 // ── github provider ─────────────────────────────────────────────────────────
@@ -217,7 +201,7 @@ func TestPush_GitHubProvider_ExecsGitPush_AndNeverUploads(t *testing.T) {
 		rest:      f, sel: sel, out: &out, ctx: context.Background(),
 	}))
 	require.Equal(t, []string{"git", "push"}, got)
-	require.Empty(t, f.uploads, "the github provider deploys via webhook — it must not upload a tarball")
+	require.Empty(t, f.calls, "the github provider deploys via webhook — it must not hand the plane an artifact")
 	require.Contains(t, out.String(), "webhook")
 }
 
@@ -369,8 +353,14 @@ func tinyTarGz(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func TestDeploymentIDFromResponse(t *testing.T) {
-	require.Equal(t, "dep_9",
-		deploymentIDFromResponse([]byte(`{"data":{"deploymentId":"dep_9"},"request_id":"r"}`)))
-	require.Empty(t, deploymentIDFromResponse([]byte(`not json`)))
+// A VERSION ON THIS PLANE IS AN ARTIFACT DIGEST — 64 hex characters. Printed in
+// full it overruns the column and pushes every field after it off the line,
+// which is what `palbase deploys` did the first time it had a real row to show.
+func TestDeployVersion_IsShortened(t *testing.T) {
+	full := "26420de2c2ef675c1e8116cb5bd5ed881761c32038af4573febbb9c6b1642188"
+	require.Equal(t, "26420de2c2ef", deployVersion(&full))
+
+	shortSHA := "abc1234"
+	require.Equal(t, "abc1234", deployVersion(&shortSHA), "a value already short is left alone")
+	require.Equal(t, "-", deployVersion(nil), "a failed attempt has no version and says so")
 }

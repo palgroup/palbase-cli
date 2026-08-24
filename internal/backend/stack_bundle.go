@@ -315,7 +315,6 @@ const withMeta = (m.controllers ?? []).filter(
 console.log(withMeta.length);
 `
 
-
 // listUploadBucketsScript reads the routes from the CLASS, under the SDK's own
 // symbol — not from controllerMeta, which carries only __palbase and basePath.
 // Guessing that shape produced a gate that quietly passed everything.
@@ -544,18 +543,21 @@ func bunVersion(ctx context.Context, dir string) string {
 	return strings.TrimSpace(out)
 }
 
-// minimumSDKMajor is the @palbase/backend major this CLI can build against.
+// minimumSDKMajor is the OLDEST @palbase/backend major this CLI can build
+// against. It is a floor, not a target: anything from here up bundles.
 //
-// This CLI serves the v2 cloud, and v2 runs 18.x. The 17 line has a different
-// controller shape: bundling against it produces an entry whose controller
-// export resolves to nothing, and the failure surfaces as a bundler stack trace
-// (`var controllers = undefined()`) that names neither the version nor the
-// problem. Measured 2026-08-21 against a real project.
+// The 17 line and below have a different controller shape — bundling against
+// one produces an entry whose controller export resolves to nothing, and the
+// failure surfaces as a bundler stack trace (`var controllers = undefined()`)
+// that names neither the version nor the problem. Measured 2026-08-21 against a
+// real project.
 //
-// The trap is easy to fall into and hard to read: npm's `latest` tag still
-// points at the 17 line, so a package.json written the documented way —
-// `"@palbase/backend": "latest"` — installs a major BELOW what the runtime
-// serves.
+// THE `latest` TRAP IS CLOSED. It used to point at the 17 line, so a
+// package.json written the documented way (`"@palbase/backend": "latest"`)
+// installed a major BELOW what the runtime served. Verified 2026-08-24:
+// `npm view @palbase/backend dist-tags` → latest 21.0.0, and the tenant runtime
+// on the live plane resolves 21.0.0 — the two agree, and `latest` is now the
+// right thing to write.
 const minimumSDKMajor = 18
 
 // checkSDKVersion refuses a build against an SDK this CLI cannot bundle, and
@@ -581,9 +583,9 @@ func checkSDKVersion(projectDir string) error {
 	}
 	return fmt.Errorf(
 		"@palbase/backend %s is installed, and this CLI builds against %d or newer.\n"+
-			"The cloud runs %d.x; the %d line declares controllers differently, so a bundle built\n"+
-			"against it carries nothing and fails with an error about the bundler rather than the version.\n\n"+
-			"  npm install @palbase/backend@%d\n\n"+
-			"npm's `latest` tag still points at the %d line, so \"latest\" in package.json installs this.",
-		pkg.Version, minimumSDKMajor, minimumSDKMajor, major, minimumSDKMajor, major)
+			"The %d line declares controllers differently, so a bundle built against it carries\n"+
+			"nothing and fails with an error about the bundler rather than about the version.\n\n"+
+			"  npm install @palbase/backend@latest\n\n"+
+			"`latest` is the right thing to write: it resolves to the line the runtime serves.",
+		pkg.Version, minimumSDKMajor, major)
 }

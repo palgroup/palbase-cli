@@ -346,7 +346,11 @@ func deployVersion(v *string) string {
 	if v == nil || *v == "" {
 		return "-"
 	}
-	return *v
+	// SHORTENED, because on this plane a version is an artifact DIGEST — 64 hex
+	// characters, which overruns the column and pushes every field after it off
+	// the line. Twelve is what every other surface prints and what `git log`
+	// taught everyone to read.
+	return short(*v)
 }
 
 // deployWhen renders the createdAt (RFC3339 from the JSON API) as a local

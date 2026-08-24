@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,16 +15,18 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
-// deployClient is the Management-API surface the palbase-mode deploy needs:
-// PostMultipart uploads the tarball (with its Idempotency-Key), and Do polls the
-// deployment-status-by-id route to a terminal state. *transport.Client satisfies
+// deployClient is the Management-API surface the palbase-mode deploy needs: one
+// call that hands the built artifact to the plane. *transport.Client satisfies
 // it; tests inject a fake.
+//
+// It used to upload a multipart source tarball and then POLL a deployment id to
+// a terminal state, because the ingress it spoke to built the source. This plane
+// has no such ingress: its push route is a synchronous relay to the tenant's own
+// management surface, so the answer IS the outcome — there is nothing to poll.
 type deployClient interface {
-	PostMultipart(ctx context.Context, path string, tarball []byte, fields map[string]string, idempotencyKey string) ([]byte, error)
 	Do(ctx context.Context, method, path string, body, out any) error
 }
 
@@ -55,14 +56,12 @@ func currentGitBranch() (string, error) {
 	return branch, nil
 }
 
-// DeployPath is the v2 deploy ingress for one Environment.
-func DeployPath(projectID, environmentRef string) string {
-	return "/api/v2/projects/" + projectID + "/environments/" + environmentRef + "/deploy"
-}
-
-// DeploymentPath is the v2 status-by-id route for one deployment.
-func DeploymentPath(projectID, environmentRef, deploymentID string) string {
-	return "/api/v2/projects/" + projectID + "/environments/" + environmentRef + "/deployments/" + deploymentID
+// PushPath is where an ARTIFACT is handed to the plane for one Environment.
+//
+// The ref is the whole selector: this plane's push route names the Environment
+// and nothing else, because an Environment IS a tenant here.
+func PushPath(environmentRef string) string {
+	return "/v1/cloud/projects/" + url.PathEscape(environmentRef) + "/push"
 }
 
 // DeploymentsPath is the v2 deploy-history route for one Environment.
@@ -77,12 +76,17 @@ func DeploymentsPath(projectID, environmentRef string) string {
 // ctx, pollInterval and pollTimeout drive the wait-for-terminal loop; when unset
 // they default (background ctx, 1.5s, 5m) so tests can shrink them.
 type pushDeps struct {
-	git          gitRunner
-	gitBranch    gitBranchResolver
-	rest         deployClient
-	sel          selection.Selection
-	out          io.Writer
-	ctx          context.Context
+	git       gitRunner
+	gitBranch gitBranchResolver
+	rest      deployClient
+	sel       selection.Selection
+	out       io.Writer
+	ctx       context.Context
+	// build and pack are the bundling seam. Production builds this project with
+	// its own node_modules and packs the result; tests substitute both so the
+	// upload contract can be asserted without Bun and a real controller tree.
+	build        func(context.Context, string, io.Writer) ([]uploadUse, error)
+	pack         func(string) ([]byte, error)
 	pollInterval time.Duration
 	pollTimeout  time.Duration
 	// idempotencyKey is the key the tarball upload rides. Empty => minted per
@@ -127,205 +131,58 @@ func runPush(d pushDeps) error {
 	if err != nil {
 		return err
 	}
-	// Gate the upload on a local pre-deploy validation (the github arm leaves this
-	// to the pre-push hook). A user-code error (bad decorator, return type, major
-	// skew) fails here so nothing broken is uploaded; environment problems (no
-	// node, registry down) warn inside runBuild and return nil, so the server
-	// still gates the real deploy.
-	if err := runBuild(ctx, cwd, out); err != nil {
+
+	// THE CLIENT BUNDLES. WHERE THE BUNDLER LIVES IS DECIDED BY WHERE THE SOURCE
+	// ENTERS THE SYSTEM: through the CLI it enters here, so it is built here;
+	// through a git webhook it enters the cloud, so the cloud builds it. The
+	// plane's push route is a RELAY — it takes an artifact and hands it to the
+	// tenant's own management surface — and it has no builder to offer.
+	//
+	// This arm used to upload a SOURCE tarball to a deploy ingress that would
+	// build it. No such surface exists on this plane: measured live 2026-08-24,
+	// `POST /api/v2/projects/{id}/environments/{ref}/deploy` answered
+	// `not_found`, so `palbase push` could not deploy to a v2 project at all.
+	build := d.build
+	if build == nil {
+		build = buildStackArtifact
+	}
+	pack := d.pack
+	if pack == nil {
+		pack = BuildStackTarball
+	}
+
+	uses, err := build(ctx, cwd, out)
+	if err != nil {
 		fmt.Fprintln(out, "✗ build failed — nothing was pushed (fix the errors above)")
 		return err
 	}
-	tarball, err := BuildTarball(cwd)
+	// The @Upload bucket gate is the PLANE's: it holds the environment's bucket
+	// list and answers `upload_bucket_missing` before anything activates. A
+	// second copy here would be a second place for the two to disagree.
+	_ = uses
+
+	tarball, err := pack(cwd)
 	if err != nil {
 		return fmt.Errorf("package backend: %w", err)
 	}
+	fmt.Fprintf(out, "sending %d KB\n", len(tarball)/1024)
 
-	// ONE key for this deploy, reused across every retry of the SAME upload.
-	// That is the whole contract: a push whose response is lost to a timeout is
-	// retried on the same key and REPLAYS the first response instead of starting
-	// a second deploy. Minting a fresh key per attempt would deploy twice.
-	key := d.idempotencyKey
-	if key == "" {
-		key = transport.NewIdempotencyKey()
+	var res struct {
+		Digest        string `json:"digest"`
+		EndpointCount int    `json:"endpointCount"`
 	}
-	retries := d.uploadRetries
-	if retries == 0 {
-		retries = 2
-	}
-
-	path := DeployPath(d.sel.ProjectID, d.sel.EnvironmentRef())
-	body, err := postDeployWithRetry(ctx, d.rest, path, tarball,
-		map[string]string{"message": "deploy via cli"}, key, retries, os.Stderr)
-	if err != nil {
+	if err := d.rest.Do(ctx, http.MethodPost,
+		PushPath(d.sel.EnvironmentRef()),
+		map[string]any{"artifact": base64.StdEncoding.EncodeToString(tarball)}, &res); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(out, "✓ deploy started for environment %s\n", d.sel.EnvironmentRef())
-	id := deploymentIDFromResponse(body)
-	if id == "" {
-		// No deployment id in the response: nothing to poll. Keep the
-		// fire-and-forget behavior rather than hard-failing a landed deploy.
-		fmt.Fprintf(out, "  track it:   palbase status\n")
-		return nil
-	}
-	fmt.Fprintf(out, "  deployment: %s\n", id)
-	return waitForDeploy(d, id, out)
-}
-
-// postDeployWithRetry uploads the tarball, retrying ONLY transport-level
-// failures (a timeout / connection reset — the case where the deploy may well
-// have STARTED and we simply never saw the answer) on the SAME Idempotency-Key.
-// An *APIError is a server verdict, not a lost response: it is returned as-is.
-func postDeployWithRetry(
-	ctx context.Context,
-	rest deployClient,
-	path string,
-	tarball []byte,
-	fields map[string]string,
-	key string,
-	retries int,
-	progress io.Writer,
-) ([]byte, error) {
-	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
-		body, err := rest.PostMultipart(ctx, path, tarball, fields, key)
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-
-		var apiErr *transport.APIError
-		if errors.As(err, &apiErr) {
-			// The server answered. 409 idempotency_key_in_progress means the FIRST
-			// attempt is still running: the retry is safe to wait on, but it is not
-			// an extra deploy either way — surface it with the actionable message.
-			return nil, err
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if attempt < retries {
-			fmt.Fprintf(progress, "upload did not complete (%v) — retrying with the same Idempotency-Key (no double deploy)\n", err)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}
-	return nil, lastErr
-}
-
-// deploymentStatus mirrors the deployments/{id} `data` payload: the fields the
-// CLI polls to a decision.
-type deploymentStatus struct {
-	Status      string `json:"status"`
-	CurrentStep string `json:"currentStep"`
-	Error       string `json:"error"`
-	Version     string `json:"version"`
-}
-
-// waitForDeploy polls the deployment-status route until the deploy reaches a
-// terminal state, then reports the outcome:
-//   - succeeded → "✓ deploy succeeded (version <v>)", exit 0.
-//   - failed    → "✗ deploy FAILED: <server error>" to stderr, non-zero exit
-//     (the exact server error — the migration SQLSTATE / drift text — so scripts
-//     and CI catch a silently-broken deploy).
-//   - timeout   → a note pointing at `palbase status`, exit 0 (don't falsely fail
-//     a slow-but-fine deploy).
-func waitForDeploy(d pushDeps, id string, out io.Writer) error {
-	ctx := d.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	interval := d.pollInterval
-	if interval <= 0 {
-		interval = 1500 * time.Millisecond
-	}
-	timeout := d.pollTimeout
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-
-	path := DeploymentPath(d.sel.ProjectID, d.sel.EnvironmentRef(), id)
-	deadline := time.Now().Add(timeout)
-	// stderr carries the machine-readable failure and the progress dots, so a
-	// script capturing stdout isn't polluted.
-	progress := os.Stderr
-
-	fmt.Fprint(progress, "  deploying")
-	for {
-		var st deploymentStatus
-		err := d.rest.Do(ctx, http.MethodGet, path, nil, &st)
-		if err != nil {
-			var apiErr *transport.APIError
-			if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-				// The row isn't queryable yet on the very first tick. Don't punish a
-				// benign race — fall back to fire-and-forget.
-				fmt.Fprintln(progress)
-				fmt.Fprintf(out, "  (deploy status not available yet — track it: palbase status)\n")
-				return nil
-			}
-			// A transient network error shouldn't abort the whole wait; keep polling
-			// until the deadline, then surface it as a timeout note.
-			if time.Now().After(deadline) {
-				fmt.Fprintln(progress)
-				fmt.Fprintf(out, "  deploy still running after %s (last error polling status: %v); check `palbase status`\n", timeout, err)
-				return nil
-			}
-		} else {
-			switch st.Status {
-			case "succeeded":
-				fmt.Fprintln(progress)
-				version := st.Version
-				if version == "" {
-					version = "(unknown)"
-				}
-				fmt.Fprintf(out, "✓ deploy succeeded (version %s)\n", version)
-				return nil
-			case "failed":
-				fmt.Fprintln(progress)
-				msg := st.Error
-				if msg == "" {
-					msg = "deploy failed (no error detail from server)"
-				}
-				fmt.Fprintf(progress, "✗ deploy FAILED: %s\n", msg)
-				// Non-zero exit so scripts/CI catch it. The detailed line is already
-				// printed, so keep the returned error short.
-				return fmt.Errorf("deploy failed")
-			default:
-				fmt.Fprint(progress, ".")
-			}
-		}
-
-		if time.Now().After(deadline) {
-			fmt.Fprintln(progress)
-			fmt.Fprintf(out, "  deploy still running after %s; check `palbase status`\n", timeout)
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			fmt.Fprintln(progress)
-			return ctx.Err()
-		case <-time.After(interval):
-		}
-	}
-}
-
-// deploymentIDFromResponse extracts the deploymentId from the deploy endpoint's
-// `{ "data": { "deploymentId": ... }, "request_id": ... }` envelope. A parse
-// miss is non-fatal — the deploy already started; we just skip the id line.
-func deploymentIDFromResponse(body []byte) string {
-	var env struct {
-		Data struct {
-			DeploymentID string `json:"deploymentId"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return ""
-	}
-	return env.Data.DeploymentID
+	// ZERO ENDPOINTS IS A SILENT FAILURE and the plane refuses it; saying the
+	// count here is what makes the success line checkable rather than decorative.
+	fmt.Fprintf(out, "✓ live on %s: %d endpoint(s), %s\n",
+		d.sel.EnvironmentRef(), res.EndpointCount, short(res.Digest))
+	fmt.Fprintln(out, "  the contract just changed — run `palbase spec` to bring the committed client level")
+	return nil
 }
 
 // cloneDeps are the injected collaborators for runClone.

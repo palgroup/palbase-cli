@@ -97,10 +97,15 @@ func TestAProjectThatIsNotABackendSaysSo(t *testing.T) {
 // The SDK-version trap, named where its victim can read it.
 //
 // npm's `latest` tag still points at the 17 line while the cloud runs 18.x.
-// A package.json written the documented way installs the OLDER major, and the
-// bundle then fails deep inside bun with `var controllers = undefined()` — a
-// message about neither the version nor the problem. Measured 2026-08-21
-// against a real project.
+// An SDK below the floor fails deep inside bun with `var controllers =
+// undefined()` — a message about neither the version nor the problem. Measured
+// 2026-08-21 against a real project.
+//
+// THE REMEDY IS `latest`, and the test says so on purpose. It used to be a
+// pinned major, because npm's `latest` pointed at the 17 line and installing it
+// made things WORSE. Verified 2026-08-24: latest is 21.0.0 and the live tenant
+// runtime resolves 21.0.0, so telling somebody to pin 18 would now hand them an
+// SDK three majors behind the runtime.
 func TestCheckSDKVersionRefusesAMajorTheCLICannotBundle(t *testing.T) {
 	dir := t.TempDir()
 	writeSDK(t, dir, "17.4.0")
@@ -109,7 +114,7 @@ func TestCheckSDKVersionRefusesAMajorTheCLICannotBundle(t *testing.T) {
 	if err == nil {
 		t.Fatal("an SDK this CLI cannot bundle was accepted")
 	}
-	for _, want := range []string{"17.4.0", "18", "npm install @palbase/backend@18", "latest"} {
+	for _, want := range []string{"17.4.0", "18", "npm install @palbase/backend@latest"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the message does not say %q:\n%s", want, err)
 		}
@@ -117,7 +122,7 @@ func TestCheckSDKVersionRefusesAMajorTheCLICannotBundle(t *testing.T) {
 }
 
 func TestCheckSDKVersionAcceptsTheSupportedMajor(t *testing.T) {
-	for _, v := range []string{"18.0.0", "18.0.1", "19.2.3"} {
+	for _, v := range []string{"18.0.0", "18.0.1", "19.2.3", "21.0.0"} {
 		dir := t.TempDir()
 		writeSDK(t, dir, v)
 		if err := checkSDKVersion(dir); err != nil {
