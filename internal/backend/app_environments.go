@@ -66,6 +66,21 @@ func (a appEnvironments) names() []string {
 }
 
 // writeAppEnvironments records every environment for one platform.
+//
+// BİLMEDİĞİNİ SİLMEZ. Bu dosyayı iki yol yazıyor: bulut yolu (uygulamayı ve
+// ortamlarını düzlemden çözer) ve yığın-URL yolu (`palbase link <url>`).
+// İkincisi uygulamanın OAuth yapılandırmasını GÖREMEZ — o bilgi düzlemde
+// yaşıyor — ve dosyayı olduğu gibi yazınca onu siliyordu.
+//
+// Ölçüldü 25.08.2026, centauri: bir `link <url>` koşumu `app_id`'yi yığın
+// ref'iyle değiştirdi, `api_key`'i düşürdü ve Apple+Google bloğunu TAMAMEN
+// sildi. Uygulama derlenmeye devam ederdi; kaybolan tek şey giriş olurdu, ve
+// bunu hiçbir hata söylemezdi.
+//
+// Bu dosyanın kendi kuralı zaten yazılıydı — kaybolan bir Local girdisi için:
+// *"an app whose Local configuration disappears ... stops compiling for a
+// reason nobody connects to the container"*. Aynı gerekçe ALANLAR için de
+// geçerli; bu, o kuralın alan seviyesindeki hâli.
 func writeAppEnvironments(platform string, envs appEnvironments) (string, error) {
 	dir := filepath.Join(nativeArtifactsDir, platform)
 	if platform == "web" {
@@ -74,6 +89,7 @@ func writeAppEnvironments(platform string, envs appEnvironments) (string, error)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	envs = mergeWithExisting(dir, envs)
 	blob, err := json.MarshalIndent(envs, "", "  ")
 	if err != nil {
 		return "", err
@@ -83,6 +99,63 @@ func writeAppEnvironments(platform string, envs appEnvironments) (string, error)
 		return "", err
 	}
 	return path, nil
+}
+
+// mergeWithExisting, yazacağı şeyin ÜRETEMEDİĞİ alanları diskteki dosyadan
+// korur.
+//
+// Yalnız BOŞ alanlar doldurulur: yeni koşum bir değer ürettiyse o kazanır —
+// aksi hâlde bu birleştirme, güncellenmesi gereken bir anahtarı sonsuza kadar
+// eski tutardı. Dosya okunamıyorsa (ilk link, bozuk JSON) yeni hâl olduğu gibi
+// yazılır: birleştirilecek bir şey yoktur.
+// isUnsetAppID, değerin gerçek bir uygulama kaydı OLMADIĞINI söyler.
+func isUnsetAppID(v string) bool {
+	v = strings.TrimSpace(v)
+	return v == "" || v == projectAppID
+}
+
+func mergeWithExisting(dir string, next appEnvironments) appEnvironments {
+	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
+	if err != nil {
+		return next
+	}
+	var prev appEnvironments
+	if err := json.Unmarshal(raw, &prev); err != nil {
+		return next
+	}
+	for name, env := range next.Environments {
+		old, ok := prev.Environments[name]
+		if !ok {
+			continue
+		}
+		// OAUTH BULUT YOLUNUN BİLDİĞİ BİR ŞEY. Yığın-URL yolu onu hiç kurmuyor
+		// ve sildiğinde uygulamanın Apple/Google girişi sessizce ölürdü.
+		if len(env.OAuth) == 0 {
+			env.OAuth = old.OAuth
+		}
+		// ANAHTAR VE UYGULAMA KİMLİĞİ de aynı kural: üretilemeyen bir değer,
+		// var olanı silmek için gerekçe değildir.
+		if strings.TrimSpace(env.APIKey) == "" {
+			env.APIKey = old.APIKey
+		}
+		// YER TUTUCU DA "ÜRETİLMEMİŞ"TİR. Yığın-URL yolu `projectAppID` yazıyor
+		// ve bu kod tabanının KENDİSİ onu gerçek bir kimlik saymıyor:
+		// `native_link.go` uygulamanın kaydını ararken `e.AppID != projectAppID`
+		// diye açıkça atlıyor. Gerçek bir kaydı onunla ezmek, bir kimliği
+		// anlamsız bir sabitle değiştirmek olurdu.
+		if isUnsetAppID(env.AppID) && !isUnsetAppID(old.AppID) {
+			env.AppID = old.AppID
+		}
+		next.Environments[name] = env
+	}
+	// DİSKTEKİ FAZLA ORTAMLAR DA KALIR: bir koşumun göremediği ortam (kapalı
+	// bir yerel yığın, erişilemeyen bir düzlem) kaybolmamalı.
+	for name, old := range prev.Environments {
+		if _, ok := next.Environments[name]; !ok {
+			next.Environments[name] = old
+		}
+	}
+	return next
 }
 
 // specPath is where one environment's contract is committed.
