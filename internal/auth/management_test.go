@@ -28,13 +28,13 @@ func TestEnsureDPoPKey_CreatesThenReuses(t *testing.T) {
 	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	// First call provisions a fresh key.
-	k1, err := EnsureDPoPKey("dev")
+	k1, err := EnsureDPoPKey()
 	require.NoError(t, err)
 	require.NotEmpty(t, k1.Thumbprint())
 
 	// Second call must reuse the stored key (stable jkt across runs) so a
 	// PAT bound to the jkt stays valid between CLI invocations.
-	k2, err := EnsureDPoPKey("dev")
+	k2, err := EnsureDPoPKey()
 	require.NoError(t, err)
 	require.Equal(t, k1.Thumbprint(), k2.Thumbprint(),
 		"EnsureDPoPKey must reuse the stored key, not mint a new jkt each call")
@@ -43,7 +43,7 @@ func TestEnsureDPoPKey_CreatesThenReuses(t *testing.T) {
 func newManagementTestClient(t *testing.T, authURL string) *Client {
 	t.Helper()
 	return &Client{
-		Cfg:        Config{AuthURL: authURL, ClientID: "palbase-cli", Mode: "dev"},
+		Cfg:        Config{AuthURL: authURL, ClientID: "palbase-cli"},
 		HttpClient: &http.Client{Timeout: 5 * time.Second},
 		Output:     io.Discard,
 	}
@@ -72,7 +72,7 @@ func TestManagementToken_LoginFallback(t *testing.T) {
 		AccessToken: "login_at_xyz",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
 	}
-	require.NoError(t, SaveCredentials("dev", creds))
+	require.NoError(t, SaveCredentials(creds))
 
 	c := newManagementTestClient(t, "http://invalid.example")
 	tok, err := c.ManagementToken(context.Background())
@@ -98,7 +98,7 @@ func TestManagementTokenRefreshesAnExpiredSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PALBASE_ACCESS_TOKEN", "")
 
-	require.NoError(t, SaveCredentials("dev", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "stale_at",
 		RefreshToken: "rt_alive",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
@@ -122,7 +122,7 @@ func TestManagementTokenRefreshesAnExpiredSession(t *testing.T) {
 	defer srv.Close()
 
 	var out bytes.Buffer
-	client := NewClient(Config{AuthURL: srv.URL, Mode: "dev"}, &out)
+	client := NewClient(Config{AuthURL: srv.URL}, &out)
 
 	token, err := client.ManagementToken(context.Background())
 	require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestManagementTokenRefreshesAnExpiredSession(t *testing.T) {
 	assert.Equal(t, "rt_alive", sentRefresh)
 
 	// And the rotated pair must be on disk: the NEXT command reads it.
-	stored, err := LoadCredentials("dev")
+	stored, err := LoadCredentials()
 	require.NoError(t, err)
 	assert.Equal(t, "rt_alive_v2", stored.RefreshToken)
 }
@@ -145,10 +145,10 @@ func TestManagementToken_ExpiredLogin_RefreshFailureIsActionable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PALBASE_ACCESS_TOKEN", "")
 	t.Setenv("PALBASE_NO_KEYRING", "1")
-	_, err := EnsureDPoPKey("dev")
+	_, err := EnsureDPoPKey()
 	require.NoError(t, err)
 
-	require.NoError(t, SaveCredentials("dev", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "stale",
 		RefreshToken: "rt_dead",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),

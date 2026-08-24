@@ -17,14 +17,14 @@ import (
 )
 
 // doctorCmd is the environment triage verb: one command that answers "why is
-// the CLI not working for me" — mode/endpoints, login state, headless PAT,
+// the CLI not working for me" — endpoints, login state, headless PAT,
 // project link, and the Node toolchain `build`/`db types` need. Informative
 // only (always exit 0): doctor diagnoses, the failing command still owns its
 // error.
 func doctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the CLI environment (mode, login, link, Node)",
+		Short: "Diagnose the CLI environment (cloud, login, link, Node)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
@@ -32,8 +32,8 @@ func doctorCmd() *cobra.Command {
 			bad := func(label, detail string) { fmt.Fprintf(out, "  ✗ %-10s %s\n", label, detail) }
 
 			fmt.Fprintf(out, "palbase %s\n", Version)
-			ok("mode", fmt.Sprintf("%s (source=%s) — studio %s, api %s",
-				resolved.Mode, resolved.Source, resolved.Endpoints.Studio, resolved.Endpoints.PlatformAPI))
+			ok("cloud", fmt.Sprintf("studio %s, api %s, projects <ref>.%s",
+				resolved.Endpoints.Studio, resolved.Endpoints.PlatformAPI, resolved.Endpoints.PublicHost))
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()

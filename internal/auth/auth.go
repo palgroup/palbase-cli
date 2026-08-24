@@ -21,7 +21,6 @@ type Config struct {
 	// apikey header, which a browser navigation cannot carry.
 	StudioURL string
 	ClientID  string
-	Mode      string // "prod" or "dev" — determines credentials file
 }
 
 // TokenResponse represents the OAuth token endpoint response.
@@ -88,7 +87,7 @@ func (c *Client) finish(ctx context.Context, create bool) error {
 	if err != nil {
 		return err
 	}
-	if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
+	if err := SaveCredentials(creds); err != nil {
 		return fmt.Errorf("save credentials: %w", err)
 	}
 	who := creds.User.Email
@@ -166,7 +165,7 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 	}
 	creds.ExpiresAt = time.Now().Add(lifetime)
 
-	if err := SaveCredentials(c.Cfg.Mode, creds); err != nil {
+	if err := SaveCredentials(creds); err != nil {
 		return nil, err
 	}
 	return creds, nil
@@ -174,7 +173,7 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 
 // Logout ends the session on the server and forgets it here.
 func (c *Client) Logout(ctx context.Context) error {
-	creds, err := LoadCredentials(c.Cfg.Mode)
+	creds, err := LoadCredentials()
 	if err == nil && creds.AccessToken != "" {
 		if err := c.revokeSession(ctx, creds.AccessToken); err != nil {
 			// Local credentials are deleted regardless of what the server
@@ -184,11 +183,11 @@ func (c *Client) Logout(ctx context.Context) error {
 		}
 	}
 
-	if err := DeleteCredentials(c.Cfg.Mode); err != nil {
+	if err := DeleteCredentials(); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(c.Output, "✓ Logged out (mode=%s)\n", c.Cfg.Mode)
+	fmt.Fprintln(c.Output, "✓ Logged out")
 	return nil
 }
 
@@ -225,7 +224,7 @@ func (c *Client) revokeSession(ctx context.Context, accessToken string) (retErr 
 
 // Whoami prints the current logged-in user info.
 func (c *Client) Whoami(ctx context.Context) error {
-	creds, err := LoadCredentials(c.Cfg.Mode)
+	creds, err := LoadCredentials()
 	if err != nil {
 		return err
 	}
@@ -245,14 +244,13 @@ func (c *Client) Whoami(ctx context.Context) error {
 	} else {
 		fmt.Fprintf(c.Output, "User:   %s\n", creds.User.ID)
 	}
-	fmt.Fprintf(c.Output, "Mode:   %s\n", c.Cfg.Mode)
 	fmt.Fprintf(c.Output, "Auth:   %s\n", c.Cfg.AuthURL)
 	return nil
 }
 
 // GetValidToken returns a valid access token, refreshing if needed.
 func (c *Client) GetValidToken(ctx context.Context) (string, error) {
-	creds, err := LoadCredentials(c.Cfg.Mode)
+	creds, err := LoadCredentials()
 	if err != nil {
 		return "", err
 	}
@@ -281,7 +279,7 @@ func (c *Client) GetValidToken(ctx context.Context) (string, error) {
 // Credentials.IsExpired, which every other caller relies on) so the
 // refresh-ahead policy is opt-in per call site.
 func (c *Client) GetFreshToken(ctx context.Context, minRemaining time.Duration) (string, error) {
-	creds, err := LoadCredentials(c.Cfg.Mode)
+	creds, err := LoadCredentials()
 	if err != nil {
 		return "", err
 	}

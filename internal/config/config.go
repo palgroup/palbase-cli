@@ -7,13 +7,6 @@ import (
 	"path/filepath"
 )
 
-type Mode string
-
-const (
-	ModeProd Mode = "prod"
-	ModeDev  Mode = "dev"
-)
-
 type Endpoints struct {
 	Studio      string
 	Auth        string
@@ -71,26 +64,21 @@ var theCloud = Endpoints{
 	PublicHost:  "v2.palbase.studio",
 }
 
-var endpointsByMode = map[Mode]Endpoints{
-	ModeProd: theCloud,
-	ModeDev:  theCloud,
-}
+// File is ~/.palbase/config.json.
+//
+// It used to carry a `mode`, and nothing carries anything now: there is one
+// cloud, so the file has no choice left to record. Kept as a type because the
+// file itself still exists on real machines — a stale `{"mode":"dev"}` decodes
+// to an empty struct and is ignored, which is the whole point of not failing on
+// unknown fields here.
+type File struct{}
 
-func (m Mode) Valid() bool {
-	_, ok := endpointsByMode[m]
-	return ok
-}
-
-func (m Mode) Endpoints() Endpoints {
-	if e, ok := endpointsByMode[m]; ok {
-		return e
-	}
-	return endpointsByMode[ModeProd]
-}
-
-type File struct {
-	Mode Mode `json:"mode,omitempty"`
-}
+// DefaultPlatformAPI is the control plane this binary is built for.
+//
+// Exported so a caller can tell "the configured cloud" from "somewhere else":
+// the only way to reach somewhere else is an explicit PALBASE_PLATFORM_URL, and
+// a person who set one should see it where it matters.
+func DefaultPlatformAPI() string { return theCloud.PlatformAPI }
 
 func Path() (string, error) {
 	home, err := os.UserHomeDir()
@@ -138,45 +126,26 @@ func Save(f File) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+// Resolved is where this CLI acts. One cloud, one address set — see theCloud.
 type Resolved struct {
-	Mode      Mode
-	Source    string
 	Endpoints Endpoints
 }
 
-// Resolve applies precedence: flagMode > PALBASE_MODE > config file > prod default.
-// Endpoints are derived from mode; env overrides (PALBASE_STUDIO_URL, PALBASE_AUTH_URL,
-// PALBASE_PLATFORM_URL) take precedence over mode-derived endpoints for escape hatches.
-func Resolve(flagMode string) (Resolved, error) {
-	var mode Mode
-	var source string
-
-	switch {
-	case flagMode != "":
-		mode = Mode(flagMode)
-		source = "flag"
-	case os.Getenv("PALBASE_MODE") != "":
-		mode = Mode(os.Getenv("PALBASE_MODE"))
-		source = "env"
-	default:
-		f, err := Load()
-		if err != nil {
-			return Resolved{}, err
-		}
-		if f.Mode != "" {
-			mode = f.Mode
-			source = "config"
-		} else {
-			mode = ModeProd
-			source = "default"
-		}
-	}
-
-	if !mode.Valid() {
-		return Resolved{}, fmt.Errorf("invalid mode %q — must be 'prod' or 'dev'", mode)
-	}
-
-	ep := mode.Endpoints()
+// Resolve answers the addresses every command uses.
+//
+// IT TAKES NOTHING, and that is the change. It used to take a mode: `prod` or
+// `dev`, selecting between two address sets. Only one was ever deployed —
+// measured 24.08.2026, Azure has no `pbc-prod-fleet-rg` and
+// `dig api.palbase.studio` answers NXDOMAIN — and `prod` was the DEFAULT, so a
+// fresh install resolved every command against a host that does not exist. The
+// failure surfaced as "no such host", which the credential layer then reported
+// as "no credential for this project": two errors, neither naming the cause.
+//
+// The env overrides stay. They are the escape hatch for someone running this
+// against a stack of their own, and unlike a mode they name an ADDRESS rather
+// than selecting from a list this binary has to keep true.
+func Resolve() (Resolved, error) {
+	ep := theCloud
 	if v := os.Getenv("PALBASE_STUDIO_URL"); v != "" {
 		ep.Studio = v
 	}
@@ -186,6 +155,5 @@ func Resolve(flagMode string) (Resolved, error) {
 	if v := os.Getenv("PALBASE_PLATFORM_URL"); v != "" {
 		ep.PlatformAPI = v
 	}
-
-	return Resolved{Mode: mode, Source: source, Endpoints: ep}, nil
+	return Resolved{Endpoints: ep}, nil
 }

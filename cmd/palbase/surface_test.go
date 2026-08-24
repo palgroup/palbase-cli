@@ -61,7 +61,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// command — it had to be hand-written into a file, and a host the
 		// deploy's fail-closed validator rejects only surfaced as a failed
 		// deploy. It is a management endpoint now, like every other setting.
-		"egress", "flags", "init",
+		"egress", "endpoints", "flags", "init",
 		"ios",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
 		// somebody runs, with no project to select and no control plane to ask.
@@ -71,7 +71,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"logs",
 		"macos",
 		"members",
-		"mode",
 		"notifications",
 		"open",
 		"plan",
@@ -176,13 +175,17 @@ func TestGolden_GlobalFlags(t *testing.T) {
 	var names []string
 	newRootCmd().PersistentFlags().VisitAll(func(f *pflag.Flag) { names = append(names, f.Name) })
 	sort.Strings(names)
-	require.Equal(t, []string{"environment", "mode", "project"}, names)
+	// `--mode` is GONE. It selected between two clouds, only one of which was ever
+	// deployed, and it was the DEFAULT — so a fresh install pointed every command
+	// at a host that does not exist. A flag offering a choice the product does not
+	// have is a flag somebody will use.
+	require.Equal(t, []string{"environment", "project"}, names)
 }
 
 // No command anywhere in the tree may take --branch, --group or --organization.
 // A single leftover would keep a retired concept reachable from a script.
 func TestNoRetiredFlagAnywhereInTheTree(t *testing.T) {
-	retired := []string{"branch", "group", "organization", "org"}
+	retired := []string{"branch", "group", "organization", "org", "mode"}
 	var walk func(c *cobra.Command, path string)
 	walk = func(c *cobra.Command, path string) {
 		for _, dead := range retired {

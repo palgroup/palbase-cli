@@ -36,20 +36,24 @@ func (c *Credentials) ExpiresSoon(within time.Duration) bool {
 	return time.Until(c.ExpiresAt) < within
 }
 
-func credentialsPath(mode string) (string, error) {
+// sessionPath is where THIS PERSON's sign-in lives.
+//
+// It was `credentials-<mode>.json` while there were two clouds to be signed in
+// to. There is one now, so the mode is gone — and the file is `session.json`
+// rather than `credentials.json` because that name is TAKEN: the backend package
+// keeps per-target project keys there, and two writers on one path would sign
+// somebody out of every project the first time either wrote.
+func sessionPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home directory: %w", err)
 	}
-	if mode == "" {
-		mode = "prod"
-	}
-	return filepath.Join(home, ".palbase", fmt.Sprintf("credentials-%s.json", mode)), nil
+	return filepath.Join(home, ".palbase", "session.json"), nil
 }
 
-// SaveCredentials writes credentials to ~/.palbase/credentials-{mode}.json with 0600 permissions.
-func SaveCredentials(mode string, creds *Credentials) error {
-	path, err := credentialsPath(mode)
+// SaveCredentials writes credentials to ~/.palbase/session.json with 0600 permissions.
+func SaveCredentials(creds *Credentials) error {
+	path, err := sessionPath()
 	if err != nil {
 		return err
 	}
@@ -66,9 +70,9 @@ func SaveCredentials(mode string, creds *Credentials) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// LoadCredentials reads credentials from ~/.palbase/credentials-{mode}.json.
-func LoadCredentials(mode string) (*Credentials, error) {
-	path, err := credentialsPath(mode)
+// LoadCredentials reads credentials from ~/.palbase/session.json.
+func LoadCredentials() (*Credentials, error) {
+	path, err := sessionPath()
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +80,7 @@ func LoadCredentials(mode string) (*Credentials, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("not logged in (%s) — run: palbase login", mode)
+			return nil, fmt.Errorf("not logged in — run: palbase login")
 		}
 		return nil, fmt.Errorf("read credentials: %w", err)
 	}
@@ -90,8 +94,8 @@ func LoadCredentials(mode string) (*Credentials, error) {
 }
 
 // DeleteCredentials removes the credentials file for the given mode.
-func DeleteCredentials(mode string) error {
-	path, err := credentialsPath(mode)
+func DeleteCredentials() error {
+	path, err := sessionPath()
 	if err != nil {
 		return err
 	}

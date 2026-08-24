@@ -11,7 +11,7 @@ import (
 )
 
 // ErrDPoPKeyMissing is returned by LoadDPoPKey when neither the keyring
-// nor the file fallback has a key for the given mode. Callers treat it
+// nor the file fallback has a key. Callers treat it
 // as "CLI not logged in" and trigger a fresh login.
 var ErrDPoPKeyMissing = errors.New("dpop key not stored")
 
@@ -21,31 +21,31 @@ var ErrDPoPKeyMissing = errors.New("dpop key not stored")
 //
 // When the file fallback is used a warning is emitted to stderr so the
 // operator knows the CLI is not using keyring protection for this session.
-func StoreDPoPKey(mode string, key *DPoPKey) error {
+func StoreDPoPKey(key *DPoPKey) error {
 	raw, err := key.marshalPrivateJWK()
 	if err != nil {
 		return err
 	}
 
 	if useFileFallback() {
-		return writeKeyFile(mode, raw)
+		return writeKeyFile(raw)
 	}
 
-	if err := keyring.Set(dpopKeyService, keyringAccount(mode), string(raw)); err != nil {
+	if err := keyring.Set(dpopKeyService, keyringAccount(), string(raw)); err != nil {
 		// Fall through to the file fallback with a visible warning. Some
 		// Linux boxes have libsecret but no unlocked keyring; erroring
 		// here would make `palbase login` impossible on CI images.
 		fmt.Fprintf(os.Stderr,
 			"palbase: OS keyring unavailable (%v); falling back to %s permission 0600\n",
-			err, fileFallbackHint(mode))
-		return writeKeyFile(mode, raw)
+			err, fileFallbackHint())
+		return writeKeyFile(raw)
 	}
 	return nil
 }
 
 // LoadDPoPKey reads the private JWK back. Checks the keyring first, then
 // the file fallback. Returns ErrDPoPKeyMissing if neither has a key.
-func LoadDPoPKey(mode string) (*DPoPKey, error) {
+func LoadDPoPKey() (*DPoPKey, error) {
 	if !useFileFallback() {
 		// keyring.Get can BLOCK indefinitely when the OS keychain syscall is
 		// unavailable (a sandboxed/headless environment, e.g. the Claude Code
@@ -53,7 +53,7 @@ func LoadDPoPKey(mode string) (*DPoPKey, error) {
 		// Bound it: if the keyring doesn't answer quickly, fall through to the
 		// file fallback rather than hanging the whole CLI. The Set path already
 		// degrades to the file fallback; this gives Get the same resilience.
-		raw, err := keyringGetWithTimeout(dpopKeyService, keyringAccount(mode), keyringTimeout)
+		raw, err := keyringGetWithTimeout(dpopKeyService, keyringAccount(), keyringTimeout)
 		if err == nil {
 			return loadPrivateJWK([]byte(raw))
 		}
@@ -66,7 +66,7 @@ func LoadDPoPKey(mode string) (*DPoPKey, error) {
 		}
 	}
 
-	path, err := fileFallbackPath(mode)
+	path, err := fileFallbackPath()
 	if err != nil {
 		return nil, err
 	}
@@ -83,15 +83,15 @@ func LoadDPoPKey(mode string) (*DPoPKey, error) {
 // DeleteDPoPKey purges the stored key from both the keyring and the file
 // fallback. Safe to call when no key is stored. Used by `palbase logout`
 // and by key-rotation paths.
-func DeleteDPoPKey(mode string) error {
+func DeleteDPoPKey() error {
 	var firstErr error
 	if !useFileFallback() {
-		if err := keyring.Delete(dpopKeyService, keyringAccount(mode)); err != nil &&
+		if err := keyring.Delete(dpopKeyService, keyringAccount()); err != nil &&
 			!errors.Is(err, keyring.ErrNotFound) {
 			firstErr = err
 		}
 	}
-	path, err := fileFallbackPath(mode)
+	path, err := fileFallbackPath()
 	if err != nil {
 		if firstErr == nil {
 			firstErr = err
@@ -111,8 +111,8 @@ func useFileFallback() bool {
 	return os.Getenv("PALBASE_NO_KEYRING") == "1"
 }
 
-func writeKeyFile(mode string, raw []byte) error {
-	path, err := fileFallbackPath(mode)
+func writeKeyFile(raw []byte) error {
+	path, err := fileFallbackPath()
 	if err != nil {
 		return err
 	}
@@ -122,10 +122,10 @@ func writeKeyFile(mode string, raw []byte) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
-func fileFallbackHint(mode string) string {
-	path, err := fileFallbackPath(mode)
+func fileFallbackHint() string {
+	path, err := fileFallbackPath()
 	if err != nil {
-		return "~/.palbase/dpop-key-" + mode + ".jwk"
+		return "~/.palbase/dpop-key.jwk"
 	}
 	return path
 }

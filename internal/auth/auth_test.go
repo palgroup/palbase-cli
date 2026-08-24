@@ -40,16 +40,16 @@ func TestSaveAndLoadCredentials(t *testing.T) {
 		User:         UserInfo{ID: "usr_123", Email: "test@example.com"},
 	}
 
-	err := SaveCredentials("prod", creds)
+	err := SaveCredentials(creds)
 	require.NoError(t, err)
 
 	// Check file permissions
-	path := filepath.Join(tmpDir, ".palbase", "credentials-prod.json")
+	path := filepath.Join(tmpDir, ".palbase", "session.json")
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 
-	loaded, err := LoadCredentials("prod")
+	loaded, err := LoadCredentials()
 	require.NoError(t, err)
 
 	assert.Equal(t, creds.AccessToken, loaded.AccessToken)
@@ -61,7 +61,7 @@ func TestLoadCredentials_NotLoggedIn(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	_, err := LoadCredentials("prod")
+	_, err := LoadCredentials()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not logged in")
 }
@@ -71,15 +71,15 @@ func TestDeleteCredentials(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	// Save first
-	err := SaveCredentials("prod", &Credentials{AccessToken: "x"})
+	err := SaveCredentials(&Credentials{AccessToken: "x"})
 	require.NoError(t, err)
 
 	// Delete
-	err = DeleteCredentials("prod")
+	err = DeleteCredentials()
 	require.NoError(t, err)
 
 	// Load should fail
-	_, err = LoadCredentials("prod")
+	_, err = LoadCredentials()
 	require.Error(t, err)
 }
 
@@ -173,7 +173,7 @@ func TestLogout(t *testing.T) {
 	defer authServer.Close()
 
 	t.Setenv("HOME", t.TempDir())
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "access",
 		RefreshToken: "refresh",
 		User:         UserInfo{Email: "test@example.com"},
@@ -189,7 +189,7 @@ func TestLogout(t *testing.T) {
 	assert.Equal(t, "Bearer access", got.bearer, "the session is named by its access token")
 	assert.Contains(t, output.String(), "✓ Logged out")
 
-	_, err := LoadCredentials("prod")
+	_, err := LoadCredentials()
 	require.Error(t, err, "the local credential must be gone")
 }
 
@@ -207,13 +207,13 @@ func TestLogoutForgetsLocallyEvenWhenTheServerRefuses(t *testing.T) {
 	defer authServer.Close()
 
 	t.Setenv("HOME", t.TempDir())
-	require.NoError(t, SaveCredentials("prod", &Credentials{AccessToken: "access"}))
+	require.NoError(t, SaveCredentials(&Credentials{AccessToken: "access"}))
 
 	var output bytes.Buffer
 	client := NewClient(Config{AuthURL: authServer.URL}, &output)
 	require.NoError(t, client.Logout(context.Background()))
 
-	_, err := LoadCredentials("prod")
+	_, err := LoadCredentials()
 	require.Error(t, err, "a server error must not strand a live credential on this machine")
 }
 
@@ -223,7 +223,7 @@ func TestWhoami(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_xyz", Email: "salih@example.com"},
@@ -245,7 +245,7 @@ func TestWhoami_NoEmail(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken: "valid",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 		User:        UserInfo{ID: "usr_noemail"},
@@ -264,7 +264,7 @@ func TestGetValidToken_Valid(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken: "my_token",
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
 	}))
@@ -296,7 +296,7 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("PALBASE_NO_KEYRING", "1")
 
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "expired",
 		RefreshToken: "old_refresh",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute),
@@ -361,11 +361,11 @@ func TestGetFreshToken_RefreshesAhead(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("PALBASE_NO_KEYRING", "1")
 
-	_, err := EnsureDPoPKey("prod")
+	_, err := EnsureDPoPKey()
 	require.NoError(t, err)
 
 	// Token is NOT yet expired (20s left) — GetValidToken would return it as-is.
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "still_valid_but_soon",
 		RefreshToken: "old_refresh",
 		ExpiresAt:    time.Now().Add(20 * time.Second),
@@ -402,7 +402,7 @@ func TestGetFreshToken_KeepsComfortableToken(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("PALBASE_NO_KEYRING", "1")
 
-	require.NoError(t, SaveCredentials("prod", &Credentials{
+	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken: "comfortable_token",
 		ExpiresAt:   time.Now().Add(30 * time.Minute),
 	}))

@@ -122,28 +122,23 @@ func loadPrivateJWK(raw []byte) (*DPoPKey, error) {
 
 // --- Keyring storage --------------------------------------------------------
 
-// dpopKeyService is the service name used for every keyring entry. The mode
-// (prod/dev) is baked into the account slot so the two CLI modes don't
-// clobber each other.
+// dpopKeyService is the service name used for every keyring entry.
+//
+// The account slot used to carry the mode, so `prod` and `dev` would not clobber
+// each other. There is one cloud now, so there is one slot — and a slot named
+// after a distinction that no longer exists is a slot somebody will one day try
+// to switch.
 const dpopKeyService = "palbase-cli"
 
-func keyringAccount(mode string) string {
-	if mode == "" {
-		mode = "prod"
-	}
-	return "dpop-key-" + mode
-}
+func keyringAccount() string { return "dpop-key" }
 
 // fileFallbackPath returns the 0600 file the CLI falls back to when the
-// OS keyring is not available. Mirrors SaveCredentials' convention so
-// both files sit alongside each other and share a purge.
-func fileFallbackPath(mode string) (string, error) {
+// OS keyring is not available. Sits beside the session file so both share a
+// purge.
+func fileFallbackPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home directory: %w", err)
 	}
-	if mode == "" {
-		mode = "prod"
-	}
-	return filepath.Join(home, ".palbase", fmt.Sprintf("dpop-key-%s.jwk", mode)), nil
+	return filepath.Join(home, ".palbase", "dpop-key.jwk"), nil
 }

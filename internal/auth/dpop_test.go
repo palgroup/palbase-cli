@@ -186,31 +186,31 @@ func TestStoreLoadDeleteDPoPKey_FileFallback(t *testing.T) {
 
 	k, err := NewDPoPKey()
 	require.NoError(t, err)
-	require.NoError(t, StoreDPoPKey("dev", k))
+	require.NoError(t, StoreDPoPKey(k))
 
 	// File must exist and be 0600.
-	path, err := fileFallbackPath("dev")
+	path, err := fileFallbackPath()
 	require.NoError(t, err)
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
 		"stored key file must be 0600 (caller-only readable)")
 
-	back, err := LoadDPoPKey("dev")
+	back, err := LoadDPoPKey()
 	require.NoError(t, err)
 	require.Equal(t, k.Thumbprint(), back.Thumbprint())
 
-	require.NoError(t, DeleteDPoPKey("dev"))
+	require.NoError(t, DeleteDPoPKey())
 	_, err = os.Stat(path)
 	require.Error(t, err, "file fallback must be removed on delete")
 
-	_, err = LoadDPoPKey("dev")
+	_, err = LoadDPoPKey()
 	require.ErrorIs(t, err, ErrDPoPKeyMissing)
 }
 
 func TestLoadDPoPKey_MissingReturnsErrMissing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PALBASE_NO_KEYRING", "1")
-	_, err := LoadDPoPKey("prod")
+	_, err := LoadDPoPKey()
 	require.ErrorIs(t, err, ErrDPoPKeyMissing)
 }

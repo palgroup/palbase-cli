@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/palgroup/palbase-cli/internal/config"
 	"io"
 	"net"
 	"net/http"
@@ -138,13 +139,23 @@ func printSignInBanner(w io.Writer, handoff string, create bool) {
 // commands, the same project names, a different world — so a non-default one is
 // worth a line. The default is worth none: a line every person sees on every
 // sign-in teaches them to stop reading.
-func PrintDeployment(w io.Writer, mode, cloud string) { printDeployment(w, mode, cloud) }
+// PrintDeployment announces the cloud being signed in to, when it is NOT the
+// one this binary is built for.
+//
+// It used to take a MODE and stay silent for "prod". There is one cloud now and
+// no mode to compare against, so the question it answers changed: the only way
+// to reach somewhere else is an explicit PALBASE_PLATFORM_URL, and someone who
+// set that deserves to see it on the line where they type their password.
+// Silence for the default keeps the common case quiet.
+func PrintDeployment(w io.Writer, cloud string) {
+	printDeployment(w, cloud, config.DefaultPlatformAPI())
+}
 
-func printDeployment(w io.Writer, mode, cloud string) {
-	if mode == "prod" {
+func printDeployment(w io.Writer, cloud, defaultCloud string) {
+	if cloud == "" || cloud == defaultCloud {
 		return
 	}
-	fmt.Fprintf(w, "  %s deployment · %s\n", mode, cloud)
+	fmt.Fprintf(w, "  signing in to %s\n", cloud)
 }
 
 // newPKCE returns a verifier and its S256 challenge. The verifier never leaves

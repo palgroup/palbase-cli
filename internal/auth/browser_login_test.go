@@ -167,9 +167,9 @@ func TestTheSignInSaysWhatAPersonNeedsAndNoMore(t *testing.T) {
 	got := out.String()
 
 	for _, want := range []string{
-		"browser",                    // something is opening
-		"app.example.test",           // where they are going, so they can trust it
-		"Waiting",                    // the terminal is not stuck
+		"browser",          // something is opening
+		"app.example.test", // where they are going, so they can trust it
+		"Waiting",          // the terminal is not stuck
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the sign-in does not say %q:\n%s", want, got)
@@ -187,19 +187,33 @@ func TestTheSignInSaysWhatAPersonNeedsAndNoMore(t *testing.T) {
 	}
 }
 
-// A person signing in to something OTHER than the default deployment has to be
+// A person signing in to something OTHER than the configured cloud has to be
 // told, because signing in to the wrong one looks identical afterwards.
+//
+// The QUESTION changed with the mode. It used to be "is this prod?"; there is
+// one cloud now, so the only way to reach somewhere else is an explicit
+// PALBASE_PLATFORM_URL — and the comparison is against the ADDRESS this binary
+// is built for, not a label.
 func TestASignInToANonDefaultDeploymentNamesIt(t *testing.T) {
+	const configured = "https://api.v2.palbase.studio"
+
 	var out strings.Builder
-	printDeployment(&out, "dev", "https://api.v2.palbase.studio")
-	if !strings.Contains(out.String(), "dev") {
+	printDeployment(&out, "http://localhost:8888", configured)
+	if !strings.Contains(out.String(), "localhost:8888") {
 		t.Errorf("a non-default deployment was not named: %q", out.String())
 	}
 
 	var quiet strings.Builder
-	printDeployment(&quiet, "prod", "https://api.palbase.studio")
+	printDeployment(&quiet, configured, configured)
 	if quiet.String() != "" {
-		t.Errorf("the default deployment announced itself: %q", quiet.String())
+		t.Errorf("the configured cloud announced itself: %q", quiet.String())
+	}
+
+	// An empty address says nothing rather than printing a blank line.
+	var empty strings.Builder
+	printDeployment(&empty, "", configured)
+	if empty.String() != "" {
+		t.Errorf("an unset address printed: %q", empty.String())
 	}
 }
 

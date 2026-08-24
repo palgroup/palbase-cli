@@ -22,8 +22,8 @@ import (
 // Sign-in no longer uses it: the v2 flow is the stack's own /auth/login and the
 // token it returns is a plain Bearer. The key survives for the REST transport,
 // which still signs a proof per request for surfaces that ask for one.
-func EnsureDPoPKey(mode string) (*DPoPKey, error) {
-	key, err := LoadDPoPKey(mode)
+func EnsureDPoPKey() (*DPoPKey, error) {
+	key, err := LoadDPoPKey()
 	if err == nil {
 		return key, nil
 	}
@@ -34,7 +34,7 @@ func EnsureDPoPKey(mode string) (*DPoPKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate dpop key: %w", err)
 	}
-	if err := StoreDPoPKey(mode, key); err != nil {
+	if err := StoreDPoPKey(key); err != nil {
 		return nil, fmt.Errorf("store dpop key: %w", err)
 	}
 	return key, nil
@@ -45,7 +45,7 @@ func EnsureDPoPKey(mode string) (*DPoPKey, error) {
 // Priority:
 //  1. PALBASE_ACCESS_TOKEN — for a headless caller (CI, an agent in a
 //     container) with no terminal to type a password into.
-//  2. The session token from credentials-<mode>.json, written by
+//  2. The session token from session.json, written by
 //     `palbase login`. The access token lives 30 minutes and is refreshed in
 //     place, so an interactive user keeps working without signing in again.
 //
@@ -54,7 +54,7 @@ func (c *Client) ManagementToken(ctx context.Context) (string, error) {
 	if v := os.Getenv("PALBASE_ACCESS_TOKEN"); v != "" {
 		return v, nil
 	}
-	creds, err := LoadCredentials(c.Cfg.Mode)
+	creds, err := LoadCredentials()
 	if err != nil || creds.AccessToken == "" {
 		return "", errNotAuthenticated()
 	}

@@ -36,9 +36,6 @@ import (
 
 var Version = "dev"
 
-// modeFlag is bound to the persistent --mode flag on the root command.
-var modeFlag string
-
 // projectFlag / environmentFlag are the GLOBAL headless overrides (spec §7.3).
 // They are the ONLY context flags: Organization is not a CLI context, and the
 // Palbase branch no longer exists, so there is no --organization and no
@@ -305,7 +302,7 @@ func newRootCmd() *cobra.Command {
 			// runtime error, not misuse — don't dump the usage block after it.
 			// (Genuine flag/arg parse errors fail before this and still show usage.)
 			cmd.SilenceUsage = true
-			r, err := config.Resolve(modeFlag)
+			r, err := config.Resolve()
 			if err != nil {
 				return err
 			}
@@ -314,7 +311,6 @@ func newRootCmd() *cobra.Command {
 				AuthURL:   r.Endpoints.Auth,
 				StudioURL: r.Endpoints.Studio,
 				ClientID:  "palbase-cli",
-				Mode:      string(r.Mode),
 			}, os.Stdout)
 			// The bridge from "signed in" to "can open this project": every
 			// target-relative verb resolves a credential, and for a cloud
@@ -340,8 +336,6 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVar(&modeFlag, "mode", "",
-		"environment mode: prod or dev (overrides config + PALBASE_MODE)")
 	rootCmd.PersistentFlags().StringVar(&projectFlag, "project", "",
 		"Project id to act on (overrides .palbase/selection.json)")
 	rootCmd.PersistentFlags().StringVar(&environmentFlag, "environment", "",
@@ -363,7 +357,7 @@ func newRootCmd() *cobra.Command {
 		loginCmd(),
 		logoutCmd(),
 		whoamiCmd(),
-		modeCmd(),
+		endpointsCmd(),
 		doctorCmd(),
 		openCmd(),
 		project.Cmd(project.Resolvers{
@@ -444,7 +438,7 @@ Two things do NOT come through here:
   a stack you host yourself           ` + "`palbase link <url> --token-stdin`" + ``,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Only a NON-default deployment announces itself. See printDeployment.
-			auth.PrintDeployment(os.Stdout, string(resolved.Mode), resolved.Endpoints.PlatformAPI)
+			auth.PrintDeployment(os.Stdout, resolved.Endpoints.PlatformAPI)
 			if create {
 				return authClient.SignUp(cmd.Context())
 			}
@@ -495,39 +489,24 @@ func whoamiCmd() *cobra.Command {
 	}
 }
 
-// modeCmd is the single CLI-configuration verb: `palbase mode` shows the
-// resolved mode + endpoints, `palbase mode prod|dev` persists a new mode.
-// (It replaces the retired `config get/set/list` triple — mode is the only
-// config key, so one command owns it.)
-func modeCmd() *cobra.Command {
+// endpointsCmd shows where this CLI acts.
+//
+// It was `palbase mode [prod|dev]`, and it SET a mode. There is nothing to set:
+// one cloud, one address set (config.Resolve). Keeping a verb that offers a
+// choice which no longer exists would let somebody switch to a deployment that
+// is not there — which is exactly what happened, and what `--mode prod` cost a
+// person today.
+func endpointsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "mode [prod|dev]",
-		Short: "Show or set the environment mode (prod | dev)",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "endpoints",
+		Args:  cobra.NoArgs,
+		Short: "Show the addresses this CLI acts on",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				path, _ := config.Path()
-				fmt.Fprintf(os.Stdout, "Mode:        %s (source=%s)\n", resolved.Mode, resolved.Source)
-				fmt.Fprintf(os.Stdout, "Config file: %s\n", path)
-				fmt.Fprintf(os.Stdout, "Studio:      %s\n", resolved.Endpoints.Studio)
-				fmt.Fprintf(os.Stdout, "Auth:        %s\n", resolved.Endpoints.Auth)
-				fmt.Fprintf(os.Stdout, "Platform:    %s\n", resolved.Endpoints.PlatformAPI)
-				return nil
-			}
-			m := config.Mode(args[0])
-			if !m.Valid() {
-				return fmt.Errorf("invalid mode %q — must be 'prod' or 'dev'", args[0])
-			}
-			f, err := config.Load()
-			if err != nil {
-				return err
-			}
-			f.Mode = m
-			if err := config.Save(f); err != nil {
-				return err
-			}
-			path, _ := config.Path()
-			fmt.Fprintf(os.Stdout, "✓ mode=%s (saved to %s)\n", m, path)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Studio:      %s\n", resolved.Endpoints.Studio)
+			fmt.Fprintf(out, "Auth:        %s\n", resolved.Endpoints.Auth)
+			fmt.Fprintf(out, "Platform:    %s\n", resolved.Endpoints.PlatformAPI)
+			fmt.Fprintf(out, "Projects:    <ref>.%s\n", resolved.Endpoints.PublicHost)
 			return nil
 		},
 	}
