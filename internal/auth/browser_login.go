@@ -115,6 +115,20 @@ func printSignInBanner(w io.Writer, handoff string, create bool) {
 	fmt.Fprintf(w, "  Opening your browser. If it does not open, use this link:\n")
 	fmt.Fprintf(w, "  %s\n\n", handoff)
 	fmt.Fprintf(w, "  Waiting for you to finish…\n")
+	if create {
+		// ACCOUNT CREATION HAS NO AUTHORIZE PAGE. The sign-in goes to
+		// `/auth/login`, the one page that reads the auth_request_id and
+		// completes it. `/auth/signup` is a 404 on the panel (measured
+		// 2026-08-24), so this opens the ordinary `/signup` — the same page whose
+		// parameter-discarding behaviour WAS the login bug.
+		//
+		// Whether it completes this request afterwards is not something this side
+		// can know, so the line below is the one sentence true either way. The
+		// alternative is a person watching a prompt that never returns, which is
+		// exactly the failure the login fix existed to remove.
+		fmt.Fprintf(w, "  If this terminal is still waiting once your account exists,\n")
+		fmt.Fprintf(w, "  press Ctrl-C and run `palbase login`.\n")
+	}
 }
 
 // printDeployment names the deployment being signed in to, and ONLY when it is

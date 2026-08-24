@@ -202,3 +202,32 @@ func TestASignInToANonDefaultDeploymentNamesIt(t *testing.T) {
 		t.Errorf("the default deployment announced itself: %q", quiet.String())
 	}
 }
+
+// `--create` must not be able to leave a terminal waiting forever.
+//
+// The sign-in handoff goes to `/auth/login`, the one page that READS the
+// auth_request_id and completes it. Account creation has no such page:
+// `/auth/signup` is a 404 on the panel (measured), so `--create` opens the
+// ordinary `/signup` — the same page whose parameter-discarding behaviour was
+// the login bug. Whether it completes the CLI's request afterwards is not
+// something this side can know.
+//
+// So it says the one sentence that is true either way: if this terminal is still
+// waiting when you are done, run `palbase login`. Nobody is left watching a
+// prompt that will never return.
+func TestAccountCreationTellsThePersonWhatToDoIfItHangs(t *testing.T) {
+	var out strings.Builder
+	printSignInBanner(&out, "https://app.example.test/signup?auth_request_id=ar_1", true)
+	got := out.String()
+
+	if !strings.Contains(got, "palbase login") {
+		t.Errorf("account creation does not name the way out of a silent wait:\n%s", got)
+	}
+	// And the ordinary sign-in does NOT carry that sentence: it goes to the page
+	// that completes the request, so the line would be noise.
+	var plain strings.Builder
+	printSignInBanner(&plain, "https://app.example.test/auth/login?auth_request_id=ar_1", false)
+	if strings.Contains(plain.String(), "still waiting") {
+		t.Errorf("the ordinary sign-in carries a caveat that is not its own:\n%s", plain.String())
+	}
+}
