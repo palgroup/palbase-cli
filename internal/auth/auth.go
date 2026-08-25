@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -108,11 +109,24 @@ func (c *Client) plane() *CloudClient {
 
 // RefreshTokens trades the stored refresh token for a fresh session.
 //
-// The v2 control plane rotates: POST /auth/token/refresh returns a new access
-// token AND a new refresh token, and the old one stops working. Keeping the
-// previous refresh token on a response that carried a new one would mean the
-// NEXT refresh presents a token the server has already retired — a sign-out
-// that arrives half an hour later for no reason the person can see.
+// A SESSION IS RENEWED AT THE DOOR IT WAS OPENED AT. `palbase login` redeems
+// its authorization code at the OIDC token endpoint (see ExchangeCode), so the
+// refresh token it receives lives in the OIDC store. This used to ask palauth's
+// SEPARATE, non-OIDC refresh store instead — the plane's own comment names them
+// as two ("palauth's standalone refresh-token store is what the non-OIDC
+// /auth/token/refresh flow uses") — and that store has never heard of a token
+// the browser flow minted.
+//
+// Measured live 25.08.2026, three times in a row: every command thirty minutes
+// after a sign-in answered `refresh tokens: 401 — invalid_token`, and the only
+// way back was to open the browser again. Nothing said which of the two stores
+// was being asked, which is why one endpoint answering for two flows is the
+// shape to avoid, not the wording.
+//
+// The plane rotates: the response carries a NEW refresh token and the old one
+// stops working. Keeping the previous one would mean the NEXT refresh presents
+// a token the server has already retired — the same sign-out, half an hour
+// later, for no reason the person can see.
 func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Credentials, error) {
 	if creds.RefreshToken == "" {
 		return nil, fmt.Errorf("no refresh token stored — run: palbase login")
@@ -123,16 +137,24 @@ func (c *Client) RefreshTokens(ctx context.Context, creds *Credentials) (*Creden
 		return nil, err
 	}
 
-	payload, err := json.Marshal(map[string]string{"refresh_token": creds.RefreshToken})
-	if err != nil {
-		return nil, err
+	// FORM ENCODING, because that is what the token endpoint speaks (RFC 6749
+	// §6) and what ExchangeCode already sends. A JSON body here would be read
+	// as an empty form and refused as a missing grant.
+	clientID := c.Cfg.ClientID
+	if clientID == "" {
+		clientID = "palbase-cli"
+	}
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {creds.RefreshToken},
+		"client_id":     {clientID},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.Cfg.AuthURL+"/auth/token/refresh", bytes.NewReader(payload))
+		c.Cfg.AuthURL+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("apikey", boot.AnonKey)
 
 	resp, err := c.HttpClient.Do(req)

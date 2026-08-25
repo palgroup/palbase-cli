@@ -110,9 +110,10 @@ func TestManagementTokenRefreshesAnExpiredSession(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
 			return
 		}
-		var body map[string]string
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		refreshPath, sentRefresh = r.URL.Path, body["refresh_token"]
+		// FORM, JSON DEĞİL: yenileme artık girişin kullandığı jeton ucuna
+		// gidiyor ve o uç form konuşuyor (RFC 6749 §6).
+		_ = r.ParseForm()
+		refreshPath, sentRefresh = r.URL.Path, r.PostFormValue("refresh_token")
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "fresh_at",
 			RefreshToken: "rt_alive_v2",
@@ -127,7 +128,7 @@ func TestManagementTokenRefreshesAnExpiredSession(t *testing.T) {
 	token, err := client.ManagementToken(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "fresh_at", token)
-	assert.Equal(t, "/auth/token/refresh", refreshPath)
+	assert.Equal(t, "/oauth/token", refreshPath)
 	assert.Equal(t, "rt_alive", sentRefresh)
 
 	// And the rotated pair must be on disk: the NEXT command reads it.

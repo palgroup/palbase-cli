@@ -83,21 +83,28 @@ func TestDeleteCredentials(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Refreshing is JSON against the stack's own endpoint, carrying the anon
-// apikey the auth surface demands — and the ROTATED refresh token must be
-// stored. Keeping the old one would make the NEXT refresh present a token the
-// server has already retired: a sign-out half an hour later, for no reason the
-// person can see.
+// A SESSION IS RENEWED AT THE DOOR IT WAS OPENED AT.
+//
+// `palbase login` redeems its code at the OIDC token endpoint, so the refresh
+// token it receives lives in the OIDC store. Refreshing used to ask palauth's
+// SEPARATE, non-OIDC refresh store instead — which has never heard of that
+// token. Measured live 25.08.2026, three times in a row: every command thirty
+// minutes after a sign-in answered `refresh tokens: 401 — invalid_token`, and
+// the only way back was to open the browser again.
+//
+// The ROTATED refresh token must still be stored. Keeping the old one would
+// make the NEXT refresh present a token the server has already retired: the
+// same sign-out, half an hour later, for no reason the person can see.
 func TestRefreshTokens(t *testing.T) {
-	var gotPath, gotAPIKey, gotRefresh string
+	var gotPath, gotAPIKey, gotGrant, gotRefresh, gotClient string
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/cloud/config" {
 			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon", Issuer: "https://plane.test"})
 			return
 		}
-		var body map[string]string
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotPath, gotAPIKey, gotRefresh = r.URL.Path, r.Header.Get("apikey"), body["refresh_token"]
+		_ = r.ParseForm()
+		gotPath, gotAPIKey = r.URL.Path, r.Header.Get("apikey")
+		gotGrant, gotRefresh, gotClient = r.PostFormValue("grant_type"), r.PostFormValue("refresh_token"), r.PostFormValue("client_id")
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "new_access",
 			RefreshToken: "new_refresh",
@@ -120,7 +127,9 @@ func TestRefreshTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, "/auth/token/refresh", gotPath)
+	assert.Equal(t, "/oauth/token", gotPath, "a browser-minted session is renewed where it was minted")
+	assert.Equal(t, "refresh_token", gotGrant)
+	assert.Equal(t, "palbase-cli", gotClient)
 	assert.Equal(t, "pb_anon", gotAPIKey, "the auth surface refuses a request without the anon apikey")
 	assert.Equal(t, "old_refresh", gotRefresh)
 	assert.Equal(t, "new_access", newCreds.AccessToken)
@@ -283,7 +292,7 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
 			return
 		}
-		assert.Equal(t, "/auth/token/refresh", r.URL.Path)
+		assert.Equal(t, "/oauth/token", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "refreshed_token",
 			RefreshToken: "new_refresh",
@@ -348,7 +357,7 @@ func TestGetFreshToken_RefreshesAhead(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
 			return
 		}
-		assert.Equal(t, "/auth/token/refresh", r.URL.Path)
+		assert.Equal(t, "/oauth/token", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken:  "ahead_refreshed_token",
 			RefreshToken: "new_refresh",
