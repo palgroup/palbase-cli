@@ -43,6 +43,10 @@ type REST interface {
 type Resolvers struct {
 	REST      func() REST
 	Selection func() *selection.Resolver
+	// CloudRef, bir yığın adresinin BULUT projesi olup olmadığını ve ref'ini
+	// söyler. Adres şeklinden okunur, ağdan değil: ulaşılamayan bir düzlem,
+	// bulut projesini "bulut değil" yapmaz.
+	CloudRef func(url string) (string, bool)
 }
 
 // logLine is one line as this command prints it.
@@ -96,6 +100,86 @@ func parseWindow(since string) (int, error) {
 	return int(d.Seconds()), nil
 }
 
+// cloudRefOf, adresin BULUT projesi olup olmadığını ve ref'ini söyler.
+//
+// Çözücü verilmemişse "hayır" der ve çağıran self-host yoluna düşer: bir
+// bağımlılığın yokluğu, bir adresi bulut projesi SAYMAK için gerekçe değildir.
+func cloudRefOf(r Resolvers, url string) (string, bool) {
+	if r.CloudRef == nil {
+		return "", false
+	}
+	return r.CloudRef(url)
+}
+
+// showCloudOpts, bulut okumasının bayrakları — iki çağıran da aynı şeyi
+// istiyor ve ikinci bir kopya, biri değiştiğinde sessizce ayrışırdı.
+type showCloudOpts struct {
+	source, levels, since, query string
+	limit                        int
+	follow, jsonOut              bool
+}
+
+// showCloud, düzlemin panel yüzeyinden bir ortamın loglarını okur.
+//
+// AYRI BİR FONKSİYON çünkü İKİ yol buraya geliyor: seçimle çözülen bir ortam ve
+// BULUT projesine linkli bir checkout. İkisinin ayrı kopyaları olsaydı, cevap
+// linkin varlığına göre değişmeye devam ederdi — düzeltilen kusur tam olarak
+// oydu.
+func showCloud(cmd *cobra.Command, r Resolvers, ref string, o showCloudOpts) error {
+	source, levels, since, query := o.source, o.levels, o.since, o.query
+	limit, follow, jsonOut := o.limit, o.follow, o.jsonOut
+	windowSec, err := parseWindow(since)
+	if err != nil {
+		return err
+	}
+	read := func(window int) ([]logLine, error) {
+		return readLines(cmd.Context(), r.REST(), ref,
+			window, limit, query, levels, source)
+	}
+
+	out := cmd.OutOrStdout()
+	// One shot: the newest `limit` lines in the window, oldest-first.
+	lines, err := read(windowSec)
+	if err != nil {
+		return err
+	}
+	if jsonOut && !follow {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(lines)
+	}
+	printLines(out, lines, jsonOut)
+	if !follow {
+		if len(lines) == 0 {
+			fmt.Fprintln(out, "(no log lines — is the backend deployed and receiving traffic?)")
+		}
+		return nil
+	}
+
+	// Follow: re-read the newest lines over a SHORT window and print what
+	// has not been printed. The store answers a window rather than a
+	// cursor, so there is nothing to page forward from; the cursor here
+	// dedupes by timestamp+message, which is what kept equal-timestamp
+	// lines from being dropped or repeated on the old transport too.
+	//
+	// The window is a few polls wide on purpose: exactly one interval
+	// would lose a line to any hiccup between two reads.
+	cursor := newFollowCursor(lines)
+	const followWindow = 60
+	for {
+		select {
+		case <-cmd.Context().Done():
+			return nil
+		case <-time.After(followInterval):
+		}
+		fresh, err := read(followWindow)
+		if err != nil {
+			return err
+		}
+		printLines(out, cursor.fresh(fresh), jsonOut)
+	}
+}
+
 // followInterval is how often --follow re-polls. A var so tests can shrink it.
 var followInterval = 2 * time.Second
 
@@ -147,9 +231,27 @@ new lines every 2s — Ctrl-C to stop.
 				// (ölçüldü: /v1/management/logs, /admin/logs → 404). Doğru
 				// davranış, olmayan bir şeyi aramak değil, ne olduğunu söylemek.
 				if !target.OnThisMachine() {
+					// BULUT PROJESİNİN LOGLARI DÜZLEMDE. Yukarıdaki yorumun
+					// dayandığı ölçüm ("uzak yığının yönetim yüzeyinde log
+					// işlemi YOK") KİRACININ yüzeyi içindi ve hâlâ doğru — ama
+					// kontrol düzlemi artık `/v1/panel/environments/<ref>/logs`
+					// sunuyor (ölçüldü canlı 25.08.2026, 200). Aynı proje
+					// SEÇİMLE zaten okunabiliyordu; yalnız LİNKLİ bir checkout
+					// reddediliyordu, yani cevap linkin varlığına göre
+					// değişiyordu.
+					if ref, ok := cloudRefOf(r, target.URL); ok {
+						fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+						return showCloud(cmd, r, ref, showCloudOpts{
+							source: source, levels: levels, since: since,
+							query: query, limit: limit, follow: follow, jsonOut: jsonOut,
+						})
+					}
+					// KENDİ YIĞININI KOŞTURAN BİRİ İÇİN DEĞİŞEN BİR ŞEY YOK:
+					// onun logları konteynerlerinde ve o konteynerler burada
+					// değil.
 					return fmt.Errorf(
 						"%s does not run on this machine, so its logs are not here either.\n"+
-							"A remote project's management surface has no log operation yet; "+
+							"A self-hosted stack keeps its logs in its own containers; "+
 							"`palbase start` brings a stack up here if you want to watch one.",
 						target.Describe())
 				}
@@ -176,57 +278,10 @@ new lines every 2s — Ctrl-C to stop.
 				return err
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-
-			windowSec, err := parseWindow(since)
-			if err != nil {
-				return err
-			}
-			read := func(window int) ([]logLine, error) {
-				return readLines(cmd.Context(), r.REST(), sel.EnvironmentRef(),
-					window, limit, query, levels, source)
-			}
-
-			out := cmd.OutOrStdout()
-			// One shot: the newest `limit` lines in the window, oldest-first.
-			lines, err := read(windowSec)
-			if err != nil {
-				return err
-			}
-			if jsonOut && !follow {
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(lines)
-			}
-			printLines(out, lines, jsonOut)
-			if !follow {
-				if len(lines) == 0 {
-					fmt.Fprintln(out, "(no log lines — is the backend deployed and receiving traffic?)")
-				}
-				return nil
-			}
-
-			// Follow: re-read the newest lines over a SHORT window and print what
-			// has not been printed. The store answers a window rather than a
-			// cursor, so there is nothing to page forward from; the cursor here
-			// dedupes by timestamp+message, which is what kept equal-timestamp
-			// lines from being dropped or repeated on the old transport too.
-			//
-			// The window is a few polls wide on purpose: exactly one interval
-			// would lose a line to any hiccup between two reads.
-			cursor := newFollowCursor(lines)
-			const followWindow = 60
-			for {
-				select {
-				case <-cmd.Context().Done():
-					return nil
-				case <-time.After(followInterval):
-				}
-				fresh, err := read(followWindow)
-				if err != nil {
-					return err
-				}
-				printLines(out, cursor.fresh(fresh), jsonOut)
-			}
+			return showCloud(cmd, r, sel.EnvironmentRef(), showCloudOpts{
+				source: source, levels: levels, since: since,
+				query: query, limit: limit, follow: follow, jsonOut: jsonOut,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&source, "source", "", "Only this source (e.g. backend)")

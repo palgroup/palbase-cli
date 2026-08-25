@@ -372,6 +372,12 @@ func newRootCmd() *cobra.Command {
 		logs.Cmd(logs.Resolvers{
 			REST:      func() logs.REST { return managementREST() },
 			Selection: selectionResolver,
+			// Adresten ref: `tenantRefOf` bunu ŞEKİLDEN okuyor ve `push`,
+			// `link`, kimlik yolu hep aynı fonksiyonu kullanıyor. İkinci bir
+			// çözücü yazmak, aynı soruya iki cevap üretirdi.
+			CloudRef: func(url string) (string, bool) {
+				return tenantRefOf(url, resolved.Endpoints.PublicHost)
+			},
 		}),
 		members.Cmd(members.Resolvers{
 			REST:   func() members.REST { return managementREST() },
