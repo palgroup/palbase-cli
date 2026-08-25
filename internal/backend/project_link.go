@@ -94,6 +94,20 @@ boot generated.`,
 			// then had no way to reach a cloud project by name. The only thing
 			// missing was the suffix, and the configured cloud carries it.
 			if o.url != "" && !strings.Contains(o.url, "://") {
+				// ADI ÖNCE DENE. Yardım metni `palbase link todoapp` diyor ve
+				// `project list` artık ADI ilk sütunda gösteriyor — insan orada
+				// gördüğünü yazar. Ama bir ad çoğu zaman ref ŞEKLİNE de uyar
+				// ("ioslinkprobe": 4-24 küçük harf), o yüzden şekil kontrolü tek
+				// başına adı sessizce ref sanıyor ve var olmayan bir konağa
+				// gidiyordu: "does not look like a Palbase stack" (ölçüldü
+				// 25.08.2026). Belgelenmiş ama var olmayan bir davranıştı.
+				//
+				// Bulut oturumu yoksa ya da liste okunamazsa SESSİZCE ref yoluna
+				// düşülür: self-host bir checkout'ta ad çözecek bir defter yok
+				// ve orada ref/adres tek doğru cevaptır.
+				if ref := refByProjectName(cmd.Context(), r, o.url); ref != "" {
+					o.url = ref
+				}
 				if !selection.IsCanonicalEnvironmentRef(o.url) {
 					return fmt.Errorf(
 						"%q is neither a stack address nor an environment ref "+
@@ -115,6 +129,45 @@ boot generated.`,
 	f.BoolVar(&o.tokenStdin, "token-stdin", false,
 		"read this stack's key from stdin and remember it for this address (self-hosted stacks)")
 	return cmd
+}
+
+// refByProjectName, çağıranın projeleri arasında ADI eşleşenin ref'ini verir.
+//
+// Boş dönmesi "bulamadım" demektir ve çağıran ref yoluna düşer — bir hata
+// DEĞİL: self-host bir checkout'ta ad çözecek bir defter yoktur.
+//
+// TAM ve büyük/küçük harf duyarsız eşleşme; birden fazla eşleşirse boş döner,
+// çünkü hangisinin kastedildiğini bilmiyoruz ve birini seçmek yanlış projeye
+// bağlanmak olabilir.
+func refByProjectName(ctx context.Context, r Resolvers, name string) string {
+	if r.REST == nil {
+		return ""
+	}
+	rest := r.REST()
+	if rest == nil {
+		return ""
+	}
+	// Şekli BURADA beyan et: `internal/project` paketini içeri almak, backend
+	// paketini komut ağacının bir yaprağına bağlardı ve döngü üretirdi.
+	var rows []struct {
+		Ref  string  `json:"ref"`
+		Name *string `json:"name"`
+	}
+	if err := rest.Do(ctx, http.MethodGet, "/v1/cloud/projects", nil, &rows); err != nil {
+		return ""
+	}
+	found := ""
+	for _, p := range rows {
+		if p.Name == nil || !strings.EqualFold(strings.TrimSpace(*p.Name), strings.TrimSpace(name)) {
+			continue
+		}
+		if found != "" {
+			// İki proje aynı adı taşıyor: seçmek yanlış projeye bağlanmak olabilir.
+			return ""
+		}
+		found = p.Ref
+	}
+	return found
 }
 
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
