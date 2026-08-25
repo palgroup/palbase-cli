@@ -279,3 +279,58 @@ func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
 		t.Error("an empty tests directory was created for a project with none")
 	}
 }
+
+// WEBHOOKS TRAVEL. Until this test existed the entry hardcoded `webhooks = []`,
+// so a project's `webhooks/stripe.ts` was compiled into the bundle and then
+// declared absent: the runtime mounts `/webhooks/<name>` from THIS export, so
+// the URL answered 404 and the deploy said "successful".
+//
+// Measured 2026-08-25 against the live plane: a Stripe receiver was written,
+// tested, pushed, and Stripe could never deliver an event to it. The same
+// defect was measured on the core side on 2026-08-21 (v2/deploy/verify.sh:1725)
+// and fixed there; this copy of the bundler kept it.
+func TestWebhooksTravelInTheEntry(t *testing.T) {
+	dir := t.TempDir()
+	hooks := filepath.Join(dir, "webhooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"stripe.ts", "shopify.ts", "notes.test.ts"} {
+		if err := os.WriteFile(filepath.Join(hooks, name), []byte("export default class X {}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+
+	// The NAME is the file's base name, because the file name IS the public URL
+	// (the SDK's decorator deliberately offers no `name` option).
+	if !strings.Contains(entry, `{ name: "stripe", ctor: __webhook_stripe }`) {
+		t.Errorf("stripe webhook missing from the entry:\n%s", entry)
+	}
+	if !strings.Contains(entry, `{ name: "shopify", ctor: __webhook_shopify }`) {
+		t.Errorf("shopify webhook missing from the entry:\n%s", entry)
+	}
+
+	// Imported BY NAME, unlike controllers: a webhook class is not registered by
+	// its decorator into a global registry, so the entry must carry the ctor.
+	if !strings.Contains(entry, `import __webhook_stripe from "`+filepath.Join(hooks, "stripe.ts")+`";`) {
+		t.Errorf("the webhook is not imported by name:\n%s", entry)
+	}
+
+	// Test files are NOT webhooks. Shipping one would mount a URL nobody meant
+	// to publish.
+	if strings.Contains(entry, "notes.test.ts") || strings.Contains(entry, `name: "notes.test"`) {
+		t.Errorf("a test file was mounted as a webhook:\n%s", entry)
+	}
+}
+
+// A project with no webhooks/ directory still bundles — and says so explicitly,
+// rather than emitting a broken entry.
+func TestAProjectWithNoWebhooksStillBundles(t *testing.T) {
+	dir := t.TempDir()
+	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	if !strings.Contains(entry, "export const webhooks = [];") {
+		t.Errorf("an empty webhooks export is missing:\n%s", entry)
+	}
+}

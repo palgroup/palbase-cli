@@ -274,7 +274,75 @@ func bundleEntry(dir string, sources []string) string {
 	// the module body, so every decorator has fired by this line.
 	b.WriteString("export const controllers = SDK.getRegisteredControllers();\n")
 	b.WriteString("export const getRegisteredControllers = SDK.getRegisteredControllers;\n")
-	b.WriteString("export const jobs = []; export const webhooks = []; export const resources = [];\n")
+	b.WriteString("export const jobs = []; export const resources = [];\n")
+
+	// WEBHOOKS TRAVEL BY NAME, unlike controllers.
+	//
+	// @Controller records its class into a global registry as it decorates it,
+	// so a controller needs no export and the entry imports it for the side
+	// effect alone. @Webhook does NOT: it stamps metadata onto the class and
+	// nothing collects it. The runtime mounts `/webhooks/<name>` from THIS
+	// export, so the ctor has to reach it by name or the mount never exists.
+	//
+	// Until this block existed the line above also hardcoded `webhooks = []`,
+	// and a project's `webhooks/stripe.ts` was compiled into the bundle and then
+	// declared absent: the URL answered 404 while the deploy said "successful".
+	// Measured against the live plane 2026-08-25; the core side measured the
+	// same defect on 2026-08-21 (v2/deploy/verify.sh) and fixed it there, and
+	// this copy of the bundler kept it.
+	//
+	// THE FILE NAME IS THE URL — the SDK's decorator deliberately offers no
+	// `name` option, so the base name is the whole contract.
+	hooks, err := webhookSources(filepath.Join(dir, "webhooks"))
+	if err != nil {
+		hooks = nil
+	}
+	var entries []string
+	for _, src := range hooks {
+		name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+		ident := fmt.Sprintf("__webhook_%s", sanitizeIdent(name))
+		fmt.Fprintf(&b, "import %s from %q;\n", ident, src)
+		entries = append(entries, fmt.Sprintf("{ name: %q, ctor: %s }", name, ident))
+	}
+	fmt.Fprintf(&b, "export const webhooks = [%s];\n", strings.Join(entries, ", "))
+	return b.String()
+}
+
+// webhookSources lists every `webhooks/*.ts` a project declares.
+//
+// TEST FILES ARE NOT WEBHOOKS: shipping one would mount a URL nobody meant to
+// publish, and a webhook URL is unauthenticated by design (the signature is the
+// credential).
+func webhookSources(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || isTestSource(e.Name()) {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".mts") {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// sanitizeIdent turns a file base name into a JS identifier fragment. A webhook
+// named `payment-failed.ts` is legal on disk and illegal as an identifier.
+func sanitizeIdent(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
 	return b.String()
 }
 
