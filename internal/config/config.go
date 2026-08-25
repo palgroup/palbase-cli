@@ -67,6 +67,14 @@ type File struct{}
 // a person who set one should see it where it matters.
 func DefaultPlatformAPI() string { return theCloud.PlatformAPI }
 
+// DefaultAuth is the address the browser sign-in itself talks to.
+//
+// It is a SEPARATE question from DefaultPlatformAPI even while both resolve to
+// the same host: the sign-in speaks to Auth, every other verb speaks to
+// PlatformAPI, and a caller that compares "the cloud I signed in to" against
+// the platform address goes quietly wrong the day the two split.
+func DefaultAuth() string { return theCloud.Auth }
+
 func Path() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

@@ -136,7 +136,7 @@ func TestTheCallbackTabNamesANonDefaultCloud(t *testing.T) {
 	}
 
 	quiet := renderCallback(t,
-		NewClient(Config{AuthURL: config.DefaultPlatformAPI()}, io.Discard),
+		NewClient(Config{AuthURL: config.DefaultAuth()}, io.Discard),
 		http.StatusOK, signedInCallback())
 	if strings.Contains(quiet, "<dt>cloud</dt>") {
 		t.Errorf("the configured cloud announced itself:\n%s", quiet)

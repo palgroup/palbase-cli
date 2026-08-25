@@ -89,8 +89,13 @@ func (c *Client) writeCallbackPage(w http.ResponseWriter, status int, view callb
 // cloudMetaRow names a non-default control plane, and stays silent for the
 // default one. The same question printDeployment answers in the terminal: a
 // line every person sees on every sign-in teaches them to stop reading.
+//
+// The comparison is against the AUTH address, because that is what this
+// sign-in actually spoke to — not the platform address printDeployment uses for
+// every other verb. Both resolve to the same host today; comparing against the
+// wrong one would start announcing every ordinary sign-in the day they split.
 func cloudMetaRow(cloud string) (callbackMetaRow, bool) {
-	if cloud == "" || strings.TrimRight(cloud, "/") == strings.TrimRight(config.DefaultPlatformAPI(), "/") {
+	if cloud == "" || strings.TrimRight(cloud, "/") == strings.TrimRight(config.DefaultAuth(), "/") {
 		return callbackMetaRow{}, false
 	}
 	return callbackMetaRow{Label: "cloud", Value: cloud}, true
