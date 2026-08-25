@@ -535,3 +535,58 @@ func TestLink_RefusesSomethingThatIsNeitherAddressNorRef(t *testing.T) {
 
 	require.ErrorContains(t, cmd.Execute(), "neither a stack address nor an environment ref")
 }
+
+// TestLinkingForWebWritesTheWebGeneratorsInputs: `--platform web` must produce
+// what @palbase/web's `palbe-gen` actually reads, and nothing Xcode-shaped.
+//
+// ÖLÇÜLDÜ 25.08.2026 (palaicloud): bir web checkout'unda `palbase web link`,
+// bağlı hedefi görünce bu doğrudan yola düşüyor (platform_link_target.go) ve bu
+// yol PLATFORMDAN BAĞIMSIZ olarak Apple adımlarını koşuyordu —
+// `Palbase/Config/Main.xcconfig` yazdı, `Palbase/palbase-config.json`'ı ortam
+// HARİTASI şemasıyla ezdi (palbe-gen düz `{app_id, base_url, api_key}` okur) ve
+// `Palbase/openapi.json`'ı hiç yazmadı. palbe.gen.ts üretilemedi ve bunu söyleyen
+// bir hata da yoktu: her adım başarıyla döndü.
+func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
+	inScratchCheckout(t)
+	t.Setenv("HOME", t.TempDir())
+
+	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
+	srv := stackServing(t, anon, nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	var out strings.Builder
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
+	dir, _ := os.Getwd()
+
+	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+	if err != nil {
+		t.Fatalf("no web config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, isNativeShape := cfg["environments"]; isNativeShape {
+		t.Errorf("the web config carries the native per-environment map:\n%s", raw)
+	}
+	if got, _ := cfg["api_key"].(string); got != anon {
+		t.Errorf("api_key is %q, want the publishable key", got)
+	}
+	if got, _ := cfg["base_url"].(string); got != srv.URL {
+		t.Errorf("base_url is %q, want %s", got, srv.URL)
+	}
+	if got, _ := cfg["app_id"].(string); got == "" {
+		t.Error("app_id is empty — palbe-gen refuses the file")
+	}
+	if _, err := os.Stat(filepath.Join(webArtifactsDir, "openapi.json")); err != nil {
+		t.Errorf("palbe-gen's contract input is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Palbase", "Config", "Main.xcconfig")); err == nil {
+		t.Error("a web link wrote an Xcode build configuration")
+	}
+	if _, err := os.Stat(filepath.Join(dir, generatedDir)); err == nil {
+		t.Error("a web link produced the Swift client directory")
+	}
+}

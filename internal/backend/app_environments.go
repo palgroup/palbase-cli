@@ -83,9 +83,6 @@ func (a appEnvironments) names() []string {
 // geçerli; bu, o kuralın alan seviyesindeki hâli.
 func writeAppEnvironments(platform string, envs appEnvironments) (string, error) {
 	dir := filepath.Join(nativeArtifactsDir, platform)
-	if platform == "web" {
-		dir = webArtifactsDir
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -156,6 +153,99 @@ func mergeWithExisting(dir string, next appEnvironments) appEnvironments {
 		}
 	}
 	return next
+}
+
+// writeWebArtifacts writes the two committed files @palbase/web's `palbe-gen`
+// reads, in the shape it actually reads them.
+//
+// THE WEB SHAPE IS NOT THE NATIVE SHAPE, and the difference is not cosmetic.
+// A native slot is a MAP of environments (`{default_environment, environments:
+// {...}}`) because one app binary is built against several; the web config is
+// FLAT (`{app_id, base_url, api_key}`) because a deployed web app is one
+// environment — `readWebConfig` in palbe/src/gen/generate.ts requires those
+// three fields at the top level and reads nothing else.
+//
+// Writing the native document here (which this path did until 2026-08-25)
+// produces a file with none of the three required fields. `palbe-gen` then
+// refuses it, and nothing upstream reports a failure — every step of the link
+// succeeded.
+//
+// The contract goes in beside it: the native path commits one spec per
+// environment under `.palbase/openapi/`, and `palbe-gen` reads exactly one,
+// `Palbase/openapi.json`.
+func writeWebArtifacts(envs appEnvironments, specs map[string][]byte) (string, error) {
+	env, ok := envs.Environments[envs.Default]
+	if !ok {
+		return "", fmt.Errorf("internal: no %q environment to write the web config from", envs.Default)
+	}
+	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+		return "", err
+	}
+	cfg := map[string]any{
+		"app_id":   env.AppID,
+		"base_url": env.BaseURL,
+		"api_key":  env.APIKey,
+	}
+	if len(env.OAuth) > 0 {
+		cfg["oauth"] = env.OAuth
+	}
+	raw, err := json.MarshalIndent(mergeWebConfigWithExisting(cfg), "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(webArtifactsDir, "palbase-config.json")
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		return "", err
+	}
+	if spec, ok := specs[envs.Default]; ok {
+		if err := os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"), spec, 0o644); err != nil {
+			return "", err
+		}
+	}
+	return path, nil
+}
+
+// mergeWebConfigWithExisting is mergeWithExisting's rule for the flat document:
+// A WRITER MUST NOT DELETE WHAT IT CANNOT PRODUCE.
+//
+// The cloud path knows things this one does not — `kind`, the OAuth block — and
+// they live in the same file. A run that overwrote it wholesale would take the
+// app's Apple/Google sign-in with it, and the app would go on building.
+func mergeWebConfigWithExisting(next map[string]any) map[string]any {
+	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+	if err != nil {
+		return next
+	}
+	var prev map[string]any
+	if err := json.Unmarshal(raw, &prev); err != nil {
+		return next
+	}
+	// A native document that an earlier run of THIS path left here is not a web
+	// config; there is nothing in it to preserve.
+	if _, isNativeShape := prev["environments"]; isNativeShape {
+		return next
+	}
+	out := map[string]any{}
+	for k, v := range prev {
+		out[k] = v
+	}
+	for k, v := range next {
+		if str, isStr := v.(string); isStr && strings.TrimSpace(str) == "" {
+			continue
+		}
+		// The placeholder is "not produced" too — the same rule the native
+		// merge applies, and for the same reason: overwriting a real
+		// registration with a constant replaces an identity with nothing.
+		if k == "app_id" {
+			if str, _ := v.(string); isUnsetAppID(str) {
+				if old, _ := prev["app_id"].(string); !isUnsetAppID(old) {
+					continue
+				}
+			}
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // specPath is where one environment's contract is committed.
@@ -493,9 +583,6 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 // readAppEnvironments reads back what the link wrote for one platform.
 func readAppEnvironments(platform string) (appEnvironments, error) {
 	dir := filepath.Join(nativeArtifactsDir, platform)
-	if platform == "web" {
-		dir = webArtifactsDir
-	}
 	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
 	if os.IsNotExist(err) {
 		return appEnvironments{}, nil

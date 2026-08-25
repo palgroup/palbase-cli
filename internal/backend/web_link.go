@@ -213,11 +213,6 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			ctx := cmd.Context()
 
-			// The target first — see linkToBoundProject.
-			if handled, err := linkToBoundProject(cmd, "web", out); handled {
-				return err
-			}
-
 			outFile := outFlag
 			if outFile == "" {
 				outFile = "palbe.gen.ts"
@@ -230,27 +225,43 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				return err
 			}
 
-			// 2. Use the SELECTED project + environment (--project / --environment
-			// override headlessly).
-			sel, err := wc.r.resolve(ctx)
-			if err != nil {
-				return err
-			}
-
-			// 3. Keep the per-machine selection out of git while leaving generated
+			// 2. Keep the per-machine selection out of git while leaving generated
 			// SDK inputs under .palbase trackable.
 			if err := selection.EnsureGitignored(".gitignore"); err != nil {
 				return fmt.Errorf("update .gitignore: %w", err)
 			}
 
-			// 4. Fetch the committed SDK-generator inputs (openapi.json +
-			// palbase-config.json under Palbase/). The CLI stops here —
+			// 3. The committed SDK-generator inputs (openapi.json +
+			// palbase-config.json under Palbase/). The CLI stops at the inputs —
 			// generating palbe.gen.ts is @palbase/web's job (palbe-gen).
-			if err := webLinkArtifacts(ctx, wc.r, sel, false, out); err != nil {
-				return fmt.Errorf("fetch artifacts: %w", err)
+			//
+			// A BINDING CHANGES WHERE THEY COME FROM AND NOTHING ELSE.
+			//
+			// This used to be written as an early return: a checkout bound to a
+			// project handed the whole command to the direct path and stopped
+			// (`if handled { return err }`). Everything below — the generator,
+			// the predev/prebuild hooks, the entry import, the gitignore guard —
+			// was skipped, and the command exited 0 having done none of it. That
+			// is the harder kind of wrong: `web link` reported success for a
+			// project it had not wired up. The binding is a fact about WHICH
+			// project answers, not about which command the person ran.
+			if bound, err := linkToBoundProject(cmd, webPlatform, out); bound {
+				if err != nil {
+					return err
+				}
+			} else {
+				// The cloud path: the SELECTED project + environment
+				// (--project / --environment override headlessly).
+				sel, err := wc.r.resolve(ctx)
+				if err != nil {
+					return err
+				}
+				if err := webLinkArtifacts(ctx, wc.r, sel, false, out); err != nil {
+					return fmt.Errorf("fetch artifacts: %w", err)
+				}
 			}
 
-			// 4b. Install @palbase/web when the project doesn't have it yet —
+			// 4. Install @palbase/web when the project doesn't have it yet —
 			// without the generator there is no palbe.gen.ts, and without that
 			// steps 6-7b all skip, so `link` would have to be run AGAIN after a
 			// manual install. Setup is this command's job; do it here.
@@ -258,7 +269,7 @@ func (wc *webCmd) newWebLinkCmd() *cobra.Command {
 				ensurePalbeWeb(ctx, out)
 			}
 
-			// 4c. First generation via the SDK's generator (predev/prebuild
+			// 5. First generation via the SDK's generator (predev/prebuild
 			// hooks regenerate on every build from here on).
 			generated, err := runPalbeGen(ctx, outFile, out)
 			if err != nil {
