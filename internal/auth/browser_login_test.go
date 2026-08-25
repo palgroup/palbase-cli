@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -23,7 +24,7 @@ func TestCallbackRefusesTheWrongState(t *testing.T) {
 		_, _ = http.Get("http://" + ln.Addr().String() + "/callback?code=STOLEN&state=someone-elses")
 	}()
 
-	code, err := awaitCallback(context.Background(), ln, "ours")
+	code, err := NewClient(Config{}, io.Discard).awaitCallback(context.Background(), ln, "ours")
 	if err == nil {
 		t.Fatal("a callback with the wrong state was accepted")
 	}
@@ -58,7 +59,7 @@ func TestCallbackTakesTheCode(t *testing.T) {
 		bodies <- string(buf[:n])
 	}()
 
-	code, err := awaitCallback(context.Background(), ln, "ours")
+	code, err := NewClient(Config{}, io.Discard).awaitCallback(context.Background(), ln, "ours")
 	if err != nil {
 		t.Fatalf("awaitCallback: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestCallbackSurfacesTheServersError(t *testing.T) {
 			"/callback?state=ours&error=access_denied&error_description=you+said+no")
 	}()
 
-	if _, err := awaitCallback(context.Background(), ln, "ours"); err == nil ||
+	if _, err := NewClient(Config{}, io.Discard).awaitCallback(context.Background(), ln, "ours"); err == nil ||
 		!strings.Contains(err.Error(), "you said no") {
 		t.Fatalf("the refusal was lost: %v", err)
 	}

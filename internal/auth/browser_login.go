@@ -86,7 +86,7 @@ func (c *Client) BrowserLogin(ctx context.Context, create bool) (*Credentials, e
 		fmt.Fprintf(c.Output, "  (this terminal could not open a browser — use the link)\n")
 	}
 
-	code, err := awaitCallback(ctx, ln, state)
+	code, err := c.awaitCallback(ctx, ln, state)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +197,11 @@ func listenLoopback() (net.Listener, string, error) {
 }
 
 // awaitCallback serves exactly one request and returns the code it carried.
-func awaitCallback(ctx context.Context, ln net.Listener, state string) (string, error) {
+//
+// Every exit writes the callback page (see callback.go): this listener is the
+// only browser surface the CLI owns, and a person who just typed their password
+// should not be handed a plain-text http.Error in the browser's default face.
+func (c *Client) awaitCallback(ctx context.Context, ln net.Listener, state string) (string, error) {
 	type result struct {
 		code string
 		err  error
@@ -212,7 +216,8 @@ func awaitCallback(ctx context.Context, ln net.Listener, state string) (string, 
 			// on the machine could drive this listener to redeem a code the
 			// person never asked for.
 			if q.Get("state") != state {
-				http.Error(w, "this callback did not come from the sign-in that started here", http.StatusBadRequest)
+				c.writeCallbackPage(w, http.StatusBadRequest, failedCallback(
+					"This redirect was not started by the terminal that is waiting."))
 				done <- result{err: errors.New("the callback carried the wrong state — sign-in abandoned")}
 				return
 			}
@@ -221,18 +226,18 @@ func awaitCallback(ctx context.Context, ln net.Listener, state string) (string, 
 				if d := q.Get("error_description"); d != "" {
 					reason = e + " — " + d
 				}
-				http.Error(w, reason, http.StatusBadRequest)
+				c.writeCallbackPage(w, http.StatusBadRequest, failedCallback(reason))
 				done <- result{err: fmt.Errorf("sign-in refused: %s", reason)}
 				return
 			}
 			code := q.Get("code")
 			if code == "" {
-				http.Error(w, "no code", http.StatusBadRequest)
+				c.writeCallbackPage(w, http.StatusBadRequest, failedCallback(
+					"The provider redirected without an authorization code."))
 				done <- result{err: errors.New("the callback carried no code")}
 				return
 			}
-			w.Header().Set("content-type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(callbackPage))
+			c.writeCallbackPage(w, http.StatusOK, signedInCallback())
 			done <- result{code: code}
 		}),
 	}
@@ -252,13 +257,6 @@ func awaitCallback(ctx context.Context, ln net.Listener, state string) (string, 
 		return "", ctx.Err()
 	}
 }
-
-// callbackPage is what the browser shows when it lands. Self-contained: this
-// server exists for one request and cannot serve a stylesheet.
-const callbackPage = `<!doctype html><meta charset="utf-8"><title>Signed in</title>
-<body style="font:16px/1.5 ui-sans-serif,system-ui;background:#0b0b0d;color:#e7e7ea;display:grid;place-items:center;height:100vh;margin:0">
-<div style="text-align:center"><p style="font-size:20px;margin:0 0 8px">Signed in.</p>
-<p style="opacity:.6;margin:0">You can close this tab and go back to the terminal.</p></div>`
 
 // handoffURL, kişinin gönderileceği panel sayfası.
 //
