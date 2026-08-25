@@ -77,12 +77,28 @@ const (
 	// KindKey is the project's secret key — what `palbase start` writes for a
 	// stack it just brought up, because there is nobody to sign in as yet.
 	KindKey Kind = "key"
+	// KindPAT is a MACHINE identity minted by the control plane: an account
+	// token, or a deploy ticket bound to one project.
+	//
+	// It is its own kind because its PRESENTATION is its own: a PAT is
+	// sender-constrained (RFC 9449), so it travels as `Authorization: DPoP
+	// <token>` beside a proof that signs this request's method and URL.
+	// Presenting it as a Bearer produces a shape the plane does not know, and
+	// the caller — holding the right credential — gets a 401. That is exactly
+	// the failure this file already recorded once for `pb_` keys: the
+	// credential was right, the PRESENTATION was wrong.
+	KindPAT Kind = "pat"
 )
 
 // keyPrefix is what every Palbase API key starts with: `pb_{ref}_{scope}{random}`.
 // A Bearer token can never begin with it — a JWT starts with its base64url
 // header — so the shape is a decision, not a guess.
 const keyPrefix = "pb_"
+
+// patPrefix is what every machine identity the control plane mints starts
+// with. It cannot collide with keyPrefix (`pb_`) or with a JWT (which starts
+// with its base64url header), so the shape is a decision, not a guess.
+const patPrefix = "pat_"
 
 // kindOf reads what a credential IS from the value itself.
 //
@@ -93,6 +109,9 @@ const keyPrefix = "pb_"
 func kindOf(value string) Kind {
 	if strings.HasPrefix(value, keyPrefix) {
 		return KindKey
+	}
+	if strings.HasPrefix(value, patPrefix) {
+		return KindPAT
 	}
 	return KindPerson
 }
@@ -108,6 +127,11 @@ func (c Credentials) Apply(req *http.Request) {
 	switch c.Kind {
 	case KindKey:
 		req.Header.Set("apikey", c.Value)
+	case KindPAT:
+		// ŞEMA BURADA, İMZA TAŞIYICI KATMANDA. Proof isteğin metodunu ve
+		// URL'sini bağlıyor; onu burada üretmek, bu fonksiyonun bilmediği
+		// şeyleri bilmesini gerektirirdi.
+		req.Header.Set("Authorization", "DPoP "+c.Value)
 	default:
 		req.Header.Set("Authorization", "Bearer "+c.Value)
 	}

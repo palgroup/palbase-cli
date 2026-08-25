@@ -284,9 +284,48 @@ func (c *Client) newSignedRequest(ctx context.Context, method, path string, body
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+
+	// MAKİNE KİMLİĞİ TAŞIYICI-BAĞLIDIR — ve sunumu da öyle.
+	//
+	// `pat_` bir DPoP token'ı (RFC 9449): `Authorization: DPoP <token>` ile
+	// gider ve yanında BU isteğin metodunu, URL'sini ve token'ının özetini
+	// imzalayan bir proof taşır. Bearer olarak sunmak, düzlemin tanımadığı bir
+	// şekil üretir ve doğru kimliği elinde tutan çağıran 401 alır.
+	//
+	// Proof BURADA üretiliyor çünkü htm/htu bu isteğin kendisi — bir katman
+	// yukarıda üretilseydi, yeniden yönlendirilen ya da yeniden denenen bir
+	// istek yanlış bir proof taşırdı. Ve her çağrı TAZE bir proof imzalıyor:
+	// sunucu tekrarları reddediyor.
+	if strings.HasPrefix(c.Token, patPrefix) {
+		if DPoPSigner == nil {
+			return nil, fmt.Errorf(
+				"makine kimliği sunulamıyor: DPoP imzalayıcı bağlı değil")
+		}
+		proof, perr := DPoPSigner(method, c.BaseURL+path, c.Token)
+		if perr != nil {
+			// SESLİ DÜŞ: proof'suz göndermek, kimliği Bearer'a düşürüp
+			// anlaşılmaz bir 401 almak olurdu.
+			return nil, fmt.Errorf("DPoP proof üretilemedi: %w", perr)
+		}
+		req.Header.Set("Authorization", "DPoP "+c.Token)
+		req.Header.Set("DPoP", proof)
+		return req, nil
+	}
+
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	return req, nil
 }
+
+// patPrefix, kontrol düzleminin bastığı makine kimliklerinin ön ekidir.
+const patPrefix = "pat_"
+
+// DPoPSigner, bir istek için RFC 9449 proof'u üretir.
+//
+// `main.go`'dan bağlanıyor, bu paket `internal/auth`'a bağımlı olmasın diye —
+// aynı sebeple `backend.CloudKeyFetcher` de orada bağlanıyor. Nil ise makine
+// kimliği taşıyan bir istek SESLİ düşer; sessizce Bearer'a düşmek, çağıranın
+// anlamayacağı bir 401 üretirdi.
+var DPoPSigner func(method, url, accessToken string) (string, error)
 
 // PostMultipart uploads a gzipped tarball to a Management-API endpoint as
 // multipart/form-data: a file part named `tarball` (filename bundle.tar.gz,

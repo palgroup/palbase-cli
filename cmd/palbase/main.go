@@ -86,6 +86,27 @@ func managementREST() *transport.Client {
 //
 // Wired here rather than imported there so the backend package stays off the
 // auth and transport packages.
+// wireDPoPSigner, taşıyıcı katmana proof üretecini bağlar.
+//
+// `internal/transport` `internal/auth`'a bağımlı OLMAMALI (aynı sebeple
+// `backend.CloudKeyFetcher` de buradan bağlanıyor), o yüzden bağ burada
+// kuruluyor. Anahtar `LoadDPoPKey` ile geliyor ve o fonksiyon
+// `PALBASE_DPOP_KEY`'i keyring'in önünde okuyor — palcore'un bileti kendi
+// anahtarına bağlı ve CLI onu aynı anahtarla sunmak zorunda.
+func wireDPoPSigner() {
+	transport.DPoPSigner = func(method, url, accessToken string) (string, error) {
+		key, err := auth.LoadDPoPKey()
+		if err != nil {
+			return "", err
+		}
+		return key.NewProof(auth.ProofOptions{
+			HTTPMethod:  method,
+			URL:         url,
+			AccessToken: accessToken,
+		})
+	}
+}
+
 func wireCloudKeyFetcher() {
 	backend.CloudKeyFetcher = func(tenantURL string) (string, error) {
 		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
@@ -316,6 +337,7 @@ func newRootCmd() *cobra.Command {
 			// target-relative verb resolves a credential, and for a cloud
 			// project that answer lives in the control plane's ledger.
 			wireCloudKeyFetcher()
+			wireDPoPSigner()
 			// Whether an address is one of OUR projects is a fact about the
 			// address, and it must not depend on a request succeeding — see
 			// backend.isCloudProjectAddress for what happened when it did.

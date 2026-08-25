@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -43,9 +44,37 @@ func StoreDPoPKey(key *DPoPKey) error {
 	return nil
 }
 
+// DPoPKeyEnv, çağıranın KENDİ DPoP anahtarını verdiği değişkendir.
+//
+// `@palbase/account` ile basılan bir bilet o SDK'nın anahtarına bağlıdır;
+// CLI aynı anahtarı kullanmadan onu sunamaz.
+const DPoPKeyEnv = "PALBASE_DPOP_KEY"
+
 // LoadDPoPKey reads the private JWK back. Checks the keyring first, then
 // the file fallback. Returns ErrDPoPKeyMissing if neither has a key.
 func LoadDPoPKey() (*DPoPKey, error) {
+	// ORTAM ANAHTARI KEYRING'İN ÖNÜNDE — ve bu bir öncelik tercihi değil, bir
+	// DOĞRULUK şartı.
+	//
+	// Bir deploy bileti, onu BASAN tarafın anahtarının parmak izine bağlanıyor.
+	// palcore'un backend'i bileti `@palbase/account` ile basıyor ve CLI'ı ayrı
+	// bir süreç olarak koşturuyor; CLI kendi keyring'indeki BAŞKA bir anahtarı
+	// kullansaydı imzaladığı proof biletin bağlı olduğu anahtarla eşleşmez ve
+	// istek 401 alırdı — hiçbir log satırının açıklamadığı bir 401.
+	//
+	// Biçim ÖZEL JWK, yani `loadPrivateJWK`'in zaten okuduğu şey. SDK da aynı
+	// biçimi üretiyor (`@palbase/account: exportKey`), bu yüzden aynı dize iki
+	// tarafta da çalışıyor.
+	if raw := strings.TrimSpace(os.Getenv(DPoPKeyEnv)); raw != "" {
+		key, err := loadPrivateJWK([]byte(raw))
+		if err != nil {
+			// SESLİ DÜŞ: ortamdaki anahtar bozuksa keyring'e sessizce düşmek,
+			// çağıranın VERDİĞİ anahtarı yok sayıp başkasıyla imzalamak olurdu.
+			return nil, fmt.Errorf("%s okunamadı: %w", DPoPKeyEnv, err)
+		}
+		return key, nil
+	}
+
 	if !useFileFallback() {
 		// keyring.Get can BLOCK indefinitely when the OS keychain syscall is
 		// unavailable (a sandboxed/headless environment, e.g. the Claude Code

@@ -99,6 +99,16 @@ func TestREST_Do_GETHasNoBody(t *testing.T) {
 	require.False(t, hadBody, "GET with nil body must not send a request body")
 }
 
+// `pat_` taşıyan her istek üretimde bir imzalayıcı BULUR (main.go
+// wireDPoPSigner). Bu paketin testleri onsuz koşsaydı, üretimde var olmayan
+// bir durumu taklit ederlerdi. İmzalayıcının YOKLUĞUNU sınayan test kendi
+// içinde açıkça söküyor.
+func init() {
+	DPoPSigner = func(method, url, accessToken string) (string, error) {
+		return "test-proof-" + method, nil
+	}
+}
+
 func TestREST_Do_MapsErrorEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -241,5 +251,81 @@ func TestAPIError_WithoutFieldsIsUnchanged(t *testing.T) {
 	err := &APIError{Code: "not_found", Status: 404, Description: "no such project"}
 	if got, want := err.Error(), "not_found (404): no such project"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// MAKİNE KİMLİĞİ DPoP OLARAK SUNULUR — ve proof BU isteği bağlar.
+//
+// Bearer olarak sunmak, düzlemin tanımadığı bir şekil üretir ve doğru kimliği
+// elinde tutan çağıran 401 alır. Bu paketin `pb_` anahtarında yaşadığı
+// arızanın aynısı: "kimlik doğruydu, SUNUM yanlıştı".
+func TestPATIsPresentedAsDPoPWithAFreshProof(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization")+"|"+r.Header.Get("DPoP"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	calls := 0
+	DPoPSigner = func(method, url, accessToken string) (string, error) {
+		calls++
+		return "proof-" + method + "-" + accessToken[:4] + "-" + string(rune('a'+calls)), nil
+	}
+	saved := DPoPSigner
+	defer func() { DPoPSigner = saved }()
+
+	c := New(srv.URL, "pat_makine")
+	if err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects", nil, nil); err != nil {
+		t.Fatalf("istek düştü: %v", err)
+	}
+	if err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects", nil, nil); err != nil {
+		t.Fatalf("ikinci istek düştü: %v", err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("iki istek bekleniyordu, %d görüldü", len(seen))
+	}
+	for _, h := range seen {
+		if !strings.HasPrefix(h, "DPoP pat_makine|") {
+			t.Fatalf("Authorization %q — `DPoP pat_makine` bekleniyordu", h)
+		}
+	}
+	// HER İSTEK KENDİ PROOF'UNU İMZALAR: sunucu tekrarı reddediyor, yani
+	// yeniden kullanılan bir proof ikinci isteği kaybettirir.
+	if seen[0] == seen[1] {
+		t.Fatal("proof YENİDEN KULLANILDI — sunucu ikinci isteği tekrar sayar")
+	}
+}
+
+// İmzalayıcı bağlı değilse SESLİ düş — sessizce Bearer'a düşmek, çağıranın
+// anlamayacağı bir 401 üretirdi.
+func TestPATWithoutASignerFailsLoudly(t *testing.T) {
+	saved := DPoPSigner
+	defer func() { DPoPSigner = saved }()
+	DPoPSigner = nil
+	c := New("https://x.test", "pat_makine")
+	err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "DPoP") {
+		t.Fatalf("imzalayıcısız PAT sessizce geçti: %v", err)
+	}
+}
+
+// BUGÜNKÜ YOL DEĞİŞMİYOR: oturum jetonu hâlâ Bearer.
+func TestSessionTokenStillBearer(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	if err := New(srv.URL, "eyJhbGciOiJFUzI1NiJ9.x.y").
+		Do(context.Background(), http.MethodGet, "/v1/cloud/me", nil, nil); err != nil {
+		t.Fatalf("oturum isteği düştü: %v", err)
+	}
+	if auth != "Bearer eyJhbGciOiJFUzI1NiJ9.x.y" {
+		t.Fatalf("oturum jetonunun sunumu DEĞİŞTİ: %q", auth)
 	}
 }

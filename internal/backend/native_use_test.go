@@ -417,7 +417,7 @@ func TestRunPullSpec_WaitsForTheExpectedDeployThenWrites(t *testing.T) {
 	var out bytes.Buffer
 	err := runPullSpec(context.Background(),
 		fetch,
-		func(context.Context) (string, error) { return "new", nil },
+		func(context.Context) (string, []string, error) { return "new", []string{"new", "old"}, nil },
 		"app1prod", dir, &out)
 	require.NoError(t, err)
 	require.Equal(t, 3, call, "it kept fetching until the origin served the expected deploy")
@@ -438,7 +438,7 @@ func TestRunPullSpec_FailsRatherThanWriteAStaleContract(t *testing.T) {
 		func(context.Context, string, io.Writer) ([]byte, error) {
 			return []byte(`{"x-palbase-deploy":"old"}`), nil
 		},
-		func(context.Context) (string, error) { return "new", nil },
+		func(context.Context) (string, []string, error) { return "new", []string{"new", "old"}, nil },
 		"app1prod", dir, io.Discard)
 	require.Error(t, err)
 	require.NoFileExists(t, filepath.Join(dir, "openapi.json"),
@@ -455,7 +455,7 @@ func TestRunPullSpec_UnverifiableSpecIsWrittenWithALoudNote(t *testing.T) {
 		func(context.Context, string, io.Writer) ([]byte, error) {
 			return []byte(`{"openapi":"3.1.0"}`), nil
 		},
-		func(context.Context) (string, error) { return "new", nil },
+		func(context.Context) (string, []string, error) { return "new", []string{"new", "old"}, nil },
 		"app1prod", dir, &out))
 	require.FileExists(t, filepath.Join(dir, "openapi.json"))
 	require.Contains(t, out.String(), "freshness UNVERIFIED")
@@ -470,7 +470,7 @@ func TestRunPullSpec_NoSuccessfulDeploySkipsTheCheck(t *testing.T) {
 		func(context.Context, string, io.Writer) ([]byte, error) {
 			return []byte(`{"x-palbase-deploy":"whatever"}`), nil
 		},
-		func(context.Context) (string, error) { return "", nil },
+		func(context.Context) (string, []string, error) { return "", nil, nil },
 		"app1prod", dir, &out))
 	require.FileExists(t, filepath.Join(dir, "openapi.json"))
 	require.NotContains(t, out.String(), "waiting for the origin")
@@ -485,7 +485,7 @@ func TestRunPullSpec_FreshnessLookupErrorWarnsAndProceeds(t *testing.T) {
 		func(context.Context, string, io.Writer) ([]byte, error) {
 			return []byte(`{"x-palbase-deploy":"old"}`), nil
 		},
-		func(context.Context) (string, error) { return "", errors.New("studio unreachable") },
+		func(context.Context) (string, []string, error) { return "", nil, errors.New("studio unreachable") },
 		"app1prod", dir, &out))
 	require.FileExists(t, filepath.Join(dir, "openapi.json"))
 	require.Contains(t, out.String(), "could not verify spec freshness")
@@ -513,7 +513,7 @@ func TestRunPullSpec_UnstampedContractIsUnverifiableNotStale(t *testing.T) {
 			calls++
 			return []byte(`{"openapi":"3.1.0","info":{"version":"1.0.0"}}`), nil
 		},
-		func(context.Context) (string, error) { return "8e35fa5f", nil },
+		func(context.Context) (string, []string, error) { return "8e35fa5f", []string{"8e35fa5f"}, nil },
 		"app1prod", dir, &out)
 
 	require.NoError(t, err, "a contract that cannot prove its freshness must still be written")
@@ -523,6 +523,43 @@ func TestRunPullSpec_UnstampedContractIsUnverifiableNotStale(t *testing.T) {
 	require.NotContains(t, out.String(), "waiting for the origin")
 	require.NotContains(t, out.String(), "deploy 1.0.0",
 		"info.version must never be presented as a deploy identity")
+}
+
+// TestRunPullSpec_AnUnknownServedDeployMeansTheLEDGERIsBehind is the case a live
+// app checkout found on 2026-08-25, and it is the mirror image of the one above.
+//
+// The check exists to catch an ORIGIN that lags its own latest deploy. It read
+// "served != newest recorded" as exactly that — but a deploy pushed STRAIGHT AT
+// A STACK (a linked checkout, a self-hosted stack, a port-forwarded push) never
+// reaches the platform's deployment ledger, so the ledger's newest is the OLD
+// one and the origin is AHEAD. Measured on `centauri`: the stack served
+// `58bacc71…`, written 2026-08-24 19:02; the ledger's newest succeeded row was
+// `ab526753…` from 09:05, ten hours EARLIER. `palbase spec` refused forever and
+// codegen for the iOS app was blocked with no way forward.
+//
+// The two cases are told apart by whether the ledger KNOWS the served identity:
+//   - served is a recorded deploy, older than newest → the origin lags. Wait.
+//   - served is not recorded at all                  → the ledger lags. Write it,
+//     and say the check could not run.
+func TestRunPullSpec_AnUnknownServedDeployMeansTheLEDGERIsBehind(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	calls := 0
+	err := runPullSpec(context.Background(),
+		func(context.Context, string, io.Writer) ([]byte, error) {
+			calls++
+			return []byte(`{"openapi":"3.1.0","x-palbase-deploy":"58bacc71"}`), nil
+		},
+		func(context.Context) (string, []string, error) {
+			return "ab526753", []string{"ab526753", "9ba0c33f"}, nil
+		},
+		"app1prod", dir, &out)
+
+	require.NoError(t, err, "a stack ahead of the ledger must not lose the command")
+	require.Equal(t, 1, calls, "it must not wait for a deploy the origin already passed")
+	require.FileExists(t, filepath.Join(dir, "openapi.json"))
+	require.Contains(t, out.String(), "freshness UNVERIFIED")
+	require.NotContains(t, out.String(), "waiting for the origin")
 }
 
 // YEREL YIĞIN DA BİR ORTAMDIR.

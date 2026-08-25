@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -222,12 +223,20 @@ Override the target with the global --project / --environment flags.`,
 
 type specFetch func(ctx context.Context, environmentRef string, w io.Writer) ([]byte, error)
 
-// specFreshness resolves the deploy identity the origin is EXPECTED to be
-// serving — the newest deployment the platform records as succeeded. Injected so
-// runPullSpec is testable without Studio; nil disables the check entirely (only
-// tests pass nil — every real caller supplies it, or a contract could be written
-// unverified through a path nobody thought to wire).
-type specFreshness func(ctx context.Context) (string, error)
+// specFreshness resolves what the PLATFORM'S LEDGER knows: the newest
+// deployment it records as succeeded, and the recent identities it has seen at
+// all. Injected so runPullSpec is testable without Studio; nil disables the
+// check entirely (only tests pass nil — every real caller supplies it, or a
+// contract could be written unverified through a path nobody thought to wire).
+//
+// THE SECOND RETURN IS WHAT MAKES THE CHECK HONEST. "Served != newest" has two
+// causes and they call for opposite actions: the origin lagging a deploy it is
+// about to pick up (wait), or the LEDGER lagging a deploy that never went
+// through it (write). A push straight at a stack — a linked checkout, a
+// self-hosted stack, a port-forwarded push — never reaches the ledger, so its
+// newest row is the old one and the origin is AHEAD. Only the known set tells
+// the two apart.
+type specFreshness func(ctx context.Context) (expected string, known []string, err error)
 
 // specWaitTimeout bounds how long `palbase spec` waits for the origin to serve
 // the deploy it is supposed to be serving. The runtime's own bound is
@@ -296,7 +305,7 @@ func fetchFreshSpec(
 		// Re-resolved every round on purpose: a deploy that finishes WHILE we
 		// wait moves the expectation forward, and pinning the first answer would
 		// leave us waiting for a version that is already superseded.
-		expected, ferr := freshness(ctx)
+		expected, known, ferr := freshness(ctx)
 		if ferr != nil {
 			fmt.Fprintf(w, "  warning: could not verify spec freshness (%v) — the written contract may predate your latest deploy\n", ferr)
 			return specBytes, specDocVersion(specBytes), nil
@@ -308,6 +317,18 @@ func fetchFreshSpec(
 		if served == "" {
 			fmt.Fprintln(w, "  note: this origin serves a contract with no deploy identity — freshness UNVERIFIED")
 			return specBytes, "", nil
+		}
+		// THE LEDGER, NOT THE ORIGIN, IS THE ONE BEHIND.
+		//
+		// A deploy the ledger has never recorded cannot be an OLDER one: the
+		// wait loop would sit out its whole deadline and then refuse, and the
+		// command would be lost for as long as that stack keeps being pushed to
+		// directly. Measured live on `centauri` 25.08.2026 — the stack served an
+		// artifact written ten hours AFTER the ledger's newest row.
+		if !slices.Contains(known, served) {
+			fmt.Fprintf(w, "  note: this origin serves deploy %s, which this platform has no record of "+
+				"(a stack pushed to directly) — freshness UNVERIFIED\n", short(served))
+			return specBytes, served, nil
 		}
 		if time.Now().After(deadline) {
 			return nil, "", fmt.Errorf(
@@ -332,22 +353,31 @@ func fetchFreshSpec(
 // history is the only place that knows which deploy the origin OUGHT to be
 // serving — the origin itself will happily report the previous one.
 func studioSpecFreshness(rest restDoer, projectID, environmentRef string) specFreshness {
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context) (string, []string, error) {
 		var resp struct {
 			Deployments []deployRow `json:"deployments"`
 		}
 		if err := rest.Do(ctx, http.MethodGet,
 			DeploymentsPath(projectID, environmentRef)+"?limit=20", nil, &resp); err != nil {
-			return "", err
+			return "", nil, err
 		}
+		expected := ""
+		known := make([]string, 0, len(resp.Deployments))
+		// EVERY identity the ledger has seen, not just the succeeded ones: a
+		// failed row still proves the ledger KNOWS that push, which is the only
+		// question the known set answers.
 		for _, d := range resp.Deployments { // newest first
-			if d.Status == "succeeded" && d.Version != nil && *d.Version != "" {
-				return *d.Version, nil
+			if d.Version == nil || *d.Version == "" {
+				continue
+			}
+			known = append(known, *d.Version)
+			if expected == "" && d.Status == "succeeded" {
+				expected = *d.Version
 			}
 		}
 		// Never deployed (or every attempt failed): there is nothing to compare
 		// against, which is not the same as a mismatch.
-		return "", nil
+		return expected, known, nil
 	}
 }
 
