@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // The entry this bundler generates is the CONTRACT between what a push ships
@@ -332,5 +334,107 @@ func TestAProjectWithNoWebhooksStillBundles(t *testing.T) {
 	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	if !strings.Contains(entry, "export const webhooks = [];") {
 		t.Errorf("an empty webhooks export is missing:\n%s", entry)
+	}
+}
+
+// TestTheBundlerDoesNotGetToNameThePublicAPI.
+//
+// The dotted operationId's NAMESPACE is derived from the controller class name
+// (`extract_meta.js: deriveControllerName` reads `Ctrl.name`), and this entry
+// puts every controller into ONE bundle. A bundler must rename duplicate
+// top-level identifiers to keep them apart, so a project that declares the same
+// class name in two files ships a namespace the BUNDLER chose:
+// `PalaiController` and `PalaiController2`.
+//
+// ÖLÇÜLDÜ 25.08.2026 (palai-cloud, canlı): on bir dosya da `export class
+// PalaiController` diyordu ve dağıtılan sözleşme `palai`, `palaiController2`
+// … `palaiController11` olarak bölünmüştü. Numaralar bundle SIRASINDAN geliyor,
+// yani bir dosya eklemek genel API yüzeyini sessizce yeniden numaralandırır ve
+// her istemcinin üretilen kodu kayar. Hiçbir yerde hata görünmüyordu.
+//
+// Kaynak ne diyorsa yüzey odur: aynı adı taşıyan iki controller AYNI namespace'i
+// paylaşır ve gerçek bir çakışma olursa onu zaten operationId kapısı gürültüyle
+// reddeder (generator.go).
+func TestTheBundlerDoesNotGetToNameThePublicAPI(t *testing.T) {
+	for _, exported := range []bool{true, false} {
+		name := "exported"
+		if !exported {
+			name = "not exported"
+		}
+		t.Run(name, func(t *testing.T) { assertControllerNamesSurviveTheBundle(t, exported) })
+	}
+}
+
+func assertControllerNamesSurviveTheBundle(t *testing.T, exported bool) {
+	t.Helper()
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is not installed")
+	}
+	dir := t.TempDir()
+	ctl := filepath.Join(dir, "controllers")
+	require.NoError(t, os.MkdirAll(ctl, 0o755))
+
+	// A stand-in for the SDK: the entry imports these four symbols, and the
+	// registry is what the extractor reads the class off.
+	sdk := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	require.NoError(t, os.MkdirAll(sdk, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sdk, "package.json"),
+		[]byte(`{"name":"@palbase/backend","version":"99.0.0","type":"module","main":"index.js"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sdk, "index.js"), []byte(`
+const REG = [];
+export function Controller() { return (cls) => { REG.push(cls); return cls; }; }
+export function getRegisteredControllers() { return REG; }
+export function __runWithRuntime() {}
+export const __requestALS = null;
+export function __getRuntime() {}
+`), 0o644))
+
+	// TWO files, ONE class name — exactly what the source says.
+	//
+	// `exported` covers both ways a controller is written: the entry imports the
+	// file for its SIDE EFFECT and never names the class, so a controller with no
+	// export at all is the documented form and must be covered too. A fix that
+	// read the name off the bundle's exports would silently skip it.
+	for _, f := range []struct{ file, method string }{
+		{"palaiAgents.controller.ts", "agents"},
+		{"palaiBots.controller.ts", "bots"},
+	} {
+		decl := "export class"
+		if !exported {
+			decl = "class"
+		}
+		body := `import { Controller } from "@palbase/backend";
+
+@Controller("/palai")
+` + decl + ` PalaiController { ` + f.method + `() { return "` + f.method + `"; } }
+`
+		require.NoError(t, os.WriteFile(filepath.Join(ctl, f.file), []byte(body), 0o644))
+	}
+	sources := []string{
+		filepath.Join(ctl, "palaiAgents.controller.ts"),
+		filepath.Join(ctl, "palaiBots.controller.ts"),
+	}
+
+	entry := filepath.Join(dir, ".controllers-entry.ts")
+	require.NoError(t, os.WriteFile(entry, []byte(bundleEntry(dir, sources)), 0o644))
+
+	out := filepath.Join(dir, "bundle.js")
+	build := exec.Command("bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out)
+	build.Dir = dir
+	if b, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("bundle failed: %v\n%s", err, b)
+	}
+
+	read := exec.Command("bun", "-e",
+		`const m = await import(process.argv[1]); console.log(m.getRegisteredControllers().map(c => c.name).join(","));`,
+		out)
+	read.Dir = dir
+	got, err := read.CombinedOutput()
+	if err != nil {
+		t.Fatalf("could not read the bundle: %v\n%s", err, got)
+	}
+	names := strings.TrimSpace(string(got))
+	if names != "PalaiController,PalaiController" {
+		t.Errorf("the bundle renamed a controller, so the public API namespace is the bundler's: got %q, want both classes to keep the name their SOURCE gives them", names)
 	}
 }

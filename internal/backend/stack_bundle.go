@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -231,6 +232,34 @@ func isTestSource(name string) bool {
 		strings.HasSuffix(name, ".test.mts") || strings.HasSuffix(name, ".test.mjs")
 }
 
+// controllerClassRe finds the class a `@Controller(...)` decorates. It tolerates
+// the decorator's own arguments (one level of nested parens), further
+// decorators between it and the class, and `export` / `default` / `abstract`.
+//
+// A regex rather than a parser because the ONLY consumer fails closed: a miss
+// leaves the bundle exactly as it was, and a wrong name renames nothing because
+// the value has to be the bundled name minus a numeric suffix.
+var controllerClassRe = regexp.MustCompile(
+	`@Controller\s*\((?:[^()]|\([^()]*\))*\)\s*(?:@[\w$.]+\s*\((?:[^()]|\([^()]*\))*\)\s*)*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)`)
+
+// controllerClassNames reads the controller class names OUT OF THE SOURCES, in
+// the order the bundle will register them: file by file, declaration by
+// declaration. A file that cannot be read contributes nothing, which is the
+// fail-closed reading — see the block in bundleEntry that consumes this.
+func controllerClassNames(sources []string) []string {
+	var names []string
+	for _, src := range sources {
+		raw, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		for _, m := range controllerClassRe.FindAllStringSubmatch(string(raw), -1) {
+			names = append(names, m[1])
+		}
+	}
+	return names
+}
+
 // controllerSources lists a project's controllers in a stable order, so two
 // builds of one tree produce the same bytes.
 func controllerSources(dir string) ([]string, error) {
@@ -272,6 +301,54 @@ func bundleEntry(dir string, sources []string) string {
 	}
 	// Read AFTER the imports above have run — ESM evaluates every import before
 	// the module body, so every decorator has fired by this line.
+	// THE BUNDLER DOES NOT GET TO NAME THE PUBLIC API.
+	//
+	// Every controller lands in ONE bundle, and a bundler MUST rename duplicate
+	// top-level identifiers to keep them apart: two files both declaring `class
+	// PalaiController` become `PalaiController` and `PalaiController2`. That
+	// rename is not cosmetic — `extract_meta.js` derives the dotted-operationId
+	// NAMESPACE from `Ctrl.name`, so the shipped API surface ends up chosen by
+	// the bundler's dedup counter, and its numbers follow bundle ORDER: adding
+	// one file renumbers the others and every client's generated code shifts
+	// under it.
+	//
+	// Ölçüldü 25.08.2026 (palai-cloud, canlı): on bir dosya da `PalaiController`
+	// diyordu ve dağıtılan sözleşme `palai` + `palaiController2..11` olarak
+	// bölünmüştü. Hiçbir adım hata vermedi; yalnız uygulama kendi backend'ine
+	// karşı derlenmez oldu.
+	//
+	// `--keep-names` BUNU KAPSAMAZ: o minification'a karşıdır, iki ayrı
+	// tanımlayıcının tekilleştirilmesine değil (ölçüldü, bun 1.3.9: bayrak
+	// açıkken de yeniden adlandırıyor).
+	//
+	// The names come from the SOURCE, read here rather than from the bundle,
+	// because a controller NEED NOT BE EXPORTED — the decorator registers it and
+	// the entry imports the file for its side effect alone. Registration order
+	// is import order, which is this list's order, so the table lines up
+	// position by position.
+	//
+	// FAILS CLOSED. A name is restored only when the bundled one is exactly the
+	// source name followed by digits — the bundler's own pattern. If this table
+	// ever drifts from what the bundle registered, nothing is renamed and the
+	// behaviour is what it was before this block existed.
+	//
+	// Two controllers that genuinely share a class name then share a namespace,
+	// which is what the source says; a real clash between their METHOD names is
+	// still refused, loudly, by the operationId gate in the runtime's generator.
+	if names := controllerClassNames(sources); len(names) > 0 {
+		blob, _ := json.Marshal(names)
+		fmt.Fprintf(&b, `{
+  const __want = %s;
+  const __regs = SDK.getRegisteredControllers();
+  for (let __i = 0; __i < __regs.length && __i < __want.length; __i++) {
+    const __c = __regs[__i], __w = __want[__i];
+    if (!__w || typeof __c !== "function" || __c.name === __w) continue;
+    if (!__c.name.startsWith(__w) || !/^[0-9]+$/.test(__c.name.slice(__w.length))) continue;
+    Object.defineProperty(__c, "name", { value: __w, configurable: true });
+  }
+}
+`, blob)
+	}
 	b.WriteString("export const controllers = SDK.getRegisteredControllers();\n")
 	b.WriteString("export const getRegisteredControllers = SDK.getRegisteredControllers;\n")
 	b.WriteString("export const jobs = []; export const resources = [];\n")
