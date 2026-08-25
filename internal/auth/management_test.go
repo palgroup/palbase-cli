@@ -179,3 +179,25 @@ func TestManagementToken_ExpiredLogin_RefreshFailureIsActionable(t *testing.T) {
 	assert.True(t, strings.Contains(msg, "refresh failed"),
 		"refresh failure must surface the underlying reason so server outages don't masquerade as login problems: %s", msg)
 }
+
+// HESAP TOKEN'I YALNIZ PALBASE_ACCESS_TOKEN YOKKEN devreye girer.
+//
+// Bu testin varlık sebebi: yeni bir kimlik kaynağı eklerken en kolay yapılan
+// hata, var olanın önüne geçirmektir. Bugün PALBASE_ACCESS_TOKEN ihraç etmiş
+// her kurulum aynen çalışmaya devam etmeli.
+func TestAccountTokenIsReadOnlyWhenAccessTokenIsAbsent(t *testing.T) {
+	c := &Client{}
+
+	t.Setenv("PALBASE_ACCESS_TOKEN", "oturum-jetonu")
+	t.Setenv(AccountTokenEnv, "pat_hesap")
+	got, err := c.ManagementToken(context.Background())
+	if err != nil || got != "oturum-jetonu" {
+		t.Fatalf("hesap token'ı mevcut kimliğin ÖNÜNE geçti: %q (%v)", got, err)
+	}
+
+	t.Setenv("PALBASE_ACCESS_TOKEN", "")
+	got, err = c.ManagementToken(context.Background())
+	if err != nil || got != "pat_hesap" {
+		t.Fatalf("hesap token'ı okunmadı: %q (%v)", got, err)
+	}
+}

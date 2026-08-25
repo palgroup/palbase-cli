@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // management.go resolves the credential the control plane's management surface
@@ -40,11 +41,22 @@ func EnsureDPoPKey() (*DPoPKey, error) {
 	return key, nil
 }
 
+// AccountTokenEnv, hesap seviyesindeki makine kimliğidir.
+//
+// Bir hesap token'ı organizasyon ve proje yaratabilir ve bilet basabilir; bir
+// deploy bileti bunların hiçbirini yapamaz. İkisi de düzleme aynı şekilde
+// (DPoP) sunuluyor, o yüzden burada ayrı bir dal gerekmiyor — fark YETKİDE,
+// sunumda değil.
+const AccountTokenEnv = "PALBASE_ACCOUNT_TOKEN"
+
 // ManagementToken resolves the credential the control plane expects.
 //
 // Priority:
 //  1. PALBASE_ACCESS_TOKEN — for a headless caller (CI, an agent in a
-//     container) with no terminal to type a password into.
+//     container) with no terminal to type a password into. A machine identity
+//     (`pat_…`) travels here too; the transport presents it as DPoP.
+//     1b. PALBASE_ACCOUNT_TOKEN — the account-level machine identity, read only
+//     when the above is absent, so no existing setup changes.
 //  2. The session token from session.json, written by
 //     `palbase login`. The access token lives 30 minutes and is refreshed in
 //     place, so an interactive user keeps working without signing in again.
@@ -52,6 +64,20 @@ func EnsureDPoPKey() (*DPoPKey, error) {
 // Returns an actionable error only when neither path is available.
 func (c *Client) ManagementToken(ctx context.Context) (string, error) {
 	if v := os.Getenv("PALBASE_ACCESS_TOKEN"); v != "" {
+		return v, nil
+	}
+
+	// HESAP TOKEN'I VARSA CLI KENDİ BİLETİNİ BASAR.
+	//
+	// palcore'un backend'i bileti `@palbase/account` ile basıp CLI'a veriyor —
+	// ama bir insanın (ya da basit bir CI'ın) elinde yalnız hesap token'ı
+	// olabilir. O durumda "önce bir bilet bas" demek, kullanıcıyı iki adımlı
+	// bir törene sokmaktır; CLI onu kendisi yapabilir.
+	//
+	// ÖNCELİK SIRASI DEĞİŞMEDİ: PALBASE_ACCESS_TOKEN hâlâ ÖNCE okunuyor. Bu
+	// yol yalnız o YOKKEN devreye giriyor, yani bugünkü hiçbir kurulum
+	// etkilenmiyor.
+	if v := strings.TrimSpace(os.Getenv(AccountTokenEnv)); v != "" {
 		return v, nil
 	}
 	creds, err := LoadCredentials()
