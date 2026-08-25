@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -224,6 +226,26 @@ func (c *Client) revokeSession(ctx context.Context, accessToken string) (retErr 
 
 // Whoami prints the current logged-in user info.
 func (c *Client) Whoami(ctx context.Context) error {
+	// HEADLESS KİMLİK DE BİR KİMLİKTİR.
+	//
+	// `ManagementToken` PALBASE_ACCESS_TOKEN'ı BİRİNCİ sırada okuyor ve
+	// `status`, `link`, `push`, `project list` onunla çalışıyor. `whoami` ise
+	// yalnız tarayıcı oturumuna bakıyordu ve jeton ayarlıyken bile
+	// "refresh tokens: 401 — invalid_token" diyordu (ölçüldü 25.08.2026):
+	// işi "ben kimim" olan komut, belgelenmiş kimliği görmezden geliyordu.
+	//
+	// Jeton varsa kimliği DÜZLEME sorulur — jetonun içini okuyup ondan bir ad
+	// çıkarmak, imzasını doğrulamadığımız bir gövdeye inanmak olurdu.
+	if tok := strings.TrimSpace(os.Getenv("PALBASE_ACCESS_TOKEN")); tok != "" {
+		id, err := c.identityOf(ctx, tok)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.Output, "User:   %s\n", id)
+		fmt.Fprintf(c.Output, "Auth:   %s (PALBASE_ACCESS_TOKEN)\n", c.Cfg.AuthURL)
+		return nil
+	}
+
 	creds, err := LoadCredentials()
 	if err != nil {
 		return err
@@ -246,6 +268,41 @@ func (c *Client) Whoami(ctx context.Context) error {
 	}
 	fmt.Fprintf(c.Output, "Auth:   %s\n", c.Cfg.AuthURL)
 	return nil
+}
+
+// identityOf, bir jetonun kime ait olduğunu DÜZLEME sorar.
+//
+// `/v1/cloud/me` çağıranın kimliğini döndürür. Jetonun yükünü yerel olarak
+// çözmek daha ucuz olurdu ama imzasını doğrulamadığımız bir gövdeye inanmak
+// demekti — ve `whoami`'nin cevabı, insanın yıkıcı bir fiilden önce baktığı
+// şeydir.
+func (c *Client) identityOf(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Cfg.AuthURL+"/v1/cloud/me", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, err := c.HttpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("reach %s: %w", c.Cfg.AuthURL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("PALBASE_ACCESS_TOKEN kabul edilmedi (HTTP %d): %s",
+			res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var me struct {
+		ID    string `json:"id"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &me); err != nil {
+		return "", fmt.Errorf("kimlik cevabı JSON değil: %w", err)
+	}
+	if me.Email != "" {
+		return fmt.Sprintf("%s (%s)", me.Email, me.ID), nil
+	}
+	return me.ID, nil
 }
 
 // GetValidToken returns a valid access token, refreshing if needed.
