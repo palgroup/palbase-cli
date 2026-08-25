@@ -590,3 +590,62 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 		t.Error("a web link produced the Swift client directory")
 	}
 }
+
+// TestTheWebConfigDoesNotResurrectARemovedField.
+//
+// `environment_ref` was taken OUT of this contract on purpose: identity comes
+// from the key and from nowhere else, and a copy that must equal its original is
+// not a second fact but a second chance to be wrong (palbe/src/gen/generate.ts).
+// The cloud writer already drops it — it rewrites the document whole.
+//
+// The direct writer merges, so that everything it cannot produce (`kind`, the
+// OAuth block) survives — and merging carried the removed field forward too.
+// ÖLÇÜLDÜ 25.08.2026, palai-cloud: after a re-link onto a NEW project the file
+// still read `"environment_ref": "palaicloudm"`, naming an environment that no
+// longer exists. Preserving what a writer cannot produce is not the same as
+// preserving what the contract deleted.
+func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
+	inScratchCheckout(t)
+
+	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
+	srv := stackServing(t, anon, nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	// A config from the cloud path, carrying both a field this path cannot
+	// produce and the removed one.
+	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"), []byte(
+		`{"app_id":"app_real","base_url":"https://old.example","api_key":"pb_old_c01234567890123456789",`+
+			`"environment_ref":"deadenv","kind":"production"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := cfg["environment_ref"]; still {
+		t.Errorf("the removed field survived the re-link, naming an environment nothing points at:\n%s", raw)
+	}
+	// …while what this writer genuinely cannot produce is still preserved.
+	if got, _ := cfg["kind"].(string); got != "production" {
+		t.Errorf("kind is %q — the writer deleted what it cannot produce", got)
+	}
+	if got, _ := cfg["app_id"].(string); got != "app_real" {
+		t.Errorf("app_id is %q, want the real registration preserved", got)
+	}
+	if got, _ := cfg["api_key"].(string); got != anon {
+		t.Errorf("api_key is %q — the run produced a value and it must win", got)
+	}
+}

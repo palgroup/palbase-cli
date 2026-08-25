@@ -227,6 +227,18 @@ func mergeWebConfigWithExisting(next map[string]any) map[string]any {
 	}
 	out := map[string]any{}
 	for k, v := range prev {
+		// PRESERVING WHAT A WRITER CANNOT PRODUCE IS NOT PRESERVING WHAT THE
+		// CONTRACT DELETED. `environment_ref` was taken out on purpose — the
+		// identity comes from the key and from nowhere else, and a copy that
+		// must equal its original is not a second fact but a second chance to
+		// be wrong. The cloud writer already drops it (it rewrites the document
+		// whole); merging carried it forward, so a re-link onto a NEW project
+		// left the file naming the OLD environment (measured 2026-08-25,
+		// palai-cloud: `"environment_ref": "palaicloudm"` survived a re-link to
+		// a project called something else entirely).
+		if k == removedEnvironmentRefField {
+			continue
+		}
 		out[k] = v
 	}
 	for k, v := range next {
@@ -247,6 +259,10 @@ func mergeWebConfigWithExisting(next map[string]any) map[string]any {
 	}
 	return out
 }
+
+// removedEnvironmentRefField is a field this contract no longer has. It is named
+// here so a writer can refuse to carry it forward rather than merely not emit it.
+const removedEnvironmentRefField = "environment_ref"
 
 // specPath is where one environment's contract is committed.
 func specPath(env string) string {
