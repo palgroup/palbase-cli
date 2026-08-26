@@ -217,11 +217,13 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			// upload fails we never write the config (so config never references a
 			// secret that isn't set). Order: secrets, then config.
 			out := cmd.OutOrStdout()
+			secretValues := map[string]string{}
 			for _, s := range spec.secrets {
 				value, serr := resolveSecretValue(cmd, name, s)
 				if serr != nil {
 					return serr
 				}
+				secretValues[s.name] = value
 				reserved := reservedSecretKey(name, s.name)
 				// THE PROJECT'S OWN VAULT, through the door `palbase secret set`
 				// uses. It used to be an `env.set` mutation on the Studio, which
@@ -240,7 +242,32 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			}
 
 			// 3. Tell the stack. No file, no deploy to wait for.
-			body, err := json.Marshal(map[string]any{"provider": name, "config": entry})
+			//
+			// GÖVDE MODÜLÜN SÖZLEŞMESİDİR: {channel, provider, credentials}.
+			// Eskiden {provider, config} gönderiliyordu ve modül bunu
+			// `bad_request: invalid channel:` ile REDDEDİYORDU — yani bu komut
+			// sırrı yükleyip config'i YAZAMADAN bitiyordu, her sağlayıcı için.
+			// Ölçüldü canlı 26.08.2026 (`palbase notifications add acs`).
+			//
+			// KİMLİK GÖVDEDE GİDER, ve bu bir gerileme değil: ayrılmış env
+			// anahtarını (`PB_NOTIFICATIONS_*`) okuyup sağlayıcı yapılandıran
+			// mekanizma v1'in "br-pod apply" adımıydı ve v2'de YOK — SDK'nın
+			// kendi yorumu da onu "resolved at deploy from control-pg" diye
+			// tarif ediyor. Yani sırrı yalnız kasaya koymak, onu HİÇBİR ŞEYİN
+			// okumadığı bir yere koymaktı. Modül `credentials`'ı ŞİFRELİ saklar
+			// ve geri okutmaz; sır git'e yine girmez.
+			creds := map[string]any{}
+			for k, v := range entry.fields {
+				creds[k] = v
+			}
+			for k, v := range secretValues {
+				creds[k] = v
+			}
+			body, err := json.Marshal(map[string]any{
+				"channel":     spec.channel,
+				"provider":    name,
+				"credentials": creds,
+			})
 			if err != nil {
 				return err
 			}

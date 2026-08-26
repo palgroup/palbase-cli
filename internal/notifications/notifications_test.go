@@ -139,8 +139,42 @@ func TestSecretsGoToTheProjectsVaultNotTheBody(t *testing.T) {
 	assert.Equal(t, http.MethodPut, written[0].Method)
 	assert.Contains(t, written[0].Path, "/v1/management/secrets/")
 	assert.Contains(t, written[0].Body, "SECRETBYTES")
-	assert.NotContains(t, rest.last().Body, "SECRETBYTES",
-		"a credential travelled in the provider entry: they go to the vault and the stack reads them there")
+	// KİMLİK GÖVDEDE DE GİDER — ve bu testin eski iddiası hiç DOĞRU OLMAMIŞTI.
+	//
+	// Burası "sır gövdede gitmez, kasaya gider ve yığın oradan okur" diyordu. O
+	// okuma mekanizması v1'in `br-pod apply` adımıydı; v2'de YOK. Sonucu ölçüldü
+	// canlı 26.08.2026: `palbase notifications add acs` sırrı yüklüyor, sonra
+	// config'i `bad_request: invalid channel:` ile yazamıyor ve HİÇBİR sağlayıcı
+	// yapılandırılmıyordu. Yani bu iddia, var olmayan bir davranışı koruyordu.
+	//
+	// Sır artık modülün sözleşmesine göre `credentials` içinde gidiyor: TLS
+	// üzerinden yığına ulaşıyor, ŞİFRELİ saklanıyor ve geri okutulmuyor. Git'e
+	// yine girmiyor — testin asıl koruduğu şey oydu ve o hâlâ doğru.
+	assert.Contains(t, rest.last().Body, "SECRETBYTES",
+		"kimlik gövdede gitmiyor — modül credentials olmadan sağlayıcıyı yapılandıramaz")
+	assert.Contains(t, rest.last().Body, "\"channel\":\"push\"",
+		"kanal gönderilmiyor — modül bunu 'invalid channel' ile reddeder")
+}
+
+// GÖVDE MODÜLÜN SÖZLEŞMESİ: {channel, provider, credentials}.
+//
+// Eski gövde {provider, config} idi ve modül onu reddediyordu — komut sırrı
+// yükleyip config'i yazamadan bitiyordu. Bu, HER sağlayıcıyı etkiliyordu.
+func TestTheProviderEntryMatchesTheModuleContract(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	rest := &fakeStack{}
+
+	_, err := runWith(t, rest, "add", "twilio",
+		"--account-sid", "AC1", "--messaging-sid", "MG1",
+		"--auth-token-file", writeSecretIn(t, dir, "tok", "TOKENBYTES"))
+	require.NoError(t, err)
+
+	body := rest.last().Body
+	for _, want := range []string{`"channel":"sms"`, `"provider":"twilio"`, `"credentials"`, "TOKENBYTES", "AC1"} {
+		assert.Contains(t, body, want, "gövde modülün beklediği alanı taşımıyor: %s", want)
+	}
+	assert.NotContains(t, body, `"config"`, "eski gövde şekli hâlâ gönderiliyor")
 }
 
 // The vault FIRST, then the sender. A sender written before its credential is a
