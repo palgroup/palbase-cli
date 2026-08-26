@@ -4,6 +4,20 @@ on:
   push:
     tags:
       - "v*"
+  # THE TAG PUSH IS NOT A RELIABLE TRIGGER, and that was measured rather than
+  # assumed: on 2026-08-26 GitHub Actions was in a major outage that stopped
+  # delivering PUSH events while `workflow_dispatch` kept running. `v0.46.0` and
+  # `v0.46.1` were both pushed and neither produced a run — the commit had no
+  # `github-actions` check-suite at all, while the previous release's commit did.
+  #
+  # A release path with ONE trigger is a release path that is down whenever that
+  # trigger is, and a fix that cannot be shipped is a fix that does not exist.
+  # So the tag can also be released by hand, from the tag itself.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, e.g. v0.46.1 (use when a tag push did not reach Actions)"
+        required: true
 
 permissions:
   contents: write
@@ -13,9 +27,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # THE INPUT REACHES `ref:`, SO ITS SHAPE IS CHECKED FIRST. Dispatch is
+      # write-access-only, but "the person could have pushed it anyway" is not a
+      # reason to hand an unvalidated string to checkout — it is the reason the
+      # blast radius is small, not the reason the check is unnecessary. It goes
+      # through env:, never straight into the run: line.
+      - name: Check the tag
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::not a release tag: expected vMAJOR.MINOR.PATCH"
+            exit 1
+          }
+
+      # CHECK OUT THE TAG, not the branch: goreleaser reads the version from the
+      # tag on HEAD, so a dispatch run standing on `main` would either refuse or
+      # publish a snapshot under a name nobody asked for. Pinned to the `tags`
+      # namespace so the input cannot name a branch or a raw sha.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
