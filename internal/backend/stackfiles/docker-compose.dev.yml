@@ -192,7 +192,12 @@ services:
     image: ${PALBASE_PALSVC_IMAGE:-ghcr.io/palgroup/palbase/palsvc:0.36.1}
     command:
       - "--modules"
-      - "deeplinks,documents,flags,analytics,messaging,db,auth,rt,notify,vault,storage"
+      # Katalogun TAMAMI. `jobs` 2026-08-26'da eklendi: self-host'un maskesinde
+      # vardı, burada ve bulutta YOKTU — yani `palbase start` ile koşan her
+      # projenin `@Job` sınıfı sessizce hiç ateşlenmiyordu. Mount edilmeyen
+      # bir modül şikâyet etmez; kayma ancak müşteri fark edince görünür.
+      # `cmd/palsvc/modulemask_test.go` bu üç maskeyi kataloga kilitliyor.
+      - "deeplinks,documents,flags,analytics,messaging,db,auth,rt,notify,vault,storage,jobs"
     # NOT PUBLISHED. The edge is the only way in, here as in the cloud.
     volumes:
       - artifacts:/var/lib/palbase/artifacts
