@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -637,4 +638,70 @@ func sdkHasControllerRegistry(t *testing.T, dir string) bool {
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	return err == nil && string(out) == "function"
+}
+
+// fatSchemaControllerTS is one controller whose METADATA — not its source —
+// crosses the pipe buffer the extractor's output travels through.
+func fatSchemaControllerTS(fields int) string {
+	var b strings.Builder
+	b.WriteString("import { Controller, Post, z } from \"@palbase/backend\";\n\nconst Fat = z.object({\n")
+	for i := 0; i < fields; i++ {
+		fmt.Fprintf(&b, "  field%d: z.string().max(200).describe(%q).optional(),\n",
+			i, strings.Repeat("d", 180)+fmt.Sprint(i))
+	}
+	b.WriteString("});\n\n@Controller(\"/fat\")\nexport class FatController {\n" +
+		"  @Post(\"/one\")\n  one(input: z.infer<typeof Fat>): z.infer<typeof Fat> { return input; }\n}\n")
+	return b.String()
+}
+
+// TestCheckMode_ABigSchemaStillBuilds is the regression lock for the truncated
+// extractor pipe.
+//
+// ‼️ `process.exit` KUYRUKTAKİ YAZIMI DÜŞÜRÜR. The extractor writes its metadata
+// to stdout — a PIPE — and exited in the same breath, so everything past the
+// buffer was dropped. The parent then failed to parse the half-document and
+// reported "extractor produced no JSON", which reads as a fault in the
+// CONTROLLER. Ölçüldü 26.08.2026, gerçek çağrı şekliyle: 128 KiB yazan bir
+// çocuktan tam 65 536 bayt okunuyor (node 26.7 ve bun 1.3.9).
+//
+// The trigger is SIZE, so nothing smaller can catch it: every fixture in this
+// file is comfortably under the buffer and all of them passed while `palbase
+// build` refused a real project's main branch. A user found this in production.
+func TestCheckMode_ABigSchemaStillBuilds(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	writeFixture(t, dir, fatSchemaControllerTS(400))
+
+	out, ok := runCheckMode(t, dir)
+	require.True(t, ok, "a controller whose metadata exceeds the pipe buffer must still build:\n%s", out)
+	require.Contains(t, out, "build OK")
+	require.NotContains(t, out, "produced no JSON",
+		"the extractor's output was truncated — the write is being abandoned by process.exit")
+}
+
+// TestCheckMode_AControllerThatRegistersNothingIsNamed.
+//
+// The route count is a SUM, and a sum hides a subtraction. A controller that
+// loads but registers nothing takes its endpoints off the air while the report
+// still ends in "build OK" — ölçüldü 26.08.2026: bir dosya rotalarını
+// kaybettiğinde çıktı "build OK — 64 route(s)" dedi, ne dosyayı andı ne düşen
+// üç rotayı. O çıktıda okunması gereken tek satır toplam sayıydı, ve onu ezbere
+// bilmek gerekiyordu.
+func TestCheckMode_AControllerThatRegistersNothingIsNamed(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "quiet.controller.ts"),
+		[]byte("import { Controller } from \"@palbase/backend\";\n\n"+
+			"@Controller(\"/quiet\")\nexport class QuietController {\n"+
+			"  // its routes were lost in an edit\n}\n"), 0o644))
+
+	out, ok := runCheckMode(t, dir)
+	require.False(t, ok, "a controller that registers nothing must fail the build:\n%s", out)
+	require.Contains(t, out, "quiet.controller.ts", "the silent file is not named:\n%s", out)
+	require.Contains(t, out, "registered no routes")
 }

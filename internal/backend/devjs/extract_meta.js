@@ -61,8 +61,21 @@ const RETURN_BUFFER_SYMBOL = Symbol.for('palbase.backend.returnBuffer');
 const CONTROLLER_META_SYMBOL = Symbol.for('palbase.backend.controllerMeta');
 
 function writeResult(result) {
-  process.stdout.write(JSON.stringify(result));
-  process.exit(0);
+  // ‼️ `process.exit` KUYRUKTAKİ YAZIMI DÜŞÜRÜR. stdout bir BORU olduğunda yazım
+  // asenkrondur: veri önce Node'un kendi kuyruğuna girer, oradan işletim
+  // sistemine geçer. `exit` o anda çağrılırsa kuyrukta ne kaldıysa gider.
+  //
+  // Ölçüldü 26.08.2026, gerçek çağrı şekliyle (`execFileSync`, stdio pipe):
+  // 128 KiB yazan bir çocuktan TAM 65 536 bayt okunuyor — hem node 26.7 hem
+  // bun 1.3.9 ile. Yazımın callback'inde çıkınca 131 072'nin tamamı geliyor.
+  // Kesilen JSON `JSON.parse` ile "extractor produced no JSON" oluyor, yani
+  // BÜYÜK bir controller'ın metadata'sı eşiği aştığı an build sebepsiz
+  // reddediliyor — ve sebep, controller'ın BOYUTU, içeriği değil.
+  //
+  // `write('', cb)` yeterli DEĞİL: bun'da o callback önceki yazımın arkasında
+  // sıraya girmiyor ve kesilme devam ediyor (ölçüldü). Callback GERÇEK yazıma
+  // bağlanmalı.
+  process.stdout.write(JSON.stringify(result), () => process.exit(0));
 }
 
 function writeError(error) {

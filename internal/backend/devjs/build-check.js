@@ -496,7 +496,47 @@ function registerControllers() {
   for (const route of routes.values()) {
     log(`  ${route.method.padEnd(6)} ${route.urlPattern}  →  ${bundledToSrcRel(route.controllerPath)} [${route.routeKey}]`);
   }
-  return { sawControllerFiles, staleSDKSignature, routeCount: routes.size, skipped };
+
+  // EVERY SOURCE CONTROLLER MUST ANSWER FOR ITSELF.
+  //
+  // The count is a SUM, and a sum hides a subtraction: a file that stops
+  // registering takes its endpoints off the air while the line above still ends
+  // in "build OK". The existing 0-route guard only fires when the WHOLE tree
+  // registers nothing, so the one shape that actually happens — one file out of
+  // seventeen going quiet — passed straight through.
+  //
+  // Ölçüldü 26.08.2026 (palai-cloud): bir controller bir an 0 bayta düştü ve
+  // `palbase build` "build OK — 66 route(s)" dedi. Ne dosyayı andı ne düşen
+  // rotayı; o çıktıda okunması gereken tek satır toplam sayıydı ve onu da
+  // ezberden bilmek gerekiyordu. Boşalan (ya da @Controller sınıfını kaybeden)
+  // bir dosya bu ağaçta bir rotayı SESSİZCE yayından kaldırır.
+  //
+  // A file that failed to LOAD is already reported as `skipped`; naming it twice
+  // would turn one fault into two findings.
+  const answered = new Set();
+  for (const route of routes.values()) answered.add(withoutExtension(bundledToSrcRel(route.controllerPath)));
+  for (const s of skipped) answered.add(withoutExtension(s.file));
+  const silent = [];
+  for (const src of sourceControllerFiles()) {
+    if (!answered.has(withoutExtension(src))) silent.push(src);
+  }
+
+  return { sawControllerFiles, staleSDKSignature, routeCount: routes.size, skipped, silent };
+}
+
+// sourceControllerFiles lists the *.controller.ts a person actually wrote,
+// project-relative — the list the registration is measured AGAINST.
+function sourceControllerFiles() {
+  if (!fs.existsSync(CONTROLLERS_DIR)) return [];
+  return walk(CONTROLLERS_DIR)
+    .filter((f) => f.endsWith('.controller.ts'))
+    .map((f) => path.join('controllers', path.relative(CONTROLLERS_DIR, f)));
+}
+
+// withoutExtension compares a SOURCE path with a BUNDLED one: the bundler emits
+// `.js` beside the `.ts` it came from, and only the extension differs.
+function withoutExtension(p) {
+  return p.replace(/\.[^./\\]+$/, '');
 }
 
 // deployExtractErrors runs the deploy's extract_meta.js over every BUNDLED
@@ -646,6 +686,13 @@ function main() {
   if (reg.buildError) failures.push({ file: 'controllers/', error: reg.buildError });
   for (const s of reg.skipped || []) failures.push(s);
   for (const e of deployExtractErrors()) failures.push(e);
+  for (const f of reg.silent || []) {
+    failures.push({
+      file: f,
+      error: 'registered no routes — a deploy would take its endpoints off the air, and the ' +
+        'total route count is the only place that would have shown it',
+    });
+  }
 
   // Files but no routes is the SILENT class: the deploy would be written as
   // successful and serve zero endpoints. Fail here instead.
@@ -661,13 +708,20 @@ function main() {
     }
   }
 
+  // ‼️ `process.exit` DEĞİL. stdout bir boru olduğunda yazım asenkrondur ve
+  // `exit` kuyrukta kalanı düşürür — ölçüldü 26.08.2026: 128 KiB yazan bir
+  // çocuktan tam 65 536 bayt okunuyor (node 26.7 ve bun 1.3.9). Bu dosya route
+  // tablosunu satır satır basıyor, yani büyük bir projede rapor tam da
+  // okunması gereken yerden kesilirdi. `exitCode` atayıp doğal çıkışı beklemek
+  // iki çalışma zamanında da her baytı teslim ediyor (ölçüldü).
   if (failures.length === 0) {
     log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly`);
-    process.exit(0);
+    process.exitCode = 0;
+    return;
   }
   for (const f of failures) log(`✗ DEPLOY WOULD FAIL: ${f.file} — ${f.error}`);
   log(`build FAILED (${failures.length} error${failures.length === 1 ? '' : 's'}) — a deploy of this tree would be rejected`);
-  process.exit(1);
+  process.exitCode = 1;
 }
 
 // Remove the temp bundle tree + the in-project staging tree on ANY exit, not
