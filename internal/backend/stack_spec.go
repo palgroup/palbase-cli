@@ -163,6 +163,26 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 		return nil, fmt.Errorf(
 			"this account may not manage %s — ask whoever runs it for `palsvc --grant-management`", target.URL)
 	case http.StatusNotFound:
+		// THE PROJECT'S OWN SENTENCE WINS. It answers `spec_unavailable` with a
+		// description — "nothing is deployed yet", or the actual reason its
+		// runtime could not build a spec — and only that side knows which.
+		//
+		// Ölçüldü 25.08.2026 (palai-cloud): tek bir `z.lazy` şeması bütün belgeyi
+		// düşürmüştü; bu satır ise saniyeler önce başarıyla deploy edilmiş bir
+		// projeye "önce bir backend push et" diyordu — yani araç, az önce
+		// yapılan şeyin yapılmasını istedi ve teşhis saatler sürdü.
+		//
+		// Only the ENVELOPE is trusted, never a raw body: a proxy's HTML 404 page
+		// is not an explanation and printing it would replace one unhelpful
+		// sentence with a worse one.
+		var envelope struct {
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &envelope) == nil &&
+			strings.TrimSpace(envelope.Description) != "" {
+			return nil, fmt.Errorf("%s cannot describe itself: %s",
+				target.URL, strings.TrimSpace(envelope.Description))
+		}
 		return nil, fmt.Errorf(
 			"%s has nothing to describe yet — push a backend to it first (palbase push)", target.URL)
 	default:

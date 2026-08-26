@@ -159,6 +159,72 @@ func GetProject(ctx context.Context, rest REST, projectID string) (ProjectDetail
 	return p, nil
 }
 
+// projectIDPrefix is what a management project id starts with. The management
+// API addresses a project by THIS, while the cloud API addresses it by ref and
+// `project list` prints its NAME — three identifiers for one thing.
+const projectIDPrefix = "proj_"
+
+// ResolveProjectID turns what a PERSON has into the id the management API needs.
+//
+// Accepts, in order: a management id (used as-is), a project NAME as
+// `palbase project list` prints it, and an environment REF as the same listing's
+// second column shows.
+//
+// ÖLÇÜLDÜ 25.08.2026: `--project` yalnız id kabul ediyordu ve o id CLI'ın
+// HİÇBİR yüzeyinde görünmüyor — `project list` de, `--json` çıktısı da yalnız ad
+// ve ref basıyor. Yani belgelenmiş bayrak, değerini hiçbir yerden alamayacağın
+// bir şey istiyordu: `project status 1jhp7jbrm` çalışırken `push --project
+// 1jhp7jbrm` "böyle bir proje yok" diyordu. Bir bayrak, aracın kendi bastığı
+// şeyi kabul etmelidir.
+//
+// The ref lookup costs one listing per project and runs ONLY when the name did
+// not match, because a ref lives on the environment rather than on the project.
+func ResolveProjectID(ctx context.Context, rest REST, given string) (string, error) {
+	given = strings.TrimSpace(given)
+	if given == "" {
+		return "", errors.New("no project given")
+	}
+	if strings.HasPrefix(given, projectIDPrefix) {
+		return given, nil
+	}
+
+	var projects []Project
+	if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects", nil, &projects); err != nil {
+		return "", fmt.Errorf("list projects to resolve %q: %w", given, err)
+	}
+
+	var named []Project
+	for _, p := range projects {
+		if strings.EqualFold(strings.TrimSpace(p.Name), given) {
+			named = append(named, p)
+		}
+	}
+	if len(named) == 1 {
+		return named[0].ID, nil
+	}
+	if len(named) > 1 {
+		// Choosing one would act on a project the person did not mean.
+		return "", fmt.Errorf("%q is the name of %d projects — pass the id instead", given, len(named))
+	}
+
+	if IsCanonicalEnvironmentRef(given) {
+		for _, p := range projects {
+			envs, err := ListEnvironments(ctx, rest, p.ID)
+			if err != nil {
+				continue
+			}
+			for _, env := range envs {
+				if env.Ref == given {
+					return p.ID, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf(
+		"no project matches %q — pass the name or the ref `palbase project list` shows, or the project id",
+		given)
+}
+
 func (r *Resolver) rest() (REST, error) {
 	if r.REST == nil {
 		return nil, errors.New("management API client is not wired")
@@ -175,7 +241,11 @@ func (r *Resolver) rest() (REST, error) {
 // and never pay for an environments listing.
 func (r *Resolver) ProjectID(ctx context.Context) (string, error) {
 	if r.ProjectFlag != "" {
-		return r.ProjectFlag, nil
+		rest, err := r.rest()
+		if err != nil {
+			return "", err
+		}
+		return ResolveProjectID(ctx, rest, r.ProjectFlag)
 	}
 	cfg, err := r.Config()
 	if err != nil {
@@ -207,6 +277,12 @@ func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 			return Selection{}, err
 		}
 		projectID = cfg.ProjectID
+	} else {
+		// A flag must accept what the tool itself prints — see ResolveProjectID.
+		projectID, err = ResolveProjectID(ctx, rest, projectID)
+		if err != nil {
+			return Selection{}, err
+		}
 	}
 	detail, err := GetProject(ctx, rest, projectID)
 	if err != nil {

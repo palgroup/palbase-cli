@@ -458,3 +458,54 @@ func TestErrNotSelected_IsMatchable(t *testing.T) {
 	var target selection.ErrNotSelected
 	require.True(t, errors.As(selection.ErrNotSelected{}, &target))
 }
+
+// TestResolveProjectID_AcceptsWhatTheToolPrints.
+//
+// ÖLÇÜLDÜ 25.08.2026: `--project` yalnız yönetim id'si kabul ediyordu ve o id
+// CLI'ın hiçbir yüzeyinde görünmüyor — `project list` ad ve ref basıyor, `--json`
+// bile id taşımıyor. Yani belgelenmiş bayrak, değerini hiçbir yerden alamayacağın
+// bir şey istiyordu: `project status <ref>` çalışırken `push --project <ref>`
+// "böyle bir proje yok" diyordu. Aynı kök `clone`'u da vuruyordu.
+func TestResolveProjectID_AcceptsWhatTheToolPrints(t *testing.T) {
+	fake := selectiontest.New(t)
+
+	// The id itself still works, and costs no lookup.
+	got, err := selection.ResolveProjectID(context.Background(), fake.REST(), "proj_1")
+	require.NoError(t, err)
+	require.Equal(t, "proj_1", got)
+
+	// The NAME, as `project list` prints it — case-insensitively, because a
+	// person reads a table rather than copying bytes.
+	for _, given := range []string{"todoapp", "TodoApp", "  todoapp  "} {
+		got, err = selection.ResolveProjectID(context.Background(), fake.REST(), given)
+		require.NoError(t, err, given)
+		require.Equal(t, "proj_1", got, given)
+	}
+
+	// The environment REF, the listing's other column.
+	got, err = selection.ResolveProjectID(context.Background(), fake.REST(), "app1prod")
+	require.NoError(t, err)
+	require.Equal(t, "proj_1", got)
+}
+
+// A value that matches nothing must say what this accepts, because "no such
+// project" sends somebody looking for a project that is right there.
+func TestResolveProjectID_SaysWhatItAccepts(t *testing.T) {
+	fake := selectiontest.New(t)
+	_, err := selection.ResolveProjectID(context.Background(), fake.REST(), "nosuchthing")
+	require.ErrorContains(t, err, "nosuchthing")
+	require.ErrorContains(t, err, "name")
+	require.ErrorContains(t, err, "ref")
+	require.ErrorContains(t, err, "id")
+}
+
+// Two projects under one name is not a tie to break: acting on either would act
+// on a project the person did not mean.
+func TestResolveProjectID_RefusesAnAmbiguousName(t *testing.T) {
+	fake := selectiontest.New(t)
+	fake.Projects = append(fake.Projects, selectiontest.Project{
+		ID: "proj_2", OrganizationID: "org_1", Name: "todoapp", Role: "owner", Mode: "platform",
+	})
+	_, err := selection.ResolveProjectID(context.Background(), fake.REST(), "todoapp")
+	require.ErrorContains(t, err, "2 projects")
+}

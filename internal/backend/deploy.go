@@ -508,6 +508,33 @@ func newPullCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 
+			// TARGET-RELATIVE, like push, status, deploys and apikey already are.
+			//
+			// The transfer was target-relative all along — `pullBundle` builds the
+			// project's address and asks ITS management API. Only the question of
+			// WHICH ref went through the cloud selection, and that selection
+			// demands a management project id: a value this CLI prints nowhere and
+			// the person does not have. So in a checkout bound to a project, the
+			// one verb that could not answer was the one whose answer was already
+			// in the directory.
+			//
+			// ÖLÇÜLDÜ 25.08.2026 (palaicloud): `pull` ve `clone`, aynı bağlantı
+			// üzerinden `status`/`deploys`/`apikey` çalışırken `not_found (404):
+			// böyle bir proje yok` diyordu. Bağlı bir checkout'ta sorulacak soru
+			// zaten yok — bağlandığı proje, çekeceği projedir.
+			if target, terr := ReadTarget(); terr == nil && strings.TrimSpace(target.URL) != "" {
+				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
+					return err
+				}
+				cred, _, credErr := Credential(target.URL)
+				if credErr != nil {
+					return credErr
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.URL)
+				return fetchDeployedSource(
+					cmd.Context(), target, cred, target.URL, cwd, cmd.OutOrStdout())
+			}
+
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
@@ -527,17 +554,23 @@ func newPullCmd(r Resolvers) *cobra.Command {
 	}
 }
 
-// newCloneCmd wires `palbase clone <projectId>`: clone the project's code into
+// newCloneCmd wires `palbase clone <project>`: clone the project's code into
 // ./<dir> and select it (config v2 = project + its production environment).
 func newCloneCmd(r Resolvers) *cobra.Command {
 	var dirFlag string
 	cmd := &cobra.Command{
-		Use:   "clone <projectId>",
+		Use:   "clone <project>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Download a project locally and select it",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			projectID := args[0]
 			ctx := cmd.Context()
+			// The argument is whatever the person has — the NAME or the REF
+			// `palbase project list` prints, or the id. It used to be the id
+			// alone, which this CLI shows on no surface at all.
+			projectID, err := selection.ResolveProjectID(ctx, r.REST(), args[0])
+			if err != nil {
+				return err
+			}
 
 			detail, err := selection.GetProject(ctx, r.REST(), projectID)
 			if err != nil {
