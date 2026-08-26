@@ -170,6 +170,33 @@ func refByProjectName(ctx context.Context, r Resolvers, name string) string {
 	return found
 }
 
+// knownRefs lists the refs this account can see, and says whether it could ask
+// at all. The boolean is the whole point: a listing that FAILED must not be read
+// as "no such project" — that is how a network blip becomes a lie about what
+// exists. Callers only refuse when the answer is known and the ref is not in it.
+func knownRefs(ctx context.Context, r Resolvers) ([]string, bool) {
+	if r.REST == nil {
+		return nil, false
+	}
+	rest := r.REST()
+	if rest == nil {
+		return nil, false
+	}
+	var rows []struct {
+		Ref string `json:"ref"`
+	}
+	if err := rest.Do(ctx, http.MethodGet, "/v1/cloud/projects", nil, &rows); err != nil {
+		return nil, false
+	}
+	refs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.Ref != "" {
+			refs = append(refs, row.Ref)
+		}
+	}
+	return refs, true
+}
+
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
 	if base == "" {

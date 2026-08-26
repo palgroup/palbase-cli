@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"os/exec"
 	"strings"
 	"time"
@@ -564,14 +565,61 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 		Short: "Download a project locally and select it",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			// The argument is whatever the person has — the NAME or the REF
-			// `palbase project list` prints, or the id. It used to be the id
-			// alone, which this CLI shows on no surface at all.
-			projectID, err := selection.ResolveProjectID(ctx, r.REST(), args[0])
-			if err != nil {
-				return err
+			given := strings.TrimSpace(args[0])
+
+			// A PROJECT IS ITS REF, and the argument is what `palbase project
+			// list` prints: the NAME in the first column or the REF in the
+			// second. This used to take a management project id and nothing
+			// else — a value this CLI shows on no surface at all, not even in
+			// `project list --json` — so the documented argument could not be
+			// obtained. Ölçüldü 25.08.2026: `project status 1jhp7jbrm` çalışırken
+			// `clone 1jhp7jbrm` "böyle bir proje yok" diyordu.
+			//
+			// The download and the binding are the same two things `link` and
+			// `pull` already do, by address, with no control plane in the path.
+			if !strings.HasPrefix(given, managementProjectIDPrefix) {
+				ref := given
+				if named := refByProjectName(ctx, r, given); named != "" {
+					ref = named
+				}
+				if !selection.IsCanonicalEnvironmentRef(ref) {
+					return fmt.Errorf(
+						"%q is neither a project name nor a ref — `palbase project list` prints both", given)
+				}
+				// A name that merely LOOKS like a ref would otherwise be built
+				// into an address nothing serves, and the failure would arrive as
+				// a sentence about credentials. Refused here, while the listing
+				// is in hand — and only when the listing actually answered.
+				if refs, asked := knownRefs(ctx, r); asked && !slices.Contains(refs, ref) {
+					return fmt.Errorf(
+						"no project of yours is called %q — `palbase project list` prints the names and refs", given)
+				}
+				host := r.Endpoints().PublicHost
+				if host == "" {
+					return errors.New("this CLI has no tenant host configured, so a project cannot be reached by ref")
+				}
+				dir := dirFlag
+				if dir == "" {
+					dir = ref
+				}
+				target := Target{URL: "https://" + ref + "." + host}
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					return err
+				}
+				cred, _, credErr := Credential(target.URL)
+				if credErr != nil {
+					return credErr
+				}
+				if err := fetchDeployedSource(
+					ctx, target, cred, target.URL, dir, cmd.OutOrStdout()); err != nil {
+					return err
+				}
+				// Bound the way `link` binds, so push/pull/spec in the new
+				// directory reach the project it came from.
+				return inDir(dir, func() error { return WriteTarget(target) })
 			}
 
+			projectID := given
 			detail, err := selection.GetProject(ctx, r.REST(), projectID)
 			if err != nil {
 				return err
@@ -615,6 +663,26 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the repo or environment name)")
 	return cmd
+}
+
+// managementProjectIDPrefix is what a management project id starts with. Only a
+// value shaped like one takes the management path; everything else is a name or
+// a ref, which is what a person actually has.
+const managementProjectIDPrefix = "proj_"
+
+// inDir runs fn with dir as the working directory and restores the old one.
+// WriteTarget writes beside the CURRENT directory by design — every other verb
+// reads it that way — so a clone binds by stepping into what it just created.
+func inDir(dir string, fn func() error) error {
+	prev, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(dir); err != nil {
+		return err
+	}
+	defer func() { _ = os.Chdir(prev) }()
+	return fn()
 }
 
 // repoURLFromFullName turns a GitHub "org/repo" full name into a cloneable

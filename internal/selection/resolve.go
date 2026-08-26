@@ -190,7 +190,16 @@ func ResolveProjectID(ctx context.Context, rest REST, given string) (string, err
 
 	var projects []Project
 	if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects", nil, &projects); err != nil {
-		return "", fmt.Errorf("list projects to resolve %q: %w", given, err)
+		// A PLANE WITHOUT THIS LISTING IS NOT A PLANE WITHOUT THIS PROJECT.
+		//
+		// The management listing exists where projects HAVE management ids; the
+		// v2 cloud addresses a project by its ref and serves no such route
+		// (measured 2026-08-25: `/api/v2/projects` answers "No route matches
+		// this method and path"). Failing here would turn "this identifier could
+		// not be looked up" into "no such project", which is the class of lie
+		// this function exists to stop telling — so the value is handed back
+		// unchanged and whoever needs it answers for it.
+		return given, nil
 	}
 
 	var named []Project
