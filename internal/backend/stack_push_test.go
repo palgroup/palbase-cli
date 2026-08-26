@@ -161,3 +161,41 @@ func quote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// TestAStackPushCarriesTheJobAndHookManifests.
+//
+// Writing a manifest that never gets packed is the same silence one step later.
+// The tarball filtered `.palbase` down to `esm` alone, so even a correct
+// `jobs.manifest.json` would have been dropped on the way out — and palsvc,
+// finding none in the artifact, PRUNES every definition. The tenant would have
+// gone from "never scheduled" to "unscheduled on every deploy".
+func TestAStackPushCarriesTheJobAndHookManifests(t *testing.T) {
+	dir := projectForPush(t)
+	write := func(rel, body string) {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".palbase/jobs/jobs.manifest.json",
+		`{"jobs":[{"name":"mac-scaler","schedule":"* * * * *","timeout":60,"retry":0,"file":"jobs/mac-scaler.ts"}]}`)
+	write(".palbase/hooks/hooks.manifest.json",
+		`{"hooks":[{"event":"auth.before_signup","blocking":true,"file":"hooks/signup.ts"}]}`)
+
+	blob, err := BuildStackTarball(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := entriesOf(t, blob)
+	for _, want := range []string{
+		".palbase/jobs/jobs.manifest.json",
+		".palbase/hooks/hooks.manifest.json",
+	} {
+		if !entries[want] {
+			t.Errorf("%s did not travel — the Go half has no schedule to read, and prunes what it cannot see", want)
+		}
+	}
+}

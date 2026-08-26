@@ -85,7 +85,15 @@ func BuildStackTarball(dir string) ([]byte, error) { return buildTarball(dir, tr
 // `.palbase/config.json` used to be here. There is no such file any more:
 // settings reach the stack directly, from whoever changes them, and a copy in a
 // push could only overwrite what somebody set from the panel.
-var stackOnlyPalbaseEntries = []string{".palbase/esm"}
+//
+// `.palbase/jobs` and `.palbase/hooks` are here because the GO half of the
+// stack cannot read a decorator: `jobs.manifest.json` is the only way the
+// scheduler learns when a job is due, and `hooks.manifest.json` the only way
+// palsvc learns which events a project handles. The code for both rides in
+// `.palbase/esm`, so leaving these two out ships an artifact that CAN run the
+// work and is never told to — which is exactly what happened to every tenant
+// with a `jobs/` directory until 2026-08-26.
+var stackOnlyPalbaseEntries = []string{".palbase/esm", ".palbase/jobs", ".palbase/hooks"}
 
 func buildTarball(dir string, forStack bool) ([]byte, error) {
 	patterns, err := loadPalignore(filepath.Join(dir, ".palignore"))

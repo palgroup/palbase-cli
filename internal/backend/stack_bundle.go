@@ -98,7 +98,12 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 	built := false
 	defer func() {
 		if !built {
-			_ = os.RemoveAll(filepath.Join(dir, ".palbase", "esm"))
+			// The manifests go with it: a refused build must leave NOTHING to
+			// deploy, and a surviving jobs.manifest.json would let the next push
+			// ship a schedule its bundle no longer carries.
+			for _, sub := range []string{"esm", "jobs", "hooks"} {
+				_ = os.RemoveAll(filepath.Join(dir, ".palbase", sub))
+			}
 		}
 	}()
 
@@ -151,6 +156,21 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 	// the part that actually costs time: "why is my digest different from yours"
 	// is answerable at a glance instead of by bisecting two laptops.
 	fmt.Fprintf(w, "built %d controller file(s) → %d controller(s)  [bun %s]\n", len(sources), n, bunVersion(ctx, dir))
+
+	// THE BY-NAME SURFACES, checked and written down.
+	//
+	// A controller proves itself: the count above refuses a bundle carrying
+	// none. Jobs, webhooks and hooks prove nothing by existing on disk, and
+	// their failure mode is not a 500 — it is silence. So they are counted OUT
+	// OF THE BUILT BUNDLE and compared against what the directories declare,
+	// and the Go half's schedule/registration manifests are written from the
+	// same bundle, before anything is packed.
+	if err := checkDefinitionsSurvived(ctx, dir, out); err != nil {
+		return nil, err
+	}
+	if err := writeDefinitionManifests(ctx, dir, out, w); err != nil {
+		return nil, err
+	}
 
 	// @Upload names a bucket that must EXIST, and only the bundle knows which
 	// names it uses — so they are read out here and checked against the stack by
@@ -351,46 +371,75 @@ func bundleEntry(dir string, sources []string) string {
 	}
 	b.WriteString("export const controllers = SDK.getRegisteredControllers();\n")
 	b.WriteString("export const getRegisteredControllers = SDK.getRegisteredControllers;\n")
-	b.WriteString("export const jobs = []; export const resources = [];\n")
+	b.WriteString("export const resources = [];\n")
 
-	// WEBHOOKS TRAVEL BY NAME, unlike controllers.
+	// THE THREE SURFACES THAT TRAVEL BY NAME, unlike controllers.
 	//
 	// @Controller records its class into a global registry as it decorates it,
 	// so a controller needs no export and the entry imports it for the side
-	// effect alone. @Webhook does NOT: it stamps metadata onto the class and
-	// nothing collects it. The runtime mounts `/webhooks/<name>` from THIS
-	// export, so the ctor has to reach it by name or the mount never exists.
+	// effect alone. @Job, @Webhook and @Hook do NOT: each stamps metadata onto
+	// the class and nothing collects it. The runtime reads these three exports
+	// — collectJobs, mountWebhooks, collectHooks — so the class has to reach
+	// them by name or the surface never exists.
 	//
-	// Until this block existed the line above also hardcoded `webhooks = []`,
-	// and a project's `webhooks/stripe.ts` was compiled into the bundle and then
-	// declared absent: the URL answered 404 while the deploy said "successful".
-	// Measured against the live plane 2026-08-25; the core side measured the
-	// same defect on 2026-08-21 (v2/deploy/verify.sh) and fixed it there, and
-	// this copy of the bundler kept it.
+	// EACH OF THESE LINES WAS ONCE A HARDCODED `[]`, AND EACH COST THE SAME.
+	// `webhooks = []` was fixed on 2026-08-25 after a project's
+	// `webhooks/stripe.ts` compiled into the bundle and was then declared
+	// absent: the URL answered 404 while the deploy said "successful".
+	// `jobs = []` was left sitting one line above it and cost the same thing for
+	// another year of tenants — measured 2026-08-26 on the live tenant
+	// `1jhp7jbrm`, whose `jobs/` held four @Job classes: the artifact carried
+	// `var jobs = []`, the classes were not in the bundle at all, the runtime
+	// printed no `[runtime] jobs:` line across five boots, and
+	// `jobs.job_definitions` held ZERO rows while palsvc ran WITH the jobs
+	// module mounted. Nothing errored; the scheduler simply had nothing to
+	// schedule, and one of the four was a balance auto-top-up.
+	// `hooks` was never emitted AT ALL, so `collectHooks` read `undefined` and
+	// every @Hook was dropped by the push that claimed to ship it.
 	//
-	// THE FILE NAME IS THE URL — the SDK's decorator deliberately offers no
-	// `name` option, so the base name is the whole contract.
-	hooks, err := webhookSources(filepath.Join(dir, "webhooks"))
-	if err != nil {
-		hooks = nil
-	}
-	var entries []string
-	for _, src := range hooks {
-		name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
-		ident := fmt.Sprintf("__webhook_%s", sanitizeIdent(name))
-		fmt.Fprintf(&b, "import %s from %q;\n", ident, src)
-		entries = append(entries, fmt.Sprintf("{ name: %q, ctor: %s }", name, ident))
-	}
-	fmt.Fprintf(&b, "export const webhooks = [%s];\n", strings.Join(entries, ", "))
+	// The palbase repository's own bundle-controllers.sh has emitted all three
+	// since 2026-08-21. That file's header calls the two implementations a
+	// DRIFT and says the push-activation gate keeps them honest — it does not:
+	// that gate asks whether ENDPOINTS are served, and all three of these
+	// surfaces are invisible to it. So the gate is here, below, per surface.
+	//
+	// THE FILE NAME IS THE NAME — none of the three decorators offers a `name`
+	// option, and by the time the code is bundled the file is gone, so the
+	// entry is the last place that knows it.
+	emitDefinitions(&b, dir, "jobs", "jobs", "__job_", "job")
+	emitDefinitions(&b, dir, "webhooks", "webhooks", "__webhook_", "ctor")
+	emitDefinitions(&b, dir, "hooks", "hooks", "__hook_", "ctor")
 	return b.String()
 }
 
-// webhookSources lists every `webhooks/*.ts` a project declares.
+// emitDefinitions writes the import lines and the `export const <export>` array
+// for one by-name surface.
 //
-// TEST FILES ARE NOT WEBHOOKS: shipping one would mount a URL nobody meant to
-// publish, and a webhook URL is unauthenticated by design (the signature is the
-// credential).
-func webhookSources(dir string) ([]string, error) {
+// `key` is the property the runtime reads the class back from and it is NOT
+// uniform: collectJobs reads `record.job`, while mountWebhooks and collectHooks
+// read `entry.ctor`. Naming the difference here beats a bundle that loads and
+// then quietly carries zero of something.
+func emitDefinitions(b *strings.Builder, dir, subdir, export, prefix, key string) {
+	sources, err := definitionSources(filepath.Join(dir, subdir))
+	if err != nil {
+		sources = nil
+	}
+	var entries []string
+	for _, src := range sources {
+		name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+		ident := prefix + sanitizeIdent(name)
+		fmt.Fprintf(b, "import %s from %q;\n", ident, src)
+		entries = append(entries, fmt.Sprintf("{ name: %q, %s: %s }", name, key, ident))
+	}
+	fmt.Fprintf(b, "export const %s = [%s];\n", export, strings.Join(entries, ", "))
+}
+
+// definitionSources lists every `*.ts` one by-name surface declares.
+//
+// TEST FILES ARE NOT DEFINITIONS: shipping one would mount a URL nobody meant
+// to publish (a webhook URL is unauthenticated by design — the signature is the
+// credential), or put a test suite on a production cron.
+func definitionSources(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -448,6 +497,186 @@ func output(ctx context.Context, dir, name string, args ...string) (string, erro
 		return "", fmt.Errorf("%s", strings.TrimSpace(trimBody([]byte(stderr.String()))))
 	}
 	return string(blob), nil
+}
+
+// countDefinitionsScript reports what the BUILT bundle carries on each by-name
+// surface. `-1` means the export is missing entirely, which is a different
+// fault from an empty one and reads differently in the refusal.
+const countDefinitionsScript = `
+const m = await import(process.argv[1]);
+const n = (x) => (Array.isArray(x) ? x.length : -1);
+console.log([n(m.jobs), n(m.webhooks), n(m.hooks)].join("\t"));
+`
+
+// checkDefinitionsSurvived refuses a bundle that dropped a surface its project
+// declares on disk.
+//
+// THIS IS THE GATE THAT DID NOT EXIST, and its absence is the whole bug. The
+// push-activation gate on the stack asks whether ENDPOINTS are served; a job, a
+// webhook and a hook are all invisible to it, so a bundle carrying none of them
+// activated cleanly and the tenant simply never ran them. Four @Job classes
+// deployed green for weeks that way (tenant `1jhp7jbrm`, measured 2026-08-26).
+//
+// It compares the DIRECTORY against the BUNDLE rather than trusting the
+// generator, because the two can disagree for reasons the generator cannot see:
+// a file that fails to default-export, a bundler that drops a side-effect-only
+// import, an SDK too old to carry the decorator.
+func checkDefinitionsSurvived(ctx context.Context, dir, bundle string) error {
+	raw, err := output(ctx, dir, "bun", "-e", countDefinitionsScript, bundle)
+	if err != nil {
+		return fmt.Errorf("the bundle could not be inspected for jobs, webhooks and hooks: %w", err)
+	}
+	fields := strings.Split(strings.TrimSpace(raw), "\t")
+	if len(fields) != 3 {
+		return fmt.Errorf("the bundle did not report its jobs, webhooks and hooks: %q", strings.TrimSpace(raw))
+	}
+	for i, surface := range []struct{ subdir, what string }{
+		{"jobs", "@Job class"},
+		{"webhooks", "@Webhook class"},
+		{"hooks", "@Hook class"},
+	} {
+		declared, err := definitionSources(filepath.Join(dir, surface.subdir))
+		if err != nil || len(declared) == 0 {
+			continue
+		}
+		carried, convErr := strconv.Atoi(strings.TrimSpace(fields[i]))
+		if convErr != nil || carried <= 0 {
+			return fmt.Errorf(
+				"%s/ holds %d file(s) but the bundle carries ZERO of them — every %s in there would deploy and never run. "+
+					"One class per file, and it must be the `export default`",
+				surface.subdir, len(declared), surface.what)
+		}
+	}
+	return nil
+}
+
+// jobManifestScript resolves each @Job's cron out of the built bundle.
+//
+// palsvc is Go and cannot run a decorator, so the SCHEDULE has to be written
+// down by something that can. This file is the only way the scheduler learns
+// when a job is due; without it the job code ships and nothing ever calls it.
+// Resolved through getJobConfig — the very function the user's class went
+// through — so the ceiling checks and cron validation are the SDK's, once.
+const jobManifestScript = `
+const m = await import(process.argv[1]);
+const outPath = process.argv[2];
+const getJobConfig = m.SDK?.getJobConfig;
+if (typeof getJobConfig !== "function") {
+  console.error("the @palbase/backend in this project exposes no getJobConfig — that SDK is too old to carry jobs.");
+  process.exit(2);
+}
+const seen = new Set();
+const entries = [];
+for (const record of m.jobs ?? []) {
+  const name = record?.name;
+  const job = record?.job;
+  if (!name) {
+    console.error("a job record carries no name — the bundler generated a bad entry.");
+    process.exit(2);
+  }
+  if (seen.has(name)) {
+    console.error("two jobs are named " + name + ". A job takes its name from its file, so this cannot be renamed away — one of the files has to go.");
+    process.exit(2);
+  }
+  seen.add(name);
+  if (!job) {
+    console.error("jobs/" + name + ".ts has no default export. One job per file, and the @Job-decorated class must be the default export.");
+    process.exit(2);
+  }
+  let cfg;
+  try {
+    cfg = getJobConfig(job);
+  } catch (e) {
+    console.error("jobs/" + name + ".ts — " + e.message);
+    process.exit(2);
+  }
+  entries.push({ name, schedule: cfg.schedule, timeout: cfg.timeout, retry: cfg.retry, file: "jobs/" + name + ".ts" });
+}
+entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+await Bun.write(outPath, JSON.stringify({ jobs: entries }, null, 2) + "\n");
+console.log(entries.length);
+`
+
+// hookManifestScript resolves which events a project hooks, and which BLOCK.
+//
+// Same split as jobs and for the same reason. palsvc reads this at deploy and
+// writes the rows that point the event at THIS stack's own runtime; no URL is
+// ever typed by an operator.
+const hookManifestScript = `
+const m = await import(process.argv[1]);
+const outPath = process.argv[2];
+const getHookConfig = m.SDK?.getHookConfig;
+if (typeof getHookConfig !== "function") {
+  console.error("the @palbase/backend in this project exposes no getHookConfig — that SDK is too old to carry hooks.");
+  process.exit(2);
+}
+const entries = [];
+const seen = new Map();
+for (const record of m.hooks ?? []) {
+  const name = record?.name;
+  const ctor = record?.ctor;
+  if (!ctor) {
+    console.error("hooks/" + name + ".ts has no default export. One hook class per file, and it must be the default export.");
+    process.exit(2);
+  }
+  let cfg;
+  try {
+    cfg = getHookConfig(ctor);
+  } catch (e) {
+    console.error("hooks/" + name + ".ts — " + e.message);
+    process.exit(2);
+  }
+  for (const [event, blocking] of [
+    ...Object.keys(cfg.blocking).map((e) => [e, true]),
+    ...Object.keys(cfg.listeners).map((e) => [e, false]),
+  ]) {
+    if (seen.has(event)) {
+      console.error("the event \"" + event + "\" is handled by both hooks/" + seen.get(event) + ".ts and hooks/" + name + ".ts. One handler per event.");
+      process.exit(2);
+    }
+    seen.set(event, name);
+    entries.push({ event, blocking, file: "hooks/" + name + ".ts" });
+  }
+}
+entries.sort((a, b) => (a.event < b.event ? -1 : a.event > b.event ? 1 : 0));
+await Bun.write(outPath, JSON.stringify({ hooks: entries }, null, 2) + "\n");
+console.log(entries.length);
+`
+
+// writeDefinitionManifests emits the documents the GO half reads.
+//
+// The bundle carries the code; these carry the facts Go cannot compute without
+// executing TypeScript — when each job is due, and which events a hook claims.
+// Both are packed into the artifact and read on activation.
+//
+// NO SURFACE, NO FILE — and the removal matters as much as the write. A project
+// that deletes its last job must stop declaring one: `ApplyManifest` prunes
+// every definition when the artifact carries no manifest, so a stale file left
+// behind from an earlier build would keep a deleted job running on a schedule
+// nothing in the source says any more.
+func writeDefinitionManifests(ctx context.Context, dir, bundle string, w io.Writer) error {
+	for _, m := range []struct{ subdir, file, script, what string }{
+		{"jobs", "jobs.manifest.json", jobManifestScript, "job"},
+		{"hooks", "hooks.manifest.json", hookManifestScript, "hook"},
+	} {
+		outDir := filepath.Join(dir, ".palbase", m.subdir)
+		declared, err := definitionSources(filepath.Join(dir, m.subdir))
+		if err != nil || len(declared) == 0 {
+			if err := os.RemoveAll(outDir); err != nil {
+				return fmt.Errorf("clear the stale %s manifest: %w", m.what, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return err
+		}
+		count, err := output(ctx, dir, "bun", "-e", m.script, bundle, filepath.Join(outDir, m.file))
+		if err != nil {
+			return fmt.Errorf("the %s manifest could not be written: %w", m.what, err)
+		}
+		fmt.Fprintf(w, "bundled %s %s(s)\n", strings.TrimSpace(count), m.what)
+	}
+	return nil
 }
 
 // countControllers reports how many classes in the bundle actually carry

@@ -611,6 +611,35 @@ function walk(dir) {
   return out;
 }
 
+// declaredSurfaces names what ELSE this tree would deploy: jobs, webhooks and
+// hooks.
+//
+// A TOTAL HIDES A SUBTRACTION. This line used to say `build OK — 67 route(s)`
+// and nothing more, and it said exactly that over a project carrying four @Job
+// classes that the push then dropped on the floor. Four background jobs — one of
+// them a balance auto-top-up — deployed green and never fired, and the report a
+// person actually reads never mentioned them, so there was no number to notice
+// was wrong (measured 2026-08-26, tenant `1jhp7jbrm`).
+//
+// Counted from the DIRECTORY rather than from a bundle, deliberately: this is
+// the declaration, and the point of printing it here is to give the author a
+// figure they can compare against what the runtime reports at boot. `palbase
+// push` is what refuses a bundle that lost one.
+function declaredSurfaces() {
+  const parts = [];
+  for (const [dir, noun] of [['jobs', 'job'], ['webhooks', 'webhook'], ['hooks', 'hook']]) {
+    let files = [];
+    try {
+      files = fs.readdirSync(path.join(PROJECT_ROOT, dir), { withFileTypes: true })
+        .filter((e) => !e.isDirectory() && /\.m?ts$/i.test(e.name) && !/\.test\.m?ts$/i.test(e.name));
+    } catch {
+      continue; // No such directory is the normal case, not a fault.
+    }
+    if (files.length > 0) parts.push(`${files.length} ${noun}(s)`);
+  }
+  return parts.length > 0 ? `, plus ${parts.join(', ')}` : '';
+}
+
 function log(msg) {
   process.stdout.write(`${msg}\n`);
 }
@@ -715,7 +744,7 @@ function main() {
   // okunması gereken yerden kesilirdi. `exitCode` atayıp doğal çıkışı beklemek
   // iki çalışma zamanında da her baytı teslim ediyor (ölçüldü).
   if (failures.length === 0) {
-    log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly`);
+    log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly${declaredSurfaces()}`);
     process.exitCode = 0;
     return;
   }
