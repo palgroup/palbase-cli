@@ -80,7 +80,7 @@ func NewOperationID() string {
 
 // Client issues authenticated requests to the control plane.
 type Client struct {
-	// BaseURL is the control plane origin (e.g. https://api.v2.palbase.studio).
+	// BaseURL is the control plane origin (e.g. https://api.palbase.studio).
 	BaseURL string
 	// Token is the session bearer token `palbase login` stored. Empty = not
 	// signed in; every request fails closed rather than going out anonymous.

@@ -182,7 +182,7 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	// read it from.
 	//
 	// Measured (2026-08-21, live): the same key opens
-	// `https://<ref>.v2.palbase.studio/v1/management/whoami` with `apikey`, and
+	// `https://<ref>.palbase.studio/v1/management/whoami` with `apikey`, and
 	// gets 401 as a Bearer. The credential was right; the PRESENTATION was wrong.
 	//
 	// BUT A PLANE SESSION IS NOT A TENANT CREDENTIAL, and presenting one as if it
@@ -193,7 +193,7 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	// tenant's management surface takes that PROJECT's service key, nothing else.
 	//
 	// Measured 2026-08-24: with the variable set to a plane session,
-	// `palbase link https://<ref>.v2.palbase.studio` answered
+	// `palbase link https://<ref>.palbase.studio` answered
 	// "did not accept this credential (401)" while the cloud could have brokered
 	// the right key on the next line. The value's KIND already tells the two
 	// apart — a project key is `pb_…`, a session is not — so a session falls

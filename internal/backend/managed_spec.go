@@ -20,7 +20,7 @@ import (
 // o: bir checkout'a servis anahtarı yazmak, telefonda taşınacak bir dosyaya
 // sunucu anahtarı koymaktır.
 //
-// Ölçüldü 2026-08-24, canlı: `GET https://8bbwb2pbm.v2.palbase.studio/admin/openapi.json`
+// Ölçüldü 2026-08-24, canlı: `GET https://8bbwb2pbm.palbase.studio/admin/openapi.json`
 // yayınlanabilir anahtarla `403 service_role_required` veriyor. `palbase ios link`
 // tam orada duruyordu ve v2'de hiçbir yığından sözleşme çekilemiyordu.
 //

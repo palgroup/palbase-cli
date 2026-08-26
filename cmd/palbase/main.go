@@ -131,7 +131,7 @@ func wireCloudKeyFetcher() {
 
 // tenantRefOf extracts the project ref from a tenant address on this cloud.
 //
-// `https://j06bwtuum.v2.palbase.studio` → `j06bwtuum`. Anything not under this
+// `https://j06bwtuum.palbase.studio` → `j06bwtuum`. Anything not under this
 // cloud's tenant suffix returns false, so a local stack or another deployment's
 // address is never sent to our control plane.
 func tenantRefOf(tenantURL, publicHost string) (string, bool) {

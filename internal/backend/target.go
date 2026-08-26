@@ -53,7 +53,7 @@ type Target struct {
 //
 // The URL field's comment used to promise "a project running on this machine",
 // and that held while `link` could only name a local stack. `palbase link
-// https://<ref>.v2.palbase.studio` writes a REMOTE one, and a verb that reads
+// https://<ref>.palbase.studio` writes a REMOTE one, and a verb that reads
 // containers has to tell the two apart: measured 2026-08-21, `palbase logs` in a
 // cloud-linked checkout answered "No such container: palbase-todoapp-runtime-1"
 // — naming a container that was never going to exist.
