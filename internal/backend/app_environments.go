@@ -34,10 +34,19 @@ import (
 
 // appEnvironment is one environment as an app needs it.
 type appEnvironment struct {
-	AppID   string          `json:"app_id"`
-	BaseURL string          `json:"base_url"`
-	APIKey  string          `json:"api_key"`
-	OAuth   json.RawMessage `json:"oauth,omitempty"`
+	AppID   string `json:"app_id"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	// SealedRoot is the public half of the root this stack's sealing chain hangs
+	// from. An app cannot derive it and must not fetch it anonymously — a root
+	// taken from the server it is meant to authenticate proves nothing — so it
+	// travels here, written once by a `link` the operator ran against their own
+	// stack.
+	//
+	// omitempty: a stack with no chain leaves it out, and the SDK then keeps its
+	// compiled-in roots. Writing "" would look like a configured root.
+	SealedRoot string          `json:"sealed_root,omitempty"`
+	OAuth      json.RawMessage `json:"oauth,omitempty"`
 }
 
 // appEnvironments is what the CLI writes and the generator reads.
@@ -422,11 +431,18 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 	specs := map[string][]byte{}
 
 	primary := defaultEnvName(target)
-	envs.Environments[primary] = appEnvironment{
+	primaryEnv := appEnvironment{
 		AppID:   projectAppID,
 		BaseURL: target.URL,
 		APIKey:  key,
 	}
+	// Best effort, and deliberately not fatal: a stack that cannot answer about
+	// its sealing root is a stack that seals nothing, which is a legal state and
+	// not a reason to refuse the link an operator asked for.
+	if _, root, err := projectKeys(ctx, target); err == nil && root != "" {
+		primaryEnv.SealedRoot = root
+	}
+	envs.Environments[primary] = primaryEnv
 	cred, _, err := Credential(target.URL)
 	if err != nil {
 		return appEnvironments{}, nil, err
@@ -462,11 +478,15 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 		fmt.Fprintf(w, "local: %s did not answer — run `palbase start`, then `palbase spec` to fill it in\n", localURL)
 		return envs, specs, nil
 	}
-	envs.Environments[localEnvName] = appEnvironment{
+	localEnv := appEnvironment{
 		AppID:   projectAppID,
 		BaseURL: localURL,
 		APIKey:  localKey,
 	}
+	if _, root, err := projectKeys(ctx, localTarget); err == nil && root != "" {
+		localEnv.SealedRoot = root
+	}
+	envs.Environments[localEnvName] = localEnv
 	if localSpec, err := fetchStackSpec(ctx, localTarget, localCred); err == nil {
 		if err := writeSpec(localEnvName, localSpec); err != nil {
 			return appEnvironments{}, nil, err
