@@ -649,3 +649,88 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 		t.Errorf("api_key is %q — the run produced a value and it must win", got)
 	}
 }
+
+// FR-001: link, yiginin muhur kokunu uygulamanin yapilandirmasina TASIR.
+//
+// SDK bu alani OKUYOR ve kimse YAZMIYORDU (3d2043c bunu duzeltti ama testsiz indi).
+// Alan olmadan self-host eden bir uygulama, yiginin muhurlu /auth/* cevabini
+// dogrulayacak koke sahip olmuyor ve ilk kayitta soyle oluyor:
+//
+//	"This request must be encrypted and the encryption key is unavailable."
+//
+// — ne sebebi ne cozumu soyleyen bir mesaj. Bu test o regresyonu sabitler.
+func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
+	inScratchCheckout(t)
+	const root = "MSpMCEuCo76fF82x5Sa9d+9h8RRzNLC3/JiTe0WOvhI="
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/management/keys" {
+			if r.Header.Get("Authorization") == "" && r.Header.Get("apikey") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"publishable":"pb_project_cPUBLISHABLE","sealed_root":"` + root + `"}`))
+			return
+		}
+		switch r.URL.Path {
+		case wellKnownPath:
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"18.0.0"}`))
+		case "/v1/management/openapi":
+			if r.Header.Get("Authorization") == "" && r.Header.Get("apikey") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	linkedAs(t, srv.URL, "a-credential")
+
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
+	if err != nil {
+		t.Fatalf("no slot file: %v", err)
+	}
+	var slot appEnvironments
+	if err := json.Unmarshal(raw, &slot); err != nil {
+		t.Fatal(err)
+	}
+	entry := slot.Environments[slot.Default]
+	if entry.SealedRoot != root {
+		t.Errorf("the app's config carries sealed_root %q; the stack said %q", entry.SealedRoot, root)
+	}
+}
+
+// FR-002: kok bildirmeyen bir yigin, link'i BASARISIZ SAYDIRMAZ ve alan hic yazilmaz.
+//
+// Zinciri olmayan bir yigin muhurlemiyor demektir, bu da operatorun istedigi link'i
+// reddetmek icin sebep degil. Olculdu: bu makinedeki `palbase start` yiginin .env'i
+// sifir muhurleme degiskeni tasiyor — yani bu dal kurgusal degil, sahadaki durum.
+func TestAStackWithNoSealingRootStillLinks(t *testing.T) {
+	inScratchCheckout(t)
+	// stackServing'in kendi cevabi zaten sealed_root ICERMIYOR — kok bildirmeyen
+	// yiginin ta kendisi.
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
+		t.Fatalf("kok bildirmeyen bir yigin link'i basarisiz yapti: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
+	if err != nil {
+		t.Fatalf("no slot file: %v", err)
+	}
+	var slot appEnvironments
+	if err := json.Unmarshal(raw, &slot); err != nil {
+		t.Fatal(err)
+	}
+	if got := slot.Environments[slot.Default].SealedRoot; got != "" {
+		t.Errorf("kok bildirmeyen yigin icin sealed_root yazildi: %q", got)
+	}
+}
