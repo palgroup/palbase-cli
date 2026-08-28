@@ -144,7 +144,8 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 		return err
 	}
 	envFile := filepath.Join(state, ".env")
-	if err := ensureBootValues(ctx, envFile, out); err != nil {
+	envChanged, err := ensureBootValues(ctx, envFile, out)
+	if err != nil {
 		return err
 	}
 
@@ -214,7 +215,19 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 		return fmt.Errorf("migrate the local database: %w", err)
 	}
 
-	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, "up", "-d"); err != nil {
+	// FORCE-RECREATE when the .env changed under a stack that already exists.
+	//
+	// Compose does not re-read --env-file for containers it is not creating, so a
+	// sealing chain written into the file is a chain the RUNNING stack cannot see.
+	// Measured end-to-end: after the migration the .env carried all three
+	// variables and `docker exec palsvc printenv | grep -c PALBASE_SEALED` printed
+	// 0 — the stack still answered `sealed_unconfigured` and an iOS client still
+	// could not sign in, while this command had already printed that it could.
+	upArgs := []string{"up", "-d"}
+	if envChanged {
+		upArgs = append(upArgs, "--force-recreate")
+	}
+	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, upArgs...); err != nil {
 		return err
 	}
 	if err := waitForStack(ctx, url, 90*time.Second); err != nil {
@@ -408,13 +421,16 @@ func stackStateDir(group string) (string, error) {
 // implementation here would be a second opinion about what a valid key looks
 // like, and the day they disagree is the day a stack boots with a key nothing
 // else accepts.
-func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error {
+// Returns whether it CHANGED the .env. The caller needs that: compose does not
+// re-read --env-file for containers that already exist, so a chain written into
+// the file is a chain the running stack cannot see until it is recreated.
+func ensureBootValues(ctx context.Context, envFile string, out io.Writer) (bool, error) {
 	if _, err := os.Stat(envFile); err == nil {
 		// .env VAR — ama bu "yapacak bir sey yok" demek degil. Muhurleme zinciri bu
 		// dosyaya SONRADAN eklendi; onu tasimayan bir yigin onu buradan kazanir.
 		return migrateSealingChainWithMint(ctx, envFile, out)
 	} else if !os.IsNotExist(err) {
-		return err
+		return false, err
 	}
 
 	fmt.Fprintln(out, "▸ generating this stack's keys")
@@ -427,14 +443,15 @@ func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error 
 		"-v", dir+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
 		"--init-env", filepath.Base(envFile))
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("generate the stack's keys: %w\n%s", err, output)
+		return false, fmt.Errorf("generate the stack's keys: %w\n%s", err, output)
 	}
 	// The generator writes as root inside the container; the operator has to be
 	// able to read their own secrets afterwards.
 	if err := os.Chmod(envFile, 0o600); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	// A brand-new .env: nothing to recreate, the containers do not exist yet.
+	return false, nil
 }
 
 // rememberPort keeps the first address this group was given, for as long as
@@ -856,19 +873,19 @@ func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) err
 // Uretici yiginin kendisi (`--init-env`): burada ikinci bir uygulama yazmak, gecerli bir
 // anahtarin nasil gorundugu konusunda ikinci bir gorus olurdu, ve ikisinin anlasmadigi
 // gun bir yigin hicbir seyin kabul etmedigi bir anahtarla acilir.
-func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Writer) error {
+func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Writer) (bool, error) {
 	if err := migrateSealingChain(ctx, envFile, out); err != nil {
-		return err
+		return false, err
 	}
 	present, err := sealingChainState(envFile)
 	if err != nil || present == 3 {
-		return err
+		return false, err
 	}
 
 	fmt.Fprintln(out, "▸ this stack predates sealing — minting its chain")
 	tmp, err := os.MkdirTemp("", "palbase-chain-")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.RemoveAll(tmp)
 
@@ -880,11 +897,11 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 		"-v", tmp+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
 		"--init-env", ".env")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("mint this stack's sealing chain: %w\n%s", err, output)
+		return false, fmt.Errorf("mint this stack's sealing chain: %w\n%s", err, output)
 	}
 	minted, err := os.ReadFile(filepath.Join(tmp, ".env"))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// UCU BIRDEN, tek yazimda: yarim bir ekleme, yukarida reddettigimiz durumu kendi
@@ -900,19 +917,19 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 		}
 	}
 	if found != 3 {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"the stack image minted %d of 3 sealing variables — it is too old to seal.\n"+
 				"  Upgrade it: `palbase upgrade`", found)
 	}
 
 	f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer f.Close()
 	if _, err := f.WriteString(chain.String()); err != nil {
-		return err
+		return false, err
 	}
-	fmt.Fprintln(out, "▸ sealing chain added — clients that must seal can sign in now")
-	return nil
+	fmt.Fprintln(out, "▸ sealing chain added — recreating the stack so it takes effect")
+	return true, nil
 }

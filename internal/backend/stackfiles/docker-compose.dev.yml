@@ -207,6 +207,21 @@ services:
       DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
       LOCAL_JWT_PEM: ${LOCAL_JWT_PEM:-}
       STACK_ROOT_KEY: ${STACK_ROOT_KEY:-}
+      # THE SEALING CHAIN, and its absence here was the whole of D-5's second half.
+      #
+      # The shipped compose forwards these three; this one did not, so a stack
+      # started by `palbase start` published no keyset no matter what its .env
+      # said. Measured end-to-end: the .env carried all three variables and
+      # `docker exec palsvc printenv | grep -c PALBASE_SEALED` still printed 0,
+      # the stack answered `sealed_unconfigured`, and the iOS SDK — which seals
+      # every /auth/* body and refuses to send one in the clear — could not sign
+      # in at all. The message it shows names neither the cause nor the fix.
+      #
+      # Empty default, like every other line here: a stack without a chain is a
+      # legal state (it seals nothing), and these are read, never invented.
+      PALBASE_SEALED_SIGNING_SEED: ${PALBASE_SEALED_SIGNING_SEED:-}
+      PALBASE_SEALED_BINDING: ${PALBASE_SEALED_BINDING:-}
+      PALBASE_SEALED_ROOT: ${PALBASE_SEALED_ROOT:-}
       PEPPER: ${PEPPER:-}
       REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:-palbase}

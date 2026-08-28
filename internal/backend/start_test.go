@@ -631,11 +631,38 @@ func TestEnsureBootValuesJudgesAnExistingEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := ensureBootValues(context.Background(), env, io.Discard)
+	_, err := ensureBootValues(context.Background(), env, io.Discard)
 	if err == nil {
 		t.Fatal("mevcut .env icin ensureBootValues hicbir sey yapmadi; yarim zinciri reddetmeliydi")
 	}
 	if !strings.Contains(err.Error(), "half a chain is not a chain") {
 		t.Fatalf("ensureBootValues yargilamiyor: %v", err)
+	}
+}
+
+// KABLOLAMA, ikinci yarisi: goc yapildiginda cagirana SOYLENMELI.
+//
+// Ucdan uca olcum bunu ortaya cikardi: zincir .env'e yazildi ama konteynerin
+// ortaminda yoktu (docker exec printenv | grep -c PALBASE_SEALED -> 0), cunku
+// compose zaten calisan konteynerleri yeniden yaratmadan yeni --env-file'i
+// okumuyor. Yigin hala "sealed_unconfigured" diyordu ve iOS giris yapamiyordu —
+// yani "clients that must seal can sign in now" mesaji o durumda YALANDI.
+//
+// Bu test o sinyali sabitler; start onu gorup --force-recreate ekliyor.
+func TestEnsureBootValuesReportsThatItMigrated(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+
+	// Zinciri TAM olan bir .env: goc yok, sinyal de yok.
+	full := "PALBASE_SEALED_SIGNING_SEED=a\nPALBASE_SEALED_BINDING=b\nPALBASE_SEALED_ROOT=c\n"
+	if err := os.WriteFile(env, []byte(full), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := ensureBootValues(context.Background(), env, io.Discard)
+	if err != nil {
+		t.Fatalf("tam zincir hata verdi: %v", err)
+	}
+	if migrated {
+		t.Fatal("hicbir sey degismediigi halde goc bildirildi — stack bosuna yeniden yaratilirdi")
 	}
 }
