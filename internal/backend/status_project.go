@@ -72,7 +72,7 @@ type statusCredential struct {
 // reads the same as the other target-relative verbs.
 func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error) {
 	ctx := cmd.Context()
-	target, err := ResolveTarget(ctx)
+	target, err := ResolveTargetFor(cmd)
 	if err != nil {
 		return true, err
 	}

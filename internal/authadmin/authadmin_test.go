@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -200,5 +201,60 @@ func TestSettingsSetReadsBeforeItWrites(t *testing.T) {
 	}
 	if sent["site_url"] != "https://kept.example" {
 		t.Errorf("a field nobody mentioned was erased: %s", rest.body)
+	}
+}
+
+// A --json FRAGMENT is a change, not a replacement.
+//
+// The read-first merge above was gated on the caller having named a flag, so
+// `--json '{"password_min_length":13}'` alone merged into an empty document and
+// the module's replacing PUT erased every field the fragment omitted — with a
+// success line, because the write itself succeeds. The help calls --json
+// "anything the named flags do not cover", which is an invitation to send
+// exactly one field.
+func TestSettingsSetJSONAloneDoesNotEraseTheRestOfTheDocument(t *testing.T) {
+	rest := &fakeREST{answer: `{"password_min_length":8,"password_max_length":64,"confirm_email_required":true,"site_url":"https://kept.example"}`}
+	run(t, rest, "settings", "set", "--json", `{"password_min_length":13}`)
+
+	if rest.calls < 2 {
+		t.Fatalf("the command wrote without reading: %d call(s)", rest.calls)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(rest.body, &sent); err != nil {
+		t.Fatalf("body is not JSON: %s", rest.body)
+	}
+	if sent["password_min_length"] != float64(13) {
+		t.Errorf("the change did not travel: %s", rest.body)
+	}
+	if sent["password_max_length"] != float64(64) {
+		t.Errorf("the untouched maximum was erased — the module reads that as zero: %s", rest.body)
+	}
+	if sent["confirm_email_required"] != true {
+		t.Errorf("e-mail confirmation was turned off by a write that never mentioned it: %s", rest.body)
+	}
+	if sent["site_url"] != "https://kept.example" {
+		t.Errorf("a field nobody mentioned was erased: %s", rest.body)
+	}
+}
+
+// TestAuditEscapesItsQueryValues: the query was concatenated raw, so a value
+// carrying &, = or a space became more parameters than the caller asked for —
+// the log is then filtered by something nobody typed.
+func TestAuditEscapesItsQueryValues(t *testing.T) {
+	rest := &fakeREST{}
+	run(t, rest, "audit", "--event-type", "sign in&limit=1", "--cursor", "a/b c+d")
+
+	if strings.Contains(rest.path, "sign in") || strings.Contains(rest.path, "&limit=1") {
+		t.Fatalf("the value was concatenated raw and became its own parameters: %s", rest.path)
+	}
+	u, err := url.Parse(rest.path)
+	if err != nil {
+		t.Fatalf("the path does not parse as a URL: %v (%s)", err, rest.path)
+	}
+	if got := u.Query().Get("event_type"); got != "sign in&limit=1" {
+		t.Errorf("event_type arrived as %q: %s", got, rest.path)
+	}
+	if got := u.Query().Get("cursor"); got != "a/b c+d" {
+		t.Errorf("cursor arrived as %q: %s", got, rest.path)
 	}
 }

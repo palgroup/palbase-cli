@@ -31,6 +31,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/spf13/cobra"
+
 	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
@@ -54,14 +56,17 @@ const (
 // means a failure to reach it is a failure to report, not a reason to try
 // somewhere else, so this returns the error that says which of the two ways to
 // name a project is missing.
-func resolveProject(ctx context.Context) (backend.Target, backend.Credentials, error) {
-	target, err := backend.ResolveTarget(ctx)
+func resolveProject(cmd *cobra.Command) (backend.Target, backend.Credentials, error) {
+	target, err := backend.ResolveTargetFor(cmd)
 	if err != nil {
 		return backend.Target{}, backend.Credentials{}, err
 	}
 	if target.URL == "" {
+		// `--environment <ref>` was the alternative offered here, and it is not
+		// one: the flag selects an environment of a project already named, and
+		// a target with no address has not named one.
 		return backend.Target{}, backend.Credentials{}, fmt.Errorf(
-			"%s names no address — run `palbase link` again, or pass --environment <ref>",
+			"%s names no address — run `palbase link <project>` again, or `palbase link <ref>` for one environment of it",
 			target.Describe())
 	}
 	cred, _, err := backend.Credential(target.URL)
@@ -208,7 +213,10 @@ func templatesOnProject(ctx context.Context, target backend.Target, cred backend
 		return encodeJSON(out, res)
 	}
 	if len(res.Templates) == 0 {
-		fmt.Fprintln(out, "No fixture accounts on this stack. Add one: palbase test-user create <name>")
+		// `palbase test-user create <name>` is what this offered, and `create`
+		// takes NO arguments — a person who typed it got "unknown command".
+		// A template is DECLARED, not created: the file is the only author.
+		fmt.Fprintln(out, "No fixture accounts on this stack. Declare one in config/test-users.ts, then `palbase push`.")
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

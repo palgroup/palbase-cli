@@ -358,10 +358,19 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
+	// WHAT THEY OVERRIDE IS THE SELECTION FILE, and never the link. Saying only
+	// "to act on" read as "overrides the target" — which is how `--environment`
+	// came to be typed at verbs that had already answered the question from
+	// .palbase/project.json and then dropped it. They are refused there now, and
+	// the usage says so before the refusal has to.
+	//
+	// --environment NARROWS a project rather than naming one: with no --project
+	// the resolver still reads .palbase/selection.json for the project id, so on
+	// its own it selects nothing at all.
 	rootCmd.PersistentFlags().StringVar(&projectFlag, "project", "",
-		"Project id to act on (overrides .palbase/selection.json)")
+		"Project id to act on (overrides .palbase/selection.json; refused in a linked checkout)")
 	rootCmd.PersistentFlags().StringVar(&environmentFlag, "environment", "",
-		"Environment slug or ref to act on (overrides .palbase/selection.json)")
+		"Environment slug or ref within that project (overrides .palbase/selection.json; refused in a linked checkout)")
 
 	// One Resolvers value for every backend-package entry point: the top-level
 	// lifecycle commands below, and `project create`'s Materialize hop, which

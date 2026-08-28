@@ -173,8 +173,16 @@ func TestRollbackWithoutAProjectRefusesActionably(t *testing.T) {
 
 	_, err := r.Run(t, "rollback", "old1")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--environment",
+	// IT PINNED `--environment`, and that assertion is why the refusal kept
+	// offering a flag that names nothing: with no --project the resolver reads
+	// .palbase/selection.json for the project id before the environment flag is
+	// ever consulted, and a checkout with no link has no such file. The other
+	// way to name a project is `palbase link <ref>` — a bare ref resolves to
+	// `<ref>.<PublicHost>` — so that is what a person with no link is told.
+	require.Contains(t, err.Error(), "palbase link <ref>",
 		"a person with no link must be told the other way to name a project")
+	require.NotContains(t, err.Error(), "--environment",
+		"the refusal offers a flag that cannot select without --project")
 }
 
 // ── selection failure ───────────────────────────────────────────────────────

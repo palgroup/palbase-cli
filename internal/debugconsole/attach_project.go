@@ -33,7 +33,7 @@ import (
 // the project is the only thing that can turn it into a topic. One door now, and
 // it is the right one either way.
 func attachToProject(cmd *cobra.Command, code string, errorsOnly, asJSON bool) (bool, error) {
-	target, err := backend.ResolveTarget(cmd.Context())
+	target, err := backend.ResolveTargetFor(cmd)
 	if err != nil {
 		return false, err
 	}

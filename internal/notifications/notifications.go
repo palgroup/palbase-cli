@@ -158,16 +158,18 @@ func providersCmd(r Resolvers) *cobra.Command {
 }
 
 // addCmd configures a single provider: it (1) uploads the provider's secret(s)
-// to the reserved env key via env.set (isSecret=true), then (2) writes/updates
-// the provider's non-secret fields in config/notifications.ts (enabled:true).
+// to the project's own vault, then (2) sends the provider's non-secret fields to
+// the stack. No file, no deploy — config/notifications.ts stopped being read at
+// the v2 cutover (see the Resolvers comment above).
 func addCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <provider> [flags]",
 		Short: "Configure a provider: upload its secret + write its config entry",
 		Long: `Configure a notification provider. The provider's NON-SECRET fields are passed
-as flags and written to config/notifications.ts; its SECRET (cert/key/api-key) is
-read from a file (or prompted, hidden) and uploaded to a reserved encrypted env
-var (PB_NOTIFICATIONS_<PROVIDER>_<FIELD>) — never written to git.
+as flags and sent straight to the Environment — live, with no deploy in between;
+its SECRET (cert/key/api-key) is read from a file (or prompted, hidden) and
+uploaded to a reserved encrypted vault key (PB_NOTIFICATIONS_<PROVIDER>_<FIELD>)
+— never written to git.
 
 Examples:
   palbase notifications add apns --team-id T --key-id K --bundle-id com.acme.app --p8-file AuthKey.p8

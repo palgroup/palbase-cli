@@ -96,7 +96,7 @@ func (s Selection) Describe() string {
 	return name + " (" + s.Environment.Ref + ")"
 }
 
-// Resolver turns (--project, --environment, .palbase/config.json) into a
+// Resolver turns (--project, --environment, .palbase/selection.json) into a
 // Selection.
 //
 // It caches: a command that needs the Project and the Environment resolves both
@@ -108,7 +108,7 @@ type Resolver struct {
 	// headless overrides. EnvironmentFlag matches an exact ref or slug.
 	ProjectFlag     string
 	EnvironmentFlag string
-	// Dir is the directory holding .palbase/config.json ("" = cwd).
+	// Dir is the directory holding .palbase/selection.json ("" = cwd).
 	Dir string
 
 	cached *Selection
@@ -265,7 +265,7 @@ func (r *Resolver) ProjectID(ctx context.Context) (string, error) {
 
 // Resolve produces the full (Project, Environment) context.
 //
-// Precedence: --project / --environment > .palbase/config.json. --environment
+// Precedence: --project / --environment > .palbase/selection.json. --environment
 // accepts an exact ref or slug so `--environment staging` works without the
 // user knowing the ref. With a Project but no Environment selected, production
 // is the default — a Project always has exactly one.
@@ -342,8 +342,11 @@ func pickEnvironment(envs []Environment, flag, wantID string) (Environment, erro
 				return e, nil
 			}
 		}
+		// `palbase env use <slug>` is what this said, and it has not existed
+		// since the v2 cutover. The reader is being told their selection is
+		// stale AND handed a command that fails — two dead ends in one line.
 		return Environment{}, fmt.Errorf(
-			"the selected environment (%s) no longer exists — re-select with `palbase env use <slug>` (have: %s)",
+			"the selected environment (%s) no longer exists — re-select with `palbase link <ref>` or `--environment <ref>` (have: %s)",
 			wantID, slugList(envs))
 	}
 	best, _ := DefaultEnvironment(envs)

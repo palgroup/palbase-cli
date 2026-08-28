@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -151,42 +152,42 @@ func settingsCmd(r Resolvers) *cobra.Command {
 		Use: "set", Short: "Change this project's auth settings", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			named := namedSettings(cmd, pwMin, pwMax, confirm, siteURL)
-			// READ FIRST, when the caller named individual settings. The module's
-			// PUT replaces the WHOLE document, so a partial body erases what it
-			// does not mention — measured live: `--password-min 13` alone was
-			// refused with "password_max_length must be between
-			// password_min_length and 64", because the absent maximum arrived as
-			// zero. A person saying "make the minimum 13" is not saying "and
-			// forget everything else".
-			//
-			// A caller who passed the whole document with --json and named
-			// nothing is saying exactly what they mean, and it is sent as-is.
-			current := map[string]any{}
-			if len(named) > 0 {
-				rest, err := r.REST(cmd)
-				if err != nil {
-					return err
-				}
-				status, raw, err := rest.Do(cmd.Context(), http.MethodGet, base+"/settings", nil)
-				if err != nil {
-					return err
-				}
-				if status != http.StatusOK {
-					return fmt.Errorf("could not read the current settings to change one of them (%d): %s",
-						status, strings.TrimSpace(string(raw)))
-				}
-				if err := json.Unmarshal(raw, &current); err != nil {
-					return fmt.Errorf("the current settings did not parse: %w", err)
-				}
+			fragment, err := parseFragment(body)
+			if err != nil {
+				return err
 			}
-			b, err := mergeSettings(body, named, current)
+			// Refuse BEFORE reading: a call that names nothing has nothing to
+			// merge, and reading first would turn it into a PUT of the document
+			// back over itself, which reads as a change in every audit log.
+			if len(named) == 0 && len(fragment) == 0 {
+				return fmt.Errorf("nothing to send: name a setting (--password-min, --password-max, " +
+					"--confirm-email, --site-url) or pass the fields to change with --json")
+			}
+			// READ FIRST, ALWAYS. The module's PUT replaces the WHOLE document,
+			// so a partial body erases what it does not mention — measured live:
+			// `--password-min 13` alone was refused with "password_max_length
+			// must be between password_min_length and 64", because the absent
+			// maximum arrived as zero. A person saying "make the minimum 13" is
+			// not saying "and forget everything else".
+			//
+			// This used to be gated on the caller having named a flag, on the
+			// theory that --json carries the whole document. It does not: its own
+			// help offers it for "anything the named flags do not cover", which is
+			// an invitation to send one field — and that one field then WAS the
+			// document, erasing the rest under a success line. --json is a
+			// fragment like any other, and takes the same merge.
+			current, err := readSettings(r, cmd)
+			if err != nil {
+				return err
+			}
+			b, err := mergeSettings(fragment, named, current)
 			if err != nil {
 				return err
 			}
 			return call(r, cmd, http.MethodPut, base+"/settings", b)
 		},
 	}
-	set.Flags().StringVar(&body, "json", "", "anything the named flags do not cover, as JSON")
+	set.Flags().StringVar(&body, "json", "", "fields the named flags do not cover, as a JSON object — merged into the current settings, not a replacement")
 	set.Flags().IntVar(&pwMin, "password-min", 0, "shortest password this project accepts")
 	set.Flags().IntVar(&pwMax, "password-max", 0, "longest password this project accepts")
 	set.Flags().BoolVar(&confirm, "confirm-email", false, "require a confirmed address before sign-in")
@@ -220,31 +221,66 @@ func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL s
 	return out
 }
 
-// mergeSettings puts the named flags over the JSON body.
+// readSettings fetches the document a `set` is about to change.
 //
-// Both are accepted rather than one winning silently: a person setting the
-// password floor and a site URL in the same breath should not have to choose
-// which half to write by hand.
-func mergeSettings(inline string, named, current map[string]any) ([]byte, error) {
+// A failure here refuses the write rather than falling back to an empty
+// document: merging into nothing is exactly the erasure this read exists to
+// prevent, and it would be indistinguishable from a successful change.
+func readSettings(r Resolvers, cmd *cobra.Command) (map[string]any, error) {
+	rest, err := r.REST(cmd)
+	if err != nil {
+		return nil, err
+	}
+	status, raw, err := rest.Do(cmd.Context(), http.MethodGet, base+"/settings", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("could not read the current settings to change one of them (%d): %s",
+			status, strings.TrimSpace(string(raw)))
+	}
+	current := map[string]any{}
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return nil, fmt.Errorf("the current settings did not parse: %w", err)
+	}
+	return current, nil
+}
+
+// parseFragment reads --json as what it is: some of the fields, not all of them.
+//
+// Parsed BEFORE anything is fetched, so a typo in the JSON is answered without a
+// round trip — and so the caller who said nothing at all can be told so.
+func parseFragment(inline string) (map[string]any, error) {
+	if strings.TrimSpace(inline) == "" {
+		return nil, nil
+	}
+	if !json.Valid([]byte(inline)) {
+		return nil, fmt.Errorf("--json is not valid JSON")
+	}
+	fragment := map[string]any{}
+	if err := json.Unmarshal([]byte(inline), &fragment); err != nil {
+		return nil, fmt.Errorf("--json must be a JSON object: %w", err)
+	}
+	return fragment, nil
+}
+
+// mergeSettings puts the named flags over the --json fragment, over the document
+// as it stands.
+//
+// Both flavours of caller are accepted rather than one winning silently: a person
+// setting the password floor and a site URL in the same breath should not have to
+// choose which half to write by hand.
+func mergeSettings(fragment, named, current map[string]any) ([]byte, error) {
 	merged := map[string]any{}
 	// The document as it stands, under everything the caller said.
 	for k, v := range current {
 		merged[k] = v
 	}
-	if strings.TrimSpace(inline) != "" {
-		if !json.Valid([]byte(inline)) {
-			return nil, fmt.Errorf("--json is not valid JSON")
-		}
-		if err := json.Unmarshal([]byte(inline), &merged); err != nil {
-			return nil, fmt.Errorf("--json must be a JSON object: %w", err)
-		}
+	for k, v := range fragment {
+		merged[k] = v
 	}
 	for k, v := range named {
 		merged[k] = v
-	}
-	if len(merged) == 0 {
-		return nil, fmt.Errorf("nothing to send: name a setting (--password-min, --password-max, " +
-			"--confirm-email, --site-url) or pass the whole document with --json")
 	}
 	return json.Marshal(merged)
 }
@@ -323,23 +359,26 @@ func auditCmd(r Resolvers) *cobra.Command {
 	c := &cobra.Command{
 		Use: "audit", Short: "This project's auth audit log", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			q := ""
-			add := func(k, v string) {
-				if v == "" {
-					return
-				}
-				sep := "?"
-				if q != "" {
-					sep = "&"
-				}
-				q += sep + k + "=" + v
-			}
+			// ENCODED, not concatenated. A cursor is an opaque token and an
+			// event type is somebody else's vocabulary: an & or an = inside
+			// either one used to split into parameters nobody typed, and the
+			// page that came back was filtered by something the caller never
+			// asked for.
+			q := url.Values{}
 			if limit > 0 {
-				add("limit", fmt.Sprint(limit))
+				q.Set("limit", fmt.Sprint(limit))
 			}
-			add("cursor", cursor)
-			add("event_type", eventType)
-			return call(r, cmd, http.MethodGet, base+"/audit"+q, nil)
+			if cursor != "" {
+				q.Set("cursor", cursor)
+			}
+			if eventType != "" {
+				q.Set("event_type", eventType)
+			}
+			path := base + "/audit"
+			if enc := q.Encode(); enc != "" {
+				path += "?" + enc
+			}
+			return call(r, cmd, http.MethodGet, path, nil)
 		},
 	}
 	c.Flags().IntVar(&limit, "limit", 0, "how many entries")

@@ -176,7 +176,10 @@ func TestRejectionsAreTerminalAndActionable(t *testing.T) {
 		{"expired", []string{"time ran out", "Arm again"}},
 		{"invalid_code", []string{"does not match", "case-insensitive", "dash is optional"}},
 		{"not_publisher", []string{"never joins as a publisher", "Arm again", "report this"}},
-		{"forbidden", []string{"may watch and nothing else", "palbase status", "--environment"}},
+		// It pinned "--environment", and that is how the false promise stayed:
+		// attach resolves the LINKED project, where the flag is refused, so the
+		// one word this assertion demanded was the one word that could not help.
+		{"forbidden", []string{"may watch and nothing else", "palbase status", "palbase link <ref>"}},
 		// Not in the contract's list: palsvc's join authorizer replies
 		// "unauthorized" today, and a reason invented later must still land
 		// somewhere useful rather than printing bare.

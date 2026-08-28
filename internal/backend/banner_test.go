@@ -103,3 +103,38 @@ func TestTheCloudSelectionFlagsAreRefusedRatherThanIgnored(t *testing.T) {
 		t.Errorf("the flag is named more than once: %v", err)
 	}
 }
+
+// A REFUSAL MAY ONLY NAME A WAY OUT THAT WORKS, and `--environment <ref>` is
+// not one.
+//
+// Every one of these lines is printed at the moment somebody is stuck, so the
+// last line is the one they type. `--environment` alone resolves NOTHING: with
+// no `--project`, selection.Resolver reads `.palbase/selection.json` for the
+// project id first, and an unlinked checkout has no such file — the run dies
+// with "no project selected" before the environment flag is ever consulted
+// (proved in TestResolve_EnvironmentFlagAloneNamesNoProject). Measured live
+// 2026-08-26: `--environment` alone died with "no project selected", linked it
+// was ignored. It addresses a cloud project in ZERO configurations.
+//
+// `palbase link <ref>` is the line that does what the reader wanted: a bare ref
+// IS an address this cloud knows (project_link.go resolves `<ref>` to
+// `https://<ref>.<PublicHost>`), so one environment can be acted on by name.
+func TestTheUnlinkedRefusalsOfferNoFlagThatCannotSelect(t *testing.T) {
+	inScratchCheckout(t)
+
+	_, readErr := ReadTarget()
+	if readErr == nil {
+		t.Fatal("an unlinked checkout resolved a target")
+	}
+	for name, err := range map[string]error{
+		"ReadTarget":           readErr,
+		"unlinkedOrCloudError": unlinkedOrCloudError(readErr),
+	} {
+		if strings.Contains(err.Error(), "--environment") {
+			t.Errorf("%s offers --environment, which selects nothing without --project: %v", name, err)
+		}
+		if !strings.Contains(err.Error(), "palbase link <ref>") {
+			t.Errorf("%s never names the way to act on one environment: %v", name, err)
+		}
+	}
+}

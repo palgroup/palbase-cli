@@ -59,10 +59,20 @@ func storeVerifiedToken(ctx context.Context, target Target, token string) error 
 //
 // Only the trailing newline goes: a token is one line, and an `echo` that
 // feeds one would otherwise be rejected for the newline it appended.
+//
+// The cap is read one byte PAST the line so an oversized input is refused
+// rather than silently cut: a truncated token is still a well-formed string,
+// so the caller would only learn about it as "did not accept this token",
+// which points at the stack instead of at the pipe.
+const maxTokenBytes = 1 << 16
+
 func readTokenFrom(r io.Reader) (string, error) {
-	raw, err := io.ReadAll(io.LimitReader(r, 1<<16))
+	raw, err := io.ReadAll(io.LimitReader(r, maxTokenBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(raw) > maxTokenBytes {
+		return "", fmt.Errorf("the token on stdin is larger than %d bytes — nothing was stored", maxTokenBytes)
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {

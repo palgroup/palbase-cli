@@ -25,7 +25,47 @@ import (
 // to skip the banner in JSON mode, because the run that most needs to say where
 // it went is the scripted one.
 func PrintTargetFor(cmd *cobra.Command) (Target, error) {
+	if err := RefuseSelectionFlagsWhenLinked(cmd); err != nil {
+		return Target{}, err
+	}
 	return PrintTarget(cmd.Context(), cmd.ErrOrStderr())
+}
+
+// ResolveTargetFor is the same resolution for a verb that prints its own banner.
+//
+// `deploys`, `rollback`, `status` and `debug attach` format the destination into
+// a longer line of their own, so they call ResolveTarget directly — and that is
+// how they came to accept --project/--environment and drop them. The refusal
+// belongs to the RESOLUTION, not to the printing, or the next verb that formats
+// its own line inherits the bug.
+func ResolveTargetFor(cmd *cobra.Command) (Target, error) {
+	if err := RefuseSelectionFlagsWhenLinked(cmd); err != nil {
+		return Target{}, err
+	}
+	return ResolveTarget(cmd.Context())
+}
+
+// RefuseSelectionFlagsWhenLinked is the gate the whole family shares.
+//
+// It asks ReadTarget, not ResolveTarget, and the difference is the point: the
+// flags are only wrong when the LINK FILE is what answered. In a checkout with
+// no link they are the only way to name a project, and refusing them there would
+// trade a silent ignore for a refusal of the one thing that works.
+//
+// An unreadable link file is not a refusal — the verb below reports it, with the
+// wording that fixes it. Two messages about the same missing file is one too
+// many.
+//
+// EXPORTED because one stack verb does not come through PrintTargetFor:
+// `palbase logs` reads the link itself and, for a cloud project, fetches THAT
+// environment's lines from the control plane. A verb that resolves its own
+// target has to ask for the gate, or it inherits exactly the bug this closes.
+func RefuseSelectionFlagsWhenLinked(cmd *cobra.Command) error {
+	linked, err := ReadTarget()
+	if err != nil {
+		return nil
+	}
+	return refuseCloudSelectionFlags(cmd, linked)
 }
 
 // PrintTarget resolves where this checkout acts and announces it.
@@ -72,10 +112,15 @@ func refuseCloudSelectionFlags(cmd *cobra.Command, target Target) error {
 	if len(named) == 0 {
 		return nil
 	}
+	// BOTH LINES NAME A COMMAND THIS BINARY ANSWERS. The first offered
+	// `palbase env <slug>`, which was retired at the v2 cutover — so the refusal
+	// that exists to stop somebody acting on the wrong project handed them a
+	// command that fails, at the moment they were already looking for one that
+	// works. A refusal is only as good as its way out.
 	return fmt.Errorf(
 		"%s select a cloud environment, and this checkout is linked to %s.\n"+
-			"  palbase env <slug>   switch which environment this checkout acts on\n"+
-			"  palbase link <…>     bind it somewhere else",
+			"  palbase link <ref>   point this checkout at another project — these verbs read the link\n"+
+			"  palbase status       show which one it is pointed at now",
 		strings.Join(dedupe(named), " and "), target.Describe())
 }
 
@@ -99,12 +144,20 @@ func dedupe(items []string) []string {
 // list and status — there is no `use`. Fourteen places across this CLI sent
 // people to it, and the one line offered to somebody with a cloud project was
 // the only line they could not follow. The four below are the four that work.
+//
+// AND THE FOURTH USED TO BE A FLAG. `--environment <ref>   act on one without
+// linking` was the last line here, which is the line a stuck reader types — and
+// it selects nothing on its own: the resolver wants a project id from
+// `.palbase/selection.json` before the environment flag matters, and this error
+// is only reached when there is no such file. Same correction as
+// readLinkedProject's, for the same reason, and `palbase link <ref>` is what
+// replaces it there too.
 func unlinkedOrCloudError(cause error) error {
 	return fmt.Errorf(
 		"this checkout is not linked to a project, and no cloud project is selected either.\n"+
 			"  palbase link <project>   a project in the cloud\n"+
+			"  palbase link <ref>       one environment of it, by ref\n"+
 			"  palbase link <url>       a project running on this machine\n"+
-			"  palbase start            bring one up here and link to it\n"+
-			"  --environment <ref>      act on one without linking (%v)",
+			"  palbase start            bring one up here and link to it (%v)",
 		cause)
 }

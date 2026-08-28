@@ -58,7 +58,10 @@ from .palbase/selection.json, falling back to the committed platform slot).`, la
 			// through the shared resolver.
 			resolver := r.Selection()
 			if resolver == nil {
-				return fmt.Errorf("no project selected — run `palbase link <project>`, or pass --environment <ref>")
+				// NOT `--environment <ref>`, which is what this offered: the
+				// flag narrows an already-selected project and cannot name one.
+				return fmt.Errorf(
+					"no project selected — run `palbase link <project>`, or `palbase link <ref>` for one environment of it")
 			}
 			cfg, err := selection.Load("")
 			if err != nil {

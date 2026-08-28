@@ -140,17 +140,23 @@ func userCmd(r Resolvers) *cobra.Command {
   palbase flags user list <user-id>
   palbase flags user clear <user-id>
 
-These commands do NOT touch config/flags.ts. config/flags.ts declares a flag's
-type and its Environment-wide DEFAULT and is applied by a deploy; an override is
-runtime state for one user, effective immediately, and travels with nothing.
+These commands do NOT touch a flag's DEFINITION. A definition — the key, its
+type and its Environment-wide DEFAULT — is written by ` + "`palbase flags add`" + `
+straight onto the Environment; an override is runtime state for one user,
+effective immediately, and travels with nothing.
 
 Dotted ` + "`palbase.`" + `-namespaced keys work here — overriding
 ` + "`palbase.debug_console`" + ` for the one user you are helping, while
 production stays off, is what this is for. (` + "`palbase flags add`" + ` rejects
-dotted keys only because they cannot be declared in config/flags.ts.)
+dotted keys because a DEFINITION key is bounded by the Environment's own rule:
+a letter, then letters, digits and underscores.)
 
 The flag must already exist on the Environment: an override of an undeclared key
-is a 404 (` + "`key_not_found`" + `). Target another Environment with --environment.`,
+is a 404 (` + "`key_not_found`" + `).
+
+The global --project / --environment flags select a CLOUD environment. In a
+checkout linked to a project they do not apply and are REFUSED — run
+` + "`palbase link <ref>`" + ` to point the checkout at another project.`,
 	}
 	cmd.AddCommand(setUserCmd(r), unsetUserCmd(r), listUserCmd(r), clearUserCmd(r))
 	return cmd
@@ -215,7 +221,11 @@ succeed with the wrong type.`,
 
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "✓ %s = %s for user %s (%s)\n", res.Key, res.Value, userID, ref)
-			fmt.Fprintln(out, "  live now — this is runtime state, not config/flags.ts")
+			// `config/flags.ts` is what this line named, and that file has been
+			// inert since flag definitions moved onto the Environment. The
+			// contrast the line is drawing is still real — override vs
+			// definition — so it draws it against the thing that exists.
+			fmt.Fprintln(out, "  live now — this is runtime state, not the flag's definition")
 			return nil
 		},
 	}

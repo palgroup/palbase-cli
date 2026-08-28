@@ -3,10 +3,15 @@
 // the platform link commands). palbase IS the backend CLI — there is no
 // `backend` parent command.
 //
-// EVERY one of them acts on the SELECTED ENVIRONMENT (`palbase env use`,
-// overridable with the global --project / --environment). There is no
-// `--branch`: the Palbase branch is gone as a resource, and a Git branch is
-// never a runtime selector — it only maps to an Environment for auto-deploy.
+// EVERY one of them acts on ONE environment: the one this checkout is linked to
+// (`palbase link <project>`, or `palbase link <ref>` for a single environment of
+// it), and otherwise the selection the global --project / --environment narrow.
+// The link WINS, and the flags are refused rather than dropped when it answers.
+// (`palbase env use` is what this said; it was retired at the v2 cutover.)
+//
+// There is no `--branch`: the Palbase branch is gone as a resource, and a Git
+// branch is never a runtime selector — it only maps to an Environment for
+// auto-deploy.
 package backend
 
 import (
@@ -101,7 +106,10 @@ type Resolvers struct {
 // Resolvers) fails with a clear error instead of a nil dereference.
 func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 	if r.Selection == nil || r.Selection() == nil {
-		return selection.Selection{}, errors.New("no project selected — run `palbase link <project>`, or pass --environment <ref>")
+		// `--environment <ref>` is not the second way in: it narrows a project
+		// the resolver has already found, and here there is none.
+		return selection.Selection{}, errors.New(
+			"no project selected — run `palbase link <project>`, or `palbase link <ref>` for one environment of it")
 	}
 	return r.Selection().Resolve(ctx)
 }

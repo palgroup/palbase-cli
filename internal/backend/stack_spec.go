@@ -133,7 +133,7 @@ func reportStaleContracts(refreshed string, envs appEnvironments, w io.Writer) {
 	}
 	fmt.Fprintf(w, "\nonly %s was refreshed. The others still describe what they last served:\n  %s\n",
 		refreshed, strings.Join(stale, "\n  "))
-	fmt.Fprintln(w, "  `palbase link` fetches every environment's contract; `palbase env <slug>` then `palbase spec` refreshes one.")
+	fmt.Fprintln(w, "  `palbase link <project>` fetches every environment's contract; `palbase link <ref>` then `palbase spec` refreshes one.")
 }
 
 // fetchStackSpec asks the management surface what the stack is serving.

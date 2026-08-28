@@ -13,7 +13,10 @@
 // cursor. A line older than the poll window is missed by a follower that was not
 // running — which is what a follower means anyway.
 //
-// Logs belong to an Environment: override the target with --environment.
+// Logs belong to an Environment, and this command reads WHICH ONE from the
+// link — not from `--environment`. In a linked checkout that flag is refused
+// rather than applied; it used to be dropped without a word, so a person who
+// asked for staging read production and the banner agreed with them.
 package logs
 
 import (
@@ -206,6 +209,12 @@ new lines every 2s — Ctrl-C to stop.
   palbase logs --follow                 tail live`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// THE LINK ANSWERS THIS, so the selection flags do not — and being
+			// dropped here costs more than anywhere else: everything below
+			// prints the lines of a place the reader did not name.
+			if err := backend.RefuseSelectionFlagsWhenLinked(cmd); err != nil {
+				return err
+			}
 			// A LINKED PROJECT HAS NO LOG SURFACE, and saying so beats resolving
 			// a cloud environment nobody asked for. Measured: in a checkout
 			// linked to a project, this silently ignored the link, resolved the

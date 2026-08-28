@@ -111,7 +111,10 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 		return true, err
 	}
 	if !ok {
-		return true, errors.New("no project to roll back: link this checkout, or pass --environment <ref>")
+		// `--environment <ref>` could never answer this: with nothing linked
+		// there is no project for it to narrow.
+		return true, errors.New(
+			"no project to roll back: run `palbase link <project>`, or `palbase link <ref>` for one environment of it")
 	}
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
@@ -224,7 +227,7 @@ func listProjectDeployments(ctx context.Context, target Target, cred Credentials
 // is a different authority answering a different question, while `rollback` has
 // nowhere else to go and reports the error ResolveTarget gave.
 func openLinked(cmd *cobra.Command) (Target, Credentials, bool, error) {
-	target, err := ResolveTarget(cmd.Context())
+	target, err := ResolveTargetFor(cmd)
 	if err != nil {
 		return Target{}, Credentials{}, false, err
 	}

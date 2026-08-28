@@ -148,12 +148,21 @@ func ReadTarget() (Target, error) {
 func readLinkedProject() (Target, error) {
 	raw, err := os.ReadFile(projectPath())
 	if errors.Is(err, os.ErrNotExist) {
+		// THE LAST LINE IS THE ONE PEOPLE TYPE, and it used to be
+		// `--environment <ref>   act on one without linking`. That flag NARROWS
+		// a project; it cannot name one. With no `--project`, the resolver reads
+		// `.palbase/selection.json` for the project id before it ever looks at
+		// the environment flag, and a checkout with no link has no such file —
+		// so the advice printed here led straight to "no project selected".
+		// A bare ref IS an address this cloud knows (`link` resolves it to
+		// `<ref>.<PublicHost>`), so that is the line that does what the reader
+		// came for.
 		return Target{}, errors.New(
 			"this checkout is not linked to a project.\n" +
 				"  palbase link <project>        a project in the cloud\n" +
+				"  palbase link <ref>            one environment of it, by ref\n" +
 				"  palbase link <url>            something running on this machine\n" +
-				"  palbase start                 bring one up here and link to it\n" +
-				"  --environment <ref>           act on one without linking")
+				"  palbase start                 bring one up here and link to it")
 	}
 	if err != nil {
 		return Target{}, err

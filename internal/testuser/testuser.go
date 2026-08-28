@@ -50,12 +50,16 @@ func Cmd() *cobra.Command {
                                                a new user.
   palbase test-user delete <id>                Purge a test user.
 
-Templates live on the stack and take effect on
-deploy — there is no way to author one from here, because git is the source of
-truth for them.
+Templates are declared in config/test-users.ts and carried to the stack by
+` + "`palbase push`" + `. There is no way to author one from here — no verb in
+this CLI writes a template.
 
 Each environment verifies tokens against its OWN auth, so a minted token is only
-valid on the environment that minted it. Override the target with --environment.
+valid on the environment that minted it.
+
+The global --project / --environment flags select a CLOUD environment. In a
+checkout linked to a project they do not apply and are REFUSED — run
+` + "`palbase link <ref>`" + ` to point the checkout at another project.
 
 The minted users are is_test; the server mints their passwords + access tokens.`,
 	}
@@ -75,7 +79,7 @@ func createCmd() *cobra.Command {
 		Short: "Mint test user(s) for the selected environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
-			target, cred, err := resolveProject(cmd.Context())
+			target, cred, err := resolveProject(cmd)
 			if err != nil {
 				return err
 			}
@@ -104,7 +108,7 @@ func listCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "List the selected environment's test users",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, cred, err := resolveProject(cmd.Context())
+			target, cred, err := resolveProject(cmd)
 			if err != nil {
 				return err
 			}
@@ -125,7 +129,7 @@ func templatesCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "List the fixture-account templates on this stack",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, cred, err := resolveProject(cmd.Context())
+			target, cred, err := resolveProject(cmd)
 			if err != nil {
 				return err
 			}
@@ -168,7 +172,7 @@ table, which is how the clone gets its own name or handle:
 			if err != nil {
 				return err
 			}
-			target, cred, err := resolveProject(cmd.Context())
+			target, cred, err := resolveProject(cmd)
 			if err != nil {
 				return err
 			}
@@ -192,7 +196,7 @@ func deleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Purge a test user and everything that belongs to them",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, cred, err := resolveProject(cmd.Context())
+			target, cred, err := resolveProject(cmd)
 			if err != nil {
 				return err
 			}

@@ -333,7 +333,10 @@ func TestResolve_DeletedEnvironmentIsNamed_NotSilentlyReplaced(t *testing.T) {
 	r.Dir = dir
 	_, err := r.Resolve(context.Background())
 	require.ErrorContains(t, err, "env_gone")
-	require.ErrorContains(t, err, "palbase env use")
+	// The way out has to be a command the binary answers: this pinned
+	// `palbase env use`, which was retired at the v2 cutover, and pinning it is
+	// how the dead name survived a year of green runs.
+	require.ErrorContains(t, err, "palbase link <ref>")
 }
 
 func TestResolve_ProjectWithoutAnEnvironmentIsNotAUsableRuntime(t *testing.T) {
@@ -508,4 +511,29 @@ func TestResolveProjectID_RefusesAnAmbiguousName(t *testing.T) {
 	})
 	_, err := selection.ResolveProjectID(context.Background(), fake.REST(), "todoapp")
 	require.ErrorContains(t, err, "2 projects")
+}
+
+// `--environment <ref>` ALONE names no project, and never could.
+//
+// Seven shipped refusals offered it as the way to "act on one without linking".
+// It is not: with no --project, Resolve reads .palbase/selection.json for the
+// project id BEFORE it ever looks at the environment flag, and an unlinked
+// checkout has no such file. The flag narrows a project; it cannot name one.
+//
+// This is the fact those strings were corrected against. It goes red the day
+// somebody makes --environment self-sufficient — which is the day the advice
+// would be worth printing again.
+func TestResolve_EnvironmentFlagAloneNamesNoProject(t *testing.T) {
+	dir := selectiontest.Chdir(t)
+	fake := selectiontest.New(t)
+
+	r := fake.Resolver()
+	r.Dir = dir
+	r.EnvironmentFlag = "abcd"
+
+	_, err := r.Resolve(context.Background())
+	require.Error(t, err, "--environment alone was accepted as a selection")
+	var notSelected selection.ErrNotSelected
+	require.ErrorAs(t, err, &notSelected,
+		"--environment alone must fail as an unmade SELECTION, not somewhere later")
 }

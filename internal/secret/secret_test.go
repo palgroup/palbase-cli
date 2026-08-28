@@ -305,3 +305,39 @@ func TestRunPassesTheChildsOwnFlagsThrough(t *testing.T) {
 		t.Errorf("the child's flag did not reach it: %q", out.String())
 	}
 }
+
+// TestSetRefusesAValueOverTheVaultCeiling is the truncation regression. The
+// vault caps one secret at 64 KiB and the read here was `LimitReader(stdin,
+// 64<<10)` with no check that the reader had been exhausted, so a larger key or
+// PEM was stored as its first 64 KiB — sealed, wrong, and announced as "is set".
+// A secret nobody can tell is corrupt is worse than one that failed to store.
+func TestSetRefusesAValueOverTheVaultCeiling(t *testing.T) {
+	held := map[string]string{}
+	srv, _ := projectHolding(t, held)
+	linkedCheckout(t, srv.URL)
+
+	oversized := strings.Repeat("k", maxValueBytes+1)
+	out, _, err := runSecret(t, oversized, "set", "SIGNING_KEY", "--stdin")
+	if err == nil {
+		t.Fatalf("an oversized value was accepted; output = %q", out)
+	}
+	if _, stored := held["SIGNING_KEY"]; stored {
+		t.Errorf("a prefix was stored anyway: %d of %d bytes", len(held["SIGNING_KEY"]), len(oversized))
+	}
+	if strings.Contains(out, "is set") {
+		t.Errorf("the truncation was announced as success:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "65536") {
+		t.Errorf("the refusal does not say what the limit is: %v", err)
+	}
+
+	// Exactly at the ceiling still goes through — an off-by-one here would
+	// refuse a secret the vault accepts.
+	exact := strings.Repeat("k", maxValueBytes)
+	if _, _, err := runSecret(t, exact, "set", "AT_THE_LINE", "--stdin"); err != nil {
+		t.Fatalf("a value exactly at the ceiling was refused: %v", err)
+	}
+	if held["AT_THE_LINE"] != exact {
+		t.Errorf("stored %d bytes of %d", len(held["AT_THE_LINE"]), len(exact))
+	}
+}

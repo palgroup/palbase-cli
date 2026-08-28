@@ -240,9 +240,14 @@ var rejectionHelp = map[string]string{
 		"`attach` never joins as a publisher — it presents the pairing code and nothing " +
 		"else — so there is nothing to correct here. Arm again on the device for a fresh " +
 		"code, and report this if it keeps happening.",
+	// `--environment` does NOT override it here: attach resolves the LINKED
+	// project, and in a linked checkout the flag is refused rather than applied.
+	// Sending somebody to a flag that cannot move them is worse than sending
+	// them nowhere — they retype it, get the same rejection, and conclude the
+	// device is at fault.
 	"forbidden": "not allowed on this session. A viewer may watch and nothing else. Check that " +
-		"the selected environment is the one the device armed against — `palbase status` " +
-		"shows it, and `--environment` overrides it.",
+		"the environment this checkout is linked to is the one the device armed against — " +
+		"`palbase status` shows it, and `palbase link <ref>` points it at another.",
 }
 
 func (e rejected) Error() string {

@@ -18,8 +18,9 @@ import (
 )
 
 // pullSpecConfigEntry is the single-ENVIRONMENT config the SDK code generators
-// consume (the Swift SPM plugin turns it into Palbase-Info.plist; the Gradle
-// plugin and @palbase/web read it directly).
+// consume (this CLI runs the SDK's palbase-swiftgen over it to emit
+// Palbase-Info.plist — the SwiftPM plugin that used to do that is gone; the
+// Gradle plugin and @palbase/web read it directly).
 //
 // It carries NO name for the project it points at, and no branch. The API KEY
 // carries the project's identity — `pb_<ref>_<scope><random>` — so a `ref` field
@@ -102,11 +103,12 @@ committed API contract stays current.
 
   web      → ` + webArtifactsDir + `/openapi.json   (` + "`palbe-gen`" + ` regenerates palbe.gen.ts from it,
                                     via the predev/prebuild hook or by hand)
-  ios/macos→ ` + nativeArtifactsDir + `/openapi.json  then regenerates Palbase/Generated/ —
-                                    PalbaseGenerated.swift + Palbase-Info.plist — using
-                                    the generator from the palbackend-ios checkout
-                                    SwiftPM resolved for this project. Commit the result.
-  android  → ` + nativeArtifactsDir + `/openapi.json  (the Gradle plugin regenerates on the next build)
+  ios/macos→ ` + nativeArtifactsDir + `/openapi/<env>.json  ONE PER ENVIRONMENT, then regenerates
+                                    Palbase/Generated/ — PalbaseGenerated.swift +
+                                    Palbase-Info.plist — using the generator from the
+                                    palbackend-ios checkout SwiftPM resolved for this
+                                    project. Commit the result.
+  android  → ` + nativeArtifactsDir + `/openapi/<env>.json  (the Gradle plugin regenerates on the next build)
 
 Which of those run is read from the COMMITTED slot files the link commands
 wrote (` + webArtifactsDir + `/palbase-config.json, ` + nativeArtifactsDir + `/<platform>/palbase-config.json),
@@ -116,7 +118,9 @@ spec does NOT write the per-environment runtime config (palbase-config.json —
 base URL + key). That comes from ` + "`palbase <platform> link`" + ` and is re-written by
 ` + "`palbase <platform> use <environment>`" + `.
 
-Override the target with the global --project / --environment flags.`,
+The global --project / --environment flags select a CLOUD environment. In a
+checkout linked to a project they do not apply and are REFUSED — run
+` + "`palbase link <ref>`" + ` to point the checkout at another project.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
 

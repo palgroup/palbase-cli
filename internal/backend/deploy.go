@@ -318,7 +318,15 @@ func requireMappedGitBranch(sel selection.Selection, resolve gitBranchResolver) 
 		label = sel.EnvironmentRef()
 	}
 	if mapped == "" {
-		return fmt.Errorf("selected environment %q has no mapped Git branch — run `palbase env branch <git-branch>` before push/pull", label)
+		// It used to say `palbase env branch <git-branch>`. That command went
+		// with the v2 cutover, and nothing replaced it: NO verb in this CLI
+		// writes source_git_branch — the mapping is a property of the
+		// environment, set where the environment is. Naming a command that does
+		// not exist costs the reader the time it takes to discover that.
+		return fmt.Errorf(
+			"selected environment %q has no mapped Git branch, and this project deploys by branch.\n"+
+				"  Nothing in this CLI sets the mapping — `palbase open` goes to the environment where it is configured",
+			label)
 	}
 	if resolve == nil {
 		resolve = currentGitBranch

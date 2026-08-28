@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
@@ -40,7 +42,7 @@ func linkedTo(t *testing.T, url string) (backend.Target, backend.Credentials) {
 	if err := backend.StoreCredential(url, cred); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := resolveProject(context.Background())
+	got, _, err := resolveProject(&cobra.Command{})
 	if err != nil {
 		t.Fatalf("a checkout with a local target and a credential did not resolve: %v", err)
 	}

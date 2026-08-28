@@ -198,8 +198,13 @@ func TestAProjectsRefusalReachesThePerson(t *testing.T) {
 }
 
 // With neither a link nor a selection there is nothing to act on, and the error
-// has to name BOTH ways to fix it — a person who never ran `link` and a person
-// who meant to pass --environment need different advice.
+// has to name BOTH ways to fix it — a whole project, or the one environment of
+// it the reader came for.
+//
+// THE SECOND DOOR USED TO BE `--environment`, and this assertion is what held it
+// open: the flag narrows a project the resolver has already found, so in a
+// checkout with no link it selects nothing at all. `palbase link <ref>` is the
+// door that opens.
 func TestWithNoProjectTheAdviceNamesBothDoors(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("HOME", t.TempDir())
@@ -210,8 +215,9 @@ func TestWithNoProjectTheAdviceNamesBothDoors(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "palbase link")
-	require.Contains(t, err.Error(), "--environment")
+	require.Contains(t, err.Error(), "palbase link <project>")
+	require.Contains(t, err.Error(), "palbase link <ref>")
+	require.NotContains(t, err.Error(), "--environment")
 }
 
 func TestParseSets(t *testing.T) {

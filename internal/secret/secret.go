@@ -194,6 +194,14 @@ its final newline is a PEM that fails to parse.`,
 	return cmd
 }
 
+// maxValueBytes is the vault's ceiling on one secret, restated here so this end
+// can REFUSE instead of truncating. The read used to stop at exactly this many
+// bytes and never ask whether more had been waiting, so a larger PEM or key was
+// sealed as its first 64 KiB and announced as set — a secret nobody can tell is
+// corrupt until the code that needs it fails somewhere else. Reading one byte
+// past the line is what makes the difference visible.
+const maxValueBytes = 64 << 10
+
 // readAssignment turns the two accepted forms into (name, value).
 func readAssignment(cmd *cobra.Command, arg string, fromStdin bool) (string, string, error) {
 	if fromStdin {
@@ -201,9 +209,12 @@ func readAssignment(cmd *cobra.Command, arg string, fromStdin bool) (string, str
 			return "", "", fmt.Errorf("--stdin takes just the name: `palbase secret set %s --stdin`",
 				strings.SplitN(arg, "=", 2)[0])
 		}
-		value, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 64<<10))
+		value, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), maxValueBytes+1))
 		if err != nil {
 			return "", "", err
+		}
+		if len(value) > maxValueBytes {
+			return "", "", fmt.Errorf("the value on standard input is larger than %d bytes, which is the most one secret can hold — nothing was stored", maxValueBytes)
 		}
 		if len(value) == 0 {
 			return "", "", fmt.Errorf("nothing arrived on standard input — a secret set to empty is a secret nobody notices is gone")

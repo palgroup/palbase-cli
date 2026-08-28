@@ -4,8 +4,12 @@ package backend
 //
 // Point the linked web project at another ENVIRONMENT of the same Project:
 // re-fetch the codegen inputs (Palbase/openapi.json + Palbase/palbase-config.json)
-// for it, record the selection in .palbase/config.json, and regenerate the typed
-// client from the refreshed contract.
+// for it, record the selection in .palbase/selection.json, and regenerate the
+// typed client from the refreshed contract.
+//
+// selection.json, NOT config.json. The two are different files with different
+// owners — `.palbase/config.json` is the EVALUATED config document a push
+// carries — and selection/config.go:62 records what the collision cost.
 //
 // It selects an ENVIRONMENT, never a branch. There is ONE web app — switching
 // environments is a config swap, so nothing in the app's own files moves.
@@ -30,11 +34,11 @@ selected project.
 
 Writes the contract to ` + webArtifactsDir + `/openapi.json, the runtime config to
 ` + webArtifactsDir + `/palbase-config.json, and records the environment in
-.palbase/config.json. Commit the refreshed ` + webArtifactsDir + `/ files alongside the
+.palbase/selection.json. Commit the refreshed ` + webArtifactsDir + `/ files alongside the
 regenerated client.
 
 The project must already be linked with 'palbase web link' (its app id is read
-from .palbase/config.json).`,
+from .palbase/selection.json).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// A project you run has one environment; switching is a cloud verb.
 			if err := refuseUseOnBoundProject("web"); err != nil {
@@ -52,7 +56,10 @@ from .palbase/config.json).`,
 			// through the shared resolver.
 			resolver := wc.r.Selection()
 			if resolver == nil {
-				return fmt.Errorf("no project selected — run `palbase link <project>`, or pass --environment <ref>")
+				// NOT `--environment <ref>`, which is what this offered: the
+				// flag narrows an already-selected project and cannot name one.
+				return fmt.Errorf(
+					"no project selected — run `palbase link <project>`, or `palbase link <ref>` for one environment of it")
 			}
 			cfg, err := selection.Load("")
 			if err != nil {
