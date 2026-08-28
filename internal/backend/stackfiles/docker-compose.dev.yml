@@ -197,7 +197,7 @@ services:
       # projenin `@Job` sınıfı sessizce hiç ateşlenmiyordu. Mount edilmeyen
       # bir modül şikâyet etmez; kayma ancak müşteri fark edince görünür.
       # `cmd/palsvc/modulemask_test.go` bu üç maskeyi kataloga kilitliyor.
-      - "deeplinks,documents,flags,analytics,messaging,db,auth,rt,notify,vault,storage,jobs"
+      - "deeplinks,documents,flags,analytics,messaging,db,auth,rt,notify,vault,storage,jobs,embed"
     # NOT PUBLISHED. The edge is the only way in, here as in the cloud.
     volumes:
       - artifacts:/var/lib/palbase/artifacts
