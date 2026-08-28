@@ -5,6 +5,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -533,5 +534,108 @@ func TestALanBoundStackAdvertisesTheAddressThePhoneUses(t *testing.T) {
 	want := "PALBASE_PUBLIC_ORIGIN=http://192.168.1.40:54321"
 	if !slices.Contains(env, want) {
 		t.Fatalf("compose ortamında %q yok:\n%s", want, strings.Join(env, "\n"))
+	}
+}
+
+// Zinciri OLMAYAN bir .env, ürünün kendi üreticisiyle zinciri kazanmalı.
+//
+// Ölçülen arıza: ensureBootValues, .env varsa hemen dönüyordu, dolayısıyla mühürleme
+// zinciri eklenmeden önce (v2 e0246a4, 2026-08-27) yaratılmış bir yığın onu ASLA
+// kazanmıyordu — o makinede mühürlemek zorunda olan her istemci (iOS SDK her /auth/*
+// gövdesini mühürler ve açıkta göndermeyi reddeder) giriş yapamamaya devam ediyordu.
+func TestSealingChainStateCountsWhatIsThere(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+
+	if err := os.WriteFile(env, []byte("PALBASE_ANON_KEY=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := sealingChainState(env); err != nil || n != 0 {
+		t.Fatalf("zincirsiz .env %d dondu (hata %v); 0 olmaliydi", n, err)
+	}
+
+	if err := os.WriteFile(env, []byte(
+		"PALBASE_ANON_KEY=x\nPALBASE_SEALED_SIGNING_SEED=a\nPALBASE_SEALED_BINDING=b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := sealingChainState(env); err != nil || n != 2 {
+		t.Fatalf("yarim zincir %d dondu (hata %v); 2 olmaliydi", n, err)
+	}
+
+	if err := os.WriteFile(env, []byte(
+		"PALBASE_SEALED_SIGNING_SEED=a\nPALBASE_SEALED_BINDING=b\nPALBASE_SEALED_ROOT=c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := sealingChainState(env); err != nil || n != 3 {
+		t.Fatalf("tam zincir %d dondu (hata %v); 3 olmaliydi", n, err)
+	}
+
+	// Dosya yoksa: sifir, hata degil — ensureBootValues bunu "yeni yigin" olarak okur.
+	if n, err := sealingChainState(filepath.Join(dir, "yok.env")); err != nil || n != 0 {
+		t.Fatalf("olmayan dosya %d dondu (hata %v); (0, nil) olmaliydi", n, err)
+	}
+}
+
+// FR-005: yarim zincir yazilmaz. verify.sh'in kanitli kurali — "half a chain is not a
+// chain": eslesmeyen bir SEED'in yanina ikinci bir BINDING eklemek, cogu .env okuyucusu
+// icin son-deger-kazanir demektir, yani baska bir kilikta uzerine yazma.
+func TestPartialSealingChainIsRefusedByName(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	if err := os.WriteFile(env, []byte("PALBASE_SEALED_SIGNING_SEED=a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(env)
+
+	err := migrateSealingChain(context.Background(), env, io.Discard)
+	if err == nil {
+		t.Fatal("yarim zincir kabul edildi; reddedilmeliydi")
+	}
+	if !strings.Contains(err.Error(), "1 of 3") {
+		t.Fatalf("hata kac degisken bulundugunu soylemiyor: %v", err)
+	}
+	after, _ := os.ReadFile(env)
+	if string(before) != string(after) {
+		t.Fatalf(".env yarim zincir halindeyken DEGISTIRILDI:\nonce: %s\nsonra: %s", before, after)
+	}
+}
+
+// FR-006: tam zincir varsa dokunulmaz — yeniden mint etmek, o zincirle muhurlenmis
+// her seyi oksuz birakirdi.
+func TestCompleteSealingChainIsLeftAlone(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	body := "PALBASE_SEALED_SIGNING_SEED=a\nPALBASE_SEALED_BINDING=b\nPALBASE_SEALED_ROOT=c\n"
+	if err := os.WriteFile(env, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateSealingChain(context.Background(), env, io.Discard); err != nil {
+		t.Fatalf("tam zincir hata verdi: %v", err)
+	}
+	after, _ := os.ReadFile(env)
+	if string(after) != body {
+		t.Fatalf("tam zincir degistirildi:\nonce: %s\nsonra: %s", body, after)
+	}
+}
+
+// KABLOLAMA: ensureBootValues yargiyi GERCEKTEN cagiriyor mu.
+//
+// Ustteki uc test yardimcilari olcuyor; bu, onlarin uretim yoluna bagli oldugunu
+// olcuyor. Onemi su: erken donus geri gelirse ("`.env` varsa hicbir sey yapma")
+// yardimcilar hala yesil kalir ve kusur sessizce geri doner. Yarim zincir secildi
+// cunku karar docker'a hic ulasmadan veriliyor — test bir konteyner baslatmaz.
+func TestEnsureBootValuesJudgesAnExistingEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	if err := os.WriteFile(env, []byte("PALBASE_SEALED_BINDING=b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureBootValues(context.Background(), env, io.Discard)
+	if err == nil {
+		t.Fatal("mevcut .env icin ensureBootValues hicbir sey yapmadi; yarim zinciri reddetmeliydi")
+	}
+	if !strings.Contains(err.Error(), "half a chain is not a chain") {
+		t.Fatalf("ensureBootValues yargilamiyor: %v", err)
 	}
 }

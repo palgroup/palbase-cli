@@ -410,7 +410,9 @@ func stackStateDir(group string) (string, error) {
 // else accepts.
 func ensureBootValues(ctx context.Context, envFile string, out io.Writer) error {
 	if _, err := os.Stat(envFile); err == nil {
-		return nil
+		// .env VAR — ama bu "yapacak bir sey yok" demek degil. Muhurleme zinciri bu
+		// dosyaya SONRADAN eklendi; onu tasimayan bir yigin onu buradan kazanir.
+		return migrateSealingChainWithMint(ctx, envFile, out)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -793,3 +795,124 @@ func groupOfLocalStack(url string) (string, bool) {
 // two checkouts of one project must reach the SAME stack, and two projects must
 // never reach each other's.
 func LocalStackProject(dir string) string { return "palbase-" + groupName(dir) }
+
+// sealingChainVars, bir yiginin muhurleme zincirini olusturan uc degisken.
+//
+// UCU BIRDEN ya da hicbiri. Yarim bir zincir, zinciri olmayan bir yigindan DAHA
+// kotudur: calisiyormus gibi gorunur ve dogrulanamayan belgeler uretir.
+var sealingChainVars = []string{
+	"PALBASE_SEALED_SIGNING_SEED",
+	"PALBASE_SEALED_BINDING",
+	"PALBASE_SEALED_ROOT",
+}
+
+// sealingChainState, .env'in uc zincir degiskeninden kacini tasidigini soyler.
+//
+// Dosya yoksa (0, nil): cagiran bunu "yeni yigin" olarak okur, hata olarak degil —
+// ensureBootValues'in normal uretim yolu tam olarak o durumdur.
+func sealingChainState(envFile string) (int, error) {
+	body, err := os.ReadFile(envFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	lines := strings.Split(string(body), "\n")
+	present := 0
+	for _, v := range sealingChainVars {
+		for _, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), v+"=") {
+				present++
+				break
+			}
+		}
+	}
+	return present, nil
+}
+
+// migrateSealingChain, mevcut bir .env'in zincir durumunu YARGILAR.
+//
+// Uc sonuc: tam zincir (dokunulmaz), hic zincir yok (mint edilebilir), ya da YARIM —
+// ve yarim, yazilmamasi gereken tek durumdur. Eslesmeyen bir SEED'in yanina ikinci bir
+// BINDING eklemek, cogu .env okuyucusu icin son-deger-kazanir demektir; yani baska bir
+// kilikta uzerine yazma. Operatore soyleyip durmak, sessizce bozmaktan iyidir.
+func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) error {
+	present, err := sealingChainState(envFile)
+	if err != nil {
+		return err
+	}
+	if present == 0 || present == 3 {
+		return nil
+	}
+	return fmt.Errorf(
+		"this stack's .env carries %d of 3 sealing variables — half a chain is not a chain.\n"+
+			"  Remove %s from %s, then run `palbase start` again to mint a fresh one.",
+		present, strings.Join(sealingChainVars, ", "), envFile)
+}
+
+// migrateSealingChainWithMint, yargilar ve gerekiyorsa zinciri GERCEKTEN ekler.
+//
+// Uretici yiginin kendisi (`--init-env`): burada ikinci bir uygulama yazmak, gecerli bir
+// anahtarin nasil gorundugu konusunda ikinci bir gorus olurdu, ve ikisinin anlasmadigi
+// gun bir yigin hicbir seyin kabul etmedigi bir anahtarla acilir.
+func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Writer) error {
+	if err := migrateSealingChain(ctx, envFile, out); err != nil {
+		return err
+	}
+	present, err := sealingChainState(envFile)
+	if err != nil || present == 3 {
+		return err
+	}
+
+	fmt.Fprintln(out, "▸ this stack predates sealing — minting its chain")
+	tmp, err := os.MkdirTemp("", "palbase-chain-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+
+	palsvc := stackImages[0].fallback
+	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
+		palsvc = override
+	}
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+		"-v", tmp+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
+		"--init-env", ".env")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("mint this stack's sealing chain: %w\n%s", err, output)
+	}
+	minted, err := os.ReadFile(filepath.Join(tmp, ".env"))
+	if err != nil {
+		return err
+	}
+
+	// UCU BIRDEN, tek yazimda: yarim bir ekleme, yukarida reddettigimiz durumu kendi
+	// elimizle yaratmak olurdu.
+	var chain strings.Builder
+	found := 0
+	for _, line := range strings.Split(string(minted), "\n") {
+		for _, v := range sealingChainVars {
+			if strings.HasPrefix(strings.TrimSpace(line), v+"=") {
+				chain.WriteString(strings.TrimSpace(line) + "\n")
+				found++
+			}
+		}
+	}
+	if found != 3 {
+		return fmt.Errorf(
+			"the stack image minted %d of 3 sealing variables — it is too old to seal.\n"+
+				"  Upgrade it: `palbase upgrade`", found)
+	}
+
+	f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(chain.String()); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "▸ sealing chain added — clients that must seal can sign in now")
+	return nil
+}
