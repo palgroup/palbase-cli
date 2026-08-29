@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"net/http"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -178,6 +179,19 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// push ships code and schema: settings reach the stack directly, from
 	// whoever changes them, and a copy of them in the source tree could only
 	// disagree with the live one.
+	//
+	// But the NAMES the stack holds are what makes `Secrets.get("…")`,
+	// `Flags.isEnabled("…")` and `@Upload({ bucket })` compile-checked, and
+	// something has to ask for them. `build` is where `palbase-env.d.ts` is
+	// already regenerated, so it is where the other generated file belongs too:
+	// one verb regenerates a project's types, not two.
+	//
+	// BEST-EFFORT ON PURPOSE. `build` works offline — that is its whole shape —
+	// so an unreachable stack is reported and skipped, never fatal, and the
+	// existing file is left exactly as it was. Narrowing a project's types to
+	// nothing because a network call failed would turn every `Secrets.get()` in
+	// the codebase into a compile error reading "your code is wrong".
+	landStackTypes(ctx, cwd, out)
 
 	node.Stdout = out
 	node.Stderr = out
@@ -192,6 +206,28 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		return nil
 	}
 	return nil
+}
+
+// landStackTypes regenerates palbase-stack.d.ts from the names the linked stack
+// holds. Best-effort: a checkout with no stack, or a stack that cannot be
+// reached, leaves the existing file alone and says so in one line.
+func landStackTypes(ctx context.Context, cwd string, out io.Writer) {
+	target, err := ReadTarget()
+	if err != nil {
+		// Not linked to anything. Nothing to ask, and nothing is wrong.
+		return
+	}
+	names, err := stackNamesFor(ctx, target)
+	if err != nil {
+		fmt.Fprintf(out, "  %s not refreshed — %v\n", stackTypesFile, err)
+		return
+	}
+	if err := generateStackTypes(ctx, cwd, filepath.Join(cwd, "node_modules"), names); err != nil {
+		fmt.Fprintf(out, "  %s not refreshed — %v\n", stackTypesFile, err)
+		return
+	}
+	fmt.Fprintf(out, "✓ %s (%d secret(s), %d flag(s), %d bucket(s))\n",
+		stackTypesFile, len(names.Secrets), len(names.Flags), len(names.Buckets))
 }
 
 // landEnvTypes copies the generated palbase-env.d.ts out of the staging tree and
@@ -298,4 +334,55 @@ func majorOf(version string) int {
 		return 0
 	}
 	return n
+}
+
+// stackNamesFor asks the linked stack for the three name sets the generated
+// types are rendered from.
+//
+// One round trip per set, and a failure in ANY of them fails the whole read:
+// a partial answer would generate a file that narrows `Secrets.get()` correctly
+// and `Flags.isEnabled()` to nothing, which is worse than not refreshing —
+// the compile error would land on code that is right.
+func stackNamesFor(ctx context.Context, target Target) (StackNames, error) {
+	cred, _, err := Credential(target.URL)
+	if err != nil {
+		return StackNames{}, fmt.Errorf("no credential for %s", target.Describe())
+	}
+	secrets, err := secretNames(ctx, target, cred)
+	if err != nil {
+		return StackNames{}, err
+	}
+	flags, err := flagKeys(ctx, target, cred)
+	if err != nil {
+		return StackNames{}, err
+	}
+	buckets, err := stackBuckets(ctx, target)
+	if err != nil {
+		return StackNames{}, err
+	}
+	return StackNames{Secrets: secrets, Flags: flags, Buckets: buckets}, nil
+}
+
+// flagKeys asks the stack which feature flags it holds.
+func flagKeys(ctx context.Context, target Target, cred Credentials) ([]string, error) {
+	status, body, err := managementCall(ctx, target, cred, http.MethodGet, "/v1/management/flags", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("%s answered %d when asked for its flags", target.Describe(), status)
+	}
+	var answer struct {
+		Flags []struct {
+			Key string `json:"key"`
+		} `json:"flags"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(answer.Flags))
+	for _, f := range answer.Flags {
+		keys = append(keys, f.Key)
+	}
+	return keys, nil
 }

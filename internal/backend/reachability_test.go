@@ -20,8 +20,10 @@ import (
 //   - `ratelimit.LoginByAccount` yapılandırılmış, hiçbir rotaya mount edilmemiş;
 //   - `ratelimit.SetAccountKey`'in hiçbir çağıranı yok;
 //   - ve bu kapının kendi kırmızısı: `generateStackTypes` gömülü bir betiği
-//     okuyor, testleri var, ve HİÇBİR KOMUT onu çağırmıyor — yani üretilen
-//     `palbase-stack.d.ts` bir müşteride hiç oluşmuyor.
+//     okuyordu, testleri vardı, ve HİÇBİR KOMUT onu çağırmıyordu — yani üretilen
+//     `palbase-stack.d.ts` bir müşteride hiç oluşmuyordu. Kapı onu bulduğu gün
+//     bir istisnayla beyan edildi; `palbase build`'e bağlanınca kapı İSTİSNANIN
+//     SİLİNMESİNİ istedi ve silindi. Borç ödendi, beyan hayatta kalmadı.
 //
 // KURAL: bir `devjs/*.js` betiğini ADIYLA okuyan her Go fonksiyonu bir
 // KOŞUCUDUR, ve çağrılmayan koşucu ölüdür — ya bir verb'e bağlanmalı ya
@@ -58,24 +60,6 @@ func TestEveryEmbeddedScriptHasAReachableRunner(t *testing.T) {
 
 	funcDecl := regexp.MustCompile(`(?m)^func (?:\([^)]*\) )?([A-Za-z_][A-Za-z0-9_]*)\(`)
 
-	// TEK İSTİSNA, VE KENDİNİ EMEKLİYE AYIRAN CİNSTEN.
-	//
-	// `stack-gen.js`'in koşucusu (`generateStackTypes`) yazılı, test edilmiş ve
-	// HİÇBİR komuttan çağrılmıyor — yani `palbase-stack.d.ts` bir müşteride hiç
-	// üretilmiyor ve ona bağlı bütün derleme-zamanı daraltma (secret adları,
-	// flag anahtarları, kova adları + variant birlikleri) ulaşılamıyor.
-	//
-	// Bu kapının BULDUĞU şey, ve borcu bu koşunun değil: onu hangi verb'in
-	// koşturacağı (`link`? `push`? yeni bir `types`?) sahibi olan koşunun
-	// kararı, ve `build` çevrimdışı olduğu için kardeşinin evine de konamıyor.
-	// Gerekçesiyle birlikte burada duruyor — gizlenmiyor, BEYAN EDİLİYOR.
-	//
-	// Ve kendini emekliye ayırıyor: biri onu bir verb'e bağladığı anda aşağıdaki
-	// kontrol KIRMIZI olur ve bu bloğun silinmesini ister. İstisna, çözüldüğünde
-	// hayatta kalamaz.
-	const known = "stack-gen.js"
-	knownStillUnreachable := false
-
 	checked := 0
 	for _, script := range scripts {
 		base := filepath.Base(script)
@@ -98,20 +82,6 @@ func TestEveryEmbeddedScriptHasAReachableRunner(t *testing.T) {
 		}
 		checked++
 
-		if base == known {
-			calls := countCalls(sources, readerFn)
-			knownStillUnreachable = calls == 0
-			if calls > 0 {
-				t.Errorf(
-					"%s artık %s üzerinden ULAŞILABİLİR — bu dosyadaki `known` istisnasını SİL; "+
-						"çözülmüş bir borcun beyanı, bir sonraki borcu gizler.",
-					base, readerFn,
-				)
-			}
-			checked++
-			continue
-		}
-
 		t.Run(base, func(t *testing.T) {
 
 			if calls := countCalls(sources, readerFn); calls == 0 {
@@ -128,9 +98,6 @@ func TestEveryEmbeddedScriptHasAReachableRunner(t *testing.T) {
 	// sessizce hiçbir şey ölçmüyor demektir.
 	if checked == 0 {
 		t.Fatal("adıyla betik okuyan hiçbir fonksiyon bulunamadı — kapı ölçecek bir şey görmüyor")
-	}
-	if !knownStillUnreachable {
-		t.Errorf("%s için tutulan istisna artık geçerli değil — sil", known)
 	}
 }
 
