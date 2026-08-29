@@ -434,9 +434,32 @@ type lastDeploy struct {
 	UpdatedAt *string `json:"updatedAt"`
 }
 
+// ── the retired cloud-status shapes ────────────────────────────────────────
+//
+// NOTHING IN PRODUCTION READS ANY OF THE FOUR TYPES BELOW, and that matters
+// here rather than being a tidiness note: they render an SDK VERSION FROM A
+// DIFFERENT DOCUMENT than the one `palbase status` and `palbase push` now agree
+// on.
+//
+// The single source is projectSDKVersion (stack_sdk.go) →
+// /.well-known/palbase.json, which the stack answers from a live probe of the
+// runtime. It is what push reinstalls against and what status prints as `sdk:`
+// (status_project.go). formatSDK below instead renders the ACTIVE ARTIFACT's
+// manifest — what the last deploy was COMPILED against. Both are real facts and
+// they diverge whenever a project moves onto a newer runtime without a
+// redeploy; the bug this replaced was reporting the second one under the label
+// people read as the first.
+//
+// So if any of this is ever wired to a verb, it must be wired as "built with",
+// beside the sdk: line and never in place of it — the same distinction
+// status_project.go's deployed line already makes.
+//
 // statusOut is `palbase status --json`. It names the full context — project,
 // environment, endpoint, repository — because "which runtime am I looking at"
-// must never be a guess (UAT CLI-005).
+// must never be a guess (UAT CLI-005). The verb answers statusJSON
+// (status_project.go) today; this shape belongs to the tRPC arm that went at the
+// v2 cutover.
+//
 // sdkStatus mirrors backend.status's `sdk` field: which @palbase/backend the
 // ACTIVE artifact was built with, and which majors that runtime could have built
 // against. Read off the artifact manifest server-side — this process has no other
@@ -505,9 +528,12 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 	return cmd
 }
 
-// formatSDK renders which SDK the live artifact was built with and which majors
+// formatSDK renders which SDK the live ARTIFACT WAS BUILT WITH and which majors
 // the runtime supports. Returns "" when the server did not report it, so a
 // never-deployed environment prints nothing rather than a misleading default.
+//
+// It is NOT "which SDK this project is on" — that is the sdk: line status
+// prints, off the document push reads. See the block above sdkStatus.
 //
 // It names the SUPPORTED SET, not just the newest, because "you are behind" is
 // the wrong message when the major in use is fully supported — that premise is

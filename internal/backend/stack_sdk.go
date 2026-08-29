@@ -13,14 +13,20 @@ package backend
 //
 // So the project hands over the bytes. `push` asks what the project runs, and
 // installs from it when the project's own node_modules disagree — which makes
-// the skew impossible rather than reported.
+// the RUNTIME skew impossible rather than reported.
+//
+// One skew survives that and is reported instead: the checkout's package.json
+// still declares whatever it declared, so a typecheck done here was typed
+// against a major this push no longer builds with. sdkSkewNotice says so.
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -42,8 +48,12 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, cred Crede
 		return nil
 	}
 
-	fmt.Fprintf(w, "this project runs @palbase/backend %s and this checkout has %s — installing the project's\n",
-		running, orNone(installed))
+	fmt.Fprintf(w, "this project runs %s %s and this checkout has %s — installing the project's\n",
+		backendPkg, running, orNone(installed))
+	// BEFORE the download, not after: this is the sentence that decides whether
+	// somebody re-runs their typecheck, and it is worth reading even on a push
+	// that then fails to fetch the tarball.
+	fmt.Fprint(w, sdkSkewNotice(declaredBackendSpec(dir), installed, running))
 
 	tarball, err := downloadProjectSDK(ctx, target, cred)
 	if err != nil {
@@ -71,8 +81,73 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, cred Crede
 	if blob, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("install the project's SDK: %s", strings.TrimSpace(trimBody(blob)))
 	}
-	fmt.Fprintf(w, "✓ @palbase/backend %s, from the project itself\n", running)
+	fmt.Fprintf(w, "✓ %s %s, from the project itself\n", backendPkg, running)
 	return nil
+}
+
+// declaredBackendSpec reads what the checkout ASKS FOR — the range in
+// package.json, not the version npm happened to resolve. They are different
+// facts, and the gap between them is the whole subject of sdkSkewNotice.
+//
+// "" when there is no package.json, no @palbase/backend entry, or the file will
+// not parse: a checkout that does not declare anything cannot be told its
+// declaration is stale.
+func declaredBackendSpec(projectDir string) string {
+	data, err := os.ReadFile(filepath.Join(projectDir, "package.json"))
+	if err != nil {
+		return ""
+	}
+	var pkg struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if json.Unmarshal(data, &pkg) != nil {
+		return ""
+	}
+	if spec := pkg.Dependencies[backendPkg]; spec != "" {
+		return spec
+	}
+	return pkg.DevDependencies[backendPkg]
+}
+
+// sdkSkewNotice says what the install above just invalidated.
+//
+// THE DOWNGRADE IS CORRECT AND ITS COST WAS UNSAID. A checkout declaring ^24 has
+// been typechecked against 24 — by `tsc`, by the editor, by whatever gate ran
+// before the push — and this install replaces node_modules with the major the
+// project RUNS. Every one of those results now describes a different SDK than
+// the bundle being uploaded, and the old message ("installing the project's")
+// gave a reader no way to know that.
+//
+// It does NOT offer a fix, because there is none to offer from here: the project
+// decides which SDK it runs, and the verb that used to move it (`palbase env`)
+// was retired at the v2 cutover. Inventing an upgrade path in a warning would
+// send people looking for a command that does not exist.
+//
+// "" when the majors agree, or when the declared range is not a version at all
+// ("latest", "*", a git url) — majorOf returns 0 there, and a notice built on a
+// major nobody declared would be noise on every push.
+func sdkSkewNotice(declared, installed, running string) string {
+	declaredMajor := majorOf(declared)
+	if declaredMajor == 0 || declaredMajor == majorOf(running) {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  ⚠ your package.json asks for %q: %q — major %d, and this push builds against %s.\n",
+		backendPkg, declared, declaredMajor, running)
+	if installed != "" {
+		fmt.Fprintf(&b, "    Every typecheck run in this checkout was against %s, so it no longer describes\n", installed)
+		fmt.Fprintf(&b, "    what gets deployed. Re-run it before trusting the result.\n")
+	} else {
+		fmt.Fprintf(&b, "    A typecheck run here will resolve the declared range, not what deploys, so it\n")
+		fmt.Fprintf(&b, "    will not describe this push.\n")
+	}
+	// The retired verb is NOT named here even to say it is gone: a shipped string
+	// that prints a dead command sends somebody to type it, and the surface gate
+	// (surface_test.go's TestNoShippedStringNamesARetiredCommand) refuses it.
+	// The reason lives in this file's comments, where it belongs.
+	fmt.Fprintf(&b, "    Nothing in the CLI moves a project's SDK: the project decides which one it runs.\n")
+	return b.String()
 }
 
 // projectSDKVersion asks the project what its runtime is running.

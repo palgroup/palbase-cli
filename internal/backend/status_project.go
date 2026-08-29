@@ -8,9 +8,10 @@ package backend
 // generated two deploys ago looks like a backend bug. A local stack that was
 // stopped this morning looks like a network problem.
 //
-// So it reports three things it can actually check: what the project is serving,
-// whether the key this app ships still matches the project's, and whether the
-// local stack this checkout was pointed at is still up.
+// So it reports what it can actually check: what the project is serving, which
+// @palbase/backend it runs (the same document `push` reads, so the two verbs
+// never disagree), whether the key this app ships still matches the project's,
+// and whether the local stack this checkout was pointed at is still up.
 
 import (
 	"context"
@@ -52,6 +53,11 @@ type statusJSON struct {
 	// AppKey is "current", "stale" or "unchecked" — the drift the text output
 	// warns about, in one word a script can branch on.
 	AppKey string `json:"app_key,omitempty"`
+	// SDK is the @palbase/backend this project RUNS, off the same document push
+	// reads. Deployed.SDKVersion, right above, is what the live ARTIFACT was
+	// BUILT with — a different fact, and the reason both are named rather than
+	// merged. Empty when the project would not say.
+	SDK string `json:"sdk,omitempty"`
 	// LastAttempt is the newest row in the PLANE's push ledger, which is a
 	// different fact from Deployed: a push that never reached the project is not
 	// in the project's history, and that is exactly the failure worth seeing.
@@ -124,11 +130,41 @@ func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error
 		if deployed.EndpointCount != nil {
 			fmt.Fprintf(out, ", %d endpoint(s)", *deployed.EndpointCount)
 		}
+		// "built with", not "SDK". This number is read off the ACTIVE ARTIFACT's
+		// manifest — the SDK that artifact was compiled against — and the bare
+		// label made it look like the answer to "which SDK is this project on",
+		// which is a different fact from a different document (see the sdk: line
+		// below). Two numbers under one word is how somebody reads a version
+		// that predicts nothing about what their next push will do.
 		if deployed.SDKVersion != "" {
-			fmt.Fprintf(out, ", SDK %s", deployed.SDKVersion)
+			fmt.Fprintf(out, ", built with SDK %s", deployed.SDKVersion)
 		}
 		fmt.Fprintf(out, "\n              activated %s\n", deployed.ActivatedAt.Local().Format("2006-01-02 15:04"))
 	}
+
+	// WHICH SDK THIS PROJECT IS ON — from the document `push` itself reads.
+	//
+	// projectSDKVersion is the function ensureProjectSDK calls to decide whether
+	// to reinstall the checkout's node_modules, and it asks
+	// /.well-known/palbase.json, which the stack answers from a LIVE probe of the
+	// runtime (v2 internal/server/wellknown.go). status used to report the
+	// artifact's number instead, and the two diverge the moment a project is
+	// moved onto a newer runtime without a redeploy — so status handed people a
+	// version that predicted nothing about the push they were about to run.
+	//
+	// Bounded, because this is `status`: describeStack waits up to
+	// stackReadyWait (3 minutes) for a project that answers 503, which is right
+	// for a push and absurd for a question about the current state.
+	//
+	// Silent when it cannot be read. Unlike the app key — where saying nothing
+	// would read as "your key is fine" — the deployed line above still names the
+	// artifact's SDK, so a reader is not left believing something false.
+	sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
+	if running, err := projectSDKVersion(sdkCtx, target, cred); err == nil && running != "" {
+		fmt.Fprintf(out, "sdk:          %s %s — what this project RUNS, and what `palbase push` builds against\n",
+			backendPkg, running)
+	}
+	cancelSDK()
 
 	if attempt := lastPushAttempt(ctx, r); attempt != nil {
 		if line := formatLastDeploy(&lastDeploy{
@@ -255,6 +291,11 @@ func statusAsJSON(ctx context.Context, cmd *cobra.Command, r Resolvers, target T
 	}
 
 	doc.AppKey = appKeyState(ctx, target)
+	sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
+	if running, sErr := projectSDKVersion(sdkCtx, target, cred); sErr == nil {
+		doc.SDK = running
+	}
+	cancelSDK()
 	doc.LastAttempt = lastPushAttempt(ctx, r)
 	fmt.Fprintln(cmd.OutOrStdout(), renderJSON(doc))
 	return nil
