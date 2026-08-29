@@ -114,7 +114,7 @@ func credsStore(home string) string {
 func doctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the CLI environment (cloud, login, link, Node)",
+		Short: "Diagnose the CLI environment (cloud, login, link, Docker, Node)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
