@@ -348,3 +348,28 @@ func TestTemplatesSet_RefusesMalformedJSONLocally(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, f.all(), "nothing may leave the machine when the file does not parse")
 }
+
+// TestProviderAddStaysReachable is a CAPABILITY LOCK, not a feature test.
+//
+// `config/notifications.ts` declared providers and the deploy applied them —
+// until the declaration applier was retired, after which the file declared into
+// the void. `add` is the door that replaced it. Removing the file is only safe
+// while this verb exists, so its disappearance must break a test rather than a
+// user's stack: that is exactly the silent capability loss
+// contract_lock_test.go records the applier producing five times.
+func TestProviderAddStaysReachable(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeStack{}
+	_, err := runWith(t, f, "add", "twilio",
+		"--account-sid", "AC1", "--messaging-sid", "MG1",
+		"--auth-token-file", writeSecretIn(t, dir, "tok", "TOKENBYTES"))
+	require.NoError(t, err)
+
+	var wrote bool
+	for _, c := range f.all() {
+		if c.Method == http.MethodPost && c.Path == providersPath {
+			wrote = true
+		}
+	}
+	assert.True(t, wrote, "notifications add must POST %s — it is the door config/notifications.ts used to be", providersPath)
+}
