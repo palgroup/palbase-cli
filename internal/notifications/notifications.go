@@ -68,6 +68,12 @@ type REST interface {
 
 const providersPath = "/v1/management/notifications/providers"
 
+// templatesPath is the whole template set, replaced in one write. The route is
+// a PUT of the COMPLETE document rather than per-key edits: templates are
+// authored as a set (an e-mail and its SMS twin change together), and a partial
+// door would let the two drift.
+const templatesPath = "/v1/management/notifications/templates"
+
 // secretPath is where a provider's credential is written: the project's own
 // vault, the same door `palbase secret set` uses.
 func secretPath(name string) string {
@@ -105,6 +111,8 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase notifications providers                 Show the catalog and what is configured.
   palbase notifications add <provider> [flags]    Configure a sender.
   palbase notifications remove <provider>         Stop delivering through one.
+  palbase notifications templates list            Show the templates this stack holds.
+  palbase notifications templates set --file F    Replace the whole template set.
 
 They live ON THE STACK and take effect immediately. They used to be declared in
 config/notifications.ts, created on every deploy and never deleted when dropped
@@ -113,7 +121,7 @@ from the file — so "removed" and "still sending" were both true.
 Provider SECRETS go to the vault, encrypted, and are never read back: the listing
 says WHICH senders are configured, not with what.`,
 	}
-	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r))
+	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r), templatesCmd(r))
 	return cmd
 }
 
@@ -410,4 +418,99 @@ func sortedProviderNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// templatesCmd is the door `config/notifications.ts` used to be.
+//
+// The providers moved to the stack and got `add`/`remove`; the TEMPLATES stayed
+// in the file, which the deploy evaluated and applied to NOTHING once the
+// declaration applier was retired. So a project could edit a subject line, push,
+// deploy green, and send the old copy. This is the door that actually writes.
+func templatesCmd(r Resolvers) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "templates",
+		Short: "The message bodies this project sends",
+	}
+
+	var file string
+	set := &cobra.Command{
+		Use:   "set --file <path>",
+		Short: "Replace this project's template set",
+		Long: `Replace the WHOLE set from a JSON document.
+
+An empty document ({}) is a legitimate value and means this project sends no
+templated messages — it is not the same as never having set one.
+
+The document is parsed here before anything leaves the machine, so a typo is
+your editor's problem rather than the stack's error message.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", file, err)
+			}
+			// PARSE BEFORE SENDING. A document that does not parse cannot be a
+			// template set, and finding that out from a 400 wastes a round trip
+			// and reports it in the stack's words rather than the file's.
+			var doc map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				return fmt.Errorf("%s is not a JSON object: %w", file, err)
+			}
+			body, err := json.Marshal(doc)
+			if err != nil {
+				return err
+			}
+			answer, err := call(r, cmd, http.MethodPut, templatesPath, body)
+			if err != nil {
+				return err
+			}
+			var applied struct {
+				Applied int `json:"applied"`
+			}
+			_ = json.Unmarshal(answer, &applied)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %d template channel(s) stored on the stack\n", len(doc))
+			return nil
+		},
+	}
+	set.Flags().StringVar(&file, "file", "", "JSON document holding the template set (required)")
+	_ = set.MarkFlagRequired("file")
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "Show the templates this stack holds",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := call(r, cmd, http.MethodGet, templatesPath, nil)
+			if err != nil {
+				return err
+			}
+			var doc map[string]map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				return fmt.Errorf("the stack's template set is not readable: %s", strings.TrimSpace(string(raw)))
+			}
+			if len(doc) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No templates on this stack.")
+				return nil
+			}
+			channels := make([]string, 0, len(doc))
+			for ch := range doc {
+				channels = append(channels, ch)
+			}
+			sort.Strings(channels)
+			for _, ch := range channels {
+				keys := make([]string, 0, len(doc[ch]))
+				for k := range doc[ch] {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", ch, k)
+				}
+			}
+			return nil
+		},
+	}
+
+	c.AddCommand(set, list)
+	return c
 }

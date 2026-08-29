@@ -270,3 +270,81 @@ func TestAddUnknownProvider(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown provider")
 }
+
+// --- templates: the door config/notifications.ts used to be -----------------
+
+// The TEMPLATE half had no command at all. Providers moved to the stack and got
+// `add`/`remove`; templates stayed in config/notifications.ts, which the deploy
+// evaluated and applied to nothing after the declaration applier was retired.
+// Removing that file without these verbs would delete the capability outright —
+// the exact failure contract_lock_test.go records the applier producing five
+// times.
+func TestTemplatesSet_WritesTheStack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "templates.json")
+	doc := `{"email":{"todo-digest":{"subject":"Hi {{name}}","html":"<p>hi</p>","text":"hi"}}}`
+	require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+
+	f := &fakeStack{answer: `{"applied":1}`}
+	out, err := runWith(t, f, "templates", "set", "--file", path)
+	require.NoError(t, err)
+
+	last := f.last()
+	assert.Equal(t, http.MethodPut, last.Method)
+	assert.Equal(t, "/v1/management/notifications/templates", last.Path)
+	assert.JSONEq(t, doc, last.Body, "the file's document travels verbatim")
+	assert.Contains(t, out, "template")
+}
+
+// An EMPTY set is a legitimate value — "this project sends nothing" — and must
+// travel as one. Refusing it, or silently sending nothing, would make "cleared"
+// and "never set" indistinguishable, which is the shape of the egress fence's
+// own empty-list rule.
+func TestTemplatesSet_EmptyDocumentIsAValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{}`), 0o600))
+
+	f := &fakeStack{answer: `{"applied":0}`}
+	_, err := runWith(t, f, "templates", "set", "--file", path)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPut, f.last().Method)
+	assert.JSONEq(t, `{}`, f.last().Body)
+}
+
+func TestTemplatesList_ReadsTheStack(t *testing.T) {
+	f := &fakeStack{answer: `{"email":{"todo-digest":{"subject":"Hi"}}}`}
+	out, err := runWith(t, f, "templates", "list")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, f.last().Method)
+	assert.Equal(t, "/v1/management/notifications/templates", f.last().Path)
+	assert.Contains(t, out, "todo-digest")
+	assert.Contains(t, out, "email")
+}
+
+// FR-006: the stack's own refusal reaches the operator verbatim. A verb that
+// swallowed a 4xx would report success for a template set nobody stored.
+func TestTemplatesSet_SurfacesTheStackRefusal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"email":{}}`), 0o600))
+
+	f := &fakeStack{status: http.StatusBadRequest, answer: `{"error":"bad_template","error_description":"subject is required"}`}
+	_, err := runWith(t, f, "templates", "set", "--file", path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subject is required")
+}
+
+// A malformed file is refused BEFORE the round trip: an unparseable document is
+// the author's mistake, and finding it locally beats finding it in the stack's
+// error message.
+func TestTemplatesSet_RefusesMalformedJSONLocally(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{not json`), 0o600))
+
+	f := &fakeStack{}
+	_, err := runWith(t, f, "templates", "set", "--file", path)
+	require.Error(t, err)
+	assert.Empty(t, f.all(), "nothing may leave the machine when the file does not parse")
+}
