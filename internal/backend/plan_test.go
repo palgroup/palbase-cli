@@ -243,103 +243,18 @@ func TestPlanWritesNOTHING(t *testing.T) {
 	}
 }
 
-// TestASecretAlreadySetThereIsSkipped is FR-037, and it is the one that protects
-// a production credential: the value on the target is usually production's and
-// the value here is usually not.
-func TestASecretAlreadySetThereIsSkipped(t *testing.T) {
-	inScratchCheckout(t)
-	dir, _ := os.Getwd()
-	declaring(t, dir, nil, []string{"SENTRY_DSN", "STRIPE_KEY"})
-
-	runningLocalStack(t, map[string]string{
-		"SENTRY_DSN": "https://dev@sentry.io/dev",
-		"STRIPE_KEY": "sk_test_local",
-	})
-	target := newProjectServer(t, map[string]string{"STRIPE_KEY": "sk_live_PRODUCTION"})
-	cred := Credentials{Value: "k", Kind: KindKey}
-
-	var out strings.Builder
-	if err := carrySecrets(context.Background(), dir, Target{URL: target.URL}, cred, false, &out); err != nil {
-		t.Fatalf("carry: %v", err)
-	}
-
-	if got := target.secrets["STRIPE_KEY"]; got != "sk_live_PRODUCTION" {
-		t.Errorf("the production key was replaced with %q", got)
-	}
-	if got := target.secrets["SENTRY_DSN"]; got != "https://dev@sentry.io/dev" {
-		t.Errorf("the gap was not filled: %q", got)
-	}
-	if !strings.Contains(out.String(), "STRIPE_KEY: already set there, left alone") {
-		t.Errorf("the skip was not reported:\n%s", out.String())
-	}
-	if strings.Contains(out.String(), "sk_") {
-		t.Errorf("a value reached the output:\n%s", out.String())
-	}
-}
-
-// TestApproveReplacesIt is FR-038 — the same run, with the decision made.
-func TestApproveReplacesIt(t *testing.T) {
-	inScratchCheckout(t)
-	dir, _ := os.Getwd()
-	declaring(t, dir, nil, []string{"STRIPE_KEY"})
-
-	runningLocalStack(t, map[string]string{"STRIPE_KEY": "sk_test_local"})
-	target := newProjectServer(t, map[string]string{"STRIPE_KEY": "sk_live_PRODUCTION"})
-
-	var out strings.Builder
-	if err := carrySecrets(context.Background(), dir, Target{URL: target.URL},
-		Credentials{Value: "k", Kind: KindKey}, true, &out); err != nil {
-		t.Fatalf("carry: %v", err)
-	}
-	if got := target.secrets["STRIPE_KEY"]; got != "sk_test_local" {
-		t.Errorf("--approve did not replace it: %q", got)
-	}
-}
-
-// TestAMissingRequiredSecretStopsThePush is FR-039, and it stops it BEFORE the
-// code ships: code that reads a credential nobody set deploys green and fails on
-// its first request.
-func TestAMissingRequiredSecretStopsThePush(t *testing.T) {
-	inScratchCheckout(t)
-	dir, _ := os.Getwd()
-	declaring(t, dir, []string{"NEO4J_PASSWORD"}, nil)
-
-	runningLocalStack(t, map[string]string{})
-	target := newProjectServer(t, map[string]string{})
-
-	var out strings.Builder
-	err := carrySecrets(context.Background(), dir, Target{URL: target.URL},
-		Credentials{Value: "k", Kind: KindKey}, false, &out)
-	if err == nil {
-		t.Fatal("a push went ahead without a required secret")
-	}
-	if !strings.Contains(err.Error(), "NEO4J_PASSWORD") {
-		t.Errorf("the refusal does not name it: %v", err)
-	}
-	if !strings.Contains(err.Error(), "palbase secret set") {
-		t.Errorf("the refusal does not say how to fix it: %v", err)
-	}
-	if len(target.writesSeen()) != 0 {
-		t.Errorf("something was written before the refusal: %v", target.writesSeen())
-	}
-}
-
-// TestAnOptionalSecretNobodySetIsNotAnError: a project can declare something it
-// does not always need, and a fresh environment must still deploy.
-func TestAnOptionalSecretNobodySetIsNotAnError(t *testing.T) {
-	inScratchCheckout(t)
-	dir, _ := os.Getwd()
-	declaring(t, dir, nil, []string{"SENTRY_DSN"})
-
-	runningLocalStack(t, map[string]string{})
-	target := newProjectServer(t, map[string]string{})
-
-	var out strings.Builder
-	if err := carrySecrets(context.Background(), dir, Target{URL: target.URL},
-		Credentials{Value: "k", Kind: KindKey}, false, &out); err != nil {
-		t.Fatalf("an optional secret blocked the push: %v", err)
-	}
-}
+// THE SECRET-CARRIER TESTS ARE GONE WITH THE CARRIER.
+//
+// Four tests pinned `carrySecrets`: a name already set on the target is skipped
+// (FR-037 — the value there is usually production's), --approve replaces it, a
+// missing REQUIRED name stops the push, and a missing optional one does not.
+// All four read `config/secrets.ts` for "what the code declares".
+//
+// That file is gone (2026-08-29) and the push carries no secrets. The stop it
+// provided moved EARLIER and got stricter: the names a controller may spell come
+// from `palbase-stack.d.ts`, generated off the stack, so code reading a secret
+// nobody set does not compile — a keystroke rather than a push. Values are
+// written with `palbase secret set NAME --stdin`.
 
 // TestPushRefusesWhileALocalStackIsRunning: the dev runtime serves the DIRECTORY
 // it has mounted and never follows the deploy pointer, so a push there activates

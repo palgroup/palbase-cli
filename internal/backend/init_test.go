@@ -119,11 +119,17 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	}
 
 	// The four files a backend needs to be one.
+	//
+	// `config/secrets.ts` was the fifth until 2026-08-29. It declared WHICH
+	// secrets the backend needed, and the scaffold shipped it so a new project
+	// started with the habit. The declaration is gone: secrets are written to the
+	// stack (`palbase secret set`) and the names a controller may spell come from
+	// the generated `palbase-stack.d.ts`, so there is nothing for a scaffold to
+	// seed.
 	for _, path := range []string{
 		"package.json", "tsconfig.json",
 		filepath.Join("db", "schema.ts"),
 		filepath.Join("controllers", "health.controller.ts"),
-		filepath.Join("config", "secrets.ts"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("the scaffold has no %s: %v", path, err)

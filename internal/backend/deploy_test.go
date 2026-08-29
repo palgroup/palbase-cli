@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -413,96 +412,14 @@ func TestDeployVersion_IsShortened(t *testing.T) {
 	require.Equal(t, "-", deployVersion(nil), "a failed attempt has no version and says so")
 }
 
-// THE DECLARED FIXTURES REACH THE STACK, AND THEY REACH IT FIRST.
+// THE FIXTURE-SHIPPING TESTS ARE GONE WITH THE BEHAVIOUR THEY LOCKED.
 //
-// A release is graded before it gets traffic: the stack mints one identity per
-// DECLARED fixture and runs the project's suites as them. Those declarations
-// live in config/test-users.ts and reach the stack through
-// PUT /v1/management/test-users/templates — which nothing called. Measured
-// 2026-08-24: pushing todoapp to a freshly provisioned tenant was refused with
-// "no test identity named \"demo\" … this run has none", and it would have been
-// refused forever, because templates only ever arrived with a deploy that
-// passed. A project declaring test users could not reach a NEW environment.
-func TestPushShipsTheDeclaredTestUsersBeforeTheArtifact(t *testing.T) {
-	seedBackendDir(t)
-	var order []string
-	f := &fakeDeploy{onCall: func() { order = append(order, "artifact") }}
-	build, pack := stubBundler(nil)
-
-	err := runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: io.Discard,
-		ctx: context.Background(), build: build, pack: pack,
-		shipTestUsers: func(context.Context, string, io.Writer) error {
-			order = append(order, "fixtures")
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []string{"fixtures", "artifact"}, order,
-		"the fixtures must be on the stack BEFORE the release is graded against them")
-}
-
-// A stack that refuses the declaration stops the push. Continuing would send an
-// artifact whose own tests cannot pass, and report the refusal as a test failure
-// — sending somebody to read suites that were never the problem.
-func TestPushStopsWhenTheFixturesAreRefused(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{}
-	build, pack := stubBundler(nil)
-
-	err := runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: io.Discard,
-		ctx: context.Background(), build: build, pack: pack,
-		shipTestUsers: func(context.Context, string, io.Writer) error {
-			return errors.New("the stack refused the declaration")
-		},
-	})
-	require.ErrorContains(t, err, "refused the declaration")
-	require.Empty(t, f.calls, "an artifact was sent after the fixtures were refused")
-}
-
-// A project that declares none says nothing and writes nothing: most projects
-// declare no fixtures, and a line about an empty declaration would be noise on
-// every push.
-func TestShippingIsSilentWhenNothingIsDeclared(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".palbase"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".palbase", "config.json"),
-		[]byte(`{"storage":{"buckets":[]}}`), 0o644))
-
-	var out bytes.Buffer
-	require.NoError(t, shipDeclaredTestUsers(context.Background(), dir, &out))
-	require.Empty(t, out.String())
-}
-
-// TEST KULLANICISI BİLDİRMEYEN BİR PROJE DE PUSH EDİLEBİLMELİ.
+// `runPush` used to PUT `config/test-users.ts` at the stack before the artifact,
+// and five tests pinned that ordering (a release is graded against fixtures, so
+// they had to land first — measured 2026-08-24, when nothing shipped them and a
+// fresh environment refused every push forever).
 //
-// Çoğu proje hiç bildirmez: `.palbase/config.json` içinde `testusers` anahtarı
-// YOKTUR ve `json.RawMessage` nil kalır. `json.Unmarshal(nil, …)` "unexpected
-// end of JSON input" der, ve o hata push'u DURDURUYORDU — yani bu düzeltmenin
-// kendisi, dokunmadığı projeleri kırdı.
-//
-// Ölçüldü 24.08.2026: palaicloud'un push'u tam burada düştü, hiç fixture
-// bildirmediği hâlde.
-func TestAProjectThatDeclaresNoTestUsersStillPushes(t *testing.T) {
-	for _, declared := range []json.RawMessage{
-		nil,                             // anahtar hiç yok
-		json.RawMessage("null"),         // anahtar var, değeri null
-		json.RawMessage(`{}`),           // boş belge
-		json.RawMessage(`{"users":{}}`), // bildirilmiş ama boş
-	} {
-		var out bytes.Buffer
-		err := carryTestUsers(context.Background(), declared,
-			Target{URL: "https://unreachable.invalid"}, Credentials{}, &out)
-		require.NoErrorf(t, err, "declared=%s", string(declared))
-		require.Emptyf(t, out.String(), "declared=%s: sessiz olmalıydı", string(declared))
-	}
-}
-
-// Ama BOZUK bir bildirim sessizce geçmemeli: yazılmış bir şeyin okunamaması,
-// hiç yazılmamış olmasıyla aynı şey değildir.
-func TestAMalformedDeclarationIsRefused(t *testing.T) {
-	err := carryTestUsers(context.Background(), json.RawMessage(`{"users":`),
-		Target{URL: "https://unreachable.invalid"}, Credentials{}, io.Discard)
-	require.ErrorContains(t, err, "read the declared test users")
-}
+// The file is gone (2026-08-29) and the templates are written where they live:
+// `palbase test-user templates set --file <path>`, locked by
+// TestTemplatesSet_SendsTheTemplatesKey in internal/testuser. The push no longer
+// has a fixture step, so there is no ordering left to pin here.

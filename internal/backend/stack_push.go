@@ -19,8 +19,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"slices"
-	"strings"
 	"time"
 )
 
@@ -128,36 +126,20 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 		}
 	}
 
-	// SECRETS BEFORE CODE, and the order is the feature. Code that reads a
-	// credential nobody set deploys green and 500s on its first request — which
-	// is exactly what todoapp's /graph/* routes did — so a declared `required`
-	// secret with no value anywhere stops the push before anything ships.
+	// SECRETS AND FIXTURES ARE NOT CARRIED BY THE PUSH ANY MORE.
 	//
-	// What it does NOT do is overwrite. A name already set on the target is left
-	// alone and reported, because the value there is usually the production one
-	// and the value here is usually not.
-	if err := carrySecrets(ctx, dir, target, cred, approve, w); err != nil {
-		return err
-	}
-
-	// THE DECLARED FIXTURES, for the same reason and in the same place.
+	// They used to be: `carrySecrets` read config/secrets.ts and filled the
+	// target's gaps (stopping the push when a required name was set nowhere), and
+	// `carryTestUsers` PUT config/test-users.ts at the stack. Both files are gone
+	// (2026-08-29) and both jobs moved to where the setting lives:
 	//
-	// A release is GRADED before it is given traffic: the stack mints one
-	// identity per fixture declared in `config/test-users.ts` and runs the
-	// project's suites as them. Nothing shipped those declarations — the PUT that
-	// receives them had no caller anywhere in this CLI — so a stack that had
-	// never been given them refused every push with "no test identity named
-	// ...", forever. Measured 2026-08-24 pushing todoapp to a freshly
-	// provisioned tenant.
-	doc, cfgErr := readEvaluatedConfig(dir)
-	if cfgErr != nil {
-		return cfgErr
-	}
-	if doc != nil {
-		if err := carryTestUsers(ctx, doc.TestUsers, target, cred, w); err != nil {
-			return err
-		}
-	}
+	//   secrets     `palbase secret set NAME --stdin`
+	//   fixtures    `palbase test-user templates set --file <path>`
+	//
+	// The stop the secret carrier provided is not lost, it MOVED EARLIER: the name
+	// a controller may spell now comes from `palbase-stack.d.ts`, generated off the
+	// stack, so code reading a secret nobody set does not compile. That is a
+	// keystroke, not a push.
 
 	tarball, err := BuildStackTarball(dir)
 	if err != nil {
@@ -261,83 +243,6 @@ func renderPushRefusal(w io.Writer, status int, body []byte) error {
 		return fmt.Errorf("push refused (%s) — nothing was swapped, the previous release keeps serving", refusal.Error)
 	}
 	return fmt.Errorf("push refused (%d): %s", status, trimBody(body))
-}
-
-// carrySecrets makes the target hold every secret this project's code declares.
-//
-// FILL, don't replace. The gap is the interesting case — a fresh environment
-// that has never been given a credential — and the already-set case is the
-// dangerous one: the value there is usually production's and the value here is
-// usually not. So a name the target already holds is skipped and reported, and
-// --approve is what replaces it.
-//
-// Values come from the stack running on this machine and from nowhere else.
-// There is no file to read (there are none) and no prompt to answer (a push is
-// not an interview), so a required name with no value anywhere stops the push —
-// before the code ships, because code that reads a credential nobody set
-// deploys green and fails on its first request.
-func carrySecrets(ctx context.Context, dir string, target Target, cred Credentials, approve bool, w io.Writer) error {
-	plan, err := planSecrets(ctx, dir, target, cred)
-	if err != nil {
-		return err
-	}
-	if len(plan.MissingRequired) > 0 {
-		return fmt.Errorf(
-			"%s is required by config/secrets.ts and set nowhere — nothing was sent.\n"+
-				"Set it on the target with `palbase secret set %s --stdin`, or start a local stack and set it there for the push to carry",
-			strings.Join(plan.MissingRequired, ", "), plan.MissingRequired[0])
-	}
-
-	toWrite := plan.Fill
-	if approve {
-		// Replacing is a decision, and --approve is where it is made. The
-		// already-set names are only replaceable when they are ALSO available
-		// here — there is nothing to replace them with otherwise.
-		source, sourceCred, ok := localSource(target)
-		if ok {
-			if available, err := secretNames(ctx, source, sourceCred); err == nil {
-				held := map[string]bool{}
-				for _, name := range available {
-					held[name] = true
-				}
-				for _, name := range plan.Present {
-					if held[name] {
-						toWrite = append(toWrite, name)
-					}
-				}
-			}
-		}
-	}
-	if len(toWrite) == 0 {
-		for _, name := range plan.Present {
-			fmt.Fprintf(w, "secret %s: already set there, left alone\n", name)
-		}
-		return nil
-	}
-
-	source, sourceCred, ok := localSource(target)
-	if !ok {
-		return fmt.Errorf("the values for %s are on the stack this machine runs, and it is not up — `palbase start`",
-			strings.Join(toWrite, ", "))
-	}
-	for _, name := range toWrite {
-		value, err := secretValue(ctx, source, sourceCred, name)
-		if err != nil {
-			return fmt.Errorf("read %s from the local stack: %w", name, err)
-		}
-		if err := putSecret(ctx, target, cred, name, value); err != nil {
-			return fmt.Errorf("set %s on %s: %w", name, target.Describe(), err)
-		}
-		// The NAME. Never the value, and never a length or a prefix either —
-		// those are how somebody confirms a guess.
-		fmt.Fprintf(w, "secret %s: set\n", name)
-	}
-	for _, name := range plan.Present {
-		if !slices.Contains(toWrite, name) {
-			fmt.Fprintf(w, "secret %s: already set there, left alone\n", name)
-		}
-	}
-	return nil
 }
 
 // sendWaitingForReady sends the request, and treats a 503 as "ask again".
