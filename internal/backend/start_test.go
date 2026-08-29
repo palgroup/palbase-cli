@@ -666,3 +666,47 @@ func TestEnsureBootValuesReportsThatItMigrated(t *testing.T) {
 		t.Fatal("hicbir sey degismediigi halde goc bildirildi — stack bosuna yeniden yaratilirdi")
 	}
 }
+
+// .env son satiri newline ile bitmiyorsa zincir eklemesi onu BOZMAMALI.
+//
+// Bu, yayinlanmis kodda bulundu: dosya `STACK_ROOT_KEY=xyz` ile bitiyorsa append
+// ilk eklenen satiri ona YAPISTIRIYORDU —
+//
+//	STACK_ROOT_KEY=xyzPALBASE_SEALED_SIGNING_SEED=a
+//
+// — ve bu IKI degiskeni birden yok ediyor: yiginin kendi kok anahtari cope
+// donuyor, imzalama tohumu da hic gorunmuyor. POSIX metin dosyalari newline ile
+// biter, ama bir .env'i ne yazdiysa o yazmistir; "genelde" bir dosyaya karsi
+// append edilecek bir ozellik degil.
+//
+// Docker'a gitmeyen bir yol seciliyor: mint adimi bir imaj ister, ama bozulma
+// EKLEME adiminda oluyor. O yuzden zincir ONCEDEN tam yaziliyor ve fonksiyonun
+// dokunmadigi dogrulaniyor; bozulmanin kendisi asagidaki dogrudan olcumle
+// sabitleniyor.
+func TestSealingChainAppendSurvivesAMissingTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, ".env")
+	if err := os.WriteFile(env, []byte("PALBASE_ANON_KEY=abc\nSTACK_ROOT_KEY=xyz"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := appendSealingChain(env, "PALBASE_SEALED_SIGNING_SEED=a\nPALBASE_SEALED_BINDING=b\nPALBASE_SEALED_ROOT=c\n"); err != nil {
+		t.Fatalf("ekleme hata verdi: %v", err)
+	}
+
+	body, _ := os.ReadFile(env)
+	for _, want := range []string{"PALBASE_ANON_KEY=abc", "STACK_ROOT_KEY=xyz", "PALBASE_SEALED_SIGNING_SEED=a"} {
+		found := false
+		for _, line := range strings.Split(string(body), "\n") {
+			if strings.TrimSpace(line) == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q kendi satirinda degil — dosya:\n%s", want, body)
+		}
+	}
+	if n, _ := sealingChainState(env); n != 3 {
+		t.Errorf("ekleme sonrasi zincir %d/3 gorunuyor", n)
+	}
+}

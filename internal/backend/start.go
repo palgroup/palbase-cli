@@ -922,14 +922,46 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 				"  Upgrade it: `palbase upgrade`", found)
 	}
 
-	f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-	if _, err := f.WriteString(chain.String()); err != nil {
+	// A NEWLINE FIRST, when the file does not end in one.
+	//
+	// This appends, and a .env whose last line has no trailing newline turns the
+	// first appended line into a continuation of it. Measured: a file ending
+	// `STACK_ROOT_KEY=xyz` came back as
+	//
+	//	STACK_ROOT_KEY=xyzPALBASE_SEALED_SIGNING_SEED=a
+	//
+	// which destroys TWO variables at once — the stack's own root key becomes
+	// garbage and the signing seed is never seen. POSIX text files end in a
+	// newline, but a .env is written by whatever wrote it, and "usually" is not
+	// a property to append against.
+	if err := appendSealingChain(envFile, chain.String()); err != nil {
 		return false, err
 	}
 	fmt.Fprintln(out, "▸ sealing chain added — recreating the stack so it takes effect")
 	return true, nil
+}
+
+// appendSealingChain, zinciri .env'in SONUNA ekler ve son satiri bozmaz.
+//
+// Ayri bir fonksiyon, cunku bozulma tam olarak BURADA oluyordu ve buna bir test
+// yazmak icin docker'a gitmeyen bir giris noktasi gerekiyor.
+func appendSealingChain(envFile, chain string) error {
+	existing, err := os.ReadFile(envFile)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// Dosya newline ile bitmiyorsa, eklenen ilk satir onceki satirin DEVAMI olur
+	// ve iki degisken birden yok olur.
+	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+		if _, err := f.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+	_, err = f.WriteString(chain)
+	return err
 }
