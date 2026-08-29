@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +17,94 @@ import (
 	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
+
+// runCombined is the production cmdRunner: it captures stderr too, because
+// `docker compose version` reports a missing plugin THERE, not on stdout.
+func runCombined(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// lookupFunc and cmdRunner are the two pieces of the environment `dockerProbes`
+// touches, injected so the probes are testable without a docker on the box.
+type lookupFunc func(name string) (string, error)
+type cmdRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+// probeLine is one reported check: whether it passed, its short label, and a
+// detail that must be ACTIONABLE — a failing line names the next command.
+type probeLine struct {
+	ok     bool
+	label  string
+	detail string
+}
+
+// dockerProbes answers "can `palbase start` work on this machine" before start
+// tries and fails with docker's own raw error.
+//
+// THE THREE THINGS THAT ACTUALLY BROKE A START (measured 2026-08-29, customer run):
+//  1. no docker at all;
+//  2. docker present but no `compose` subcommand — `docker: unknown command:
+//     docker compose`, which reads like a typo and is a missing plugin;
+//  3. ~/.docker/config.json naming a credsStore whose helper binary is gone —
+//     `docker-credential-desktop not found` after a move to Colima. The daemon is
+//     healthy; the config points at a helper that left.
+//
+// `home` is a parameter rather than a call to os.UserHomeDir so a test can put a
+// config.json where it wants one.
+func dockerProbes(ctx context.Context, look lookupFunc, run cmdRunner, home string) []probeLine {
+	docker, err := look("docker")
+	if err != nil {
+		return []probeLine{{
+			label:  "docker",
+			detail: "not found on PATH — `palbase start` runs the local stack in containers; install Docker or Colima",
+		}}
+	}
+	out := []probeLine{{ok: true, label: "docker", detail: docker}}
+
+	if v, cErr := run(ctx, docker, "compose", "version"); cErr != nil {
+		out = append(out, probeLine{
+			label:  "compose",
+			detail: "`docker compose` is not available — the local stack is a compose project; install the Docker Compose plugin (v2)",
+		})
+	} else {
+		out = append(out, probeLine{ok: true, label: "compose", detail: strings.TrimSpace(string(v))})
+	}
+
+	store := credsStore(home)
+	switch {
+	case store == "":
+		out = append(out, probeLine{ok: true, label: "creds", detail: "no credsStore configured (fine — docker will use plain config)"})
+	default:
+		helper := "docker-credential-" + store
+		if _, hErr := look(helper); hErr != nil {
+			out = append(out, probeLine{
+				label: "creds",
+				detail: fmt.Sprintf(
+					"~/.docker/config.json asks for credsStore %q but %s is not on PATH — install it, or remove the credsStore line",
+					store, helper),
+			})
+		} else {
+			out = append(out, probeLine{ok: true, label: "creds", detail: helper})
+		}
+	}
+	return out
+}
+
+// credsStore reads the credential helper name out of ~/.docker/config.json.
+// An absent or unreadable file means "no helper configured", which is a valid
+// setup rather than a failure.
+func credsStore(home string) string {
+	raw, err := os.ReadFile(filepath.Join(home, ".docker", "config.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		CredsStore string `json:"credsStore"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.CredsStore)
+}
 
 // doctorCmd is the environment triage verb: one command that answers "why is
 // the CLI not working for me" — endpoints, login state, headless PAT,
@@ -73,6 +163,17 @@ func doctorCmd() *cobra.Command {
 					ok("hook", fmt.Sprintf("hooks/pre-push %s", detail))
 				default: // missing
 					bad("hook", "hooks/pre-push missing — run 'palbase push' or 'palbase clone' once to install it")
+				}
+			}
+
+			// Docker prerequisites, before Node: `palbase start` needs these and
+			// used to discover each one by failing with docker's own raw error.
+			home, _ := os.UserHomeDir()
+			for _, l := range dockerProbes(ctx, exec.LookPath, runCombined, home) {
+				if l.ok {
+					ok(l.label, l.detail)
+				} else {
+					bad(l.label, l.detail)
 				}
 			}
 
