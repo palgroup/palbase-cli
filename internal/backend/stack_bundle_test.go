@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -731,4 +732,51 @@ func TestAJobTheSDKCannotResolveStopsTheBuild(t *testing.T) {
 	err := writeDefinitionManifests(context.Background(), dir, bundle, &strings.Builder{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "jobs/broken.ts")
+}
+
+// A PROJECT'S CHANNELS HAVE TO REACH THE RUNTIME, and the entry is the only
+// thing that can carry them.
+//
+// `defineChannels` anchors its declaration on a globalThis symbol as it is
+// evaluated, and the runtime reads the bundle's `channels` EXPORT first,
+// falling back to that symbol. Neither exists unless the entry imports the
+// file: nothing else in a project references channels.ts, so a bundle built
+// without this line does not contain the declaration at all.
+//
+// What that costs is not a missing feature. Undeclared channels are REFUSED —
+// fail-closed, by design — so a project whose channels.ts never shipped has
+// every join answered `unauthorized`, with the file sitting in plain sight and
+// the deploy reporting success. This is `jobs = []` again (fixed 2026-08-26),
+// and it cost the same silence.
+//
+// Measured 2026-08-28 on the shipped binary: `channels` appeared nowhere in
+// this package.
+func TestTheEntryShipsTheProjectsChannels(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "channels.ts"),
+		[]byte(`import { defineChannels, ownerOnly } from "@palbase/backend";
+export default defineChannels({ "user:{uid}": ownerOnly() });`), 0o644))
+
+	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+
+	channels := filepath.Join(dir, "channels.ts")
+	assert.Contains(t, entry,
+		"import __channels from "+strconv.Quote(channels)+"; export const channels = __channels;",
+		"the entry does not carry the project's channels — every join would be refused")
+
+	// The declaration must be evaluated with the controllers, BEFORE the module
+	// body reads anything: the globalThis fallback the runtime keeps is written
+	// by that evaluation.
+	assert.Less(t, strings.Index(entry, "channels.ts"), strings.Index(entry, "SDK.getRegisteredControllers()"),
+		"channels are imported after the registry is read")
+}
+
+// A project without a channels.ts still bundles — the file is optional, exactly
+// like db/schema.ts. An entry that named it unconditionally would fail to build
+// for every project that does not use realtime.
+func TestAProjectWithoutChannelsStillBundles(t *testing.T) {
+	dir := t.TempDir()
+	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	assert.NotContains(t, entry, "channels.ts")
+	assert.NotContains(t, entry, "export const channels")
 }

@@ -319,6 +319,25 @@ func bundleEntry(dir string, sources []string) string {
 	if schema := filepath.Join(dir, "db", "schema.ts"); fileExists(schema) {
 		fmt.Fprintf(&b, "import __schema from %q; export const schema = __schema;\n", schema)
 	}
+	// CHANNELS TRAVEL THE SAME WAY, and for a sharper reason than the schema.
+	//
+	// `defineChannels` writes its declaration onto a globalThis symbol as the
+	// module is evaluated, and the runtime reads this EXPORT first, falling back
+	// to that symbol. Nothing else in a project imports channels.ts — it is not
+	// a controller, a job, a webhook or a hook — so without this line the file
+	// is not in the bundle at all, neither path finds a declaration, and the
+	// table ships empty.
+	//
+	// An empty table is not a missing feature: undeclared channels are REFUSED,
+	// fail-closed by design. So a project whose channels.ts never shipped has
+	// every join answered `unauthorized` while the file sits in plain sight and
+	// the deploy reports success. That is `jobs = []` again — same silence, same
+	// class — and it is why the three lines below exist at all.
+	//
+	// It cannot live under config/: nothing evaluates that directory.
+	if channels := filepath.Join(dir, "channels.ts"); fileExists(channels) {
+		fmt.Fprintf(&b, "import __channels from %q; export const channels = __channels;\n", channels)
+	}
 	// Read AFTER the imports above have run — ESM evaluates every import before
 	// the module body, so every decorator has fired by this line.
 	// THE BUNDLER DOES NOT GET TO NAME THE PUBLIC API.
