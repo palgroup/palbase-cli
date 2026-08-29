@@ -1,20 +1,15 @@
 // Package egress provides the `palbase egress` subcommand group: list / add /
-// remove. It is GUIDED authoring for the outbound-HTTP allowlist config-as-code
-// surface — the same shape `palbase storage` and `palbase flags` have — so an
-// author declares hosts without hand-writing TypeScript and without guessing the
-// deploy's fail-closed host rules.
+// remove. They read and write the outbound-HTTP allowlist ON THE STACK through
+// the management API, and run the deploy's fail-closed host rules locally so a
+// host the stack would reject (a URL, a port, an IP literal, an internal name)
+// is caught at authoring time rather than as a failed deploy.
 //
-// config/egress.ts was the one module config surface with NO command: it had to
-// be hand-written, and a host the deploy rejects (a URL, a port, an IP literal,
-// an internal name) only surfaced as a FAILED deploy. These commands run the same
-// checks locally, so the mistake is caught at authoring time.
-//
-// The CLI is the SOLE author of config/egress.ts: every write regenerates the
-// whole file from the current host set. A hand-edit that keeps the generated
-// `defineEgress({ hosts: [...] })` shape still round-trips.
-//
-// No network, no secrets — pure local file authoring. The allowlist is enforced
-// at deploy (artifact manifest → isolate → tenantFetch), not from here.
+// IT USED TO SAY "No network, no secrets — pure local file authoring", and it
+// used to write config/egress.ts. Both stopped being true: `read`/`write` below
+// GET and PUT /v1/management/egress, and the file is gone (2026-08-29). The
+// fence has one door, and this is it — the deploy stamps the stack's current
+// value into the artifact manifest, which is why a change here takes effect on
+// the next deploy.
 package egress
 
 import (
@@ -29,9 +24,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// configPath is the project-relative path the deploy evals.
-const configPath = "config/egress.ts"
 
 // hostEntryRE pulls the quoted host strings out of the hosts: [ ... ] array.
 var hostEntryRE = regexp.MustCompile(`"([^"]*)"`)

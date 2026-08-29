@@ -1,21 +1,18 @@
 // Package flags provides the `palbase flags` subcommand group: list / add /
-// remove (this file) and `user set/unset/list/clear` (user.go). The first three
-// are GUIDED authoring for the feature-flag config-as-code surface — they
-// read/write config/flags.ts (the typed DSL from @palbase/backend), so an author
-// declares flag DEFINITIONS without hand-writing TypeScript. On `git push`, the
-// deploy evals config/flags.ts and UPSERTS the flag definitions into PalFlags
-// (create-or-update; never auto-deleted).
+// remove (this file) and `user set/unset/list/clear` (user.go). All of them
+// write FLAGS ON THE STACK through the management API — they are the door, not
+// a file authoring aid.
 //
 // A flag DEFINITION is a typed project-wide DEFAULT (key + type + default value
 // + optional string variants + description). The per-user VALUE of a flag (an
-// override / A-B assignment) is runtime state, never in git — set from the SDK,
-// from Studio, or from `palbase flags user set` (user.go, the ONLY part of this
-// package that touches the network).
+// override / A-B assignment) is runtime state — set from the SDK, from Studio,
+// or from `palbase flags user set`.
 //
-// The CLI is the SOLE author of config/flags.ts: every write regenerates the
-// whole file from the current flag set (deterministic template), and reads parse
-// that same generated shape back. This sidesteps having to parse arbitrary
-// TypeScript in Go — the file is config-as-code data the CLI fully owns.
+// IT USED TO WRITE config/flags.ts AND THAT FILE IS GONE (2026-08-29). Its
+// header claimed the deploy "evals config/flags.ts and UPSERTS the definitions
+// into PalFlags"; that stopped being true when the declaration applier was
+// retired, and nothing said so. What a controller may SPELL is now a generated
+// type (`palbase-stack.d.ts`), and what EXISTS is what these commands wrote.
 //
 // No secrets are involved (flags carry no credentials), so no command in this
 // package touches the encrypted store.
@@ -35,9 +32,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// configPath is the project-relative path the deploy's br-pod evals.
-const configPath = "config/flags.ts"
 
 // flagKeyRE bounds a flag key to PalFlags' system-flag key rule (a letter, then
 // letters / digits / underscores). Matches the SDK's FLAG_KEY_RE so a key the

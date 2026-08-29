@@ -1,8 +1,6 @@
 // Package storage provides the `palbase storage` subcommand group:
-// list / add / remove. These commands are GUIDED authoring for the storage
-// config-as-code surface — they read/write config/storage.ts (the typed DSL
-// from @palbase/backend), so an author declares buckets without hand-writing
-// TypeScript.
+// list / add / remove. These commands write BUCKETS ON THE STACK through the
+// management API — they are the door, not a file authoring aid.
 //
 // THE DEPLOY DOES NOT RECONCILE THEM, and this comment used to say it did.
 // Buckets live ON THE STACK: the declaration applier was retired deliberately
@@ -16,15 +14,14 @@
 // buckets at all; the first upload would have 404'd (measured on `centauri`,
 // 2026-08-24).
 //
-// The CLI is the SOLE author of config/storage.ts: every write regenerates the
-// whole file from the current bucket set (deterministic template), and reads
-// parse that same generated shape back. This sidesteps having to parse
-// arbitrary TypeScript in Go — the file is config-as-code data the CLI fully
-// owns. A user hand-edit that keeps the generated `name: bucket({ ... })` shape
-// still round-trips; a free-form rewrite would not.
+// IT USED TO WRITE config/storage.ts AND THAT FILE IS GONE (2026-08-29). The
+// declaration was applied to nothing after the applier was retired, so a project
+// could declare three buckets, deploy green, and hold none — measured on
+// `centauri`, 2026-08-24. What a controller may SPELL is now a generated type
+// (`palbase-stack.d.ts`), and what EXISTS is what these commands wrote.
 //
 // No secrets are involved (buckets carry no credentials), so these commands
-// never touch the encrypted store — pure local file authoring.
+// never touch the encrypted store.
 package storage
 
 import (
@@ -40,9 +37,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// configPath is the project-relative path the deploy's br-pod evals.
-const configPath = "config/storage.ts"
 
 // bucketNameRE bounds a bucket name to the Storage module's allowed shape
 // (lowercase/digits/dash/dot/underscore, must start alnum). Matches the SDK's

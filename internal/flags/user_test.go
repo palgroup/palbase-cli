@@ -316,8 +316,18 @@ func TestFlagsUserList_HumanOutputMarksTheWinner(t *testing.T) {
 	require.Contains(t, out, "source is inferred")
 }
 
-// The override commands are runtime state. Writing config/flags.ts here would
-// put an Environment-specific, per-user value into git.
+// legacyConfigPath is the file `palbase flags` USED to write. Production no
+// longer knows this name — the constant lives here, in the guard, because the
+// only remaining question about it is "did we start writing it again?".
+//
+// The guard outlived its original reason and got a stronger one. It began as
+// "override commands are runtime state; writing config/flags.ts would put an
+// Environment-specific, per-user value into git". Now NO flags command may write
+// it: the declaration was applied to nothing after the applier was retired, so
+// the file could only ever mislead — a project declaring flags that the stack
+// never held.
+const legacyConfigPath = "config/flags.ts"
+
 func TestFlagsUser_NeverTouchesConfigFile(t *testing.T) {
 	f := newFakeStack(t, map[string]any{
 		"PUT /v1/user-flags/users/usr_42/palbase.debug_console": map[string]any{
@@ -327,13 +337,15 @@ func TestFlagsUser_NeverTouchesConfigFile(t *testing.T) {
 	_, err := runFlags(t, f,
 		"user", "set", "usr_42", "palbase.debug_console", "--type", "boolean", "--value", "true")
 	require.NoError(t, err)
-	_, statErr := os.Stat(configPath)
-	require.True(t, os.IsNotExist(statErr), "flags user set must not write %s", configPath)
+	_, statErr := os.Stat(legacyConfigPath)
+	require.True(t, os.IsNotExist(statErr), "no flags command may write %s — it is gone", legacyConfigPath)
 }
 
-// The counterpart guard: `flags add` still refuses a dotted key, because it
-// cannot live in config/flags.ts. Loosening the override key rule must not have
-// loosened this one.
+// The counterpart guard: `flags add` still refuses a dotted key. The reason
+// moved with the file — it used to be "a dotted key cannot live in
+// config/flags.ts"; it is now the stack's own key shape, which `flags add`
+// checks locally so the mistake is caught before the round trip. Loosening the
+// override key rule must not have loosened this one.
 func TestFlagsAdd_StillRejectsDottedKey(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cmd := Cmd(Resolvers{})
