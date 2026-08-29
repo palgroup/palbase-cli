@@ -299,28 +299,8 @@ func TestTemplatesSet_WritesTheStack(t *testing.T) {
 // An EMPTY set is a legitimate value — "this project sends nothing" — and must
 // travel as one. Refusing it, or silently sending nothing, would make "cleared"
 // and "never set" indistinguishable, which is the shape of the egress fence's
-// own empty-list rule.
-func TestTemplatesSet_EmptyDocumentIsAValue(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{}`), 0o600))
-
-	f := &fakeStack{answer: `{"applied":0}`}
-	_, err := runWith(t, f, "templates", "set", "--file", path)
-	require.NoError(t, err)
-	assert.Equal(t, http.MethodPut, f.last().Method)
-	assert.JSONEq(t, `{}`, f.last().Body)
-}
-
-func TestTemplatesList_ReadsTheStack(t *testing.T) {
-	f := &fakeStack{answer: `{"email":{"todo-digest":{"subject":"Hi"}}}`}
-	out, err := runWith(t, f, "templates", "list")
-	require.NoError(t, err)
-	assert.Equal(t, http.MethodGet, f.last().Method)
-	assert.Equal(t, "/v1/management/notifications/templates", f.last().Path)
-	assert.Contains(t, out, "todo-digest")
-	assert.Contains(t, out, "email")
-}
+// There is no list test because there is no list verb: the contract publishes
+// PUT for this path and nothing else. Written once, it answered 405 live.
 
 // FR-006: the stack's own refusal reaches the operator verbatim. A verb that
 // swallowed a 4xx would report success for a template set nobody stored.

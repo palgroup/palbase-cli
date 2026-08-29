@@ -111,7 +111,6 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase notifications providers                 Show the catalog and what is configured.
   palbase notifications add <provider> [flags]    Configure a sender.
   palbase notifications remove <provider>         Stop delivering through one.
-  palbase notifications templates list            Show the templates this stack holds.
   palbase notifications templates set --file F    Replace the whole template set.
 
 They live ON THE STACK and take effect immediately. They used to be declared in
@@ -475,42 +474,11 @@ your editor's problem rather than the stack's error message.`,
 	set.Flags().StringVar(&file, "file", "", "JSON document holding the template set (required)")
 	_ = set.MarkFlagRequired("file")
 
-	list := &cobra.Command{
-		Use:   "list",
-		Short: "Show the templates this stack holds",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			raw, err := call(r, cmd, http.MethodGet, templatesPath, nil)
-			if err != nil {
-				return err
-			}
-			var doc map[string]map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &doc); err != nil {
-				return fmt.Errorf("the stack's template set is not readable: %s", strings.TrimSpace(string(raw)))
-			}
-			if len(doc) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No templates on this stack.")
-				return nil
-			}
-			channels := make([]string, 0, len(doc))
-			for ch := range doc {
-				channels = append(channels, ch)
-			}
-			sort.Strings(channels)
-			for _, ch := range channels {
-				keys := make([]string, 0, len(doc[ch]))
-				for k := range doc[ch] {
-					keys = append(keys, k)
-				}
-				sort.Strings(keys)
-				for _, k := range keys {
-					fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", ch, k)
-				}
-			}
-			return nil
-		},
-	}
+	// THERE IS NO `list`, and the contract is why: /v1/management/notifications/
+	// templates publishes PUT and nothing else. One was written here and answered
+	// 405 on a live stack (2026-08-29). A read verb needs a read endpoint first;
+	// inventing a path the surface does not serve would only move the 405.
 
-	c.AddCommand(set, list)
+	c.AddCommand(set)
 	return c
 }
