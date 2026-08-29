@@ -106,9 +106,45 @@ func credsStore(home string) string {
 	return strings.TrimSpace(cfg.CredsStore)
 }
 
+// toolchainProbes answers "can `palbase build` and `palbase push` run here".
+//
+// TWO ENGINES, NOT ONE, and only one of them used to be reported. `palbase
+// build` drives Node (devjs/*.js), but `palbase push` bundles the backend with
+// BUN — stack_bundle.go:59 refuses with "bun is not installed, and it is what
+// builds a backend for this runtime", and bunVersion() (stack_bundle.go:977)
+// stamps the artifact with it. A push on a machine without bun therefore died
+// on bun's absence while `doctor` — the command whose whole job is "why is the
+// CLI not working for me" — printed a clean bill of health and never said the
+// word. Measured 2026-08-29, customer run.
+func toolchainProbes(ctx context.Context, look lookupFunc, run cmdRunner) []probeLine {
+	var out []probeLine
+	if node, err := look("node"); err != nil {
+		out = append(out, probeLine{
+			label:  "node",
+			detail: "not found on PATH — `palbase build` and `palbase db types` need Node.js",
+		})
+	} else {
+		v, _ := run(ctx, node, "--version")
+		out = append(out, probeLine{ok: true, label: "node", detail: fmt.Sprintf("%s (%s)", strings.TrimSpace(string(v)), node)})
+	}
+	if bun, err := look("bun"); err != nil {
+		out = append(out, probeLine{
+			label: "bun",
+			detail: "not found on PATH — `palbase push` bundles the backend with Bun (the stack RUNS Bun, " +
+				"so the bundle is built by the engine that will run it); install it from https://bun.sh " +
+				"(`curl -fsSL https://bun.sh/install | bash`, or `brew install oven-sh/bun/bun`)",
+		})
+	} else {
+		v, _ := run(ctx, bun, "--version")
+		out = append(out, probeLine{ok: true, label: "bun", detail: fmt.Sprintf("%s (%s)", strings.TrimSpace(string(v)), bun)})
+	}
+	return out
+}
+
 // doctorCmd is the environment triage verb: one command that answers "why is
 // the CLI not working for me" — endpoints, login state, headless PAT,
-// project link, and the Node toolchain `build`/`db types` need. Informative
+// project link, and the two JS engines the CLI drives: Node (`build`, `db
+// types`) and Bun (`push`'s bundler). Informative
 // only (always exit 0): doctor diagnoses, the failing command still owns its
 // error.
 func doctorCmd() *cobra.Command {
@@ -177,11 +213,12 @@ func doctorCmd() *cobra.Command {
 				}
 			}
 
-			if node, err := exec.LookPath("node"); err != nil {
-				bad("node", "not found on PATH — `palbase build` and `palbase db types` need Node.js")
-			} else {
-				v, _ := exec.CommandContext(ctx, node, "--version").Output()
-				ok("node", fmt.Sprintf("%s (%s)", strings.TrimSpace(string(v)), node))
+			for _, l := range toolchainProbes(ctx, exec.LookPath, runCombined) {
+				if l.ok {
+					ok(l.label, l.detail)
+				} else {
+					bad(l.label, l.detail)
+				}
 			}
 			return nil
 		},

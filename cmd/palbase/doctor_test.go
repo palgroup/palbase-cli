@@ -108,3 +108,78 @@ func TestDockerProbesNameEachPrerequisiteThatCanFailAStart(t *testing.T) {
 		}
 	})
 }
+
+// `palbase push` düştü ve sebebi `bun is not installed` idi
+// (`internal/backend/stack_bundle.go:59-61`): bir backend'i bu runtime için
+// bundle eden BUN, ve `bunVersion()` da (stack_bundle.go:977) build yolunda
+// ona bağlı. Ortam teşhisi için var olan komut — `doctor` — node'u yokluyordu,
+// bun'ı hiç anmıyordu; yani "neden çalışmıyor" sorusunun cevabı doctor'ın
+// çıktısında YOKTU ve push'un ham hatası olarak geldi.
+func TestToolchainProbesNameBunBecausePushBundlesWithIt(t *testing.T) {
+	found := func(names ...string) lookupFunc {
+		set := map[string]bool{}
+		for _, n := range names {
+			set[n] = true
+		}
+		return func(name string) (string, error) {
+			if set[name] {
+				return "/usr/local/bin/" + name, nil
+			}
+			return "", errors.New("not found")
+		}
+	}
+	version := func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("1.3.9\n"), nil
+	}
+
+	lineFor := func(t *testing.T, lines []probeLine, label string) probeLine {
+		t.Helper()
+		for _, l := range lines {
+			if l.label == label {
+				return l
+			}
+		}
+		t.Fatalf("%q satırı hiç basılmadı; satırlar: %+v", label, lines)
+		return probeLine{}
+	}
+
+	t.Run("bun yok", func(t *testing.T) {
+		lines := toolchainProbes(context.Background(), found("node"), version)
+		bun := lineFor(t, lines, "bun")
+		if bun.ok {
+			t.Fatalf("bun PATH'te yokken satır yeşil: %+v", bun)
+		}
+		// Eyleme dönüştürülebilirlik: satır kurulum yolunu söylemeli.
+		if !strings.Contains(bun.detail, "bun.sh") {
+			t.Errorf("kurulum tavsiyesi yok: %q", bun.detail)
+		}
+		// Ve NEDEN gerektiğini — push'un bundle'ı bun'la ürettiğini.
+		if !strings.Contains(strings.ToLower(bun.detail), "push") {
+			t.Errorf("satır bun'ın neden gerektiğini söylemiyor: %q", bun.detail)
+		}
+	})
+
+	t.Run("bun var", func(t *testing.T) {
+		lines := toolchainProbes(context.Background(), found("node", "bun"), version)
+		bun := lineFor(t, lines, "bun")
+		if !bun.ok {
+			t.Fatalf("bun PATH'teyken satır kırmızı: %+v", bun)
+		}
+		if !strings.Contains(bun.detail, "1.3.9") {
+			t.Errorf("satır sürümü taşımıyor: %q", bun.detail)
+		}
+	})
+
+	// NEGATİF KONTROL: node satırı korunur — bun onun YANINA eklendi, yerine
+	// değil.
+	t.Run("node satırı duruyor", func(t *testing.T) {
+		lines := toolchainProbes(context.Background(), found("bun"), version)
+		node := lineFor(t, lines, "node")
+		if node.ok {
+			t.Fatalf("node PATH'te yokken satır yeşil: %+v", node)
+		}
+		if !strings.Contains(node.detail, "palbase build") {
+			t.Errorf("node satırı neyin düşeceğini söylemiyor: %q", node.detail)
+		}
+	})
+}
