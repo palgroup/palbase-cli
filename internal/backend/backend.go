@@ -68,7 +68,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // modules/backend on every push/PR touching either submodule and fails the
 // moment a copy drifts — there is no Go test for this in this repo.
 //
-//go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js
+//go:embed devjs/build-check.js devjs/env-gen.js devjs/stack-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js
 var buildCheckFS embed.FS
 
 // REST is the subset of the Management-API transport the provider-aware deploy
@@ -918,6 +918,83 @@ var envGenExternals = []string{"@palbase/backend", "@palbase/core"}
 // envTypesFile is the derived declaration file: it augments the SDK's `Tables`
 // interface so `Database.tables.*` is typed with no import and no generic.
 const envTypesFile = "palbase-env.d.ts"
+
+// stackTypesFile is the derived declaration file for the names the STACK holds.
+// It augments `@palbase/backend/stack`, so `Secrets.get(...)`, the Flags client
+// and `@Upload({ bucket })` accept this project's real names and nothing else.
+//
+// It is the thing that replaced `config/secrets.ts`. That file asked the author
+// to restate, in the repo, names the vault already held, and the push compared
+// the two lists at deploy. This is read FROM the stack and checked by the
+// compiler, so there is no second list to drift and no check to forget.
+const stackTypesFile = "palbase-stack.d.ts"
+
+// StackNames are the three sets `palbase-stack.d.ts` is rendered from.
+type StackNames struct {
+	Secrets []string `json:"secrets"`
+	Flags   []string `json:"flags"`
+	Buckets []string `json:"buckets"`
+}
+
+// generateStackTypes writes the project's palbase-stack.d.ts from the names the
+// linked environment's stack holds.
+//
+// A read failure is NOT written through: the existing file is left alone and the
+// error is returned. A stack that is briefly unreachable must not silently
+// narrow a project's types to nothing — that would turn every Secrets.get() in
+// the codebase into a compile error and read as "your code is wrong" rather than
+// "the stack could not be asked".
+func generateStackTypes(ctx context.Context, projectDir, nodeModules string, names StackNames) error {
+	if _, err := exec.LookPath("node"); err != nil {
+		return fmt.Errorf("node not on PATH (Node.js required to generate %s)", stackTypesFile)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "palbase-stackgen-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	scriptPath := filepath.Join(tmpDir, "stack-gen.js")
+	body, err := buildCheckFS.ReadFile("devjs/stack-gen.js")
+	if err != nil {
+		return fmt.Errorf("read embedded stack-gen.js: %w", err)
+	}
+	if err := os.WriteFile(scriptPath, body, 0o644); err != nil {
+		return err
+	}
+
+	reqData, err := json.Marshal(struct {
+		Names   StackNames `json:"names"`
+		OutPath string     `json:"out_path"`
+	}{Names: names, OutPath: filepath.Join(projectDir, stackTypesFile)})
+	if err != nil {
+		return err
+	}
+
+	evalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(evalCtx, "node", scriptPath)
+	cmd.Dir = projectDir
+	cmd.Env = append(os.Environ(), "NODE_PATH="+nodeModules)
+	cmd.Stdin = bytes.NewReader(reqData)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("stack-gen: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	var res struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		return fmt.Errorf("parse stack-gen output: %w (output: %s)", err, strings.TrimSpace(stdout.String()))
+	}
+	if res.Error != "" {
+		return fmt.Errorf("stack-gen: %s", res.Error)
+	}
+	return nil
+}
 
 func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
 	schemaPath := filepath.Join(projectDir, "db", "schema.ts")
