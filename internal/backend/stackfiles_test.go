@@ -112,3 +112,41 @@ func TestOnlyTheEdgeIsPublished(t *testing.T) {
 		t.Error("something publishes the database port — a stack's password would be on the host, and `--lan` would put it on the network")
 	}
 }
+
+// GO SABITLERI ILE COMPOSE VARSAYILANLARI AYNI ETIKETI SOYLEMELI.
+//
+// Etiket IKI yerde yasiyor: stackImages'in fallback'i (bu paket, varlik kontrolu
+// ve `palbase upgrade` icin) ve compose belgesinin ${VAR:-default}'u (gercekte
+// KOSAN sey, cunku bu komut o degiskenleri export etmiyor).
+//
+// Olculdu 2026-08-29: yalniz Go sabiti 0.37.0'a tasindi, compose 0.36.1'de kaldi,
+// ve `palbase start` eski imaji kosmaya devam etti. Sonuc, storage semasi 4'e
+// gocmus bir veritabaninda:
+//
+//	migrate module "storage": no migration found for version 4
+//
+// Bir sey hakkinda anlasmak zorunda olan iki yer, bir gun anlasmayi birakacak iki
+// yerdir. Bu, onu soyleyen test.
+func TestTheGoConstantsAndTheComposeDefaultsAgree(t *testing.T) {
+	doc := string(stackCompose)
+	for _, want := range stackImages {
+		// compose satiri: image: ${VAR:-<etiket>}
+		marker := "${" + want.env + ":-"
+		i := strings.Index(doc, marker)
+		if i < 0 {
+			t.Errorf("compose %s degiskenini hic okumuyor", want.env)
+			continue
+		}
+		rest := doc[i+len(marker):]
+		j := strings.IndexByte(rest, '}')
+		if j < 0 {
+			t.Errorf("compose %s satiri kapanmamis", want.env)
+			continue
+		}
+		got := rest[:j]
+		if got != want.fallback {
+			t.Errorf("%s: Go sabiti %q, compose varsayilani %q — `palbase start` compose'unkini kosar",
+				want.env, want.fallback, got)
+		}
+	}
+}
