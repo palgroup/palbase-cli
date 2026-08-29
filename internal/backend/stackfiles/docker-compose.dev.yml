@@ -135,7 +135,7 @@ services:
   # for no certificate. The route table it reads is the shipped table, from the
   # same file inside the same image.
   envoy:
-    image: ${PALBASE_EDGE_IMAGE:-ghcr.io/palgroup/palbase/edge:0.37.0}
+    image: ${PALBASE_EDGE_IMAGE:-ghcr.io/palgroup/palbase/edge:0.39.0}
     command: ["-c", "/etc/envoy/bootstrap.dev.yaml"]
     ports:
       # PALBASE_HTTP_BIND is 127.0.0.1 unless somebody deliberately widened it
@@ -189,7 +189,7 @@ services:
     # PULLED by default, so `palbase start` works on a machine that has never
     # seen this repository. Building locally? Set PALBASE_PALSVC_IMAGE to your
     # own tag — the CLI prints the build command when an image is missing.
-    image: ${PALBASE_PALSVC_IMAGE:-ghcr.io/palgroup/palbase/palsvc:0.37.0}
+    image: ${PALBASE_PALSVC_IMAGE:-ghcr.io/palgroup/palbase/palsvc:0.39.0}
     command:
       - "--modules"
       # Katalogun TAMAMI. `jobs` 2026-08-26'da eklendi: self-host'un maskesinde
@@ -277,7 +277,7 @@ services:
   runtime:
     # The DEV target, pulled: it carries the bundler and TypeScript the stager
     # needs. The production image comes up healthy and then refuses every save.
-    image: ${PALBASE_RUNTIME_IMAGE:-ghcr.io/palgroup/palbase/runtime-dev:0.37.0}
+    image: ${PALBASE_RUNTIME_IMAGE:-ghcr.io/palgroup/palbase/runtime-dev:0.39.0}
     environment:
       # The switch. With it set, the artifact path is not taken at all — there
       # is no ARTIFACT_BLOB_URL here and nothing looks for one.

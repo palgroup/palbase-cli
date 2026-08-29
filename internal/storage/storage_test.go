@@ -89,7 +89,7 @@ func TestRemoveActuallyRemoves(t *testing.T) {
 // TestListReadsTheStack.
 func TestListReadsTheStack(t *testing.T) {
 	t.Chdir(t.TempDir())
-	rest := &fakeREST{answer: `[{"name":"avatars","public":true,"object_count":3,"total_bytes":900}]`}
+	rest := &fakeREST{answer: `{"buckets":[{"name":"avatars","public":true,"object_count":3,"total_bytes":900}]}`}
 
 	out, err := runStorage(t, rest, "list")
 	if err != nil {
@@ -228,8 +228,7 @@ func TestStorageAddRefusesAMalformedVariant(t *testing.T) {
 // Bildirdiğin variant'ı göremezsen bildirip bildirmediğini bilemezsin — ve
 // bu, `add`den hemen sonra sorulan soru.
 func TestStorageListShowsVariants(t *testing.T) {
-	rest := &fakeREST{answer: `[{"name":"posts","public":true,"object_count":2,"total_bytes":10,
-		"variants":[{"name":"thumb"},{"name":"card"}]}]`}
+	rest := &fakeREST{answer: `{"buckets":[{"name":"posts","public":true,"object_count":2,"total_bytes":10,"variants":[{"name":"thumb"},{"name":"card"}]}]}`}
 	out, err := runStorage(t, rest, "list")
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -238,7 +237,7 @@ func TestStorageListShowsVariants(t *testing.T) {
 		t.Errorf("liste variant adlarını göstermiyor:\n%s", out)
 	}
 	// NEGATİF KONTROL: variant'sız kova fazladan satır basmaz.
-	plain := &fakeREST{answer: `[{"name":"docs","public":false,"object_count":0,"total_bytes":0}]`}
+	plain := &fakeREST{answer: `{"buckets":[{"name":"docs","public":false,"object_count":0,"total_bytes":0}]}`}
 	out2, _ := runStorage(t, plain, "list")
 	if strings.Contains(out2, "variants:") {
 		t.Errorf("variant'sız kova için variant satırı basıldı:\n%s", out2)

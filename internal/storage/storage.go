@@ -198,6 +198,20 @@ func parseVariant(raw string) (string, variantSpec, error) {
 	return name, spec, nil
 }
 
+// bucketRow is one bucket as the stack lists it.
+type bucketRow struct {
+	Name        string `json:"name"`
+	Public      bool   `json:"public"`
+	ObjectCount int    `json:"object_count"`
+	TotalBytes  int64  `json:"total_bytes"`
+	// The renditions this bucket declares. Shown because they are declared here
+	// and nowhere else: without them the listing cannot answer "what did I ask
+	// this bucket to render", which is the question you have right after asking.
+	Variants []struct {
+		Name string `json:"name"`
+	} `json:"variants"`
+}
+
 // parseSize converts a --max-size value ("5MB", "20MB", "1024") to bytes.
 // Binary units, case-insensitive; a bare number is bytes. Mirrors the SDK's
 // parseFileSizeLimit so the CLI and the typed DSL agree.
@@ -356,23 +370,28 @@ func bucketsListCmd(r Resolvers) *cobra.Command {
 				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
 				return nil
 			}
-			var buckets []struct {
-				Name        string `json:"name"`
-				Public      bool   `json:"public"`
-				ObjectCount int    `json:"object_count"`
-				TotalBytes  int64  `json:"total_bytes"`
-				// A bucket's renditions. Shown because they are declared here and
-				// nowhere else: without them the listing cannot answer "what did I
-				// ask this bucket to render", which is the question you have right
-				// after asking for one.
-				Variants []struct {
-					Name string `json:"name"`
-				} `json:"variants"`
+			// THE ENVELOPE, not a bare array. The endpoint answers
+			// `{"buckets":[…]}` — measured against a live 0.39.0 stack — and this
+			// decoded into a bare slice, failed, and fell through to printing the
+			// raw JSON. The fallback made the bug invisible: the command "worked",
+			// it just never rendered the table it was written to render. The test
+			// that covered it used a bare-array fixture, which is a shape nothing
+			// on the other side produces.
+			// THE ENVELOPE, not a bare array. The endpoint answers
+			// `{"buckets":[…]}` — measured against a live stack — and this decoded
+			// into a bare slice, failed, and fell through to printing raw JSON.
+			// The fallback made the bug invisible: the command "worked", it just
+			// never rendered the table it was written to render. The test that
+			// covered it used a bare-array fixture, a shape nothing on the other
+			// side produces.
+			var answer struct {
+				Buckets []bucketRow `json:"buckets"`
 			}
-			if err := json.Unmarshal(raw, &buckets); err != nil {
+			if err := json.Unmarshal(raw, &answer); err != nil || answer.Buckets == nil {
 				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
 				return nil
 			}
+			buckets := answer.Buckets
 			if len(buckets) == 0 {
 				fmt.Fprintln(out, "this stack has no buckets")
 				fmt.Fprintln(out, "  add one: palbase storage add avatars --public")

@@ -119,7 +119,7 @@ func TestOnlyTheEdgeIsPublished(t *testing.T) {
 // ve `palbase upgrade` icin) ve compose belgesinin ${VAR:-default}'u (gercekte
 // KOSAN sey, cunku bu komut o degiskenleri export etmiyor).
 //
-// Olculdu 2026-08-29: yalniz Go sabiti 0.37.0'a tasindi, compose 0.36.1'de kaldi,
+// Olculdu 2026-08-29: yalniz Go sabiti 0.39.0'a tasindi, compose 0.36.1'de kaldi,
 // ve `palbase start` eski imaji kosmaya devam etti. Sonuc, storage semasi 4'e
 // gocmus bir veritabaninda:
 //

@@ -796,7 +796,7 @@ func TestAProjectWithoutChannelsStillBundles(t *testing.T) {
 // REDDEDIYOR — yani seam'i yaymayan bir bundler, acilmayan bir deploy uretir.
 //
 // Olculdu 2026-08-29: shell bundler `buildModuleClients`'i kazandi, bu kazanmadi,
-// ve runtime 0.37.0 yayinlandi. `palbase push` ile uretilen her bundle
+// ve runtime 0.39.0 yayinlandi. `palbase push` ile uretilen her bundle
 // reddedilecekti.
 func TestTheBundleEntryCarriesEveryRuntimeSeamSymbol(t *testing.T) {
 	entry := bundleEntry(t.TempDir(), nil)
