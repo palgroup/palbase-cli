@@ -94,9 +94,22 @@ function readReturnTypes(sourceText, fileLabel) {
   // `import { TodoSchema as T } from "../models/todo"`    → T:"../models/todo" (+ original)
   const imports = {};        // localName → specifier
   const importOriginal = {}; // localName → originalExportedName (for aliases)
+  // localName → true when the binding is TYPE-ONLY. Both spellings count:
+  // `import type { X }` (clause-level) and `import { type X }` (specifier-level).
+  //
+  // WHY IT IS TRACKED. A return schema has to survive to RUNTIME: this module
+  // emits code that binds the same-named zod const onto the route registry. A
+  // type-only import is ERASED by esbuild, so the emitted line then refers to an
+  // identifier that does not exist and the deploy fails with a bare
+  // `X is not defined` — no controller, no method, no cause. Measured on a
+  // customer run 2026-08-29. The check costs one flag read; not doing it is what
+  // made this module's own promise ("a violation is a HARD build error, never
+  // silent") false for the single most likely mistake.
+  const typeOnly = {};
   for (const stmt of sf.statements) {
     if (!tsapi.isImportDeclaration(stmt) || !stmt.importClause) continue;
     const spec = stmt.moduleSpecifier.text;
+    const clauseIsTypeOnly = stmt.importClause.isTypeOnly === true;
     const named = stmt.importClause.namedBindings;
     if (named && tsapi.isNamedImports(named)) {
       for (const el of named.elements) {
@@ -104,6 +117,7 @@ function readReturnTypes(sourceText, fileLabel) {
         const original = el.propertyName ? el.propertyName.text : local;
         imports[local] = spec;
         importOriginal[local] = original;
+        if (clauseIsTypeOnly || el.isTypeOnly === true) typeOnly[local] = true;
       }
     }
   }
@@ -252,6 +266,15 @@ function readReturnTypes(sourceText, fileLabel) {
           fnName,
           `return type \`${typeName}\` has no matching imported/exported zod schema in scope — ` +
             `export \`const ${typeName} = z.object(...)\` and import it`,
+        );
+      }
+      if (typeOnly[typeName]) {
+        throw err(
+          fnName,
+          `return type \`${typeName}\` is imported as TYPE-ONLY, but a response schema has to exist at ` +
+            `RUNTIME: the deploy binds the zod value of that name onto the route. A type-only import is ` +
+            `erased when the bundle is built, so this would fail at boot with \`${typeName} is not ` +
+            `defined\`. Drop the \`type\` keyword: \`import { ${typeName} } from ...\``,
         );
       }
       methods.push({ fnName, typeName, isArray });
