@@ -94,6 +94,11 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"status",
 		"stop",
 		"storage",
+		//  runs BOTH layers: the project's own npm test for services, and
+		// the same suite again with PALBASE_TEST_* exported for the ones that
+		// call the stack. It exists because the SDK told authors to test two
+		// layers and shipped no way to run them together.
+		"test",
 		"test-user",
 		"web",
 		"whoami",

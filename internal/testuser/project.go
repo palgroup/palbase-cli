@@ -178,6 +178,22 @@ func trimBody(raw []byte) string {
 	return string(raw)
 }
 
+// MintIdentities creates `count` test identities and returns the SAME payload
+// `create --json` prints. Exported so `palbase test` mints through this path
+// rather than shelling out to itself — one mint, one shape, one place to fix.
+func MintIdentities(cmd *cobra.Command, count int) ([]byte, error) {
+	target, cred, err := resolveProject(cmd)
+	if err != nil {
+		return nil, err
+	}
+	var res stackMinted
+	body := map[string]any{"count": count, "with_tokens": true}
+	if err := callProject(cmd.Context(), target, cred, http.MethodPost, adminTestUsers, body, &res); err != nil {
+		return nil, err
+	}
+	return json.Marshal(asIdentities(res))
+}
+
 func createOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
 	count int, template string, jsonOut bool, out io.Writer) error {
 	body := map[string]any{"count": count, "with_tokens": true}

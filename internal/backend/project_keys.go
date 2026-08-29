@@ -23,6 +23,12 @@ import (
 )
 
 // projectPublishableKey asks the project for the key an app ships.
+// PublishableKey is projectPublishableKey for callers outside this package —
+// `palbase test` needs the key it puts in PALBASE_TEST_API_KEY.
+func PublishableKey(ctx context.Context, target Target) (string, error) {
+	return projectPublishableKey(ctx, target)
+}
+
 func projectPublishableKey(ctx context.Context, target Target) (string, error) {
 	key, _, err := projectKeys(ctx, target)
 	return key, err

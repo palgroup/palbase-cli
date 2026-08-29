@@ -29,6 +29,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/storage"
+	palbasetest "github.com/palgroup/palbase-cli/internal/test"
 	"github.com/palgroup/palbase-cli/internal/testuser"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
@@ -436,6 +437,22 @@ func newRootCmd() *cobra.Command {
 			REST: func() admin.REST { return managementREST() },
 		}),
 		testuser.Cmd(),
+		// `palbase test` mints through testuser's own path, so the identities it
+		// exports are the same shape `test-user create --json` prints.
+		palbasetest.Cmd(palbasetest.Resolvers{
+			Target: func(cmd *cobra.Command) (palbasetest.Target, error) {
+				target, err := backend.ReadTarget()
+				if err != nil {
+					return palbasetest.Target{}, err
+				}
+				key, keyErr := backend.PublishableKey(cmd.Context(), target)
+				if keyErr != nil {
+					return palbasetest.Target{}, keyErr
+				}
+				return palbasetest.Target{URL: target.URL, APIKey: key}, nil
+			},
+			Mint: testuser.MintIdentities,
+		}),
 	)
 
 	// CLI-1 flat redesign: the backend lifecycle commands (build/push/pull/
