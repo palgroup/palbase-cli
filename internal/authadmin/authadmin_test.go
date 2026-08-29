@@ -258,3 +258,26 @@ func TestAuditEscapesItsQueryValues(t *testing.T) {
 		t.Errorf("cursor arrived as %q: %s", got, rest.path)
 	}
 }
+
+// TestAuthTemplatesSetStaysReachable is a CAPABILITY LOCK, not a feature test.
+//
+// The `config/` surface is gone (2026-08-29), so the management API is the only
+// door left for a project's auth templates. This verb IS that door. Losing it
+// would not break a build — it would leave a project unable to change the mail
+// its users receive, which is precisely the silent capability loss
+// `internal/management/contract_lock_test.go` records the retired declaration
+// applier producing five times.
+func TestAuthTemplatesSetStaysReachable(t *testing.T) {
+	rest := &fakeREST{}
+	run(t, rest, "templates", "set", "verify_email", "--json", `{"subject":"Confirm"}`)
+
+	if rest.method != http.MethodPut {
+		t.Fatalf("auth templates set must PUT, got %s", rest.method)
+	}
+	if want := "/v1/management/auth/templates/verify_email"; rest.path != want {
+		t.Fatalf("auth templates set must reach %s, got %s", want, rest.path)
+	}
+	if !strings.Contains(string(rest.body), "Confirm") {
+		t.Fatalf("the body must travel to the stack, got %s", rest.body)
+	}
+}
