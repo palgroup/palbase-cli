@@ -85,10 +85,43 @@ type stackMinted struct {
 		Email       string `json:"email"`
 		Password    string `json:"password"`
 		AccessToken string `json:"access_token"`
+		// Name is what a TEMPLATE mint calls this identity; a plain mint sends
+		// none and the position supplies one.
+		Name string `json:"name"`
 		// Inserted is how many rows landed in each table. Empty for a plain
 		// mint, which declares no data.
 		Inserted map[string]int `json:"inserted"`
 	} `json:"users"`
+}
+
+// asIdentities renders a mint in the shape `createTestApi({ identities })`
+// accepts, so the output of this command can be handed to the harness with
+// nothing in between.
+//
+// WHY IT IS NOT THE STACK'S SHAPE. The stack answers
+// `{"users":[{user_id,email,password,access_token}]}` — an array, snake_case,
+// and `user_id` where the harness reads `id`. Nothing documented that, and
+// nothing translated it, so every project wrote the same adapter: a measured
+// customer run carried a mint script plus five lines copied into a test setup.
+// Two spellings of one fact is a translation somebody has to keep correct
+// forever, and the CLI is the only side that can end it.
+//
+// Names are positional (`user1`, `user2`, …) because a plain mint declares
+// none; a template mint names them and that name is used.
+func asIdentities(res stackMinted) map[string]any {
+	identities := make(map[string]any, len(res.Users))
+	for i, u := range res.Users {
+		name := u.Name
+		if name == "" {
+			name = fmt.Sprintf("user%d", i+1)
+		}
+		entry := map[string]any{"id": u.UserID, "email": u.Email, "password": u.Password}
+		if u.AccessToken != "" {
+			entry["accessToken"] = u.AccessToken
+		}
+		identities[name] = entry
+	}
+	return map[string]any{"identities": identities}
 }
 
 // stackTemplates is what GET /admin/test-user-templates answers: the
@@ -160,7 +193,7 @@ func createOnProject(ctx context.Context, target backend.Target, cred backend.Cr
 		return err
 	}
 	if jsonOut {
-		return encodeJSON(out, res)
+		return encodeJSON(out, asIdentities(res))
 	}
 	if template != "" {
 		fmt.Fprintf(out, "✓ created %d test user(s) from template %q\n", len(res.Users), template)

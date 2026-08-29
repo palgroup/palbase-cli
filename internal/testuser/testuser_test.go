@@ -59,6 +59,29 @@ func runCmd(t *testing.T, reply string, args ...string) (seenCall, string, error
 	return seen, out.String(), err
 }
 
+// runCmdSplit is runCmd with the streams KEPT APART. `--json` is a scripting
+// surface: the destination banner goes to stderr precisely so stdout stays
+// machine-readable, and a test that merged them could not tell a broken payload
+// from a working one.
+func runCmdSplit(t *testing.T, reply string, args ...string) (string, string, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+	linkedTo(t, srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	cmd := Cmd()
+	cmd.SetArgs(args)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	err := cmd.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
 // TestTestUserSurface pins the subcommand set and the flags. The command group
 // is the whole lifecycle, not just minting.
 func TestTestUserSurface(t *testing.T) {
@@ -318,4 +341,53 @@ func TestTemplatesSet_RefusesMalformedJSONLocally(t *testing.T) {
 
 	_, _, err := runCmd(t, `{}`, "templates", "set", "--file", path)
 	require.Error(t, err)
+}
+
+// `--json` şekli HİÇBİR YERDE belgeli değildi ve harness'ın istediği şekle
+// UYMUYORDU: burası {"users":[{user_id,email,password,access_token}]} basıyor,
+// createTestApi.identities ise {"<ad>":{id,email,password,accessToken}}
+// istiyor. Aradaki çeviriyi her müşteri elle yazıyor — ölçülen koşuda bir
+// mint-betiği ve onun kopyaladığı beş satır. Çıktı artık DOĞRUDAN geçirilebilir.
+func TestCreateJSONIsWhatTheHarnessAccepts(t *testing.T) {
+	reply := `{"users":[
+		{"user_id":"usr_1","email":"a@e.f","password":"p1","access_token":"tok1"},
+		{"user_id":"usr_2","email":"b@e.f","password":"p2","access_token":"tok2"}
+	]}`
+
+	out, banner, err := runCmdSplit(t, reply, "create", "--count", "2", "--json")
+	if err != nil {
+		t.Fatalf("create --json: %v", err)
+	}
+
+	// Banner stderr'de kalmalı: stdout borulanabilir olmalı.
+	if !strings.Contains(banner, "▸") {
+		t.Errorf("hedef banner stderr'e gitmiyor: %q", banner)
+	}
+
+	var got struct {
+		Identities map[string]struct {
+			ID          string `json:"id"`
+			Email       string `json:"email"`
+			Password    string `json:"password"`
+			AccessToken string `json:"accessToken"`
+		} `json:"identities"`
+	}
+	if uErr := json.Unmarshal([]byte(out), &got); uErr != nil {
+		t.Fatalf("çıktı JSON değil: %v\n%s", uErr, out)
+	}
+	if len(got.Identities) != 2 {
+		t.Fatalf("identities iki kimlik taşımalı, %d taşıyor: %s", len(got.Identities), out)
+	}
+	first, ok := got.Identities["user1"]
+	if !ok {
+		t.Fatalf("kimlikler ada göre anahtarlanmalı (user1, user2): %s", out)
+	}
+	if first.ID != "usr_1" || first.Email != "a@e.f" || first.Password != "p1" || first.AccessToken != "tok1" {
+		t.Errorf("alan adları harness'ın şekline uymuyor: %+v", first)
+	}
+	// NEGATİF KONTROL: yığının kendi yazımı ÇIKTIDA KALMAMALI, yoksa iki şekil
+	// bir arada yaşar ve hangisinin sözleşme olduğu belirsizleşir.
+	if strings.Contains(out, "access_token") || strings.Contains(out, "user_id") {
+		t.Errorf("yığının snake_case yazımı çıktıda kaldı: %s", out)
+	}
 }
