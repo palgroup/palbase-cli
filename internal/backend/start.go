@@ -262,10 +262,28 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	// credentialed before anything can be written into its vault.
 	pullSecrets(ctx, group, Target{URL: url, Local: true}, out)
 
-	fmt.Fprintf(out, "▸ %s (local)\n", url)
-	fmt.Fprintln(out, "  edit a controller and the running stack serves it — no build, no deploy")
-	fmt.Fprintln(out, "  `palbase stop` points this checkout back at its project")
+	for _, line := range startBanner(url) {
+		fmt.Fprintln(out, line)
+	}
 	return nil
+}
+
+// startBanner is what a started stack tells you about itself.
+//
+// The schema line is here because its absence cost a round trip. `palbase push`
+// refuses on a local stack — correctly: the dev runtime serves the DIRECTORY it
+// mounted and never follows the deploy pointer, so a push would activate a
+// version nothing loads. The refusal even names `db apply`. But it is only
+// reachable by TRYING to push, and a person who has just run `start` has no
+// reason to think a push is the wrong verb. So the answer moves to where the
+// question forms.
+func startBanner(url string) []string {
+	return []string{
+		fmt.Sprintf("▸ %s (local)", url),
+		"  edit a controller and the running stack serves it — no build, no deploy",
+		"  schema changes are applied with `palbase db apply` — `push` is for the cloud",
+		"  `palbase stop` points this checkout back at its project",
+	}
 }
 
 func runStop(ctx context.Context, dir string, out io.Writer) error {

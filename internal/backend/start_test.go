@@ -710,3 +710,28 @@ func TestSealingChainAppendSurvivesAMissingTrailingNewline(t *testing.T) {
 		t.Errorf("ekleme sonrasi zincir %d/3 gorunuyor", n)
 	}
 }
+
+// `palbase push` bir lokal yığında REDDEDİLİYOR ve doğru sebeple: dev runtime
+// mount ettiği DİZİNİ servis ediyor, deploy pointer'ını hiç takip etmiyor, yani
+// bir push hiçbir şeyin yüklemeyeceği bir sürümü aktive ederdi. Reddin metni de
+// yerine ne yapılacağını söylüyor. AMA bu ancak DENEYİNCE öğreniliyordu: start
+// biterken "kaynak canlı servis edilir" diyor, şema için ne yapılacağını
+// söylemiyordu — bir kiracı push'u deneyip reddi okuyarak öğrendi.
+func TestStartBannerSaysHowToApplyTheSchema(t *testing.T) {
+	lines := startBanner("http://127.0.0.1:63638")
+
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "db apply") {
+		t.Errorf("banner şema için ne yapılacağını söylemiyor:\n%s", joined)
+	}
+	if !strings.Contains(joined, "http://127.0.0.1:63638") {
+		t.Errorf("banner adresi kaybetti:\n%s", joined)
+	}
+	// Var olan iki cümle korunur — bu bir ekleme, yeniden yazım değil.
+	if !strings.Contains(joined, "no build, no deploy") {
+		t.Errorf("banner 'no build, no deploy' cümlesini kaybetti:\n%s", joined)
+	}
+	if !strings.Contains(joined, "palbase stop") {
+		t.Errorf("banner 'palbase stop' cümlesini kaybetti:\n%s", joined)
+	}
+}
