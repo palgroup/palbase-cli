@@ -434,78 +434,6 @@ type lastDeploy struct {
 	UpdatedAt *string `json:"updatedAt"`
 }
 
-// ── the retired cloud-status shapes ────────────────────────────────────────
-//
-// NOTHING IN PRODUCTION READS ANY OF THE FOUR TYPES BELOW, and that matters
-// here rather than being a tidiness note: they render an SDK VERSION FROM A
-// DIFFERENT DOCUMENT than the one `palbase status` and `palbase push` now agree
-// on.
-//
-// The single source is projectSDKVersion (stack_sdk.go) →
-// /.well-known/palbase.json, which the stack answers from a live probe of the
-// runtime. It is what push reinstalls against and what status prints as `sdk:`
-// (status_project.go). formatSDK below instead renders the ACTIVE ARTIFACT's
-// manifest — what the last deploy was COMPILED against. Both are real facts and
-// they diverge whenever a project moves onto a newer runtime without a
-// redeploy; the bug this replaced was reporting the second one under the label
-// people read as the first.
-//
-// So if any of this is ever wired to a verb, it must be wired as "built with",
-// beside the sdk: line and never in place of it — the same distinction
-// status_project.go's deployed line already makes.
-//
-// statusOut is `palbase status --json`. It names the full context — project,
-// environment, endpoint, repository — because "which runtime am I looking at"
-// must never be a guess (UAT CLI-005). The verb answers statusJSON
-// (status_project.go) today; this shape belongs to the tRPC arm that went at the
-// v2 cutover.
-//
-// sdkStatus mirrors backend.status's `sdk` field: which @palbase/backend the
-// ACTIVE artifact was built with, and which majors that runtime could have built
-// against. Read off the artifact manifest server-side — this process has no other
-// way to know, because it does not run the runtime image.
-//
-// nil when the environment has never deployed, or its active artifact predates
-// manifest schema v2. That is "not reported", NOT "only the newest is supported":
-// rendering the second would resurrect the wrong premise this whole change
-// removed from `palbase build`.
-type sdkStatus struct {
-	Version         *string `json:"version"`
-	SupportedMajors []int   `json:"supportedMajors"`
-}
-
-// statusResponse is what backend.status answers.
-//
-// Named rather than anonymous because it is a WIRE CONTRACT, and an anonymous
-// struct hides that: channelSdkMajors was added to the server and to statusOut
-// but not here, so the value arrived and was dropped one line before the
-// renderer. Nothing failed — the field was simply never there, which looked
-// exactly like a server that had not sent it.
-type statusResponse struct {
-	Head             *string     `json:"head"`
-	ActiveVersion    *string     `json:"activeVersion"`
-	LastDeploy       *lastDeploy `json:"lastDeploy"`
-	SDK              *sdkStatus  `json:"sdk"`
-	ChannelSDKMajors []int       `json:"channelSdkMajors"`
-}
-
-type statusOut struct {
-	ProjectID          string      `json:"projectId"`
-	EnvironmentID      string      `json:"environmentId"`
-	EnvironmentRef     string      `json:"environment_ref"`
-	EnvironmentSlug    string      `json:"environmentSlug"`
-	RepositoryProvider string      `json:"repositoryProvider"`
-	Head               *string     `json:"head"`
-	ActiveVersion      *string     `json:"activeVersion"`
-	LastDeploy         *lastDeploy `json:"lastDeploy"`
-	SDK                *sdkStatus  `json:"sdk,omitempty"`
-	// ChannelSDKMajors is what the runtime image the fleet pins TODAY can build,
-	// as opposed to SDK.SupportedMajors, which is what the image that ran this
-	// environment's last successful deploy could build. Nil when no deploy has
-	// reported for the pinned image yet.
-	ChannelSDKMajors []int `json:"channelSdkMajors,omitempty"`
-}
-
 func newStatusCmd(r Resolvers) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -526,55 +454,6 @@ func newStatusCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
 	return cmd
-}
-
-// formatSDK renders which SDK the live ARTIFACT WAS BUILT WITH and which majors
-// the runtime supports. Returns "" when the server did not report it, so a
-// never-deployed environment prints nothing rather than a misleading default.
-//
-// It is NOT "which SDK this project is on" — that is the sdk: line status
-// prints, off the document push reads. See the block above sdkStatus.
-//
-// It names the SUPPORTED SET, not just the newest, because "you are behind" is
-// the wrong message when the major in use is fully supported — that premise is
-// exactly what made `palbase build` refuse pushes the platform would have
-// accepted.
-func formatSDK(s *sdkStatus, channelMajors []int, activeVersion *string) string {
-	if s == nil || (s.Version == nil && len(s.SupportedMajors) == 0) {
-		return ""
-	}
-	var b strings.Builder
-	if s.Version != nil {
-		fmt.Fprintf(&b, "sdk:          @palbase/backend %s\n", *s.Version)
-	}
-	if len(s.SupportedMajors) > 0 {
-		// ANCHORED to the deploy it came from. This number is read out of that
-		// deploy's artifact manifest, so it describes the image that ran it — and
-		// unlabelled it was taken for a statement about the present: a maintainer
-		// whose last deploy predated the fleet moving to 12-17 read "12-15",
-		// concluded major 17 was unavailable, and planned a downgrade around an
-		// obstacle that did not exist. The fix is the same one Kubernetes settled
-		// on with observedGeneration — say what the observation was made against.
-		where := "your last deploy"
-		if activeVersion != nil {
-			where = "your last deploy (" + *activeVersion + ")"
-		}
-		fmt.Fprintf(&b, "              %s built with major(s) %s\n", where, joinMajors(s.SupportedMajors))
-	}
-	if len(channelMajors) > 0 {
-		// And the question people actually came to ask: what will the NEXT one
-		// build with.
-		fmt.Fprintf(&b, "              the runtime today builds major(s) %s\n", joinMajors(channelMajors))
-	}
-	return b.String()
-}
-
-func joinMajors(majors []int) string {
-	parts := make([]string, len(majors))
-	for i, m := range majors {
-		parts[i] = strconv.Itoa(m)
-	}
-	return strings.Join(parts, ", ")
 }
 
 // formatLastDeploy renders the human "last deploy" block for `palbase status`.

@@ -1,8 +1,6 @@
 package backend
 
 import (
-	"encoding/json"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -13,24 +11,6 @@ import (
 )
 
 func ptr[T any](v T) *T { return &v }
-
-func decodeTRPCInput(t *testing.T, r *http.Request) map[string]any {
-	t.Helper()
-	// tRPC queries carry `?input={"json":{...}}`; mutations carry it in the body.
-	raw := r.URL.Query().Get("input")
-	if raw == "" {
-		var body struct {
-			JSON map[string]any `json:"json"`
-		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		return body.JSON
-	}
-	var wrapper struct {
-		JSON map[string]any `json:"json"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(raw), &wrapper))
-	return wrapper.JSON
-}
 
 // `palbase status` names the FULL context — which project, which address —
 // because "which runtime am I looking at" must never be a guess (UAT CLI-005).
@@ -205,79 +185,4 @@ func TestCommands_WithoutASelection_FailActionably(t *testing.T) {
 			require.NotContains(t, err.Error(), "project use")
 		})
 	}
-}
-
-// `palbase status` reports the SDK the live artifact was built with and the
-// majors the runtime can build — the answer this process cannot compute itself,
-// because it does not run the runtime image.
-func TestFormatSDK_ReportsVersionAndSupportedSet(t *testing.T) {
-	v := "12.0.1"
-	active := "86a01cf"
-	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 13}}, nil, &active)
-
-	require.Contains(t, out, "@palbase/backend 12.0.1")
-	require.Contains(t, out, "major(s) 12, 13",
-		"the SET must be named — 'you are behind 13' is wrong when 12 is supported, "+
-			"and that premise is what made palbase build refuse pushes the platform accepted")
-	require.Contains(t, out, "your last deploy (86a01cf)",
-		"the reading comes from that deploy's manifest and must say so — unanchored, "+
-			"it was read as a statement about the present and cost someone a downgrade plan")
-}
-
-// The question people bring to this line is 'can I move to the new major', and
-// the historical set cannot answer it. When the channel has reported, say both.
-func TestFormatSDK_NamesWhatTheRuntimeBuildsToday(t *testing.T) {
-	v := "15.0.0"
-	active := "86a01cf"
-	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 13, 14, 15}},
-		[]int{12, 13, 14, 15, 16, 17}, &active)
-
-	require.Contains(t, out, "your last deploy (86a01cf) built with major(s) 12, 13, 14, 15")
-	require.Contains(t, out, "the runtime today builds major(s) 12, 13, 14, 15, 16, 17")
-}
-
-// An image nothing has deployed with yet has reported no capability. Saying
-// nothing is right; inventing a set, or echoing the historical one as if it were
-// current, is the bug this whole line exists to fix.
-func TestFormatSDK_SilentAboutAnUnreportedChannel(t *testing.T) {
-	v := "15.0.0"
-	out := formatSDK(&sdkStatus{Version: &v, SupportedMajors: []int{12, 15}}, nil, nil)
-
-	require.Contains(t, out, "major(s) 12, 15")
-	require.NotContains(t, out, "today builds")
-}
-
-// Not reported ⇒ print nothing. A never-deployed environment, or one whose active
-// artifact predates manifest schema v2, must not be given a default that reads
-// like a supported set.
-func TestFormatSDK_SilentWhenUnreported(t *testing.T) {
-	require.Empty(t, formatSDK(nil, nil, nil))
-	require.Empty(t, formatSDK(&sdkStatus{}, nil, nil))
-}
-
-// The server can send a field the client silently drops, and nothing anywhere
-// says so: channelSdkMajors reached statusOut and the renderer but never the
-// struct the response is decoded into, so `palbase status` looked exactly like a
-// platform that had not sent it. Decode a server-shaped payload and check every
-// field survives the boundary.
-func TestStatusResponse_DecodesEveryFieldTheServerSends(t *testing.T) {
-	const payload = `{
-	  "head": "0f9748ab",
-	  "activeVersion": "0f9748ab",
-	  "lastDeploy": {"status": "succeeded"},
-	  "sdk": {"version": "17.3.0", "supportedMajors": [12, 17]},
-	  "channelSdkMajors": [12, 13, 14, 15, 16, 17]
-	}`
-
-	var resp statusResponse
-	require.NoError(t, json.Unmarshal([]byte(payload), &resp))
-
-	require.Equal(t, "0f9748ab", *resp.Head)
-	require.Equal(t, "0f9748ab", *resp.ActiveVersion)
-	require.NotNil(t, resp.LastDeploy)
-	require.NotNil(t, resp.SDK)
-	require.Equal(t, []int{12, 17}, resp.SDK.SupportedMajors)
-	require.Equal(t, []int{12, 13, 14, 15, 16, 17}, resp.ChannelSDKMajors,
-		"the channel set must survive decoding — it was dropped here once, and the "+
-			"missing line was indistinguishable from a platform that never reported")
 }
