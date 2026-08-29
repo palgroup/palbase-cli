@@ -842,3 +842,51 @@ func TestStackBucketsCarriesDeclaredVariants(t *testing.T) {
 		t.Errorf("variant'sız kova temiz gelmedi: %+v", got[1])
 	}
 }
+
+// THE APPLICATION'S DEFAULT AUTH TRAVELS THE SAME WAY, and for the same reason
+// as channels: nothing else in a project imports the file that declares it.
+//
+// `defineDefaultAuth` is a function called at MODULE SCOPE; it writes the
+// application ring of the auth cascade (route → controller → application →
+// `true`) onto a globalThis symbol as its file is evaluated. A file no import
+// reaches is not in the bundle, is never evaluated, and the declaration is
+// SILENTLY not there — the cascade falls through to its terminal `true` and the
+// project runs on a default it believes it replaced.
+//
+// Which way that fails depends on what was declared, and one direction is the
+// dangerous one: `defineDefaultAuth({ verifiedEmail: true })` TIGHTENS the
+// terminal default, so losing it leaves every route open to any signed-in user
+// while the declaration sits in plain sight and the deploy reports success.
+// Same silence as `jobs = []` and as the channels table that shipped empty.
+//
+// `auth.ts` at the project root is the well-known name, chosen to match
+// `channels.ts` — one flat file the bundler knows by path.
+func TestTheBundleEntryShipsTheProjectsDefaultAuth(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "auth.ts"),
+		[]byte(`import { defineDefaultAuth } from "@palbase/backend";
+defineDefaultAuth({ verifiedEmail: true });`), 0o644))
+
+	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+
+	auth := filepath.Join(dir, "auth.ts")
+	assert.Contains(t, entry, "import "+strconv.Quote(auth)+";",
+		"the entry does not carry the project's default auth — the cascade would fall through to its terminal default")
+
+	// Imported for its SIDE EFFECT and never named: the declaration is a call,
+	// not a value, so there is nothing to export. It must still be evaluated
+	// with the controllers, BEFORE the module body reads the registry — the
+	// route table and the emitted spec both read the slot that evaluation fills.
+	assert.Less(t, strings.Index(entry, "auth.ts"), strings.Index(entry, "SDK.getRegisteredControllers()"),
+		"the default auth is imported after the registry is read")
+}
+
+// A project without an auth.ts still bundles — the file is optional, exactly
+// like channels.ts and db/schema.ts. An entry that named it unconditionally
+// would fail to build for every project that never declared an application
+// default, which is most of them.
+func TestAProjectWithoutADefaultAuthStillBundles(t *testing.T) {
+	dir := t.TempDir()
+	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	assert.NotContains(t, entry, "auth.ts")
+}

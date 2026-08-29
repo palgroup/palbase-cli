@@ -346,6 +346,28 @@ func bundleEntry(dir string, sources []string) string {
 	if channels := filepath.Join(dir, "channels.ts"); fileExists(channels) {
 		fmt.Fprintf(&b, "import __channels from %q; export const channels = __channels;\n", channels)
 	}
+	// THE APPLICATION'S DEFAULT AUTH, on the same terms and for the same reason.
+	//
+	// `defineDefaultAuth` is a call at module scope: it writes the application
+	// ring of the auth cascade (route → controller → application → `true`) onto
+	// a globalThis symbol as its file is evaluated. Nothing else in a project
+	// imports that file — it is not a controller, a job, a webhook or a hook —
+	// so without this line it is not in the bundle, is never evaluated, and the
+	// declaration is simply NOT THERE.
+	//
+	// The cascade then falls through to its terminal `true`, and the direction
+	// of that failure is the dangerous one: an application declaring
+	// `{ verifiedEmail: true }` TIGHTENS the terminal default, so losing the
+	// declaration leaves every route open to any signed-in user — the file in
+	// plain sight, the deploy reporting success, nothing saying so. Same silence
+	// as `jobs = []` and as the channels table that shipped empty.
+	//
+	// SIDE EFFECT, never named: the declaration is a call and not a value, so —
+	// unlike channels — there is nothing to export. It only has to be evaluated,
+	// and it is evaluated here, before the module body reads the registry.
+	if auth := filepath.Join(dir, "auth.ts"); fileExists(auth) {
+		fmt.Fprintf(&b, "import %q;\n", auth)
+	}
 	// Read AFTER the imports above have run — ESM evaluates every import before
 	// the module body, so every decorator has fired by this line.
 	// THE BUNDLER DOES NOT GET TO NAME THE PUBLIC API.
