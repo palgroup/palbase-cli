@@ -506,6 +506,20 @@ function registerControllers() {
       skipped.push({ file: bundledToSrcRel(file), error: err.message });
       continue;
     }
+    // A controller the runtime cannot construct is a deploy that comes up and
+    // then fails — or worse, comes up with `undefined` fields. The SDK owns the
+    // rule and the message; asking it here is what moves the answer from BOOT
+    // (where it takes the deploy down) to BUILD (where the author is looking).
+    // Older SDKs do not export it, and an older SDK is not a reason to refuse.
+    try {
+      const sdk = require('@palbase/backend');
+      if (typeof sdk.assertZeroArgConstructor === 'function') {
+        sdk.assertZeroArgConstructor(Ctrl, 'controller');
+      }
+    } catch (err) {
+      skipped.push({ file: bundledToSrcRel(file), error: err.message });
+      continue;
+    }
     const meta = readControllerMeta(Ctrl);
     const routeList = readControllerRoutes(Ctrl);
     for (const route of routeList) {
