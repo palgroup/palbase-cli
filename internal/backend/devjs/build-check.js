@@ -117,14 +117,47 @@ const throwAnalysis = require('./throw_analysis.js');
 // straight away.
 const txAnalysis = require('./tx_analysis.js');
 
+// SRC_EXT_BY_STEM is the staging manifest: project-relative stem
+// ("controllers/todos.controller") → the extension the AUTHOR wrote (".ts").
+//
+// esbuild emits `.js` beside every source it bundles, so past the stager the
+// original extension is simply gone — and every path this runner reports is
+// derived from the bundled tree. Recording the correspondence at the one moment
+// both trees are in hand is cheaper and more honest than guessing later.
+//
+// `null` means AMBIGUOUS: two sources sharing a stem (todos.controller.ts AND
+// todos.controller.js) map onto one bundled file, so there is no single source
+// to name and the fail-safe applies. Naming the wrong one of two real files is
+// worse than naming neither.
+const SRC_EXT_BY_STEM = new Map();
+
+// recordStagedSources fills the manifest from the source tree, BEFORE any
+// injection runs — a stage that throws on a bad return type has still recorded
+// what it walked, so the error it reports can name the file the author opens.
+function recordStagedSources(srcDir) {
+  for (const file of walk(srcDir)) {
+    const stem = withoutExtension(path.join('controllers', path.relative(srcDir, file)));
+    const ext = path.extname(file);
+    if (SRC_EXT_BY_STEM.has(stem) && SRC_EXT_BY_STEM.get(stem) !== ext) {
+      SRC_EXT_BY_STEM.set(stem, null);
+      continue;
+    }
+    SRC_EXT_BY_STEM.set(stem, ext);
+  }
+}
+
 // stageControllersWithReturnBindings copies controllers/*.ts into a staging dir,
 // appending each file's return-type schema injection, and returns the staging
 // dir for esbuild to bundle. The user's source is never modified. A return-type
 // violation throws (caught by registerControllers and surfaced loudly), matching
 // the deploy behavior.
+//
+// It also records the staging manifest bundledToSrcRel reads, because this is
+// the only place that sees the source tree and the staged tree at once.
 function stageControllersWithReturnBindings(srcDir, stageDir) {
   rmBundledTree(stageDir);
   fs.mkdirSync(stageDir, { recursive: true });
+  recordStagedSources(srcDir);
   for (const file of walk(srcDir)) {
     const rel = path.relative(srcDir, file);
     const dest = path.join(stageDir, rel);
@@ -583,12 +616,27 @@ function deployExtractErrors() {
 }
 
 // bundledToSrcRel maps a bundled controller path back to the project-relative
-// SOURCE path for friendly logging (BUNDLE_ROOT/controllers/x.controller.js →
-// controllers/x.controller.js). The bundled `.js` mirrors the source tree
-// (esbuild --outbase), so we just swap the bundle root for "controllers".
+// SOURCE path (BUNDLE_ROOT/controllers/x.controller.js → controllers/x.controller.ts).
+// The bundled tree mirrors the source tree (esbuild --outbase), so the bundle
+// root is swapped for "controllers" and the extension is restored from the
+// staging manifest.
+//
+// THE EXTENSION IS THE WHOLE POINT. This used to take it from the bundled path,
+// which is always `.js` — so `palbase build` reported
+// `controllers/todos.controller.js` for a file the author had written as
+// `todos.controller.ts`. That string is what the route table prints, what a
+// skipped controller is named by, and what an extractor error points at: the
+// three places somebody needs to OPEN the file, all naming a path that resolves
+// to nothing (the `.js` lives in a temp dir that is deleted on exit).
+//
+// Unmapped or ambiguous stems keep the bundled extension — a fail-safe, because
+// a path that is merely unhelpful beats a path that is confidently wrong.
 function bundledToSrcRel(bundledPath) {
   const rel = path.relative(BUNDLED_CONTROLLERS_DIR, bundledPath);
-  return path.join('controllers', rel);
+  const srcRel = path.join('controllers', rel);
+  const srcExt = SRC_EXT_BY_STEM.get(withoutExtension(srcRel));
+  if (!srcExt) return srcRel;
+  return withoutExtension(srcRel) + srcExt;
 }
 
 // esbuildErr renders a child_process.execFileSync error: prefer the captured
@@ -856,4 +904,5 @@ if (require.main === module) {
 // directly, never re-implemented in a test.
 module.exports = {
   registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
+  stageControllersWithReturnBindings, bundledToSrcRel,
 };

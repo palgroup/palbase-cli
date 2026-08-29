@@ -342,3 +342,100 @@ test('controllers/ with source but no *.controller.ts fails and names the conven
   assert.strictEqual(code, 1, `build must fail; output:\n${out}`);
   assert.match(out, /only \*\.controller\.ts files register routes/);
 });
+// ── the reported path must be one the author can OPEN ──────────────────────
+//
+// `palbase build` prints a line per route:
+//
+//   GET    /todos  →  controllers/todos.controller.js [list]
+//
+// and that `.js` does not exist. The author wrote `controllers/todos.controller.ts`;
+// the `.js` is the esbuild output in a temp dir that is deleted on exit. So the
+// one path in the output a person would click, or paste into an editor, or grep
+// for, is the one path that resolves to nothing — and the same string is reused
+// for skipped controllers and for extractor errors, which is exactly where
+// somebody needs to open the file.
+//
+// bundledToSrcRel took the extension from the BUNDLED path (path.relative over
+// BUNDLED_CONTROLLERS_DIR), so it could only ever say `.js`.
+//
+// Both suites below drive the REAL staging function — the only place that sees
+// the source tree and the staged tree at once — so unhooking the manifest from
+// it turns them red.
+
+const { stageControllersWithReturnBindings, bundledToSrcRel } = require('./build-check.js');
+
+// typescriptAvailable probes the parser return_types.js needs, the same way
+// esbuildAvailable() probes esbuild. `go test` provisions it on NODE_PATH
+// (devjs_node_test.go → ensureParserTS), so this runs in the Go gate; a bare
+// `node --test` on a machine without typescript skips instead of failing.
+function typescriptAvailable() {
+  try {
+    const ts = require('typescript');
+    return typeof ts.createSourceFile === 'function';
+  } catch {
+    return false;
+  }
+}
+
+function stagedFixture(t, files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-srcrel-'));
+  const src = path.join(root, 'controllers');
+  fs.mkdirSync(src, { recursive: true });
+  for (const [name, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(src, name), body);
+  }
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  stageControllersWithReturnBindings(src, path.join(root, '.palbase-build-controllers'));
+}
+
+test('the reported path carries the SOURCE extension, not the bundled one', (t) => {
+  // `helpers.ts` is copied VERBATIM by the stager (only *.controller.ts takes
+  // the return-bindings path), so this case needs neither esbuild nor a
+  // TypeScript parser and always runs.
+  stagedFixture(t, {
+    'helpers.ts': 'export const ok = true;\n',
+    'diag.controller.js': 'export default class D {}\n',
+  });
+
+  assert.strictEqual(
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'helpers.js')),
+    path.join('controllers', 'helpers.ts'),
+    'a .ts source must be reported as .ts — the bundled .js is a temp file that is deleted on exit',
+  );
+
+  // NEGATIVE CONTROL: a source that really IS .js keeps .js. Without this,
+  // "always say .ts" would pass the assertion above and lie about every
+  // plain-JS controller.
+  assert.strictEqual(
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'diag.controller.js')),
+    path.join('controllers', 'diag.controller.js'),
+    'a genuine .js source must stay .js',
+  );
+
+  // FAIL-SAFE: a bundled file the manifest never saw keeps the bundled
+  // extension rather than being guessed at.
+  assert.strictEqual(
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'ghost.controller.js')),
+    path.join('controllers', 'ghost.controller.js'),
+    'an unmapped bundled path must fall back to the bundled extension',
+  );
+});
+
+test('a real *.controller.ts route reports its .ts source', (t) => {
+  if (!typescriptAvailable()) return t.skip('no TypeScript 5 compiler API (bare `node --test`?)');
+
+  stagedFixture(t, {
+    'todos.controller.ts': [
+      'import { Controller, Get } from "@palbase/backend";',
+      '@Controller("/todos")',
+      'export default class TodosController {',
+      '  @Get("/") list(): void {}',
+      '}',
+    ].join('\n'),
+  });
+
+  assert.strictEqual(
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'todos.controller.js')),
+    path.join('controllers', 'todos.controller.ts'),
+  );
+});
