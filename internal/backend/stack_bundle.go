@@ -309,7 +309,15 @@ func controllerSources(dir string) ([]string, error) {
 func bundleEntry(dir string, sources []string) string {
 	var b strings.Builder
 	b.WriteString(bundleEntryHeader + "\n")
-	b.WriteString(`export { __runWithRuntime, __requestALS, __getRuntime } from "@palbase/backend";` + "\n")
+	// buildModuleClients RIDES THE SAME SEAM, and leaving it out is not cosmetic:
+	// the runtime builds this project's module clients from the BUNDLE's SDK copy
+	// and REFUSES TO BOOT a bundle that does not re-export it. A bundle without
+	// this line is a deploy that does not come up.
+	//
+	// There are two bundlers — this one and runtime/scripts/bundle-controllers.sh
+	// in the palbase repository — and they must emit the same seam. They did not,
+	// for one release: the shell one gained this symbol and this one did not.
+	b.WriteString(`export { __runWithRuntime, __requestALS, __getRuntime, buildModuleClients } from "@palbase/backend";` + "\n")
 	b.WriteString(`import * as SDK from "@palbase/backend"; export { SDK };` + "\n")
 	for _, src := range sources {
 		fmt.Fprintf(&b, "import %q;\n", src)

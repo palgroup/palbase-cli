@@ -27,8 +27,14 @@ func TestTheGeneratedEntryKeepsOneSDKInstance(t *testing.T) {
 	// ONE module instance, shared with the runtime. Two instances each get their
 	// own AsyncLocalStorage, and the request scope then silently does not reach
 	// a handler — no error, no log, just a nil user in production.
-	if !strings.Contains(entry, `export { __runWithRuntime, __requestALS, __getRuntime } from "@palbase/backend";`) {
-		t.Errorf("the entry does not re-export the SDK's request-scope hooks:\n%s", entry)
+	// By SYMBOL, not by the literal line: the seam grows (buildModuleClients was
+	// added when the runtime began building module clients from the bundle's own
+	// SDK copy), and an exact-match assertion turns every addition into a false
+	// failure that says the opposite of what happened.
+	for _, sym := range []string{"__runWithRuntime", "__requestALS", "__getRuntime"} {
+		if !strings.Contains(entry, sym) {
+			t.Errorf("the entry does not re-export %s:\n%s", sym, entry)
+		}
 	}
 	if !strings.Contains(entry, `import * as SDK from "@palbase/backend"; export { SDK };`) {
 		t.Errorf("the entry does not share the SDK namespace:\n%s", entry)
@@ -388,6 +394,7 @@ const REG = [];
 export function Controller() { return (cls) => { REG.push(cls); return cls; }; }
 export function getRegisteredControllers() { return REG; }
 export function __runWithRuntime() {}
+export function buildModuleClients() { return {}; }
 export const __requestALS = null;
 export function __getRuntime() {}
 `), 0o644))
@@ -585,6 +592,7 @@ export function getHookConfig(c) {
   return { blocking: m.blocking ?? {}, listeners: m.listeners ?? {} };
 }
 export function __runWithRuntime() {}
+export function buildModuleClients() { return {}; }
 export const __requestALS = null;
 export function __getRuntime() {}
 `)
@@ -779,4 +787,24 @@ func TestAProjectWithoutChannelsStillBundles(t *testing.T) {
 	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	assert.NotContains(t, entry, "channels.ts")
 	assert.NotContains(t, entry, "export const channels")
+}
+
+// HER İKİ BUNDLER DA AYNI SEAM'İ YAYMALI.
+//
+// Bu bundler'ın ikizi palbase deposunda: runtime/scripts/bundle-controllers.sh.
+// Runtime, bundle'ın re-export ettigi seam'i ADIYLA ariyor ve eksikse BOOT'U
+// REDDEDIYOR — yani seam'i yaymayan bir bundler, acilmayan bir deploy uretir.
+//
+// Olculdu 2026-08-29: shell bundler `buildModuleClients`'i kazandi, bu kazanmadi,
+// ve runtime 0.37.0 yayinlandi. `palbase push` ile uretilen her bundle
+// reddedilecekti.
+func TestTheBundleEntryCarriesEveryRuntimeSeamSymbol(t *testing.T) {
+	entry := bundleEntry(t.TempDir(), nil)
+	// Runtime bunlarin HEPSINI ariyor: hook'lar (abi.ts requestScopeHooksOf) ve
+	// modul istemci kurucusu (abi.ts moduleClientsBuilderOf).
+	for _, sym := range []string{"__runWithRuntime", "__requestALS", "__getRuntime", "buildModuleClients"} {
+		if !strings.Contains(entry, sym) {
+			t.Errorf("bundle entry %q yaymiyor — runtime bu bundle'i reddeder ve deploy acilmaz", sym)
+		}
+	}
 }
