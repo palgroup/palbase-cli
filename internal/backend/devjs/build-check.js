@@ -689,6 +689,60 @@ function scanTxPlanViolations() {
   return violations;
 }
 
+
+// scanTypecheckIsRunning answers ONE question: would `tsc` actually check this
+// project, or would it exit reporting only a config problem and verify nothing?
+//
+// THE SILENT-NOTHING CASE IS THE POINT. A tsconfig naming `types: ["node"]`
+// without @types/node installed makes tsc print
+//
+//   error TS2688: Cannot find type definition file for 'node'
+//
+// and then check NO FILES. A deliberate `const n: number = "string"` in a
+// controller is not reported; `--listFiles` still lists the file. Measured
+// 2026-08-29 on a copied fixture, where it silently invalidated a run's own
+// verification.
+//
+// It matters more than it used to. A project's spellable secret, flag and
+// bucket names come from the generated `palbase-stack.d.ts` and are enforced by
+// the COMPILER — nothing else checks them. A typecheck that verifies nothing
+// takes that gate away without saying so, and the build looks green.
+//
+// Only the config-level failure is reported here. Ordinary type errors are the
+// author's business and this build has never graded them; the claim being made
+// is narrower and stronger — "your typecheck is not running at all".
+function scanTypecheckIsRunning() {
+  const tsconfig = path.join(PROJECT_ROOT, 'tsconfig.json');
+  if (!fs.existsSync(tsconfig)) return null;
+
+  let raw;
+  try {
+    raw = fs.readFileSync(tsconfig, 'utf8');
+  } catch {
+    return null;
+  }
+  // A `types` array is what turns a missing @types package into a program-wide
+  // stop. Without one, a missing type package is just a missing import.
+  if (!/"types"\s*:\s*\[/.test(raw)) return null;
+
+  // `-p typescript` ON PURPOSE: bare `npx tsc` resolves to an unrelated package
+  // of that name (it prints "This is not the tsc command you are looking for"
+  // and exits 0), so a check written the obvious way silently passes. Binding
+  // the PACKAGE rather than the binary name is what makes this run the compiler.
+  let out = '';
+  try {
+    out = execFileSync('npx', ['--yes', '-p', 'typescript', 'tsc', '--noEmit'], {
+      cwd: PROJECT_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    out = `${err.stdout || ''}${err.stderr || ''}`;
+  }
+  const missing = [...out.matchAll(/error TS2688: Cannot find type definition file for '([^']+)'/g)]
+    .map((m) => m[1]);
+  if (missing.length === 0) return null;
+  return missing;
+}
+
 function main() {
   // TxPlan Ref-truthiness gate runs FIRST and exits immediately on any
   // finding — never merged into the `failures` list below. That list can, in
@@ -696,6 +750,22 @@ function main() {
   // able to. A Ref-truthiness miss is a transaction that commits the WRONG
   // data with no error anywhere, which is worse than any other build failure
   // this file reports — see tx_analysis.js's header.
+  // TYPECHECK-IS-RUNNING gate, before anything else reports success.
+  //
+  // A project whose tsc exits on a config error checks nothing, and the names a
+  // controller may spell (`palbase-stack.d.ts`) are enforced by the compiler and
+  // by nothing else. Green here would mean the gate is gone.
+  const missingTypes = scanTypecheckIsRunning();
+  if (missingTypes && missingTypes.length > 0) {
+    log(`\u2717 DEPLOY WOULD FAIL: tsc cannot resolve ${missingTypes.map((t) => `"${t}"`).join(', ')} ` +
+      'from `types` in tsconfig.json, so it stops before checking a single file.');
+    log('  Nothing is being typechecked — not your controllers, and not the secret, flag and');
+    log('  bucket names that only the compiler enforces. Install the missing package');
+    log(`  (\`npm i -D @types/${missingTypes[0]}\`) or drop it from \`types\`.`);
+    log('build FAILED (typecheck is not running)');
+    process.exit(1);
+  }
+
   const txViolations = scanTxPlanViolations();
   if (txViolations.length > 0) {
     for (const v of txViolations) log(`✗ DEPLOY WOULD FAIL: ${txAnalysis.formatViolation(v)}`);
