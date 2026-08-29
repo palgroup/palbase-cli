@@ -82,13 +82,28 @@ func TestTheFlushIdiomActuallyDeliversEverything(t *testing.T) {
 	flushing := write("flushing.js",
 		"process.stdout.write('x'.repeat(128*1024), () => process.exit(0));\n")
 
-	out, err := exec.Command(node, dropping).Output()
-	require.NoError(t, err)
-	require.Less(t, len(out), size,
-		"the dropping shape delivered everything — this platform cannot show the fault, "+
-			"so the assertion below would prove nothing")
-
-	out, err = exec.Command(node, flushing).Output()
+	// THE REQUIREMENT, asserted on every platform: the flush idiom delivers all of
+	// it. This runs first and unconditionally, because it is the thing that must
+	// be true — not a corollary of the contrast below.
+	out, err := exec.Command(node, flushing).Output()
 	require.NoError(t, err)
 	require.Equal(t, size, len(out), "the flush idiom still lost output")
+
+	// AND THE CONTRAST, where the platform can show it.
+	//
+	// The dropping shape (write, then exit immediately) loses output only where
+	// the pipe cannot take 128 KiB in one go. On the CI runner it does take it,
+	// so the two shapes look identical there — which says nothing about the
+	// idiom and everything about the buffer.
+	//
+	// Measured 2026-08-29: this failed a release with `"131072" is not less than
+	// "131072"`. A platform that cannot exhibit the fault is not a failing
+	// platform; it is a platform where this half proves nothing, and saying so
+	// is the honest outcome. The requirement above still ran.
+	out, err = exec.Command(node, dropping).Output()
+	require.NoError(t, err)
+	if len(out) >= size {
+		t.Logf("this platform's pipe took all %d bytes without the flush, so the "+
+			"contrast is not observable here; the requirement above still held", size)
+	}
 }
