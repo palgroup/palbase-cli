@@ -30,7 +30,11 @@ func newPlanCmd() *cobra.Command {
 		Use:   "plan",
 		Args:  cobra.NoArgs,
 		Short: "Show what `palbase push` would change",
-		Long: `Show the whole change set — code, schema, config and secrets — and apply none of it.
+		Long: `Show the whole change set — code and schema — and apply none of it.
+
+The config and secret sections are gone with config/ itself (23.0.0); this
+help promised them for one release after they stopped being printed, which is
+the shape of stale text this CLI exists not to ship.
 
 Nothing is written to the target: the schema half is computed by the project
 itself, which is the same computation the push runs, stopped before it writes.`,
