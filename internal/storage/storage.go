@@ -135,6 +135,69 @@ live bucket and its files in place. Removing here removes.`,
 	return cmd
 }
 
+// variantSpec is one rendition as `--variant` writes it, in the shape the
+// storage module reads (handler.go bucketDeclaration.Variants).
+type variantSpec struct {
+	Width   int    `json:"width"`
+	Height  int    `json:"height"`
+	Fit     string `json:"fit"`
+	Format  string `json:"format"`
+	Quality int    `json:"quality,omitempty"`
+}
+
+// variantNameRE mirrors the module's own check so a bad name is refused here
+// rather than after a round trip.
+var variantNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// validFits are the three the renderer implements; anything else is refused by
+// the stack, and refusing it here says so with the list.
+var validFits = map[string]bool{"cover": true, "contain": true, "inside": true}
+
+// parseVariant reads `name=WxH:fit:format[:quality]`.
+//
+// WHY THE FLAG EXISTS AT ALL. The stack renders renditions, serves them at
+// `?variant=`, and carries them through move/copy — the whole machine is built.
+// Nothing could DECLARE one: `storage add` had three flags, the panel has no
+// UI, and the config-file path was retired. A measured customer dropped image
+// variants from their design because the product offered no way to ask for one.
+func parseVariant(raw string) (string, variantSpec, error) {
+	name, rest, ok := strings.Cut(raw, "=")
+	if !ok || name == "" || rest == "" {
+		return "", variantSpec{}, fmt.Errorf("--variant must be name=WxH:fit:format[:quality] (got %q)", raw)
+	}
+	if !variantNameRE.MatchString(name) {
+		return "", variantSpec{}, fmt.Errorf("variant name %q must match %s", name, variantNameRE.String())
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) < 3 || len(parts) > 4 {
+		return "", variantSpec{}, fmt.Errorf("--variant %q: expected WxH:fit:format[:quality]", raw)
+	}
+	w, h, dimOK := strings.Cut(parts[0], "x")
+	if !dimOK {
+		return "", variantSpec{}, fmt.Errorf("--variant %q: size must be WxH, e.g. 640x480", raw)
+	}
+	width, wErr := strconv.Atoi(w)
+	height, hErr := strconv.Atoi(h)
+	if wErr != nil || hErr != nil || width <= 0 || height <= 0 {
+		return "", variantSpec{}, fmt.Errorf("--variant %q: width and height must be positive whole numbers", raw)
+	}
+	if !validFits[parts[1]] {
+		return "", variantSpec{}, fmt.Errorf("--variant %q: fit must be cover, contain or inside", raw)
+	}
+	spec := variantSpec{Width: width, Height: height, Fit: parts[1], Format: parts[2]}
+	if spec.Format == "" {
+		return "", variantSpec{}, fmt.Errorf("--variant %q: a format is required (the stack refuses one it cannot render)", raw)
+	}
+	if len(parts) == 4 {
+		q, qErr := strconv.Atoi(parts[3])
+		if qErr != nil || q < 1 || q > 100 {
+			return "", variantSpec{}, fmt.Errorf("--variant %q: quality must be a whole number 1-100", raw)
+		}
+		spec.Quality = q
+	}
+	return name, spec, nil
+}
+
 // parseSize converts a --max-size value ("5MB", "20MB", "1024") to bytes.
 // Binary units, case-insensitive; a bare number is bytes. Mirrors the SDK's
 // parseFileSizeLimit so the CLI and the typed DSL agree.
@@ -185,9 +248,10 @@ func parseSizeLiteral(lit string) (int64, error) {
 
 func bucketsAddCmd(r Resolvers) *cobra.Command {
 	var (
-		publicFlag bool
-		maxSize    string
-		mimeFlag   string
+		publicFlag   bool
+		maxSize      string
+		mimeFlag     string
+		variantFlags []string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -195,6 +259,10 @@ func bucketsAddCmd(r Resolvers) *cobra.Command {
 		Long: `Create a bucket, or update it if it is already there.
 
   palbase storage add avatars --public --max-size 5MB --mime image/png,image/jpeg
+  palbase storage add posts --variant card=640x480:cover:webp:82 --variant thumb=160x160:cover:webp
+
+A --variant asks the stack to render that size when an image is uploaded; the
+client then requests it with ?variant=<name>. Repeat the flag per rendition.
 
 Idempotent, and it lands on the stack immediately — there is no file to commit
 and no deploy to wait for.`,
@@ -219,6 +287,20 @@ and no deploy to wait for.`,
 				}
 				def["allowedMimeTypes"] = mimes
 			}
+			if len(variantFlags) > 0 {
+				variants := map[string]variantSpec{}
+				for _, raw := range variantFlags {
+					name, spec, vErr := parseVariant(raw)
+					if vErr != nil {
+						return vErr
+					}
+					if _, dup := variants[name]; dup {
+						return fmt.Errorf("--variant %q declared twice", name)
+					}
+					variants[name] = spec
+				}
+				def["variants"] = variants
+			}
 			body, err := json.Marshal(def)
 			if err != nil {
 				return err
@@ -233,6 +315,8 @@ and no deploy to wait for.`,
 	cmd.Flags().BoolVar(&publicFlag, "public", false, "anyone with the URL may read it")
 	cmd.Flags().StringVar(&maxSize, "max-size", "", "per-file ceiling, e.g. 5MB")
 	cmd.Flags().StringVar(&mimeFlag, "mime", "", "allowed MIME types, comma-separated")
+	cmd.Flags().StringArrayVar(&variantFlags, "variant", nil,
+		"an image rendition, repeatable: name=WxH:fit:format[:quality] (fit: cover|contain|inside)")
 	return cmd
 }
 
@@ -277,6 +361,13 @@ func bucketsListCmd(r Resolvers) *cobra.Command {
 				Public      bool   `json:"public"`
 				ObjectCount int    `json:"object_count"`
 				TotalBytes  int64  `json:"total_bytes"`
+				// A bucket's renditions. Shown because they are declared here and
+				// nowhere else: without them the listing cannot answer "what did I
+				// ask this bucket to render", which is the question you have right
+				// after asking for one.
+				Variants []struct {
+					Name string `json:"name"`
+				} `json:"variants"`
 			}
 			if err := json.Unmarshal(raw, &buckets); err != nil {
 				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
@@ -295,6 +386,14 @@ func bucketsListCmd(r Resolvers) *cobra.Command {
 					vis = "public"
 				}
 				fmt.Fprintf(out, "  %-24s %-8s %d file(s), %d bytes\n", b.Name, vis, b.ObjectCount, b.TotalBytes)
+				if len(b.Variants) > 0 {
+					names := make([]string, 0, len(b.Variants))
+					for _, v := range b.Variants {
+						names = append(names, v.Name)
+					}
+					sort.Strings(names)
+					fmt.Fprintf(out, "  %-24s variants: %s\n", "", strings.Join(names, ", "))
+				}
 			}
 			return nil
 		},

@@ -162,3 +162,85 @@ func TestTheBucketBodyIsSpelledTheWayTheModuleReadsIt(t *testing.T) {
 		}
 	}
 }
+
+// SUNUCUDAKİ RENDER MAKİNESİ ULAŞILAMAZDI. Storage modülü variant'ları tam
+// destekliyor — bildirimi doğruluyor, görseli render ediyor, imzalı URL
+// üretiyor, move/copy ile taşıyor (handler.go upsertBucket + imaging) — ama
+// onları BİLDİREBİLECEK hiçbir istemci yoktu: `storage add`'in üç bayrağı
+// vardı (--public/--max-size/--mime), panelde arayüz yok, ve config/storage.ts
+// yolu kaldırıldı. Bir müşteri görsel varyantlarını tasarımdan çıkarmak
+// zorunda kaldı.
+//
+// ŞEKİL SUNUCUDAN: handler.go `variant{Width,Height,Fit,Format,Quality}`,
+// fit ∈ cover|contain|inside, format yığının render edebildikleriyle sınırlı.
+func TestStorageAddSendsDeclaredVariants(t *testing.T) {
+	rest := &fakeREST{answer: `{"bucket":"posts"}`}
+	if _, err := runStorage(t, rest, "add", "posts", "--public",
+		"--variant", "card=640x480:cover:webp:82",
+		"--variant", "thumb=160x160:cover:webp"); err != nil {
+		t.Fatalf("add --variant: %v", err)
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(rest.body), &sent); err != nil {
+		t.Fatalf("gövde JSON değil: %v — %s", err, rest.body)
+	}
+	variants, ok := sent["variants"].(map[string]any)
+	if !ok {
+		t.Fatalf("variants gövdede yok: %s", rest.body)
+	}
+	card, ok := variants["card"].(map[string]any)
+	if !ok {
+		t.Fatalf("card variant'ı yok: %s", rest.body)
+	}
+	for key, want := range map[string]any{
+		"width": float64(640), "height": float64(480),
+		"fit": "cover", "format": "webp", "quality": float64(82),
+	} {
+		if card[key] != want {
+			t.Errorf("card.%s = %v, beklenen %v", key, card[key], want)
+		}
+	}
+	// Kalite verilmediyse gönderilmez — sunucunun kendi varsayılanı geçerli olsun.
+	thumb := variants["thumb"].(map[string]any)
+	if _, present := thumb["quality"]; present {
+		t.Errorf("kalite verilmemişken gönderildi: %v", thumb)
+	}
+}
+
+func TestStorageAddRefusesAMalformedVariant(t *testing.T) {
+	for _, bad := range []string{
+		"card",                     // = yok
+		"card=640",                 // boyut yok
+		"card=640x480",             // fit/format yok
+		"card=640x480:squish:webp", // geçersiz fit
+		"card=640x480:cover:webp:x", // kalite sayı değil
+	} {
+		t.Run(bad, func(t *testing.T) {
+			rest := &fakeREST{answer: `{"bucket":"posts"}`}
+			if _, err := runStorage(t, rest, "add", "posts", "--variant", bad); err == nil {
+				t.Errorf("bozuk variant %q kabul edildi — yığına gitmeden reddedilmeliydi", bad)
+			}
+		})
+	}
+}
+
+// Bildirdiğin variant'ı göremezsen bildirip bildirmediğini bilemezsin — ve
+// bu, `add`den hemen sonra sorulan soru.
+func TestStorageListShowsVariants(t *testing.T) {
+	rest := &fakeREST{answer: `[{"name":"posts","public":true,"object_count":2,"total_bytes":10,
+		"variants":[{"name":"thumb"},{"name":"card"}]}]`}
+	out, err := runStorage(t, rest, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(out, "variants: card, thumb") {
+		t.Errorf("liste variant adlarını göstermiyor:\n%s", out)
+	}
+	// NEGATİF KONTROL: variant'sız kova fazladan satır basmaz.
+	plain := &fakeREST{answer: `[{"name":"docs","public":false,"object_count":0,"total_bytes":0}]`}
+	out2, _ := runStorage(t, plain, "list")
+	if strings.Contains(out2, "variants:") {
+		t.Errorf("variant'sız kova için variant satırı basıldı:\n%s", out2)
+	}
+}
