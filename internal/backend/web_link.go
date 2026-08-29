@@ -122,6 +122,26 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 	return nil
 }
 
+// announceModified names a file `web link` EDITED IN PLACE.
+//
+// The command already said `✓ wrote …` for every file it created, and said
+// nothing at all for the three it opens and changes: package.json (predev/
+// prebuild spliced into scripts), the entry file (app/layout.tsx and friends,
+// one import line), and an existing providers component (one more import).
+// So a person ran one command and `git status` came back with edits to files
+// they had written themselves, with nothing in the output saying which of them
+// Palbase had touched or why. `✓` and `~` are the two events kept apart on
+// purpose — created vs changed — because looking for a NEW file when a file was
+// edited is the wrong search.
+//
+// Generated artifacts (Palbase/openapi.json, Palbase/palbase-config.json,
+// palbe.gen.ts) are deliberately NOT announced here: they carry their own
+// `✓ wrote` line and nobody hand-edits them, so calling them "modified" would
+// bury the three lines that are actually about the reader's own code.
+func announceModified(w io.Writer, path string) {
+	fmt.Fprintf(w, "~ modified %s\n", path)
+}
+
 // resolveWebApp reuses the local web app id only when it still belongs to the
 // selected PROJECT as a web app. Otherwise it registers a replacement instead of
 // guessing another remote app.
@@ -563,7 +583,9 @@ func locatePackageJSONScripts(data []byte) (scriptsLocation, error) {
 
 // patchPackageJSONScripts adds scripts.predev / scripts.prebuild via byte
 // splice. Hooks already set to a different value are warned about and left
-// untouched; when nothing is missing the file is not rewritten at all.
+// untouched; when nothing is missing the file is not rewritten at all — and
+// then nothing is announced either, which is what makes the `~ modified` line
+// worth reading.
 func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
 	return patchPackageJSONScriptsWithCommand(pkgPath, webTypesCmd, w)
 }
@@ -580,7 +602,11 @@ func patchPackageJSONScriptsWithCommand(pkgPath, typesCmd string, w io.Writer) e
 	}
 
 	if !loc.found {
-		return os.WriteFile(pkgPath, spliceNewScriptsObject(data, loc.topEnd, typesCmd), 0o644)
+		if err := os.WriteFile(pkgPath, spliceNewScriptsObject(data, loc.topEnd, typesCmd), 0o644); err != nil {
+			return err
+		}
+		announceModified(w, pkgPath)
+		return nil
 	}
 
 	pairs, err := parseOrderedObject(data[loc.valStart:loc.valEnd])
@@ -611,7 +637,11 @@ func patchPackageJSONScriptsWithCommand(pkgPath, typesCmd string, w io.Writer) e
 		return nil // byte-identical: don't touch the file
 	}
 
-	return os.WriteFile(pkgPath, spliceScriptEntries(data, loc, missing, typesCmd), 0o644)
+	if err := os.WriteFile(pkgPath, spliceScriptEntries(data, loc, missing, typesCmd), 0o644); err != nil {
+		return err
+	}
+	announceModified(w, pkgPath)
+	return nil
 }
 
 // spliceScriptEntries inserts the missing hook entries at the END of the
@@ -816,7 +846,11 @@ func wireEntryImport(entryFlag, outFile string, w io.Writer) error {
 	newLines = append(newLines, lines[:insertAt]...)
 	newLines = append(newLines, importLine)
 	newLines = append(newLines, lines[insertAt:]...)
-	return os.WriteFile(entryPath, []byte(strings.Join(newLines, "\n")), 0o644)
+	if err := os.WriteFile(entryPath, []byte(strings.Join(newLines, "\n")), 0o644); err != nil {
+		return err
+	}
+	announceModified(w, entryPath)
+	return nil
 }
 
 // entryImportInsertIndex returns the line index BEFORE which the generated
@@ -1084,7 +1118,7 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 		if err := os.WriteFile(providersPath, []byte(strings.Join(newLines, "\n")), 0o644); err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "✓ added the Palbase import to existing %s\n", providersPath)
+		announceModified(w, providersPath)
 		return nil
 	}
 	if !os.IsNotExist(readErr) {

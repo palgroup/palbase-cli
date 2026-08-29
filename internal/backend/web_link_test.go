@@ -1404,3 +1404,68 @@ func TestWebUnlinkLeavesTheEvaluatedConfigAlone(t *testing.T) {
 		t.Errorf("unlink left the selection in place (err=%v)", err)
 	}
 }
+
+// `palbase web link` YAZDIĞI dosyaları duyuruyordu (`✓ wrote …`), DÜZENLEDİĞİ
+// dosyaları duyurmuyordu. Oysa üç yerde var olan bir dosyanın içine giriyor:
+// package.json'a predev/prebuild spliceleniyor, giriş dosyasına (app/layout.tsx)
+// bir import satırı, ve var olan bir providers bileşenine bir import daha.
+// Üçü de sessizce oluyordu — komut bittikten sonra `git status` bir kullanıcının
+// yazmadığı değişiklikleri gösteriyor ve hangisinin kimden geldiği çıktıda
+// yazmıyordu. `grep modified web_link.go` → 0 sonuç.
+//
+// KAPSAM: kullanıcının sahip olduğu dosyalar. Palbase/openapi.json,
+// Palbase/palbase-config.json ve palbe.gen.ts üretilmiş artefaktlar — onların
+// kendi `✓ wrote` satırı zaten var ve bir kullanıcı onları elle düzenlemiyor.
+func TestWebLink_AnnouncesEveryFileItEdited(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("import React from 'react';\n"), 0o644))
+	// Var olan bir providers bileşeni: `web link` buna da bir import splice'lar.
+	require.NoError(t, os.WriteFile("app/providers.tsx",
+		[]byte("'use client';\nexport function Providers({ children }) { return children; }\n"), 0o644))
+
+	out := runWebLink(t)
+
+	for _, edited := range []string{"package.json", "app/layout.tsx", "app/providers.tsx"} {
+		require.Containsf(t, out, "~ modified "+edited,
+			"%s düzenlendi ama çıktıda adı geçmiyor:\n%s", edited, out)
+	}
+
+	// Gerçekten düzenlendiklerini ölç — duyuru doğru olduğu için değerli,
+	// basıldığı için değil.
+	pkg, err := os.ReadFile("package.json")
+	require.NoError(t, err)
+	require.Contains(t, string(pkg), `"predev"`)
+	entry, err := os.ReadFile("app/layout.tsx")
+	require.NoError(t, err)
+	require.Contains(t, string(entry), "palbe.gen")
+	providers, err := os.ReadFile("app/providers.tsx")
+	require.NoError(t, err)
+	require.Contains(t, string(providers), "palbe.gen")
+
+	// NEGATİF KONTROL: ikinci koşuda hiçbir şey düzenlenmiyor (üçü de
+	// idempotent) — o zaman satır HİÇ basılmamalı. Bu olmadan "her zaman bas"
+	// da testi geçerdi ve duyuru bilgi taşımazdı.
+	again := runWebLink(t)
+	require.NotContainsf(t, again, "~ modified",
+		"hiçbir düzenleme yokken duyuru basıldı:\n%s", again)
+}
+
+// Bir dosya YARATILDIĞINDA `~ modified` değil `✓ wrote` denir: ikisi bir
+// kullanıcı için farklı iki olay, ve yaratılan dosya için "modified" demek
+// `git status`taki yeni dosyayı aramaya gönderir.
+func TestWebLink_CreatedFilesAreWrittenNotModified(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	out := runWebLink(t)
+
+	require.FileExists(t, "app/providers.tsx")
+	require.Contains(t, out, "✓ wrote app/providers.tsx")
+	require.NotContains(t, out, "~ modified app/providers.tsx")
+}
