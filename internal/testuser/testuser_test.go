@@ -17,6 +17,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -266,4 +268,54 @@ func TestParseSets(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})
+}
+
+// --- templates set: the door config/test-users.ts used to be ----------------
+
+// `config/test-users.ts` was PUT at the stack by the push (carryTestUsers). The
+// file is gone, so this verb is the door — and it must send `{templates: {...}}`,
+// not the evaluated document's own shape.
+//
+// THAT EXACT MISMATCH ALREADY COST A RELEASE: carryTestUsers sent the document
+// as-is, which decoded CLEANLY into a request with no templates; the stack
+// stored the empty set and answered 200 while the push printed "declared the
+// project's test users" (measured 2026-08-24). Same map, different key. This
+// test pins the key.
+func TestTemplatesSet_SendsTheTemplatesKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "templates.json")
+	doc := `{"alice":{"email":"alice@example.com","password":"pw"}}`
+	require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+
+	seen, _, err := runCmd(t, `{"applied":1}`, "templates", "set", "--file", path)
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPut, seen.method)
+	require.Equal(t, "/v1/management/test-users/templates", seen.path)
+
+	tpl, ok := seen.body["templates"].(map[string]any)
+	require.True(t, ok, "the request must carry a `templates` object, got %v", seen.body)
+	require.Contains(t, tpl, "alice")
+}
+
+// The bare `templates` verb keeps LISTING. Turning it into a group must not take
+// away the reading it already did.
+//
+// Note the ASYMMETRY the reply shape records: GET answers an ARRAY of templates,
+// while the PUT above takes a MAP under `templates`. That is the module's
+// existing contract — carryTestUsers sent the same map — and not something this
+// change invented.
+func TestTemplates_BareStillLists(t *testing.T) {
+	seen, _, err := runCmd(t, `{"templates":[]}`, "templates")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, seen.method)
+}
+
+// A file that does not parse is refused BEFORE the round trip.
+func TestTemplatesSet_RefusesMalformedJSONLocally(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{nope`), 0o600))
+
+	_, _, err := runCmd(t, `{}`, "templates", "set", "--file", path)
+	require.Error(t, err)
 }

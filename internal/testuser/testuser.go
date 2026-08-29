@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -140,6 +141,61 @@ func templatesCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the list as JSON")
+	cmd.AddCommand(templatesSetCmd())
+	return cmd
+}
+
+// templatesSetCmd is the door `config/test-users.ts` used to be.
+//
+// The file was PUT at the stack by the push (carryTestUsers). It is gone, so
+// this is where a fixture template set is written now.
+//
+// IT SENDS `{templates: {...}}`, and that wrapper is the whole point. The
+// retired courier sent the evaluated document as-is — `{__config, users: {...}}`
+// — which decoded CLEANLY into a request carrying no templates. The stack stored
+// the empty set, answered 200, and the push printed "declared the project's test
+// users" while the stack held none (measured 2026-08-24). Same map, different
+// key, no error anywhere.
+func templatesSetCmd() *cobra.Command {
+	var file string
+	cmd := &cobra.Command{
+		Use:   "set --file <path>",
+		Short: "Replace this stack's fixture-account templates",
+		Long: `Replace the template set from a JSON document.
+
+The document is a map of template name to definition. It is parsed here before
+anything leaves the machine, so a typo is your editor's problem rather than the
+stack's error message.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", file, err)
+			}
+			var templates map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &templates); err != nil {
+				return fmt.Errorf("%s is not a JSON object: %w", file, err)
+			}
+			target, cred, err := resolveProject(cmd)
+			if err != nil {
+				return err
+			}
+			if _, err := backend.PrintTargetFor(cmd); err != nil {
+				return err
+			}
+			body, err := json.Marshal(map[string]any{"templates": templates})
+			if err != nil {
+				return err
+			}
+			if err := putTemplatesOnProject(cmd.Context(), target, cred, body); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %d fixture template(s) stored on the stack\n", len(templates))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&file, "file", "", "JSON document holding the template set (required)")
+	_ = cmd.MarkFlagRequired("file")
 	return cmd
 }
 

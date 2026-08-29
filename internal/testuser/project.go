@@ -202,6 +202,16 @@ func printStackUser(out io.Writer, id, email, password, token string, inserted m
 	fmt.Fprintf(out, "  rows:     %s\n", strings.Join(parts, ", "))
 }
 
+// putTemplatesOnProject replaces the stack's fixture-template set.
+//
+// The body arrives already marshalled because its SHAPE is the thing under
+// test: the route takes `{templates: {...}}`, and the retired courier's habit of
+// sending the evaluated document as-is is what made a 200 mean nothing was
+// stored. Marshalling it here would hide that decision one layer down.
+func putTemplatesOnProject(ctx context.Context, target backend.Target, cred backend.Credentials, body []byte) error {
+	return callProject(ctx, target, cred, http.MethodPut, adminTemplates, json.RawMessage(body), nil)
+}
+
 // templatesOnProject lists what this stack has been told a test user can be.
 func templatesOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
 	jsonOut bool, out io.Writer) error {
@@ -213,10 +223,10 @@ func templatesOnProject(ctx context.Context, target backend.Target, cred backend
 		return encodeJSON(out, res)
 	}
 	if len(res.Templates) == 0 {
-		// `palbase test-user create <name>` is what this offered, and `create`
-		// takes NO arguments — a person who typed it got "unknown command".
-		// A template is DECLARED, not created: the file is the only author.
-		fmt.Fprintln(out, "No fixture accounts on this stack. Declare one in config/test-users.ts, then `palbase push`.")
+		// It used to say "Declare one in config/test-users.ts, then `palbase
+		// push`" — and that file is gone (2026-08-29). The stack is the author
+		// now, so the message names the verb that actually writes it.
+		fmt.Fprintln(out, "No fixture accounts on this stack. Write a set with `palbase test-user templates set --file <path>`.")
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
