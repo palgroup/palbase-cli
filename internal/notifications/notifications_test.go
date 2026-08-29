@@ -303,13 +303,19 @@ func TestTemplatesSet_WritesTheStack(t *testing.T) {
 // verb is back — and this pins the METHOD and PATH, which is what the first
 // attempt got wrong.
 func TestTemplatesList_ReadsTheStack(t *testing.T) {
-	f := &fakeStack{answer: `{"email":{"todo-digest":{"subject":"Hi"}}}`}
+	// The module answers an ARRAY with slug/locale/subject — NOT the
+	// {channel: {key: def}} map this test first assumed. The live stack said so
+	// (2026-08-29): a route's response shape is not its request shape, and this
+	// one differs on both.
+	f := &fakeStack{answer: `[{"slug":"todo-digest","locale":"en","subject":"Hi","is_default":false},` +
+		`{"slug":"palauth.magic_link","locale":"tr","subject":"Giriş","is_default":true}]`}
 	out, err := runWith(t, f, "templates", "list")
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, f.last().Method)
 	assert.Equal(t, "/v1/management/notifications/templates", f.last().Path)
 	assert.Contains(t, out, "todo-digest")
-	assert.Contains(t, out, "email")
+	assert.Contains(t, out, "yours", "a template the project added is marked as theirs")
+	assert.Contains(t, out, "built-in", "a shipped default is marked, so \"what did I add?\" has an answer")
 }
 
 // FR-006: the stack's own refusal reaches the operator verbatim. A verb that

@@ -435,11 +435,14 @@ func templatesCmd(r Resolvers) *cobra.Command {
 	var file string
 	set := &cobra.Command{
 		Use:   "set --file <path>",
-		Short: "Replace this project's template set",
-		Long: `Replace the WHOLE set from a JSON document.
+		Short: "Add this project's templates from a JSON document",
+		Long: `Add templates from a JSON document.
 
-An empty document ({}) is a legitimate value and means this project sends no
-templated messages — it is not the same as never having set one.
+IT DOES NOT REPLACE. This said "replace the WHOLE set" until a live stack
+answered "template with this slug already exists" on the second run
+(2026-08-29): the route underneath composes per-template creates and has no
+bulk-replace, so re-sending a set is an error rather than an update. Changing
+one template means changing it where it lives, not re-sending the file.
 
 The document is parsed here before anything leaves the machine, so a typo is
 your editor's problem rather than the stack's error message.`,
@@ -468,7 +471,7 @@ your editor's problem rather than the stack's error message.`,
 				Applied int `json:"applied"`
 			}
 			_ = json.Unmarshal(answer, &applied)
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ %d template channel(s) stored on the stack\n", len(doc))
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %d template channel(s) added to the stack\n", len(doc))
 			return nil
 		},
 	}
@@ -491,28 +494,37 @@ your editor's problem rather than the stack's error message.`,
 			if err != nil {
 				return err
 			}
-			var doc map[string]map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &doc); err != nil {
+			// The module answers an ARRAY of templates, not a map of channels. It
+			// was written here as `{channel: {key: def}}` and the live stack said
+			// otherwise (2026-08-29) — the shape a route RETURNS is not the shape it
+			// TAKES, and this one differs on both axes.
+			var rows []struct {
+				Slug      string `json:"slug"`
+				Locale    string `json:"locale"`
+				Subject   string `json:"subject"`
+				IsDefault bool   `json:"is_default"`
+			}
+			if err := json.Unmarshal(raw, &rows); err != nil {
 				return fmt.Errorf("the stack's template set is not readable: %s", strings.TrimSpace(string(raw)))
 			}
-			if len(doc) == 0 {
+			if len(rows) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No templates on this stack.")
 				return nil
 			}
-			channels := make([]string, 0, len(doc))
-			for ch := range doc {
-				channels = append(channels, ch)
-			}
-			sort.Strings(channels)
-			for _, ch := range channels {
-				keys := make([]string, 0, len(doc[ch]))
-				for k := range doc[ch] {
-					keys = append(keys, k)
+			sort.Slice(rows, func(i, j int) bool {
+				if rows[i].Slug != rows[j].Slug {
+					return rows[i].Slug < rows[j].Slug
 				}
-				sort.Strings(keys)
-				for _, k := range keys {
-					fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", ch, k)
+				return rows[i].Locale < rows[j].Locale
+			})
+			for _, r := range rows {
+				// The built-ins a stack ships with are marked, because "what did I
+				// add?" is the question this listing exists to answer.
+				origin := "yours"
+				if r.IsDefault {
+					origin = "built-in"
 				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%-34s %-4s %-9s %s\n", r.Slug, r.Locale, origin, r.Subject)
 			}
 			return nil
 		},
