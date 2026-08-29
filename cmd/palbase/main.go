@@ -32,6 +32,7 @@ import (
 	palbasetest "github.com/palgroup/palbase-cli/internal/test"
 	"github.com/palgroup/palbase-cli/internal/testuser"
 	"github.com/palgroup/palbase-cli/internal/transport"
+	"github.com/palgroup/palbase-cli/internal/versions"
 	"github.com/spf13/cobra"
 )
 
@@ -401,6 +402,9 @@ func newRootCmd() *cobra.Command {
 			Target: func() (apikey.Target, error) { return linkedTarget() },
 		}),
 		debugconsole.Cmd(debugconsole.Resolvers{}),
+		versions.Cmd(versions.Resolvers{
+			REST: func(cmd *cobra.Command) (versions.REST, error) { return openStackManagement(cmd) },
+		}),
 		logs.Cmd(logs.Resolvers{
 			REST:      func() logs.REST { return managementREST() },
 			Selection: selectionResolver,
