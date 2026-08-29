@@ -121,7 +121,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 		if bucketErr != nil {
 			return bucketErr
 		}
-		if bucketErr := unknownUploadBuckets(uses, have); bucketErr != nil {
+		if bucketErr := unknownUploadBuckets(uses, bucketNames(have)); bucketErr != nil {
 			return bucketErr
 		}
 	}

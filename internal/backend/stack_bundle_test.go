@@ -226,7 +226,7 @@ func TestTheBucketListComesFromTheManagementSurface(t *testing.T) {
 	if asked != "/v1/management/storage/buckets" {
 		t.Errorf("the bucket list was read from %q", asked)
 	}
-	if len(got) != 2 || got[0] != "avatars" || got[1] != "receipts" {
+	if len(got) != 2 || got[0].Name != "avatars" || got[1].Name != "receipts" {
 		t.Errorf("the stack's buckets did not arrive: %v", got)
 	}
 }
@@ -806,5 +806,39 @@ func TestTheBundleEntryCarriesEveryRuntimeSeamSymbol(t *testing.T) {
 		if !strings.Contains(entry, sym) {
 			t.Errorf("bundle entry %q yaymiyor — runtime bu bundle'i reddeder ve deploy acilmaz", sym)
 		}
+	}
+}
+
+// ZİNCİRİN KIRIK HALKASI, ÖLÇÜLDÜ. `stack-gen.ts` variant birliğini ZATEN
+// üretiyor ve girdisi olarak {name, variants} bekliyor (bucketMembers,
+// variant'sız kovada `never`). Go tarafı ise kova listesinden yalnız `name`
+// ayrıştırıyordu, yani okuyanı olan bir bayrağın yazanı yoktu: yığında
+// bildirilen bir rendition üretilen tipe hiç ulaşmıyordu.
+func TestStackBucketsCarriesDeclaredVariants(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"buckets":[
+			{"name":"posts","variants":[{"name":"card"},{"name":"thumb"}]},
+			{"name":"docs"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	got, err := stackBuckets(context.Background(), Target{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("stackBuckets: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("iki kova bekleniyordu: %+v", got)
+	}
+	if got[0].Name != "posts" || len(got[0].Variants) != 2 {
+		t.Fatalf("posts'un variant'ları düştü: %+v", got[0])
+	}
+	if got[0].Variants[0] != "card" || got[0].Variants[1] != "thumb" {
+		t.Errorf("variant adları yanlış: %+v", got[0].Variants)
+	}
+	// NEGATİF KONTROL: variant bildirmeyen kova BOŞ liste taşır, nil değil —
+	// üretilen tipte `never` olması gereken şey budur.
+	if got[1].Name != "docs" || len(got[1].Variants) != 0 {
+		t.Errorf("variant'sız kova temiz gelmedi: %+v", got[1])
 	}
 }

@@ -83,7 +83,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 		if bucketErr != nil {
 			return bucketErr
 		}
-		if bucketErr := unknownUploadBuckets(uses, have); bucketErr != nil {
+		if bucketErr := unknownUploadBuckets(uses, bucketNames(have)); bucketErr != nil {
 			return bucketErr
 		}
 		fmt.Fprintf(indent(out), "%d @Upload route(s), every bucket exists\n", len(uses))

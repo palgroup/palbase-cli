@@ -764,6 +764,16 @@ func readUploadBuckets(ctx context.Context, dir, bundle string) ([]uploadUse, er
 // does not have. Storage will not create one on demand, so the alternative is a
 // route that compiles, deploys, activates, and 404s the first file somebody
 // uploads.
+// bucketNames is the name-only view, for the gates that only care whether a
+// bucket EXISTS.
+func bucketNames(buckets []StackBucket) []string {
+	names := make([]string, 0, len(buckets))
+	for _, b := range buckets {
+		names = append(names, b.Name)
+	}
+	return names
+}
+
 func unknownUploadBuckets(uses []uploadUse, have []string) error {
 	if len(uses) == 0 {
 		return nil
@@ -790,8 +800,26 @@ func unknownUploadBuckets(uses []uploadUse, have []string) error {
 		len(bad), strings.Join(bad, "\n  "), held)
 }
 
+// StackBucket is one bucket as the generated types need it: a NAME and the
+// renditions it declares.
+//
+// It is not just a name because `stack-gen.ts` renders a SHAPE per bucket
+// carrying its variant union — `never` for a bucket with none — so that asking
+// for a rendition a bucket does not have is a compile error. That generator was
+// already written and already expecting `{name, variants}`; this side parsed
+// only `name` and dropped the rest, so a rendition declared on the stack never
+// reached a type. A flag with a reader and no writer.
+type StackBucket struct {
+	Name string `json:"name"`
+	// Variants is EMPTY, never nil, for a bucket with no renditions: the
+	// generator renders an empty union as `never`, which is exactly right, and
+	// `omitempty` here would make "declares none" indistinguishable from
+	// "was not asked".
+	Variants []string `json:"variants"`
+}
+
 // stackBuckets asks the stack which buckets it actually has.
-func stackBuckets(ctx context.Context, target Target) ([]string, error) {
+func stackBuckets(ctx context.Context, target Target) ([]StackBucket, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimSuffix(target.URL, "/")+"/v1/management/storage/buckets", nil)
 	if err != nil {
@@ -814,17 +842,27 @@ func stackBuckets(ctx context.Context, target Target) ([]string, error) {
 	}
 	var payload struct {
 		Buckets []struct {
-			Name string `json:"name"`
+			Name     string `json:"name"`
+			Variants []struct {
+				Name string `json:"name"`
+			} `json:"variants"`
 		} `json:"buckets"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("the bucket list did not parse: %w", err)
 	}
-	names := make([]string, 0, len(payload.Buckets))
+	out := make([]StackBucket, 0, len(payload.Buckets))
 	for _, b := range payload.Buckets {
-		names = append(names, b.Name)
+		// Empty rather than nil: a bucket with no renditions has an EMPTY union,
+		// which the generator renders as `never`. nil and empty would generate
+		// the same thing today and diverge the moment somebody checks for one.
+		variants := make([]string, 0, len(b.Variants))
+		for _, v := range b.Variants {
+			variants = append(variants, v.Name)
+		}
+		out = append(out, StackBucket{Name: b.Name, Variants: variants})
 	}
-	return names, nil
+	return out, nil
 }
 
 // stageControllers writes a copy of the project's controllers with each route's

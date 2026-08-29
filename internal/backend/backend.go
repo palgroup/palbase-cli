@@ -930,10 +930,15 @@ const envTypesFile = "palbase-env.d.ts"
 const stackTypesFile = "palbase-stack.d.ts"
 
 // StackNames are the three sets `palbase-stack.d.ts` is rendered from.
+//
+// Buckets are not plain names: `stack-gen.ts` renders a SHAPE per bucket
+// carrying its variant union, so `getPublicUrl(p, { variant })` refuses a
+// rendition the bucket does not declare. Sending only names made every bucket's
+// union `never` — the generator was ready for this and had nothing to read.
 type StackNames struct {
-	Secrets []string `json:"secrets"`
-	Flags   []string `json:"flags"`
-	Buckets []string `json:"buckets"`
+	Secrets []string      `json:"secrets"`
+	Flags   []string      `json:"flags"`
+	Buckets []StackBucket `json:"buckets"`
 }
 
 // generateStackTypes writes the project's palbase-stack.d.ts from the names the
