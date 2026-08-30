@@ -67,6 +67,25 @@ var (
 // this whole change was written to close: FR-010's first cut had the parameter
 // in the handler and no caller that could send it, and a fresh verifier found it.
 // A pure function is a thing a test can hold.
+// consentsIn renders what the destination URL actually asks for.
+//
+// Derived from the url rather than from the booleans a second time: a sentence
+// computed independently is a sentence that can be true while the request is
+// not.
+func consentsIn(url string) string {
+	var on []string
+	if strings.Contains(url, "accept-data-loss=true") {
+		on = append(on, "data loss approved")
+	}
+	if strings.Contains(url, "accept-breaking=true") {
+		on = append(on, "BREAKING CHANGE FORCED (--accept-breaking)")
+	}
+	if len(on) == 0 {
+		return "none"
+	}
+	return strings.Join(on, ", ")
+}
+
 func pushURL(base string, acceptDataLoss, acceptBreaking bool) string {
 	var q []string
 	if acceptDataLoss {
@@ -103,6 +122,24 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 			"this checkout is pointed at the stack running on this machine, which already serves this directory — a push here would activate a version nothing loads.\n" +
 				"  palbase stop       point it back at the project, then push\n" +
 				"  palbase db apply   if it was the schema you wanted applied here")
+	}
+
+	// THE DESTINATION, CONSENTS AND ALL, BEFORE ANY WORK.
+	//
+	// One value: the line a person reads and the request that goes are the same
+	// string, so they cannot disagree about what was consented to. Built here
+	// rather than beside the request because break-glass was INVISIBLE — an
+	// operator forcing a breaking change through saw a transcript identical to an
+	// ordinary push, and so did whoever read it afterwards looking for why the
+	// column went away.
+	//
+	// Measured before this moved: pinning `acceptBreaking` to false at the call
+	// site left the whole package green. The flag reached this function (tested)
+	// and pushURL built the right URL when asked (tested), and the last hop
+	// between them was in nobody's test — so consent could be dropped in silence.
+	url := pushURL(target.URL, approve, acceptBreaking)
+	if approve || acceptBreaking {
+		fmt.Fprintf(w, "  consents: %s\n", consentsIn(url))
 	}
 
 	dir, err := os.Getwd()
@@ -169,7 +206,6 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	}
 	fmt.Fprintf(w, "sending %s (%d KB)\n", dir, len(tarball)/1024)
 
-	url := pushURL(target.URL, approve, acceptBreaking)
 	status, body, err := sendWaitingForReady(ctx, stackClient(target), func() (*http.Request, error) {
 		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))
 		if rerr != nil {
