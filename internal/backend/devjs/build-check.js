@@ -180,7 +180,21 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
         fileExists: (p) => fs.existsSync(p),
         projectRoot: PROJECT_ROOT,
       });
-      fs.writeFileSync(dest, out);
+      // THE APPLICATION RING OF THE CASCADE HAS TO BE EVALUATED TO EXIST.
+      //
+      // `defineDefaultAuth` is a call at module scope, and nothing in a project
+      // imports `auth.ts` — it is not a controller, a job, a webhook or a hook.
+      // So a per-controller bundle never evaluated it, `getDefaultAuth()`
+      // answered `undefined`, and the cascade fell through to its terminal
+      // `true`: a project declaring `defineDefaultAuth(false)` had `palbase
+      // build` report `required: true` for every silent route. The pod's own
+      // bundler already does exactly this (bundle-controllers.sh: `if [ -f
+      // "$PROJ/auth.ts" ]`), and so does the stack bundler
+      // (stack_bundle.go: "SIDE EFFECT, never named"). This is the third place
+      // that needs it and the one that was missing.
+      const authFile = path.join(PROJECT_ROOT, 'auth.ts');
+      const prelude = fs.existsSync(authFile) ? `import ${JSON.stringify(authFile)};\n` : '';
+      fs.writeFileSync(dest, prelude + out);
     } else {
       fs.copyFileSync(file, dest);
     }
