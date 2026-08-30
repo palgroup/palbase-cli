@@ -2,7 +2,9 @@ package backend
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -220,5 +222,97 @@ func TestPushURL_CarriesBothConsents(t *testing.T) {
 			t.Errorf("pushURL(dataLoss=%v, breaking=%v) = %q, beklenen %q",
 				tc.dataLoss, tc.breaking, got, tc.want)
 		}
+	}
+}
+
+// BAYRAK → PARAMETRE HALKASI.
+//
+// `TestPushURL_CarriesBothConsents` saf fonksiyonu sabitliyor ama onu KİMİN,
+// HANGİ bayrakla çağırdığını tutmuyordu. Taze bir doğrulayıcı ölçtü: `breaking`
+// değişkenini `GetBool("approve")`'a bağlayınca suite yeşil kalıyordu — yani
+// `--approve` sessizce uyumluluk kapısını açabilir, `--accept-breaking` hiçbir
+// şey yapmayabilirdi.
+//
+// Bu, kapatmak için yazılan kusurun bir halka yukarısı: parametre var, tele
+// çıkıyor, ama bağ kanıtsız.
+func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
+	dir := projectForPush(t)
+	if err := os.WriteFile(filepath.Join(dir, ".palbase", "local.json"),
+		[]byte(`{"url":"https://127.0.0.1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	realPush := stackPush
+	t.Cleanup(func() { stackPush = realPush })
+
+	for _, tc := range []struct {
+		args                    []string
+		wantDataLoss, wantBreak bool
+	}{
+		{nil, false, false},
+		{[]string{"--approve"}, true, false},
+		{[]string{"--accept-breaking"}, false, true},
+		{[]string{"--approve", "--accept-breaking"}, true, true},
+	} {
+		var gotDataLoss, gotBreak bool
+		called := false
+		stackPush = func(_ context.Context, _ Target, _ Credentials, approve, breaking bool, _ io.Writer) error {
+			called, gotDataLoss, gotBreak = true, approve, breaking
+			return nil
+		}
+
+		cmd := newPushCmd(Resolvers{})
+		cmd.SetArgs(tc.args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		_ = cmd.Execute()
+
+		if !called {
+			t.Fatalf("%v: push stack yoluna hiç girmedi — bu vaka o hâlde hiçbir şey ölçmez", tc.args)
+		}
+		if gotDataLoss != tc.wantDataLoss {
+			t.Errorf("%v → accept-data-loss=%v, beklenen %v", tc.args, gotDataLoss, tc.wantDataLoss)
+		}
+		if gotBreak != tc.wantBreak {
+			t.Errorf("%v → accept-breaking=%v, beklenen %v", tc.args, gotBreak, tc.wantBreak)
+		}
+	}
+}
+
+// BULUT YOLUNDA BAYRAK SESSİZCE YUTULMAZ.
+//
+// `--accept-breaking` bağlı bir yığının uyumluluk kapısını açıyor ve o kapı yalnız
+// yığında var. Bulut yolunda hiçbir şeye ulaşmıyordu: kabul ediliyor, düşürülüyor,
+// ve push sıradan kurallarla gidiyordu — operatör zorladığını sanarken. Komutun
+// kendi help metni bunu yasaklıyor: kabul edilip yok sayılan bir bayrak, hiç
+// olmayandan beterdir.
+func TestPushCmd_CloudPathRefusesAcceptBreaking(t *testing.T) {
+	// Bağlı yığın YOK: .palbase/local.json olmayan bir dizin bulut dalına düşer.
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	cmd := newPushCmd(Resolvers{})
+	cmd.SetArgs([]string{"--accept-breaking"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("bulut yolu --accept-breaking'i sessizce yuttu")
+	}
+	if !strings.Contains(err.Error(), "accept-breaking") {
+		t.Errorf("red bayrağı ADIYLA anmalı: %v", err)
+	}
+	if !strings.Contains(err.Error(), "linked") {
+		t.Errorf("red ne yapılacağını söylemeli: %v", err)
 	}
 }

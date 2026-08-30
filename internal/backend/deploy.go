@@ -418,6 +418,15 @@ func fetchDeployedSource(ctx context.Context, target Target, cred Credentials, n
 
 // newPushCmd wires `palbase push` — the deploy verb. It always targets the
 // SELECTED Environment; there is no --branch.
+// stackPush is the seam the flag→consent binding is asserted through.
+//
+// Reading the flags in a test and calling `pushURL` proves the URL builder and
+// nothing else: a fresh verifier bound `breaking` to `GetBool("approve")` and no
+// test noticed, which would have meant `--approve` silently opening the
+// compatibility gate. The binding itself has to be observable, so the call goes
+// through a variable a test can stand in front of.
+var stackPush = runStackPush
+
 func newPushCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "push",
@@ -460,9 +469,23 @@ flag that is accepted and ignored is worse than one that is refused.`,
 				}
 				approve, _ := cmd.Flags().GetBool("approve")
 				breaking, _ := cmd.Flags().GetBool("accept-breaking")
-				return runStackPush(cmd.Context(), target, cred, approve, breaking, cmd.OutOrStdout())
+				return stackPush(cmd.Context(), target, cred, approve, breaking, cmd.OutOrStdout())
 			}
 
+			// A FLAG THAT IS ACCEPTED AND IGNORED IS WORSE THAN ONE THAT DOES NOT
+			// EXIST — this command says so itself, a few lines up.
+			//
+			// `--accept-breaking` opens the stack's compatibility gate, and only
+			// the stack has that gate. On the cloud path it reached nothing:
+			// accepted, dropped, and the push went out under the ordinary rules
+			// while the operator believed they had forced it. Refused by name
+			// instead, the way `--project` and `--environment` are.
+			if f := cmd.Flags().Lookup("accept-breaking"); f != nil && f.Changed {
+				return fmt.Errorf(
+					"--accept-breaking is for a stack you are linked to: it opens THAT stack's " +
+						"compatibility gate, and this push goes to a cloud environment, which has " +
+						"no such gate to open. Drop the flag, or run the push from a linked checkout")
+			}
 			sel, err := r.Selection().Resolve(cmd.Context())
 			if err != nil {
 				return err
