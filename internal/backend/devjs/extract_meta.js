@@ -430,11 +430,20 @@ function extractControllerMeta(Ctrl, zodToJSON, errorRegistry) {
     const options = (route.options && typeof route.options === 'object') ? route.options : {};
     const params = Array.isArray(route.params) ? route.params : [];
 
-    // Effective auth = route.options.auth ?? controller.defaultAuth ?? true.
-    const effectiveAuthValue =
-      options.auth !== undefined ? options.auth :
-      defaultAuth !== undefined ? defaultAuth :
-      true;
+    // THE cascade, asked of the SDK rather than written here.
+    //
+    // This was a THIRD hand-written copy: route ?? controller ?? true, with no
+    // APPLICATION ring — so a project that declared `defineDefaultAuth(false)`
+    // shipped a contract saying `required: true` to every generated client.
+    // Enforcement was right (the runtime reads the ring); the SPEC this build
+    // emits was not, and a contract that disagrees with the server is the
+    // failure `controller.ts` names where the cascade is defined: "Two
+    // hand-written copies of a cascade is how the build-time answer and the
+    // runtime answer come to disagree."
+    //
+    // Older SDKs do not export it; falling back to the two-ring chain is what
+    // this file did before, so an older SDK is no worse off than it was.
+    const effectiveAuthValue = resolveAuthCascade(options.auth, defaultAuth);
 
     const bodyParam = findParam(params, 'body');
     const queryParam = findParam(params, 'query');
@@ -499,3 +508,18 @@ function extractControllerMeta(Ctrl, zodToJSON, errorRegistry) {
 }
 
 main().catch(writeError);
+
+/** The SDK's `resolveEffectiveAuth`, or this file's previous two-ring chain when
+ * the installed SDK is older than the export. */
+function resolveAuthCascade(routeAuth, controllerAuth) {
+  try {
+    const sdk = require('@palbase/backend');
+    if (typeof sdk.resolveEffectiveAuth === 'function') {
+      return sdk.resolveEffectiveAuth(routeAuth, controllerAuth);
+    }
+  } catch {
+    // Unresolvable package — the fallback below is the documented behaviour.
+  }
+  return routeAuth !== undefined ? routeAuth : controllerAuth !== undefined ? controllerAuth : true;
+}
+
