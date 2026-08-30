@@ -49,6 +49,22 @@ To start over, ` + "`palbase start --reset`" + ` throws the whole local database
 brings it back empty; nothing here does that, because at that point the schema is
 not the thing you are resetting.`,
 	}
+	// AN UNKNOWN SUBCOMMAND MUST NOT EXIT 0.
+	//
+	// Cobra's default for a parent with children is to print help and succeed,
+	// so `palbase db aply` — a typo in a deploy script — printed the help text
+	// and reported SUCCESS. In CI that is a schema change that never ran, with a
+	// green tick over it. Measured 2026-08-30: exit 0.
+	//
+	// The BARE `palbase db` still prints help and still exits 0: that is a person
+	// asking what the command does, and answering them is not an error. Only an
+	// argument nobody recognises is.
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return c.Help()
+		}
+		return fmt.Errorf("unknown command %q for %q\n\nRun 'palbase db --help' for the list", args[0], c.CommandPath())
+	}
 	cmd.AddCommand(planCmd(), applyCmd(), queryCmd())
 	return cmd
 }
