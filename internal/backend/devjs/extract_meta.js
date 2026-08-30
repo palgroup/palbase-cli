@@ -511,11 +511,37 @@ main().catch(writeError);
 
 /** The SDK's `resolveEffectiveAuth`, or this file's previous two-ring chain when
  * the installed SDK is older than the export. */
+let warnedAboutFallback = false;
+
 function resolveAuthCascade(routeAuth, controllerAuth) {
   try {
     const sdk = require('@palbase/backend');
     if (typeof sdk.resolveEffectiveAuth === 'function') {
       return sdk.resolveEffectiveAuth(routeAuth, controllerAuth);
+    }
+    // THE EXPORT IS MISSING, AND THAT HAS TWO CAUSES THAT LOOK IDENTICAL.
+    //
+    // Either the installed SDK predates the export — the case this fallback was
+    // written for — or `require` resolved a DIFFERENT copy than the bundle uses
+    // (a stray @palbase/backend higher up the directory walk will win it;
+    // measured on a developer machine, 2026-08-30). The second is not an old
+    // SDK, and the difference matters: the fallback knows only two rings, so the
+    // APPLICATION default is never read and a project declaring
+    // `defineDefaultAuth(false)` propagates `required: true` — a wrong contract,
+    // shipped to clients, with nothing on the terminal to say so.
+    //
+    // It fails CLOSED (more restrictive, never less), so this is a warning and
+    // not a refusal. But it stops being silent.
+    if (!warnedAboutFallback) {
+      warnedAboutFallback = true;
+      process.stderr.write(
+        'palbase: the installed @palbase/backend does not export resolveEffectiveAuth ' +
+          `(resolved: ${require.resolve('@palbase/backend')}).\n` +
+          '  Falling back to the route→controller cascade — the APPLICATION default ' +
+          "(defineDefaultAuth) will NOT be applied, so routes that say nothing are\n" +
+          '  published as auth-required. Upgrade @palbase/backend, or check that the ' +
+          'copy being resolved is the project\'s own.\n',
+      );
     }
   } catch {
     // Unresolvable package — the fallback below is the documented behaviour.
