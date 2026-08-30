@@ -100,6 +100,9 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// layers and shipped no way to run them together.
 		"test",
 		"test-user",
+		// f668ec6'de eklendi ve bu listeye yazılmamıştı — kapı o commit'ten beri
+		// kırmızıydı. Kapının işi tam da bu: yeni bir komut BİLEREK buraya yazılır.
+		"versions",
 		"web",
 		"whoami",
 	}, topLevel(t))
