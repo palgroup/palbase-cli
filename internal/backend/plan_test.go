@@ -265,7 +265,7 @@ func TestPushRefusesWhileALocalStackIsRunning(t *testing.T) {
 	local := newProjectServer(t, map[string]string{})
 
 	err := runStackPush(context.Background(), Target{URL: local.URL, Local: true},
-		Credentials{Value: "k", Kind: KindKey}, false, &strings.Builder{})
+		Credentials{Value: "k", Kind: KindKey}, false, false, &strings.Builder{})
 	if err == nil {
 		t.Fatal("a push to the local stack was accepted")
 	}
@@ -294,7 +294,7 @@ func TestPushInAnAppCheckoutWritesNOTHING(t *testing.T) {
 
 	project := newProjectServer(t, map[string]string{})
 	err := runStackPush(context.Background(), Target{URL: project.URL},
-		Credentials{Value: "k", Kind: KindKey}, false, &strings.Builder{})
+		Credentials{Value: "k", Kind: KindKey}, false, false, &strings.Builder{})
 	if err == nil {
 		t.Fatal("a push from an app checkout was accepted")
 	}

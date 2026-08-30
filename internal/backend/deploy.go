@@ -459,7 +459,8 @@ flag that is accepted and ignored is worse than one that is refused.`,
 					return tokErr
 				}
 				approve, _ := cmd.Flags().GetBool("approve")
-				return runStackPush(cmd.Context(), target, cred, approve, cmd.OutOrStdout())
+				breaking, _ := cmd.Flags().GetBool("accept-breaking")
+				return runStackPush(cmd.Context(), target, cred, approve, breaking, cmd.OutOrStdout())
 			}
 
 			sel, err := r.Selection().Resolve(cmd.Context())
@@ -484,6 +485,13 @@ flag that is accepted and ignored is worse than one that is refused.`,
 	// removes data, and replacing a secret the target already holds.
 	cmd.Flags().Bool("approve", false,
 		"apply the changes the plan marked: data-removing schema changes, and replacing a secret already set there")
+	cmd.Flags().Bool("accept-breaking", false,
+		"break-glass: apply a schema the running release still declares it needs.\n"+
+			"The ordinary path is two deploys — mark the column .ignored(), ship, then\n"+
+			"drop it — and the refusal names it. This exists for the case that dance\n"+
+			"cannot serve: the running release is already broken and the fix is the\n"+
+			"very change being refused. Every use is logged on the stack, with the\n"+
+			"serving digest and the objects it overrode.")
 	return cmd
 }
 

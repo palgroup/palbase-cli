@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -60,7 +61,28 @@ var (
 	stackReadyRetryEvery = 6 * time.Second
 )
 
-func runStackPush(ctx context.Context, target Target, cred Credentials, approve bool, w io.Writer) error {
+// pushURL is where the two consents become part of the request.
+//
+// Split out because a flag that exists and never reaches the wire is the defect
+// this whole change was written to close: FR-010's first cut had the parameter
+// in the handler and no caller that could send it, and a fresh verifier found it.
+// A pure function is a thing a test can hold.
+func pushURL(base string, acceptDataLoss, acceptBreaking bool) string {
+	var q []string
+	if acceptDataLoss {
+		q = append(q, "accept-data-loss=true")
+	}
+	if acceptBreaking {
+		q = append(q, "accept-breaking=true")
+	}
+	u := base + "/v1/management/push"
+	if len(q) > 0 {
+		u += "?" + strings.Join(q, "&")
+	}
+	return u
+}
+
+func runStackPush(ctx context.Context, target Target, cred Credentials, approve, acceptBreaking bool, w io.Writer) error {
 	// Where this is going, before anything goes. Both push paths funnel through
 	// here — the linked-project one and the probe in the cloud command — so one
 	// line here covers both without either being able to forget it.
@@ -147,10 +169,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve 
 	}
 	fmt.Fprintf(w, "sending %s (%d KB)\n", dir, len(tarball)/1024)
 
-	url := target.URL + "/v1/management/push"
-	if approve {
-		url += "?accept-data-loss=true"
-	}
+	url := pushURL(target.URL, approve, acceptBreaking)
 	status, body, err := sendWaitingForReady(ctx, stackClient(target), func() (*http.Request, error) {
 		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))
 		if rerr != nil {

@@ -55,7 +55,7 @@ func TestStatusDoesNotAdviseACommandThatRefusesThisTarget(t *testing.T) {
 	// is a target a push refuses. Without this the assertion below would keep
 	// passing if push ever started accepting local targets, and the advice would
 	// silently become correct-to-omit.
-	pushErr := runStackPush(context.Background(), local, Credentials{Value: "k", Kind: KindKey}, false, &bytes.Buffer{})
+	pushErr := runStackPush(context.Background(), local, Credentials{Value: "k", Kind: KindKey}, false, false, &bytes.Buffer{})
 	if pushErr == nil {
 		t.Fatal("push accepted a local target — this test's premise no longer holds, revisit the advice in status")
 	}

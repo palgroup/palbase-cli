@@ -199,3 +199,26 @@ func TestAStackPushCarriesTheJobAndHookManifests(t *testing.T) {
 		}
 	}
 }
+
+// CAM-KIR BAYRAĞI TELE ÇIKIYOR MU.
+//
+// Bir bayrağın var olması yetmiyor: FR-010'un ilk hâlinde parametre HANDLER'da
+// vardı ama hiçbir çağrı onu gönderemiyordu, ve taze bir doğrulayıcı bunu
+// yakaladı. Ölçülen şey URL'in kendisi.
+func TestPushURL_CarriesBothConsents(t *testing.T) {
+	const base = "https://stack.example"
+	for _, tc := range []struct {
+		dataLoss, breaking bool
+		want               string
+	}{
+		{false, false, base + "/v1/management/push"},
+		{true, false, base + "/v1/management/push?accept-data-loss=true"},
+		{false, true, base + "/v1/management/push?accept-breaking=true"},
+		{true, true, base + "/v1/management/push?accept-data-loss=true&accept-breaking=true"},
+	} {
+		if got := pushURL(base, tc.dataLoss, tc.breaking); got != tc.want {
+			t.Errorf("pushURL(dataLoss=%v, breaking=%v) = %q, beklenen %q",
+				tc.dataLoss, tc.breaking, got, tc.want)
+		}
+	}
+}
