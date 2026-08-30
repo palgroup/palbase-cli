@@ -458,6 +458,10 @@ test('jobs/ classes are discovered, not just counted', (t) => {
     path.join(FIXTURE_ROOT, 'jobs', 'topup.job.js'),
     [
       'class Topup { constructor(repo) { this.repo = repo; } async run() {} }',
+      // What `@Job` stamps. The fixture carries it because the rule reads it —
+      // an undecorated class in jobs/ is not a job, and the earlier version of
+      // this fixture (no stamp) is why every exported FUNCTION looked like one.
+      "Object.defineProperty(Topup, '__palbase', { value: 'job' });",
       'module.exports = { default: Topup };',
     ].join('\n'),
   );
@@ -468,6 +472,40 @@ test('jobs/ classes are discovered, not just counted', (t) => {
   assert.ok(topup, `Topup not among ${JSON.stringify(found.map((f) => f.cls && f.cls.name))}`);
   // The arity the SDK's rule reads. One parameter is what took the deploy down.
   assert.strictEqual(topup.cls.length, 1);
+});
+
+// A JOB FILE IS ALLOWED TO EXPORT ORDINARY CODE.
+//
+// The discovery took every exported FUNCTION for a surface class, and the SDK's
+// rule only reads arity — so `export const makeClient = (url) => …` beside a job
+// was reported as "job class makeClient declares a constructor with 1
+// parameter(s)" and `palbase build` exited 1. A correct project could not build.
+// The controller path never had this: it elides on `__palbase !== 'controller'`.
+test('an ordinary helper beside a job is not mistaken for a job class', (t) => {
+  if (!esbuildAvailable()) {
+    t.skip('esbuild unavailable (offline npx)');
+    return;
+  }
+  fs.mkdirSync(path.join(FIXTURE_ROOT, 'jobs'), { recursive: true });
+  fs.writeFileSync(
+    path.join(FIXTURE_ROOT, 'jobs', 'sweep.job.js'),
+    [
+      'class Sweep { async run() {} }',
+      "Object.defineProperty(Sweep, '__palbase', { value: 'job' });",
+      'function centsToLira(cents) { return cents / 100; }',
+      'const makeClient = (url) => ({ url });',
+      'class SweepFailed extends Error { constructor(msg) { super(msg); } }',
+      'module.exports = { default: Sweep, centsToLira, makeClient, SweepFailed };',
+    ].join('\n'),
+  );
+
+  const names = surfaceClassesIn('jobs')
+    .filter((f) => f.cls)
+    .map((f) => f.cls.name);
+  assert.ok(names.includes('Sweep'), `the job itself must still be found: ${JSON.stringify(names)}`);
+  for (const stranger of ['centsToLira', 'makeClient', 'SweepFailed']) {
+    assert.ok(!names.includes(stranger), `${stranger} is not a job class: ${JSON.stringify(names)}`);
+  }
 });
 
 test('an absent surface directory is not a fault', () => {

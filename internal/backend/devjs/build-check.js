@@ -264,6 +264,17 @@ function rmBundledTree(outDir) {
 // "✗ DEPLOY WOULD FAIL: controllers/tenancy.test.js — Invalid URL" about a file
 // no deploy would ever load.
 const CONTROLLER_ENTRY_RE = /\.controller\.(c?ts|tsx|c?js|mjs)$/i;
+
+// What the DEPLOY treats as a surface definition, spelled the same way here.
+//
+// `stack_bundle.go`'s `definitionSources` skips test files, and says why:
+// "TEST FILES ARE NOT DEFINITIONS: shipping one would mount a URL nobody meant
+// to publish … or put a test suite on a production cron." The build check
+// bundled them anyway, and since `palbase build` stages a tree with no
+// node_modules, a `*.test.ts` importing vitest took the WHOLE build down with
+// `Could not resolve "vitest"` — while the scaffold's own AGENTS.md tells
+// authors to write exactly those files. Measured live 2026-08-30.
+const SURFACE_ENTRY_RE = /^(?!.*\.test\.(c?ts|c?js|mts|mjs)$).*\.(c?ts|tsx|c?js|mjs)$/i;
 // Bundled output is always plain JS (esbuild), so the bundled-side twin of the
 // rule above drops the TypeScript extensions.
 const BUNDLED_CONTROLLER_RE = /\.controller\.(c?js|mjs)$/i;
@@ -705,6 +716,28 @@ const SURFACE_DIRS = [
   ['hooks', 'hook class'],
 ];
 
+// The stamps a decorator leaves, read here the way the CONTROLLER path reads
+// `__palbase !== 'controller'` before it treats a class as a controller.
+//
+// WITHOUT THIS every exported FUNCTION in jobs/, webhooks/ or hooks/ was taken
+// for a surface class, and the SDK's rule only reads arity — so an ordinary
+// helper beside a job (`export const makeClient = (url) => …`, an Error subclass
+// with a message parameter, a plain `function centsToLira(cents)`) was reported
+// as "job class … declares a constructor with 1 parameter(s)" and `palbase build`
+// exited 1. A CORRECT project could not build: the guard against a broken deploy
+// was breaking working ones instead. Measured 2026-08-30.
+const HOOK_BLOCKING = Symbol.for('palbase.backend.hookBlocking');
+const WEBHOOK_EVENTS = Symbol.for('palbase.backend.webhookEvents');
+
+function isSurfaceClass(value, dirName) {
+  if (typeof value !== 'function') return false;
+  if (dirName === 'jobs') return value.__palbase === 'job';
+  if (dirName === 'webhooks') return value.__palbase === 'webhook';
+  // Hooks carry no `__palbase`; @OnEvent / @OnWebhook stamp these symbols
+  // instead, one per decorated method.
+  return value[HOOK_BLOCKING] !== undefined || value[WEBHOOK_EVENTS] !== undefined;
+}
+
 /** Every class a surface file exports, decorated or default. Bundled first, for
  * the same reason controllers are: the sources are TypeScript and the extension
  * -less relative imports must resolve the way they do on deploy. */
@@ -713,7 +746,16 @@ function surfaceClassesIn(dirName) {
   if (!fs.existsSync(srcDir)) return [];
   const outDir = path.join(BUNDLE_ROOT, dirName);
   rmBundledTree(outDir);
-  if (!bundleSrcDir(srcDir, outDir, CONTROLLER_RESOURCE_EXTERNALS)) return [];
+  // A bundle failure here is a USER-CODE fault (a syntax error, an unresolved
+  // import) and reads as one — the controller path does the same at its own
+  // bundle. Uncaught, it reached main()'s outer catch and printed
+  // `FATAL: … Command failed: npx --yes esbuild --bundle …` with the whole
+  // argument list, burying esbuild's actual diagnosis.
+  try {
+    if (!bundleSrcDir(srcDir, outDir, CONTROLLER_RESOURCE_EXTERNALS, SURFACE_ENTRY_RE)) return [];
+  } catch (err) {
+    return [{ file: path.join(BUNDLE_ROOT, dirName, `${dirName}/`), error: esbuildErr(err) }];
+  }
 
   const found = [];
   for (const file of walk(outDir)) {
@@ -731,7 +773,7 @@ function surfaceClassesIn(dirName) {
     }
     const candidates = [mod && mod.default, ...(mod ? Object.keys(mod).map((k) => mod[k]) : [])];
     for (const value of candidates) {
-      if (typeof value === 'function' && !found.some((f) => f.cls === value)) {
+      if (isSurfaceClass(value, dirName) && !found.some((f) => f.cls === value)) {
         found.push({ file, cls: value });
       }
     }
