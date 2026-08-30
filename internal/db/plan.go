@@ -17,6 +17,9 @@ type schemaPlan struct {
 	Changes     []string            `json:"changes"`
 	Destructive []destructiveChange `json:"destructive"`
 	Unsupported []string            `json:"unsupported"`
+	// Incompatible is what a push of this change would be refused for, with the
+	// way out named. Empty when the push would be accepted.
+	Incompatible []string `json:"incompatible"`
 }
 
 type destructiveChange struct {
@@ -115,6 +118,13 @@ func renderPlan(w io.Writer, plan schemaPlan) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "not applied by this rail — change these yourself:")
 		for _, item := range plan.Unsupported {
+			fmt.Fprintf(w, "  %s\n", item)
+		}
+	}
+	if len(plan.Incompatible) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "this change would be refused at push:")
+		for _, item := range plan.Incompatible {
 			fmt.Fprintf(w, "  %s\n", item)
 		}
 	}
