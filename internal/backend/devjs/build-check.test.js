@@ -23,9 +23,10 @@ const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-buildcheck-t
 process.env.PALBASE_DEV_ROOT = FIXTURE_ROOT;
 
 // RESOURCE_INLINE_CANARY marks the resource IMPLEMENTATION: it must appear in
-// the shared resources bundle and must NOT appear in the controller bundle —
-// if it does, the controller inlined its own never-booted Resource twin (the
-// exact bug the deploy bundler's ExternalResourceImports prevents).
+// the shared resources bundle and must NOT appear in the controller bundle — if
+// it does, the controller inlined a PRIVATE COPY of the module instead of
+// sharing the one (the exact bug the deploy bundler's ExternalResourceImports
+// prevents), and two controllers importing it would each hold their own.
 // Plain-JS fixture ON PURPOSE: a `.controller.ts` takes the staging
 // return-bindings path (return_types.js), which needs the `typescript` package
 // — absent in the CI unit env. A `.controller.js` is copied VERBATIM by
@@ -34,16 +35,9 @@ process.env.PALBASE_DEV_ROOT = FIXTURE_ROOT;
 fs.mkdirSync(path.join(FIXTURE_ROOT, 'resources'), { recursive: true });
 fs.mkdirSync(path.join(FIXTURE_ROOT, 'controllers'), { recursive: true });
 fs.writeFileSync(path.join(FIXTURE_ROOT, 'resources', 'env.js'), [
-  'import { Resource } from "@palbase/backend";',
-  '',
-  'export class EnvDiag extends Resource {',
-  '  value = "";',
-  '  async init(env) {',
-  '    this.value = "RESOURCE_INLINE_CANARY";',
-  '  }',
-  '}',
-  '',
-  'export const envDiag = new EnvDiag();',
+  'export const envDiag = {',
+  '  value: "RESOURCE_INLINE_CANARY",',
+  '};',
   '',
 ].join('\n'));
 fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.js'), [
@@ -72,6 +66,7 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'tenancy.test.js'), [
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
 const {
   registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
+  surfaceClassesIn,
 } = require('./build-check.js');
 
 test.after(() => {
@@ -342,6 +337,7 @@ test('controllers/ with source but no *.controller.ts fails and names the conven
   assert.strictEqual(code, 1, `build must fail; output:\n${out}`);
   assert.match(out, /only \*\.controller\.ts files register routes/);
 });
+
 // ── the reported path must be one the author can OPEN ──────────────────────
 //
 // `palbase build` prints a line per route:
@@ -438,4 +434,42 @@ test('a real *.controller.ts route reports its .ts source', (t) => {
     bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'todos.controller.js')),
     path.join('controllers', 'todos.controller.ts'),
   );
+});
+
+
+// THE SURFACE CLASSES THE BUILD NEVER LOADED (FR-011's missing half).
+//
+// `declaredSurfaces()` reads the filesystem and COUNTS files; it never loads a
+// class, so the SDK's zero-argument rule had no build-time half for jobs, hooks
+// and webhooks. A `@Job` with constructor parameters built clean and took the
+// deploy down at boot, when the runtime resolved it.
+//
+// This proves the half that was missing: the build can now SEE those classes.
+// That the rule then refuses one is the SDK's own contract, proven live against
+// a real project (the run's UAT), because the rule and its message belong to the
+// SDK and this file only asks it.
+test('jobs/ classes are discovered, not just counted', (t) => {
+  if (!esbuildAvailable()) {
+    t.skip('esbuild unavailable (offline npx)');
+    return;
+  }
+  fs.mkdirSync(path.join(FIXTURE_ROOT, 'jobs'), { recursive: true });
+  fs.writeFileSync(
+    path.join(FIXTURE_ROOT, 'jobs', 'topup.job.js'),
+    [
+      'class Topup { constructor(repo) { this.repo = repo; } async run() {} }',
+      'module.exports = { default: Topup };',
+    ].join('\n'),
+  );
+
+  const found = surfaceClassesIn('jobs');
+  assert.ok(found.length > 0, 'the build must LOAD jobs/, not only count the files');
+  const topup = found.find((f) => f.cls && f.cls.name === 'Topup');
+  assert.ok(topup, `Topup not among ${JSON.stringify(found.map((f) => f.cls && f.cls.name))}`);
+  // The arity the SDK's rule reads. One parameter is what took the deploy down.
+  assert.strictEqual(topup.cls.length, 1);
+});
+
+test('an absent surface directory is not a fault', () => {
+  assert.deepStrictEqual(surfaceClassesIn('no-such-surface-dir'), []);
 });

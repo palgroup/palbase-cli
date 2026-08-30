@@ -683,6 +683,85 @@ function walk(dir) {
 // person actually reads never mentioned them, so there was no number to notice
 // was wrong (measured 2026-08-26, tenant `1jhp7jbrm`).
 //
+
+// SURFACE CONSTRUCTORS — the half of the zero-argument rule that was missing.
+//
+// The SDK refuses a hook/job/webhook class that declares constructor parameters
+// (decorators/{hook,job,webhook}.ts call assertZeroArgConstructor), but it does
+// so in the RESOLVER, which runs at boot. So a project with
+// `@Job class Topup { constructor(private repo: Repo) {} }` built clean, exit 0,
+// and then took the deploy down when the runtime resolved it — the exact place
+// FR-010 exists to move the answer AWAY from.
+//
+// Controllers were already checked here (registerControllers below). These three
+// directories were only COUNTED — declaredSurfaces reads the filesystem and
+// never loads a class — so the rule had no build-time half for them.
+//
+// The rule and the message stay the SDK's; this asks it. An older SDK that does
+// not export the check is not a reason to refuse a build.
+const SURFACE_DIRS = [
+  ['jobs', 'job class'],
+  ['webhooks', 'webhook class'],
+  ['hooks', 'hook class'],
+];
+
+/** Every class a surface file exports, decorated or default. Bundled first, for
+ * the same reason controllers are: the sources are TypeScript and the extension
+ * -less relative imports must resolve the way they do on deploy. */
+function surfaceClassesIn(dirName) {
+  const srcDir = path.join(PROJECT_ROOT, dirName);
+  if (!fs.existsSync(srcDir)) return [];
+  const outDir = path.join(BUNDLE_ROOT, dirName);
+  rmBundledTree(outDir);
+  if (!bundleSrcDir(srcDir, outDir, CONTROLLER_RESOURCE_EXTERNALS)) return [];
+
+  const found = [];
+  for (const file of walk(outDir)) {
+    if (!/\.(c?js)$/i.test(path.basename(file))) continue;
+    let mod;
+    try {
+      delete require.cache[require.resolve(file)];
+      mod = require(file);
+    } catch (err) {
+      // A file that will not load is reported the way a controller's is; it is
+      // not silently skipped, because "did not load" and "declared nothing"
+      // deploy very differently.
+      found.push({ file, error: err.message });
+      continue;
+    }
+    const candidates = [mod && mod.default, ...(mod ? Object.keys(mod).map((k) => mod[k]) : [])];
+    for (const value of candidates) {
+      if (typeof value === 'function' && !found.some((f) => f.cls === value)) {
+        found.push({ file, cls: value });
+      }
+    }
+  }
+  return found;
+}
+
+/** Refusals for every surface class that declares constructor parameters. */
+function checkSurfaceConstructors() {
+  const runtime = runtimeModule();
+  if (!runtime || typeof runtime.assertZeroArgConstructor !== 'function') return [];
+  const failures = [];
+  for (const [dirName, kind] of SURFACE_DIRS) {
+    for (const entry of surfaceClassesIn(dirName)) {
+      const shown = path.join(dirName, path.relative(path.join(BUNDLE_ROOT, dirName), entry.file))
+        .replace(/\.c?js$/i, '.ts');
+      if (entry.error) {
+        failures.push({ file: shown, error: entry.error });
+        continue;
+      }
+      try {
+        runtime.assertZeroArgConstructor(entry.cls, kind);
+      } catch (err) {
+        failures.push({ file: shown, error: err.message });
+      }
+    }
+  }
+  return failures;
+}
+
 // Counted from the DIRECTORY rather than from a bundle, deliberately: this is
 // the declaration, and the point of printing it here is to give the author a
 // figure they can compare against what the runtime reports at boot. `palbase
@@ -875,6 +954,9 @@ function main() {
   // tablosunu satır satır basıyor, yani büyük bir projede rapor tam da
   // okunması gereken yerden kesilirdi. `exitCode` atayıp doğal çıkışı beklemek
   // iki çalışma zamanında da her baytı teslim ediyor (ölçüldü).
+  // The surface classes the deploy would resolve at boot, checked HERE instead.
+  for (const f of checkSurfaceConstructors()) failures.push(f);
+
   if (failures.length === 0) {
     log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly${declaredSurfaces()}`);
     process.exitCode = 0;
@@ -919,4 +1001,5 @@ if (require.main === module) {
 module.exports = {
   registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
   stageControllersWithReturnBindings, bundledToSrcRel,
+  surfaceClassesIn, checkSurfaceConstructors,
 };
