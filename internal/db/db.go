@@ -138,41 +138,23 @@ func (l local) post(ctx context.Context, path, contentType string, body []byte) 
 // and then hits a missing table has been told the opposite of what happened. So
 // the names come back with the source and the caller says them out loud; the
 // verb that carries the whole directory is `palbase push`.
-func readSchema() (string, []string, error) {
+func readSchema() ([]backend.SchemaSource, error) {
 	sources, err := backend.ReadSchemaSources(".")
 	if err != nil {
 		if errors.Is(err, backend.ErrNoSchema) {
-			return "", nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"no %s in this directory — `palbase db` reads the schema this project declares",
 				backend.PublicSchemaFile)
 		}
-		return "", nil, err
+		return nil, err
 	}
-
-	var public string
-	var others []string
-	for _, s := range sources {
-		if s.Name == "public" {
-			public = s.Source
-			continue
-		}
-		others = append(others, s.Path())
-	}
-	return public, others, nil
+	return sources, nil
 }
 
-// reportSchemasLeftBehind names the declarations this request did not carry.
-//
-// On stderr, next to the banner that says WHERE the verb acted: both answer the
-// same question — what this result is actually about — and a result whose scope
-// is narrower than the project is a result somebody will over-read.
-func reportSchemasLeftBehind(cmd *cobra.Command, others []string) {
-	if len(others) == 0 {
-		return
-	}
-	fmt.Fprintf(cmd.ErrOrStderr(),
-		"▸ this acts on %s only — %s did not travel; `palbase push` carries the whole directory\n",
-		backend.PublicSchemaFile, strings.Join(others, ", "))
+// schemaBody is the envelope both `plan` and `apply` send — the encoder lives
+// in backend, beside SchemaSource, because `palbase plan` sends the same thing.
+func schemaBody(sources []backend.SchemaSource) ([]byte, error) {
+	return backend.SchemaSourcesBody(sources)
 }
 
 // apiError renders the stack's error envelope, falling back to the raw body when

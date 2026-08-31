@@ -29,17 +29,20 @@ row counts. --approve runs those too.`,
 			if err != nil {
 				return err
 			}
-			source, others, err := readSchema()
+			sources, err := readSchema()
 			if err != nil {
 				return err
 			}
-			reportSchemasLeftBehind(cmd, others)
+			payload, err := schemaBody(sources)
+			if err != nil {
+				return err
+			}
 
 			path := "/v1/management/schema/apply"
 			if approve {
 				path += "?approve=true"
 			}
-			status, body, err := stack.post(cmd.Context(), path, "text/plain", []byte(source))
+			status, body, err := stack.post(cmd.Context(), path, "application/json", payload)
 			if err != nil {
 				return err
 			}

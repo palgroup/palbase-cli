@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -96,10 +95,9 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 
 	// SCHEMA, computed by the project against its own database.
 	//
-	// The PUBLIC declaration is what goes: this endpoint takes a single body and
-	// the stack names that body `public`. Any sibling schema is named below
-	// rather than dropped silently — a plan that is narrower than the project is
-	// a plan somebody will read as complete.
+	// EVERY declaration goes. It used to send the public file alone and print a
+	// note naming the siblings — but a plan narrower than the project is a plan
+	// somebody reads as complete, and the note was the admission that it was not.
 	fmt.Fprintln(out, "schema")
 	sources, err := ReadSchemaSources(dir)
 	switch {
@@ -108,21 +106,12 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	case err != nil:
 		return err
 	default:
-		var source []byte
-		var others []string
-		for _, src := range sources {
-			if src.Name == "public" {
-				source = []byte(src.Source)
-				continue
-			}
-			others = append(others, src.Path())
-		}
-		if len(others) > 0 {
-			fmt.Fprintf(indent(out), "%s only — %s not planned here; the push plans the whole directory\n",
-				PublicSchemaFile, strings.Join(others, ", "))
+		payload, err := SchemaSourcesBody(sources)
+		if err != nil {
+			return err
 		}
 		status, body, err := managementCall(ctx, target, cred, http.MethodPost,
-			"/v1/management/schema/plan", source, "text/plain")
+			"/v1/management/schema/plan", payload, "application/json")
 		if err != nil {
 			return err
 		}

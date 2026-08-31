@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/palgroup/palbase-cli/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -62,13 +63,12 @@ plan would change something.`,
 			if err != nil {
 				return err
 			}
-			source, others, err := readSchema()
+			sources, err := readSchema()
 			if err != nil {
 				return err
 			}
-			reportSchemasLeftBehind(cmd, others)
 
-			plan, err := computePlan(cmd.Context(), stack, source)
+			plan, err := computePlan(cmd.Context(), stack, sources)
 			if err != nil {
 				return err
 			}
@@ -84,8 +84,12 @@ plan would change something.`,
 	return cmd
 }
 
-func computePlan(ctx context.Context, stack local, source string) (schemaPlan, error) {
-	status, body, err := stack.post(ctx, "/v1/management/schema/plan", "text/plain", []byte(source))
+func computePlan(ctx context.Context, stack local, sources []backend.SchemaSource) (schemaPlan, error) {
+	payload, err := schemaBody(sources)
+	if err != nil {
+		return schemaPlan{}, err
+	}
+	status, body, err := stack.post(ctx, "/v1/management/schema/plan", "application/json", payload)
 	if err != nil {
 		return schemaPlan{}, err
 	}

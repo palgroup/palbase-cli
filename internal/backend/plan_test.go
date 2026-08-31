@@ -6,11 +6,13 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -80,6 +82,7 @@ export default defineSecrets({
 
 // projectServer answers as a management surface and records every write.
 type projectServer struct {
+	planBody []byte
 	*httptest.Server
 	mu      sync.Mutex
 	writes  []string
@@ -133,6 +136,10 @@ func newProjectServer(t *testing.T, secrets map[string]string) *projectServer {
 			w.WriteHeader(http.StatusNoContent)
 
 		case r.URL.Path == "/v1/management/schema/plan":
+			raw, _ := io.ReadAll(r.Body)
+			p.mu.Lock()
+			p.planBody = raw
+			p.mu.Unlock()
 			_, _ = w.Write([]byte(`{"in_sync":false,"changes":["create table notes"],"destructive":[]}`))
 
 		default:
@@ -309,11 +316,14 @@ func TestPushInAnAppCheckoutWritesNOTHING(t *testing.T) {
 	}
 }
 
-// TestPlanNamesTheSchemasItDoesNotPlan — `palbase plan` predicts a push, and a
-// push carries the whole db/ directory while this endpoint takes one body the
-// stack names `public`. The gap is real and permanent; what must never happen is
-// that it goes unsaid, because a plan read as complete is worse than no plan.
-func TestPlanNamesTheSchemasItDoesNotPlan(t *testing.T) {
+// TestPlanCarriesEverySchema — `palbase plan` predicts a push, and a push
+// carries the whole db/ directory. So does this now.
+//
+// It used to send the public file alone and print a note naming the siblings it
+// had left out. The note was honest and useless: a developer whose billing
+// schema had drifted was told, by the verb whose only job is to say what would
+// change, that nothing would. The gap is closed rather than announced.
+func TestPlanCarriesEverySchema(t *testing.T) {
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	buildableBackend(t, dir)
@@ -340,8 +350,26 @@ func TestPlanNamesTheSchemasItDoesNotPlan(t *testing.T) {
 	if err := runPlan(context.Background(), dir, Target{URL: target.URL}, cred, &out); err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	if !strings.Contains(out.String(), "db/billing.ts") {
-		t.Errorf("the plan did not say which schema it left out:\n%s", out.String())
+
+	sent := target.schemaPlanBody()
+	var body struct {
+		Sources []struct{ Name string } `json:"sources"`
+	}
+	if err := json.Unmarshal(sent, &body); err != nil {
+		t.Fatalf("the plan did not send the sources envelope: %v — %q", err, sent)
+	}
+	names := make([]string, 0, len(body.Sources))
+	for _, src := range body.Sources {
+		names = append(names, src.Name)
+	}
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "billing" || names[1] != "public" {
+		t.Fatalf("the plan is narrower than the project: sent %v", names)
+	}
+	// NEGATIVE CONTROL: the note this replaced must be gone. Leaving it would
+	// tell a developer their billing schema stayed behind while it did not.
+	if strings.Contains(out.String(), "not planned here") {
+		t.Errorf("the plan still announces a gap it no longer has:\n%s", out.String())
 	}
 }
 
@@ -369,4 +397,12 @@ func TestPlanOfASingleSchemaSaysNothingExtra(t *testing.T) {
 	if strings.Contains(out.String(), "not planned here") {
 		t.Errorf("a single-schema project was given a caveat:\n%s", out.String())
 	}
+}
+
+// schemaPlanBody returns the body the plan endpoint actually received — the
+// only place that can say whether the CLI sent the whole project or a part.
+func (p *projectServer) schemaPlanBody() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.planBody
 }

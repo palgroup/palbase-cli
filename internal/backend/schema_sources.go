@@ -17,6 +17,7 @@ package backend
 // that it is the only place the rule lives.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -156,4 +157,25 @@ func HasSchemaDeclaration(projectDir string) bool {
 func HasLegacySchemaFile(projectDir string) bool {
 	info, err := os.Stat(filepath.Join(projectDir, LegacySchemaFile))
 	return err == nil && !info.IsDir()
+}
+
+// SchemaSourcesBody encodes the sources for the management API's schema verbs.
+//
+// It lives HERE, beside SchemaSource, because two commands send it — `palbase
+// plan` against a target and `palbase db plan/apply` against the local stack —
+// and a second encoder is a second answer to "what does this project declare".
+// The one that used to send only the public file made `plan` narrower than the
+// project it was planning, and printed a note about it instead of fixing it.
+func SchemaSourcesBody(sources []SchemaSource) ([]byte, error) {
+	type wireSource struct {
+		Name   string `json:"name"`
+		Source string `json:"source"`
+	}
+	wire := struct {
+		Sources []wireSource `json:"sources"`
+	}{Sources: make([]wireSource, 0, len(sources))}
+	for _, s := range sources {
+		wire.Sources = append(wire.Sources, wireSource{Name: s.Name, Source: s.Source})
+	}
+	return json.Marshal(wire)
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,15 +21,20 @@ func TestReadSchemaFindsEverySchemaFile(t *testing.T) {
 		"billing.ts": `export default defineSchema("billing", { tables: [] });`,
 	})
 
-	public, others, err := readSchema()
+	sources, err := readSchema()
 	if err != nil {
 		t.Fatalf("readSchema: %v", err)
 	}
-	if !strings.Contains(public, `defineSchema("public"`) {
-		t.Errorf("the public declaration is not what travels: %q", public)
+	if len(sources) != 2 {
+		t.Fatalf("both schemas must be in hand, got %d", len(sources))
 	}
-	if len(others) != 1 || others[0] != "db/billing.ts" {
-		t.Fatalf("the schemas that did NOT travel must be named, got %v", others)
+	// Sorted by file name — readdir order would make the plan flap between runs.
+	if sources[0].Name != "billing" || sources[1].Name != "public" {
+		t.Fatalf("the sources are not sorted by file name: %v", sources)
+	}
+	if !strings.Contains(sources[1].Source, `defineSchema("public"`) ||
+		!strings.Contains(sources[0].Source, `defineSchema("billing"`) {
+		t.Errorf("each source must carry its OWN text: %v", sources)
 	}
 }
 
@@ -41,7 +47,7 @@ func TestReadSchemaRejectsTheLegacyLayout(t *testing.T) {
 		"schema.ts": `export default defineSchema({ tables: {} });`,
 	})
 
-	_, _, err := readSchema()
+	_, err := readSchema()
 	if err == nil {
 		t.Fatal("the old single-file layout was accepted")
 	}
@@ -63,7 +69,7 @@ func TestReadSchemaRejectsTheLegacyLayout(t *testing.T) {
 func TestReadSchemaNamesThePublicFileWhenThereIsNoSchema(t *testing.T) {
 	scratchCheckout(t)
 
-	_, _, err := readSchema()
+	_, err := readSchema()
 	if err == nil {
 		t.Fatal("a checkout with no db/ was accepted")
 	}
@@ -73,20 +79,23 @@ func TestReadSchemaNamesThePublicFileWhenThereIsNoSchema(t *testing.T) {
 	}
 }
 
-// TestASingleSchemaProjectCarriesNoNote is the NEGATIVE CONTROL for the note
-// below: the ordinary project must not be told that something did not travel.
-func TestASingleSchemaProjectCarriesNoNote(t *testing.T) {
+// TestASingleSchemaProjectIsStillASet is the NEGATIVE CONTROL for the envelope:
+// the ordinary one-file project takes the SAME road as a three-file one.
+//
+// A shape that special-cases the common case has two code paths, and the rare
+// one is the one nobody runs — so it is the one that is broken.
+func TestASingleSchemaProjectIsStillASet(t *testing.T) {
 	scratchCheckout(t)
 	writeSchemaFiles(t, map[string]string{
 		"public.ts": `export default defineSchema("public", { tables: [] });`,
 	})
 
-	_, others, err := readSchema()
+	sources, err := readSchema()
 	if err != nil {
 		t.Fatalf("readSchema: %v", err)
 	}
-	if len(others) != 0 {
-		t.Fatalf("a single-schema project was told something stayed behind: %v", others)
+	if len(sources) != 1 || sources[0].Name != "public" {
+		t.Fatalf("a single-schema project must still arrive as a set: %v", sources)
 	}
 }
 
@@ -103,18 +112,19 @@ func writeSchemaFiles(t *testing.T, files map[string]string) {
 	}
 }
 
-// TestPlanSaysWhichSchemasDidNotTravel — the note is the whole reason the
-// narrower scope is acceptable, so it has to REACH somebody. A helper nobody
-// calls is not a feature, and this asserts the text on the stream a person
-// reads, not the return value of the function that builds it.
+// TestPlanSeesEverySchema — `db plan` and `db apply` carry the WHOLE directory.
 //
-// It also pins WHICH source went: the public declaration, never a sibling.
-func TestPlanSaysWhichSchemasDidNotTravel(t *testing.T) {
-	var gotBody string
+// They used to send one body, the public declaration, and print a note naming
+// the siblings that stayed behind. A note is not a plan: a project whose
+// billing schema drifted got told "in sync" by the verb whose entire job is to
+// say what would change. The endpoint now takes every source the directory
+// declares, so the answer covers the project rather than a part of it.
+func TestPlanSeesEverySchema(t *testing.T) {
+	var gotBody, gotType string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(r.Body)
-		gotBody = buf.String()
+		gotBody, gotType = buf.String(), r.Header.Get("content-type")
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"in_sync":true,"changes":[],"destructive":[]}`))
 	}))
@@ -127,30 +137,43 @@ func TestPlanSaysWhichSchemasDidNotTravel(t *testing.T) {
 		"billing.ts": `export default defineSchema("billing", { tables: [] });`,
 	})
 
-	_, banner, err := run(t, "plan")
-	if err != nil {
+	if _, _, err := run(t, "plan"); err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	if !strings.Contains(gotBody, `defineSchema("public"`) {
-		t.Errorf("the PUBLIC declaration is not what travelled: %q", gotBody)
+	if !strings.HasPrefix(gotType, "application/json") {
+		t.Errorf("the sources travel as JSON, got content-type %q", gotType)
 	}
-	if strings.Contains(gotBody, "billing") {
-		t.Errorf("a sibling schema rode along in a body the stack names `public`: %q", gotBody)
+	var sent struct {
+		Sources []struct{ Name, Source string } `json:"sources"`
 	}
-	for _, want := range []string{"db/billing.ts", "db/public.ts", "palbase push"} {
-		if !strings.Contains(banner, want) {
-			t.Errorf("the note does not name %q: %q", want, banner)
-		}
+	if err := json.Unmarshal([]byte(gotBody), &sent); err != nil {
+		t.Fatalf("the body is not the sources envelope: %v — %q", err, gotBody)
+	}
+	// Sorted by name, because an order that came off readdir would make the
+	// plan flap between runs on the same unchanged project.
+	if len(sent.Sources) != 2 ||
+		sent.Sources[0].Name != "billing" || sent.Sources[1].Name != "public" {
+		t.Fatalf("both schemas must travel, sorted: %+v", sent.Sources)
+	}
+	if !strings.Contains(sent.Sources[0].Source, `defineSchema("billing"`) {
+		t.Errorf("the billing source is not its own text: %q", sent.Sources[0].Source)
+	}
+	if !strings.Contains(sent.Sources[1].Source, `defineSchema("public"`) {
+		t.Errorf("the public source is not its own text: %q", sent.Sources[1].Source)
 	}
 }
 
-// TestAnOrdinarySchemaIsNotAnnounced is the NEGATIVE CONTROL: the gate must
-// only fire on its target. A note printed for every project is noise people
-// learn to skip, and then it is not there on the day it matters.
-func TestAnOrdinarySchemaIsNotAnnounced(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// TestApplySeesEverySchema — the same, on the verb that WRITES. Diverging here
+// is the worse half: plan would report on the project and apply would change
+// only part of it.
+func TestApplySeesEverySchema(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(r.Body)
+		gotBody = buf.String()
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"in_sync":true,"changes":[],"destructive":[]}`))
+		_, _ = w.Write([]byte(`{"changed":false,"summary":[]}`))
 	}))
 	defer srv.Close()
 
@@ -158,11 +181,19 @@ func TestAnOrdinarySchemaIsNotAnnounced(t *testing.T) {
 	runningStackAt(t, srv.URL)
 	writeSchemaFiles(t, map[string]string{
 		"public.ts": `export default defineSchema("public", { tables: [] });`,
+		"audit.ts":  `export default defineSchema("audit", { tables: [] });`,
 	})
 
-	if _, banner, err := run(t, "plan"); err != nil {
-		t.Fatalf("plan: %v", err)
-	} else if strings.Contains(banner, "did not travel") {
-		t.Errorf("a single-schema project was told something stayed behind: %q", banner)
+	if _, _, err := run(t, "apply"); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	var sent struct {
+		Sources []struct{ Name, Source string } `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &sent); err != nil {
+		t.Fatalf("the body is not the sources envelope: %v — %q", err, gotBody)
+	}
+	if len(sent.Sources) != 2 || sent.Sources[0].Name != "audit" {
+		t.Fatalf("both schemas must reach the writer, sorted: %+v", sent.Sources)
 	}
 }
