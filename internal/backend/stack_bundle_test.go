@@ -22,7 +22,7 @@ import (
 // runtime, so they are asserted here.
 func TestTheGeneratedEntryKeepsOneSDKInstance(t *testing.T) {
 	dir := t.TempDir()
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 
 	// ONE module instance, shared with the runtime. Two instances each get their
 	// own AsyncLocalStorage, and the request scope then silently does not reach
@@ -58,7 +58,7 @@ func TestTheGeneratedEntryKeepsOneSDKInstance(t *testing.T) {
 
 func TestTheSchemaTravelsOnlyWhenItExists(t *testing.T) {
 	dir := t.TempDir()
-	if strings.Contains(bundleEntry(dir, nil), "db/public.ts") {
+	if entry0, _ := bundleEntry(dir, nil); strings.Contains(entry0, "db/public.ts") {
 		t.Error("a project with no declaration got one imported anyway")
 	}
 
@@ -70,7 +70,7 @@ func TestTheSchemaTravelsOnlyWhenItExists(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	entry := bundleEntry(dir, nil)
+	entry, _ := bundleEntry(dir, nil)
 	// EVERY declaration travels, not just public's. The runtime resolves a
 	// table by its schema-qualified key, and a key it was never handed resolves
 	// to nothing — silently, because a missing table def only means "no column
@@ -330,7 +330,7 @@ func TestWebhooksTravelInTheEntry(t *testing.T) {
 		}
 	}
 
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 
 	// The NAME is the file's base name, because the file name IS the public URL
 	// (the SDK's decorator deliberately offers no `name` option).
@@ -358,7 +358,7 @@ func TestWebhooksTravelInTheEntry(t *testing.T) {
 // rather than emitting a broken entry.
 func TestAProjectWithNoWebhooksStillBundles(t *testing.T) {
 	dir := t.TempDir()
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	if !strings.Contains(entry, "export const webhooks = [];") {
 		t.Errorf("an empty webhooks export is missing:\n%s", entry)
 	}
@@ -444,7 +444,9 @@ export function __getRuntime() {}
 	}
 
 	entry := filepath.Join(dir, ".controllers-entry.ts")
-	require.NoError(t, os.WriteFile(entry, []byte(bundleEntry(dir, sources)), 0o644))
+	body, err := bundleEntry(dir, sources)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(entry, []byte(body), 0o644))
 
 	out := filepath.Join(dir, "bundle.js")
 	build := exec.Command("bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out)
@@ -497,7 +499,7 @@ func TestJobsTravelInTheEntry(t *testing.T) {
 		}
 	}
 
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 
 	// The NAME is the file's base name: @Job carries no `name` option, and by
 	// the time the code is bundled the file is gone.
@@ -527,7 +529,7 @@ func TestJobsTravelInTheEntry(t *testing.T) {
 // shape is one the next reader has to guess about.
 func TestAProjectWithNoJobsStillBundles(t *testing.T) {
 	dir := t.TempDir()
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	if !strings.Contains(entry, "export const jobs = [];") {
 		t.Errorf("an empty jobs export is missing:\n%s", entry)
 	}
@@ -551,7 +553,7 @@ func TestHooksTravelInTheEntry(t *testing.T) {
 		}
 	}
 
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 
 	if !strings.Contains(entry, `{ name: "before-signup", ctor: __hook_before_signup }`) {
 		t.Errorf("the hook is missing from the entry:\n%s", entry)
@@ -563,7 +565,7 @@ func TestHooksTravelInTheEntry(t *testing.T) {
 
 func TestAProjectWithNoHooksStillBundles(t *testing.T) {
 	dir := t.TempDir()
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	if !strings.Contains(entry, "export const hooks = [];") {
 		t.Errorf("an empty hooks export is missing:\n%s", entry)
 	}
@@ -623,7 +625,7 @@ export function __getRuntime() {}
 
 	entry := filepath.Join(dir, ".controllers-entry.ts")
 	require.NoError(t, os.WriteFile(entry,
-		[]byte(bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})), 0o644))
+		[]byte(mustBundleEntry(t, dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})), 0o644))
 
 	out := filepath.Join(dir, ".palbase", "esm", "controllers", "controllers.js")
 	require.NoError(t, os.MkdirAll(filepath.Dir(out), 0o755))
@@ -783,7 +785,7 @@ func TestTheEntryShipsTheProjectsChannels(t *testing.T) {
 		[]byte(`import { defineChannels, ownerOnly } from "@palbase/backend";
 export default defineChannels({ "user:{uid}": ownerOnly() });`), 0o644))
 
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 
 	channels := filepath.Join(dir, "channels.ts")
 	assert.Contains(t, entry,
@@ -802,7 +804,7 @@ export default defineChannels({ "user:{uid}": ownerOnly() });`), 0o644))
 // for every project that does not use realtime.
 func TestAProjectWithoutChannelsStillBundles(t *testing.T) {
 	dir := t.TempDir()
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	assert.NotContains(t, entry, "channels.ts")
 	assert.NotContains(t, entry, "export const channels")
 }
@@ -817,7 +819,7 @@ func TestAProjectWithoutChannelsStillBundles(t *testing.T) {
 // ve runtime 0.39.0 yayinlandi. `palbase push` ile uretilen her bundle
 // reddedilecekti.
 func TestTheBundleEntryCarriesEveryRuntimeSeamSymbol(t *testing.T) {
-	entry := bundleEntry(t.TempDir(), nil)
+	entry, _ := bundleEntry(t.TempDir(), nil)
 	// Runtime bunlarin HEPSINI ariyor: hook'lar (abi.ts requestScopeHooksOf) ve
 	// modul istemci kurucusu (abi.ts moduleClientsBuilderOf).
 	for _, sym := range []string{"__runWithRuntime", "__requestALS", "__getRuntime", "buildModuleClients"} {
@@ -885,7 +887,7 @@ func TestTheBundleEntryShipsTheProjectsDefaultAuth(t *testing.T) {
 		[]byte(`import { defineDefaultAuth } from "@palbase/backend";
 defineDefaultAuth({ verifiedEmail: true });`), 0o644))
 
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 
 	auth := filepath.Join(dir, "auth.ts")
 	assert.Contains(t, entry, "import "+strconv.Quote(auth)+";",
@@ -905,6 +907,47 @@ defineDefaultAuth({ verifiedEmail: true });`), 0o644))
 // default, which is most of them.
 func TestAProjectWithoutADefaultAuthStillBundles(t *testing.T) {
 	dir := t.TempDir()
-	entry := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
+	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
 	assert.NotContains(t, entry, "auth.ts")
+}
+
+// A BUNDLE WITH NO SCHEMA MUST BE A DECISION, NEVER AN ACCIDENT.
+//
+// The schema block used to be guarded by `err == nil`, which swallowed the
+// retired layout, a db/ with no public file, and an unreadable directory alike
+// — and produced a bundle carrying NO schema, silently. At runtime that means
+// `setSchema([])`: the project's typed `.tables` surface comes back empty with
+// nothing anywhere naming the cause.
+func TestAnUnreadableDeclarationStopsTheBundle(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The retired single-file layout: ReadSchemaSources refuses it by name.
+	if err := os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte("export default {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bundleEntry(dir, nil); err == nil {
+		t.Fatal("a refused declaration produced a bundle instead of an error")
+	}
+
+	// NEGATIVE CONTROL: no db/ at all is still legitimate and still bundles.
+	empty := t.TempDir()
+	entry, err := bundleEntry(empty, nil)
+	if err != nil {
+		t.Fatalf("a project with no declaration must still bundle: %v", err)
+	}
+	if strings.Contains(entry, "export const schemas") {
+		t.Error("a project with no declaration got a schemas export anyway")
+	}
+}
+
+// mustBundleEntry is bundleEntry for the tests that only care about the text.
+func mustBundleEntry(t *testing.T, dir string, sources []string) string {
+	t.Helper()
+	body, err := bundleEntry(dir, sources)
+	if err != nil {
+		t.Fatalf("bundleEntry: %v", err)
+	}
+	return body
 }

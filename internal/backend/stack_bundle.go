@@ -23,6 +23,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,7 +118,11 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 		return nil, err
 	}
 	entry := filepath.Join(staged, ".controllers-entry.ts")
-	if err := os.WriteFile(entry, []byte(bundleEntry(dir, stagedSources)), 0o644); err != nil {
+	entryBody, err := bundleEntry(dir, stagedSources)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(entry, []byte(entryBody), 0o644); err != nil {
 		return nil, err
 	}
 
@@ -306,7 +311,7 @@ func controllerSources(dir string) ([]string, error) {
 //
 // Controllers are imported for their SIDE EFFECT and never named — @Controller
 // records the class as it decorates it, so a controller needs no export at all.
-func bundleEntry(dir string, sources []string) string {
+func bundleEntry(dir string, sources []string) (string, error) {
 	var b strings.Builder
 	b.WriteString(bundleEntryHeader + "\n")
 	// buildModuleClients RIDES THE SAME SEAM, and leaving it out is not cosmetic:
@@ -334,8 +339,21 @@ func bundleEntry(dir string, sources []string) string {
 	// way. THE TWO BUNDLERS CHANGE TOGETHER (see bundle-controllers.sh): they
 	// drifted once over `buildModuleClients` and the drift lasted a release.
 	//
-	// Optional, like channels.ts: a project with no declaration still bundles.
-	if declared, err := ReadSchemaSources(dir); err == nil {
+	// ONLY "no declaration" IS OPTIONAL — every other failure is reported.
+	//
+	// `err == nil` here would have swallowed the retired layout, a db/ with no
+	// public file, and an unreadable directory alike, and produced a bundle with
+	// NO SCHEMA and no complaint: the project's typed `.tables` surface would
+	// come back empty at runtime with nothing anywhere naming the cause. That is
+	// the same silence the shell bundler just stopped doing, and generateEnvTypes
+	// in this package already gets it right.
+	declared, err := ReadSchemaSources(dir)
+	switch {
+	case errors.Is(err, ErrNoSchema):
+		// A project with no declaration still bundles, like channels.ts.
+	case err != nil:
+		return "", fmt.Errorf("read the schema declaration: %w", err)
+	default:
 		refs := make([]string, 0, len(declared))
 		for i, src := range declared {
 			fmt.Fprintf(&b, "import __schema%d from %q;\n", i, filepath.Join(dir, src.Path()))
@@ -474,7 +492,7 @@ func bundleEntry(dir string, sources []string) string {
 	emitDefinitions(&b, dir, "jobs", "jobs", "__job_", "job")
 	emitDefinitions(&b, dir, "webhooks", "webhooks", "__webhook_", "ctor")
 	emitDefinitions(&b, dir, "hooks", "hooks", "__hook_", "ctor")
-	return b.String()
+	return b.String(), nil
 }
 
 // emitDefinitions writes the import lines and the `export const <export>` array
