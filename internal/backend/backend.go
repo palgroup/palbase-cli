@@ -150,6 +150,10 @@ func Commands(r Resolvers) []*cobra.Command {
 		newCloneCmd(r),
 		newPullCmd(r),
 		newPushCmd(r),
+		// FR-090/091: proje sahibinin kendi runtime tazelemesi. Filo
+		// yuvarlamasının müşteri tarafı — operatör kendi hızında yuvarlarken
+		// beklemek istemeyen proje bugün geçebilsin.
+		newUpgradeCmd(r),
 		// Takes the resolvers for ONE reason: a bare Environment ref has to become
 		// an address, and only the configured cloud knows the suffix. Everything
 		// after that is unchanged — it is told where the stack is, once, and asks
