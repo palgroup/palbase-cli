@@ -9,7 +9,7 @@
  * makeStackDts() and writes the returned text.
  *
  * SIMPLER THAN env-gen.js ON PURPOSE, and the difference is the whole point of
- * this change: env-gen has to esbuild-bundle `db/schema.ts` because the schema
+ * this change: env-gen has to esbuild-bundle `db/*.ts` because the schema
  * is a DECLARATION the author wrote. There is no file to bundle here. The stack
  * is the authority on which names exist, so this bridge only renders what it is
  * handed.

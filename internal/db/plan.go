@@ -11,7 +11,7 @@ import (
 )
 
 // schemaPlan is the stack's SchemaPlan: what it would take to make the database
-// match db/schema.ts, and what that would cost.
+// match db/public.ts, and what that would cost.
 type schemaPlan struct {
 	InSync      bool                `json:"in_sync"`
 	Changes     []string            `json:"changes"`
@@ -49,8 +49,8 @@ func planCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Args:  cobra.NoArgs,
-		Short: "Show what it would take to make the local database match db/schema.ts",
-		Long: `Plan db/schema.ts against the local stack's database. Applies nothing.
+		Short: "Show what it would take to make the local database match db/public.ts",
+		Long: `Plan db/public.ts against the local stack's database. Applies nothing.
 
 The plan is computed by the stack against its database as it is right now, so it
 covers what a text diff cannot: type changes, policies, constraints.
@@ -62,10 +62,11 @@ plan would change something.`,
 			if err != nil {
 				return err
 			}
-			source, err := readSchema()
+			source, others, err := readSchema()
 			if err != nil {
 				return err
 			}
+			reportSchemasLeftBehind(cmd, others)
 
 			plan, err := computePlan(cmd.Context(), stack, source)
 			if err != nil {
@@ -105,7 +106,7 @@ func computePlan(ctx context.Context, stack local, source string) (schemaPlan, e
 // decision.
 func renderPlan(w io.Writer, plan schemaPlan) {
 	if plan.InSync && len(plan.Changes) == 0 {
-		fmt.Fprintln(w, "✓ the database matches db/schema.ts")
+		fmt.Fprintln(w, "✓ the database matches db/public.ts")
 		return
 	}
 	for _, change := range plan.Changes {

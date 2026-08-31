@@ -128,7 +128,7 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	// seed.
 	for _, path := range []string{
 		"package.json", "tsconfig.json",
-		filepath.Join("db", "schema.ts"),
+		filepath.Join("db", "public.ts"),
 		filepath.Join("controllers", "health.controller.ts"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {

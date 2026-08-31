@@ -54,7 +54,7 @@ func writeSchema(t *testing.T, body string) {
 	if err := os.MkdirAll("db", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join("db", "schema.ts"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join("db", "public.ts"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -115,7 +115,7 @@ func TestALinkedCloudProjectIsNotATarget(t *testing.T) {
 }
 
 // TestPlanGoesToTheStackInFrontOfYou: the request lands on the local address,
-// carries the credential, and ships db/schema.ts verbatim.
+// carries the credential, and ships db/public.ts verbatim.
 func TestPlanGoesToTheStackInFrontOfYou(t *testing.T) {
 	var seen atomic.Int32
 	var gotPath, gotAuth, gotBody string

@@ -9,6 +9,13 @@
 // local mirror of the gate that refuses a deploy collecting zero endpoints, and it
 // catches a broken controller in seconds rather than after a push.
 //
+// THE SCHEMA IS STILL GATED, and by `palbase build` rather than by a test in this
+// file. Build runs the same bundle-and-evaluate the deploy runs over `db/` — every
+// schema file, not one named path — so the one-file-per-schema cutover reached
+// this hook without the hook changing. A `-f <file>` guard here would have been
+// the thing that did NOT reach it: it would still be naming db/schema.ts and
+// quietly never firing.
+//
 // The hook is a fast LOCAL feedback loop, not the real gate — `command -v
 // palbase || exit 0` makes it a no-op on a CLI-less machine, `--no-verify`
 // bypasses it, and the server always gates the actual deploy. Ensure is called
@@ -59,6 +66,17 @@ exit 0
 // before v2: the CLI's old `db.go` const and the orchestrator template file
 // (they differ only in a comment line). Ensure treats an exact match as
 // "ours, old" and upgrades it to v2 so the marker-less v1 fleet self-heals.
+//
+// ‼️ THESE ARE FROZEN BYTES, NOT TEXT. They mention `db/schema.ts` and
+// `palbase db check` — both retired — and they must KEEP mentioning them. This
+// is not code that runs and not a message anybody reads: it is the fingerprint
+// of a file already sitting on other people's machines. Rewriting it to the
+// current file name is the one edit that breaks the thing it looks like it is
+// fixing — the match stops, Ensure classifies those hooks as "foreign", and the
+// fleet keeps a pre-push hook calling a verb that no longer exists, forever.
+//
+// A rename sweep will want to touch them. TestTheV1FingerprintsAreFrozen pins
+// them by hash so the sweep fails loudly instead of succeeding quietly.
 var knownV1Bodies = []string{
 	// db.go prePushHook const.
 	`#!/bin/sh

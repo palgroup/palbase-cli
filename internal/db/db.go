@@ -19,11 +19,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -37,13 +36,14 @@ func Cmd() *cobra.Command {
 		Short: "Work on the schema of the stack running on this machine",
 		Long: `Try schema changes against your local stack before they become a push.
 
-  palbase db plan    What it would take to make the local database match db/schema.ts
+  palbase db plan    What it would take to make the local database match db/public.ts
   palbase db apply   Do it
   palbase db query   Run one read-only statement and see the rows
 
-There are no migration files: db/schema.ts is the declaration, the plan is
-computed against the database as it is right now, and ` + "`palbase push`" + ` is what
-carries it — with the code, the config and the secrets — to a cloud environment.
+There are no migration files: db/ is the declaration — one file per schema,
+db/public.ts and any db/<name>.ts beside it. The plan is computed against the
+database as it is right now, and ` + "`palbase push`" + ` is what carries it — with
+the code, the config and the secrets — to a cloud environment.
 
 To start over, ` + "`palbase start --reset`" + ` throws the whole local database away and
 brings it back empty; nothing here does that, because at that point the schema is
@@ -92,7 +92,7 @@ func openLocal(cmd *cobra.Command) (local, error) {
 		return local{}, fmt.Errorf(
 			"`palbase db` works on the stack running on this machine, and there is not one.\n" +
 				"  palbase start   bring one up here, then try the change against it\n" +
-				"  palbase push    send db/schema.ts, the code and the config to the linked project",
+				"  palbase push    send db/, the code and the config to the linked project",
 		)
 	}
 
@@ -125,17 +125,54 @@ func (l local) post(ctx context.Context, path, contentType string, body []byte) 
 	return res.StatusCode, raw, err
 }
 
-// readSchema loads db/schema.ts, which is the whole input to plan and apply.
-func readSchema() (string, error) {
-	path := filepath.Join("db", "schema.ts")
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return "", fmt.Errorf("no %s in this directory — `palbase db` reads the schema this project declares", path)
-	}
+// readSchema loads the project's declaration and returns the PUBLIC schema
+// source, plus the paths of the schemas that did not travel with it.
+//
+// WHY ONLY ONE SOURCE GOES. The declaration is a directory now, but this
+// group's endpoint takes a single body and the stack names that body `public` —
+// so `public` is the only schema these verbs can carry, and the rest of the
+// directory is simply not part of this request.
+//
+// That is a fine thing for the local loop to be, and a terrible thing for it to
+// be QUIETLY. A person with a db/billing.ts who runs `db apply`, sees "applied"
+// and then hits a missing table has been told the opposite of what happened. So
+// the names come back with the source and the caller says them out loud; the
+// verb that carries the whole directory is `palbase push`.
+func readSchema() (string, []string, error) {
+	sources, err := backend.ReadSchemaSources(".")
 	if err != nil {
-		return "", err
+		if errors.Is(err, backend.ErrNoSchema) {
+			return "", nil, fmt.Errorf(
+				"no %s in this directory — `palbase db` reads the schema this project declares",
+				backend.PublicSchemaFile)
+		}
+		return "", nil, err
 	}
-	return string(raw), nil
+
+	var public string
+	var others []string
+	for _, s := range sources {
+		if s.Name == "public" {
+			public = s.Source
+			continue
+		}
+		others = append(others, s.Path())
+	}
+	return public, others, nil
+}
+
+// reportSchemasLeftBehind names the declarations this request did not carry.
+//
+// On stderr, next to the banner that says WHERE the verb acted: both answer the
+// same question — what this result is actually about — and a result whose scope
+// is narrower than the project is a result somebody will over-read.
+func reportSchemasLeftBehind(cmd *cobra.Command, others []string) {
+	if len(others) == 0 {
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(),
+		"▸ this acts on %s only — %s did not travel; `palbase push` carries the whole directory\n",
+		backend.PublicSchemaFile, strings.Join(others, ", "))
 }
 
 // apiError renders the stack's error envelope, falling back to the raw body when

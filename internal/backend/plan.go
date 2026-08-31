@@ -16,11 +16,12 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -94,14 +95,32 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	}
 
 	// SCHEMA, computed by the project against its own database.
+	//
+	// The PUBLIC declaration is what goes: this endpoint takes a single body and
+	// the stack names that body `public`. Any sibling schema is named below
+	// rather than dropped silently — a plan that is narrower than the project is
+	// a plan somebody will read as complete.
 	fmt.Fprintln(out, "schema")
-	source, err := os.ReadFile(filepath.Join(dir, "db", "schema.ts"))
+	sources, err := ReadSchemaSources(dir)
 	switch {
-	case os.IsNotExist(err):
-		fmt.Fprintln(out, "  no db/schema.ts — this project declares no tables")
+	case errors.Is(err, ErrNoSchema):
+		fmt.Fprintf(out, "  no %s — this project declares no tables\n", PublicSchemaFile)
 	case err != nil:
 		return err
 	default:
+		var source []byte
+		var others []string
+		for _, src := range sources {
+			if src.Name == "public" {
+				source = []byte(src.Source)
+				continue
+			}
+			others = append(others, src.Path())
+		}
+		if len(others) > 0 {
+			fmt.Fprintf(indent(out), "%s only — %s not planned here; the push plans the whole directory\n",
+				PublicSchemaFile, strings.Join(others, ", "))
+		}
 		status, body, err := managementCall(ctx, target, cred, http.MethodPost,
 			"/v1/management/schema/plan", source, "text/plain")
 		if err != nil {

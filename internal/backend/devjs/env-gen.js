@@ -2,18 +2,23 @@
 /**
  * Palbase env-type generator bridge.
  *
- * Generates the project's `palbase-env.d.ts` from its `db/schema.ts`. This is
- * the local twin of the backend-runtime's schema extraction (modules/backend
- * internal/runtime/schema_extract.js): the Go CLI esbuild-bundles the project's
- * `db/schema.ts` to a temp CJS file (with @palbase/* kept external so it
- * resolves to the project's installed package on NODE_PATH), then runs this
- * script over that bundle.
+ * Generates the project's `palbase-env.d.ts` from its `db/*.ts` — one file per
+ * schema. This is the local twin of the backend-runtime's schema extraction
+ * (modules/backend internal/runtime/schema_extract.js): the Go CLI writes an
+ * entry importing every declaration, esbuild-bundles it to a temp CJS file
+ * (with @palbase/* kept external so it resolves to the project's installed
+ * package on NODE_PATH), then runs this script over that bundle.
  *
- * This script require()s the bundle (which default-exports a defineSchema()
- * result), require()s the project's @palbase/backend for makeEnvDts(), and
- * writes the returned `palbase-env.d.ts` text to the project root. That file
- * augments the @palbase/backend/env `Tables` interface so handlers get a typed
+ * This script require()s the bundle (which exports `modules` — one namespace
+ * per schema file — and the matching `names`), require()s the project's
+ * @palbase/backend for makeEnvDts(), and writes the returned
+ * `palbase-env.d.ts` text to the project root. That file augments the
+ * @palbase/backend/env `Tables` interface so handlers get a typed
  * `Database.tables.*` with no import and no generic.
+ *
+ * EVERY schema in ONE call. makeEnvDts names relations across schemas, so it
+ * needs both ends of a foreign key in the same invocation; calling it per file
+ * would emit a relation pointing at a table it thinks is absent.
  *
  * Usage:
  *   echo '{"bundle_path":"/tmp/schema.js","out_path":"/proj/palbase-env.d.ts"}' \
@@ -90,36 +95,60 @@ async function main() {
     return;
   }
 
-  let schemaDef;
+  let bundle;
   try {
-    const mod = require(bundlePath);
-    // Accept the schema however the author exported it: the default export (the
-    // documented `export default defineSchema(...)`), the module object itself
-    // (`module.exports = defineSchema(...)`), or any named export that is itself
-    // a defineSchema() result (an object carrying `.tables`). Mirrors the
-    // runtime's schema_extract.js tolerance.
-    schemaDef = mod && mod.default ? mod.default : mod;
-    if (!schemaDef || typeof schemaDef !== 'object' || !schemaDef.tables) {
-      const named =
-        mod && typeof mod === 'object'
-          ? Object.values(mod).find(
-              (v) => v && typeof v === 'object' && v.tables && typeof v.tables === 'object',
-            )
-          : undefined;
-      if (named) schemaDef = named;
-    }
+    bundle = require(bundlePath);
   } catch (err) {
     writeError('Failed to evaluate schema: ' + (err && err.message ? err.message : err));
     return;
   }
 
-  if (!schemaDef || typeof schemaDef !== 'object' || !schemaDef.tables) {
-    writeError('schema module does not export a defineSchema() result with .tables');
+  const modules = bundle && Array.isArray(bundle.modules) ? bundle.modules : null;
+  const names = bundle && Array.isArray(bundle.names) ? bundle.names : [];
+  if (!modules) {
+    writeError('the bundled schema entry exported no `modules` array');
     return;
   }
 
+  // Accept the declaration however the author exported it: the default export
+  // (the documented `export default defineSchema(...)`), the module object
+  // itself, or any named export that is itself a defineSchema() result (an
+  // object carrying `.tables`). Mirrors the runtime's schema_extract.js
+  // tolerance, applied once per file.
+  const pickSchema = (mod) => {
+    let def = mod && mod.default ? mod.default : mod;
+    if (!def || typeof def !== 'object' || !def.tables) {
+      def =
+        mod && typeof mod === 'object'
+          ? Object.values(mod).find(
+              (v) => v && typeof v === 'object' && v.tables && typeof v.tables === 'object',
+            )
+          : undefined;
+    }
+    return def && typeof def === 'object' && def.tables ? def : undefined;
+  };
+
+  const schemas = [];
+  for (let i = 0; i < modules.length; i += 1) {
+    const name = names[i] !== undefined ? names[i] : String(i);
+    const def = pickSchema(modules[i]);
+    if (!def) {
+      // Named, not counted: "one file did not export a schema" sends somebody
+      // to read all of them.
+      writeError(
+        'db/' +
+          name +
+          '.ts does not export a defineSchema(...) result — write `export default defineSchema("' +
+          name +
+          '", { tables: [ … ] })`',
+      );
+      return;
+    }
+    schemas.push(def);
+  }
+
   try {
-    const dts = makeEnvDts(schemaDef);
+    const dts = makeEnvDts(schemas);
     fs.writeFileSync(outPath, dts);
   } catch (err) {
     writeError('Failed to write palbase-env.d.ts: ' + (err && err.message ? err.message : err));

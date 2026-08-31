@@ -58,14 +58,14 @@ func TestTheGeneratedEntryKeepsOneSDKInstance(t *testing.T) {
 
 func TestTheSchemaTravelsOnlyWhenItExists(t *testing.T) {
 	dir := t.TempDir()
-	if strings.Contains(bundleEntry(dir, nil), "db/schema.ts") {
+	if strings.Contains(bundleEntry(dir, nil), "db/public.ts") {
 		t.Error("a project with no declaration got one imported anyway")
 	}
 
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte("export default {}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte("export default {}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(bundleEntry(dir, nil), "export const schema = __schema;") {
@@ -780,7 +780,7 @@ export default defineChannels({ "user:{uid}": ownerOnly() });`), 0o644))
 }
 
 // A project without a channels.ts still bundles — the file is optional, exactly
-// like db/schema.ts. An entry that named it unconditionally would fail to build
+// like db/public.ts. An entry that named it unconditionally would fail to build
 // for every project that does not use realtime.
 func TestAProjectWithoutChannelsStillBundles(t *testing.T) {
 	dir := t.TempDir()
@@ -882,7 +882,7 @@ defineDefaultAuth({ verifiedEmail: true });`), 0o644))
 }
 
 // A project without an auth.ts still bundles — the file is optional, exactly
-// like channels.ts and db/schema.ts. An entry that named it unconditionally
+// like channels.ts and db/public.ts. An entry that named it unconditionally
 // would fail to build for every project that never declared an application
 // default, which is most of them.
 func TestAProjectWithoutADefaultAuthStillBundles(t *testing.T) {

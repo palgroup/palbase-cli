@@ -420,13 +420,12 @@ export type TodoSchema = z.infer<typeof TodoSchema>;
 	require.Contains(t, out, "build OK")
 }
 
-// TestCheckMode_BrokenSchemaFails locks the db/schema.ts half of build==deploy.
+// TestCheckMode_BrokenSchemaFails locks the db/ half of build==deploy.
 //
-// The deploy runs schema_extract.js over db/schema.ts and dies with "schema
-// module does not export a defineSchema() result with .tables"; check mode never
-// loaded the file at all, so `export {}` printed "build OK" and then failed the
-// deploy. Both directions: a schema with no defineSchema() must FAIL, and a real
-// one must PASS.
+// The deploy evaluates every db/*.ts and dies when one exports no
+// defineSchema() result; check mode never loaded the files at all, so
+// `export {}` printed "build OK" and then failed the deploy. Both directions: a
+// schema with no defineSchema() must FAIL, and a real one must PASS.
 func TestCheckMode_BrokenSchemaFails(t *testing.T) {
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
@@ -437,28 +436,23 @@ func TestCheckMode_BrokenSchemaFails(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
 
 	// The reported shape: a schema module that exports nothing usable.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte("export {};\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte("export {};\n"), 0o644))
 	var out bytes.Buffer
 	err := runBuild(context.Background(), dir, &out)
 	require.Error(t, err, "a schema with no defineSchema() must fail the build:\n%s", out.String())
-	require.Contains(t, out.String(), "db/schema.ts", "the failure must name the file:\n%s", out.String())
+	require.Contains(t, out.String(), "db/public.ts", "the failure must name the file:\n%s", out.String())
 
-	// Mutation twin: a real defineSchema() result must pass.
-	// Shape verified against the SDK's real exports + a deployed project's
-	// db/schema.ts — not invented: defineSchema({ tables: { <t>: { columns } } }).
-	const realSchema = `import { defineSchema, uuid, text } from "@palbase/backend";
-export default defineSchema({
-  tables: {
-    todos: {
-      columns: {
-        id: uuid().primaryKey().defaultRandom(),
-        title: text().notNull(),
-      },
-    },
-  },
-});
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte(realSchema), 0o644))
+	// The half above needed no schema DSL at all — a module exporting nothing is
+	// rejected before anything is evaluated — so it has already run and passed
+	// by the time we get here. The mutation twin below is the half that needs
+	// the SDK to be able to express the declaration.
+	requireCutoverSDK(t, dir)
+
+	// Mutation twin: a real defineSchema() result must pass. The shape is the
+	// one the SDK's OWN scaffold ships (template/db/public.ts) rather than a
+	// literal written here: a fixture that agrees only with itself proves
+	// nothing about the package this test just installed.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realPublicSchema), 0o644))
 	out.Reset()
 	require.NoError(t, runBuild(context.Background(), dir, &out),
 		"a valid defineSchema() must pass:\n%s", out.String())
@@ -496,25 +490,11 @@ func TestRunBuild_LandsTheTypesInTheCheckout(t *testing.T) {
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
 	}
+	requireCutoverSDK(t, dir)
 	useTestParserCache(t)
 	writeFixture(t, dir, goodControllerTS)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte(`
-import { defineSchema, uuid, text, boolean } from "@palbase/backend";
-
-export default defineSchema({
-  tables: {
-    todos: {
-      columns: {
-        id: uuid().defaultRandom(),
-        title: text(),
-        done: boolean().default(false),
-      },
-      primaryKey: ["id"],
-    },
-  },
-});
-`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realPublicSchema), 0o644))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -523,7 +503,7 @@ export default defineSchema({
 
 	body, err := os.ReadFile(filepath.Join(dir, envTypesFile))
 	require.NoError(t, err, "the derived types never reached the checkout:\n%s", out.String())
-	require.Contains(t, string(body), "todos:", "the landed file does not describe db/schema.ts:\n%s", body)
+	require.Contains(t, string(body), "todos:", "the landed file does not describe db/public.ts:\n%s", body)
 	require.Contains(t, string(body), `declare module "@palbase/backend/env"`)
 	require.Contains(t, out.String(), envTypesFile, "the build does not say it wrote the file:\n%s", out.String())
 
@@ -704,4 +684,129 @@ func TestCheckMode_AControllerThatRegistersNothingIsNamed(t *testing.T) {
 	require.False(t, ok, "a controller that registers nothing must fail the build:\n%s", out)
 	require.Contains(t, out, "quiet.controller.ts", "the silent file is not named:\n%s", out)
 	require.Contains(t, out, "registered no routes")
+}
+
+// realPublicSchema is the declaration shape the SDK's own scaffold ships
+// (@palbase/backend template/db/public.ts). Written in the DSL the installed
+// package actually exports — `defineTable("name", …)` collected by
+// `defineSchema("public", { tables: [ … ] })` — because these tests npm-install
+// the real package and a fixture in a retired shape would prove only that the
+// two halves of this file agree with each other.
+const realPublicSchema = `import { defineSchema, defineTable, uuid, text, boolean } from "@palbase/backend";
+
+const todos = defineTable("todos", {
+  columns: {
+    id: uuid().primaryKey().defaultRandom(),
+    title: text().notNull(),
+    done: boolean().default(false),
+  },
+});
+
+export default defineSchema("public", { tables: [todos] });
+`
+
+// realBillingSchema is a SECOND schema, the thing the whole cutover exists for.
+const realBillingSchema = `import { defineSchema, defineTable, uuid, integer } from "@palbase/backend";
+
+const invoices = defineTable("invoices", {
+  columns: {
+    id: uuid().primaryKey().defaultRandom(),
+    amount_cents: integer().notNull(),
+  },
+});
+
+export default defineSchema("billing", { tables: [invoices] });
+`
+
+// TestRunBuild_AMultiSchemaProjectBuilds is the NEGATIVE CONTROL for every
+// refusal this cutover added: the gates must reject the OLD layout and nothing
+// else. A project declaring db/public.ts AND db/billing.ts is the legitimate
+// shape the change was made for, and it has to walk all the way through the
+// real SDK — read, bundled, evaluated, typed — not merely past the Go reader.
+//
+// It also pins the reason both files go in ONE makeEnvDts call: the generated
+// file has to carry the second schema, and a per-file generator would emit two
+// files that each think the other's tables do not exist.
+func TestRunBuild_AMultiSchemaProjectBuilds(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	requireCutoverSDK(t, dir)
+	useTestParserCache(t)
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realPublicSchema), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "billing.ts"), []byte(realBillingSchema), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuild(ctx, dir, &out),
+		"a legitimate multi-schema project was refused:\n%s", out.String())
+
+	body, err := os.ReadFile(filepath.Join(dir, envTypesFile))
+	require.NoError(t, err, "the derived types never reached the checkout:\n%s", out.String())
+	require.Contains(t, string(body), "todos:", "the public schema is missing from the types:\n%s", body)
+	require.Contains(t, string(body), "billing", "the SECOND schema never reached the types:\n%s", body)
+	require.Contains(t, string(body), "invoices:", "the second schema's table is missing:\n%s", body)
+}
+
+// TestRunBuild_TheLegacyLayoutIsRefusedByName is NFR-002 where a person meets
+// it: `palbase build`. "Invalid schema" would send them looking; this names the
+// file to write and where the move is written down.
+func TestRunBuild_TheLegacyLayoutIsRefusedByName(t *testing.T) {
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	useTestParserCache(t)
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte(realPublicSchema), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.Error(t, runBuild(ctx, dir, &out), "the retired layout built:\n%s", out.String())
+	for _, want := range []string{LegacySchemaFile, PublicSchemaFile, MigrationGuide} {
+		require.Contains(t, out.String(), want, "the refusal does not name %q:\n%s", want, out.String())
+	}
+}
+
+// requireCutoverSDK skips when the @palbase/backend npm just installed predates
+// the one-file-per-schema cutover.
+//
+// WHY A PROBE RATHER THAN A CONSTANT. These tests install from the REGISTRY, on
+// purpose: their whole value is that they run the CLI against the SDK a real
+// user resolves, not against a fixture this repo wrote. That makes them hostage
+// to release order — the CLI moved to the new DSL (`defineTable`, and a
+// `makeEnvDts` that takes every schema at once) before the package carrying it
+// was published, so today the registry answers with a build that cannot express
+// what the test is asking. Measured 2026-08-31: @palbase/backend@24.3.0 on npm
+// exports no `defineTable`, and `makeEnvDts([schema])` throws "Cannot convert
+// undefined or null to object".
+//
+// Skipping is right and pinning a version is not: the day the release lands,
+// this probe passes and the tests run again with no edit. A hardcoded "skip
+// until 25.x" would still be skipping a year later.
+//
+// The BEHAVIOUR is not unproven meanwhile — TestGenerateEnvTypes exercises the
+// same bundle-and-bridge path against a pinned fixture package that mirrors the
+// new contract and THROWS on the wrong arity. What waits on the release is the
+// proof against the shipped artifact, which is a different claim and is why
+// this says so out loud instead of quietly passing.
+func requireCutoverSDK(t *testing.T, dir string) {
+	t.Helper()
+	const probe = `try { const m = require("@palbase/backend");
+	  process.stdout.write(typeof m.defineTable === "function" ? "yes" : "no"); }
+	catch (e) { process.stdout.write("no"); }`
+	cmd := exec.Command("node", "-e", probe)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "yes" {
+		t.Skipf("the @palbase/backend on the registry predates the cutover (no `defineTable`) — "+
+			"this test proves the CLI against the SHIPPED SDK and runs again once that release lands; "+
+			"probe said %q (err: %v)", strings.TrimSpace(string(out)), err)
+	}
 }

@@ -1,6 +1,8 @@
 package hook
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"os/exec"
@@ -178,4 +180,45 @@ func TestEnsure_RewritesDriftedCurrentVersionBody(t *testing.T) {
 	info2, err := os.Stat(hookPath)
 	require.NoError(t, err)
 	assert.Equal(t, info.ModTime(), info2.ModTime(), "a byte-identical hook must be a no-op")
+}
+
+// TestTheV1FingerprintsAreFrozen guards the bytes a rename sweep would eat.
+//
+// The v1 bodies name `db/schema.ts` and `palbase db check`, both retired. They
+// are not text — they are the fingerprint of a file already on other people's
+// machines, and the ONLY thing that lets Ensure recognise those hooks as ours
+// and upgrade them. Rewriting them to the current file name would stop the
+// match, classify the fleet's hooks as "foreign", and strand them.
+//
+// The existing isKnownV1 test cannot catch that: it compares the variable to
+// itself, so an edited literal still passes. This pins the bytes from OUTSIDE,
+// by hash, which is the only assertion a sweep cannot satisfy by accident.
+func TestTheV1FingerprintsAreFrozen(t *testing.T) {
+	want := []string{
+		"5b47689ad7574d8d0c063a4243ef2bb707a76599aa1aa6084e326274e00a77f3",
+		"a0c32de8ebf732a77d05cd5c552b6d8bbdcf03a067da5c3aedb4b599b9a7edd5",
+	}
+	require.Len(t, knownV1Bodies, len(want),
+		"a v1 fingerprint was added or removed — the fleet's self-heal set changed")
+	for i, body := range knownV1Bodies {
+		sum := sha256.Sum256([]byte(body))
+		require.Equal(t, want[i], hex.EncodeToString(sum[:]),
+			"knownV1Bodies[%d] was edited. If this was a rename sweep: PUT IT BACK. "+
+				"These bytes identify hooks already on disk elsewhere; changing them "+
+				"makes Ensure treat those hooks as foreign and never upgrade them.", i)
+	}
+}
+
+// TestTheLiveHookGatesTheSchemaThroughBuild — the active body carries no
+// `-f <schema file>` test, and that is why the one-file-per-schema cutover
+// reached it for free. `palbase build` evaluates the whole db/ directory, so a
+// guard naming a single file here would be the part that silently stopped
+// firing. This pins the absence.
+func TestTheLiveHookGatesTheSchemaThroughBuild(t *testing.T) {
+	require.Contains(t, Body, "palbase build",
+		"the hook stopped running the check that validates db/")
+	require.NotContains(t, Body, "db/schema.ts",
+		"the live hook names the retired schema file")
+	require.NotContains(t, Body, "palbase db check",
+		"the live hook calls a verb that no longer exists")
 }

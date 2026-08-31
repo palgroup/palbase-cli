@@ -151,15 +151,18 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		// the pod's global install provides it — point it at the project's copy.
 		fmt.Sprintf("PALBASE_RUNTIME_MODULES=%s", filepath.Join(cwd, "node_modules")),
 	)
-	// db/schema.ts is deploy-fatal too and check mode never looked at it: a schema
-	// module that doesn't export a defineSchema() result passed `palbase build`
-	// and then failed the deploy with `schema module does not export a
-	// defineSchema() result with .tables`. generateEnvTypes runs the SAME bundle +
-	// bridge the deploy's extractor does (and is a clean no-op when there is no
-	// db/schema.ts), so reuse it rather than restating the rule. It writes into the
+	// db/ is deploy-fatal too and check mode never looked at it: a schema module
+	// that doesn't export a defineSchema() result passed `palbase build` and then
+	// failed the deploy. generateEnvTypes runs the SAME bundle + bridge the
+	// deploy's extractor does (and is a clean no-op when the project declares no
+	// database), so reuse it rather than restating the rule. It writes into the
 	// staging tree, which is discarded — build validates, it does not mutate.
+	//
+	// The refusal names the DIRECTORY, not a file: the failure can be the old
+	// layout, a missing db/public.ts, or one sibling of several that does not
+	// evaluate — and the error carries which.
 	if err := generateEnvTypes(ctx, buildRoot, filepath.Join(cwd, "node_modules")); err != nil {
-		fmt.Fprintf(out, "✗ DEPLOY WOULD FAIL: db/schema.ts — %v\n", err)
+		fmt.Fprintf(out, "✗ DEPLOY WOULD FAIL: %s/ — %v\n", SchemaDir, err)
 		return fmt.Errorf("build failed")
 	}
 	// …and then it LANDS in the checkout. Generating into the staging tree and
@@ -168,7 +171,7 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// last written, which is the file's whole reason to exist.
 	//
 	// It is written as soon as the schema is valid, before the controller checks
-	// below can fail the build. The types describe db/schema.ts and nothing else —
+	// below can fail the build. The types describe db/*.ts and nothing else —
 	// a controller with a bad decorator does not make them wrong, and the moment
 	// somebody most needs their editor working is while they are fixing one.
 	if err := landEnvTypes(buildRoot, cwd, out); err != nil {
@@ -233,9 +236,9 @@ func landStackTypes(ctx context.Context, cwd string, out io.Writer) {
 // landEnvTypes copies the generated palbase-env.d.ts out of the staging tree and
 // into the checkout, where the project's tsconfig can see it.
 //
-// A no-op in the two cases that are not mistakes: the project has no db/schema.ts
-// (nothing was generated), or staging fell back to the live tree (generation
-// already wrote there).
+// A no-op in the two cases that are not mistakes: the project declares no
+// database (nothing was generated), or staging fell back to the live tree
+// (generation already wrote there).
 func landEnvTypes(buildRoot, cwd string, out io.Writer) error {
 	if buildRoot == cwd {
 		return nil

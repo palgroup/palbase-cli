@@ -208,7 +208,7 @@ func TestPlanWritesNOTHING(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "db", "schema.ts"), []byte("export default {}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte("export default {}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -306,5 +306,67 @@ func TestPushInAnAppCheckoutWritesNOTHING(t *testing.T) {
 	}
 	if len(project.writesSeen()) != 0 {
 		t.Errorf("it reached the project before refusing: %v", project.writesSeen())
+	}
+}
+
+// TestPlanNamesTheSchemasItDoesNotPlan — `palbase plan` predicts a push, and a
+// push carries the whole db/ directory while this endpoint takes one body the
+// stack names `public`. The gap is real and permanent; what must never happen is
+// that it goes unsaid, because a plan read as complete is worse than no plan.
+func TestPlanNamesTheSchemasItDoesNotPlan(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Plain objects, not `defineSchema(...)` calls: runPlan BUNDLES the project
+	// and the bundle evaluates the schema module, so a fixture that calls an
+	// unimported symbol dies as a ReferenceError long before the assertion. What
+	// this test needs from the files is their NAMES.
+	for name, body := range map[string]string{
+		"public.ts":  "export default {};",
+		"billing.ts": "export default {};",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "db", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	target := newProjectServer(t, map[string]string{})
+	cred := Credentials{Value: "k", Kind: KindKey}
+
+	var out strings.Builder
+	if err := runPlan(context.Background(), dir, Target{URL: target.URL}, cred, &out); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !strings.Contains(out.String(), "db/billing.ts") {
+		t.Errorf("the plan did not say which schema it left out:\n%s", out.String())
+	}
+}
+
+// TestPlanOfASingleSchemaSaysNothingExtra is the NEGATIVE CONTROL: the ordinary
+// project must not carry a caveat. A note on every plan is a note nobody reads.
+func TestPlanOfASingleSchemaSaysNothingExtra(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"),
+		[]byte("export default {};"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := newProjectServer(t, map[string]string{})
+	cred := Credentials{Value: "k", Kind: KindKey}
+
+	var out strings.Builder
+	if err := runPlan(context.Background(), dir, Target{URL: target.URL}, cred, &out); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if strings.Contains(out.String(), "not planned here") {
+		t.Errorf("a single-schema project was given a caveat:\n%s", out.String())
 	}
 }

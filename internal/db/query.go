@@ -31,7 +31,7 @@ func queryCmd() *cobra.Command {
 
 READ ONLY, and the database enforces it: the statement runs inside a READ ONLY
 transaction, so anything that would write is refused by Postgres itself. Change
-the schema by editing db/schema.ts and running ` + "`palbase db apply`" + ` — ad-hoc DDL
+the schema by editing db/public.ts and running ` + "`palbase db apply`" + ` — ad-hoc DDL
 would put the database ahead of its declaration and the next push would refuse.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stack, err := openLocal(cmd)

@@ -91,7 +91,7 @@ stack serves the new version, with no build, no artifact and no version history.
 Everything after this — push, db, secret, spec, logs — acts on the local stack
 until ` + "`palbase stop`" + `.
 
-    palbase start --reset     throw the database away and build it from db/schema.ts`,
+    palbase start --reset     throw the database away and build it from db/`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dir, err := os.Getwd()
 			if err != nil {
@@ -104,7 +104,7 @@ until ` + "`palbase stop`" + `.
 		},
 	}
 	cmd.Flags().BoolVar(&reset, "reset", false,
-		"empty the local database first, then build it from db/schema.ts")
+		"empty the local database first, then build it from db/")
 	cmd.Flags().BoolVar(&lan, "lan", false,
 		"publish the API on this machine's network address, so a phone on the same wifi can reach it")
 	return cmd
@@ -185,7 +185,7 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if reset {
 		fmt.Fprintln(out, "▸ removing the local database")
 		// -v takes the volumes with it, which is the reset: the schema comes
-		// back from db/schema.ts on the next boot rather than from a dump.
+		// back from db/ on the next boot rather than from a dump.
 		if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, "down", "-v"); err != nil {
 			return err
 		}

@@ -54,7 +54,8 @@ func projectForPush(t *testing.T) string {
 		}
 	}
 	write("controllers/todo.controller.ts", "// source")
-	write("db/schema.ts", "export default {}")
+	write("db/public.ts", "export default {}")
+	write("db/billing.ts", "export default {}")
 	write(".palbase/esm/controllers/controllers.js", "export const controllers = [];")
 	write(".palbase/esm/tests/todos.test.js", "// the suite a deploy grades this release by")
 	// A leftover from before the cutover. People have one of these on disk right
@@ -76,7 +77,11 @@ func TestAStackPushCarriesTheBuiltCode(t *testing.T) {
 	entries := entriesOf(t, blob)
 	for _, want := range []string{
 		"controllers/todo.controller.ts",
-		"db/schema.ts",
+		// EVERY schema file travels, not a named one: the stack reads the
+		// DIRECTORY, so a tarball carrying only db/public.ts would deploy a
+		// project whose second schema silently ceased to exist.
+		"db/public.ts",
+		"db/billing.ts",
 		".palbase/esm/controllers/controllers.js",
 		// The suites travel BUILT. A deploy runs them against the release it
 		// just made, in a container with no node_modules to resolve them.

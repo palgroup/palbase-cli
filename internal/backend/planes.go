@@ -53,11 +53,16 @@ func (p Plane) HasApp() bool { return p == PlaneApp || p == PlaneBoth }
 
 // PlaneOf inspects a directory.
 //
-// A backend is `db/schema.ts` AND `controllers/`: either alone is ambiguous —
+// A backend is `db/public.ts` AND `controllers/`: either alone is ambiguous —
 // an app repo can carry a `controllers` directory of view controllers, and a
 // stray schema file is not a backend.
+//
+// The retired `db/schema.ts` deliberately does NOT answer for the schema half.
+// Accepting it would let a project that cannot deploy walk through this door
+// and fail further in, with a message about whatever it reached first;
+// RequireBackendPlane below names the real problem instead.
 func PlaneOf(dir string) Plane {
-	backend := isDir(filepath.Join(dir, "controllers")) && exists(filepath.Join(dir, "db", "schema.ts"))
+	backend := isDir(filepath.Join(dir, "controllers")) && HasSchemaDeclaration(dir)
 	app := hasApple(dir) || exists(filepath.Join(dir, "build.gradle")) ||
 		exists(filepath.Join(dir, "build.gradle.kts")) || hasWeb(dir)
 
@@ -79,9 +84,20 @@ func RequireBackendPlane(dir string) error {
 	if PlaneOf(dir).HasBackend() {
 		return nil
 	}
+	// A checkout still carrying the retired layout is not a stranger who wandered
+	// in — it is this project, one rename behind. Telling it "no schema here"
+	// while db/schema.ts sits in front of the person reading is true and useless.
+	if HasLegacySchemaFile(dir) {
+		return fmt.Errorf(
+			"%s is the old layout: rename it to %s and declare each table with "+
+				"defineTable(\"name\", {…}) inside defineSchema(\"public\", { tables: [ … ] }) — "+
+				"the move is written out at %s",
+			LegacySchemaFile, PublicSchemaFile, MigrationGuide)
+	}
 	return fmt.Errorf(
-		"this is not a backend checkout: no db/schema.ts and controllers/ here (%s).\n"+
-			"Run this where your controllers live, or `palbase init` to start one", dir)
+		"this is not a backend checkout: no %s and controllers/ here (%s).\n"+
+			"Run this where your controllers live, or `palbase init` to start one",
+		PublicSchemaFile, dir)
 }
 
 // There is deliberately NO RequireAppPlane.

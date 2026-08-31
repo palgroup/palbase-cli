@@ -793,28 +793,35 @@ func parseRetryAfter(v string) time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
-// envGenExternals are kept external when bundling db/schema.ts so the bundle
+// envGenExternals are kept external when bundling db/*.ts so the bundle
 // resolves @palbase/* to the project's installed package on NODE_PATH at eval
 // time — exactly like the backend-runtime's schema extractor does. Bundling
 // them in would duplicate the DSL and break the `defineSchema(...)` identity.
 var envGenExternals = []string{"@palbase/backend", "@palbase/core"}
 
 // generateEnvTypes regenerates the project's palbase-env.d.ts from its
-// db/schema.ts. This is the typed-Database wiring: the generated file augments
+// db/*.ts. This is the typed-Database wiring: the generated file augments
 // @palbase/backend/env's `Tables` interface so a project's handlers get a typed
 // `Database.tables.*` with no import and no generic.
 //
-// Mechanism mirrors the backend-runtime's schema extractor
-// (modules/backend internal/runtime/schema_extract.js): db/schema.ts imports
-// @palbase/backend via ESM (which bare Node can't resolve from a tenant dir), so
-// we esbuild-bundle it to a temp CJS file with @palbase/* external, then run the
-// embedded env-gen.js bridge over that bundle. The bridge require()s the
-// project's @palbase/backend for makeEnvDts(), calls it with the schema, and
-// writes palbase-env.d.ts to projectDir.
+// EVERY schema at once, not one call per file. A foreign key from `billing` to
+// `public` can only be named with both ends in hand, so a per-file generator
+// would emit a relation pointing at a table it thinks does not exist — and the
+// types would disagree with the database the same deploy just built.
 //
-// It is a clean no-op when the project has no db/schema.ts (a v1 project, or a
-// v2 project that doesn't declare a schema): there is no typed Database to
-// generate, so we return nil without touching the filesystem.
+// Mechanism mirrors the backend-runtime's schema extractor
+// (modules/backend internal/runtime/schema_extract.js): db/*.ts imports
+// @palbase/backend via ESM (which bare Node can't resolve from a tenant dir), so
+// we esbuild-bundle a generated entry to a temp CJS file with @palbase/*
+// external, then run the embedded env-gen.js bridge over that bundle. The
+// bridge require()s the project's @palbase/backend for makeEnvDts(), calls it
+// with every declaration, and writes palbase-env.d.ts to projectDir.
+//
+// It is a clean no-op when the project declares no database at all (a v1
+// project, or a v2 project with no db/): there is no typed Database to
+// generate, so we return nil without touching the filesystem. A db/ that IS
+// there and cannot be read is the opposite — a mistake somebody is waiting to
+// see — and it comes back as an error.
 // nodeModules is where @palbase/backend actually lives, which is not always
 // inside projectDir: `palbase build` validates a DEPLOY-SHAPED staging tree
 // (node_modules stripped, exactly like the push tarball) while the bridge still
@@ -907,12 +914,12 @@ func generateStackTypes(ctx context.Context, projectDir, nodeModules string, nam
 }
 
 func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
-	schemaPath := filepath.Join(projectDir, "db", "schema.ts")
-	if _, err := os.Stat(schemaPath); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil // no schema → nothing to type, skip cleanly
-		}
-		return fmt.Errorf("stat db/schema.ts: %w", err)
+	sources, err := ReadSchemaSources(projectDir)
+	if errors.Is(err, ErrNoSchema) {
+		return nil // no declaration → nothing to type, skip cleanly
+	}
+	if err != nil {
+		return err
 	}
 
 	if _, err := exec.LookPath("node"); err != nil {
@@ -928,10 +935,14 @@ func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error
 	}
 	defer removeTemp(tmpDir)
 
-	// Bundle db/schema.ts → temp CJS, keeping @palbase/* external.
+	// One entry importing every declaration → temp CJS, @palbase/* external.
+	entryPath := filepath.Join(tmpDir, "schemas.entry.mjs")
+	if err := os.WriteFile(entryPath, []byte(envGenEntry(projectDir, sources)), 0o644); err != nil {
+		return err
+	}
 	bundlePath := filepath.Join(tmpDir, "schema.js")
-	if err := bundleSchemaTS(ctx, projectDir, nodeModules, schemaPath, bundlePath); err != nil {
-		return fmt.Errorf("bundle db/schema.ts: %w", err)
+	if err := bundleSchemaTS(ctx, projectDir, nodeModules, entryPath, bundlePath); err != nil {
+		return fmt.Errorf("bundle %s/: %w", SchemaDir, err)
 	}
 
 	// Extract the embedded env-gen.js bridge next to the bundle.
@@ -951,16 +962,18 @@ func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error
 	return nil
 }
 
-// bundleSchemaTS runs `npx esbuild` over db/schema.ts, emitting a CJS bundle at
-// outPath with @palbase/* kept external. Runs from projectDir so node_modules
-// resolution and any relative imports inside schema.ts anchor to the project.
-func bundleSchemaTS(ctx context.Context, projectDir, nodeModules, schemaPath, outPath string) error {
+// bundleSchemaTS runs `npx esbuild` over the generated entry, emitting a CJS
+// bundle at outPath with @palbase/* kept external. Runs from projectDir so
+// node_modules resolution anchors to the project; the schema files are named by
+// absolute path, so a sibling import inside one of them still resolves against
+// db/ rather than against the temp directory the entry lives in.
+func bundleSchemaTS(ctx context.Context, projectDir, nodeModules, entryPath, outPath string) error {
 	bundleCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	args := []string{
 		"--yes", "esbuild",
-		schemaPath,
+		entryPath,
 		"--bundle",
 		"--platform=node",
 		"--format=cjs",
@@ -985,6 +998,39 @@ func bundleSchemaTS(ctx context.Context, projectDir, nodeModules, schemaPath, ou
 		return fmt.Errorf("esbuild: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// envGenEntry writes the module esbuild starts from: every schema file as a
+// NAMESPACE import, plus the names in the same order.
+//
+// Namespaces rather than defaults because a schema file may export its
+// declaration three ways — `export default`, a named `schema`, or the module
+// itself — and all three exist in real projects. Choosing here would make this
+// the fourth place that rule is written; the bridge applies it once, to each
+// namespace it is handed.
+//
+// The order is ReadSchemaSources' order, which is sorted by file name. Nothing
+// downstream re-sorts, so an unsorted entry would reorder the generated file on
+// every run and turn `palbase-env.d.ts` into a permanent diff.
+func envGenEntry(projectDir string, sources []SchemaSource) string {
+	var b strings.Builder
+	names := make([]string, 0, len(sources))
+	for i, src := range sources {
+		fmt.Fprintf(&b, "import * as __s%d from %q;\n", i,
+			filepath.Join(projectDir, SchemaDir, src.Name+".ts"))
+		names = append(names, src.Name)
+	}
+	b.WriteString("export const modules = [")
+	for i := range sources {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "__s%d", i)
+	}
+	b.WriteString("];\n")
+	blob, _ := json.Marshal(names)
+	fmt.Fprintf(&b, "export const names = %s;\n", blob)
+	return b.String()
 }
 
 // runEnvGenBridge runs the env-gen.js bridge over the bundled schema, writing

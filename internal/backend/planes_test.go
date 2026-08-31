@@ -37,7 +37,7 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 	}{
 		{"a backend", func(t *testing.T, d string) {
 			mkdir(t, d, "controllers")
-			write(t, d, "db/schema.ts")
+			write(t, d, "db/public.ts")
 		}, PlaneBackend},
 
 		{"an Xcode app", func(t *testing.T, d string) { mkdir(t, d, "MyApp.xcodeproj") }, PlaneApp},
@@ -50,7 +50,7 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 
 		{"a monorepo root that is both", func(t *testing.T, d string) {
 			mkdir(t, d, "controllers")
-			write(t, d, "db/schema.ts")
+			write(t, d, "db/public.ts")
 			mkdir(t, d, "MyApp.xcodeproj")
 		}, PlaneBoth},
 
@@ -61,7 +61,7 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 		// make it a backend.
 		{"a backend's package.json alone", func(t *testing.T, d string) {
 			mkdir(t, d, "controllers")
-			write(t, d, "db/schema.ts")
+			write(t, d, "db/public.ts")
 			write(t, d, "package.json")
 		}, PlaneBackend},
 		{"an app's controllers directory alone", func(t *testing.T, d string) {
@@ -89,7 +89,7 @@ func TestAWrongPlaneVerbSaysWhatItLookedFor(t *testing.T) {
 	if err == nil {
 		t.Fatal("a backend verb was allowed in an app checkout")
 	}
-	for _, want := range []string{"db/schema.ts", "controllers/", "palbase init"} {
+	for _, want := range []string{"db/public.ts", "controllers/", "palbase init"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not mention %q: %v", want, err)
 		}
@@ -97,7 +97,7 @@ func TestAWrongPlaneVerbSaysWhatItLookedFor(t *testing.T) {
 
 	backend := t.TempDir()
 	mkdir(t, backend, "controllers")
-	write(t, backend, "db/schema.ts")
+	write(t, backend, "db/public.ts")
 	if err := RequireBackendPlane(backend); err != nil {
 		t.Fatalf("a backend verb was refused in a backend checkout: %v", err)
 	}
@@ -105,4 +105,44 @@ func TestAWrongPlaneVerbSaysWhatItLookedFor(t *testing.T) {
 	// is also run from a backend checkout (the harness links its backend fixture
 	// with --platform ios), so the refusal would have no verb to protect. What
 	// the plane detector answers is still asserted above.
+}
+
+// TestALegacyCheckoutIsToldWhatToRename is NFR-002 on the surface a backend
+// verb hits first. A project with controllers/ and the retired db/schema.ts is
+// not a stranger — it is this project, one rename behind — and "no schema here"
+// is a sentence nobody can act on while the file is on screen in front of them.
+func TestALegacyCheckoutIsToldWhatToRename(t *testing.T) {
+	dir := t.TempDir()
+	mkdir(t, dir, "controllers")
+	write(t, dir, "db/schema.ts")
+
+	if got := PlaneOf(dir); got.HasBackend() {
+		t.Fatalf("the retired layout still answers for the schema half: PlaneOf → %v", got)
+	}
+	err := RequireBackendPlane(dir)
+	if err == nil {
+		t.Fatal("a checkout with no usable declaration was accepted")
+	}
+	for _, want := range []string{LegacySchemaFile, PublicSchemaFile, MigrationGuide} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+}
+
+// TestATrueBackendIsStillAccepted is the NEGATIVE CONTROL for the gate above:
+// it must refuse its target and nothing else. A multi-schema project is a
+// legitimate backend and must walk straight through.
+func TestATrueBackendIsStillAccepted(t *testing.T) {
+	dir := t.TempDir()
+	mkdir(t, dir, "controllers")
+	write(t, dir, "db/public.ts")
+	write(t, dir, "db/billing.ts")
+
+	if got := PlaneOf(dir); got != PlaneBackend {
+		t.Fatalf("a multi-schema backend was not recognised: PlaneOf → %v", got)
+	}
+	if err := RequireBackendPlane(dir); err != nil {
+		t.Fatalf("a legitimate multi-schema backend was refused: %v", err)
+	}
 }

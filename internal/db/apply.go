@@ -19,8 +19,8 @@ func applyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "apply",
 		Args:  cobra.NoArgs,
-		Short: "Make the local database match db/schema.ts",
-		Long: `Apply db/schema.ts to the local stack's database, in one transaction.
+		Short: "Make the local database match db/public.ts",
+		Long: `Apply db/public.ts to the local stack's database, in one transaction.
 
 Changes that take data away are refused, and the refusal lists them with their
 row counts. --approve runs those too.`,
@@ -29,10 +29,11 @@ row counts. --approve runs those too.`,
 			if err != nil {
 				return err
 			}
-			source, err := readSchema()
+			source, others, err := readSchema()
 			if err != nil {
 				return err
 			}
+			reportSchemasLeftBehind(cmd, others)
 
 			path := "/v1/management/schema/apply"
 			if approve {
@@ -51,7 +52,7 @@ row counts. --approve runs those too.`,
 					return fmt.Errorf("read the result: %w", err)
 				}
 				if !applied.Changed {
-					fmt.Fprintln(out, "✓ the database already matches db/schema.ts")
+					fmt.Fprintln(out, "✓ the database already matches db/public.ts")
 					return nil
 				}
 				for _, line := range applied.Summary {

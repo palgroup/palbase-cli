@@ -322,9 +322,17 @@ func bundleEntry(dir string, sources []string) string {
 	for _, src := range sources {
 		fmt.Fprintf(&b, "import %q;\n", src)
 	}
-	// The schema is optional: a project with no db/schema.ts still bundles, it
-	// just has no typed `.tables` surface.
-	if schema := filepath.Join(dir, "db", "schema.ts"); fileExists(schema) {
+	// THE PUBLIC SCHEMA, and only it.
+	//
+	// The runtime feeds this export straight to `setSchema`, which takes ONE
+	// declaration — the typed `.tables` surface is the public schema's. A
+	// sibling `db/billing.ts` is still declared, still planned and still applied
+	// by the deploy, which reads the DIRECTORY; it just has no accessor on this
+	// object yet, and exporting an array here would hand setSchema something it
+	// would quietly read as empty.
+	//
+	// Optional, like channels.ts: a project with no declaration still bundles.
+	if schema := filepath.Join(dir, SchemaDir, "public.ts"); fileExists(schema) {
 		fmt.Fprintf(&b, "import __schema from %q; export const schema = __schema;\n", schema)
 	}
 	// CHANNELS TRAVEL THE SAME WAY, and for a sharper reason than the schema.
