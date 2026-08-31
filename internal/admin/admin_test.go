@@ -44,7 +44,7 @@ func run(t *testing.T, rest *stubREST, stdin string, args ...string) (string, er
 // WHICH image.
 func TestFleetUpgradeRefusesAMismatchedConfirmation(t *testing.T) {
 	rest := &stubREST{}
-	_, err := run(t, rest, "yes\n", "fleet", "upgrade", "acr.example/stack:sha-abc")
+	_, err := run(t, rest, "yes\n", "fleet", "upgrade", "acr.example/stack:sha-abc", "--canary", "canary0m")
 	if err == nil {
 		t.Fatal("a reflex confirmation was accepted")
 	}
@@ -55,7 +55,7 @@ func TestFleetUpgradeRefusesAMismatchedConfirmation(t *testing.T) {
 
 func TestFleetUpgradeSendsImageAndParallelism(t *testing.T) {
 	rest := &stubREST{reply: UpgradeAccepted{JobID: "job_1"}}
-	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--yes", "--parallel", "6")
+	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--canary", "canary0m", "--yes", "--parallel", "6")
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestFleetUpgradeSendsImageAndParallelism(t *testing.T) {
 // while a fleet of fourteen sat there — a lie with a tabwriter.
 func TestFleetUpgradeInventsNoCounts(t *testing.T) {
 	rest := &stubREST{reply: map[string]string{"jobId": "job_2"}}
-	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--yes")
+	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--canary", "canary0m", "--yes")
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
@@ -138,5 +138,45 @@ func TestSurfaceCarriesOnlyTheV2OperatorVerbs(t *testing.T) {
 	got := fmt.Sprint(names)
 	if got != "[fleet sweep]" {
 		t.Fatalf("unexpected surface: %s", got)
+	}
+}
+
+// KANARYA İŞARETİ ZORUNLU — VE VARSAYILANI YOKTU DEĞİL, YANLIŞTI.
+//
+// Düzlem eskiden envanterin İLKİNİ kanarya yapıyordu: yani rastgele bir ÖDEYEN
+// MÜŞTERİ, bir imajın açılmadığını ilk öğrenen oluyordu. O kesinti geri
+// alınamaz — migrasyon runtime reddedilmeden ÖNCE koşuyor, yani eski imaja
+// dönmek eski runtime'ı yeni şemanın önüne koymak demek.
+//
+// Bayrak eksikken komut İSTEĞİ HİÇ GÖNDERMEMELİ: sunucu da reddediyor, ama
+// reddi ağa çıkmadan söylemek operatöre bir tur kazandırıyor.
+func TestFleetUpgradeRefusesWithoutACanary(t *testing.T) {
+	rest := &stubREST{}
+	out, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc", "--yes")
+	if err == nil {
+		t.Fatalf("kanaryasız yükseltme KABUL EDİLDİ: %s", out)
+	}
+	if !strings.Contains(err.Error(), "--canary is required") {
+		t.Fatalf("red kanaryayı adlandırmıyor: %v", err)
+	}
+	if rest.path != "" {
+		t.Fatalf("istek yine de GÖNDERİLDİ (%s) — red ağa çıkmadan verilmeliydi", rest.path)
+	}
+}
+
+// VE GÖNDERİLEN GÖVDE onu TAŞIMALI: bayrağı okuyup göndermemek, kapıyı yalnız
+// istemcide kurmak olurdu.
+func TestFleetUpgradeSendsTheCanaryRef(t *testing.T) {
+	rest := &stubREST{reply: map[string]any{"jobId": "j1"}}
+	if _, err := run(t, rest, "", "fleet", "upgrade", "acr.example/stack:sha-abc",
+		"--canary", "kanarya0m", "--yes"); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	body, ok := rest.body.(map[string]any)
+	if !ok {
+		t.Fatalf("gövde okunamadı: %#v", rest.body)
+	}
+	if body["canaryRef"] != "kanarya0m" {
+		t.Fatalf("gövde canaryRef taşımıyor: %#v", body)
 	}
 }

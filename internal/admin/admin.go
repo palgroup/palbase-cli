@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -73,6 +74,7 @@ func fleetCmd(r Resolvers) *cobra.Command {
 
 func fleetUpgradeCmd(r Resolvers) *cobra.Command {
 	var parallel int
+	var canary string
 	var yes bool
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -86,9 +88,21 @@ rest roll in batches. Each tenant's pod is replaced — its disk and its identit
 stay — so a tenant is briefly unavailable while its own pod restarts.
 
 The image must come from this fleet's own registry. The plane refuses any other,
-which is the point: a fleet-wide roll is the widest blast radius there is.`,
+which is the point: a fleet-wide roll is the widest blast radius there is.
+
+--canary is REQUIRED and names the tenant that goes first. There is no default:
+the plane used to take whichever tenant came first out of the inventory, which
+made a random paying customer the one that finds out an image cannot boot — and
+that outage cannot be undone, because the schema moves forward before the
+runtime is refused.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			image := args[0]
+			if strings.TrimSpace(canary) == "" {
+				return fmt.Errorf(
+					"--canary is required: name the tenant that goes first.\n" +
+						"There is no default, because the default was a random customer — and an image " +
+						"that cannot boot leaves that tenant unrecoverable (the schema moves forward first)")
+			}
 			if !yes {
 				fmt.Fprintf(cmd.OutOrStdout(),
 					"This replaces the pod of EVERY tenant in the fleet with:\n  %s\nType the image to confirm: ", image)
@@ -101,7 +115,7 @@ which is the point: a fleet-wide roll is the widest blast radius there is.`,
 				}
 			}
 			var out UpgradeAccepted
-			body := map[string]any{"image": image, "parallel": parallel}
+			body := map[string]any{"image": image, "parallel": parallel, "canaryRef": canary}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/fleet/upgrade", body, &out); err != nil {
 				return err
 			}
@@ -115,6 +129,7 @@ which is the point: a fleet-wide roll is the widest blast radius there is.`,
 		},
 	}
 	cmd.Flags().IntVar(&parallel, "parallel", 4, "how many tenants roll at once after the canary")
+	cmd.Flags().StringVar(&canary, "canary", "", "ref of the tenant that goes first (required)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
