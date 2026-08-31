@@ -71,6 +71,29 @@ func (s SchemaSource) Path() string { return SchemaDir + "/" + s.Name + ".ts" }
 // and an unsorted set would hand the evaluator a different positional answer
 // from one run to the next — so the same unchanged schema would diff clean on
 // one push and dirty on the next, and nobody would trust either.
+// isSchemaDeclaration says whether a file in db/ declares a schema.
+//
+// Every `*.ts` in the directory used to qualify, and two kinds of file that
+// live there legitimately are not declarations:
+//
+//   - `public.test.ts` — the bundler builds EVERY `*.test.ts` in a project into
+//     its own test module, so the product invites a test to sit beside the
+//     thing it tests, in db/ like anywhere else.
+//   - `billing.d.ts` — a generated type declaration has no runtime value at all.
+//
+// Read as schemas they became `public.test` and `billing.d`: a bundle that
+// cannot resolve its own import, or — for a test file that does export a
+// default — A SCHEMA CREATED IN THE DATABASE. Measured 2026-08-31 pushing the
+// control plane.
+func isSchemaDeclaration(name string) bool {
+	if !strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".d.ts") {
+		return false
+	}
+	// The same suffix the bundler's own test predicate uses; the two are one
+	// rule about one file and must not disagree about it.
+	return !strings.HasSuffix(strings.TrimSuffix(name, ".ts"), ".test")
+}
+
 func ReadSchemaSources(projectDir string) ([]SchemaSource, error) {
 	dir := filepath.Join(projectDir, SchemaDir)
 	entries, err := os.ReadDir(dir)
@@ -84,7 +107,7 @@ func ReadSchemaSources(projectDir string) ([]SchemaSource, error) {
 	out := make([]SchemaSource, 0, len(entries))
 	legacy := false
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".ts") {
+		if e.IsDir() || !isSchemaDeclaration(e.Name()) {
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".ts")

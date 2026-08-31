@@ -131,3 +131,35 @@ func TestReadSchemaSourcesIgnoresNonSchemaEntries(t *testing.T) {
 		t.Fatalf("a non-schema entry was read as a declaration: %v", got)
 	}
 }
+
+// A COLOCATED TEST IS NOT A SCHEMA DECLARATION — and neither is a `.d.ts`.
+//
+// This package's OWN bundler builds every `*.test.ts` in the project into its
+// own test module (stack_bundle.go, bundleTests). So the product invites a test
+// to sit next to the thing it tests — in db/ like anywhere else — and this
+// reader then called that test a schema named `public.test` and handed the
+// bundler an `import __schemaN from "db/public.test.ts"` that cannot resolve.
+//
+// Measured 2026-08-31 pushing the control plane: `No matching export in
+// "db/public.test.ts" for import "default"`. The build error is the LUCKY case.
+// A test file that does export a default would have been planned as a schema
+// and CREATED IN THE DATABASE.
+func TestReadSchemaSourcesSkipsTestsAndTypeDeclarations(t *testing.T) {
+	dir := schemaProject(t, map[string]string{
+		"public.ts":      `export default defineSchema("public", { tables: [] })`,
+		"public.test.ts": `import { test } from "vitest"; test("t", () => {})`,
+		"billing.ts":     `export default defineSchema("billing", { tables: [] })`,
+		"billing.d.ts":   `export declare const x: number;`,
+	})
+	got, err := ReadSchemaSources(dir)
+	if err != nil {
+		t.Fatalf("ReadSchemaSources: %v", err)
+	}
+	var names []string
+	for _, s := range got {
+		names = append(names, s.Name)
+	}
+	if strings.Join(names, ",") != "billing,public" {
+		t.Fatalf("schema names = %v, want [billing public]", names)
+	}
+}
