@@ -104,3 +104,43 @@ PB-N kayıtları; (d) tsconfig include'unu şablonla hizala.
 `internal/testuser/testuser.go:52-54` · `internal/backend/deploy.go:735-744` (öksüz yorum) ·
 `@palbase/backend/dist/test/index.d.ts:30,112-113` · yayınlanmış README (dolaylı: yok olan API).
 Kapı bunları da tutmalı: yalnız dosyayı değil, dosyanın ADINI taşıyan yayınlanmış string'i de.
+
+## Sonuç (2026-08-31)
+
+**CLI — commit `b0714e4`, `go test ./...` 0 FAIL.**
+
+| Ne | Nerede |
+|---|---|
+| `deadDeclarations` + `reportDeadDeclarations` | `internal/backend/checkout_shape.go` |
+| `includeBlindSpots` + `reportIncludeBlindSpots` | aynı dosya |
+| İkisi de `controllers/` erken dönüşünden ÖNCE, kısa devre YOK | `internal/backend/build.go` |
+| `TestNoShippedStringNamesARetiredConfigFile` (eşli muafiyetle) | `cmd/palbase/surface_test.go` |
+| `test-user --help` yalanı | `internal/testuser/testuser.go` |
+| `flags --help` yalanı + kendi alt komutuyla çelişkisi | `internal/flags/flags.go` |
+| `deploy.go`'nun öksüz yorumu + ölü `testUserTemplatesPath` | silindi |
+
+**Aynı ağaç, aynı koşullar (negatif kontrol):** eski binary `build OK — 67 route(s)`
+· yeni binary exit 1, iki beyanı kapılarıyla + iki kör noktayı eklenecek satırlarla.
+`config/pricing.ts` işaretlenmedi.
+
+### D-009 — Kapının kuralı OLUMSUZLAMADAN POZİTİFE çevrildi
+İlk taslak emekli dosya ADINI yasaklıyordu: dokuz string yakaladı, **altısı haklıydı**
+(*"It used to be config/egress.ts, applied on every push…"* — okuyucunun ihtiyacı olan
+anlatım). Yalanı konusuyla avlayan kapı, aynı konu hakkındaki gerçeği de vurur.
+Kural: **adı anıyorsan emekliliğini de YAZ.** Ayırdığı iki gerçek yalan:
+`test-user --help` (var olan `templates set` fiilinin yokluğunu iddia ediyordu) ve
+`flags --help` (*"config/flags.ts is git-authoritative"* — ve kendi `remove` alt
+komutu *"It is gone: there is no file left to fall back to"* diyor).
+
+### D-010 — `TestBuildIgnoresAConfigDirectoryEntirely` tersine çevrildi
+Eski hâli *"a leftover config/ does not fail the build — people have these
+directories on disk right now"* diyordu: kusuru adlandırıp özellik sanmış, ve zarar
+gören tam da o insanlar. Testin hayatta kalan yarısı (build config/'ü
+DEĞERLENDİRMİYOR) emekli OLMAYAN bir dosya adıyla korundu — emekli bir ad
+kullanılsaydı red erkenden döner ve iddialar boşa düşerdi.
+
+## AÇIK — kapsam dışı keşif
+`palai-cloud/backend/db/` tek dosya taşıyor ve adı `schema.ts`. Yeni CLI onu
+reddediyor (eş oturumun `db/` cutover'ı). Bugün canlı deploy'u etkilemiyor
+(yayındaki CLI 0.49.1'de bu kapı yok), ama **bir sonraki CLI sürümüyle o proje
+build edilemez hâle gelir.** Göç: `db/public.ts`. Kullanıcıya sunuldu.
