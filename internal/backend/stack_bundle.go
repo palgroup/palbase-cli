@@ -322,18 +322,26 @@ func bundleEntry(dir string, sources []string) string {
 	for _, src := range sources {
 		fmt.Fprintf(&b, "import %q;\n", src)
 	}
-	// THE PUBLIC SCHEMA, and only it.
+	// EVERY SCHEMA THE DIRECTORY DECLARES.
 	//
-	// The runtime feeds this export straight to `setSchema`, which takes ONE
-	// declaration — the typed `.tables` surface is the public schema's. A
-	// sibling `db/billing.ts` is still declared, still planned and still applied
-	// by the deploy, which reads the DIRECTORY; it just has no accessor on this
-	// object yet, and exporting an array here would hand setSchema something it
-	// would quietly read as empty.
+	// It used to carry the public file alone, because `setSchema` took ONE
+	// declaration and an array would have been read as empty. `setSchema` takes
+	// the SET now, so the sibling schemas — planned and applied by the deploy,
+	// which has always read the directory — finally reach the runtime that has
+	// to resolve their tables.
+	//
+	// ReadSchemaSources is the same reader the deploy rail uses, sorted the same
+	// way. THE TWO BUNDLERS CHANGE TOGETHER (see bundle-controllers.sh): they
+	// drifted once over `buildModuleClients` and the drift lasted a release.
 	//
 	// Optional, like channels.ts: a project with no declaration still bundles.
-	if schema := filepath.Join(dir, SchemaDir, "public.ts"); fileExists(schema) {
-		fmt.Fprintf(&b, "import __schema from %q; export const schema = __schema;\n", schema)
+	if declared, err := ReadSchemaSources(dir); err == nil {
+		refs := make([]string, 0, len(declared))
+		for i, src := range declared {
+			fmt.Fprintf(&b, "import __schema%d from %q;\n", i, filepath.Join(dir, src.Path()))
+			refs = append(refs, fmt.Sprintf("__schema%d", i))
+		}
+		fmt.Fprintf(&b, "export const schemas = [%s];\n", strings.Join(refs, ", "))
 	}
 	// CHANNELS TRAVEL THE SAME WAY, and for a sharper reason than the schema.
 	//

@@ -65,11 +65,29 @@ func TestTheSchemaTravelsOnlyWhenItExists(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte("export default {}"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"public.ts", "billing.ts"} {
+		if err := os.WriteFile(filepath.Join(dir, "db", name), []byte("export default {}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !strings.Contains(bundleEntry(dir, nil), "export const schema = __schema;") {
-		t.Error("a declared schema does not travel with the bundle")
+	entry := bundleEntry(dir, nil)
+	// EVERY declaration travels, not just public's. The runtime resolves a
+	// table by its schema-qualified key, and a key it was never handed resolves
+	// to nothing — silently, because a missing table def only means "no column
+	// metadata", never an error.
+	if !strings.Contains(entry, "export const schemas = [__schema0, __schema1];") {
+		t.Errorf("the bundle does not carry both declarations:\n%s", entry)
+	}
+	for _, want := range []string{"db/billing.ts", "db/public.ts"} {
+		if !strings.Contains(entry, want) {
+			t.Errorf("%s did not travel with the bundle", want)
+		}
+	}
+	// NEGATIVE CONTROL: the retired single-export form must be gone. Leaving it
+	// would let a runtime that still reads `schema` look correct on public and
+	// be empty everywhere else.
+	if strings.Contains(entry, "export const schema =") {
+		t.Error("the bundle still emits the retired single-schema export")
 	}
 }
 
