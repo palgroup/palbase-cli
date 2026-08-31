@@ -63,6 +63,21 @@ gates the real deploy).`,
 // install failed) warn and return nil (fail-open — the server gate is the
 // authoritative backstop).
 func runBuild(ctx context.Context, cwd string, out io.Writer) error {
+	// THE SHAPE OF THE CHECKOUT, FIRST — AND BEFORE THE controllers/ EARLY RETURN.
+	//
+	// Both checks are pure filesystem: no node, no bun, no network, microseconds.
+	// They run ahead of everything because a tree can carry either defect while
+	// having no controllers/ at all, and because the answer is more useful before
+	// sixty lines of route listing than after them.
+	//
+	// NOT SHORT-CIRCUITED. A checkout that has been through one upgrade tends to
+	// have both, and reporting one at a time turns a single fix into two builds.
+	deadDecl := reportDeadDeclarations(cwd, out)
+	blindSpots := reportIncludeBlindSpots(cwd, out)
+	if deadDecl || blindSpots {
+		return fmt.Errorf("build failed")
+	}
+
 	controllersDir := filepath.Join(cwd, "controllers")
 	if _, err := os.Stat(controllersDir); err != nil {
 		fmt.Fprintln(out, "no controllers/ — nothing to validate")

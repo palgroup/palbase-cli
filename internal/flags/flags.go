@@ -92,25 +92,26 @@ func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "flags",
 		Short: "Manage feature-flag definitions and per-user overrides",
-		Long: `Author the project's feature-flag DEFINITIONS declaratively in config/flags.ts,
-and override a flag for a single end user on the running Environment.
+		Long: `The feature-flag DEFINITIONS this project ships, and per-user overrides on
+the running Environment.
 
-  palbase flags list                       Show the flags declared in config/flags.ts.
+  palbase flags list                       Show the flags this stack holds.
   palbase flags add <key> --type ... ...   Add or update a flag definition.
-  palbase flags remove <key>               Remove a flag definition entry.
+  palbase flags remove <key>               Remove a flag definition.
   palbase flags user ...                   Set/inspect/clear ONE user's overrides.
 
 A flag definition is a typed project-wide DEFAULT (its type + default value, and
-for string flags an optional list of allowed variants). config/flags.ts is
-git-authoritative: commit it and ` + "`git push`" + ` to deploy. The deploy upserts
-the flag definitions (create-or-update, idempotent); it never deletes a flag
-dropped from the file (removing here leaves the live flag in place — see
-` + "`remove`" + `).
+for string flags an optional list of allowed variants). THEY LIVE ON THE STACK and
+take effect on the next deploy. They used to be declared in config/flags.ts and
+upserted by every deploy, which never deleted one dropped from the file — so
+` + "`remove`" + ` edited the file and left the live flag serving, and "removed" and
+"still there" were both true. There is no file left to fall back to, so a removal
+here is the whole operation.
 
 A per-user VALUE is the other kind of thing: runtime state for one user in one
 Environment, live the moment it is written, never in git. That is
 ` + "`palbase flags user`" + ` — including for the ` + "`palbase.`" + `-namespaced
-keys that cannot be declared in config/flags.ts at all.`,
+keys a flag definition cannot carry at all.`,
 	}
 	cmd.AddCommand(listCmd(r), addCmd(r), removeCmd(r), userCmd(r))
 	return cmd

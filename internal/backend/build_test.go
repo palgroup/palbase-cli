@@ -529,9 +529,21 @@ func TestRunBuild_LandsTheTypesInTheCheckout(t *testing.T) {
 // so a copy in the source tree could only disagree with the live one, and a push
 // that carried it would silently overwrite what somebody set from the panel.
 //
-// The stronger half of this test is that a config/ directory left behind by an
-// older checkout does not fail the build and does not travel. People have these
-// directories on disk right now.
+// ‼️ ITS OTHER HALF USED TO SAY "a leftover config/ does not FAIL the build, and
+// people have these directories on disk right now" — AND THAT SENTENCE NAMED THE
+// DEFECT WHILE CALLING IT A FEATURE. Those people were the ones being harmed:
+// measured 2026-08-31 on a customer tree, `config/egress.ts` sat there importing
+// `defineEgress` (removed in 23.0.0) while `palbase build` printed
+// "build OK — 67 route(s)" and `tsc --noEmit` exited 0, and the owner believed
+// five allowed hosts were declared in git. `reportDeadDeclarations` now refuses a
+// retired declaration BY NAME; TestBuildRefusesARetiredConfigDeclaration covers it.
+//
+// What survives here, and is the reason this expensive test is kept: the build
+// still does not EVALUATE config/. The fixture is a file with a name no
+// declaration ever had, holding text no compiler would accept — if anything read
+// the directory, this would fail. Using a RETIRED name instead would make the
+// assertions below vacuous: the refusal returns before a config document could be
+// produced, and a test that can only pass proves nothing.
 func TestBuildIgnoresAConfigDirectoryEntirely(t *testing.T) {
 	dir := t.TempDir()
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -543,16 +555,16 @@ func TestBuildIgnoresAConfigDirectoryEntirely(t *testing.T) {
 	useTestParserCache(t)
 	writeFixture(t, dir, goodControllerTS)
 
-	// A leftover from before the cutover, including one that would NOT evaluate:
-	// nothing reads it, so nothing can trip over it.
+	// A project's own module that merely lives under config/, holding text no
+	// compiler would accept: nothing reads the directory, so nothing trips over it.
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "secrets.ts"),
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "pricing.ts"),
 		[]byte("this is not valid typescript and it does not matter\n"), 0o644))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	var out bytes.Buffer
-	require.NoError(t, runBuild(ctx, dir, &out), "a stale config/ failed the build:\n%s", out.String())
+	require.NoError(t, runBuild(ctx, dir, &out), "a plain module under config/ failed the build:\n%s", out.String())
 
 	_, err := os.Stat(filepath.Join(dir, ".palbase", "config.json"))
 	require.True(t, os.IsNotExist(err), "the build still produces a config document to ship")
@@ -809,4 +821,83 @@ func requireCutoverSDK(t *testing.T, dir string) {
 			"this test proves the CLI against the SHIPPED SDK and runs again once that release lands; "+
 			"probe said %q (err: %v)", strings.TrimSpace(string(out)), err)
 	}
+}
+
+// --- the retired-declaration gate ---------------------------------------
+
+// A `config/` declaration the SDK deleted is refused, by NAME, with its door.
+//
+// THE FAILURE THIS EXISTS FOR, MEASURED 2026-08-31 on a customer tree: a checkout
+// written against 21.0.1 was upgraded, and `config/egress.ts` kept importing
+// `defineEgress` — an export 23.0.0 removed. `palbase build` printed
+// "build OK — 67 route(s)" and `tsc --noEmit` exited 0, because `config/` is in
+// NEITHER include list (not the project's, not the template's) and the bundler
+// never reads that directory. The person went on believing five allowed hosts
+// were declared in git.
+func TestBuildRefusesARetiredConfigDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "egress.ts"),
+		[]byte("import { defineEgress } from \"@palbase/backend\";\nexport default defineEgress({hosts:[]});\n"), 0o644))
+
+	var out bytes.Buffer
+	err := runBuild(context.Background(), dir, &out)
+	require.Error(t, err, "a dead declaration must fail the build, not warn")
+	require.Contains(t, out.String(), "config/egress.ts")
+	require.Contains(t, out.String(), "palbase egress add",
+		"the refusal has to name the door, or it is a dead end")
+}
+
+// ‼️ AND A PLAIN MODULE THAT MERELY LIVES UNDER config/ IS NOT A DECLARATION.
+// The same customer tree carries `config/pricing.ts` — its own price table,
+// imported by `webhooks/stripe.ts`, nothing to do with palbase. A gate keyed on
+// the DIRECTORY would have refused a correct repository.
+func TestBuildAcceptsAPlainModuleUnderConfig(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "pricing.ts"),
+		[]byte("export const RATE = 3;\n"), 0o644))
+
+	var out bytes.Buffer
+	require.NoError(t, runBuild(context.Background(), dir, &out))
+	require.NotContains(t, out.String(), "pricing.ts")
+}
+
+// --- the tsconfig coverage gate -----------------------------------------
+
+// A directory the deploy COMPILES but the tsconfig does not INCLUDE is refused.
+//
+// `jobs/`, `webhooks/` and `hooks/` are read off disk by the bundler — no
+// controller imports them, so `include` is the only thing that can put them in
+// front of tsc. Measured on the same tree: the include list named neither, and two
+// jobs read `meta.name` — a field `JobMeta` has never had — logging
+// `job: undefined` on their error path for months, green through every gate.
+func TestBuildRefusesATsconfigThatSkipsACompiledDirectory(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "jobs", "sweep.ts"), []byte("export default class {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
+		[]byte(`{"include":["controllers/**/*.ts","services/**/*.ts"]}`), 0o644))
+
+	var out bytes.Buffer
+	err := runBuild(context.Background(), dir, &out)
+	require.Error(t, err)
+	require.Contains(t, out.String(), "jobs/**/*.ts", "the refusal has to print the line to add")
+}
+
+// ‼️ NO `include` AT ALL IS NOT A HOLE — tsc then takes the whole directory, which
+// is MORE coverage than any list. Judging that as a gap would refuse the one shape
+// that cannot have this defect, and it is why the gate reads the key rather than
+// the file's existence. It also sidesteps `extends`: a tsconfig that inherits its
+// include has none of its own, and resolving the chain to say so would be a
+// compiler's job, not a gate's.
+func TestBuildAcceptsATsconfigWithNoIncludeList(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "jobs", "sweep.ts"), []byte("export default class {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
+		[]byte(`{"compilerOptions":{"strict":true}}`), 0o644))
+
+	var out bytes.Buffer
+	require.NoError(t, runBuild(context.Background(), dir, &out))
 }

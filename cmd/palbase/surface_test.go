@@ -483,3 +483,160 @@ func inScratchCheckout(t *testing.T) {
 	require.NoError(t, os.Chdir(dir))
 	t.Setenv("HOME", t.TempDir())
 }
+
+// retiredConfigFiles are the author-facing declaration files @palbase/backend
+// 23.0.0 removed. `config/` is retired ENTIRELY, so this list is closed: nothing
+// joins it, which is why naming the seven here carries no drift risk.
+//
+// Each one had a door and now has a different one; the message a person reads
+// has to name the door, so the verb rides along with the file.
+var retiredConfigFiles = []struct{ file, verb string }{
+	{"config/egress.ts", "palbase egress add <host>"},
+	{"config/flags.ts", "palbase flags add"},
+	{"config/storage.ts", "palbase storage add"},
+	{"config/notifications.ts", "palbase notifications add"},
+	{"config/test-users.ts", "palbase test-user templates set --file <path>"},
+	{"config/secrets.ts", "palbase secret set NAME --stdin"},
+	{"config/auth.json", "palbase auth settings set"},
+}
+
+// retirementRegistry IS the declaration that these files are retired: it pairs
+// each one with the verb that replaced it, and `palbase build` refuses a checkout
+// still carrying one. Naming them there is the opposite of the defect below.
+//
+// THE SKIP IS PAIRED, so it cannot widen. The test asserts the registry still
+// names ALL seven — the moment it stops being the registry, the exemption stops
+// being true and this test says so rather than covering for it.
+const retirementRegistry = "internal/backend/checkout_shape.go"
+
+// A shipped string that names a retired config file must SAY it is retired.
+//
+// ‼️ THE RULE IS POSITIVE ON PURPOSE, AND THE FIRST DRAFT TAUGHT WHY. A gate that
+// simply refused the file NAME flagged nine strings, and six of them were right:
+// `palbase egress --help` says "It used to be config/egress.ts, applied on every
+// push, which meant the panel could not change it" — narration a reader needs, and
+// exactly what makes the new door make sense. Hunting a lie by its subject catches
+// the truth about the same subject. So the demand is that the truth be WRITTEN: name
+// the retired file and the string must also carry a retirement marker.
+//
+// What that separates, measured on this tree: `palbase test-user --help` said
+// "Templates ARE declared in config/test-users.ts" while `templatesSetCmd` sat
+// ninety lines below it, and `palbase flags --help` said "config/flags.ts IS
+// git-authoritative: commit it and git push to deploy" while its own `remove`
+// subcommand said "It is gone: there is no file left to fall back to". Both are
+// present tense about a file the SDK deleted in 23.0.0; both carry no marker.
+//
+// CONCATENATION IS FOLDED FIRST. `flags.go` builds its Long with `+` across four
+// literals, so the file name and the marker can land in different ones — judging
+// literals separately would fail a string that tells the truth in two pieces.
+//
+// STRING LITERALS ONLY, as above: this tree narrates the cutover in its comments on
+// purpose, and a gate that read comments would be deleted within a week.
+func TestNoShippedStringNamesARetiredConfigFile(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	require.NoError(t, err)
+
+	// A string may name a retired file only while saying it is retired. Lower-cased
+	// before matching, so prose casing is not part of the contract.
+	markers := []string{"used to", "no longer", "is gone", "are gone", "removed", "retired"}
+	saysRetired := func(text string) bool {
+		low := strings.ToLower(text)
+		for _, m := range markers {
+			if strings.Contains(low, m) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// flatten returns the text of a `+` chain of string literals, and false if any
+	// operand is not one (a runtime value cannot be judged here).
+	var flatten func(ast.Expr) (string, bool)
+	flatten = func(e ast.Expr) (string, bool) {
+		switch v := e.(type) {
+		case *ast.BasicLit:
+			if v.Kind != token.STRING {
+				return "", false
+			}
+			text, err := strconv.Unquote(v.Value)
+			if err != nil {
+				text = v.Value
+			}
+			return text, true
+		case *ast.BinaryExpr:
+			if v.Op != token.ADD {
+				return "", false
+			}
+			l, okL := flatten(v.X)
+			r, okR := flatten(v.Y)
+			if !okL || !okR {
+				return "", false
+			}
+			return l + r, true
+		}
+		return "", false
+	}
+
+	var offences []string
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		if unreachableCommandSurfaces[rel] || rel == retirementRegistry {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0) // 0 = drop comments
+		if err != nil {
+			return err
+		}
+		judge := func(text string, pos token.Pos) {
+			if saysRetired(text) {
+				return
+			}
+			for _, dead := range retiredConfigFiles {
+				if strings.Contains(text, dead.file) {
+					offences = append(offences, fmt.Sprintf(
+						"%s:%d names %s in the present tense — it was retired in @palbase/backend 23.0.0 "+
+							"and the door is `%s`. Say so in the string, or stop naming the file.",
+						rel, fset.Position(pos).Line, dead.file, dead.verb))
+				}
+			}
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.BinaryExpr:
+				if text, ok := flatten(v); ok {
+					judge(text, v.Pos())
+					return false // its literals are judged as one string
+				}
+			case *ast.BasicLit:
+				if v.Kind == token.STRING {
+					text, err := strconv.Unquote(v.Value)
+					if err != nil {
+						text = v.Value
+					}
+					judge(text, v.Pos())
+				}
+			}
+			return true
+		})
+		return nil
+	}))
+	require.Empty(t, offences,
+		"shipped strings name a deleted file as if it still worked:\n  %s",
+		strings.Join(offences, "\n  "))
+
+	// The exemption, earned.
+	registry, err := os.ReadFile(filepath.Join(root, retirementRegistry))
+	require.NoError(t, err, "the registry is exempt from the scan above; it has to exist")
+	for _, dead := range retiredConfigFiles {
+		require.Containsf(t, string(registry), dead.file,
+			"%s no longer names %s. It is exempt BECAUSE it is the registry, so a row it drops "+
+				"is a retired file nothing declares retired and nothing refuses.", retirementRegistry, dead.file)
+	}
+}

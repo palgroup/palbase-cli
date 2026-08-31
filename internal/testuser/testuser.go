@@ -43,17 +43,18 @@ func Cmd() *cobra.Command {
   palbase test-user create --count 5           Mint 5 plain test users.
   palbase test-user create --template demo     Mint 1 user + seed their data
                                                tree from a declared template.
-  palbase test-user templates                  List templates declared in
-                                               this stack.
+  palbase test-user templates                  List the templates this stack holds.
+  palbase test-user templates set --file F     Replace the whole template set.
   palbase test-user list                       List this environment's test users.
   palbase test-user clone <id> --email x@y.z --password ...
                                                Copy a test user's data tree onto
                                                a new user.
   palbase test-user delete <id>                Purge a test user.
 
-Templates are declared in config/test-users.ts and carried to the stack by
-` + "`palbase push`" + `. There is no way to author one from here — no verb in
-this CLI writes a template.
+TEMPLATES LIVE ON THE STACK. They used to be declared in config/test-users.ts and
+carried up by ` + "`palbase push`" + `; @palbase/backend 23.0.0 removed that
+declaration, so ` + "`templates set`" + ` above is where a template set is written
+now — and it is the only door.
 
 Each environment verifies tokens against its OWN auth, so a minted token is only
 valid on the environment that minted it.

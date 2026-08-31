@@ -730,15 +730,3 @@ func repoDirFromFullName(fullName string) string {
 	}
 	return fullName
 }
-
-// testUserTemplatesPath is where a stack's declared fixture accounts are set.
-const testUserTemplatesPath = "/v1/management/test-users/templates"
-
-// shipDeclaredTestUsers puts `config/test-users.ts` on the stack this checkout
-// acts on.
-//
-// Silent when the project declares none — most do not, and a line about an empty
-// declaration would be noise on every push.
-//
-// It talks to the PROJECT, not the plane: fixtures are the stack's own state,
-// the same as its buckets and its secrets, and the plane's push route is a relay
