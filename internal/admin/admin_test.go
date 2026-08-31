@@ -180,3 +180,47 @@ func TestFleetUpgradeSendsTheCanaryRef(t *testing.T) {
 		t.Fatalf("gövde canaryRef taşımıyor: %#v", body)
 	}
 }
+
+// OPERATÖR SÜRÜKLENMEYİ OKUYABİLMELİ (FR-014).
+//
+// `GET /v1/panel/fleet/drift` var ve üçlü ayrımı doğru yapıyor — ama bugün onu
+// çağırabilen tek istemci Studio ve o ekran henüz yok. Yani operatörün "filom
+// nerede sürüklenmiş" sorusunu soracağı hiçbir yer yoktu: kapıları olan ama
+// gözü olmayan bir sistem.
+func TestFleetDriftReadsThePanelSurface(t *testing.T) {
+	rest := &stubREST{reply: []map[string]any{
+		{"ref": "aaa11111m", "observed": "acr/t:sha-OLD", "desired": "acr/t:sha-NEW", "cell_id": "01", "bucket": "toAlign"},
+		{"ref": "zzz99999m", "observed": "", "desired": "acr/t:sha-NEW", "cell_id": "01", "bucket": "onWake"},
+	}}
+	out, err := run(t, rest, "", "fleet", "drift")
+	if err != nil {
+		t.Fatalf("drift: %v", err)
+	}
+	if rest.method != "GET" || rest.path != "/v1/panel/fleet/drift" {
+		t.Fatalf("yanlış uç: %s %s", rest.method, rest.path)
+	}
+	// KOVALAR AYRI GÖSTERİLMELİ. Tek listede vermek tam da ekranın okunmaz
+	// olmasına yol açan şeydi: arşivli çoğunluk, gerçekten yanlış imaj koşan
+	// azınlığı gömüyordu.
+	if !strings.Contains(out, "aaa11111m") || !strings.Contains(out, "zzz99999m") {
+		t.Fatalf("her iki kiracı da listelenmedi:\n%s", out)
+	}
+	if !strings.Contains(out, "toAlign") || !strings.Contains(out, "onWake") {
+		t.Fatalf("kovalar adlandırılmadı:\n%s", out)
+	}
+}
+
+// BOŞ SÜRÜKLENME AÇIKÇA SÖYLENMELİ.
+//
+// Sessiz bir boş çıktı, "filo hizalı" ile "komut çalışmadı"yı aynı gösterir —
+// ve bu depo o sınıf sessizliğin bedelini defalarca ödedi.
+func TestFleetDriftSaysAlignedRatherThanPrintingNothing(t *testing.T) {
+	rest := &stubREST{reply: []map[string]any{}}
+	out, err := run(t, rest, "", "fleet", "drift")
+	if err != nil {
+		t.Fatalf("drift: %v", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("boş sürüklenme SESSİZCE geçti — 'hizalı' ile 'komut çalışmadı' ayırt edilemez")
+	}
+}

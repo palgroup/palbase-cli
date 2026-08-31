@@ -69,6 +69,80 @@ func Cmd(r Resolvers) *cobra.Command {
 func fleetCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{Use: "fleet", Short: "Operate the tenant fleet"}
 	cmd.AddCommand(fleetUpgradeCmd(r))
+	cmd.AddCommand(fleetDriftCmd(r))
+	return cmd
+}
+
+// driftRow is one tenant the fleet ledger and the cell disagree about.
+type driftRow struct {
+	Ref      string `json:"ref"`
+	Observed string `json:"observed"`
+	Desired  string `json:"desired"`
+	CellID   string `json:"cell_id"`
+	Bucket   string `json:"bucket"`
+}
+
+// fleetDriftCmd shows where the fleet has drifted from the proven image.
+//
+// WHY THIS EXISTS: the plane has answered this question since the drift
+// endpoint landed, and until now nothing could ASK it — the only client is
+// Studio and that screen does not exist yet. A fleet with gates and no eyes is
+// one an operator can only inspect by rolling it.
+//
+// THE BUCKETS STAY APART. A tenant in `toAlign` is running the WRONG image; one
+// in `onWake` is running NOTHING and will take the current image when it wakes.
+// Measured live 2026-08-31: 37 tenants, 32 of them archived — a single list put
+// 36 rows in front of the operator and buried the handful that were actually
+// wrong.
+func fleetDriftCmd(r Resolvers) *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "drift",
+		Args:  cobra.NoArgs,
+		Short: "Show where the fleet has drifted from the proven image",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var rows []driftRow
+			if err := r.REST().Do(cmd.Context(), http.MethodGet, "/v1/panel/fleet/drift", nil, &rows); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if jsonOut {
+				return encodeJSON(out, rows)
+			}
+			// AN EMPTY ANSWER IS STILL AN ANSWER. Printing nothing makes "the
+			// fleet is aligned" and "the command did nothing" identical, and
+			// this repository has paid for that class of silence more than once.
+			if len(rows) == 0 {
+				fmt.Fprintln(out, "aligned: every tenant is on the proven image")
+				return nil
+			}
+			buckets := map[string][]driftRow{}
+			for _, row := range rows {
+				buckets[row.Bucket] = append(buckets[row.Bucket], row)
+			}
+			for _, b := range []string{"toAlign", "onWake"} {
+				rs := buckets[b]
+				if len(rs) == 0 {
+					continue
+				}
+				fmt.Fprintf(out, "\n%s (%d)\n", b, len(rs))
+				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				for _, row := range rs {
+					// An archived tenant observes NOTHING, and "" would read as
+					// a missing value rather than as the fact it is.
+					observed := row.Observed
+					if observed == "" {
+						observed = "(not running)"
+					}
+					fmt.Fprintf(tw, "  %s\t%s\t%s\n", row.Ref, row.CellID, observed)
+				}
+				_ = tw.Flush()
+			}
+			fmt.Fprintf(out, "\ndesired: %s\n", rows[0].Desired)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }
 
