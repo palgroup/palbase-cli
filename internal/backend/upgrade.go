@@ -22,9 +22,41 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// refPattern is the plane's own rule for a project ref, copied here for one
+// purpose: reading a ref back out of a linked address. Kept narrow on purpose —
+// anything that is not clearly a ref must come back empty rather than be sent
+// at the cloud as a project id.
+var refPattern = regexp.MustCompile(`^[a-z0-9]{4,24}$`)
+
+// refFromTargetURL reads the project ref out of a linked checkout's address.
+//
+// `palbase link` writes only a URL, because that address is all the other
+// target-relative verbs need: push, status and deploys talk to the stack
+// directly. `upgrade` is different — it calls a CLOUD route that names the
+// project — so it reads the ref back out rather than asking for a selection
+// the user already made by linking.
+//
+// A LOCAL STACK YIELDS NOTHING: `localhost` and an IP are not refs, and
+// guessing one would aim an upgrade at a project id that does not exist.
+// Neither is a bare plane host like `api.palbase.studio` — a tenant address has
+// the ref FIRST and at least one label after it.
+func refFromTargetURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	labels := strings.Split(u.Hostname(), ".")
+	if len(labels) < 3 || !refPattern.MatchString(labels[0]) {
+		return ""
+	}
+	return labels[0]
+}
 
 // upgradeResult, düzlemin cevabı.
 //
@@ -59,11 +91,20 @@ serving.`,
 					return err
 				}
 			}
-			sel, err := r.resolve(cmd.Context())
-			if err != nil {
-				return unlinkedOrCloudError(err)
+			// A LINKED CHECKOUT ALREADY NAMES ITS PROJECT — in its address.
+			// Reading it back is what makes `upgrade` behave like `push` and
+			// `status`: the checkout you linked is the project you act on.
+			ref := ""
+			if target, err := ReadTarget(); err == nil {
+				ref = refFromTargetURL(target.URL)
 			}
-			ref := sel.EnvironmentRef()
+			if ref == "" {
+				sel, err := r.resolve(cmd.Context())
+				if err != nil {
+					return unlinkedOrCloudError(err)
+				}
+				ref = sel.EnvironmentRef()
+			}
 			if ref == "" {
 				return errors.New(
 					"no project to upgrade: run `palbase link <project>` first — upgrade moves ONE project's runtime and needs to know which")
