@@ -113,6 +113,7 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'tenancy.test.js'), [
 // `require.main === module`; the only top-level effect is one throwaway temp dir.
 const {
   registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
+  BUNDLED_MODULES_FILE, BUNDLED_EXTRACT_DIR,
   surfaceClassesIn,
 } = require('./build-check.js');
 
@@ -158,9 +159,12 @@ test('controllers bundle keeps ../resources/* external (shared resource module)'
   // (The controller is later skipped at require — no @palbase/backend in the
   // fixture — but the bundled .js this test inspects is already emitted.)
   registerControllers();
-  const controllerBundle = path.join(BUNDLED_CONTROLLERS_DIR, 'app.module.js');
-  assert.ok(fs.existsSync(controllerBundle), 'the bundled MODULE must exist — it is the entry now');
-  const bundled = fs.readFileSync(controllerBundle, 'utf8');
+  // THE bundle the container is asked about — one file, one entry, the shape
+  // the deploy produces. It sits one directory below BUNDLE_ROOT exactly as the
+  // per-module bundles did, so `../resources/env` still resolves to the shared
+  // copy beside it.
+  assert.ok(fs.existsSync(BUNDLED_MODULES_FILE), 'the unified module bundle must exist');
+  const bundled = fs.readFileSync(BUNDLED_MODULES_FILE, 'utf8');
   assert.match(bundled, /require\("\.\.\/resources\/env"\)/,
     'the module bundle must require("../resources/env") — external, resolved to the shared instance');
   assert.doesNotMatch(bundled, /RESOURCE_INLINE_CANARY/,
@@ -344,13 +348,17 @@ test('a non-controller file in controllers/ is neither bundled nor loaded', (t) 
   bundleResources();
   const reg = registerControllers();
 
-  assert.ok(!fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'tenancy.test.js')),
+  assert.ok(!fs.existsSync(path.join(BUNDLED_EXTRACT_DIR, 'tenancy.test.js')),
     'only *.module.* files are entry points, exactly as on deploy');
   const offending = (reg.skipped || []).filter((s) => /tenancy\.test/.test(s.file));
   assert.deepEqual(offending, [],
     'a file the deploy never loads must not produce a build failure');
-  assert.ok(fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'app.module.js')),
-    'the module — the entry — is still bundled');
+  // BOTH compilations of the module: the per-module one the deploy extractor
+  // reads, and the unified one the container is asked about.
+  assert.ok(fs.existsSync(path.join(BUNDLED_EXTRACT_DIR, 'app.module.js')),
+    'the module — the entry — is still bundled for the extractor');
+  assert.ok(fs.existsSync(BUNDLED_MODULES_FILE),
+    'the module must also reach the unified bundle the container reads');
 });
 
 // Narrowing the scan must NOT cost the silent-failure signal it was guarding:

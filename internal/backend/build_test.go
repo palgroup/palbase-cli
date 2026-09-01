@@ -965,3 +965,191 @@ func TestBuildAcceptsATsconfigWithNoIncludeList(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, runBuild(context.Background(), dir, &out))
 }
+
+// TestASharedModuleIsNotDuplicatedPerBundle locks the parity that `palbase
+// build` exists to provide, on the one shape a module system exists FOR.
+//
+// The local check bundled every `*.module.ts` as its OWN entry
+// (`bun build --outdir` over N entries), and Bun gives an independent bundle per
+// entry: a class two modules share is COMPILED TWICE, once into each. The
+// container decides ownership by identity, so `CoreModule` registered its
+// exports with copy A while `FeatureService` asked for copy B — and the build
+// refused a correct project with
+//
+//	private dependency: CoreService is internal to CoreModule — it is not exported
+//
+// while `palbase push`, which writes ONE generated entry importing every module
+// and bundles that (stack_bundle.go bundleEntry → `--outfile`), accepted it.
+// A local gate that refuses what the deploy accepts is the same defect as one
+// that accepts what the deploy refuses; this one just fails in the direction
+// that looks safe.
+//
+// Ölçüldü 01.09.2026, 50 modüllük bir ağaçta: çok-girişli derleme her bundle'a
+// kendi `class CoreService`'ini koydu (3/3 dosyada bir kopya), tek-girişli
+// derleme bir tane koydu.
+func TestASharedModuleIsNotDuplicatedPerBundle(t *testing.T) {
+	dir := t.TempDir()
+	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelPack()
+	sdk := packLocalSDK(t, ctxPack)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	if !sdkHasControllerRegistry(t, dir) {
+		t.Skip("the packed SDK exposes no controller registry")
+	}
+	useTestParserCache(t)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "services"), 0o755))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "core.service.ts"), []byte(`
+import { Injectable } from "@palbase/backend";
+
+@Injectable()
+export class CoreService {
+  greeting(): string {
+    return "ok";
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "core.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreService } from "./services/core.service.ts";
+
+@Module({ providers: [CoreService as Token], exports: [CoreService as Token] })
+export class CoreModule {}
+`), 0o644))
+
+	// TWO modules depending on the shared one, and TWO is the number that
+	// matters. With one consumer the bug hides: every module bundle re-registers
+	// `CoreModule` with its own copy, the LAST registration wins, and the single
+	// consumer happens to be holding exactly that copy. It takes a second
+	// consumer for the winner to be somebody else's copy — which is why this
+	// fixture has two, and why a one-consumer version of this test passed
+	// against the broken bundler.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "feature.service.ts"), []byte(`
+import { Injectable } from "@palbase/backend";
+import { CoreService } from "./core.service.ts";
+
+@Injectable()
+export class FeatureService {
+  constructor(private readonly core: CoreService) {}
+  status(): string {
+    return this.core.greeting();
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "feature.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+import { FeatureService } from "../services/feature.service.ts";
+
+export const StatusResponse = z.object({ status: z.string() });
+export type StatusResponse = z.infer<typeof StatusResponse>;
+
+@Controller("/status", { auth: false })
+export class FeatureController {
+  constructor(private readonly svc: FeatureService) {}
+
+  @Get("")
+  read(): StatusResponse {
+    return { status: this.svc.status() };
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "feature.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreModule } from "./core.module.ts";
+import { FeatureController } from "./controllers/feature.controller.ts";
+import { FeatureService } from "./services/feature.service.ts";
+
+@Module({
+  controllers: [FeatureController as Token],
+  providers: [FeatureService as Token],
+  imports: [CoreModule as Token],
+})
+export class FeatureModule {}
+`), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "second.service.ts"), []byte(`
+import { Injectable } from "@palbase/backend";
+import { CoreService } from "./core.service.ts";
+
+@Injectable()
+export class SecondService {
+  constructor(private readonly core: CoreService) {}
+  status(): string {
+    return this.core.greeting();
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "second.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+import { SecondService } from "../services/second.service.ts";
+
+export const SecondResponse = z.object({ status: z.string() });
+export type SecondResponse = z.infer<typeof SecondResponse>;
+
+@Controller("/second", { auth: false })
+export class SecondController {
+  constructor(private readonly svc: SecondService) {}
+
+  @Get("")
+  read(): SecondResponse {
+    return { status: this.svc.status() };
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreModule } from "./core.module.ts";
+import { SecondController } from "./controllers/second.controller.ts";
+import { SecondService } from "./services/second.service.ts";
+
+@Module({
+  controllers: [SecondController as Token],
+  providers: [SecondService as Token],
+  imports: [CoreModule as Token],
+})
+export class SecondModule {}
+`), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuild(ctx, dir, &out),
+		"a module that imports another module's EXPORTED class was refused:\n%s", out.String())
+	require.Contains(t, out.String(), "build OK")
+	require.Contains(t, out.String(), "/status")
+	require.Contains(t, out.String(), "/second")
+
+	// NEGATIVE CONTROL, in the same conditions: drop the export and the SAME
+	// build must refuse. Without this the test above passes for a build that
+	// stopped checking boundaries at all.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "core.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreService } from "./services/core.service.ts";
+
+@Module({ providers: [CoreService as Token], exports: [] })
+export class CoreModule {}
+`), 0o644))
+	out.Reset()
+	require.Error(t, runBuild(ctx, dir, &out),
+		"an unexported dependency crossed a module boundary:\n%s", out.String())
+	require.Contains(t, out.String(), "private dependency")
+
+	// And the route must be attributed to the file its controller was WRITTEN
+	// in. Every route used to print the first module file the loop happened to
+	// load, which at 50 modules names the wrong file 49 times out of 50.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "core.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreService } from "./services/core.service.ts";
+
+@Module({ providers: [CoreService as Token], exports: [CoreService as Token] })
+export class CoreModule {}
+`), 0o644))
+	out.Reset()
+	require.NoError(t, runBuild(ctx, dir, &out))
+	require.Contains(t, out.String(), "controllers/feature.controller.ts",
+		"the route table names a file the controller was not written in:\n%s", out.String())
+}
