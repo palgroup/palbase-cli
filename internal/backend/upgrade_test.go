@@ -1,6 +1,11 @@
 package backend
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/palgroup/palbase-cli/internal/transport"
+)
 
 // A LINKED CHECKOUT ALREADY NAMES ITS PROJECT — IN ITS ADDRESS.
 //
@@ -39,4 +44,76 @@ func TestRefFromTargetURLRefusesWhatIsNotARef(t *testing.T) {
 			t.Fatalf("refFromTargetURL(%q) = %q, want empty", u, got)
 		}
 	}
+}
+
+// UZUN BİR TAKAS, BİR KAPIYI AŞAR — ve CLI bunu başarısızlık sanmamalı.
+//
+// CANLIDA ÖLÇÜLDÜ (2026-09-01): `palbase upgrade` bir kiracıyı eski imajdan
+// kanıtlanmış imaja GERÇEKTEN taşıdı (pod öncesi `sha-f2a96b7b`, sonrası
+// `sha-6a4eebea9`, healthz 200) ama kullanıcıya şunu yazdı:
+//
+//	http_error (503): upstream connect error or disconnect/reset before headers
+//
+// Sebep: sunucu takas boyunca 120 sn'ye kadar bekliyor ve bu POST bir pod
+// değişimini kapsıyor; kapı bağlantıyı kesiyor. İstek idempotent — hedef her
+// zaman kanıtlanmış imaj — o yüzden doğru davranış TAŞIYICIYA İNANMAK DEĞİL,
+// SONUCU DOĞRULAMAK.
+//
+// Başarılı bir işlemi "başarısız" diye raporlamak, kullanıcıyı ya tekrar
+// denemeye ya da taşınmış bir kiracıyı taşınmamış sanmaya iter.
+func TestUpgradeConfirmsAfterADroppedConnection(t *testing.T) {
+	t.Run("düşen bağlantıdan sonra sonucu DOĞRULAR", func(t *testing.T) {
+		calls := 0
+		rest := restFunc(func(_ context.Context, _, _ string, _, out any) error {
+			calls++
+			if calls == 1 {
+				return &transport.APIError{Code: "http_error", Status: 503, Description: "connection termination"}
+			}
+			*(out.(*upgradeResult)) = upgradeResult{Changed: false, Image: "img:proven"}
+			return nil
+		})
+		got, dropped, err := upgradeWithConfirmation(context.Background(), rest, "/p", 3, 0)
+		if err != nil {
+			t.Fatalf("doğrulama başarısız: %v", err)
+		}
+		if !dropped {
+			t.Error("bağlantının düştüğü BİLDİRİLMELİ — kullanıcı ne olduğunu bilmeli")
+		}
+		if got.Image != "img:proven" {
+			t.Errorf("imaj %q", got.Image)
+		}
+		if calls != 2 {
+			t.Errorf("çağrı sayısı %d, 2 bekleniyordu", calls)
+		}
+	})
+
+	t.Run("kalıcı 5xx HÂLÂ hata", func(t *testing.T) {
+		rest := restFunc(func(_ context.Context, _, _ string, _, _ any) error {
+			return &transport.APIError{Code: "http_error", Status: 503}
+		})
+		if _, _, err := upgradeWithConfirmation(context.Background(), rest, "/p", 3, 0); err == nil {
+			t.Fatal("kalıcı arıza sessizce başarı sayılamaz")
+		}
+	})
+
+	t.Run("4xx yeniden DENENMEZ — reddin sebebi geçici değil", func(t *testing.T) {
+		calls := 0
+		rest := restFunc(func(_ context.Context, _, _ string, _, _ any) error {
+			calls++
+			return &transport.APIError{Code: "bad_request", Status: 400, Description: "kuşağı bilinmiyor"}
+		})
+		if _, _, err := upgradeWithConfirmation(context.Background(), rest, "/p", 3, 0); err == nil {
+			t.Fatal("400 hata olarak dönmeli")
+		}
+		if calls != 1 {
+			t.Errorf("4xx %d kez denendi — bir kez denenmeliydi", calls)
+		}
+	})
+}
+
+// restFunc, REST arayüzünü tek bir fonksiyondan karşılar.
+type restFunc func(ctx context.Context, method, path string, body, out any) error
+
+func (f restFunc) Do(ctx context.Context, method, path string, body, out any) error {
+	return f(ctx, method, path, body, out)
 }

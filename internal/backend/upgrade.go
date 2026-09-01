@@ -17,6 +17,7 @@ package backend
 // hazır olduğunda devrediliyor. Komut, düzlem takası bitirene kadar bekliyor.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
+	"time"
 )
 
 // refPattern is the plane's own rule for a project ref, copied here for one
@@ -66,6 +69,72 @@ func refFromTargetURL(raw string) string {
 type upgradeResult struct {
 	Image   string `json:"image"`
 	Changed bool   `json:"changed"`
+}
+
+// UZUN BİR TAKAS BİR KAPIYI AŞAR — ve o kesinti bir BAŞARISIZLIK DEĞİLDİR.
+//
+// Sunucu yükseltmeyi kenar tutucusunun ardında yapıyor ve yeni runtime servise
+// girene kadar bekliyor: bu POST bir pod değişimini KAPSIYOR ve dakikalar
+// sürebiliyor. Canlıda ölçüldü (2026-09-01): çağrı `http_error (503):
+// connection termination` ile döndü, ama kiracı GERÇEKTEN taşınmıştı
+// (`sha-f2a96b7b` → `sha-6a4eebea9`, healthz 200). Kullanıcıya yalan söylendi.
+//
+// İSTEK İDEMPOTENT — hedef her zaman kanıtlanmış imaj, seçenek yok — o yüzden
+// doğru davranış taşıyıcıya inanmak değil SONUCU DOĞRULAMAK. Yalnız 5xx ve
+// taşıma arızaları yeniden denenir: bir 4xx, düzlemin GEREKÇELİ reddidir ve
+// tekrar sormak onu değiştirmez.
+// upgradeDoer, bu yardımcının ihtiyaç duyduğu TEK fiil. `REST`'in tamamını
+// istemek, çağıranı ilgisiz bir yükleme fiiline bağlardı.
+// Takasın kendisi dakikalar sürebiliyor; dört deneme × 5 sn, kapının kestiği
+// bir bağlantıdan sonra düzleme sormak için yeterli ve bir arızayı da uzun
+// süre gizlemiyor.
+const (
+	upgradeAttempts   = 4
+	upgradeRetryDelay = 5 * time.Second
+)
+
+type upgradeDoer interface {
+	Do(ctx context.Context, method, path string, body, out any) error
+}
+
+func upgradeWithConfirmation(
+	ctx context.Context, rest upgradeDoer, path string, attempts int, delay time.Duration,
+) (upgradeResult, bool, error) {
+	var out upgradeResult
+	dropped := false
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		out = upgradeResult{}
+		err := rest.Do(ctx, http.MethodPost, path, nil, &out)
+		if err == nil {
+			return out, dropped, nil
+		}
+		lastErr = err
+		if !upgradeIsRetryable(err) {
+			return upgradeResult{}, false, err
+		}
+		dropped = true
+		if i+1 < attempts && delay > 0 {
+			select {
+			case <-ctx.Done():
+				return upgradeResult{}, dropped, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return upgradeResult{}, dropped, lastErr
+}
+
+// upgradeIsRetryable: yalnız düzlemin CEVAP VEREMEDİĞİ hâller. Bir 4xx
+// gerekçeli bir reddir; onu tekrarlamak yalnız aynı reddi bir kez daha alır.
+func upgradeIsRetryable(err error) bool {
+	var api *transport.APIError
+	if errors.As(err, &api) {
+		return api.Status == 0 || api.Status >= 500
+	}
+	// Taşıma katmanının kendi arızası (bağlantı kesildi, zaman aşımı):
+	// düzlemin ne dediğini HİÇ öğrenemedik, o yüzden sormaya devam.
+	return true
 }
 
 func newUpgradeCmd(r Resolvers) *cobra.Command {
@@ -110,9 +179,10 @@ serving.`,
 					"no project to upgrade: run `palbase link <project>` first — upgrade moves ONE project's runtime and needs to know which")
 			}
 
-			var out upgradeResult
 			path := "/v1/cloud/projects/" + url.PathEscape(ref) + "/upgrade"
-			if err := r.REST().Do(cmd.Context(), http.MethodPost, path, nil, &out); err != nil {
+			out, dropped, err := upgradeWithConfirmation(
+				cmd.Context(), r.REST(), path, upgradeAttempts, upgradeRetryDelay)
+			if err != nil {
 				return err
 			}
 			if jsonOut {
@@ -122,6 +192,14 @@ serving.`,
 			}
 			// FR-091: çıktı HANGİ imaja geçildiğini söylemek ZORUNDA. "Tamam"
 			// demek, kullanıcıya neyi koşturduğunu söylememektir.
+			// BAĞLANTI DÜŞTÜYSE BUNU SÖYLE. Sessizce başarı yazmak, kullanıcıya
+			// gördüğü duraksamayı açıklamaz; "başarısız" yazmak ise YALAN olurdu —
+			// düzlem soruldu ve cevabı bu.
+			if dropped {
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"the connection dropped during the swap; the plane reports %s runs %s\n", ref, out.Image)
+				return nil
+			}
 			if !out.Changed {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s already runs the proven image %s\n", ref, out.Image)
 				return nil
