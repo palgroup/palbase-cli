@@ -85,7 +85,6 @@ fs.writeFileSync(path.join(BUNDLE_ROOT, 'package.json'), '{"type":"commonjs"}\n'
 // installed instance, and .ts is added to the resolve set so a `.js`-spelled
 // import of a `.ts` source (the TS-idiomatic ESM form) still resolves.
 const ESBUILD_EXTERNAL = '@palbase/backend';
-const ESBUILD_RESOLVE_EXTENSIONS = '.ts,.tsx,.js,.jsx,.json';
 
 // Extra externals for the CONTROLLERS bundle ONLY — the project's OWN
 // resources/* relative imports stay external, mirroring the deploy bundler's
@@ -107,6 +106,7 @@ const returnTypes = require('./return_types.js');
 // (modules/backend/internal/runtime/throw_analysis.js), the same parity rule
 // as return_types.js: build and deploy must infer identical error sets.
 const throwAnalysis = require('./throw_analysis.js');
+const generics = require('./generics.js');
 // TxPlan Ref-truthiness build gate — VERBATIM-identical to the deploy copy
 // (modules/backend/internal/runtime/tx_analysis.js), same parity rule. Unlike
 // its two siblings above (return-schema binding, throw inference — both DX/
@@ -222,12 +222,20 @@ function bundleSrcDir(srcDir, outDir, externals = [], entryFilter = null) {
   if (entries.length === 0) return false;
 
   fs.mkdirSync(outDir, { recursive: true });
+  // BUN, not esbuild — and this is the change that makes a local build able to
+  // answer the same question the deploy answers.
+  //
+  // esbuild NEVER emits `emitDecoratorMetadata` (the maintainer's standing
+  // position, measured: zero `__metadata` calls in its output). The container
+  // reads that metadata to know what a constructor asks for, so a bundle built
+  // by esbuild could not be validated here AT ALL: `palbase build` would report
+  // success on a graph the deploy refuses. Bun emits it, and Bun is already a
+  // hard requirement for `push` and `plan` (stack_bundle.go), so nothing new is
+  // being asked of anyone.
   const args = [
-    '--yes', 'esbuild',
-    '--bundle',
-    '--platform=node',
+    'build',
+    '--target=node',
     '--format=cjs',
-    '--target=es2022',
     // Preserve `class.name` through bundling — prod parity with the deploy
     // bundler (modules/backend internal/deploy/bundler.go, same flag). The
     // dotted operationId namespace derives from the live Ctrl.name; when a
@@ -236,23 +244,20 @@ function bundleSrcDir(srcDir, outDir, externals = [], entryFilter = null) {
     // TodosController2). Not a tunable — a correctness requirement, always on.
     '--keep-names',
     `--outdir=${outDir}`,
-    `--outbase=${srcDir}`,
-    `--resolve-extensions=${ESBUILD_RESOLVE_EXTENSIONS}`,
-    `--external:${ESBUILD_EXTERNAL}`,
-    ...externals.map((e) => `--external:${e}`),
+    `--root=${srcDir}`,
+    `--external=${ESBUILD_EXTERNAL}`,
+    ...externals.map((e) => `--external=${e}`),
     ...entries,
   ];
   // Run from PROJECT_ROOT so node_modules resolution (for any non-external dep
-  // a handler/service imports) + relative imports anchor to the project. esbuild
-  // is resolved via `npx --yes` — the same way the CLI's env-gen bundling shells
-  // out (bundleSchemaTS), so no separate install is required.
+  // a handler/service imports) + relative imports anchor to the project.
   // NODE_PATH is PROJECT_ROOT/node_modules and must STAY that — do NOT "unify" it
   // with RUNTIME_MODULES. esbuild honours NODE_PATH, so pointing it at the real
   // node_modules lets a bare `import "zod"` resolve here while the deploy (which
   // bundles from a node_modules-free tarball) fails on it — the exact false-green
   // `palbase build` used to print. Under `palbase build` this path does not exist,
   // which is what makes the local bundle match the deploy.
-  execFileSync('npx', args, {
+  execFileSync('bun', args, {
     cwd: PROJECT_ROOT,
     env: Object.assign({}, process.env, { NODE_PATH: path.join(PROJECT_ROOT, 'node_modules') }),
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -277,7 +282,12 @@ function rmBundledTree(outDir) {
 // top-level code threw, and the build printed
 // "✗ DEPLOY WOULD FAIL: controllers/tenancy.test.js — Invalid URL" about a file
 // no deploy would ever load.
-const CONTROLLER_ENTRY_RE = /\.controller\.(c?ts|tsx|c?js|mjs)$/i;
+// THE bundle entry: a module file, and nothing else.
+//
+// It used to be `*.controller.ts`, which made the DIRECTORY the declaration.
+// A module imports the classes it owns, so bundling one reaches everything that
+// project declares — and nothing it does not.
+const MODULE_ENTRY_RE = /\.module\.(c?ts|tsx|c?js|mjs)$/i;
 
 // What the DEPLOY treats as a surface definition, spelled the same way here.
 //
@@ -291,7 +301,7 @@ const CONTROLLER_ENTRY_RE = /\.controller\.(c?ts|tsx|c?js|mjs)$/i;
 const SURFACE_ENTRY_RE = /^(?!.*\.test\.(c?ts|c?js|mts|mjs)$).*\.(c?ts|tsx|c?js|mjs)$/i;
 // Bundled output is always plain JS (esbuild), so the bundled-side twin of the
 // rule above drops the TypeScript extensions.
-const BUNDLED_CONTROLLER_RE = /\.controller\.(c?js|mjs)$/i;
+const BUNDLED_MODULE_RE = /\.module\.(c?js|mjs)$/i;
 // Every source extension the controllers/ tree may legitimately contain. Used
 // only to answer "does this directory hold source at all" when no controller
 // entry was found — the difference between an empty directory (fine) and a
@@ -484,12 +494,21 @@ function registerControllers() {
     // Inject return-type → response-schema bindings into a staging copy, then
     // bundle THAT. A return-type violation (missing annotation, inline/union
     // type, unimported schema) throws here and is surfaced loudly below.
-    const staged = stageControllersWithReturnBindings(CONTROLLERS_DIR, STAGED_CONTROLLERS_DIR);
+    // The WHOLE project is staged: a module imports its controllers by relative
+    // path, so staging only controllers/ leaves the module pointing at the
+    // un-staged sources and the injected return types are bypassed.
+    // Unresolvable constructor SHAPES, refused at source before anything is
+    // bundled — the same call the deploy stager makes, over the same tree.
+    // Generics and unions cannot be injected honestly (metadata erases the type
+    // arguments; the two transpilers disagree on unions), and neither is
+    // visible at runtime.
+    generics.assertNoGenericDepsInTree(PROJECT_ROOT);
+    const staged = stageControllersWithReturnBindings(PROJECT_ROOT, STAGED_CONTROLLERS_DIR);
     // Controllers keep their `../resources/*` imports EXTERNAL so they resolve
     // to the shared BUNDLE_ROOT/resources/ copy (bundled by bundleResources
     // BEFORE this runs — main() ordering). Deploy parity: bundler.go sets
     // ExternalResourceImports only for the controllers bundle.
-    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR, CONTROLLER_RESOURCE_EXTERNALS, CONTROLLER_ENTRY_RE);
+    bundleSrcDir(staged, BUNDLED_CONTROLLERS_DIR, CONTROLLER_RESOURCE_EXTERNALS, MODULE_ENTRY_RE);
   } catch (err) {
     // A bundle error (syntax error, unresolved import) OR a return-type
     // violation must be LOUD — otherwise the dir scan below finds nothing and
@@ -505,46 +524,61 @@ function registerControllers() {
     // endpoints yet — fine), and a controllers/ full of source that registers
     // NOTHING, which deploys as a success serving zero endpoints. Narrowing the
     // scan to `.controller.` must not cost us the second signal.
-    const sourceFiles = walk(CONTROLLERS_DIR).filter((f) => CONTROLLER_SOURCE_RE.test(path.basename(f)));
-    if (sourceFiles.length > 0) {
-      const err = 'only *.controller.ts files register routes; controllers/ has source files but none of them';
-      log(`controllers/ has no *.controller.ts — ${err}`);
-      return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: err };
-    }
-    log('0 route(s) (no controllers/*.controller.ts found)');
-    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped };
+    const err =
+      'no *.module.ts under this project — a module is what says which classes exist, ' +
+      'who owns them and what they may reach, and a project with none declares nothing at all';
+    log(`no modules — ${err}`);
+    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: err };
   }
 
   let sawControllerFiles = false;
   let staleSDKSignature = false;
+
+  // ONE PASS OVER THE MODULES, then one question to the container.
+  //
+  // A module file registers everything it owns as it is required, so the loop
+  // below only has to LOAD them; what exists afterwards is what the container is
+  // asked about. This is also what replaced the per-controller
+  // `assertZeroArgConstructor` call: a controller that takes constructor
+  // arguments is no longer a fault, and the faults that remain — an unresolvable
+  // dependency, a boundary crossed without an import, a cycle, a class no module
+  // owns — are exactly what `createApp` refuses on deploy. Asking the container
+  // here is what makes the two decisions the SAME decision.
+  const loadedModules = [];
   for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
-    if (!BUNDLED_CONTROLLER_RE.test(path.basename(file))) continue;
+    if (!BUNDLED_MODULE_RE.test(path.basename(file))) continue;
     sawControllerFiles = true;
-    let Ctrl;
     try {
-      Ctrl = loadControllerClass(file);
+      delete require.cache[require.resolve(file)];
+      require(file);
+      loadedModules.push(file);
     } catch (err) {
       // A decorator that resolved to `undefined` (stale/missing @palbase/backend)
       // throws "... is not a function" at module-eval time. Flag it so main()
       // can give an actionable message instead of a bare skip.
       if (/is not a function/.test(err.message)) staleSDKSignature = true;
       skipped.push({ file: bundledToSrcRel(file), error: err.message });
-      continue;
     }
-    // A controller the runtime cannot construct is a deploy that comes up and
-    // then fails — or worse, comes up with `undefined` fields. The SDK owns the
-    // rule and the message; asking it here is what moves the answer from BOOT
-    // (where it takes the deploy down) to BUILD (where the author is looking).
-    // Older SDKs do not export it, and an older SDK is not a reason to refuse.
+  }
+
+  // THE decision, taken once, by the same code the deploy runs.
+  let container = null;
+  if (loadedModules.length > 0) {
     try {
       const sdk = require('@palbase/backend');
-      if (typeof sdk.assertZeroArgConstructor === 'function') {
-        sdk.assertZeroArgConstructor(Ctrl, 'controller');
+      if (typeof sdk.buildContainer === 'function') {
+        container = sdk.buildContainer();
+        if (typeof sdk.assertNoOrphanEntryPoints === 'function') {
+          sdk.assertNoOrphanEntryPoints(registeredControllers(), container.owned);
+        }
       }
     } catch (err) {
-      skipped.push({ file: bundledToSrcRel(file), error: err.message });
-      continue;
+      skipped.push({ file: 'modules', error: err.message });
+      return { sawControllerFiles, staleSDKSignature, routeCount: 0, skipped, buildError: err.message };
     }
+  }
+
+  for (const Ctrl of registeredControllers()) {
     const meta = readControllerMeta(Ctrl);
     const routeList = readControllerRoutes(Ctrl);
     for (const route of routeList) {
@@ -559,7 +593,7 @@ function registerControllers() {
         urlPattern,
         regex,
         paramNames,
-        controllerPath: file,
+        controllerPath: loadedModules[0] ?? BUNDLED_CONTROLLERS_DIR,
         controllerName: deriveControllerName(Ctrl),
         routeKey,
       });
@@ -585,12 +619,26 @@ function registerControllers() {
   //
   // A file that failed to LOAD is already reported as `skipped`; naming it twice
   // would turn one fault into two findings.
-  const answered = new Set();
-  for (const route of routes.values()) answered.add(withoutExtension(bundledToSrcRel(route.controllerPath)));
+  // Compared by CLASS NAME rather than by path, because a route no longer knows
+  // which file its controller was written in: the bundle entry is a module, and
+  // one module reaches many files.
+  //
+  // The shape this catches is the one modules made possible — a controller
+  // written and then never listed. It never registers, so it produces no routes
+  // and no error either: the class simply is not in the bundle. Naming the file
+  // is what turns that silence into a sentence.
+  // Raw class names on both sides: `deriveControllerName` strips the
+  // "Controller" suffix and lowercases, which is right for an operationId and
+  // wrong for matching what the source file declares.
+  const answered = new Set(
+    registeredControllers()
+      .map((c) => (typeof c === 'function' ? c.name : ''))
+      .filter(Boolean),
+  );
   for (const s of skipped) answered.add(withoutExtension(s.file));
   const silent = [];
-  for (const src of sourceControllerFiles()) {
-    if (!answered.has(withoutExtension(src))) silent.push(src);
+  for (const { file, className } of sourceControllerFiles()) {
+    if (className && !answered.has(className)) silent.push(file);
   }
 
   return { sawControllerFiles, staleSDKSignature, routeCount: routes.size, skipped, silent };
@@ -602,7 +650,18 @@ function sourceControllerFiles() {
   if (!fs.existsSync(CONTROLLERS_DIR)) return [];
   return walk(CONTROLLERS_DIR)
     .filter((f) => f.endsWith('.controller.ts'))
-    .map((f) => path.join('controllers', path.relative(CONTROLLERS_DIR, f)));
+    .map((f) => {
+      const rel = path.join('controllers', path.relative(CONTROLLERS_DIR, f));
+      let className = null;
+      try {
+        const m = /@Controller\s*\([\s\S]*?\)\s*(?:@[\w$]+\s*\([\s\S]*?\)\s*)*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/
+          .exec(fs.readFileSync(f, 'utf8'));
+        className = m ? m[1] : null;
+      } catch {
+        /* unreadable is reported elsewhere */
+      }
+      return { file: rel, className };
+    });
 }
 
 // withoutExtension compares a SOURCE path with a BUNDLED one: the bundler emits
@@ -624,7 +683,7 @@ function deployExtractErrors() {
   if (!fs.existsSync(BUNDLED_CONTROLLERS_DIR)) return out;
   const extractor = path.join(__dirname, 'extract_meta.js');
   for (const file of walk(BUNDLED_CONTROLLERS_DIR)) {
-    if (!BUNDLED_CONTROLLER_RE.test(path.basename(file))) continue;
+    if (!BUNDLED_MODULE_RE.test(path.basename(file))) continue;
     const srcRel = bundledToSrcRel(file);
     let stdout;
     try {
@@ -688,9 +747,16 @@ function esbuildErr(err) {
 
 // walk yields every file under dir (recursive). Returns an array so callers can
 // iterate without a callback.
+// Directories that are never a tenant's source.
+//
+// Skipped by NAME, not by type: node_modules is often a SYMLINK and
+// `isDirectory()` is false for one, so a type-gated check walks into it.
+const WALK_SKIP = new Set(['node_modules', 'dist', 'build', '.git']);
+
 function walk(dir) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (WALK_SKIP.has(entry.name) || entry.name.startsWith('.palbase')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walk(full));
     else out.push(full);

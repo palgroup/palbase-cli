@@ -164,9 +164,18 @@ func npmInstallProject(t *testing.T, dir string, deps ...string) bool {
 
 // npmInstallBackend installs @palbase/backend + the extractor's transitive dep
 // into dir/node_modules, with the typescript a well-behaved project has today.
+// The LOCAL SDK, not the published one.
+//
+// These tests lock `palbase build` against `palbase push` — the same decision,
+// twice. That decision now runs through the container, and the published SDK
+// has no `@Module` at all, so a build against it would prove nothing about the
+// code that ships. `plan_test.go` made the same move for the same reason.
 func npmInstallBackend(t *testing.T, dir string) bool {
 	t.Helper()
-	return npmInstallProject(t, dir, "@palbase/backend", "typescript@^5", "zod-to-json-schema")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	sdk := packLocalSDK(t, ctx)
+	return npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema")
 }
 
 // useTestParserCache points the CLI's tool cache (where ensureParserTS installs
@@ -248,6 +257,17 @@ func writeFixture(t *testing.T, dir, controllerTS string) {
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "models"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(goodModelTS), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "todos.controller.ts"), []byte(controllerTS), 0o644))
+	// A project declares at least one module: it is the bundle entry, and what
+	// says which classes exist and who owns them. Written by name-agnostic
+	// re-export so a fixture can rename its controller class without touching
+	// this line.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import * as controllers from "./controllers/todos.controller.ts";
+
+@Module({ controllers: Object.values(controllers).filter((v) => typeof v === "function") as Token[] })
+export class AppModule {}
+`), 0o644))
 }
 
 // TestCheckMode_CentauriClassIsCaught is the cross-boundary lock (M1): a real
@@ -292,7 +312,9 @@ func TestCheckMode_CentauriClassIsCaught(t *testing.T) {
 // this goes RED with the parser error.
 func TestCheckMode_UserTypeScript7StillBuilds(t *testing.T) {
 	dir := t.TempDir()
-	if !npmInstallProject(t, dir, "@palbase/backend", "typescript@7", "zod-to-json-schema") {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if !npmInstallProject(t, dir, packLocalSDK(t, ctx), "typescript@7", "zod-to-json-schema") {
 		t.Skip("node/npm unavailable or install failed")
 	}
 	// Guard the guard: if npm ever stops serving a 7.x here, the test would
@@ -310,7 +332,9 @@ func TestCheckMode_UserTypeScript7StillBuilds(t *testing.T) {
 // (nothing forces them to) must still build.
 func TestCheckMode_NoTypeScriptInProjectStillBuilds(t *testing.T) {
 	dir := t.TempDir()
-	if !npmInstallProject(t, dir, "@palbase/backend", "zod-to-json-schema") {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if !npmInstallProject(t, dir, packLocalSDK(t, ctx), "zod-to-json-schema") {
 		t.Skip("node/npm unavailable or install failed")
 	}
 	_, err := os.Stat(filepath.Join(dir, "node_modules", "typescript"))
@@ -396,6 +420,13 @@ export default class TodosController {
 }
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "todos.controller.ts"), []byte(controller), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import * as controllers from "./controllers/todos.controller.ts";
+
+@Module({ controllers: Object.values(controllers).filter((v) => typeof v === "function") as Token[] })
+export class AppModule {}
+`), 0o644))
 
 	// A package nobody installed and nobody declared.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "models", "todo.ts"), []byte(`import { z } from "a-package-that-does-not-exist";
@@ -571,16 +602,20 @@ func TestBuildIgnoresAConfigDirectoryEntirely(t *testing.T) {
 	require.NotContains(t, out.String(), "config:", "the build still reports configuration it no longer carries")
 }
 
-// TestBuildAcceptsAControllerWithNoExport is one of two defects the CLI harness
-// found the first time it ran, against this repository's own fixture.
+// A controller a module cannot NAME is refused, and the refusal says so.
 //
-// `@Controller` records the class as it decorates it, so a controller file needs
-// no export — the SDK documents that and the runtime reads the registry. The
-// local gate did not follow: it insisted on a default export and refused every
-// file written the current way, on a project `palbase push` deploys happily. A
-// gate that refuses what the deploy accepts is worse than no gate, because it
-// teaches people to stop running it.
-func TestBuildAcceptsAControllerWithNoExport(t *testing.T) {
+// This test used to assert the opposite — that an unexported controller builds —
+// and it was right for its time: `@Controller` registers the class as it
+// decorates it, so the file needed no export and a gate that demanded one
+// refused what the deploy accepted.
+//
+// Modules changed the premise, not the principle. A module lists the classes it
+// owns, and listing something requires a reference to it; a class nobody can
+// name is a class no module can own, and a class no module owns is refused at
+// boot (FR-035). So the export is no longer ceremony — it is how ownership is
+// expressible at all. What the gate must still do is REFUSE THE SAME THING THE
+// DEPLOY REFUSES, and name it.
+func TestAControllerNoModuleCanNameIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelPack()
@@ -613,10 +648,39 @@ class HealthController {
 }
 `), 0o644))
 
+	// No module — there is nothing to list an unexported class in.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	var out bytes.Buffer
-	require.NoError(t, runBuild(ctx, dir, &out), "an unexported controller was refused:\n%s", out.String())
+	err := runBuild(ctx, dir, &out)
+	require.Error(t, err, "a controller no module can name was accepted:\n%s", out.String())
+	require.Contains(t, out.String(), "module",
+		"the refusal must say what is missing, not just that something is")
+
+	// NEGATIVE CONTROL: export it, list it, and the same tree builds.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "health.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+
+export const HealthResponse = z.object({ status: z.string() });
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
+@Controller("/health", { auth: false })
+export class HealthController {
+  @Get("")
+  check(): HealthResponse {
+    return { status: "ok" };
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { HealthController } from "./controllers/health.controller.ts";
+
+@Module({ controllers: [HealthController as Token] })
+export class AppModule {}
+`), 0o644))
+	out.Reset()
+	require.NoError(t, runBuild(ctx, dir, &out), "a listed controller was refused:\n%s", out.String())
 	require.Contains(t, out.String(), "build OK")
 	require.Contains(t, out.String(), "/health")
 }

@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"net/http"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,6 +76,18 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	blindSpots := reportIncludeBlindSpots(cwd, out)
 	if deadDecl || blindSpots {
 		return fmt.Errorf("build failed")
+	}
+
+	// BUN, said in the same words `push` uses.
+	//
+	// The local check bundles with Bun now, because esbuild never emits
+	// `emitDecoratorMetadata` and without that metadata the dependency graph
+	// cannot be validated here at all — the build would report success on a
+	// graph the deploy refuses. Bun was already required for `push` and `plan`;
+	// saying so here keeps the two answers the same answer.
+	if _, err := exec.LookPath("bun"); err != nil {
+		return fmt.Errorf("bun is not installed, and it is what builds a backend for this runtime " +
+			"(https://bun.sh). The stack runs Bun, so the bundle is built by the engine that will run it")
 	}
 
 	controllersDir := filepath.Join(cwd, "controllers")

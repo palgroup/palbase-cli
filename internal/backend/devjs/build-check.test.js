@@ -19,6 +19,25 @@ const { execFileSync } = require('node:child_process');
 // Fixture project for the bundle-flow test below. PROJECT_ROOT is bound when
 // build-check.js is require()d, so PALBASE_DEV_ROOT must point at the fixture
 // BEFORE the require.
+// The TypeScript parser has to be resolvable IN THIS PROCESS too.
+//
+// Two tests call `scanTxPlanViolations` directly rather than through a
+// subprocess, so an env var does not reach them: they were failing on
+// "typescript could not be loaded" instead of on their subject, and had been for
+// as long as this file has been run outside the CLI (which installs its own
+// pinned parser). A test that cannot reach its subject measures nothing.
+{
+  const repoModules = path.resolve(
+    __dirname, '..', '..', '..', '..', 'palbase-ts', 'backend', 'node_modules',
+  );
+  if (fs.existsSync(path.join(repoModules, 'typescript'))) {
+    process.env.NODE_PATH = process.env.NODE_PATH
+      ? repoModules + path.delimiter + process.env.NODE_PATH
+      : repoModules;
+    require('node:module').Module._initPaths();
+  }
+}
+
 const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-buildcheck-test-'));
 process.env.PALBASE_DEV_ROOT = FIXTURE_ROOT;
 
@@ -50,6 +69,34 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'diag.controller.js'), [
   '}',
   '',
 ].join('\n'));
+
+// THE MODULE. The bundler collects `*.module.ts` and nothing else, so a
+// controller reaches the bundle by being listed here — not by sitting in
+// controllers/.
+fs.writeFileSync(path.join(FIXTURE_ROOT, 'app.module.js'), [
+  'import DiagController from "./controllers/diag.controller";',
+  '',
+  'export const declared = [DiagController];',
+  '',
+].join('\n'));
+
+// Where the TypeScript parser comes from when this file runs under a bare
+// `node --test`.
+//
+// build-check needs it (tx_analysis, return_types) and the CLI normally installs
+// its own pinned copy — which is not there in a test run. Two tests were failing
+// on that rather than on their subject, and a test that cannot reach its subject
+// is not measuring anything. The monorepo's own install is used instead, and
+// when it is absent the tests SKIP with the reason rather than reporting a
+// failure of the code.
+function parserPath() {
+  const repo = path.resolve(__dirname, '..', '..', '..', '..', 'palbase-ts', 'backend', 'node_modules');
+  return fs.existsSync(path.join(repo, 'typescript')) ? repo : '';
+}
+
+function parserAvailable() {
+  return parserPath() !== '';
+}
 
 // A NON-controller file dropped into controllers/. Its top-level `new URL()` on a
 // relative path throws the moment the file is require()d — the exact shape of the
@@ -111,13 +158,13 @@ test('controllers bundle keeps ../resources/* external (shared resource module)'
   // (The controller is later skipped at require — no @palbase/backend in the
   // fixture — but the bundled .js this test inspects is already emitted.)
   registerControllers();
-  const controllerBundle = path.join(BUNDLED_CONTROLLERS_DIR, 'diag.controller.js');
-  assert.ok(fs.existsSync(controllerBundle), 'bundled controller must exist');
+  const controllerBundle = path.join(BUNDLED_CONTROLLERS_DIR, 'app.module.js');
+  assert.ok(fs.existsSync(controllerBundle), 'the bundled MODULE must exist — it is the entry now');
   const bundled = fs.readFileSync(controllerBundle, 'utf8');
   assert.match(bundled, /require\("\.\.\/resources\/env"\)/,
-    'controller bundle must require("../resources/env") — external, resolved to the shared instance');
+    'the module bundle must require("../resources/env") — external, resolved to the shared instance');
   assert.doesNotMatch(bundled, /RESOURCE_INLINE_CANARY/,
-    'resource code must NOT be inlined into the controller bundle (a second copy)');
+    'resource code must NOT be inlined into the module bundle (a second copy)');
 });
 
 // ── TypeScript parser guard ────────────────────────────────────────────────
@@ -298,32 +345,33 @@ test('a non-controller file in controllers/ is neither bundled nor loaded', (t) 
   const reg = registerControllers();
 
   assert.ok(!fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'tenancy.test.js')),
-    'only *.controller.* files are entry points, exactly as on deploy');
+    'only *.module.* files are entry points, exactly as on deploy');
   const offending = (reg.skipped || []).filter((s) => /tenancy\.test/.test(s.file));
   assert.deepEqual(offending, [],
     'a file the deploy never loads must not produce a build failure');
-  assert.ok(fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'diag.controller.js')),
-    'the real controller is still bundled');
+  assert.ok(fs.existsSync(path.join(BUNDLED_CONTROLLERS_DIR, 'app.module.js')),
+    'the module — the entry — is still bundled');
 });
 
 // Narrowing the scan must NOT cost the silent-failure signal it was guarding:
 // a controllers/ full of source that registers nothing deploys as a SUCCESS
 // serving zero endpoints, which is the whole reason this runner exists.
-test('controllers/ with source but no *.controller.ts fails and names the convention', (t) => {
+test('a project with source but NO module fails and says what a module is for', (t) => {
   if (!esbuildAvailable()) return t.skip('npx esbuild unavailable (offline?)');
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-buildcheck-noentry-'));
   fs.mkdirSync(path.join(root, 'controllers'), { recursive: true });
-  // Misnamed on purpose: a @Controller class in a file the deploy will never
-  // treat as an entry point.
-  fs.writeFileSync(path.join(root, 'controllers', 'todos.js'),
+  // A controller written and never listed. It reaches no bundle, registers
+  // nothing, and would deploy as a success serving zero endpoints — the silence
+  // the module glob made possible and this refusal closes.
+  fs.writeFileSync(path.join(root, 'controllers', 'todos.controller.ts'),
     'export default class TodosController {}\n');
 
   let out = '';
   let code = 0;
   try {
     out = execFileSync('node', [path.join(__dirname, 'build-check.js')], {
-      env: Object.assign({}, process.env, { PALBASE_DEV_ROOT: root }),
+      env: Object.assign({}, process.env, { PALBASE_DEV_ROOT: root, NODE_PATH: parserPath() }),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -335,7 +383,7 @@ test('controllers/ with source but no *.controller.ts fails and names the conven
   }
 
   assert.strictEqual(code, 1, `build must fail; output:\n${out}`);
-  assert.match(out, /only \*\.controller\.ts files register routes/);
+  assert.match(out, /no \*\.module\.ts/);
 });
 
 // ── the reported path must be one the author can OPEN ──────────────────────
