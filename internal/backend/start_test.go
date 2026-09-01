@@ -764,7 +764,13 @@ func TestStackImagesTrackTheCoreVersion(t *testing.T) {
 	const authority = "../../../../v2-cloud/bootstrap/images/version.env"
 	raw, err := os.ReadFile(authority)
 	if err != nil {
-		t.Fatalf("çekirdek sürümünün tek kaynağı okunamadı (%s): %v", authority, err)
+		// Otorite palbase deposunda yaşıyor ve bu CLI kendi başına da klonlanır
+		// (her CI runner'ı öyle). Komşusu `TestTheVendoredComposeMatchesTheRepository`
+		// aynı sebeple ATLIYOR: pin YALNIZ iki ağacın yan yana olduğu yerde —
+		// yani pinin gerçekten düzenlendiği geliştirici makinesinde — ölçülebilir.
+		// Okunamayan bir girdi karşısında DÜŞMEK, ölçemediği şeyi kırmızı
+		// göstermek olurdu.
+		t.Skipf("palbase deposu bu checkout'un yanında değil: %v", err)
 	}
 	var core string
 	for _, line := range strings.Split(string(raw), "\n") {

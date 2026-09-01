@@ -241,6 +241,18 @@ func TestPushURL_CarriesBothConsents(t *testing.T) {
 // Bu, kapatmak için yazılan kusurun bir halka yukarısı: parametre var, tele
 // çıkıyor, ama bağ kanıtsız.
 func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
+	// KİMLİK BU TESTİN KENDİ KURDUĞU ŞEY — geliştiricinin makinesinden ödünç
+	// ALINMAZ. Ölçüldü 2026-09-01: bu test yalnız `~/.palbase/credentials.json`
+	// içinde `https://127.0.0.1` kaydı OLAN makinelerde yeşildi; temiz bir
+	// HOME'da (yani her CI runner'ında) push kimlik bulamayıp stack yoluna hiç
+	// girmiyor ve dört vakanın dördü de hiçbir şey ölçmüyordu. Yeşil, kodun
+	// değil o makinenin özelliğiydi.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+	if err := StoreCredential("https://127.0.0.1", Credentials{Value: "stack-key", Kind: KindKey}); err != nil {
+		t.Fatal(err)
+	}
+
 	dir := projectForPush(t)
 	if err := os.WriteFile(filepath.Join(dir, ".palbase", "local.json"),
 		[]byte(`{"url":"https://127.0.0.1"}`), 0o644); err != nil {
