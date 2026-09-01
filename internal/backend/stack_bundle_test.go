@@ -318,70 +318,6 @@ func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
 // tested, pushed, and Stripe could never deliver an event to it. The same
 // defect was measured on the core side on 2026-08-21 (v2/deploy/verify.sh:1725)
 // and fixed there; this copy of the bundler kept it.
-func TestWebhooksTravelInTheEntry(t *testing.T) {
-	dir := t.TempDir()
-	hooks := filepath.Join(dir, "webhooks")
-	if err := os.MkdirAll(hooks, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"stripe.ts", "shopify.ts", "notes.test.ts"} {
-		if err := os.WriteFile(filepath.Join(hooks, name), []byte("export default class X {}"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
-
-	// The NAME is the file's base name, because the file name IS the public URL
-	// (the SDK's decorator deliberately offers no `name` option).
-	if !strings.Contains(entry, `{ name: "stripe", ctor: __webhook_stripe }`) {
-		t.Errorf("stripe webhook missing from the entry:\n%s", entry)
-	}
-	if !strings.Contains(entry, `{ name: "shopify", ctor: __webhook_shopify }`) {
-		t.Errorf("shopify webhook missing from the entry:\n%s", entry)
-	}
-
-	// Imported BY NAME, unlike controllers: a webhook class is not registered by
-	// its decorator into a global registry, so the entry must carry the ctor.
-	if !strings.Contains(entry, `import __webhook_stripe from "`+filepath.Join(hooks, "stripe.ts")+`";`) {
-		t.Errorf("the webhook is not imported by name:\n%s", entry)
-	}
-
-	// Test files are NOT webhooks. Shipping one would mount a URL nobody meant
-	// to publish.
-	if strings.Contains(entry, "notes.test.ts") || strings.Contains(entry, `name: "notes.test"`) {
-		t.Errorf("a test file was mounted as a webhook:\n%s", entry)
-	}
-}
-
-// A project with no webhooks/ directory still bundles — and says so explicitly,
-// rather than emitting a broken entry.
-func TestAProjectWithNoWebhooksStillBundles(t *testing.T) {
-	dir := t.TempDir()
-	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
-	if !strings.Contains(entry, "export const webhooks = [];") {
-		t.Errorf("an empty webhooks export is missing:\n%s", entry)
-	}
-}
-
-// TestTheBundlerDoesNotGetToNameThePublicAPI.
-//
-// The dotted operationId's NAMESPACE is derived from the controller class name
-// (`extract_meta.js: deriveControllerName` reads `Ctrl.name`), and this entry
-// puts every controller into ONE bundle. A bundler must rename duplicate
-// top-level identifiers to keep them apart, so a project that declares the same
-// class name in two files ships a namespace the BUNDLER chose:
-// `PalaiController` and `PalaiController2`.
-//
-// ÖLÇÜLDÜ 25.08.2026 (palai-cloud, canlı): on bir dosya da `export class
-// PalaiController` diyordu ve dağıtılan sözleşme `palai`, `palaiController2`
-// … `palaiController11` olarak bölünmüştü. Numaralar bundle SIRASINDAN geliyor,
-// yani bir dosya eklemek genel API yüzeyini sessizce yeniden numaralandırır ve
-// her istemcinin üretilen kodu kayar. Hiçbir yerde hata görünmüyordu.
-//
-// Kaynak ne diyorsa yüzey odur: aynı adı taşıyan iki controller AYNI namespace'i
-// paylaşır ve gerçek bir çakışma olursa onu zaten operationId kapısı gürültüyle
-// reddeder (generator.go).
 func TestTheBundlerDoesNotGetToNameThePublicAPI(t *testing.T) {
 	for _, exported := range []bool{true, false} {
 		name := "exported"
@@ -487,98 +423,6 @@ export function __getRuntime() {}
 // SHAPE IS THE CONTRACT: `{ name, job }`, the same pair the palbase repository's
 // bundle-controllers.sh emits, because the runtime's collectJobs() reads
 // `record.job` and resolves it through getJobConfig.
-func TestJobsTravelInTheEntry(t *testing.T) {
-	dir := t.TempDir()
-	jobs := filepath.Join(dir, "jobs")
-	if err := os.MkdirAll(jobs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"mac-scaler.ts", "auto-reload.ts", "notes.test.ts"} {
-		if err := os.WriteFile(filepath.Join(jobs, name), []byte("export default class X {}"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
-
-	// The NAME is the file's base name: @Job carries no `name` option, and by
-	// the time the code is bundled the file is gone.
-	if !strings.Contains(entry, `{ name: "mac-scaler", job: __job_mac_scaler }`) {
-		t.Errorf("mac-scaler job missing from the entry:\n%s", entry)
-	}
-	if !strings.Contains(entry, `{ name: "auto-reload", job: __job_auto_reload }`) {
-		t.Errorf("auto-reload job missing from the entry:\n%s", entry)
-	}
-	if !strings.Contains(entry, `import __job_mac_scaler from "`+filepath.Join(jobs, "mac-scaler.ts")+`";`) {
-		t.Errorf("the job is not imported by name:\n%s", entry)
-	}
-	// A test file beside the jobs is not a job. Scheduling one would run a suite
-	// on a cron in production.
-	if strings.Contains(entry, "notes.test.ts") || strings.Contains(entry, `name: "notes.test"`) {
-		t.Errorf("a test file was scheduled as a job:\n%s", entry)
-	}
-	// The placeholder must be GONE, not merely followed by a real one: two
-	// `jobs` exports in one ESM module is a bundle that cannot be imported.
-	if strings.Contains(entry, "export const jobs = [];") {
-		t.Errorf("the hardcoded empty jobs export survived:\n%s", entry)
-	}
-}
-
-// A project with no jobs/ directory still bundles, and says so explicitly — the
-// runtime tolerates a missing export, but an artifact that never declares the
-// shape is one the next reader has to guess about.
-func TestAProjectWithNoJobsStillBundles(t *testing.T) {
-	dir := t.TempDir()
-	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
-	if !strings.Contains(entry, "export const jobs = [];") {
-		t.Errorf("an empty jobs export is missing:\n%s", entry)
-	}
-}
-
-// TestHooksTravelInTheEntry — the same subtraction, one surface over.
-//
-// The generator emitted NO `hooks` export at all, so `collectHooks(mod)` read
-// `undefined` and every @Hook a project declared was dropped by the push that
-// claimed to ship it. palbase's own bundle-controllers.sh has emitted them since
-// 2026-08-21; this copy of the bundler never learned.
-func TestHooksTravelInTheEntry(t *testing.T) {
-	dir := t.TempDir()
-	hooks := filepath.Join(dir, "hooks")
-	if err := os.MkdirAll(hooks, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"before-signup.ts", "notes.test.ts"} {
-		if err := os.WriteFile(filepath.Join(hooks, name), []byte("export default class X {}"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
-
-	if !strings.Contains(entry, `{ name: "before-signup", ctor: __hook_before_signup }`) {
-		t.Errorf("the hook is missing from the entry:\n%s", entry)
-	}
-	if strings.Contains(entry, "notes.test.ts") {
-		t.Errorf("a test file was registered as a hook:\n%s", entry)
-	}
-}
-
-func TestAProjectWithNoHooksStillBundles(t *testing.T) {
-	dir := t.TempDir()
-	entry, _ := bundleEntry(dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})
-	if !strings.Contains(entry, "export const hooks = [];") {
-		t.Errorf("an empty hooks export is missing:\n%s", entry)
-	}
-}
-
-// bundleWithDefinitions builds a REAL bun bundle from a project carrying the
-// given jobs/webhooks/hooks and returns (projectDir, bundlePath).
-//
-// A real bundle rather than a hand-written stand-in: the whole defect class this
-// file guards is "the generator said one thing and the artifact carried
-// another", and only bun can settle that. The stub SDK is the smallest thing
-// that answers the entry's imports plus the two resolvers the manifests go
-// through.
 func bundleWithDefinitions(t *testing.T, files map[string]string) (string, string) {
 	t.Helper()
 	if _, err := exec.LookPath("bun"); err != nil {
@@ -651,134 +495,6 @@ export default class J { async run() {} }`
 // neither, so a tenant with four @Job classes had zero rows in
 // `jobs.job_definitions` and the scheduler had nothing to fire (measured
 // 2026-08-26, tenant `1jhp7jbrm`).
-func TestTheJobManifestIsWrittenFromTheBundle(t *testing.T) {
-	dir, bundle := bundleWithDefinitions(t, map[string]string{
-		"jobs/mac-scaler.ts":  jobSource("* * * * *"),
-		"jobs/auto-reload.ts": jobSource("0 3 * * *"),
-	})
-
-	require.NoError(t, checkDefinitionsSurvived(context.Background(), dir, bundle))
-	require.NoError(t, writeDefinitionManifests(context.Background(), dir, bundle, &strings.Builder{}))
-
-	blob, err := os.ReadFile(filepath.Join(dir, ".palbase", "jobs", "jobs.manifest.json"))
-	require.NoError(t, err, "palsvc has no cron to read without this file")
-
-	var manifest struct {
-		Jobs []struct {
-			Name     string `json:"name"`
-			Schedule string `json:"schedule"`
-			Timeout  int    `json:"timeout"`
-			Retry    int    `json:"retry"`
-			File     string `json:"file"`
-		} `json:"jobs"`
-	}
-	require.NoError(t, json.Unmarshal(blob, &manifest))
-	require.Len(t, manifest.Jobs, 2)
-
-	// Sorted by name, so two builds of one tree produce the same bytes.
-	assert.Equal(t, "auto-reload", manifest.Jobs[0].Name)
-	assert.Equal(t, "0 3 * * *", manifest.Jobs[0].Schedule)
-	assert.Equal(t, "jobs/auto-reload.ts", manifest.Jobs[0].File)
-	assert.Equal(t, "mac-scaler", manifest.Jobs[1].Name)
-	assert.Equal(t, "* * * * *", manifest.Jobs[1].Schedule)
-	assert.Equal(t, 60, manifest.Jobs[1].Timeout)
-}
-
-// TestTheHookManifestIsWrittenFromTheBundle: one row per EVENT, carrying
-// whether it blocks — that is what palsvc registers from.
-func TestTheHookManifestIsWrittenFromTheBundle(t *testing.T) {
-	dir, bundle := bundleWithDefinitions(t, map[string]string{
-		"hooks/signup.ts": `import { Hook } from "@palbase/backend";
-@Hook({ blocking: { "auth.before_signup": async () => {} }, listeners: { "auth.after_login": async () => {} } })
-export default class H {}`,
-	})
-
-	require.NoError(t, writeDefinitionManifests(context.Background(), dir, bundle, &strings.Builder{}))
-
-	blob, err := os.ReadFile(filepath.Join(dir, ".palbase", "hooks", "hooks.manifest.json"))
-	require.NoError(t, err)
-	var manifest struct {
-		Hooks []struct {
-			Event    string `json:"event"`
-			Blocking bool   `json:"blocking"`
-			File     string `json:"file"`
-		} `json:"hooks"`
-	}
-	require.NoError(t, json.Unmarshal(blob, &manifest))
-	require.Len(t, manifest.Hooks, 2)
-	assert.Equal(t, "auth.after_login", manifest.Hooks[0].Event)
-	assert.False(t, manifest.Hooks[0].Blocking)
-	assert.Equal(t, "auth.before_signup", manifest.Hooks[1].Event)
-	assert.True(t, manifest.Hooks[1].Blocking)
-}
-
-// TestAProjectThatDroppedItsLastJobStopsDeclaringOne.
-//
-// The removal matters as much as the write: palsvc prunes every definition when
-// an artifact carries NO manifest, so a stale file from an earlier build would
-// keep a deleted job firing on a schedule the source no longer contains.
-func TestAProjectThatDroppedItsLastJobStopsDeclaringOne(t *testing.T) {
-	dir, bundle := bundleWithDefinitions(t, nil)
-	stale := filepath.Join(dir, ".palbase", "jobs", "jobs.manifest.json")
-	require.NoError(t, os.MkdirAll(filepath.Dir(stale), 0o755))
-	require.NoError(t, os.WriteFile(stale,
-		[]byte(`{"jobs":[{"name":"deleted","schedule":"* * * * *","timeout":60,"retry":0,"file":"jobs/deleted.ts"}]}`), 0o644))
-
-	require.NoError(t, writeDefinitionManifests(context.Background(), dir, bundle, &strings.Builder{}))
-
-	_, err := os.Stat(stale)
-	assert.True(t, os.IsNotExist(err),
-		"a project with no jobs/ still declared one — the deleted job would keep running")
-}
-
-// TestABundleThatDroppedItsJobsIsRefused — THE GATE THAT DID NOT EXIST.
-//
-// The stack's push-activation gate asks whether ENDPOINTS are served. A job, a
-// webhook and a hook are all invisible to it, which is how four @Job classes
-// deployed green for weeks and never ran. Here the directory is compared against
-// the built bundle, while the author is still watching.
-func TestABundleThatDroppedItsJobsIsRefused(t *testing.T) {
-	dir, bundle := bundleWithDefinitions(t, nil)
-	// The bundle is already built and carries no jobs; the directory appears
-	// afterwards, which is exactly the shape of "the generator did not look".
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "jobs", "nightly.ts"), []byte(jobSource("0 3 * * *")), 0o644))
-
-	err := checkDefinitionsSurvived(context.Background(), dir, bundle)
-	require.Error(t, err, "a bundle that carries none of the project's jobs must not ship")
-	assert.Contains(t, err.Error(), "jobs/")
-	assert.Contains(t, err.Error(), "ZERO")
-}
-
-// A job whose @Job is missing or invalid stops the build with the FILE named,
-// rather than deploying a class the scheduler will reject at activation.
-func TestAJobTheSDKCannotResolveStopsTheBuild(t *testing.T) {
-	dir, bundle := bundleWithDefinitions(t, map[string]string{
-		"jobs/broken.ts": `export default class J { async run() {} }`,
-	})
-
-	err := writeDefinitionManifests(context.Background(), dir, bundle, &strings.Builder{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "jobs/broken.ts")
-}
-
-// A PROJECT'S CHANNELS HAVE TO REACH THE RUNTIME, and the entry is the only
-// thing that can carry them.
-//
-// `defineChannels` anchors its declaration on a globalThis symbol as it is
-// evaluated, and the runtime reads the bundle's `channels` EXPORT first,
-// falling back to that symbol. Neither exists unless the entry imports the
-// file: nothing else in a project references channels.ts, so a bundle built
-// without this line does not contain the declaration at all.
-//
-// What that costs is not a missing feature. Undeclared channels are REFUSED —
-// fail-closed, by design — so a project whose channels.ts never shipped has
-// every join answered `unauthorized`, with the file sitting in plain sight and
-// the deploy reporting success. This is `jobs = []` again (fixed 2026-08-26),
-// and it cost the same silence.
-//
-// Measured 2026-08-28 on the shipped binary: `channels` appeared nowhere in
-// this package.
 func TestTheEntryShipsTheProjectsChannels(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "channels.ts"),
@@ -950,4 +666,153 @@ func mustBundleEntry(t *testing.T, dir string, sources []string) string {
 		t.Fatalf("bundleEntry: %v", err)
 	}
 	return body
+}
+
+// The entry carries MODULES and nothing that names a surface by its file.
+//
+// It used to emit `jobs`, `webhooks` and `hooks` arrays built from directory
+// globs, with each entry's NAME taken from its file. Both halves were a second
+// declaration the module system never saw: the directory decided what existed,
+// and the file name decided its identity. Measured before the change — @Job,
+// @Webhook and @Hook register NOTHING (only @Controller does), so a class
+// carrying @Job outside jobs/ never ran, and one inside it ran whether or not
+// any module listed it.
+func TestTheEntryCarriesModulesAndNoByNameArrays(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "billing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mods := []string{
+		filepath.Join(dir, "app.module.ts"),
+		filepath.Join(dir, "billing", "billing.module.ts"),
+	}
+	for _, m := range mods {
+		if err := os.WriteFile(m, []byte("export class M {}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entry, err := bundleEntry(dir, mods)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, m := range mods {
+		if !strings.Contains(entry, `import "`+m+`";`) {
+			t.Errorf("module %s is not imported by the entry:\n%s", m, entry)
+		}
+	}
+	// The three arrays are gone. A bundle that still declared them would be
+	// declaring a second source of truth for what a project contains.
+	for _, gone := range []string{"export const jobs", "export const webhooks", "export const hooks"} {
+		if strings.Contains(entry, gone) {
+			t.Errorf("the entry still emits %q — discovery is the module's now:\n%s", gone, entry)
+		}
+	}
+	// Controllers stay: @Controller genuinely registers itself, and the engine
+	// reconciles that list against the modules (a controller in no module is
+	// REFUSED at boot rather than served).
+	if !strings.Contains(entry, "export const controllers = SDK.getRegisteredControllers();") {
+		t.Errorf("the entry no longer exports the registered controllers:\n%s", entry)
+	}
+}
+
+// A module file lives beside the domain it owns, so discovery is recursive.
+func TestModuleSourcesWalksNestedDirectoriesAndSkipsNodeModules(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"billing", filepath.Join("node_modules", "pkg"), ".palbase"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(rel string) {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte("export class M {}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("app.module.ts")
+	write(filepath.Join("billing", "billing.module.ts"))
+	write(filepath.Join("node_modules", "pkg", "vendor.module.ts"))
+	write(filepath.Join(".palbase", "stale.module.ts"))
+
+	found, err := moduleSources(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("expected the two project modules, got %v", found)
+	}
+	for _, f := range found {
+		if strings.Contains(f, "node_modules") || strings.Contains(f, ".palbase") {
+			t.Errorf("a non-source module leaked into discovery: %s", f)
+		}
+	}
+}
+
+// The manifest is written from WHAT THE CONTAINER HOLDS, and that is pure Go
+// logic worth testing without a bundle.
+//
+// The half palsvc actually schedules from: the bundle carries the CODE, this
+// file carries the fact Go cannot compute without executing TypeScript — when
+// each job is due. `palbase push` wrote neither once, so a tenant with four
+// @Job classes had zero rows in `jobs.job_definitions` and the scheduler had
+// nothing to fire (measured 2026-08-26, tenant `1jhp7jbrm`).
+func TestTheJobManifestIsWrittenFromWhatTheContainerHolds(t *testing.T) {
+	dir := t.TempDir()
+	surfaces := &bundleSurfaces{
+		Controllers: 1,
+		Jobs: []jobDef{
+			{Name: "mac-scaler", Schedule: "* * * * *", Timeout: 60, Retry: 0},
+			{Name: "auto-reload", Schedule: "0 3 * * *", Timeout: 60, Retry: 5},
+		},
+	}
+	require.NoError(t, writeDefinitionManifests(context.Background(), dir, surfaces, &strings.Builder{}))
+
+	blob, err := os.ReadFile(filepath.Join(dir, ".palbase", "jobs", "jobs.manifest.json"))
+	require.NoError(t, err, "palsvc has no cron to read without this file")
+
+	var manifest struct {
+		Jobs []struct {
+			Name     string `json:"name"`
+			Schedule string `json:"schedule"`
+			Timeout  int    `json:"timeout"`
+			Retry    int    `json:"retry"`
+		} `json:"jobs"`
+	}
+	require.NoError(t, json.Unmarshal(blob, &manifest))
+	require.Len(t, manifest.Jobs, 2)
+	require.Equal(t, "mac-scaler", manifest.Jobs[0].Name)
+	require.Equal(t, "* * * * *", manifest.Jobs[0].Schedule)
+	require.Equal(t, 60, manifest.Jobs[0].Timeout)
+	require.Equal(t, 5, manifest.Jobs[1].Retry)
+}
+
+// Two jobs under one name is a scheduler that fires one of them and drops the
+// other, silently. The name is DECLARED now, so it can be renamed away — the
+// message has to say that, because the old one said the opposite ("a job takes
+// its name from its file, so this cannot be renamed away").
+func TestTwoJobsUnderOneNameIsRefused(t *testing.T) {
+	err := writeDefinitionManifests(context.Background(), t.TempDir(), &bundleSurfaces{
+		Jobs: []jobDef{
+			{Name: "sweep", Schedule: "0 1 * * *"},
+			{Name: "sweep", Schedule: "0 2 * * *"},
+		},
+	}, &strings.Builder{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sweep")
+	require.Contains(t, err.Error(), "rename")
+}
+
+// A build that removed the last job must remove the manifest with it, or the
+// scheduler keeps firing something the bundle no longer carries.
+func TestAStaleJobManifestIsRemovedWhenTheLastJobGoes(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".palbase", "jobs")
+	require.NoError(t, os.MkdirAll(stale, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stale, "jobs.manifest.json"), []byte(`{"jobs":[{"name":"gone"}]}`), 0o644))
+
+	require.NoError(t, writeDefinitionManifests(context.Background(), dir, &bundleSurfaces{}, &strings.Builder{}))
+
+	_, err := os.Stat(filepath.Join(stale, "jobs.manifest.json"))
+	require.True(t, os.IsNotExist(err), "a stale manifest survived a build with no jobs")
 }

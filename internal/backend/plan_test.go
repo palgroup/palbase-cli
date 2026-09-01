@@ -57,12 +57,24 @@ export const HealthResponse = z.object({ status: z.string() });
 export type HealthResponse = z.infer<typeof HealthResponse>;
 
 @Controller("/health", { auth: false })
-class HealthController {
+export class HealthController {
   @Get("/")
   async check(): Promise<HealthResponse> {
     return { status: "ok" };
   }
 }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A project declares at least one module: it is what says which classes
+	// exist and who owns them, and the bundler collects `*.module.ts` and
+	// nothing else.
+	if err := os.WriteFile(filepath.Join(dir, "app.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { HealthController } from "./controllers/health.controller.ts";
+
+@Module({ controllers: [HealthController as Token] })
+export class AppModule {}
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
