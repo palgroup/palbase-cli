@@ -126,7 +126,25 @@ async function main() {
         registered = sdk.getRegisteredControllers().filter((c) => !before.has(c));
       }
     } catch { /* as above */ }
-    const Ctrl = registered.length > 0 ? registered[registered.length - 1] : (mod.default || mod);
+    // ONE bundle now carries MANY controllers: the entry is a module, and a
+    // module owns everything it lists. `registered` is the delta this import
+    // produced, so it is exactly the module's controllers.
+    //
+    // A class the module does NOT own is dropped here rather than described:
+    // nothing a module did not list may reach the OpenAPI document (FR-035,
+    // FR-045). The deploy would refuse such a bundle at boot anyway, so this is
+    // the same answer given earlier — and given by the same code, so the two
+    // cannot disagree.
+    let owned = null;
+    try {
+      const sdk = require('@palbase/backend');
+      if (typeof sdk.buildContainer === 'function') owned = sdk.buildContainer().owned;
+    } catch (e) {
+      writeError('the modules in this bundle do not form a valid graph: ' + e.message);
+      return;
+    }
+    const claimed = owned ? registered.filter((c) => owned.has(c)) : registered;
+    const Ctrl = claimed.length > 0 ? claimed[claimed.length - 1] : (mod.default || mod);
 
     // zod-to-json-schema: bundled inside @palbase/backend (the same converter
     // the OpenAPI generator uses there). Load lazily so the extractor stays

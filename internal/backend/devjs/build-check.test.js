@@ -559,3 +559,69 @@ test('an ordinary helper beside a job is not mistaken for a job class', (t) => {
 test('an absent surface directory is not a fault', () => {
   assert.deepStrictEqual(surfaceClassesIn('no-such-surface-dir'), []);
 });
+
+// A class no module owns must not reach the OpenAPI document.
+//
+// `extract_meta.js` is what the deploy runs to describe a bundle, and it used to
+// take the LAST class the import registered — whatever that was. With modules
+// one bundle carries many classes, and a class the module did not list is a
+// class that does not exist: the deploy refuses such a bundle at boot, so
+// describing it here would put an endpoint in a specification that will never
+// answer.
+test('extract_meta drops a controller the module does not own', (t) => {
+  if (!parserAvailable()) return t.skip('no TypeScript parser available');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-extract-owned-'));
+  const sdkDir = path.join(root, 'node_modules', '@palbase', 'backend');
+  fs.mkdirSync(sdkDir, { recursive: true });
+
+  // A stand-in SDK that supplies the INPUTS this assertion is about: a registry
+  // holding two controllers, and a container that owns one. The behaviour under
+  // test is extract_meta's — which of them it describes — so the stand-in only
+  // has to answer the two questions extract_meta asks.
+  fs.writeFileSync(path.join(sdkDir, 'package.json'),
+    JSON.stringify({ name: '@palbase/backend', version: '0.0.0-test', main: 'index.js' }));
+  fs.writeFileSync(path.join(sdkDir, 'index.js'), [
+    'const REG = [];',
+    'exports.getRegisteredControllers = () => REG;',
+    'exports.__register = (c) => { REG.push(c); };',
+    'exports.buildContainer = () => ({ owned: new Set(REG.filter((c) => c.__owned)) });',
+    '',
+  ].join('\n'));
+
+  const bundle = path.join(root, 'app.module.js');
+  fs.writeFileSync(bundle, [
+    'const sdk = require("@palbase/backend");',
+    'class Owned { }',
+    'Owned.__palbase = "controller";',
+    'Owned.__owned = true;',
+    'class Orphan { }',
+    'Orphan.__palbase = "controller";',
+    'sdk.__register(Owned);',
+    'sdk.__register(Orphan);   // registered LAST, so an unfiltered read takes it',
+    'module.exports = {};',
+    '',
+  ].join('\n'));
+
+  let out = '';
+  try {
+    out = execFileSync('node', [path.join(__dirname, 'extract_meta.js')], {
+      input: JSON.stringify({ bundle_path: bundle }),
+      encoding: 'utf8',
+      env: Object.assign({}, process.env, {
+        NODE_PATH: path.join(root, 'node_modules') + path.delimiter + parserPath(),
+      }),
+    });
+  } catch (err) {
+    out = String(err.stdout || '') + String(err.stderr || '');
+  }
+
+  // Orphan is registered LAST, so an unfiltered read takes IT. The extractor
+  // reports a derived, lowercased `controllerName`, which is the field that
+  // tells the two apart — asserting on the class name as written would match
+  // nothing either way and prove nothing (measured: it did).
+  const parsed = JSON.parse(out);
+  assert.strictEqual(parsed.controllerName, 'owned',
+    `the extractor described the wrong class — an unowned one reached the spec:\n${out}`);
+  fs.rmSync(root, { recursive: true, force: true });
+});
