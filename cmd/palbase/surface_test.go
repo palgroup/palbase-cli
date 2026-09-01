@@ -100,6 +100,10 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// layers and shipped no way to run them together.
 		"test",
 		"test-user",
+		// upgrade: bir projeyi KANITLANMIŞ filo imajına taşır — Studio'daki
+		// yuvarlama düğmesinin CLI karşılığı. Kapı bu komutu da yakaladı ve
+		// yakalaması doğruydu: yeni bir verb bu listeye BİLEREK yazılır.
+		"upgrade",
 		// f668ec6'de eklendi ve bu listeye yazılmamıştı — kapı o commit'ten beri
 		// kırmızıydı. Kapının işi tam da bu: yeni bir komut BİLEREK buraya yazılır.
 		"versions",

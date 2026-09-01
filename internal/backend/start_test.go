@@ -735,3 +735,54 @@ func TestStartBannerSaysHowToApplyTheSchema(t *testing.T) {
 		t.Errorf("banner 'palbase stop' cümlesini kaybetti:\n%s", joined)
 	}
 }
+
+// YEREL YIĞININ İMAJLARI ÇEKİRDEĞİN TEK KAYNAĞIYLA AYNI SÜRÜMDE OLMALI.
+//
+// CANLIDA ÖLÇÜLDÜ (2026-09-01): `palbase db plan` ve `db apply` bu deponun
+// KENDİ backend'inde düşüyordu —
+//
+//	db/schema.ts did not evaluate: Expected ";" but found ":" (422)
+//
+// — ve o dizinde `db/schema.ts` diye bir dosya YOK; `db/public.ts` var. Mesajı
+// üreten palsvc'ydi: koşan binary `db/schema.ts` dizesini 11 kez taşıyor,
+// `db/public.ts`'i SIFIR kez. Yani yerel yığın DSL göçünden ÖNCEKİ bir raile
+// bakıyordu ve geliştirici yerel şemasını hiç ilerletemiyordu.
+//
+// TUZAK, PİNİN ESKİ OLMASI DEĞİL — NUMARASININ BÜYÜK OLMASI: `0.39.0`
+// 29.08.2026'da yayımlandı, `0.36.5` ise 31.08'de. Sıralamada büyük görünen
+// etiket terk edilmiş bir seriden geliyordu, ve "daha yeni" sanıldı.
+//
+// Bu yüzden test sürümleri KARŞILAŞTIRMIYOR, EŞİTLİK istiyor ve otoriteyi
+// deponun tek çekirdek sürüm beyanından okuyor. `version.env`'in kendi başlığı
+// zaten bunu söylüyor: "iki yerde ayrı ayrı yazılsaydı biri güncellenip diğeri
+// unutulduğunda aynı ortamda İKİ FARKLI çekirdek koşardı ve bunu hiçbir hata
+// mesajı söylemezdi." `start.go` tam olarak o ikinci yazandı.
+//
+// Ve dev = prod aynası olduğu için bu bir tercih değil: geliştiricinin yığını
+// bulutun koştuğu çekirdekten geri kalırsa, yerelde geçen şey yayında düşer.
+func TestStackImagesTrackTheCoreVersion(t *testing.T) {
+	const authority = "../../../../v2-cloud/bootstrap/images/version.env"
+	raw, err := os.ReadFile(authority)
+	if err != nil {
+		t.Fatalf("çekirdek sürümünün tek kaynağı okunamadı (%s): %v", authority, err)
+	}
+	var core string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "V2_VERSION="); ok {
+			core = strings.TrimSpace(rest)
+			break
+		}
+	}
+	if core == "" {
+		t.Fatalf("%s içinde V2_VERSION yok — bu dosya artık otorite değilse test de yanlış yerde", authority)
+	}
+
+	for _, img := range stackImages {
+		tag := img.fallback[strings.LastIndex(img.fallback, ":")+1:]
+		if tag != core {
+			t.Errorf("%s varsayılanı %q sürümünü pinliyor, çekirdek ise %q — "+
+				"yerel yığın buluttan farklı bir çekirdek koşar (imaj: %s)",
+				img.env, tag, core, img.fallback)
+		}
+	}
+}
