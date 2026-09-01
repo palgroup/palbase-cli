@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/admin"
 	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/authadmin"
@@ -434,11 +433,6 @@ func newRootCmd() *cobra.Command {
 		egress.Cmd(egress.Resolvers{REST: openStackEgress}),
 		notifications.Cmd(notifications.Resolvers{
 			REST: func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
-		}),
-		// `admin` speaks the v2 control plane's operator surface: roll the fleet,
-		// sweep unclaimed tenants. Both are gated server-side and fail closed.
-		admin.Cmd(admin.Resolvers{
-			REST: func() admin.REST { return managementREST() },
 		}),
 		testuser.Cmd(),
 		// `palbase test` mints through testuser's own path, so the identities it

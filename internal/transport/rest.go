@@ -10,8 +10,13 @@
 // a project knows, this one for what the plane knows. `internal/studio` is
 // deleted.
 //
-// `/api/v1` survives ONLY for `palbase admin *` — the fleet-operator routes
-// deliberately stay on v1.
+// THERE IS NO `palbase admin` ANY MORE (2026-09-01). This sentence used to
+// read "`/api/v1` survives ONLY for `palbase admin *`", and it was wrong twice
+// over: the fleet-operator tree was removed once the operator console gained
+// the rollout (proved live, job ed667120-…), and the `/v1/*` paths this client
+// still calls were never that tree's — they are the PLANE's own surface
+// (`/v1/management/flags`, `/v1/cloud/projects/.../push`, `/v1/cloud/me`, …),
+// reached by commands that have nothing to do with the fleet.
 //
 // Auth model (D-32 / RFC 9449): every request carries
 //

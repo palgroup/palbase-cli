@@ -58,7 +58,23 @@ func topLevel(t *testing.T) []string {
 // muscle memory and in scripts.
 func TestGolden_TopLevelCommands(t *testing.T) {
 	require.Equal(t, []string{
-		"admin",
+		// `admin` is ABSENT — and its absence is the POINT (FR-092).
+		//
+		// It carried three operator verbs: `fleet drift`, `fleet upgrade` and
+		// `sweep`. Rolling the fleet was, for a long time, ONLY possible here:
+		// the operator needed the right binary, the right credential and the
+		// right image name — the three things least available during an
+		// incident. That verb now lives in the operator console
+		// (`/admin/fleet`), where it was proved live on 2026-09-01 (job
+		// ed667120-6cc1-428b-9f37-097ae74abde4 → done), with the canary
+		// REQUIRED and the plane's own refusal rendered verbatim.
+		//
+		// `drift` is the console's "Tenant image drift" section. `sweep` was
+		// retired outright by the project owner's decision — the plane still
+		// serves POST /v1/cloud/sweep, but nothing in this CLI calls it.
+		//
+		// No alias, no hidden command: an alias would keep a removed surface
+		// alive in muscle memory and in scripts.
 		"android",
 		"apikey", "auth", "build",
 		"clone",
