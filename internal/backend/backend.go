@@ -68,7 +68,7 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 // modules/backend on every push/PR touching either submodule and fails the
 // moment a copy drifts — there is no Go test for this in this repo.
 //
-//go:embed devjs/build-check.js devjs/env-gen.js devjs/stack-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js
+//go:embed devjs/build-check.js devjs/env-gen.js devjs/stack-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js devjs/generics.js
 var buildCheckFS embed.FS
 
 // REST is the subset of the Management-API transport the provider-aware deploy
