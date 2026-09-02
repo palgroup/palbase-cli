@@ -50,35 +50,60 @@ func TestTheVendoredComposeMatchesTheRepository(t *testing.T) {
 	}
 }
 
-// withoutBarman removes the barman service and the two lines that exist only to
+// withoutBarman removes the barman service and the lines that exist only to
 // serve it, returning whether the service was there at all.
+//
+// The block ends at the NEXT key at the same indent — barman sits BETWEEN two
+// services, so cutting to `networks:` swallowed everything after it. Measured:
+// the first attempt produced a vendored file with two services missing and the
+// image-default gates caught it.
 func withoutBarman(doc string) (string, bool) {
-	const marker = "  # ── barman ───"
-	i := strings.Index(doc, marker)
-	if i < 0 {
-		return doc, false
-	}
-	// The block runs to the next top-level key (`networks:` / `volumes:`) or EOF.
-	rest := doc[i:]
-	end := len(doc)
-	for _, next := range []string{"\nnetworks:", "\nvolumes:", "\nsecrets:"} {
-		if j := strings.Index(rest, next); j >= 0 && i+j < end {
-			end = i + j
+	lines := strings.Split(doc, "\n")
+	start := -1
+	for i, l := range lines {
+		if l == "  barman:" {
+			start = i
+			break
 		}
 	}
-	out := doc[:i] + doc[end:]
-	// The three lines the repository copy carries only because barman exists.
+	if start < 0 {
+		return doc, false
+	}
+	// Walk back over the comment block that introduces it.
+	for start > 0 && (strings.HasPrefix(lines[start-1], "  #") || lines[start-1] == "") {
+		start--
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if topLevelKey(lines[i]) {
+			end = i
+			break
+		}
+	}
+	kept := append(append([]string{}, lines[:start]...), lines[end:]...)
+	out := strings.Join(kept, "\n")
 	for _, line := range []string{
 		"#   barman     continuous WAL streaming + scheduled base backups (PITR)\n",
 		"      # Yeni bir dev stack'te de replication erişimi hazır gelsin (FR-004) — yoksa\n",
 		"      # barman bağlanamaz ve yedekleme dev'de sessizce çalışmaz.\n",
 		"      - ./barman/initdb/10-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro\n",
+		"  barmandata:\n",
 	} {
 		out = strings.Replace(out, line, "", 1)
 	}
 	out = strings.ReplaceAll(out, "five containers", "four containers")
 	out = strings.ReplaceAll(out, "five-container stack", "four-container stack")
 	return out, true
+}
+
+// topLevelKey reports whether the line opens a sibling of `barman:` — a service
+// at two-space indent, or a document-level key like `networks:`.
+func topLevelKey(l string) bool {
+	if l == "" || strings.HasPrefix(l, "    ") || strings.HasPrefix(l, "  #") {
+		return false
+	}
+	trimmed := strings.TrimPrefix(l, "  ")
+	return strings.HasSuffix(trimmed, ":") && !strings.HasPrefix(trimmed, " ")
 }
 
 // The images must be NAMED as registry references by default. A local tag as

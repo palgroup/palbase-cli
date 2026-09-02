@@ -179,12 +179,183 @@ services:
     # `data` ONLY. Nothing that faces the outside shares a network with it.
     networks: [data]
     restart: unless-stopped
+  barman:
+    build:
+      context: ./barman
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: palbase
+      PGDATABASE: palbase
+      PGPASSWORD: ${POSTGRES_PASSWORD:-}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 3 * * *}
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-RECOVERY WINDOW OF 30 DAYS}
+      BACKUP_TARGET: ${BACKUP_TARGET:-disk}
+      BACKUP_MAX_SLOT_WAL_KEEP: ${BACKUP_MAX_SLOT_WAL_KEEP:-2GB}
+      # Nesne depolama İÇİN AYRILDI — HENÜZ ÇALIŞMIYOR. BACKUP_TARGET=s3 verilirse
+      # servis açıkça REDDEDER (barman-cloud hook script'leri bu sürümde bağlanmadı).
+      # Değişkenler burada duruyor ki bağlandığında compose sözleşmesi değişmesin.
+      # Bugün yedekler barmandata volume'ünde; host kaybına karşı o volume'ü kendi
+      # yedekleme akışınıza dahil edin.
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
+    volumes:
+      - barmandata:/var/lib/barman
+    # Ölçülmüş tepe: 44.8 MiB. 128 MiB, 2.9x marj.
+    mem_limit: 128m
+    cpus: 0.5
+    networks: [data]
+    restart: unless-stopped
 
+  # ── palsvc ─────────────────────────────────────────────────────────────────
+  #
+  # Every module in one process — and ONLY that, now. Same image as the shipped
+  # stack, same role-mask, same everything: it is not the edge here either, and
+  # it publishes nothing.
+  palsvc:
+    # PULLED by default, so `palbase start` works on a machine that has never
+    # seen this repository. Building locally? Set PALBASE_PALSVC_IMAGE to your
+    # own tag — the CLI prints the build command when an image is missing.
+    image: ${PALBASE_PALSVC_IMAGE:-ghcr.io/palgroup/palbase/palsvc:0.40.0}
+    command:
+      - "--modules"
+      # Katalogun TAMAMI. `jobs` 2026-08-26'da eklendi: self-host'un maskesinde
+      # vardı, burada ve bulutta YOKTU — yani `palbase start` ile koşan her
+      # projenin `@Job` sınıfı sessizce hiç ateşlenmiyordu. Mount edilmeyen
+      # bir modül şikâyet etmez; kayma ancak müşteri fark edince görünür.
+      # `cmd/palsvc/modulemask_test.go` bu üç maskeyi kataloga kilitliyor.
+      - "deeplinks,documents,flags,analytics,messaging,db,auth,rt,notify,vault,storage,jobs,embed"
+    # NOT PUBLISHED. The edge is the only way in, here as in the cloud.
+    volumes:
+      - artifacts:/var/lib/palbase/artifacts
+      - storage:/var/lib/palbase/storage
+    environment:
+      PALSVC_ARTIFACT_ROOT: /var/lib/palbase/artifacts
+      DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
+      LOCAL_JWT_PEM: ${LOCAL_JWT_PEM:-}
+      STACK_ROOT_KEY: ${STACK_ROOT_KEY:-}
+      # THE SEALING CHAIN, and its absence here was the whole of D-5's second half.
+      #
+      # The shipped compose forwards these three; this one did not, so a stack
+      # started by `palbase start` published no keyset no matter what its .env
+      # said. Measured end-to-end: the .env carried all three variables and
+      # `docker exec palsvc printenv | grep -c PALBASE_SEALED` still printed 0,
+      # the stack answered `sealed_unconfigured`, and the iOS SDK — which seals
+      # every /auth/* body and refuses to send one in the clear — could not sign
+      # in at all. The message it shows names neither the cause nor the fix.
+      #
+      # Empty default, like every other line here: a stack without a chain is a
+      # legal state (it seals nothing), and these are read, never invented.
+      PALBASE_SEALED_SIGNING_SEED: ${PALBASE_SEALED_SIGNING_SEED:-}
+      PALBASE_SEALED_BINDING: ${PALBASE_SEALED_BINDING:-}
+      PALBASE_SEALED_ROOT: ${PALBASE_SEALED_ROOT:-}
+      PEPPER: ${PEPPER:-}
+      REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-palbase}
+      PALBASE_STACK_REF: ${PALBASE_STACK_REF:-project}
+      # PANELİN KONAĞI — yığının kendi adresi DEĞİL.
+      #
+      # Auth, site_url ilan etmemiş bir yığın için eylem bağlantılarını
+      # (şifre sıfırlama, e-posta doğrulama) buradan kuruyor ve o sayfaları
+      # panel sunuyor. Tenant konağı hiç HTML sunmaz; ikisini birbirinden
+      # türetmek bağlantıyı boş bir yere göndermek olurdu.
+      PALBASE_PUBLIC_HOST: ${PALBASE_PUBLIC_HOST:-}
+      PALBASE_RUNTIME_URL: ${PALBASE_RUNTIME_URL:-http://runtime:4005}
+      PALBASE_ANON_KEY: ${PALBASE_ANON_KEY:-}
+      PALBASE_SERVICE_ROLE_KEY: ${PALBASE_SERVICE_ROLE_KEY:-}
+      # E-mail and SMS, carried verbatim from the shipped stack so ONE env file
+      # drives both. Unset means the channel is undeliverable and says so at
+      # boot, per channel — it does not mean "off quietly".
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__PROVIDER: ${SMTP_PROVIDER:-}
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__SMTP_HOST: ${SMTP_HOST:-}
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__SMTP_PORT: ${SMTP_PORT:-587}
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__SMTP_USERNAME: ${SMTP_USERNAME:-}
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      PALNOTIFY_SHARED_PROVIDERS__EMAIL__FROM_NAME: ${SMTP_FROM_NAME:-}
+      PALNOTIFY_SHARED_PROVIDERS__SMS__ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      PALNOTIFY_SHARED_PROVIDERS__SMS__FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      PALNOTIFY_SHARED_PROVIDERS__SMS__VERIFY_SERVICE_SID: ${TWILIO_VERIFY_SERVICE_SID:-}
+      PALSVC_TELEMETRY_OTLP_ENDPOINT: ${PALSVC_TELEMETRY_OTLP_ENDPOINT:-}
+      PALSVC_TELEMETRY_PROMETHEUS: ${PALSVC_TELEMETRY_PROMETHEUS:-}
+      PALSVC_TELEMETRY_PUSH_INTERVAL: ${PALSVC_TELEMETRY_PUSH_INTERVAL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Both: it answers the edge and it holds the database pool.
+    networks: [edge, data]
+    restart: unless-stopped
+
+  # ── runtime ────────────────────────────────────────────────────────────────
+  #
+  # YOUR CODE, from the directory you are editing. The image must be the
+  # runtime Dockerfile's `dev` TARGET — the same image with two additions the
+  # build needs, the bundler script and the TypeScript compiler the stager reads
+  # return types with (see the Dockerfile, and the build line in the header).
+  # Built from the production target instead, this comes up and then refuses
+  # every rebuild with "this project's @palbase/backend ships no stager".
+  #
+  # No `bun --watch`: restarting this process on every save would throw away the
+  # database pool and the warm secrets, and the reload it would be standing in
+  # for is already here — src/dev.ts rebuilds the bundle and swaps the app in
+  # place, clearing the controller registry first so the new code is what
+  # answers. A build that fails does NOT take the process down; the previous one
+  # goes on serving and the bundler's own message is printed.
+  runtime:
+    # The DEV target, pulled: it carries the bundler and TypeScript the stager
+    # needs. The production image comes up healthy and then refuses every save.
+    image: ${PALBASE_RUNTIME_IMAGE:-ghcr.io/palgroup/palbase/runtime-dev:0.40.0}
+    environment:
+      # The switch. With it set, the artifact path is not taken at all — there
+      # is no ARTIFACT_BLOB_URL here and nothing looks for one.
+      PALBASE_DEV_CONTROLLERS: /app/project
+      PALBASE_STACK_REF: ${PALBASE_STACK_REF:-project}
+      DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
+      DB_ROLE: ${RUNTIME_DB_ROLE:-backend_authenticated}
+      DB_POOL_MAX: ${RUNTIME_DB_POOL_MAX:-32}
+      AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://palsvc:8080/.well-known/jwks.json}
+      MODULE_BASE_URL: ${MODULE_BASE_URL:-http://palsvc:8080}
+      # YIĞININ KENDİ GENEL ADRESİ — ve onu YALNIZ operatör bilir.
+      #
+      # Bir `@Upload` handler'ı cevabına `getPublicUrl` ile nesne URL'i koyuyor
+      # ve o URL cevabın gövdesinden ÇIKIYOR: bir <img>'e, bir e-postaya, başka
+      # bir konaktaki uygulamaya. İç adresten (`http://palsvc:8080`) kurulanı
+      # orada hiçbir şey çözemez, göreli bırakılanı da — ölçüldü canlı
+      # 24.08.2026, iOS istemcisi `/v1/files/...` alıp -1002 verdi.
+      #
+      # Ayarlanmazsa SDK çağrı yerinde ADIYLA reddediyor; sessiz bir varsayılan
+      # uydurmuyoruz çünkü yanlış olduğunu hiçbir hata söylemezdi.
+      PALBASE_PUBLIC_ORIGIN: ${PALBASE_PUBLIC_ORIGIN:-}
+      PALBASE_ANON_KEY: ${PALBASE_ANON_KEY:-}
+      PALBASE_SERVICE_ROLE_KEY: ${PALBASE_SERVICE_ROLE_KEY:-}
+      REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
+    volumes:
+      # The project, read-WRITE: the bundler writes .palbase/ into it, exactly
+      # as it does when a deploy runs it on your machine.
+      - ${PALBASE_PROJECT_DIR:?set PALBASE_PROJECT_DIR — the project this stack serves}:/app/project
+      # Built bundles. A build per save, pruned to the last few by src/dev.ts.
+      - artifactcache:/var/cache/palbase/artifacts
+    # NOT `node_modules` — the project's own dependencies are its own, and the
+    # bundle a deploy produces inlines whatever the project resolved. Masking
+    # them would build something different here from what ships. The image
+    # carries an @palbase/backend and a TypeScript one directory up, at
+    # /app/node_modules, so a project that has never been `npm install`ed still
+    # builds: resolution walks out of /app/project and finds them.
+    depends_on:
+      palsvc:
+        condition: service_started
+    # Both: the edge routes to it, and its own SQL reaches postgres.
+    networks: [edge, data]
+    restart: unless-stopped
 
 volumes:
   pgdata:
   # Barman'ın yedek deposu ve WAL arşivi.
-  barmandata:
   artifactcache:
   # palsvc still serves /_artifacts and can still be pushed to. Nothing in this
   # stack READS what lands there — the runtime is serving your directory — so a
