@@ -1153,3 +1153,105 @@ export class CoreModule {}
 	require.Contains(t, out.String(), "controllers/feature.controller.ts",
 		"the route table names a file the controller was not written in:\n%s", out.String())
 }
+
+// TestACycleIsONEFindingAndSaysWhatItIs locks two things the build got wrong at
+// once, both measured on the scaffold on 2026-09-02.
+//
+// A dependency cycle NEVER reaches the container: `class A { constructor(b: B) }`
+// emits `__metadata("design:paramtypes", [B])` where the class is DEFINED, so B
+// is read inside its temporal dead zone and the engine throws before anything
+// DI-shaped runs. The build refused — correctly — with
+//
+//	Cannot access 'BService' before initialization
+//
+// which tells the author nothing, and it printed FOUR findings for the one
+// fault: the load failure, the extractor hitting the same failure, and every
+// controller in the project named as having "registered no routes" because the
+// bundle they live in never loaded.
+func TestACycleIsONEFindingAndSaysWhatItIs(t *testing.T) {
+	dir := t.TempDir()
+	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelPack()
+	sdk := packLocalSDK(t, ctxPack)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	if !sdkHasControllerRegistry(t, dir) {
+		t.Skip("the packed SDK exposes no controller registry")
+	}
+	useTestParserCache(t)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "services"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "cycle.service.ts"), []byte(`
+import { Injectable } from "@palbase/backend";
+
+@Injectable()
+export class AService {
+  constructor(private readonly b: BService) {}
+}
+
+@Injectable()
+export class BService {
+  constructor(private readonly a: AService) {}
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "health.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+
+export const HealthResponse = z.object({ status: z.string() });
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
+@Controller("/health", { auth: false })
+export class HealthController {
+  @Get("")
+  check(): HealthResponse {
+    return { status: "ok" };
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { HealthController } from "./controllers/health.controller.ts";
+import { AService, BService } from "./services/cycle.service.ts";
+
+@Module({
+  controllers: [HealthController as Token],
+  providers: [AService as Token, BService as Token],
+})
+export class AppModule {}
+`), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.Error(t, runBuild(ctx, dir, &out), "a cycle was accepted:\n%s", out.String())
+
+	got := out.String()
+	require.Equal(t, 1, strings.Count(got, "DEPLOY WOULD FAIL"),
+		"one authoring fault must be one finding:\n%s", got)
+	require.Contains(t, got, "dependency cycle",
+		"the refusal must name the cause, not just the engine's TDZ message:\n%s", got)
+	require.Contains(t, got, "forwardRef",
+		"the message must close the door the reader will reach for next:\n%s", got)
+	// The cascade this test exists to prevent: controllers named as silent
+	// because the bundle they live in never loaded.
+	require.NotContains(t, got, "registered no routes",
+		"a controller must not be blamed for a bundle that failed to load:\n%s", got)
+
+	// NEGATIVE CONTROL: break the cycle and the SAME tree builds.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "cycle.service.ts"), []byte(`
+import { Injectable } from "@palbase/backend";
+
+@Injectable()
+export class AService {}
+
+@Injectable()
+export class BService {
+  constructor(private readonly a: AService) {}
+}
+`), 0o644))
+	out.Reset()
+	require.NoError(t, runBuild(ctx, dir, &out), "the acyclic tree was refused:\n%s", out.String())
+	require.Contains(t, out.String(), "build OK")
+}

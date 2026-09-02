@@ -615,7 +615,9 @@ function registerControllers() {
     // scan to `.controller.` must not cost us the second signal.
     const err =
       'no *.module.ts under this project — a module is what says which classes exist, ' +
-      'who owns them and what they may reach, and a project with none declares nothing at all';
+      'who owns them and what they may reach, and a project with none declares nothing at all. ' +
+      'Create `<domain>.module.ts` with @Module({ controllers: [...], providers: [...] }), or run ' +
+      '`palbase init` in an empty directory to get one.';
     log(`no modules — ${err}`);
     return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: err };
   }
@@ -645,7 +647,20 @@ function registerControllers() {
       // throws "... is not a function" at module-eval time. Flag it so main()
       // can give an actionable message instead of a bare skip.
       if (/is not a function/.test(err.message)) staleSDKSignature = true;
-      skipped.push({ file: 'modules', error: err.message });
+      // ONE FAULT, ONE FINDING, and nothing downstream. When the bundle does not
+      // load, every later check is measuring its absence: the extractor reports
+      // the same error again, and every controller in the project is named as
+      // having "registered no routes" — one authoring mistake printed as four.
+      // Measured on the scaffold with a two-class cycle: 4 errors, three of them
+      // consequences of the first.
+      return {
+        sawControllerFiles,
+        staleSDKSignature,
+        routeCount: 0,
+        skipped: [],
+        buildError: explainLoadFailure(err),
+        buildErrorFile: 'modules',
+      };
     }
   }
 
@@ -661,8 +676,17 @@ function registerControllers() {
         }
       }
     } catch (err) {
-      skipped.push({ file: 'modules', error: err.message });
-      return { sawControllerFiles, staleSDKSignature, routeCount: 0, skipped, buildError: err.message };
+      // Same rule: the container's refusal IS the finding. It used to be pushed
+      // into `skipped` AND returned as `buildError`, so every graph fault was
+      // printed twice under two different, both-wrong file names.
+      return {
+        sawControllerFiles,
+        staleSDKSignature,
+        routeCount: 0,
+        skipped: [],
+        buildError: err.message,
+        buildErrorFile: 'modules',
+      };
     }
   }
 
@@ -743,6 +767,36 @@ function registerControllers() {
   }
 
   return { sawControllerFiles, staleSDKSignature, routeCount: routes.size, skipped, silent };
+}
+
+/**
+ * Turns a module-bundle load failure into something an author can act on.
+ *
+ * A DEPENDENCY CYCLE never reaches the container: `class A { constructor(b: B) }`
+ * emits `__metadata("design:paramtypes", [B])` where the class is DEFINED, so B
+ * is read while it is still in its temporal dead zone and the engine throws
+ * `Cannot access 'B' before initialization` — before anything DI-shaped runs.
+ * Measured 02.09.2026 on the scaffold, in one file and across two, with the same
+ * result both times. The container's own cycle detector still earns its place
+ * (a graph assembled by hand reaches it), but a cycle somebody TYPED lands here,
+ * and "Cannot access 'B' before initialization" tells them nothing.
+ *
+ * Anything not recognised is passed through unchanged: a message that is merely
+ * raw beats one that confidently names the wrong cause.
+ */
+function explainLoadFailure(err) {
+  const msg = String((err && err.message) || err);
+  const tdz = /Cannot access '([^']+)' before initialization/.exec(msg);
+  if (tdz) {
+    return (
+      `${msg} — ${tdz[1]} is read while it is still being defined. This is what a ` +
+      `dependency cycle looks like at load time: two classes name each other in ` +
+      `their constructors, so neither can be built first. Break the cycle — move ` +
+      `the shared piece into a third class both depend on. (There is no ` +
+      `forwardRef: the import dies before the container is consulted.)`
+    );
+  }
+  return msg;
 }
 
 // sourceControllerFiles lists the *.controller.ts a person actually wrote,
@@ -1201,9 +1255,14 @@ async function main() {
   const reg = registerControllers();
 
   const failures = [];
-  if (reg.buildError) failures.push({ file: 'controllers/', error: reg.buildError });
+  if (reg.buildError) failures.push({ file: reg.buildErrorFile || 'controllers/', error: reg.buildError });
   for (const s of reg.skipped || []) failures.push(s);
-  for (const e of await deployExtractErrors()) failures.push(e);
+  // The extractor is SKIPPED once the bundle failed to load or the graph was
+  // refused: it loads the same bundle and can only report the same fault a
+  // second time, under a second file name. One fault, one finding.
+  if (!reg.buildError) {
+    for (const e of await deployExtractErrors()) failures.push(e);
+  }
   for (const f of reg.silent || []) {
     failures.push({
       file: f,
