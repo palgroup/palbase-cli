@@ -837,7 +837,7 @@ func stackBuckets(ctx context.Context, target Target) ([]StackBucket, error) {
 	}
 	res, err := stackClient(target).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("reach %s: %w", target.URL, err)
+		return nil, fmt.Errorf("%w: reach %s: %v", errStackSilent, target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -1044,6 +1044,10 @@ func checkSDKVersion(projectDir string) error {
 		pkg.Version, minimumSDKMajor, major)
 }
 
+// errStackSilent marks the one state that must never be spelled as a ceiling:
+// the stack did not answer at all.
+var errStackSilent = errors.New("the stack did not answer")
+
 // stackServesGeneration asks the target what the HIGHEST rung it can serve is.
 //
 // `/v1/management/deployments/current` carries it since the DI run wired the
@@ -1056,6 +1060,20 @@ func checkSDKVersion(projectDir string) error {
 // current deployment, and a stack running an older image does not publish the
 // field. What that ABSENCE means is decided by `pushCeilingRefusal`, in one
 // place, with its reasoning written down.
+//
+// THREE STATES, NOT TWO — and conflating the third with the second bricked a
+// real tenant. `centauri` answered 503 at every path (its runtime was down), the
+// 503 was read as "no answer about the ceiling", the caller turned that into the
+// documented default of 2, and the push refused with "the stack's runtime serves
+// at most 2" — a measurement nobody made — and sent the author to `palbase
+// upgrade`, which refuses back with "push first". Measured 2026-09-02.
+//
+//	404 / 200-without-the-field  the stack ANSWERED and named no ceiling; its
+//	                             image predates the field, so the rung below is
+//	                             the answer. (nil, nil)
+//	5xx / transport failure      nobody answered. We know NOTHING about this
+//	                             stack, and saying otherwise is a lie with an
+//	                             outage attached. errStackSilent.
 func stackServesGeneration(ctx context.Context, target Target) (*int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimSuffix(target.URL, "/")+"/v1/management/deployments/current", nil)
@@ -1067,17 +1085,22 @@ func stackServesGeneration(ctx context.Context, target Target) (*int, error) {
 	}
 	res, err := stackClient(target).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("reach %s: %w", target.URL, err)
+		return nil, fmt.Errorf("%w: reach %s: %v", errStackSilent, target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
+	if res.StatusCode >= 500 {
+		// The stack did not answer. Not "answered with no ceiling" — did not
+		// answer. The caller must not turn this into a number.
+		return nil, fmt.Errorf("%w: %s answered %d", errStackSilent, target.URL, res.StatusCode)
+	}
 	if res.StatusCode != http.StatusOK {
 		// 404 is the ordinary state of a stack nobody has pushed to yet. It is
-		// not a fault and it is not a ceiling — it is no answer, and the caller
-		// says what no answer means.
+		// not a fault and it is not a ceiling — it is no answer ABOUT THE
+		// CEILING, from a stack that is up, and the caller says what that means.
 		return nil, nil
 	}
 	var out struct {

@@ -185,7 +185,24 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	// the call that a stack which cannot answer stops the push; this one asks a
 	// question about capability, and a network blip must not be spelled as
 	// "your bundle is too new".
-	if serves, ceilErr := stackServesGeneration(ctx, target); ceilErr == nil {
+	serves, ceilErr := stackServesGeneration(ctx, target)
+	switch {
+	case errors.Is(ceilErr, errStackSilent):
+		// The stack is not answering, so its ceiling is UNKNOWN — and a bundle
+		// that reaches a rung must not be activated against an unknown one. The
+		// refusal says what was actually observed instead of naming a default,
+		// and it does NOT send the author to `palbase upgrade`: upgrade refuses
+		// a project whose deployed generation the plane never recorded, so the
+		// two commands would point at each other while the tenant stays down.
+		if reaches != nil {
+			return fmt.Errorf(
+				"this bundle reaches ABI generation %d, and the stack did not answer when asked what it\n"+
+					"  can serve (%v). Pushing against an unknown ceiling could activate an artifact that\n"+
+					"  boots WITHOUT the machinery that generation needs.\n"+
+					"  The stack's runtime has to be serving before anything can be pushed to it.",
+				*reaches, ceilErr)
+		}
+	case ceilErr == nil:
 		if why := pushCeilingRefusal(reaches, serves); why != "" {
 			return errors.New(why)
 		}
