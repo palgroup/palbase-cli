@@ -777,6 +777,7 @@ function registerControllers() {
     // object there. The silent-controller check above compares by name for the
     // same reason.
     ownedNames: container ? new Set([...container.owned].map((c) => (typeof c === 'function' ? c.name : ''))) : null,
+    pressure: container && Array.isArray(container.pressure) ? container.pressure : [],
   };
 }
 
@@ -1127,6 +1128,50 @@ function checkSurfaceConstructors(ownedNames) {
   return failures;
 }
 
+/**
+ * WHERE A MODULE IS BECOMING AMBIENT (FR-016).
+ *
+ * The container computes this and hands it back on `App.container.pressure`, and
+ * until now NOTHING read it: it was a number nobody could see, which is the same
+ * as a number nobody computed. The FR says the system REPORTS it when the build
+ * finishes, and this is that report.
+ *
+ * NOT A GATE, and deliberately quiet below the threshold. A module every other
+ * module imports is the design asking for something ambient — but how much
+ * sharing is too much is a JUDGEMENT about the domain, so this prints a number
+ * and never changes an exit code. And it prints NOTHING when nothing crosses the
+ * line: a line on every build is a line people stop reading, which is how a real
+ * signal gets lost.
+ *
+ * 80% is where `container.ts` draws it, and this reads that same shape rather
+ * than inventing a second threshold.
+ *
+ * AND A PERCENTAGE NEEDS A POPULATION. Measured 2026-09-02: a project with two
+ * modules, one importing the other, reports 100% — true, and no signal at all,
+ * because "all of the others" is one module. `pressure` carries the denominator
+ * so the note can require enough others to mean something, and can print the
+ * count beside the percentage rather than asking the reader to guess it.
+ */
+const AMBIENT_PRESSURE_PCT = 80;
+const AMBIENT_MIN_OTHERS = 3;
+
+function reportModulePressure(pressure) {
+  // Not every path through `registerControllers` produces one: a project with
+  // no `controllers/` returns before a container exists. `undefined` there is
+  // "nothing to report", and reading it as an iterable turned a clean build into
+  // `TypeError: pressure is not iterable` — a crash in the REPORT, about a
+  // project that had nothing to report.
+  if (!Array.isArray(pressure)) return;
+  for (const entry of pressure) {
+    if (!entry || typeof entry.pct !== 'number' || typeof entry.of !== 'number') continue;
+    if (entry.of < AMBIENT_MIN_OTHERS || entry.pct < AMBIENT_PRESSURE_PCT) continue;
+    log(
+      `  note: ${entry.module} is imported by ${entry.pct}% of the other modules ` +
+        `(${entry.of} of them) — the design is asking for something ambient. Not an error.`,
+    );
+  }
+}
+
 // Counted from the DIRECTORY rather than from a bundle, deliberately: this is
 // the declaration, and the point of printing it here is to give the author a
 // figure they can compare against what the runtime reports at boot. `palbase
@@ -1328,6 +1373,7 @@ async function main() {
   for (const f of checkSurfaceConstructors(reg.ownedNames)) failures.push(f);
 
   if (failures.length === 0) {
+    reportModulePressure(reg.pressure);
     log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly${declaredSurfaces()}`);
     process.exitCode = 0;
     return;

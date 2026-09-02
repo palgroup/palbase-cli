@@ -1375,3 +1375,107 @@ export default class OrphanWebhook {
 	require.Contains(t, out.String(), "OrphanWebhook")
 	require.Contains(t, out.String(), "no module lists it")
 }
+
+// TestModulePressureIsREPORTED locks FR-016, which said "the system SHALL
+// report" and nothing did.
+//
+// `buildContainer` computed the number and `createApp` put it on
+// `App.container.pressure`, where NOTHING read it — a number nobody can see is
+// the same as a number nobody computed. Measured 2026-09-02 across eighteen real
+// builds: not one printed a line about it.
+//
+// It is a REPORT, not a gate: a module every other module imports is the design
+// asking for something ambient, and how much sharing is too much is a judgement
+// about the domain. So the exit code must not move, and the line must not appear
+// when nothing crosses the threshold — a line on every build is a line people
+// stop reading.
+func TestModulePressureIsREPORTED(t *testing.T) {
+	dir := t.TempDir()
+	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelPack()
+	sdk := packLocalSDK(t, ctxPack)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	if !sdkHasControllerRegistry(t, dir) {
+		t.Skip("the packed SDK exposes no controller registry")
+	}
+	useTestParserCache(t)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "services"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "core.service.ts"), []byte(`
+import { Injectable } from "@palbase/backend";
+
+@Injectable()
+export class CoreService {
+  tag(): string {
+    return "core";
+  }
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "core.module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreService } from "./services/core.service.ts";
+
+@Module({ providers: [CoreService as Token], exports: [CoreService as Token] })
+export class CoreModule {}
+`), 0o644))
+
+	// FOUR feature modules, ALL importing the shared one: 100% pressure over a
+	// population big enough to mean something. Three would not be: a percentage
+	// needs a denominator, and "all of the others" over one or two others is a
+	// number with no signal in it — measured on a two-module project, which
+	// reported 100% and said nothing.
+	for _, name := range []string{"a", "b", "c", "d"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", name+".controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+import { CoreService } from "../services/core.service.ts";
+
+export const Out`+name+` = z.object({ tag: z.string() });
+export type Out`+name+` = z.infer<typeof Out`+name+`>;
+
+@Controller("/`+name+`", { auth: false })
+export class Ctl`+name+` {
+  constructor(private readonly core: CoreService) {}
+  @Get("")
+  read(): Out`+name+` {
+    return { tag: this.core.tag() };
+  }
+}
+`), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name+".module.ts"), []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { CoreModule } from "./core.module.ts";
+import { Ctl`+name+` } from "./controllers/`+name+`.controller.ts";
+
+@Module({ controllers: [Ctl`+name+` as Token], imports: [CoreModule as Token] })
+export class Mod`+name+` {}
+`), 0o644))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuild(ctx, dir, &out), "the tree did not build:\n%s", out.String())
+
+	got := out.String()
+	require.Contains(t, got, "CoreModule is imported by 100%",
+		"module pressure was computed and never reported:\n%s", got)
+	require.Contains(t, got, "(4 of them)",
+		"the percentage was printed without the population it is a percentage OF:\n%s", got)
+	require.Contains(t, got, "Not an error.", "the report must say it is not a gate:\n%s", got)
+	require.Contains(t, got, "build OK", "a report must not change the verdict:\n%s", got)
+
+	// SILENT BELOW THE LINE. Two consumers is still 100%, and still no signal —
+	// the note must go quiet on population, not only on percentage.
+	for _, name := range []string{"c", "d"} {
+		require.NoError(t, os.Remove(filepath.Join(dir, name+".module.ts")))
+		require.NoError(t, os.Remove(filepath.Join(dir, "controllers", name+".controller.ts")))
+	}
+	out.Reset()
+	require.NoError(t, runBuild(ctx, dir, &out), "the reduced tree did not build:\n%s", out.String())
+	require.Contains(t, out.String(), "build OK")
+	require.NotContains(t, out.String(), "is imported by",
+		"a pressure note fired below the threshold:\n%s", out.String())
+}

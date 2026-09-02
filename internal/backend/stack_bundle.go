@@ -189,8 +189,8 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 		fmt.Fprintf(w, "bundled %d webhook(s) → /webhooks/{%s}\n",
 			len(surfaces.Webhooks), strings.Join(surfaces.Webhooks, ", "))
 	}
-	if surfaces.Hooks > 0 {
-		fmt.Fprintf(w, "bundled %d hook class(es)\n", surfaces.Hooks)
+	if len(surfaces.Hooks) > 0 {
+		fmt.Fprintf(w, "bundled hook(s) → %s\n", strings.Join(surfaces.Hooks, ", "))
 	}
 
 	// @Upload names a bucket that must EXIST, and only the bundle knows which
@@ -604,7 +604,10 @@ try {
 console.log(JSON.stringify({
   controllers: SDK.controllersOf(c).length,
   rooms: SDK.roomsOf(c).length,
-  hooks: SDK.hooksOf(c).length,
+  hooks: SDK.hooksOf(c).flatMap((k) => {
+    const m = SDK.getHookManifest(k);
+    return [...m.blocking, ...m.listeners];
+  }),
   jobs: SDK.jobsOf(c).map((k) => SDK.getJobManifest(k)),
   webhooks: SDK.webhooksOf(c).map((k) => SDK.getWebhookManifest(k).name),
 }));
@@ -615,7 +618,12 @@ console.log(JSON.stringify({
 type bundleSurfaces struct {
 	Controllers int      `json:"controllers"`
 	Rooms       int      `json:"rooms"`
-	Hooks       int      `json:"hooks"`
+	// THE EVENTS, not a count. A hook's identity IS the event it intercepts
+	// (`before.user.create`) — it has no name of its own — and this line used to
+	// be `int`, so the build said "2 hook class(es)" where jobs and webhooks said
+	// what they were. A count cannot tell an operator that a deploy stopped
+	// intercepting an event, which is the one thing they would want to know.
+	Hooks       []string `json:"hooks"`
 	Jobs        []jobDef `json:"jobs"`
 	Webhooks    []string `json:"webhooks"`
 }
