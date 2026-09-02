@@ -766,7 +766,18 @@ function registerControllers() {
     if (className && !answered.has(className)) silent.push(file);
   }
 
-  return { sawControllerFiles, staleSDKSignature, routeCount: routes.size, skipped, silent };
+  return {
+    sawControllerFiles,
+    staleSDKSignature,
+    routeCount: routes.size,
+    skipped,
+    silent,
+    // BY NAME, not by identity: the surface check below loads the per-directory
+    // bundles, which are separate compilations, so the same class is a different
+    // object there. The silent-controller check above compares by name for the
+    // same reason.
+    ownedNames: container ? new Set([...container.owned].map((c) => (typeof c === 'function' ? c.name : ''))) : null,
+  };
 }
 
 /**
@@ -1071,10 +1082,27 @@ function surfaceClassesIn(dirName) {
   return found;
 }
 
-/** Refusals for every surface class that declares constructor parameters. */
-function checkSurfaceConstructors() {
-  const runtime = runtimeModule();
-  if (!runtime || typeof runtime.assertZeroArgConstructor !== 'function') return [];
+/**
+ * Every surface class on disk is one a MODULE lists — and the container builds it.
+ *
+ * This used to assert `assertZeroArgConstructor` on each one, which is the rule
+ * the controllers path retired when a module became the declaration: jobs,
+ * hooks, webhooks and rooms are all resolved from the container now
+ * (`collectJobs`/`collectHooks`/`collectWebhooks`/`collectRooms` in the
+ * runtime), so a constructor parameter is not a fault — it is the point.
+ *
+ * Measured 02.09.2026: a `@Webhook` class taking one injected dependency, marked
+ * `@Injectable()` and listed in a module's `providers`, was refused with a
+ * message telling the author to mark it `@Injectable()` and list it in a
+ * module's `providers`. The gate named a fix the author had already applied.
+ *
+ * What replaces it is the question that actually matters and had no answer: a
+ * surface class NO module lists never reaches `webhooksOf(container)`, so it is
+ * never mounted, never scheduled, never called — silently. That is the same
+ * fault `assertNoOrphanEntryPoints` refuses for controllers, and it needs the
+ * same refusal here.
+ */
+function checkSurfaceConstructors(ownedNames) {
   const failures = [];
   for (const [dirName, kind] of SURFACE_DIRS) {
     for (const entry of surfaceClassesIn(dirName)) {
@@ -1084,10 +1112,15 @@ function checkSurfaceConstructors() {
         failures.push({ file: shown, error: entry.error });
         continue;
       }
-      try {
-        runtime.assertZeroArgConstructor(entry.cls, kind);
-      } catch (err) {
-        failures.push({ file: shown, error: err.message });
+      if (!ownedNames) continue; // the graph was refused; that IS the finding
+      const name = typeof entry.cls === 'function' ? entry.cls.name : '';
+      if (!ownedNames.has(name)) {
+        failures.push({
+          file: shown,
+          error:
+            `${kind} ${name || '<anonymous>'} is declared but no module lists it, so nothing ` +
+            `builds it and it will never run — add it to a module's \`providers\``,
+        });
       }
     }
   }
@@ -1292,7 +1325,7 @@ async function main() {
   // okunması gereken yerden kesilirdi. `exitCode` atayıp doğal çıkışı beklemek
   // iki çalışma zamanında da her baytı teslim ediyor (ölçüldü).
   // The surface classes the deploy would resolve at boot, checked HERE instead.
-  for (const f of checkSurfaceConstructors()) failures.push(f);
+  for (const f of checkSurfaceConstructors(reg.ownedNames)) failures.push(f);
 
   if (failures.length === 0) {
     log(`build OK — ${reg.routeCount} route(s) across the controllers would deploy cleanly${declaredSurfaces()}`);

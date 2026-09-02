@@ -1255,3 +1255,123 @@ export class BService {
 	require.NoError(t, runBuild(ctx, dir, &out), "the acyclic tree was refused:\n%s", out.String())
 	require.Contains(t, out.String(), "build OK")
 }
+
+// TestASurfaceClassIsOwnedByAModule locks the rule that replaced the retired
+// zero-argument check for jobs, hooks and webhooks.
+//
+// Every surface is built by the CONTAINER now (collectJobs / collectHooks /
+// collectWebhooks / collectRooms in the runtime), so a constructor parameter is
+// not a fault — it is the point. The build refused it anyway, with a message
+// telling the author to mark the class `@Injectable()` and list it in a
+// module's `providers`: measured 2026-09-02 on a webhook that already carried
+// both. A gate that names a fix the author has applied is worse than no gate.
+//
+// What the check owes instead is the question that had no answer: a surface
+// class no module lists never reaches `webhooksOf(container)`, so it is never
+// mounted and never called — the same silence `assertNoOrphanEntryPoints`
+// refuses for controllers.
+func TestASurfaceClassIsOwnedByAModule(t *testing.T) {
+	dir := t.TempDir()
+	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelPack()
+	sdk := packLocalSDK(t, ctxPack)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	if !sdkHasControllerRegistry(t, dir) {
+		t.Skip("the packed SDK exposes no controller registry")
+	}
+	useTestParserCache(t)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "webhooks"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "health.controller.ts"), []byte(`
+import { Controller, Get, z } from "@palbase/backend";
+
+export const HealthResponse = z.object({ status: z.string() });
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
+@Controller("/health", { auth: false })
+export class HealthController {
+  @Get("")
+  check(): HealthResponse {
+    return { status: "ok" };
+  }
+}
+`), 0o644))
+
+	// A webhook that takes an INJECTED dependency — the shape the old check
+	// refused outright.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "webhooks", "stripe.webhook.ts"), []byte(`
+import { Injectable, On, Webhook } from "@palbase/backend";
+
+@Injectable()
+export class Ledger {
+  seen = 0;
+}
+
+@Injectable()
+@Webhook({ name: "stripe", provider: "stripe", secret: { env: "STRIPE_SECRET" } })
+export default class StripeWebhook {
+  constructor(private readonly ledger: Ledger) {}
+
+  @On("payment.succeeded")
+  async paid(): Promise<void> {
+    this.ledger.seen++;
+  }
+}
+`), 0o644))
+
+	moduleWith := func(extra string) []byte {
+		return []byte(`
+import { Module, type Token } from "@palbase/backend";
+import { HealthController } from "./controllers/health.controller.ts";
+import StripeWebhook, { Ledger } from "./webhooks/stripe.webhook.ts";
+
+@Module({
+  controllers: [HealthController as Token],
+  providers: [Ledger as Token` + extra + `],
+})
+export class AppModule {}
+`)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), moduleWith(", StripeWebhook as Token"), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuild(ctx, dir, &out),
+		"an injected webhook listed in a module was refused:\n%s", out.String())
+	require.Contains(t, out.String(), "build OK")
+	require.NotContains(t, out.String(), "zero-argument constructor",
+		"the retired rule is still being enforced:\n%s", out.String())
+
+	// NEGATIVE CONTROL 1: take it out of the module. It carries `@Injectable()`,
+	// so FR-010 owns this one — refused by name either way.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), moduleWith(""), 0o644))
+	out.Reset()
+	require.Error(t, runBuild(ctx, dir, &out),
+		"a webhook no module lists was accepted — it would never run:\n%s", out.String())
+	require.Contains(t, out.String(), "StripeWebhook")
+	require.Contains(t, out.String(), "listed in no module")
+
+	// NEGATIVE CONTROL 2: a surface class carrying ONLY the surface decorator —
+	// no `@Injectable()`, so the FR-010 registry never sees it. This is the case
+	// the surface check itself owns, and nothing caught it before: the class
+	// would be bundled, counted in "plus 1 webhook(s)", and never mounted.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "webhooks", "orphan.webhook.ts"), []byte(`
+import { On, Webhook } from "@palbase/backend";
+
+@Webhook({ name: "orphan", provider: "stripe", secret: { env: "ORPHAN_SECRET" } })
+export default class OrphanWebhook {
+  @On("x.y")
+  async go(): Promise<void> {}
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.module.ts"), moduleWith(", StripeWebhook as Token"), 0o644))
+	out.Reset()
+	require.Error(t, runBuild(ctx, dir, &out),
+		"a @Webhook no module lists was accepted — it would never run:\n%s", out.String())
+	require.Contains(t, out.String(), "OrphanWebhook")
+	require.Contains(t, out.String(), "no module lists it")
+}
