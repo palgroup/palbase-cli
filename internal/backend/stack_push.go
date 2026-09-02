@@ -202,6 +202,9 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 					"  The stack's runtime has to be serving before anything can be pushed to it.",
 				*reaches, ceilErr)
 		}
+	case errors.Is(ceilErr, errNoDeploymentYet):
+		// Nothing deployed: no ceiling to compare against, and nothing to
+		// protect. The runtime's boot gate is the backstop.
 	case ceilErr == nil:
 		if why := pushCeilingRefusal(reaches, serves); why != "" {
 			return errors.New(why)

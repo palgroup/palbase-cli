@@ -1048,6 +1048,11 @@ func checkSDKVersion(projectDir string) error {
 // the stack did not answer at all.
 var errStackSilent = errors.New("the stack did not answer")
 
+// errNoDeploymentYet marks a stack that ANSWERED and has nothing deployed. Its
+// ceiling is unknown and unknowable from here, and the first push is exactly
+// when that happens.
+var errNoDeploymentYet = errors.New("the stack has nothing deployed yet")
+
 // stackServesGeneration asks the target what the HIGHEST rung it can serve is.
 //
 // `/v1/management/deployments/current` carries it since the DI run wired the
@@ -1097,10 +1102,25 @@ func stackServesGeneration(ctx context.Context, target Target) (*int, error) {
 		// answer. The caller must not turn this into a number.
 		return nil, fmt.Errorf("%w: %s answered %d", errStackSilent, target.URL, res.StatusCode)
 	}
+	if res.StatusCode == http.StatusNotFound {
+		// NOTHING DEPLOYED YET — and that is a THIRD state, not the second one.
+		//
+		// It used to fall through to (nil, nil), which the caller reads as "the
+		// image published no ceiling" and answers with the documented default of
+		// 2. That default is right for an OLD IMAGE; it is wrong here, and the
+		// cost was the whole feature: a bundle reaching rung 3 could never be
+		// pushed to a stack that had never been pushed to — which is EVERY
+		// project's first push. Measured 2026-09-02.
+		//
+		// So this gate says nothing here, deliberately. What it protects against
+		// is activating an artifact over a working one the runtime cannot serve;
+		// with nothing deployed there is nothing to protect, and the runtime's
+		// own boot gate (`abi.ts`) still refuses a bundle it cannot serve —
+		// loudly, and since FR-149 without killing the pod, so the refusal is
+		// readable and the next push is accepted.
+		return nil, errNoDeploymentYet
+	}
 	if res.StatusCode != http.StatusOK {
-		// 404 is the ordinary state of a stack nobody has pushed to yet. It is
-		// not a fault and it is not a ceiling — it is no answer ABOUT THE
-		// CEILING, from a stack that is up, and the caller says what that means.
 		return nil, nil
 	}
 	var out struct {
