@@ -668,3 +668,69 @@ test('extract_meta drops a controller the module does not own', (t) => {
     `the extractor described the wrong class — an unowned one reached the spec:\n${out}`);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+// ── every symbol this file GUARDS ON must be one the SDK EXPORTS ───────────
+//
+// `build-check.js` reaches into `@palbase/backend` behind
+// `typeof sdk.X === 'function'`, so an SDK that does not export `X` makes the
+// guard false and the check silently does not run. That is a READER WITH NO
+// WRITER, and it cost the run its central promise: `assertNoOrphanEntryPoints`
+// was never exported from `src/index.ts`, so the orphan check never ran on the
+// build path at all. Measured 2026-09-02 through the real CLI — a `@Controller`
+// no module listed entered the route table and `palbase build` printed
+// "build OK — 6 route(s)", exit 0, while the runtime refused the same tree at
+// boot.
+//
+// The guards themselves are RIGHT: an older SDK in a user's project genuinely
+// may not have these, and refusing that project outright would be worse. What
+// was missing is anything checking the other side.
+test('every `typeof sdk.X` guard names a symbol the SDK exports', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'build-check.js'), 'utf8');
+  const guarded = [
+    ...source.matchAll(/typeof\s+sdk\.([A-Za-z_$][\w$]*)\s*===\s*'function'/g),
+  ].map((m) => m[1]);
+
+  // A regex that stops matching would report silence and call it success.
+  assert.ok(guarded.length >= 3, `no sdk guards found in build-check.js (got ${guarded.length})`);
+
+  // THE SDK'S OWN SOURCE, at its known place in this monorepo — not
+  // `require('@palbase/backend')`, which does not resolve from this directory
+  // and made the first version of this test pass by not looking. A gate that
+  // cannot find its subject must SAY SO, not report silence.
+  const indexTs = path.resolve(
+    __dirname,
+    '..', '..', '..', '..', 'palbase-ts', 'backend', 'src', 'index.ts',
+  );
+  assert.ok(
+    fs.existsSync(indexTs),
+    `the SDK source is not at ${indexTs} — this gate has nothing to measure and must not pass quietly`,
+  );
+
+  // Comments stripped: this file's own explanation NAMES the symbol that was
+  // missing, so a comment-blind search would find the sentence rather than the
+  // export.
+  const code = fs
+    .readFileSync(indexTs, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  const exported = new Set(
+    [...code.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+([A-Za-z_$][\w$]*)/gm)]
+      .map((m) => m[1])
+      .concat(
+        [...code.matchAll(/^export\s*\{([^}]*)\}/gm)].flatMap((m) =>
+          m[1]
+            .split(',')
+            .map((part) => part.trim().split(/\s+as\s+/).pop().trim())
+            .filter(Boolean),
+        ),
+      ),
+  );
+
+  const missing = guarded.filter((name) => !exported.has(name));
+  assert.deepEqual(
+    missing,
+    [],
+    `build-check.js guards on ${missing.join(', ')}, which the SDK does not export — ` +
+      `the guard is false every time and the check never runs`,
+  );
+});
