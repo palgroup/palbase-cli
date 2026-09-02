@@ -1,0 +1,62 @@
+name: CI
+
+# NOTHING WAS TESTED UNTIL SOMEBODY CUT A VERSION.
+#
+# This repository had ONE workflow — `release.yml` — and its only trigger was
+# `push: tags: v*`. That means every commit on `main` reached `main` ungated,
+# and the first thing to run the suite was a release. Measured on 2026-09-02:
+# `v0.51.0` was tagged to ship the `palbase admin` removal, the Release run
+# failed on `TestBuildCheckNodeSuite`, and the four commits that broke it had
+# never been through CI. The tag was deleted; nothing shipped.
+#
+# The cost lands on the wrong person. Whoever cuts the release inherits every
+# break written since the last one, and has to bisect work that is not theirs
+# — in a repository several sessions push to. This gate moves that discovery
+# back to the push that caused it.
+#
+# It runs the SAME suite as the release gate, deliberately — see
+# `cmd/palbase/workflows_test.go`, which fails if the two ever disagree. A
+# cheaper push gate (no `-race`, a different Go, no bun) would go green on
+# exactly what the release rejects, and a green that means nothing is worse
+# than no gate at all.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an older run pointless — cancel it rather than paying for
+# a verdict on a commit nobody will ship.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+
+      # bun, because the CLI builds a backend with it and several tests exercise
+      # that path. Without it they SKIP, so this gate would be quietly thinner
+      # than the release gate — which is the shape of a CI that passes and lets
+      # the release fail.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.9"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run tests
+        run: go test ./... -race -count=1
