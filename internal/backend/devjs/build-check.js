@@ -28,7 +28,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
+const { cpus } = require('os');
 
 const PROJECT_ROOT = process.env.PALBASE_DEV_ROOT || process.cwd();
 
@@ -148,7 +149,14 @@ const generics = require('./generics.js');
 const txAnalysis = require('./tx_analysis.js');
 
 // SRC_EXT_BY_STEM is the staging manifest: project-relative stem
-// ("controllers/todos.controller") → the extension the AUTHOR wrote (".ts").
+// ("controllers/todos.controller", "notes.module") → the extension the AUTHOR
+// wrote (".ts").
+//
+// The stem used to be prefixed with "controllers/" unconditionally, from when
+// only `controllers/` was staged. The WHOLE project is staged now, so that
+// prefix invented a directory: a project-root `notes.module.ts` was reported as
+// `controllers/notes.module.ts` — a path that resolves to nothing, which is the
+// one outcome this manifest's fail-safe exists to avoid.
 //
 // esbuild emits `.js` beside every source it bundles, so past the stager the
 // original extension is simply gone — and every path this runner reports is
@@ -166,7 +174,7 @@ const SRC_EXT_BY_STEM = new Map();
 // what it walked, so the error it reports can name the file the author opens.
 function recordStagedSources(srcDir) {
   for (const file of walk(srcDir)) {
-    const stem = withoutExtension(path.join('controllers', path.relative(srcDir, file)));
+    const stem = withoutExtension(path.relative(srcDir, file));
     const ext = path.extname(file);
     if (SRC_EXT_BY_STEM.has(stem) && SRC_EXT_BY_STEM.get(stem) !== ext) {
       SRC_EXT_BY_STEM.set(stem, null);
@@ -771,27 +779,51 @@ function withoutExtension(p) {
 // Express-style :param). Returns [{file, error}]; empty when every controller
 // extracts clean. A spawn failure (node/extractor missing) is reported as its
 // own entry so the run fails loud rather than passing blind.
-function deployExtractErrors() {
+async function deployExtractErrors() {
   const out = [];
   if (!fs.existsSync(BUNDLED_EXTRACT_DIR)) return out;
   const extractor = path.join(__dirname, 'extract_meta.js');
   let described = 0;
-  for (const file of walk(BUNDLED_EXTRACT_DIR)) {
-    if (!BUNDLED_MODULE_RE.test(path.basename(file))) continue;
-    const srcRel = bundledToSrcRel(file);
-    let stdout;
-    try {
-      stdout = execFileSync('node', [extractor], {
-        input: JSON.stringify({ bundle_path: file }),
+  const files = walk(BUNDLED_EXTRACT_DIR).filter((f) => BUNDLED_MODULE_RE.test(path.basename(f)));
+
+  /** One extraction: a node process, its stdin, and whatever it wrote back. */
+  const extractOne = (file) =>
+    new Promise((resolve) => {
+      const kid = spawn('node', [extractor], {
         // RUNTIME_MODULES, not PROJECT_ROOT/node_modules: the project root is the
         // DEPLOY-SHAPED staging tree, which has no node_modules (that is the
         // point — see RUNTIME_MODULES). The extractor still needs the real
         // @palbase/backend, the same way the pod's global install provides it.
         env: Object.assign({}, process.env, { NODE_PATH: RUNTIME_MODULES }),
-        encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-    } catch (err) {
+      let stdout = '';
+      let stderr = '';
+      kid.stdout.on('data', (d) => { stdout += d; });
+      kid.stderr.on('data', (d) => { stderr += d; });
+      kid.on('error', (err) => resolve({ file, err }));
+      kid.on('close', (code) =>
+        resolve(code === 0 ? { file, stdout } : { file, err: new Error(stderr.trim() || `exit ${code}`) }),
+      );
+      kid.stdin.end(JSON.stringify({ bundle_path: file }));
+    });
+
+  // IN PARALLEL, because this is one `node` PROCESS PER MODULE and a project
+  // grows by adding modules. Serially it cost ~50 ms each: measured 01.09.2026
+  // on a 50-module / 1000-endpoint tree, `palbase build` took 4.6 s against
+  // 1.9 s for the same endpoints under one module, and the whole 2.7 s gap was
+  // these spawns waiting for each other. Nothing about the work changed — the
+  // extractor still sees one bundle at a time, in its own process, exactly as
+  // the deploy calls it.
+  const LANES = Math.max(2, Math.min(8, cpus().length));
+  const results = [];
+  for (let i = 0; i < files.length; i += LANES) {
+    results.push(...(await Promise.all(files.slice(i, i + LANES).map(extractOne))));
+  }
+
+  for (const { file, stdout, err } of results) {
+    const srcRel = bundledToSrcRel(file);
+    if (err) {
       out.push({ file: srcRel, error: `extractor failed to run: ${err.message}` });
       continue;
     }
@@ -853,8 +885,9 @@ const NO_CONTROLLER_IN_BUNDLE = /must default-export a @Controller class[\s\S]*g
 // a path that is merely unhelpful beats a path that is confidently wrong.
 function bundledToSrcRel(bundledPath) {
   const base = bundledPath.startsWith(BUNDLED_EXTRACT_DIR) ? BUNDLED_EXTRACT_DIR : BUNDLED_CONTROLLERS_DIR;
-  const rel = path.relative(base, bundledPath);
-  const srcRel = path.join('controllers', rel);
+  // The bundled tree mirrors the staged tree, which mirrors the PROJECT ROOT
+  // (`--root=srcDir`), so the relative path is already the project-relative one.
+  const srcRel = path.relative(base, bundledPath);
   const srcExt = SRC_EXT_BY_STEM.get(withoutExtension(srcRel));
   if (!srcExt) return srcRel;
   return withoutExtension(srcRel) + srcExt;
@@ -1129,7 +1162,7 @@ function scanTypecheckIsRunning() {
   return missing;
 }
 
-function main() {
+async function main() {
   // TxPlan Ref-truthiness gate runs FIRST and exits immediately on any
   // finding — never merged into the `failures` list below. That list can, in
   // principle, grow a tolerated/soft entry some day; this one must never be
@@ -1170,7 +1203,7 @@ function main() {
   const failures = [];
   if (reg.buildError) failures.push({ file: 'controllers/', error: reg.buildError });
   for (const s of reg.skipped || []) failures.push(s);
-  for (const e of deployExtractErrors()) failures.push(e);
+  for (const e of await deployExtractErrors()) failures.push(e);
   for (const f of reg.silent || []) {
     failures.push({
       file: f,
@@ -1233,12 +1266,10 @@ for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) 
 // tests (the resource-externals cross-boundary test drives the REAL bundle path)
 // without running the check.
 if (require.main === module) {
-  try {
-    main();
-  } catch (err) {
+  main().catch((err) => {
     log(`FATAL: build check failed to run: ${err && err.stack ? err.stack : String(err)}`);
     process.exit(1);
-  }
+  });
 }
 
 // Exported for the Go-side tests: the REAL stage+bundle path must be exercised

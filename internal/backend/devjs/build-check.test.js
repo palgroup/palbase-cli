@@ -429,12 +429,20 @@ function typescriptAvailable() {
   }
 }
 
+// Keys are PROJECT-RELATIVE paths, because the staging root is the PROJECT
+// ROOT — a module owns its controllers by relative path, so staging only
+// `controllers/` would leave the module pointing at un-staged sources. This
+// fixture used to stage `controllers/` itself and name its files bare, which
+// let the manifest fabricate a `controllers/` prefix for everything and still
+// look right: a root-level `notes.module.ts` was reported as
+// `controllers/notes.module.ts`, a path that resolves to nothing.
 function stagedFixture(t, files) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-srcrel-'));
-  const src = path.join(root, 'controllers');
-  fs.mkdirSync(src, { recursive: true });
-  for (const [name, body] of Object.entries(files)) {
-    fs.writeFileSync(path.join(src, name), body);
+  const src = path.join(root, 'project');
+  for (const [rel, body] of Object.entries(files)) {
+    const dest = path.join(src, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, body);
   }
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   stageControllersWithReturnBindings(src, path.join(root, '.palbase-build-controllers'));
@@ -445,21 +453,30 @@ test('the reported path carries the SOURCE extension, not the bundled one', (t) 
   // the return-bindings path), so this case needs neither esbuild nor a
   // TypeScript parser and always runs.
   stagedFixture(t, {
-    'helpers.ts': 'export const ok = true;\n',
-    'diag.controller.js': 'export default class D {}\n',
+    'controllers/helpers.ts': 'export const ok = true;\n',
+    'controllers/diag.controller.js': 'export default class D {}\n',
+    'notes.module.ts': 'export class NotesModule {}\n',
   });
 
   assert.strictEqual(
-    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'helpers.js')),
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'controllers', 'helpers.js')),
     path.join('controllers', 'helpers.ts'),
     'a .ts source must be reported as .ts — the bundled .js is a temp file that is deleted on exit',
+  );
+
+  // A MODULE LIVES AT THE PROJECT ROOT, and must be reported there. The prefix
+  // this used to add named a file the author does not have.
+  assert.strictEqual(
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'notes.module.js')),
+    'notes.module.ts',
+    'a project-root module must not be reported under controllers/',
   );
 
   // NEGATIVE CONTROL: a source that really IS .js keeps .js. Without this,
   // "always say .ts" would pass the assertion above and lie about every
   // plain-JS controller.
   assert.strictEqual(
-    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'diag.controller.js')),
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'controllers', 'diag.controller.js')),
     path.join('controllers', 'diag.controller.js'),
     'a genuine .js source must stay .js',
   );
@@ -467,7 +484,7 @@ test('the reported path carries the SOURCE extension, not the bundled one', (t) 
   // FAIL-SAFE: a bundled file the manifest never saw keeps the bundled
   // extension rather than being guessed at.
   assert.strictEqual(
-    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'ghost.controller.js')),
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'controllers', 'ghost.controller.js')),
     path.join('controllers', 'ghost.controller.js'),
     'an unmapped bundled path must fall back to the bundled extension',
   );
@@ -477,7 +494,7 @@ test('a real *.controller.ts route reports its .ts source', (t) => {
   if (!typescriptAvailable()) return t.skip('no TypeScript 5 compiler API (bare `node --test`?)');
 
   stagedFixture(t, {
-    'todos.controller.ts': [
+    'controllers/todos.controller.ts': [
       'import { Controller, Get } from "@palbase/backend";',
       '@Controller("/todos")',
       'export default class TodosController {',
@@ -487,7 +504,7 @@ test('a real *.controller.ts route reports its .ts source', (t) => {
   });
 
   assert.strictEqual(
-    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'todos.controller.js')),
+    bundledToSrcRel(path.join(BUNDLED_CONTROLLERS_DIR, 'controllers', 'todos.controller.js')),
     path.join('controllers', 'todos.controller.ts'),
   );
 });
