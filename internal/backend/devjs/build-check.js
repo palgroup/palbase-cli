@@ -557,6 +557,35 @@ function deriveControllerName(Ctrl) {
   return name.charAt(0).toLowerCase() + name.slice(1);
 }
 
+
+/**
+ * Every `*.module.ts` in the tree — the same walk `moduleSources` does in Go,
+ * and for the same reason: a module lives beside the domain it owns, not in a
+ * directory this tool names.
+ */
+function moduleFiles(root) {
+  const out = [];
+  const skip = new Set(['node_modules', 'dist', '.git']);
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (skip.has(e.name) || e.name.startsWith('.palbase')) continue;
+        walk(path.join(dir, e.name));
+      } else if (e.name.endsWith('.module.ts')) {
+        out.push(path.join(dir, e.name));
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
 // registerControllers stages, bundles and loads every controller, filling the
 // route table. Returns { sawControllerFiles, staleSDKSignature, routeCount,
 // skipped[], buildError? } — a skipped controller or a buildError is a deploy
@@ -564,8 +593,20 @@ function deriveControllerName(Ctrl) {
 function registerControllers() {
   routes.clear();
   const skipped = []; // {file, error} — a controller that failed to load
-  if (!fs.existsSync(CONTROLLERS_DIR)) {
-    log(`controllers/ not found at ${CONTROLLERS_DIR}`);
+  // A BACKEND IS ITS MODULES, NOT A DIRECTORY NAMED `controllers`.
+  //
+  // This stat used to end the function: no `controllers/` meant zero routes and
+  // a green build. Everything BELOW already works on the whole tree — the stager
+  // stages the project, `bundleModulesAsOne` bundles the modules, and a
+  // controller is discovered because its module imports it — so the only thing
+  // that directory name still decided was whether any of it ran.
+  //
+  // Measured 2026-09-02 on a project moved to `modules/<name>/<name>.controller.ts`
+  // (the layout the module system exists to allow, and the one a Nest developer
+  // arrives with): `build OK — 0 route(s)`, with 85 routes in the tree. A gate
+  // that reports silence is worse than one that refuses.
+  if (moduleFiles(PROJECT_ROOT).length === 0) {
+    log(`no *.module.ts under ${PROJECT_ROOT}`);
     return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped };
   }
 
@@ -671,6 +712,8 @@ function registerControllers() {
       const sdk = require('@palbase/backend');
       if (typeof sdk.buildContainer === 'function') {
         container = sdk.buildContainer();
+        containerForSurfaces = container;
+        sdkForSurfaces = sdk;
         if (typeof sdk.assertNoOrphanEntryPoints === 'function') {
           sdk.assertNoOrphanEntryPoints(registeredControllers(), container.owned);
         }
@@ -1012,6 +1055,9 @@ function walk(dir) {
 //
 // The rule and the message stay the SDK's; this asks it. An older SDK that does
 // not export the check is not a reason to refuse a build.
+let containerForSurfaces = null;
+let sdkForSurfaces = null;
+
 const SURFACE_DIRS = [
   ['jobs', 'job class'],
   ['webhooks', 'webhook class'],
@@ -1177,16 +1223,31 @@ function reportModulePressure(pressure) {
 // figure they can compare against what the runtime reports at boot. `palbase
 // push` is what refuses a bundle that lost one.
 function declaredSurfaces() {
+  // THE COUNT COMES FROM THE MODULE, NOT FROM A DIRECTORY LISTING.
+  //
+  // This used to `readdirSync` `jobs/`, `webhooks/` and `hooks/` at the project
+  // root and count the files. That was a second discovery the module system
+  // never saw, and it went silent the moment a project put its job beside the
+  // module that declares it: measured 2026-09-02, a tree with three `@Job`
+  // classes inside `modules/*/jobs/` reported none, while the modules listed
+  // all three and the runtime would have run them.
+  //
+  // A count nobody computes from the declaration is a count that lies. The
+  // container already holds these classes — the module put them there — so ask
+  // it. `jobsOf`/`webhooksOf`/`hooksOf` are the SDK's own predicates, and an
+  // older SDK that does not export them is not a reason to refuse a build.
+  if (containerForSurfaces === null || sdkForSurfaces === null) return '';
   const parts = [];
-  for (const [dir, noun] of [['jobs', 'job'], ['webhooks', 'webhook'], ['hooks', 'hook']]) {
-    let files = [];
+  for (const [fn, noun] of [['jobsOf', 'job'], ['webhooksOf', 'webhook'], ['hooksOf', 'hook']]) {
+    const of = sdkForSurfaces[fn];
+    if (typeof of !== 'function') continue;
+    let n = 0;
     try {
-      files = fs.readdirSync(path.join(PROJECT_ROOT, dir), { withFileTypes: true })
-        .filter((e) => !e.isDirectory() && /\.m?ts$/i.test(e.name) && !/\.test\.m?ts$/i.test(e.name));
+      n = of(containerForSurfaces).length;
     } catch {
-      continue; // No such directory is the normal case, not a fault.
+      continue;
     }
-    if (files.length > 0) parts.push(`${files.length} ${noun}(s)`);
+    if (n > 0) parts.push(`${n} ${noun}(s)`);
   }
   return parts.length > 0 ? `, plus ${parts.join(', ')}` : '';
 }

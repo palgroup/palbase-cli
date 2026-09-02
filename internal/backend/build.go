@@ -90,9 +90,22 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 			"(https://bun.sh). The stack runs Bun, so the bundle is built by the engine that will run it")
 	}
 
-	controllersDir := filepath.Join(cwd, "controllers")
-	if _, err := os.Stat(controllersDir); err != nil {
-		fmt.Fprintln(out, "no controllers/ — nothing to validate")
+	// A BACKEND IS ITS MODULES, NOT A DIRECTORY NAMED `controllers`.
+	//
+	// This used to stat `controllers/` and, when it was absent, print "nothing to
+	// validate" and return SUCCESS. That is a gate reporting silence: a project
+	// that keeps each module in its own folder — the layout the module system
+	// exists to allow, and the one Nest developers arrive with — validated
+	// NOTHING and said OK. Measured 2026-09-02 on a project moved to
+	// `modules/<name>/`: `build OK — 0 route(s)`, with 85 routes in the tree.
+	//
+	// The real precondition is the one the bundler already uses: at least one
+	// `*.module.ts` anywhere. Absence of that is still worth saying out loud,
+	// because a tree with no module genuinely has nothing to answer with.
+	if mods, err := moduleSources(cwd); err != nil {
+		return err
+	} else if len(mods) == 0 {
+		fmt.Fprintln(out, "no *.module.ts — nothing to validate")
 		return nil
 	}
 
