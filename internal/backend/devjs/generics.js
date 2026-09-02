@@ -19,8 +19,24 @@
  * WHY A TREE WALK AND NOT THE STAGING LOOP. The stager is handed
  * `<project>/controllers` (stack_bundle.go) and stages that directory alone.
  * Bolting this check to that loop would leave every service unexamined — and a
- * service is where an injectable class normally lives. The rule is about every
- * class, so the check reads every source file.
+ * service is where an injectable class normally lives. So the check reads every
+ * source file.
+ *
+ * WHICH CLASSES IT SPEAKS ABOUT — and this was narrowed after a real project
+ * was refused for a class nothing injects. `GooglePlacesError extends Error`,
+ * constructed by hand with `new GooglePlacesError("HTTP", …)`, was rejected for
+ * a union parameter it is entitled to have. The rule is not "every class": it is
+ * every class the container can CONSTRUCT, and that set is decided by a
+ * mechanism, not by a naming convention. `emitDecoratorMetadata` writes
+ * `design:paramtypes` onto a class only when the class carries a class
+ * decorator. Without it there are no emitted parameter types, so the container
+ * cannot inject the class and the Bun/SWC disagreement is unreachable. A
+ * decorated class is therefore exactly the set at risk — and reading the
+ * decorator's PRESENCE rather than its NAME keeps the check honest when
+ * `import { Injectable as Inj }` renames it.
+ *
+ * A class listed in a module's `providers` without a decorator is not a hole:
+ * the container refuses it on its own, naming the missing metadata.
  */
 
 const fs = require('node:fs');
@@ -93,8 +109,22 @@ function assertNoGenericDeps(source, relPath) {
   const t = ts();
   const sf = t.createSourceFile(relPath, source, t.ScriptTarget.Latest, true);
 
+  /**
+   * Does this class carry a class decorator? That is the emitter's own
+   * condition for writing `design:paramtypes`, so it is the condition for the
+   * container being able to construct the class at all.
+   */
+  const isDecorated = (cls) => {
+    if (!cls) return false;
+    const decorators =
+      typeof t.canHaveDecorators === 'function' && t.canHaveDecorators(cls)
+        ? t.getDecorators(cls)
+        : cls.decorators;
+    return Array.isArray(decorators) && decorators.length > 0;
+  };
+
   const visit = (node) => {
-    if (t.isConstructorDeclaration(node)) {
+    if (t.isConstructorDeclaration(node) && isDecorated(node.parent)) {
       const owner =
         node.parent && node.parent.name && node.parent.name.text
           ? node.parent.name.text
