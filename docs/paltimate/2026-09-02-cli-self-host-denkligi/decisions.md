@@ -488,3 +488,42 @@ Grep: `stackLogin|StackLogin` çağıranı **YOK** — yol gerçekten kaldırıl
 üretiyor, ve çekirdek `palbase-cli`'ı tam da `offline_access` + `refresh_token`
 grant'iyle ekiyor (`bootstrap_handler.go:46-53`). Emekliye ayrılan yolun kusuru
 (refresh yokluğu) seçilen yolda yapısal olarak yok.
+
+## D-006'nın son önermesi doğrulandı (2026-09-02)
+
+**Discovery ANONİM.** `v2/internal/modules/auth/auth.go:200-211` `MountPublic`
+`/.well-known` ve `/.well-known/*`'ı `Verify` grubunun DIŞINDA, parent router'a
+kaydediyor; gerekçe `auth.go:191-199`'da yazılı:
+
+> *"It has to be outside… a client fetches the keys in order to VERIFY a token,
+> which is a thing it may need to do before it holds one — and **RFC 8414 §3
+> specifies the discovery document as an unauthenticated GET**, so a gate here
+> would make this stack's issuer undiscoverable by any conforming client."*
+
+Yani D-006'nın "issuer çekirdeğin kendi discovery belgesinden gelir" adımı, ürünün
+zaten kasten desteklediği şeydir — yeni bir delik açmıyor.
+
+**Düzeltme:** discovery handler'ı `internal/modules/auth/internal/server/oidc_handlers.go`
+içinde; `internal/oidc/provider.go` sağlayıcı servisini tutuyor, belgeyi değil.
+
+**`POST /v1/management/session` çağıranı SIFIR** (`grep -rn "management/session"`
+→ boş). Emekliye ayrılan parola yolunun yerine hiçbir şey konmamış — self-host'ta
+oturum açmanın tek yolu bugün `--token-stdin`.
+
+**`stack_login.go` ÖLÜ DEĞİL** — adı yanıltıcı, ama 13 canlı çağıranı olan tek
+TLS-politika darboğazı (`stack_push.go:249`, `stack_bundle.go:837,1090`,
+`stack_spec.go:148,225`, `project_keys.go:62`, `stack_sdk.go:174`,
+`start_secrets.go:199`, `link_token.go:42`, + `HTTPClient` çağıranları). Adlandırdığı
+login silinmiş, taşınmamış. (Kapsam içi küçük bir hijyen kalemi: dosya adı.)
+
+**`link --token-stdin`'in kendi yorumu kısıtı zaten yazmış** (`link_token.go:28-53`):
+
+> *"THE CREDENTIAL CHAIN HAS FOUR LINKS AND A STACK RUNNING ON SOMEBODY'S OWN
+> CLUSTER MATCHES ONLY ONE OF THEM: the store. It is not on this machine, so
+> `palbase start` has nothing to read; it is not in our ledger, so signing in buys
+> nothing — **doctor says 'not logged in' and the link works anyway, which is the
+> tell.**"*
+
+D-005 tam olarak bu cümlenin "signing in buys nothing" kısmını yanlışlıyor: artık
+alacak. Ve "doctor says not logged in… which is the tell" satırı, D-002'nin
+düzeltmeyi taahhüt ettiği kusurun kod içindeki itirafıdır.
