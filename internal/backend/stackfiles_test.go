@@ -13,6 +13,20 @@ import (
 // stopped resembling the one the repository tests. Held against the original
 // whenever the palbase repository is beside this checkout — every development
 // machine, and no CI runner, which is why an absence skips rather than fails.
+//
+// ONE SERVICE IS DELIBERATELY NOT VENDORED, and the exclusion is NAMED here
+// rather than left as a silent difference. `barman` (continuous WAL streaming
+// and scheduled base backups) is declared with `build:` and mounts
+// `./barman/initdb/...` — a local build context that exists in the palbase
+// repository and NOWHERE on the machine of somebody who installed the CLI from
+// brew. Vendoring it verbatim would make `palbase start` fail for exactly the
+// audience this file was created for.
+//
+// So the vendored copy is the four-container PRODUCT stack, and the fifth
+// service is a cloud operations concern. The exclusion is verified, not
+// assumed: `barmanBlock` must still be FOUND in the repository copy, so the day
+// barman is removed — or vendored properly — this gate goes red and the
+// exception has to be revisited instead of quietly outliving its reason.
 func TestTheVendoredComposeMatchesTheRepository(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -24,10 +38,47 @@ func TestTheVendoredComposeMatchesTheRepository(t *testing.T) {
 	if err != nil {
 		t.Skipf("the palbase repository is not beside this checkout: %v", err)
 	}
-	if string(want) != string(stackCompose) {
-		t.Errorf("the vendored %s differs from %s — re-vendor it, or the CLI starts a stack the repository does not test",
-			composeFile, original)
+
+	trimmed, found := withoutBarman(string(want))
+	if !found {
+		t.Fatalf("no `barman:` service in %s — the exclusion below has outlived its reason; "+
+			"vendor the file as-is and delete this carve-out", original)
 	}
+	if trimmed != string(stackCompose) {
+		t.Errorf("the vendored %s differs from %s (barman aside) — re-vendor it, or the CLI starts "+
+			"a stack the repository does not test", composeFile, original)
+	}
+}
+
+// withoutBarman removes the barman service and the two lines that exist only to
+// serve it, returning whether the service was there at all.
+func withoutBarman(doc string) (string, bool) {
+	const marker = "  # ── barman ───"
+	i := strings.Index(doc, marker)
+	if i < 0 {
+		return doc, false
+	}
+	// The block runs to the next top-level key (`networks:` / `volumes:`) or EOF.
+	rest := doc[i:]
+	end := len(doc)
+	for _, next := range []string{"\nnetworks:", "\nvolumes:", "\nsecrets:"} {
+		if j := strings.Index(rest, next); j >= 0 && i+j < end {
+			end = i + j
+		}
+	}
+	out := doc[:i] + doc[end:]
+	// The three lines the repository copy carries only because barman exists.
+	for _, line := range []string{
+		"#   barman     continuous WAL streaming + scheduled base backups (PITR)\n",
+		"      # Yeni bir dev stack'te de replication erişimi hazır gelsin (FR-004) — yoksa\n",
+		"      # barman bağlanamaz ve yedekleme dev'de sessizce çalışmaz.\n",
+		"      - ./barman/initdb/10-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro\n",
+	} {
+		out = strings.Replace(out, line, "", 1)
+	}
+	out = strings.ReplaceAll(out, "five containers", "four containers")
+	out = strings.ReplaceAll(out, "five-container stack", "four-container stack")
+	return out, true
 }
 
 // The images must be NAMED as registry references by default. A local tag as
