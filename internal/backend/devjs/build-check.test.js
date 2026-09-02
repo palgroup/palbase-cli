@@ -693,18 +693,31 @@ test('every `typeof sdk.X` guard names a symbol the SDK exports', () => {
   // A regex that stops matching would report silence and call it success.
   assert.ok(guarded.length >= 3, `no sdk guards found in build-check.js (got ${guarded.length})`);
 
-  // THE SDK'S OWN SOURCE, at its known place in this monorepo — not
+  // THE SDK'S OWN SOURCE, at its known place beside this checkout — not
   // `require('@palbase/backend')`, which does not resolve from this directory
-  // and made the first version of this test pass by not looking. A gate that
-  // cannot find its subject must SAY SO, not report silence.
+  // and made the first version of this test pass by not looking.
+  //
+  // ABSENT IS NOT THE SAME AS SILENT, and getting that wrong cost a release.
+  // The first fix made a missing SDK a FAILURE, which is right on a developer
+  // machine and wrong on a runner: `palbase-ts` is a separate repository and CI
+  // checks out only this one, so `go test ./...` went red for an environment,
+  // not for a defect — measured 2026-09-02, it took down the v0.52.0 release
+  // job. Every other cross-repo gate here already settled this (`init_test.go`,
+  // `stackfiles_test.go`): held on every development machine, skipped where the
+  // sibling is not there, and the skip SAYS which file it wanted.
+  //
+  // That is not the bug this test was written for. The bug was a `catch` that
+  // swallowed a RESOLUTION error and reported success with no message at all.
   const indexTs = path.resolve(
     __dirname,
     '..', '..', '..', '..', 'palbase-ts', 'backend', 'src', 'index.ts',
   );
-  assert.ok(
-    fs.existsSync(indexTs),
-    `the SDK source is not at ${indexTs} — this gate has nothing to measure and must not pass quietly`,
-  );
+  if (!fs.existsSync(indexTs)) {
+    console.log(
+      `  ↷ atlandı: SDK kaynağı ${indexTs} adresinde yok — palbase-ts bu checkout'un yanında değil`,
+    );
+    return;
+  }
 
   // Comments stripped: this file's own explanation NAMES the symbol that was
   // missing, so a comment-blind search would find the sentence rather than the
