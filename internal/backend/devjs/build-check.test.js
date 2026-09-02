@@ -89,9 +89,27 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'app.module.js'), [
 // is not measuring anything. The monorepo's own install is used instead, and
 // when it is absent the tests SKIP with the reason rather than reporting a
 // failure of the code.
+// WHERE A `typescript` PARSER CAN BE FOUND — and the INHERITED one counts.
+//
+// This used to look in ONE place: a sibling `palbase-ts` checkout next to this
+// repo. That path exists on a developer's machine and NEVER on CI, which checks
+// out `palbase-cli` alone. So on CI this returned '' — and the two spawns below
+// wrote that '' into NODE_PATH, THROWING AWAY the parser the Go wrapper had
+// already provisioned (`runDevJSSuite` → ensureParserTS → ~/.palbase/tools,
+// exported as NODE_PATH and inherited by every child).
+//
+// The result was a test that passed locally and failed on CI, and it failed
+// misleadingly: `a project with source but NO module` died on a parser-load
+// error instead of asserting the `no *.module.ts` refusal it exists to check.
+// Reproduced 2026-09-02: NODE_PATH='' -> "could not be loaded (Cannot find
+// module 'typescript')"; NODE_PATH=<provisioned> -> "no *.module.ts".
+//
+// The monorepo path still wins when present (a developer's tree is the fastest
+// resolution); the inherited NODE_PATH is the fallback, not a replacement.
 function parserPath() {
   const repo = path.resolve(__dirname, '..', '..', '..', '..', 'palbase-ts', 'backend', 'node_modules');
-  return fs.existsSync(path.join(repo, 'typescript')) ? repo : '';
+  if (fs.existsSync(path.join(repo, 'typescript'))) return repo;
+  return process.env.NODE_PATH || '';
 }
 
 function parserAvailable() {
