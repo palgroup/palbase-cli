@@ -87,7 +87,7 @@ type pushDeps struct {
 	// build and pack are the bundling seam. Production builds this project with
 	// its own node_modules and packs the result; tests substitute both so the
 	// upload contract can be asserted without Bun and a real controller tree.
-	build        func(context.Context, string, io.Writer) ([]uploadUse, error)
+	build        func(context.Context, string, io.Writer) ([]uploadUse, *int, error)
 	pack         func(string) ([]byte, error)
 	pollInterval time.Duration
 	pollTimeout  time.Duration
@@ -153,7 +153,7 @@ func runPush(d pushDeps) error {
 		pack = BuildStackTarball
 	}
 
-	uses, err := build(ctx, cwd, out)
+	uses, _, err := build(ctx, cwd, out)
 	if err != nil {
 		fmt.Fprintln(out, "✗ build failed — nothing was pushed (fix the errors above)")
 		return err

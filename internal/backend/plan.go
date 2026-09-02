@@ -75,7 +75,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// A plan that goes green on code the push then refuses is worse than no plan:
 	// it is a check whose passing means nothing.
 	fmt.Fprintln(out, "code")
-	uses, err := buildStackArtifact(ctx, dir, indent(out))
+	uses, _, err := buildStackArtifact(ctx, dir, indent(out))
 	if err != nil {
 		return err
 	}

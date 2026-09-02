@@ -96,12 +96,15 @@ func seedBackendDir(t *testing.T) {
 
 // stubBundler substitutes the bundling seam: production builds this project with
 // its own node_modules and Bun, which a unit test has neither of.
-func stubBundler(built *bool) (func(context.Context, string, io.Writer) ([]uploadUse, error), func(string) ([]byte, error)) {
-	return func(context.Context, string, io.Writer) ([]uploadUse, error) {
+func stubBundler(built *bool) (func(context.Context, string, io.Writer) ([]uploadUse, *int, error), func(string) ([]byte, error)) {
+	return func(context.Context, string, io.Writer) ([]uploadUse, *int, error) {
 			if built != nil {
 				*built = true
 			}
-			return nil, nil
+			// nil rung: this stub is about the push CONTRACT, not about what a
+			// bundle reaches. The ceiling gate reads nil as "not this gate's
+			// question" and stays out of the way.
+			return nil, nil, nil
 		}, func(string) ([]byte, error) {
 			return []byte("gzip-artifact-bytes"), nil
 		}
@@ -149,8 +152,8 @@ func TestPush_BuildFailure_UploadsNothing(t *testing.T) {
 	err := runPush(pushDeps{
 		rest: f, sel: palbaseProject(t), out: &out,
 		ctx: context.Background(),
-		build: func(context.Context, string, io.Writer) ([]uploadUse, error) {
-			return nil, errors.New("controllers/todo.controller.ts: return type must be a NAMED zod schema")
+		build: func(context.Context, string, io.Writer) ([]uploadUse, *int, error) {
+			return nil, nil, errors.New("controllers/todo.controller.ts: return type must be a NAMED zod schema")
 		},
 		pack: func(string) ([]byte, error) {
 			t.Fatal("nothing may be packed after a failed build")

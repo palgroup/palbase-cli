@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -166,9 +167,28 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	// this project's own node_modules, which live here. Shipping whatever a
 	// previous build left on disk is how somebody edits a controller, pushes, and
 	// deploys yesterday's code under today's commit message.
-	uses, err := buildStackArtifact(ctx, dir, w)
+	uses, reaches, err := buildStackArtifact(ctx, dir, w)
 	if err != nil {
 		return err
+	}
+
+	// THE CEILING, BEFORE THE ARTIFACT IS ACTIVATED (FR-048).
+	//
+	// The refusal already existed at BOOT (`abi.ts` aboveCeilingRefusal) and it
+	// is loud and non-destructive — the previous release keeps serving. What it
+	// could not do is arrive before the push, so an author learned their bundle
+	// was too new for their stack from a pod log rather than from the command
+	// they had just typed. That knowledge had nowhere to come from: the runtime
+	// published the number and this plane dropped it, all the way up.
+	//
+	// A read failure is NOT a refusal here. The bucket check above already made
+	// the call that a stack which cannot answer stops the push; this one asks a
+	// question about capability, and a network blip must not be spelled as
+	// "your bundle is too new".
+	if serves, ceilErr := stackServesGeneration(ctx, target); ceilErr == nil {
+		if why := pushCeilingRefusal(reaches, serves); why != "" {
+			return errors.New(why)
+		}
 	}
 
 	// @Upload names a bucket that must EXIST — storage will not create one on

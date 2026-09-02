@@ -104,7 +104,7 @@ func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "controllers"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := buildStackArtifact(context.Background(), dir, &strings.Builder{})
+	_, _, err := buildStackArtifact(context.Background(), dir, &strings.Builder{})
 	if err == nil {
 		t.Fatal("a project with no controllers built successfully")
 	}
@@ -117,7 +117,7 @@ func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
 }
 
 func TestAProjectThatIsNotABackendSaysSo(t *testing.T) {
-	_, err := buildStackArtifact(context.Background(), t.TempDir(), &strings.Builder{})
+	_, _, err := buildStackArtifact(context.Background(), t.TempDir(), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "controllers") {
 		t.Fatalf("a directory with no controllers/ got %v", err)
 	}
@@ -815,4 +815,53 @@ func TestAStaleJobManifestIsRemovedWhenTheLastJobGoes(t *testing.T) {
 
 	_, err := os.Stat(filepath.Join(stale, "jobs.manifest.json"))
 	require.True(t, os.IsNotExist(err), "a stale manifest survived a build with no jobs")
+}
+
+// TestDIGenerationCeilingRefusal is FR-048, and the task that claimed it was
+// ticked with NOTHING behind it: `go test -run TestDIGeneration` answered "no
+// tests to run" and no commit in this repository mentions the FR. The refusal
+// was built on the RUNTIME side (abi.ts aboveCeilingRefusal) and the plan was
+// never corrected to say so.
+//
+// What was genuinely missing is the knowledge arriving before the push. The
+// runtime published its ceiling; palsvc dropped the field on the floor; so no
+// caller up the chain could read it and the admission gate stayed one-way.
+func TestDIGenerationCeilingRefusal(t *testing.T) {
+	two, three := 2, 3
+
+	t.Run("a bundle above the stack's ceiling is refused, naming both numbers", func(t *testing.T) {
+		why := pushCeilingRefusal(&three, &two)
+		require.NotEmpty(t, why)
+		require.Contains(t, why, "generation 3")
+		require.Contains(t, why, "at most 2")
+		// The fix, not just the fault: a refusal that does not say what to type
+		// next costs the reader the next hour.
+		require.Contains(t, why, "palbase upgrade")
+		// And WHY it matters — an operator weighing whether to force it needs to
+		// know the failure is silent, not loud.
+		require.Contains(t, why, "undefined")
+	})
+
+	t.Run("a bundle at or under the ceiling passes", func(t *testing.T) {
+		require.Empty(t, pushCeilingRefusal(&two, &two))
+		require.Empty(t, pushCeilingRefusal(&two, &three))
+		require.Empty(t, pushCeilingRefusal(&three, &three))
+	})
+
+	// ABSENCE IS AN ANSWER, and reading it as "unknown, refuse" would refuse
+	// every push to every image in the fleet today — not a gate but an outage.
+	// The field arrived with rung 3, so an image that does not publish it was
+	// built before rung 3 existed.
+	t.Run("a stack that publishes no ceiling is read as rung 2", func(t *testing.T) {
+		require.Empty(t, pushCeilingRefusal(&two, nil), "rung 2 fits an old image")
+		require.NotEmpty(t, pushCeilingRefusal(&three, nil), "rung 3 does not")
+	})
+
+	// A bundle that reaches NO rung is a FLOOR problem, and the floor check at
+	// boot owns it by name. Blaming the ceiling would send the reader to the
+	// wrong fix.
+	t.Run("a bundle that reaches no rung is not this gate's fault to report", func(t *testing.T) {
+		require.Empty(t, pushCeilingRefusal(nil, &two))
+		require.Empty(t, pushCeilingRefusal(nil, nil))
+	})
 }
