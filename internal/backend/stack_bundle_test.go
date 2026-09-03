@@ -117,9 +117,13 @@ func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
 }
 
 func TestAProjectThatIsNotABackendSaysSo(t *testing.T) {
+	// The refusal names the MODULE, not a directory. It used to say
+	// `controllers/`, which sent an author looking for a folder the runtime does
+	// not use — and made the layout the module system exists to allow
+	// unpushable.
 	_, _, err := buildStackArtifact(context.Background(), t.TempDir(), &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "controllers") {
-		t.Fatalf("a directory with no controllers/ got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "*.module.ts") {
+		t.Fatalf("a directory with no module got %v", err)
 	}
 }
 

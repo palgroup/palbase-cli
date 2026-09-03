@@ -102,10 +102,21 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// The real precondition is the one the bundler already uses: at least one
 	// `*.module.ts` anywhere. Absence of that is still worth saying out loud,
 	// because a tree with no module genuinely has nothing to answer with.
-	if mods, err := moduleSources(cwd); err != nil {
-		return err
-	} else if len(mods) == 0 {
-		fmt.Fprintln(out, "no *.module.ts — nothing to validate")
+	// NOTHING TO VALIDATE MEANS NOT A BACKEND AT ALL — no schema AND no module.
+	//
+	// The first attempt returned early whenever there was no module, and that
+	// closed a refusal: a `@Controller` no module can name has to REACH the
+	// container check to be refused, and skipping past it turned the refusal
+	// into a pass. `TestAControllerNoModuleCanNameIsRefused` caught it — the
+	// same shape of bug this change set exists to remove, one layer over.
+	//
+	// Asking for a schema OR a module was still too coarse: a tree with a
+	// `@Controller` and neither of those is a backend somebody is in the middle
+	// of writing, and it must be REFUSED, not waved through. So the exit asks the
+	// smallest honest question — is there any source here at all — and it asks it
+	// without reading a directory name.
+	if !hasProjectSource(cwd) {
+		fmt.Fprintln(out, "no TypeScript sources — nothing to validate")
 		return nil
 	}
 
@@ -428,4 +439,30 @@ func flagKeys(ctx context.Context, target Target, cred Credentials) ([]string, e
 		keys = append(keys, f.Key)
 	}
 	return keys, nil
+}
+
+// hasProjectSource reports whether the tree holds any TypeScript the build could
+// be about. It stops at the first hit and skips the directories that are never
+// somebody's source.
+func hasProjectSource(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path != dir && (name == "node_modules" || name == "dist" || name == ".git" ||
+				strings.HasPrefix(name, ".palbase")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(name, ".ts") && !strings.HasSuffix(name, ".d.ts") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }

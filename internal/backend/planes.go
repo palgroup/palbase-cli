@@ -102,8 +102,8 @@ func RequireBackendPlane(dir string) error {
 			LegacySchemaFile, PublicSchemaFile, MigrationGuide)
 	}
 	return fmt.Errorf(
-		"this is not a backend checkout: no %s and controllers/ here (%s).\n"+
-			"Run this where your controllers live, or `palbase init` to start one",
+		"this is not a backend checkout: no %s and no *.module.ts here (%s).\n"+
+			"Run this where your modules live, or `palbase init` to start one",
 		PublicSchemaFile, dir)
 }
 

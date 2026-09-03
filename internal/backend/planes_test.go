@@ -36,7 +36,7 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 		want  Plane
 	}{
 		{"a backend", func(t *testing.T, d string) {
-			mkdir(t, d, "controllers")
+			write(t, d, "modules/notes/notes.module.ts")
 			write(t, d, "db/public.ts")
 		}, PlaneBackend},
 
@@ -49,7 +49,7 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 		}, PlaneApp},
 
 		{"a monorepo root that is both", func(t *testing.T, d string) {
-			mkdir(t, d, "controllers")
+			write(t, d, "modules/notes/notes.module.ts")
 			write(t, d, "db/public.ts")
 			mkdir(t, d, "MyApp.xcodeproj")
 		}, PlaneBoth},
@@ -58,9 +58,11 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 
 		// The two that LOOK like a plane. A backend's own package.json must not
 		// make it a web app, and an app repo full of view controllers must not
-		// make it a backend.
+		// make it a backend — the second is now true BY CONSTRUCTION rather than
+		// by luck: a backend is a schema plus a module, and `controllers/` on its
+		// own says nothing at all.
 		{"a backend's package.json alone", func(t *testing.T, d string) {
-			mkdir(t, d, "controllers")
+			write(t, d, "modules/notes/notes.module.ts")
 			write(t, d, "db/public.ts")
 			write(t, d, "package.json")
 		}, PlaneBackend},
@@ -89,14 +91,17 @@ func TestAWrongPlaneVerbSaysWhatItLookedFor(t *testing.T) {
 	if err == nil {
 		t.Fatal("a backend verb was allowed in an app checkout")
 	}
-	for _, want := range []string{"db/public.ts", "controllers/", "palbase init"} {
+	// The refusal must name BOTH halves of what a backend is — the schema and a
+	// module. It used to say `controllers/`, which sent an author looking for a
+	// directory the runtime does not use.
+	for _, want := range []string{"db/public.ts", "*.module.ts", "palbase init"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not mention %q: %v", want, err)
 		}
 	}
 
 	backend := t.TempDir()
-	mkdir(t, backend, "controllers")
+	write(t, backend, "modules/notes/notes.module.ts")
 	write(t, backend, "db/public.ts")
 	if err := RequireBackendPlane(backend); err != nil {
 		t.Fatalf("a backend verb was refused in a backend checkout: %v", err)
@@ -135,7 +140,7 @@ func TestALegacyCheckoutIsToldWhatToRename(t *testing.T) {
 // legitimate backend and must walk straight through.
 func TestATrueBackendIsStillAccepted(t *testing.T) {
 	dir := t.TempDir()
-	mkdir(t, dir, "controllers")
+	write(t, dir, "modules/notes/notes.module.ts")
 	write(t, dir, "db/public.ts")
 	write(t, dir, "db/billing.ts")
 

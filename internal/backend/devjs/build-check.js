@@ -605,10 +605,11 @@ function registerControllers() {
   // (the layout the module system exists to allow, and the one a Nest developer
   // arrives with): `build OK — 0 route(s)`, with 85 routes in the tree. A gate
   // that reports silence is worse than one that refuses.
-  if (moduleFiles(PROJECT_ROOT).length === 0) {
-    log(`no *.module.ts under ${PROJECT_ROOT}`);
-    return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped };
-  }
+  // NO EARLY RETURN ON "no modules" EITHER. A `@Controller` that no module can
+  // name has to reach `assertNoOrphanEntryPoints` below to be refused, and that
+  // needs the tree bundled and loaded first. Returning here made the refusal
+  // unreachable — a gate reporting silence, which is the defect this whole
+  // change set exists to remove.
 
   // esbuild-bundle controllers/*.ts (+ their transitively-imported handlers/
   // and services/) into BUNDLED_CONTROLLERS_DIR. We discover/require the BUNDLED
@@ -1412,7 +1413,20 @@ async function main() {
 
   // Files but no routes is the SILENT class: the deploy would be written as
   // successful and serve zero endpoints. Fail here instead.
-  if (failures.length === 0 && reg.sawControllerFiles && reg.routeCount === 0) {
+  //
+  // "FILES" MEANS DECLARED CONTROLLERS, not "a module loaded". `sawControllerFiles`
+  // is set the moment the module bundle is required, so on its own it says
+  // nothing about controllers — and a project whose modules own only jobs was
+  // refused with a message about `controllers/`. The honest question is whether
+  // any module DECLARED a controller and none of them registered a route.
+  const declaredControllerCount = (() => {
+    try {
+      return registeredControllers().length;
+    } catch {
+      return 0;
+    }
+  })();
+  if (failures.length === 0 && reg.sawControllerFiles && declaredControllerCount > 0 && reg.routeCount === 0) {
     if (reg.staleSDKSignature) {
       failures.push({
         file: 'controllers/',
@@ -1420,7 +1434,7 @@ async function main() {
           'resolved to undefined. Run `npm install @palbase/backend@latest`.',
       });
     } else {
-      failures.push({ file: 'controllers/', error: 'controllers/ has files but 0 routes would register' });
+      failures.push({ file: 'controllers/', error: `${declaredControllerCount} @Controller class(es) are declared and 0 routes would register` });
     }
   }
 

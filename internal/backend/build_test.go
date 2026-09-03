@@ -62,7 +62,25 @@ func seedInstalledBackend(t *testing.T, dir, version string) {
 	t.Helper()
 	pkgDir := filepath.Join(dir, "node_modules", "@palbase", "backend")
 	require.NoError(t, os.MkdirAll(pkgDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"version":"`+version+`"}`), 0o644))
+	// A RESOLVABLE package, not just a version string. The version is what these
+	// tests are about, but a module file imports `@palbase/backend` and the
+	// bundler now actually loads it — discovery stopped stopping at an empty
+	// `controllers/`, so the fake has to be importable or every fixture fails for
+	// a reason that has nothing to do with the test.
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "package.json"),
+		[]byte(`{"name":"@palbase/backend","version":"`+version+`","main":"index.js"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "index.js"),
+		[]byte("// The decorators are no-op factories; the two functions the build check\n"+
+			"// calls answer with the SHAPE it iterates, not with a bare function — a\n"+
+			"// blanket Proxy made `registeredControllers()` return undefined and the\n"+
+			"// check died on `not iterable`.\n"+
+			"const decorator = () => () => {};\n"+
+			"module.exports = new Proxy(\n"+
+			"  { getRegisteredControllers: () => [], buildContainer: () => ({ owned: [] }),\n"+
+			"    assertNoOrphanEntryPoints: () => {}, jobsOf: () => [], webhooksOf: () => [],\n"+
+			"    hooksOf: () => [] },\n"+
+			"  { get: (t, k) => (k in t ? t[k] : decorator) },\n"+
+			");\n"), 0o644))
 	// Stub zod-to-json-schema so ensureDevServerTools is a no-op (no real npm
 	// install → the skew tests stay hermetic and fast).
 	ztjs := filepath.Join(dir, "node_modules", "zod-to-json-schema")
@@ -90,7 +108,15 @@ func seedInstalledBackend(t *testing.T, dir, version string) {
 // vendored set; this process does not.
 func TestRunBuild_OlderMajorDoesNotFailTheLocalBuild(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "controllers"), 0o755))
+	// A MODULE, because a project with none is now refused on its own terms —
+	// discovery stopped reading directory names, so an empty `controllers/` is
+	// no longer a project. This test is about the SDK MAJOR not gating a local
+	// build; the fixture just has to be a backend.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "app"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "app", "app.module.ts"),
+		[]byte("import { Module } from \"@palbase/backend\";\n\n"+
+			"@Module({ controllers: [], providers: [], exports: [], imports: [] })\n"+
+			"export class AppModule {}\n"), 0o644))
 	seedInstalledBackend(t, dir, "12.0.1")
 
 	var out bytes.Buffer

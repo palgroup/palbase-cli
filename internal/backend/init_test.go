@@ -129,7 +129,7 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	for _, path := range []string{
 		"package.json", "tsconfig.json",
 		filepath.Join("db", "public.ts"),
-		filepath.Join("controllers", "health.controller.ts"),
+		filepath.Join("modules", "health", "health.controller.ts"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Errorf("the scaffold has no %s: %v", path, err)
@@ -145,11 +145,11 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	// registry. That is correct for a real user, where both installs are the
 	// same version, and it is why this assertion reads the source.
 	fromPkg, err := os.ReadFile(filepath.Join(sdkSourceDir(t),
-		"template", "controllers", "health.controller.ts"))
+		"template", "modules", "health", "health.controller.ts"))
 	if err != nil {
 		t.Fatalf("the SDK source has no template: %v", err)
 	}
-	written, err := os.ReadFile(filepath.Join(dir, "controllers", "health.controller.ts"))
+	written, err := os.ReadFile(filepath.Join(dir, "modules", "health", "health.controller.ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestInitInsideATreeWithAnAncestorPackageJSON(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(parent, "node_modules")); err == nil {
 		t.Error("npm installed into the ancestor project instead")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "controllers", "health.controller.ts")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "modules", "health", "health.controller.ts")); err != nil {
 		t.Errorf("no scaffold was written: %v\n%s", err, out.String())
 	}
 }
