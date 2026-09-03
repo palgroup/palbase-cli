@@ -312,3 +312,13 @@ Salesforce tarzı hash defteri gerçek bir boşluğu kapatıyor (D-045b) ama pro
 ### K-06 · YAGNI · `pull`'un toptan reddi dosya-başına yapılsın mı?
 Git'in kendisi dosya başına. Ama toptan ret **daha güvenli** ve bugün çalışıyor; dosya-başına yapmak yeni bir karşılaştırma mekanizması ister.
 **Karar:** Toptan ret KALIYOR; yalnız mesajı iyileşiyor (hangi dosyalar, ne yapmalı). Dosya-başına inceltme, ölçülmüş bir şikâyet gelmeden yapılmayacak.
+
+### D-047 · TASARIM ONAYLANDI + 26.0.0 yayını için yetki verildi
+**Kullanıcı (2026-09-03):** *"onu da yapabilirsin sen kanka"* — `@palbase/backend@26.0.0`'ın npm'e yayımlanmasına açık onay. Tasarıma itiraz gelmedi; ⑪ ("hepsi baştan sona") ile birlikte tasarım ONAYLI sayılıyor.
+**Yetkinin sınırı (team-lead tarafından konan, kullanıcıya bildirildi):** Yayın **koşulludur**. Denetimde ölçülen sinyal: 26'nın `notes.module.ts`'i 25'in `services/`'iyle karıştırıldığında `No matching export in ".../services/note.service.ts" for import "DbNoteRepo"`. Bu bir KARIŞTIRMA artefaktı olabilir; ama doğrulanmadan major yayımlamak P0-2'yi derinleştirir.
+**Zorunlu kanıt (yayından ÖNCE):** repo'nun 26.0.0'ından tarball paketle → boş dizinde `init` → `npm install` → `palbase build` **yeşil** + şablonun kendi testleri geçiyor. Kanıt yoksa yayın YOK ve kullanıcıya bildirilir.
+**Gerekçe:** [[feedback_run_it_locally_first]], [[feedback_verify_build_not_ide]] ve bu programın bütün teşhisi — ölçmeden "tamam" demek bu deponun kusur sınıfı.
+
+### D-048 · Yayın, spec/plan DIŞINDA ad-hoc yapılmayacak
+**Karar:** Onay alındı ama yayın, planın **ilk görevi** olarak kanıtıyla birlikte koşacak; brainstorm'dan doğrudan icraya atlanmayacak.
+**Gerekçe:** Pipeline'ın varlık sebebi tam bu. Bu denetimin baş bulgusu "kapılar ölçmediği için üç P0 sessizce yayına çıktı" — o dersi bulan oturumun aynı atlamayı yapması tutarsız olur.
