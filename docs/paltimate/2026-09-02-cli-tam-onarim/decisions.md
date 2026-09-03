@@ -223,3 +223,92 @@ Yani kiracı imajı, yerel yığının kullandığı **aynı palsvc ve runtime'�
 **Okuma:** ⑩ (doğru stack) gereksinim olarak GERİ GELDİ, ama mekanizma D-030 ile uyumlu: **proje-yerel, commit'lenen config'te sürüm beyanı** — ağ manifestosu, sunucu ucu, filo yayım hattı YOK. Bu yüzden `v2-cloud` kulvarına hiç girmiyor ve "image işine girme" talimatıyla çelişmiyor.
 **Araştırma açıldı:** Supabase'in yerel yığın sürümleme/`config.toml` modeli (kullanıcı doğrudan sordu) + "proje kendi çekirdek sürümünü beyan eder" deseninin diğer örnekleri.
 **Ön bilgi (rs-pin-priorart):** Supabase CLI bugün imajları `//go:embed` ile binary'ye gömülü bir Dockerfile'da taşıyor, değişken tag, digest yok — yani bizim bugünkü hâlimizin aynısı. Ama `config.toml` tarafında sürüm alanları olup olmadığı AYRI bir soru ve ölçülecek.
+
+### D-036 · "Supabase nasıl yapıyor?" — CEVAP: config'te sürüm pinlemiyor, bunu BİLEREK reddediyor
+**Ölçüldü (rs-supabase, kaynak HEAD `eceb7d50`):**
+1. **Her imaj alanı `toml:"-" json:"-"`** (14 alan doğrulandı) — kullanıcı config'inden **yapısal olarak erişilemez**. İmajlar `//go:embed`'lenmiş bir Dockerfile'dan `init()`'te regex ile ayrıştırılıyor, `AS <stage>` ile anahtarlanıyor, Dependabot bump'lıyor.
+2. `config.toml` yalnız **anlamsal seçiciler** sunuyor, asla tag değil: `db.major_version` (13/14/15/17 — 16 reddediliyor), `edge_runtime.deno_version` (1|2), `experimental.orioledb_version`. **15 servisin 12'si binary'ye kaynaklı.**
+3. **Yerel↔barındırılan denklik:** `supabase link` canlı uçları **YOKLUYOR** (PostgREST'in OpenAPI `info.version`'ı vb.) ve tag'leri `supabase/.temp/*-version`'a yazıyor. **İki tuzak:** yoklamalar best-effort (sessizce gömülü varsayılana düşüyor) ve `.temp` `supabase init` tarafından **GITIGNORE'lanıyor** → taze bir klon ya da CI runner'ı denkliği hiç almıyor.
+4. Config'te şema-sürümü alanı ve göç yok; yeni zorunlu alanlar sert düşüyor (issue #2899, maintainer: *"unintentionally became a breaking change"*).
+5. **Gerçek proje-düzeyi pin, CLI'ın KENDİSİ** — npm devDependency olarak; `setup-cli@v3` artık lockfile'ları okuyor.
+**Ve tasarım dersi:** `toml:"-"` bir kaza değil, **düşünülmüş bir ret** — kullanıcıya servis-başına tag pinleme vermek, ona bir uyumluluk matrisi vermektir.
+
+### D-037 · Öncü DÜZELTMELERİ
+- **Firebase `firebase.json`'da sürüm PİNLEMİYOR** — `emulators` bloğu yalnız host/port (yayımlanmış JSON şemasına karşı doğrulandı); sürümler CLI'ın `downloadableEmulatorInfo.json`'unda.
+- **Nhost TAM PİNLİYOR, servis başına:** `[hasura] version`, `[auth] version`, `[postgres] version` — doğrudan tag'e ekleniyor (`"nhost/postgres:" + version`). Kullanıcının önerdiği şeklin gerçek örneği bu, Supabase değil.
+- **Dagger:** `dagger.json` `engineVersion` + asgari uyum tabanı.
+
+### D-038 · Şekil (d) "SDK bağımlılığından türet" — NEREDEYSE HİÇ KİMSE yapmıyor, ve emsaller TERSİNİ yapıyor
+**Bulgu:** Emsallerde **CLI bağımlılıktır, yığın ondan türer** — bizim düşündüğümüzün tersi. Arıza modları: aralık vs lockfile, monorepo hoisting, JS olmayan SDK yüzeyleri (bizde iOS/Android var!), ve yine de çevrimdışı bir sürüm→imaj tablosu gerekiyor — yani şekil (a)'ya çöküyor, sürüm beyan edilmek yerine keşfedilmiş oluyor.
+**Sonuç:** `package.json`'daki `@palbase/backend`'i okuyup ona göre yığın kaldırma fikri **tek başına** yeterli değil; çözücü olabilir, otorite olamaz.
+
+### D-039 · KARAR ADAYI (W5 mekanizması) · Tek anlamsal sürüm alanı, beyan edilir ve COMMIT'LENİR
+**Aday:** Proje config'inde **tek bir anlamsal alan** (servis başına tag DEĞİL). Yoksa kurulu `@palbase/backend`'den türetilir, **sonra yazılır ve commit'lenir**.
+**Neden bu şekil:**
+- Supabase'in iki tuzağından da kaçıyor: binary'ye kaynaklı değil (proje beyan edebiliyor) ve taze klonda görünmez değil (commit'leniyor, `.temp` gibi gitignore'lanmıyor).
+- Servis-başına tag pinlemeyi **açıkça reddediyor** (D-036'nın dersi): kullanıcıya uyumluluk matrisi verilmez.
+- Ağ yok, sunucu ucu yok, filo hattı yok → D-030 ("image işine girme") ile çelişmiyor.
+**Açık:** Alanın adı/yeri ve sürüm→imaj tablosunun nerede duracağı; `rs-envcheckout` dönünce config yüzeyiyle birlikte kararlaştırılacak.
+
+### D-040 · ORTAM CHECKOUT'U ÇALIŞMA AĞACINA DOKUNMAMALI — kanıt ezici
+**Bulgu (rs-envcheckout, 16 sistem):** "Ortam değiştir" ile "kodumu senkronla"yı birleştiren **tam olarak BİR** büyük platform var: AWS Amplify Gen 1 `env checkout`. **AWS onu düzeltmedi — SİLDİ.** Gen 2'de `env checkout` yok, `team-provider-info.json` yok; Gen 1 EOL 2027-05-01. Yani satıcı kendi tasarımını reddetti.
+**Amplify'ın belgelenmiş acısı:** sessiz üzerine yazmalar (#12430), fonksiyon kodunun uyarısız geri alınması (#5569), *"crippling"/"insane"* merge çakışmaları (#7938, 3 yıl sonra hâlâ #13618), ve maintainer itirafı: *"the CLI will not retain state of the filesystem between environments"* (#9116). **Kök neden tek cümlede: tek dizinde ÜÇ yazıcı (araç, kullanıcı, git) ve hakem yok.** Ayrıca doğrulandı: Amplify'da kirli-ağaç kontrolü HİÇ YOK.
+**En yakın yapısal analog Convex** (BaaS; her deployment kendi fonksiyonlarını, verisini, cron'larını, URL'ini tutuyor — bizim modelimizin aynısı): **kod indirme yolu HİÇ YOK** (kaynakta doğrulandı). "Hangi ortamdayım" sorusuna cevabı **mutasyon değil, DUYURU**: her komuttan önce basılan ortak `announceDeploymentTarget()`.
+
+### D-041 · KULLANICININ SEZGİSİ DOĞRU, HEDEFİ BİR KOMUT ERKEN
+**Kullanıcı:** *"change varsa eğer hata vermesi lazım."* → **Haklı, ama yanlış komutta.**
+**Çıkarım:** Hiçbir şey YAZMAYAN bir checkout'un ezecek bir şeyi yoktur — dolayısıyla kirli ağaç, checkout'u reddetmek için sebep DEĞİLDİR. Ret şuralara aittir:
+- **`push`'ta — kayıp-güncelleme koruması:** *"staging, en son çektiğinden beri ilerledi"* (git'in non-fast-forward reddinin aynısı).
+- **`pull`'da — ezme koruması, DOSYA BAŞINA** (blanket değil): git'in kendisi bile yalnız dosya iki commit arasında FARKLIYSA **ve** yerelde değiştirilmişse reddeder.
+
+### D-042 · "Ortamlar farklı kod taşır" YAYGIN; ama platform ASLA kayıt merci değil
+**Bulgu:** Ortamların farklı kod taşıması yaygın (Convex, Netlify, Heroku review apps, Railway, Fly, Shopify) — **ama her vakada o kod bir git commit'inden/dalından gelir; platform hiçbir zaman store of record değildir.** Kod-indirme fiili olan yalnız 6 sistem var ve karnesi kötü: Amplify (ölü), clasp (en kötü, 6 yıllık düzeltilmemiş hata), Shopify (varsayılan olarak yereli siler), `supabase functions download` (sessiz üzerine yazma), `wrangler --from-dash` (yalnız iskelet), Val Town (en iyi — **asimetrik**: push zorlayıcı, pull kapılı).
+**Sonuç:** `palbase pull`'un bugünkü "ortamın deploy edilmiş sürümünü indir" davranışı bu tehlikeli azınlıkta duruyor ve ezme koruması yok.
+
+### D-043 · Görülmemiş üçüncü okul + Heroku'nun cevabı
+- **Üçüncü okul: ortamlar COMMIT'LENEN config'te beyan edilir** (`fly.staging.toml`, wrangler `[env.X]`, `shopify.theme.toml`). **Palbase zaten `.palbase/openapi/<env>.json` commit'liyor — yolun yarısındayız.**
+- **Heroku'nun slug PROMOSYONU** (`promote staging production`: derlenmiş artefaktı yeniden derlemeden kopyalar) kullanıcının *"orada ne yapacağız bilmiyorum"* dediği yere **ağaca hiç dokunmadan** cevap veriyor.
+- **Git'i olmayan projeler için Salesforce'un içerik-hash manifestosu** (`sourcePathInfos.json` + uzak revizyon sayaçları) VCS'siz çift yönlü çakışma tespiti yapıyor — bizim `.palbase/` altındaki commit'li artefaktlarla aynı şekil.
+
+### D-044 · AÇIK SORU (kullanıcıya) · Aynı ortama kaç kişi deploy ediyor?
+**rs-envcheckout'un uyarısı:** *"Her Amplify arızası bir TAKIM arızasıydı."* Tek kişi çalışıyorsa kayıp-güncelleme koruması düşük öncelik; iki+ kişi aynı ortama deploy ediyorsa en yüksek öncelik. Bu, sıralamayı değiştirir → sorulacak.
+
+### D-045 · İÇ DURUM DOĞRULANDI (team-lead, bizzat) — korumaların yarısı var, kritik yarısı yok
+**`pull` — koruma VAR ve iyi yazılmış:** `deploy.go:535` → `refuseDirtyTree` (`pull_guard.go:29`). `git status --porcelain`; **hata durumunda fail-CLOSED** ("bakamadı"ya "temiz" cevabı vermek, korumak için var olduğu işi ezmektir — yorumu bunu yazıyor); untracked (`??`) gerekçesiyle yok sayılıyor.
+**İki sınırı:** (a) git'in kendisi gibi **dosya başına değil, TOPTAN** reddediyor — alakasız bir `README.md` değişikliği `pull`'u durduruyor; (b) **git olmayan projede hiç korumuyor** (`not a git repository` → `return nil`). rs-envcheckout'un Salesforce içerik-hash emsali tam bu ikinci boşluk için.
+**`push` — koruma YOK.** Deploy öncesi `deployments/current` sorgulanmıyor, beklenen-sürüm/If-Match yok. İki kişi aynı ortama push ederse **birbirini sessizce eziyor**. D-041'in "ret `push`'a aittir" reçetesinin karşılığı bugün sıfır.
+**Sonuç:** rs-envcheckout'un reçetesiyle mevcut kod birebir örtüşüyor; eksik olan tam olarak onun işaret ettiği iki yer.
+
+### D-046 · Takım gerçek olacak → kayıp-güncelleme koruması YÜKSEK öncelik
+**Kullanıcı:** *"team çalışabilir bir noktada, deployları birden fazla geliştirici yapıp yolluyor."*
+**Karar:** `push` kayıp-güncelleme koruması baştan tasarlanır, sonraya bırakılmaz. Araştırmanın uyarısı bağlayıcı: *"her Amplify arızası bir TAKIM arızasıydı."*
+
+---
+
+## Öz-eleştiri (skill adımı 5) — kendi taslağımı kırma denemesi
+
+### K-01 · RED-TEAM · "Duyuran ama yazmayan checkout" kullanıcıyı hayal kırıklığına uğratabilir
+Kullanıcı kod senkronu bekliyordu. Checkout hiçbir şey yazmazsa "ortam değiştirdim ama kodum aynı" şaşkınlığı doğar.
+**Düzeltme:** Checkout'un duyurusu SÜSLEME DEĞİL, ÖLÇÜM olacak: hangi ortam, orada hangi sürüm koşuyor, yerel ağacın ondan sapıyor mu, ve sapıyorsa kodu almanın yolu (`palbase pull`). Convex'in `announceDeploymentTarget()`'i bunun emsali. Sessiz bir "▸ staging" satırı bu gereksinimi KARŞILAMAZ.
+
+### K-02 · RED-TEAM · Sürüm→imaj tablosu CLI binary'sindeyse ⑮'i geri ihlal ediyoruz
+Proje config'te `0.41` beyan etsin; tabloyu taşıyan CLI eskiyse "bilinmeyen sürüm" der → **yine CLI güncellemesi gerekir**, ki kullanıcı bunu istemiyordu (⑮) ve Supabase'in "binary'ye kaynaklı" tuzağının aynısı.
+**Düzeltme (Expo'nun hamlesi, D-023):** Tabloyu **`@palbase/backend` paketinin İÇİNDE** dağıt — proje zaten ona bağımlı, npm zaten dağıtıyor. `npm i @palbase/backend@…` tabloyu da tazeler: **CLI sürümü gerekmez, ağ ucu gerekmez, `v2-cloud` işi gerekmez.** D-030 ile çelişmez.
+
+### K-03 · RED-TEAM (EN CİDDİ) · "En son görülen deploy" kaydı COMMIT'LENMEMELİ
+Kayıp-güncelleme koruması bir "en son gördüğüm sürüm" kaydı ister. Bunu commit'lemek Amplify'ın 1 numaralı acısını birebir kopyalamak olur: `team-provider-info.json` commit'liydi ve *"crippling merge conflicts"*in kaynağıydı.
+**Düzeltme:** Kayıt **makine-yerel ve gitignore'lu**. Yokluğu ret sebebi DEĞİL — taze klonda mevcut sürüm çekilir, duyurulur, devam edilir. Ret yalnız "kayıt VAR ve uzak ondan ilerlemiş" durumunda.
+
+### K-04 · KARŞI-HİPOTEZ · "Ortamlar farklı kod taşır" öncülü
+Tersi doğru olsaydı (tüm ortamlar tek commit'ten aynı kodu koşsa) ne beklerdim? Promosyon tabanlı bir akış (bir kez derle, ortamlar arası terfi ettir) ve ortam başına kod indirme fiilinin olmaması.
+**Arandı:** `push` çalışma ağacını ortam başına deploy ediyor; `pull` ortam başına kod indiriyor; `.palbase/openapi/<env>.json` ortam başına commit'leniyor.
+**Bulundu:** Ortam başına kod GERÇEKTEN model. → **DESTEKLENDİ.**
+**Ama:** Heroku'nun promosyon modeli (D-043) gerçek bir alternatif ve kullanıcının *"orada ne yapacağız bilmiyorum"*una ağaca dokunmadan cevap veriyor. Varsayım olarak dayatılmayacak, tasarımda **seçenek olarak sunulacak**.
+
+### K-05 · YAGNI · Git'siz projeler için içerik-hash manifestosu ŞİMDİ değil
+Salesforce tarzı hash defteri gerçek bir boşluğu kapatıyor (D-045b) ama projelerin ezici çoğunluğu git'te olacak.
+**Kesildi → ucuz dürüstlükle değiştirildi:** `pull`, git olmayan bir dizinde sessizce devam etmek yerine **koruyamadığını SÖYLEYECEK**. Tam çözüm sonraki tura.
+
+### K-06 · YAGNI · `pull`'un toptan reddi dosya-başına yapılsın mı?
+Git'in kendisi dosya başına. Ama toptan ret **daha güvenli** ve bugün çalışıyor; dosya-başına yapmak yeni bir karşılaştırma mekanizması ister.
+**Karar:** Toptan ret KALIYOR; yalnız mesajı iyileşiyor (hangi dosyalar, ne yapmalı). Dosya-başına inceltme, ölçülmüş bir şikâyet gelmeden yapılmayacak.
