@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Plane is what a directory is.
@@ -62,7 +63,13 @@ func (p Plane) HasApp() bool { return p == PlaneApp || p == PlaneBoth }
 // and fail further in, with a message about whatever it reached first;
 // RequireBackendPlane below names the real problem instead.
 func PlaneOf(dir string) Plane {
-	backend := isDir(filepath.Join(dir, "controllers")) && HasSchemaDeclaration(dir)
+	// A BACKEND IS A SCHEMA PLUS AT LEAST ONE MODULE — not a directory named
+	// `controllers`. That name was the third place discovery still read the file
+	// system instead of the declaration, and it was the one a real project hit
+	// last: `palbase push` refused a tree whose domains live in
+	// `modules/<name>/` with "this is not a backend checkout", after `build`
+	// had already validated 85 routes in it. Measured 2026-09-02.
+	backend := hasModuleFile(dir) && HasSchemaDeclaration(dir)
 	app := hasApple(dir) || exists(filepath.Join(dir, "build.gradle")) ||
 		exists(filepath.Join(dir, "build.gradle.kts")) || hasWeb(dir)
 
@@ -150,4 +157,29 @@ func hasWeb(dir string) bool {
 	return exists(filepath.Join(dir, "index.html")) ||
 		isDir(filepath.Join(dir, "public")) ||
 		isDir(filepath.Join(dir, "src", "app")) // next.js app router
+}
+
+// hasModuleFile reports whether any `*.module.ts` lives under dir — the same
+// question `moduleSources` answers, asked cheaply and stopping at the first hit.
+func hasModuleFile(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path != dir && (name == "node_modules" || name == "dist" || name == ".git" ||
+				strings.HasPrefix(name, ".palbase")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(name, ".module.ts") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
