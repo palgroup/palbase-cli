@@ -175,3 +175,58 @@ func TestStatusSDKComesFromTheSameSourceAsPush(t *testing.T) {
 	require.Truef(t, strings.Contains(got, "built with"),
 		"the artifact's SDK is not labelled as the version it was BUILT with:\n%s", got)
 }
+
+// SESSİZ BUDAMA — canlıda ölçüldü 2026-09-03, `w4recipe` (88ykkmctm).
+//
+// `palbase push` yığının SDK'sını `--no-save` ile kuruyor, sonra build çıkarıcı
+// aracı için İKİNCİ bir `npm install` çağırıyor; npm o sırada `node_modules`'ı
+// `package.json`'a göre yeniden hizalıyor ve elle yerleştirilmiş SDK'yı
+// DECLARED sürüme geri alıyor. Deneyle ölçüldü, aynı dizinde:
+//
+//	başlangıç                     21.0.1
+//	SDK tarball kurulunca         26.0.0
+//	çıkarıcı araç kurulunca       21.0.1   ← geri döndü
+//
+// CLI bu sırada "✓ @palbase/backend 26.0.0, from the project itself" YAZIYORDU.
+// Bundle 21'e karşı derlendi, `defineTable` orada yok, ve hata bundler'ın
+// içinden çıktı: "the bundle could not be inspected". Aynı arıza kontrol
+// düzleminin push'unu 02.09'da dört kez düşürdü ve İKİ teşhis birden yanlış
+// çıktı — çünkü ikisi de BEYANI okudu, kurulanı değil.
+func TestSDKPruneIsNamedNotSilent(t *testing.T) {
+	t.Run("sürüm DEĞİŞTİYSE red, ve iki sürümü de adlandırır", func(t *testing.T) {
+		why := sdkPruneRefusal("26.0.0", "21.0.1")
+		require.NotEmpty(t, why, "budama sessiz kalmamalı")
+		require.Contains(t, why, "26.0.0")
+		require.Contains(t, why, "21.0.1")
+	})
+
+	t.Run("değişmediyse SESSİZ — kapı yalnız budamayı avlar", func(t *testing.T) {
+		require.Empty(t, sdkPruneRefusal("26.0.0", "26.0.0"))
+	})
+
+	t.Run("BİLİNMEYEN sürüm bir budama İDDİASI değildir", func(t *testing.T) {
+		// Kurulu sürüm okunamıyorsa (node_modules yok, package.json bozuk)
+		// "değişti" demek uydurmaktır: ölçemediğimiz şeyi kusur ilan etmek,
+		// tam da bu koşuda iki kez yapılan hatanın aynısı olurdu.
+		require.Empty(t, sdkPruneRefusal("", "21.0.1"))
+		require.Empty(t, sdkPruneRefusal("26.0.0", ""))
+	})
+}
+
+// SIRA KURALDIR: yığının SDK'sı SON npm mutasyonu olmalı.
+//
+// Yukarıdaki kapı budamayı ADLANDIRIR; bu test budamanın hiç OLMAMASINI tutar.
+// Araç önce kurulursa `buildToolMissing` sonra false döner ve ikinci `npm
+// install` hiç koşmaz — yani SDK'yı budayacak komut ortada kalmaz.
+func TestStackSDKIsTheLastInstall(t *testing.T) {
+	src, err := os.ReadFile("stack_sdk.go")
+	require.NoError(t, err)
+	body := string(src)
+
+	tools := strings.Index(body, "ensureBuildCheckTools(")
+	install := strings.Index(body, `"npm", "install", "--no-save"`)
+	require.NotEqual(t, -1, tools, "ensureProjectSDK çıkarıcı aracı hiç sağlamıyor")
+	require.NotEqual(t, -1, install, "SDK kurulumu bulunamadı")
+	require.Less(t, tools, install,
+		"çıkarıcı araç SDK'DAN SONRA kuruluyor — o npm çağrısı SDK'yı budar")
+}

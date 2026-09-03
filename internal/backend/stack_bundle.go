@@ -575,7 +575,7 @@ func output(ctx context.Context, dir, name string, args ...string) (string, erro
 	cmd.Stderr = &stderr
 	blob, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("%s", strings.TrimSpace(trimBody([]byte(stderr.String()))))
+		return "", fmt.Errorf("%s", strings.TrimSpace(trimDiagnostic([]byte(stderr.String()))))
 	}
 	return string(blob), nil
 }
@@ -1166,4 +1166,30 @@ func pushCeilingRefusal(measured *int, serves *int) string {
 			"  generation needs — every injected dependency would arrive undefined.\n"+
 			"  Upgrade the stack's runtime first (`palbase upgrade`), then push.",
 		*measured, ceiling)
+}
+
+// trimDiagnostic, YEREL BİR ALETİN hata çıktısını taşır — HTTP gövdesini değil.
+//
+// Buraya `trimBody` bağlıydı ve o 300 karakterde keser. 300, bir sunucu
+// gövdesi için doğru sınır; bir derleyici hatası için yanlış: bun önce kod
+// ÇERÇEVESİNİ basar, asıl cümle SONDA gelir. Yani kırpma tam olarak okunması
+// gereken yeri atıyordu — `palbase push` "the bundle could not be inspected:"
+// deyip ardına bağlamsız birkaç satır bytecode yapıştırıyordu.
+//
+// BEDELİ ÖLÇÜLDÜ: kontrol düzleminin push'u 02.09.2026'da dört kez bu hatayla
+// düştü ve arka arkaya İKİ teşhis yanlış çıktı; ikisi de görünen parçadan
+// tahmin yürütmek zorunda kalmıştı, çünkü hatanın kendisi ekrana hiç gelmedi.
+//
+// SINIRSIZ DA DEĞİL: kaçak bir alet megabaytlarca dökebilir ve terminali
+// doldurmak da bir tür saklamaktır. 8 KB, en uzun bun/tsc çerçevesini sonuyla
+// birlikte taşır.
+func trimDiagnostic(b []byte) string {
+	const cap = 8000
+	s := strings.TrimSpace(string(b))
+	if len(s) <= cap {
+		return s
+	}
+	// BAŞ VE SON BİRLİKTE: baş çerçeveyi, son asıl cümleyi taşır. Yalnız birini
+	// tutmak, bu kusurun kendisini bir ucundan tekrar üretmek olurdu.
+	return s[:cap/2] + "\n  …[kırpıldı]…\n" + s[len(s)-cap/2:]
 }

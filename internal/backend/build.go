@@ -140,6 +140,17 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// extractor; without it the header checks degrade (best-effort install).
 	ensureBuildCheckTools(cwd)
 
+	// VE ŞİMDİ AYNI SORUYU İKİNCİ KEZ SOR (bkz. `sdkPruneRefusal`).
+	//
+	// Yukarıdaki yorum bu tehlikeyi biliyordu ama yalnız sürümü önce OKUYORDU;
+	// okunan doğru sayı, yanlış bir SDK'ya derlenmiş bundle'ın üstünde yazılı
+	// kalıyordu. Sıra `stack_sdk.go`'da düzeltildi — bu kapı, düzeltmenin bir
+	// gün sessizce geri alınmasını yakalar. Refuse, warn DEĞİL: yanlış SDK'ya
+	// derlenen bir bundle sessizce yanlış bir artefakt üretir.
+	if why := sdkPruneRefusal(installed, installedBackendVersion(cwd)); why != "" {
+		return errors.New(why)
+	}
+
 	// The installed SDK version, reported but NOT gated here.
 	//
 	// This used to fail the build when the installed major differed from npm's

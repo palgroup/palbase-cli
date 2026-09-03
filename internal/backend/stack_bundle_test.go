@@ -869,3 +869,36 @@ func TestDIGenerationCeilingRefusal(t *testing.T) {
 		require.Empty(t, pushCeilingRefusal(nil, nil))
 	})
 }
+
+// TEŞHİSİ SAKLAYAN TEŞHİS KAPISI — canlıda ölçüldü 03.09.2026.
+//
+// `output` yerel bir aletin stderr'ini `trimBody` ile 300 karaktere kırpıyordu.
+// 300 karakter bir HTTP gövdesi için doğru sınır; bir derleyici hatası için
+// yanlış: bun'ın çıktısı kod ÇERÇEVESİYLE başlar ve asıl cümle sonda gelir, yani
+// kırpma tam olarak okunması gereken yeri atıyordu. `palbase push` günlerce
+// "the bundle could not be inspected:" deyip ardına anlamsız bir parça
+// yapıştırdı; kontrol düzleminin push'u 02.09'da dört kez bununla düştü ve İKİ
+// teşhis birden yanlış çıktı.
+func TestToolDiagnosticIsNotTruncatedToAnHTTPBody(t *testing.T) {
+	long := strings.Repeat("x", 1200) + "SON-CÜMLE-BURADA"
+
+	kept := trimDiagnostic([]byte(long))
+	require.Contains(t, kept, "SON-CÜMLE-BURADA",
+		"aletin asıl hata cümlesi kırpılmış — çerçeve kalıp teşhis gitmiş")
+
+	// SINIRSIZ DEĞİL: kaçak bir alet megabaytlarca dökebilir ve terminali
+	// doldurmak da bir tür saklamaktır.
+	require.LessOrEqual(t, len(trimDiagnostic([]byte(strings.Repeat("y", 100000)))), 8200)
+}
+
+// Ve kapı, bir gün birinin onu tekrar HTTP kırpıcısına bağlamasını tutar.
+func TestBundleInspectionDoesNotUseTheHTTPTrimmer(t *testing.T) {
+	src, err := os.ReadFile("stack_bundle.go")
+	require.NoError(t, err)
+	body := string(src)
+	start := strings.Index(body, "func output(")
+	require.NotEqual(t, -1, start)
+	fn := body[start : start+600]
+	require.NotContains(t, fn, "trimBody(",
+		"output yine HTTP gövde kırpıcısını kullanıyor — alet hatası 300 karakterde kesilir")
+}

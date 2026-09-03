@@ -55,6 +55,27 @@ func ensureProjectSDK(ctx context.Context, dir string, target Target, cred Crede
 	// that then fails to fetch the tarball.
 	fmt.Fprint(w, sdkSkewNotice(declaredBackendSpec(dir), installed, running))
 
+	// ÇIKARICI ARAÇ ÖNCE — VE SIRA BİR ZEVK MESELESİ DEĞİL.
+	//
+	// `ensureBuildCheckTools` bir `npm install --no-save` koşar. npm o çağrıda
+	// `node_modules`'ı `package.json` + lockfile'a göre YENİDEN HİZALAR, yani
+	// aşağıda elle yerleştirdiğimiz SDK'yı beyan edilen sürüme geri alır.
+	// Canlıda ölçüldü 03.09.2026 (`w4recipe`), aynı dizinde üç adım:
+	//
+	//	başlangıç                 21.0.1
+	//	SDK tarball kurulunca     26.0.0
+	//	çıkarıcı araç kurulunca   21.0.1   ← geri döndü
+	//
+	// Bundle 21'e karşı derlendi (`defineTable` orada yok) ve hata bundler'ın
+	// içinden "the bundle could not be inspected" diye çıktı. `build.go` bu
+	// tuzağı BİLİYORDU — yorumu "ensureBuildCheckTools SDK'yı budayabilir"
+	// diyor — ama önlemi yalnız sürümü ÖNCE OKUMAKTI; budamanın kendisi
+	// durmadı, ve okunan doğru sayı yanlış bir bundle'ın üstünde yazılı kaldı.
+	//
+	// Aracı BURADA sağlamak, `runBuild`'in sonraki çağrısını no-op yapar
+	// (`buildToolMissing` false döner): SDK'yı budayacak komut hiç koşmaz.
+	ensureBuildCheckTools(dir)
+
 	tarball, err := downloadProjectSDK(ctx, target, cred)
 	if err != nil {
 		return err
@@ -201,4 +222,28 @@ func orNone(version string) string {
 		return "none"
 	}
 	return version
+}
+
+// sdkPruneRefusal, bundle'a girmeden ÖNCE sorulan tek soruyu cevaplar: derleme
+// hangi SDK'ya karşı yapılacak, kurduğumuz mu?
+//
+// `before` bir npm mutasyonundan ÖNCE, `after` SONRA okunan sürümdür. İkisi
+// ayrıldıysa `node_modules` bizim koyduğumuzu taşımıyor demektir ve bundan
+// sonrası yalandır: CLI "✓ 26.0.0 kuruldu" yazarken 21.0.1'e derler, hata da
+// bundler'ın içinden anlamsız bir sözdizimi parçası olarak çıkar.
+//
+// BİLİNMEYEN BİR SÜRÜM BUDAMA İDDİASI DEĞİLDİR: `installedBackendVersion`
+// okuyamadığında "" döner, ve "" ile bir şeyi karşılaştırıp "değişti" demek,
+// ölçemediğimiz şeyi kusur ilan etmek olurdu — bu koşuda iki teşhis tam olarak
+// öyle çürüdü.
+func sdkPruneRefusal(before, after string) string {
+	if before == "" || after == "" || before == after {
+		return ""
+	}
+	return fmt.Sprintf(
+		"the installed %s changed from %s to %s while preparing the build.\n"+
+			"  A tool install re-aligned node_modules against package.json and took the\n"+
+			"  stack's SDK with it, so the bundle would compile against %s — not the\n"+
+			"  version this stack RUNS. Nothing was pushed.",
+		backendPkg, before, after, after)
 }
