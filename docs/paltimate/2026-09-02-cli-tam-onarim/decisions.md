@@ -322,3 +322,25 @@ Git'in kendisi dosya başına. Ama toptan ret **daha güvenli** ve bugün çalı
 ### D-048 · Yayın, spec/plan DIŞINDA ad-hoc yapılmayacak
 **Karar:** Onay alındı ama yayın, planın **ilk görevi** olarak kanıtıyla birlikte koşacak; brainstorm'dan doğrudan icraya atlanmayacak.
 **Gerekçe:** Pipeline'ın varlık sebebi tam bu. Bu denetimin baş bulgusu "kapılar ölçmediği için üç P0 sessizce yayına çıktı" — o dersi bulan oturumun aynı atlamayı yapması tutarsız olur.
+
+### D-049 · P0-1 HÂLÂ CANLI — düzeltme denendi, kapı yeşil kaldı, sürüm kesildi, kusur sağ çıktı
+**Ölçüldü (2026-09-03, team-lead):**
+- `v0.53.0` tag'i `ca3565c` ("vendor'lama barman bloğunun SINIRINI doğru buluyor") commit'ini **İÇERİYOR** (`git merge-base --is-ancestor` → evet).
+- Buna rağmen `docker compose config` güncel depo dosyasını **hâlâ reddediyor**: `service "barman" refers to undefined volume barmandata: invalid compose project`.
+- Vendor'lanan dosyada `barman:` servisi duruyor (`:182`, `- barmandata:/var/lib/barman` `:208`); `volumes:` bloğunda `barmandata` **yok** (yalnız pgdata, artifactcache, artifacts, storage).
+- Vendorlama testi **GEÇİYOR** (`go test -run 'TestTheVendoredCompose|Vendor|Barman'` → `ok`).
+- Brew'daki `0.53.0` binary'si bozuk dosyayı taşıyor (`strings | grep -c 'context: ./barman'` → 1; `barmandata:` beyanı → 0).
+
+**Anlamı:** Sınır-bulma mantığı düzeltildi ama **vendor'lanan artefakt geçersiz kaldı**, ve kapı bunu göremediği için sürüm kesildi. Bu, denetimin merkez tezinin canlı ikinci kanıtı: [[feedback_a_regex_gate_does_not_measure_what_the_stager_rejects]] — kapı gerçek aracı TAKLİT ediyor, ÇALIŞTIRMIYOR.
+
+**Tasarıma etkisi:** P0-1 Spec 1'de KALIYOR ve `docker compose config` negatif kontrolü **en yüksek öncelikli tek kalem** oldu — çünkü onsuz bir düzeltmeyi düzeltme-olmayandan ayırt etmek mümkün değil, ve bu tam olarak iki kez oldu.
+
+**Koordinasyon:** Düzeltmeyi deneyen oturum iyi niyetle çalıştı; kapı ona da aynı yalanı söyledi. Kusur kişide değil kapıda. Çakışmamak için: benim işim kapıyı koymak; artefaktın kendisini düzelten commit ya onlardan gelir ya benden — hangisi önce gelirse diğeri doğrulamaya döner.
+
+### D-050 · 26.0.0 YAYIN KOŞULU SAĞLANDI (D-047'nin kanıtı)
+**Ölçüldü:** repo 26.0.0 → `npm pack` → temiz dizine kurulum → şablon kopyalandı → `palbase build`:
+- HEAD CLI (`13bd760`) ile: **`build OK — 5 route(s)`, exit 0**
+- Yayındaki brew binary (`0.53.0`) ile: **`build OK — 5 route(s)`, exit 0**
+Şablon `modules/health/health.module.ts` + `modules/notes/notes.module.ts` taşıyor, `package.json` `^26.0.0` beyan ediyor.
+**Sonuç:** Yayın güvenli ve P0-2'yi **CLI değişikliği olmadan** kapatıyor — `init` şablonu çektiği paketin içinden kopyalıyor (`init.go` `newestPublishedSDK` + template kopyası). D-047'nin koşulu KARŞILANDI.
+**Düzeltilen bayat yorum:** `init.go:68-71` *"`latest` bilerek v1 hattında tutuluyor"* diyor — registry bugün `latest`=`next`=25.1.0 gösteriyor; yorum yanlış, Spec 1'e alınacak.
