@@ -339,9 +339,12 @@ kötüdür — o testin başlığı diye okunur. Hikâyenin kendisi kaybolmamı�
 diyordu; `palbase link`'in bulut yolu o dosyayı SİLİYOR ve ortam başına sözleşme yazıyor — bu görevin
 okumayı öğrendiği değişikliğin ta kendisi. Artık `.palbase/openapi/<environment>.json`.
 
-**N-1 · Türkçe kapısının iki kör noktası.** ASCII yarısı bu koşuda zaten kapanmıştı (denetçi eski
-ağacı ölçmüş). Kalan gerçekti: kapı yalnız `token.STRING`'e bakıyordu, `'ş'` bir rune literal olarak
-geçiyordu. **Negatif kontrol:** `var _ = 'ş'` → `FAIL … (Turkish letters) 'ş'`.
+**N-1 · Türkçe kapısının iki kör noktası.** ASCII yarısını "denetçi eski ağacı ölçmüş" diye
+geçiştirmiştim; **yanlıştı ve denetçi kronolojiyi kanıtladı.** `turkishASCII`'yi getiren commit
+`118a106`, denetçinin scratch kopyasının ardılı (`git merge-base --is-ancestor 5b12713 118a106` →
+evet, ve kopya `5b12713`'ten de önce alınmış) — yani ASCII boşluğu ölçüldüğü anda GERÇEKTİ ve
+`118a106` onun düzeltmesi. İki yarı da bu koşuda kapandı; ikincisini bağımsız yakaladım. Kalan
+gerçekti: kapı yalnız `token.STRING`'e bakıyordu, `'ş'` bir rune literal olarak geçiyordu. **Negatif kontrol:** `var _ = 'ş'` → `FAIL … (Turkish letters) 'ş'`.
 
 **N-2 · parse edilemeyen dosya sessizce atlanıyordu.** `if perr != nil { return nil }` kapının görüş
 alanını "parse edilebilen her dosya"ya daraltıyordu — adının vaat ettiği şey bu değil. Artık
@@ -356,3 +359,22 @@ altıya çıkarmıştı — plan gerçeğe hizalandı. **N-5** bilgi kalemi, aks
 devam eder ve alan tele kimse karar vermeden çıkar. Tel formatının anahtarları artık ölçülüyor.
 **Mutation:** `wireSource`'a `Leaked` alanı ekle → `a source carries [leaked name source], want
 [name source] — a field reached the wire without anybody choosing to send it`.
+
+
+### Ve bir kez daha kendi kuralımı çiğnedim: commit BAŞLIĞINI okudum, gövdeyi değil
+
+Android CI'ının silinmesini `e09eb71`'in başlığından anlattım — *"pipelines are being rewritten from
+scratch"* — ve gövdeyi hiç açmadım. Gövde başka bir şey söylüyor:
+
+> Actions minutes are the scarce resource and none of these were gating anything we trust;
+> faz0b builds and tests locally. Deleting rather than disabling, because disabled is one click
+> from firing.
+
+Fark önemli: başlık bir GECİKME anlatıyor (yeniden yazım gelecek), gövde bir KARAR anlatıyor —
+kapılar kimsenin güvenmediği için kaldırılmış ve yerine "biri yerelde derleyip test ediyor"
+konmuş, üstelik geri açılmasın diye silinerek. Ve o öncül yanlıştı: boşlukta kesilen iki sürümün
+İKİSİ de bir suite'in yakalayacağı kusur taşıdı, `http://localhost.evil.com`'u kabul eden prefix
+kontrolü dahil. Yerel test bir kişinin bir makinede bir gün yaptığı şeydir; kapı değildir.
+
+Kayıtlı kuralım bunu zaten söylüyordu: **çerçeve başta, ASIL CÜMLE sonda.** Yorum ve commit
+düzeltildi.
