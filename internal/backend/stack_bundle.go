@@ -1174,5 +1174,5 @@ func trimDiagnostic(b []byte) string {
 	}
 	// BAŞ VE SON BİRLİKTE: baş çerçeveyi, son asıl cümleyi taşır. Yalnız birini
 	// tutmak, bu kusurun kendisini bir ucundan tekrar üretmek olurdu.
-	return s[:cap/2] + "\n  …[kırpıldı]…\n" + s[len(s)-cap/2:]
+	return s[:cap/2] + "\n  …[trimmed]…\n" + s[len(s)-cap/2:]
 }

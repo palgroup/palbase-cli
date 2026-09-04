@@ -20,7 +20,8 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 - **FR-005** WHEN CI koşarsa THEN `golangci-lint run` bulgu raporlarsa iş SHALL başarısız olsun (`continue-on-error` yok) — `.golangci.yml`'in kendi beyanını gerçek yapar.
 - **FR-006** WHEN CI koşarsa THEN `go vet -tags e2e ./tests/e2e/` başarısızsa iş SHALL başarısız olsun.
 - **FR-007** WHEN `tests/e2e` derlenirse THEN paket SHALL güncel `auth.LoadDPoPKey` imzasıyla derlensin.
-- **FR-009** WHEN kapı koşarsa THEN test dışı kaynakta kullanıcıya basılan hiçbir dize SHALL Türkçe karakter taşımasın (yorumlar hariç); ölçülen üç ihlal (`transport/rest.go:313`, `auth/auth.go:322`, `auth/dpop_storage.go:73`) İngilizceye çevrilir.
+- **FR-009** WHEN kapı koşarsa THEN test dışı kaynakta kullanıcıya basılan hiçbir dize SHALL Türkçe karakter taşımasın; ölçülen **altı** ihlal İngilizceye çevrilir: `transport/rest.go:307` ve `:313`, `auth/auth.go:322`, `auth/dpop_storage.go:73`, `backend/stack_bundle.go:1177`, `project/project.go:69`.
+  > **Sayım düzeltildi (Changelog A-4).** İlk ölçüm satır-tabanlı bir regex'ti ve dizeyi `fmt.Errorf(`'ten SONRAKİ satırda taşıyan üç ihlali kaçırdı. Kapı bu yüzden regex değil **Go AST'si** ile yazılır: `parser.ParseFile` yorumları yapısal olarak dışarıda bırakır, `BasicLit` yalnız gerçek dizeleri verir.
 - **FR-010** IF bir testin `npm install` adımı başarısız olursa THEN CI ortamında test SHALL başarısız olsun, atlanmasın; atlama yalnız aracın hiç kurulu olmamasına izinlidir.
 - **FR-011** WHEN `go test ./... -short` koşarsa THEN toplam duvar saati NFR-001'deki bütçeyi aşmasın.
 
@@ -105,6 +106,7 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/transport/rest.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
 | `internal/auth/auth.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
 | `internal/auth/dpop_storage.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
+| `internal/project/project.go` | modify | Türkçe yer tutucu İngilizceye | FR-009 |
 | `internal/backend/testdeps_test.go` | modify | CI'da npm install hatası t.Fatal | FR-010 |
 | `internal/backend/build_test.go` | modify | ağ isteyen/uzun testler `-short` dışına | FR-010, FR-011 |
 | `internal/flags/flags.go` | modify | zarf çözümü; ham-gövde fallback'i kalkar | FR-012 |
@@ -160,3 +162,5 @@ Bkz. `./research.md` — 17 kod-tabanı iddiası (`file:line` + alıntı, donma 
 - **A-1 · 2026-09-04 · FR-018 eklendi + Impact Map 15 satır büyüdü.** Planlama sırasında §7 taraması bir karar sızıntısı buldu: FR-005 lint kapısını bloklayıcı yapıyor ama borç ölçülmemişti. Ölçüm: 20 dosyada 48 bulgu (errcheck 2 · staticcheck 7 · unused 39), 15 dosya Impact Map dışında. Kapıyı borç ödenmeden açmak CI'ı kırardı; advisory'ye düşürmek yasak. Borç FR-018 olarak kapsama alındı, sınırı yazıldı (Kol E'nin büyük emeklilikleri Artım 2'de kalıyor). Kapsam büyüdüğü için kullanıcı onayına sunuldu.
 - **A-2 · 2026-09-04 · FR-015 karakteri değişti, P-1 çözüldü.** Yeniden doğrulamada CB-18 bayat çıktı: 26.0.0 hiç yayımlanmadı, 27.1.0 çıktı ve P0-2 kapandı (taze ölçüm CB-18a). FR düşürülmedi; düzeltme değil regresyon kapısı oldu.
 - **A-3 · 2026-09-04 · rota kapısı Artım 2'ye ertelendi; FR-009 kapsamı ölçüldü; C-3/C-4 düştü; `stackfiles.go` Impact Map'ten çıktı.** Fidelity taraması üç şey buldu: (1) rota kapısı doğduğu gün kırmızı olurdu — ölü `/api/v2/projects` çağrısı `selection/resolve.go:192`'de duruyor ve onu kaldıran iş Kol E'de; kapı kendisini yeşil yapan işle birlikte gider. (2) Türkçe kapısının yeşil olması için üç kaynak dosyanın çevrilmesi gerekiyor — ölçüldü ve Impact Map'e eklendi. (3) `stackfiles.go` yalnız gömülü baytları yazıyor, değişmesi gerekmiyor; sahte satır bırakmak yerine çıkarıldı.
+
+- **A-4 · 2026-09-04 · FR-009 sayımı 3 → 6, Impact Map +1 (`project/project.go`).** İlk ölçüm satır-tabanlı regex'ti; dizeyi çağrıdan sonraki satırda taşıyan üç ihlali kaçırdı. AST taraması altı buldu. `stack_bundle.go` zaten T003'ün Impact Map satırıydı; ihlali T005 kapsamında düzeltiliyor.

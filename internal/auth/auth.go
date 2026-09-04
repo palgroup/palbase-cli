@@ -319,7 +319,7 @@ func (c *Client) identityOf(ctx context.Context, token string) (string, error) {
 		Email string `json:"email"`
 	}
 	if err := json.Unmarshal(body, &me); err != nil {
-		return "", fmt.Errorf("kimlik cevabı JSON değil: %w", err)
+		return "", fmt.Errorf("the identity response was not JSON: %w", err)
 	}
 	if me.Email != "" {
 		return fmt.Sprintf("%s (%s)", me.Email, me.ID), nil

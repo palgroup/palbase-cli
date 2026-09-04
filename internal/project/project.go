@@ -66,7 +66,7 @@ type Project struct {
 // "sunucu adı unuttu" aynı görünürdü.
 func (p Project) displayName() string {
 	if p.Name == nil || *p.Name == "" {
-		return "(adsız)"
+		return "(unnamed)"
 	}
 	return *p.Name
 }

@@ -304,13 +304,13 @@ func (c *Client) newSignedRequest(ctx context.Context, method, path string, body
 	if strings.HasPrefix(c.Token, patPrefix) {
 		if DPoPSigner == nil {
 			return nil, fmt.Errorf(
-				"makine kimliği sunulamıyor: DPoP imzalayıcı bağlı değil")
+				"cannot present a machine identity: no DPoP signer is wired")
 		}
 		proof, perr := DPoPSigner(method, c.BaseURL+path, c.Token)
 		if perr != nil {
 			// SESLİ DÜŞ: proof'suz göndermek, kimliği Bearer'a düşürüp
 			// anlaşılmaz bir 401 almak olurdu.
-			return nil, fmt.Errorf("DPoP proof üretilemedi: %w", perr)
+			return nil, fmt.Errorf("could not produce a DPoP proof: %w", perr)
 		}
 		req.Header.Set("Authorization", "DPoP "+c.Token)
 		req.Header.Set("DPoP", proof)

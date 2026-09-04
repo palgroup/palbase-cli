@@ -153,18 +153,18 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 - [x] **Adım 3: config/*.ts döneminden kalan ölü sembolleri sil** — `storage.go`: `bucketDef`, `parseSizeLiteral`, `describe`, `humanBytes` · `egress.go`: `hostEntryRE`, `hostsArrayRE`, `lineCommentRE` · `logs.go`: `reverse` · `auth_test.go`: 7 ölü test yardımcısı. Her biri için önce sıfır çağıran doğrulaması.
 - [x] **Adım 4: staticcheck'leri düzelt** — `logs.go` ve `cmd/palbase/doctor.go` (QF1002 tip switch biçimi).
 - [x] **Adım 5: Yeşili gör** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/auth/... ./internal/storage/... ./internal/egress/... ./internal/logs/... ./internal/project/... ./cmd/...` · Beklenen: **`0 issues`**; `go build ./...` · Beklenen: exit 0
-- [ ] **Adım 6: Commit** — `chore(lint): config/*.ts döneminin ölü sembolleri silindi (gitroot.go tümüyle)`
+- [x] **Adım 6: Commit** — `chore(lint): config/*.ts döneminin ölü sembolleri silindi (gitroot.go tümüyle)`
 
 ---
 
 ### T005: Türkçe dizeleri çevir ve kapıyı koy
-<!-- deps: [] | files: [internal/transport/rest.go, internal/auth/auth.go, internal/auth/dpop_storage.go, cmd/palbase/surface_test.go] | satisfies: [FR-009] -->
+<!-- deps: [] | files: [internal/transport/rest.go, internal/auth/auth.go, internal/auth/dpop_storage.go, internal/project/project.go, cmd/palbase/surface_test.go] | satisfies: [FR-009] -->
 
 **Interfaces:**
 - Consumes: —
 - Produces: `TestNoUserFacingStringIsTurkish` kapısı
 
-- [ ] **Adım 1: Kapıyı yaz (kırmızı olmalı)** — `cmd/palbase/surface_test.go` sonuna:
+- [x] **Adım 1: Kapıyı yaz (kırmızı olmalı)** — `cmd/palbase/surface_test.go` sonuna:
 ```go
 // TestNoUserFacingStringIsTurkish holds sdk/cli/CLAUDE.md's rule: the task may
 // be Turkish, the CLI's output may not. Comments are exempt — only string
@@ -206,12 +206,12 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 	}
 }
 ```
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **FAIL**, üç ihlali adıyla listeler
-- [ ] **Adım 3: Üç dizeyi çevir** —
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **FAIL**, üç ihlali adıyla listeler
+- [x] **Adım 3: Üç dizeyi çevir** —
   - `internal/transport/rest.go:313` → `fmt.Errorf("could not produce a DPoP proof: %w", perr)`
   - `internal/auth/auth.go:322` → `fmt.Errorf("the identity response was not JSON: %w", err)`
   - `internal/auth/dpop_storage.go:73` → `fmt.Errorf("could not read %s: %w", DPoPKeyEnv, err)`
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **PASS**
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **PASS**
 - [ ] **Adım 5: Commit** — `fix(cli): terminale düşen üç Türkçe dize İngilizceye — ve dönüşünü kapı engelliyor`
 
 ---

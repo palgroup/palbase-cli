@@ -70,7 +70,7 @@ func LoadDPoPKey() (*DPoPKey, error) {
 		if err != nil {
 			// SESLİ DÜŞ: ortamdaki anahtar bozuksa keyring'e sessizce düşmek,
 			// çağıranın VERDİĞİ anahtarı yok sayıp başkasıyla imzalamak olurdu.
-			return nil, fmt.Errorf("%s okunamadı: %w", DPoPKeyEnv, err)
+			return nil, fmt.Errorf("could not read %s: %w", DPoPKeyEnv, err)
 		}
 		return key, nil
 	}

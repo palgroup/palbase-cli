@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -658,5 +659,56 @@ func TestNoShippedStringNamesARetiredConfigFile(t *testing.T) {
 		require.Containsf(t, string(registry), dead.file,
 			"%s no longer names %s. It is exempt BECAUSE it is the registry, so a row it drops "+
 				"is a retired file nothing declares retired and nothing refuses.", retirementRegistry, dead.file)
+	}
+}
+
+// TestNoUserFacingStringIsTurkish holds sdk/cli/CLAUDE.md's rule: the task may
+// be Turkish, the CLI's OUTPUT may not.
+//
+// It parses rather than greps, and the difference is not cosmetic — it is the
+// reason this gate exists at all. A line-based regex was tried first and missed
+// three of the six violations, because each carried its string on the line
+// AFTER `fmt.Errorf(`. go/parser also excludes comments structurally, so the
+// Turkish reasoning this codebase writes in its comments cannot trip it.
+func TestNoUserFacingStringIsTurkish(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file")
+	}
+	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+
+	const turkish = "çğıöşüÇĞİÖŞÜ"
+	fset := token.NewFileSet()
+	var offenders []string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") ||
+			strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		parsed, perr := parser.ParseFile(fset, path, nil, 0) // no comments
+		if perr != nil {
+			return nil
+		}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			lit, isLit := n.(*ast.BasicLit)
+			if !isLit || lit.Kind != token.STRING {
+				return true
+			}
+			if strings.ContainsAny(lit.Value, turkish) {
+				rel, _ := filepath.Rel(root, path)
+				offenders = append(offenders, fmt.Sprintf("%s:%d %s",
+					rel, fset.Position(lit.Pos()).Line, lit.Value))
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("user-facing strings must be English (sdk/cli/CLAUDE.md):\n%s",
+			strings.Join(offenders, "\n"))
 	}
 }
