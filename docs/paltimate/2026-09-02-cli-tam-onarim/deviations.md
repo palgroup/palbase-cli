@@ -64,3 +64,19 @@ nerede koştuğu, ne talep ettiği değil. `init`→`build` e2e'si CI'da koşmay
 **Cazip çünkü:** runner'da UID eşlemesini çözmek (`--user`, `chmod`, ya da named volume) bir sonraki
 adım gibi duruyor ve `start`'ı CI'da da ölçülebilir kılardı.
 **Etkisi:** Bugün `start`'ın regresyonu yalnız yerelde/opt-in yakalanır. Bitiş kapısında teklif edilecek.
+
+---
+
+## Takip döngüsü — ÜÇ KEŞİF DE KAPANDI (2026-09-04, kullanıcı onayıyla)
+
+- **D-01 → FR-021 (T015).** e2e varsayılanı ölü konaktan dağıtılmış adrese. Ölçüldü:
+  `api.dev.palbase.studio` → **000 (bağlanamadı)**, `api.palbase.studio` → **200**.
+- **D-03 → FR-019 (T013).** `push` artık gerçekten `Idempotency-Key` taşıyor. T003 ölü BEYANI
+  silmişti; bu YETENEĞİ getirdi. Kırmızı kanıtı: *"the upload … carries no Idempotency-Key —
+  a timed-out retry becomes a second deploy"*.
+- **D-04 → FR-020 (T014).** CI artık tam yığın kaldırabiliyor. Kök neden: `--init-env` konteyneri
+  root olarak yazıyordu ve userns remap yapan daemon'da o root 0700 dizine yazamıyordu.
+  `--user uid:gid` ile çözüldü — **dizin izni gevşetilmedi**, çünkü orada service-role anahtarı var.
+  Opt-in bayrağı kaldırıldı; CI run 33867907256 `Run tests` **yeşil**.
+
+**Açık kalem kalmadı.** D-02 (çekirdek sürüm sürüklenmesi) başka bir oturum tarafından çözüldü.
