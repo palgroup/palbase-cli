@@ -16,6 +16,7 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -29,6 +30,10 @@ import (
 // management surface, so the answer IS the outcome — there is nothing to poll.
 type deployClient interface {
 	Do(ctx context.Context, method, path string, body, out any) error
+	// DoIdempotent carries a replay key. The artifact upload uses it so a
+	// request that timed out AFTER the plane accepted it is not retried into a
+	// second deploy of the same bytes.
+	DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error
 }
 
 // gitRunner runs an external command (default: git). Injected so the
@@ -96,9 +101,8 @@ type pushDeps struct {
 // runPush routes `palbase push` by the project's repository provider:
 //   - github:  exec `git push` (the webhook deploys into the mapped Environment).
 //   - palbase: tarball the cwd and POST it to the SELECTED Environment's deploy
-//     ingress. NO Idempotency-Key rides today: the transport supports one
-//     (PostMultipart takes it) and this caller passes none, so a timed-out
-//     upload that actually landed is re-sent as a SECOND deploy.
+//     ingress, carrying an Idempotency-Key so a timed-out upload that actually
+//     landed is not re-sent as a second deploy.
 func runPush(d pushDeps) error {
 	out := d.out
 	if out == nil {
@@ -182,9 +186,13 @@ func runPush(d pushDeps) error {
 		Digest        string `json:"digest"`
 		EndpointCount int    `json:"endpointCount"`
 	}
-	if err := d.rest.Do(ctx, http.MethodPost,
+	// ONE KEY PER INVOCATION, and it must NOT change on a retry — that is the
+	// whole of what a replay key is for. Without it a push that timed out after
+	// the plane had accepted the artifact came back as a SECOND deploy.
+	if err := d.rest.DoIdempotent(ctx, http.MethodPost,
 		PushPath(d.sel.EnvironmentRef()),
-		map[string]any{"artifact": base64.StdEncoding.EncodeToString(tarball)}, &res); err != nil {
+		map[string]any{"artifact": base64.StdEncoding.EncodeToString(tarball)}, &res,
+		transport.NewIdempotencyKey()); err != nil {
 		return err
 	}
 

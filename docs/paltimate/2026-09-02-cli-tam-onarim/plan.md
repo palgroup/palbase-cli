@@ -396,6 +396,51 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 
 ---
 
+---
+
+### T013: `push` idempotency anahtarını GERÇEKTEN taşısın
+<!-- deps: [] | files: [internal/backend/deploy.go, internal/backend/deploy_test.go, internal/backend/backend.go] | satisfies: [FR-019] -->
+
+**Interfaces:**
+- Consumes: `transport.NewIdempotencyKey() string` (`internal/transport/rest.go:56`) · `(*transport.Client).DoIdempotent(ctx, method, path, body, out any, idempotencyKey string) error` (`:209`)
+- Produces: `REST.DoIdempotent` arayüz metodu; `runPush` onu kullanır
+
+- [x] **Adım 1: Testi yaz, kırmızıyı gör** — `deploy_test.go`'da sahte REST, `DoIdempotent`'a geçen anahtarı kaydetsin; `runPush` sonrası anahtarın BOŞ OLMADIĞINI ve iki çağrıda AYNI kaldığını assert et. Run: `go test ./internal/backend/ -run TestPushCarriesAnIdempotencyKey -count=1` · Beklenen: **FAIL** (bugün `Do` çağrılıyor, anahtar yok).
+- [x] **Adım 2: Arayüzü genişlet** — `internal/backend/backend.go`'daki `REST` arayüzüne `DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error` ekle. Yorumdaki "with its Idempotency-Key" iddiası ilk kez doğru olacak.
+- [x] **Adım 3: `runPush`'u bağla** — `deploy.go:185`'teki `d.rest.Do(...)` çağrısını `d.rest.DoIdempotent(..., key)` yap; `key` invocation başına bir kez `transport.NewIdempotencyKey()` ile üretilsin (yeniden denemede DEĞİŞMESİN — anahtarın bütün anlamı bu).
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'Push' -count=1` · Beklenen: **PASS**; ardından `go build ./... && go vet ./...` temiz.
+- [ ] **Adım 5: Commit** — `fix(push): yükleme artık Idempotency-Key taşıyor — düşen bir istek ikinci deploy değil`
+
+---
+
+### T014: CI tam yığını kaldırabilsin [P]
+<!-- deps: [] | files: [internal/backend/start.go, internal/backend/start_e2e_test.go, .github/workflows/ci.yml] | satisfies: [FR-020] -->
+
+**Interfaces:**
+- Consumes: `stackStateDir(group string) (string, error)` (`internal/backend/start.go:430`, bugün `os.MkdirAll(dir, 0o700)`)
+- Produces: konteynerin yazabildiği durum dizini; opt-in bayrağı olmadan koşan yığın e2e'si
+
+- [ ] **Adım 1: Kök nedeni yeniden üret** — Run: `PALBASE_E2E_STACK=1 go test ./internal/backend/ -run TestStartServesAndStopCleansUp -count=1` yerelde geçer; CI logunda düşen hata `write .env: open .env: permission denied` (run 33859855884). Sebep: durum dizini `0o700` ve `--init-env` konteyneri BAŞKA bir UID ile koşuyor.
+- [ ] **Adım 2: Konteyneri host kullanıcısıyla koştur** — `start.go`'daki `--init-env` `docker run` çağrısına `--user $(id -u):$(id -g)` eşdeğerini ekle (Go'da `os.Getuid()`/`os.Getgid()`). Dizin izinlerini GEVŞETME: `0o700` bir sırrı taşıyor ve gevşetmek onu makinedeki her kullanıcıya açardı.
+- [ ] **Adım 3: Opt-in bayrağını kaldır** — `start_e2e_test.go`'daki `PALBASE_E2E_STACK` kapısını sil; `-short` ve araç yokluğu kapıları KALSIN.
+- [ ] **Adım 4: Yerelde yeşili gör** — Run: `go test ./internal/backend/ -run TestStartServesAndStopCleansUp -count=1` · Beklenen: **PASS**, bayrak olmadan.
+- [ ] **Adım 5: CI'da kanıtla** — Commit + push; Run: `gh run watch <id> --exit-status` · Beklenen: **exit 0** ve `Run tests` adımı yeşil. Kırmızıysa görev bitmemiştir.
+- [ ] **Adım 6: Commit** — `fix(start): init-env konteyneri host kullanıcısıyla koşuyor — CI de yığın kaldırabiliyor`
+
+---
+
+### T015: e2e suite'inin ölü konağı [P]
+<!-- deps: [] | files: [tests/e2e/mgmt_api_test.go] | satisfies: [FR-021] -->
+
+**Interfaces:**
+- Consumes: `internal/config`'in dağıtılmış bulut adresi `https://api.palbase.studio` (`config.go:49-50`)
+- Produces: dağıtılmış bir adrese düşen e2e varsayılanı
+
+- [ ] **Adım 1: Ölü konağı ölç** — Run: `curl -s -o /dev/null -w '%{http_code}' https://api.dev.palbase.studio/v1/cloud/config` · Beklenen: bağlanamama/DNS hatası (adres hiç dağıtılmadı); karşılaştırma: aynı komut `https://api.palbase.studio` için **200**.
+- [ ] **Adım 2: Varsayılanı düzelt** — `mgmt_api_test.go:47`'deki `https://api.dev.palbase.studio` yerine `internal/config`'in dağıtılmış varsayılanını kullan; dosya başındaki (`:4`, `:15`) ölü konağı anan yorumları da düzelt.
+- [ ] **Adım 3: Derlemeyi doğrula** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: çıktı yok, exit 0.
+- [ ] **Adım 4: Commit** — `fix(e2e): varsayılan taban dağıtılmış adrese — api.dev.palbase.studio hiç var olmadı`
+
 ## UAT Checklist
 
 **Bu ortamda mevcut doğrulama araçları (etiketleme bu envanterden türetildi):** Bash (derlenmiş binary'yi koşturur), `docker` + `docker compose`, `go`/`golangci-lint`, `npm`, `curl`, `gh` (CI koşumları), dosya sistemi okuma. Bu araçların gözleyebildiği her kalem `[agent]`.
@@ -454,6 +499,9 @@ graph TD
 | FR-016 | T012 |
 | FR-017 | T009 |
 | FR-018 | T003, T004, T006, T007 |
+| FR-019 | T013 |
+| FR-020 | T014 |
+| FR-021 | T015 |
 
 *(008 numarası boş — rota kapısı Artım 2'ye ertelendi, Changelog A-3.)*
 

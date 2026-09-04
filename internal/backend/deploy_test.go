@@ -49,6 +49,17 @@ type deployCall struct {
 	method string
 	path   string
 	body   any
+	// idempotencyKey is empty for a plain Do. A push that leaves it empty is a
+	// push whose timed-out retry becomes a SECOND deploy.
+	idempotencyKey string
+}
+
+func (f *fakeDeploy) DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
+	if err := f.Do(ctx, method, path, body, out); err != nil {
+		return err
+	}
+	f.calls[len(f.calls)-1].idempotencyKey = idempotencyKey
+	return nil
 }
 
 func (f *fakeDeploy) Do(_ context.Context, method, path string, body, out any) error {
@@ -426,3 +437,32 @@ func TestDeployVersion_IsShortened(t *testing.T) {
 // `palbase test-user templates set --file <path>`, locked by
 // TestTemplatesSet_SendsTheTemplatesKey in internal/testuser. The push no longer
 // has a fixture step, so there is no ordering left to pin here.
+
+// The upload has to be REPLAYABLE. It carried no Idempotency-Key: the transport
+// has supported one since it was written (PostMultipart takes it, DoIdempotent
+// takes it) and the caller passed none, so an upload that timed out AFTER the
+// plane accepted it came back as a second deploy of the same artifact.
+func TestPushCarriesAnIdempotencyKey(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{}
+	build, pack := stubBundler(nil)
+	var out bytes.Buffer
+
+	require.NoError(t, runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: &out,
+		ctx: context.Background(), build: build, pack: pack,
+	}))
+
+	var upload *deployCall
+	for i := range f.calls {
+		if f.calls[i].method == http.MethodPost {
+			upload = &f.calls[i]
+		}
+	}
+	if upload == nil {
+		t.Fatal("no upload call was made")
+	}
+	if upload.idempotencyKey == "" {
+		t.Fatalf("the upload to %s carries no Idempotency-Key — a timed-out retry becomes a second deploy", upload.path)
+	}
+}

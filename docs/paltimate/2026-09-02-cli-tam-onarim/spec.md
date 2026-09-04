@@ -44,6 +44,12 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
   > **Neden bir FR gerekti:** FR-005 lint kapısını **bloklayıcı** yapıyor, ama ölçüldüğünde 20 dosyada 48 bulgu var (errcheck 2 · staticcheck 7 · unused 39) ve 15 dosya Impact Map'te değildi. Kapıyı borç ödenmeden açmak ya CI'ı kırar ya da kapıyı advisory'ye düşürür — ikincisi [[feedback_no_advisory_gates_pay_the_debt]] ile yasak. Borcun içinde **gerçek bir kusur** var: `internal/backend/start.go` yığın `.env`'ine mühür yazarken `Close()` hatasını yutuyor (denetim E-3) — kısa yazımda yarım mühürlü yığın bırakır.
   > **Kapsam sınırı:** yalnız `unused` sembollerin silinmesi ve 9 errcheck/staticcheck bulgusunun düzeltilmesi. Kol E'nin büyük emeklilikleri (`internal/apps` 617 satır, github kolu, `internal/hook`) Artım 2'de kalır — bunlar `unused` raporlamıyor çünkü kendi içlerinde birbirlerini çağırıyorlar.
 
+### Takip döngüsü (bitiş kapısında kullanıcı onayıyla alındı — Changelog A-6)
+
+- **FR-019** WHEN `palbase push` bir artefakt yüklerse THEN istek SHALL bir `Idempotency-Key` taşısın ve zaman aşımına uğrayan bir yükleme AYNI anahtarla yeniden denensin; böylece inen ama cevabı kaybolan bir yükleme ikinci bir deploy'a dönüşmesin.
+- **FR-020** WHEN `TestStartServesAndStopCleansUp` bir CI runner'ında koşarsa THEN yığın SHALL ayağa kalksın; bind-mount edilen durum dizini konteynerin kullanıcısı tarafından yazılabilir olsun ve test opt-in bayrağına ihtiyaç duymasın.
+- **FR-021** WHEN `tests/e2e` bir taban adres seçerse THEN varsayılan SHALL dağıtılmış bir adres olsun; hiç dağıtılmamış `api.dev.palbase.studio` varsayılan olmaktan çıksın.
+
 ## Fonksiyonel Olmayan Gereksinimler
 
 - **NFR-001** `go test ./... -short` tek makinede **≤ 180 sn** (bugün ölçülen: 455 sn, tek başına `internal/backend`).
@@ -132,6 +138,8 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/logs/logs.go` | modify | 1 ölü sembol + 1 staticcheck | FR-018 |
 | `internal/project/gitroot.go` | modify | dosya tümüyle ölü — silinir | FR-018 |
 | `cmd/palbase/doctor.go` | modify | 1 staticcheck | FR-018 |
+| `internal/backend/deploy_test.go` | modify | idempotency anahtarının taşındığını ölçen test | FR-019 |
+| `internal/backend/backend.go` | modify | `REST` arayüzü `DoIdempotent`'ı taşır | FR-019 |
 | `internal/backend/scaffold_e2e_test.go` | create | yayımlanmış SDK'ya karşı init→build uçtan uca | FR-015 |
 | `internal/backend/start_e2e_test.go` | create | start→well-known 200→stop uçtan uca | FR-016 |
 | **ÇAPRAZ DEPO** `../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt` | modify | çok-ortam config okuma + `https` şartının kalkması | FR-014 |
@@ -167,3 +175,5 @@ Bkz. `./research.md` — 17 kod-tabanı iddiası (`file:line` + alıntı, donma 
 - **A-4 · 2026-09-04 · FR-009 sayımı 3 → 6, Impact Map +1 (`project/project.go`).** İlk ölçüm satır-tabanlı regex'ti; dizeyi çağrıdan sonraki satırda taşıyan üç ihlali kaçırdı. AST taraması altı buldu. `stack_bundle.go` zaten T003'ün Impact Map satırıydı; ihlali T005 kapsamında düzeltiliyor.
 
 - **A-5 · 2026-09-04 · Impact Map +1 (`internal/backend/init_test.go`).** T010 uygulanırken FR-010'un sınıfının ikinci örneği bulundu: `packLocalSDK` `npm pack` başarısızlığını KOŞULSUZ atlamaya çeviriyor (CI dahil). FR-010 bunu zaten talep ediyor; dosya Impact Map'te değildi.
+
+- **A-6 · 2026-09-04 · FR-019/020/021 eklendi.** Bitiş kapısında kullanıcı üç defter keşfini de aldı: `push`'un hiç göndermediği idempotency (D-03), CI'ın tam yığın kaldıramaması (D-04), ve e2e'nin ölü konağı (D-01). Impact Map +2; kalan dosyalar zaten verilmişti.

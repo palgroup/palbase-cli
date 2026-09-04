@@ -33,6 +33,10 @@ func (n *nameREST) Do(_ context.Context, _ string, path string, _ any, out any) 
 	return json.Unmarshal(blob, out)
 }
 
+func (n *nameREST) DoIdempotent(ctx context.Context, method, path string, body, out any, _ string) error {
+	return n.Do(ctx, method, path, body, out)
+}
+
 func (n *nameREST) PostMultipart(context.Context, string, []byte, map[string]string, string) ([]byte, error) {
 	return nil, errors.New("bu testte kullanılmıyor")
 }

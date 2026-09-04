@@ -77,6 +77,10 @@ var buildCheckFS embed.FS
 // everything else. *transport.Client satisfies it; tests substitute a stub.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
+	// DoIdempotent is Do with a replay key. The deploy upload rides it: a
+	// request that timed out AFTER the plane accepted it must not become a
+	// second deploy of the same artifact when it is retried.
+	DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error
 	PostMultipart(ctx context.Context, path string, tarball []byte, fields map[string]string, idempotencyKey string) ([]byte, error)
 }
 
