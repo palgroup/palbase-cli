@@ -44,6 +44,12 @@ func packLocalSDK(t *testing.T, ctx context.Context) string {
 	cmd.Dir = sdk
 	body, err := cmd.Output()
 	if err != nil {
+		// A FAILED PACK IS NOT A MISSING TOOL — same class as npmInstallProject.
+		// Skipping here meant a broken SDK tree or a registry problem turned every
+		// cross-boundary test green, in CI too, where nobody reads the skip lines.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("npm pack failed in CI — this is a failure, not a skip: %v", err)
+		}
 		t.Skipf("npm pack failed: %v", err)
 	}
 	name := strings.TrimSpace(string(body))

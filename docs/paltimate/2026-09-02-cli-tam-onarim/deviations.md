@@ -43,3 +43,13 @@ yeşilmiş gibi göstermeyecek.
 **Bulundu:** `deploy.go` ölü alanları silinirken: transport `PostMultipart(..., idempotencyKey)` destekliyor, `runPush` hiç geçmiyor.
 **Cazip çünkü:** alanlar zaten oradaydı, "bağlamak" tek satır gibi duruyor.
 **Etkisi:** Zaman aşımına uğrayıp aslında inen bir yükleme İKİNCİ DEPLOY olarak gider. Gerçek bir kusur ama bu artımın hiçbir FR'si değil; T003 yalnız ölü beyanı ve onun yalanını kaldırdı. Bitiş kapısında teklif edilecek.
+
+## D-02 GÜNCELLEME (2026-09-04) · ÇEKİRDEK SÜRÜKLENMESİ ÇÖZÜLDÜ — başka oturum tarafından
+T010 sırasında iki test aniden kırmızıya döndü (`TestTheGoConstantsAndTheComposeDefaultsAgree`,
+`TestTheImageCheckAsksForTheTAGCOMPOSEUSES`). Araştırıldı: **benim değişikliklerimden değil** —
+`0.41.0` hiçbir commit'te yoktu, yani başka bir oturum `sdk/cli`'da CANLI yazıyordu ve
+sabitleri bump'layıp compose'a henüz geçmemişti. Ölçüm o ara durumu yakalamış.
+Zincir tamamlanınca dördü de yeşil: `TestStackImagesTrackTheCoreVersion` dahil.
+**D-02 kapandı ve düzelten ben değilim** — doğru kulvarda kaldı.
+**Alınan ders:** aynı depoda eşzamanlı yazıcı varken `git add <dizin>` tehlikeli;
+bu koşunun kalan commit'leri DOSYA DOSYA pathspec kullanıyor.

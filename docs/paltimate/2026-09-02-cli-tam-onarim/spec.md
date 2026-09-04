@@ -108,7 +108,8 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/auth/dpop_storage.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
 | `internal/project/project.go` | modify | Türkçe yer tutucu İngilizceye | FR-009 |
 | `internal/backend/testdeps_test.go` | modify | CI'da npm install hatası t.Fatal | FR-010 |
-| `internal/backend/build_test.go` | modify | ağ isteyen/uzun testler `-short` dışına | FR-010, FR-011 |
+| `internal/backend/build_test.go` | modify | ağ isteyen/uzun testler `-short` dışına; kurulum hatası CI'da ölümcül | FR-010, FR-011 |
+| `internal/backend/init_test.go` | modify | `npm pack` hatası CI'da ölümcül (aynı sınıfın ikinci örneği) | FR-010 |
 | `internal/flags/flags.go` | modify | zarf çözümü; ham-gövde fallback'i kalkar | FR-012 |
 | `internal/flags/flags_test.go` | modify | fikstür gerçek sunucu zarfına | FR-012 |
 | `internal/notifications/notifications.go` | modify | ad→kimlik çözümü (C-4) | FR-013 |
@@ -164,3 +165,5 @@ Bkz. `./research.md` — 17 kod-tabanı iddiası (`file:line` + alıntı, donma 
 - **A-3 · 2026-09-04 · rota kapısı Artım 2'ye ertelendi; FR-009 kapsamı ölçüldü; C-3/C-4 düştü; `stackfiles.go` Impact Map'ten çıktı.** Fidelity taraması üç şey buldu: (1) rota kapısı doğduğu gün kırmızı olurdu — ölü `/api/v2/projects` çağrısı `selection/resolve.go:192`'de duruyor ve onu kaldıran iş Kol E'de; kapı kendisini yeşil yapan işle birlikte gider. (2) Türkçe kapısının yeşil olması için üç kaynak dosyanın çevrilmesi gerekiyor — ölçüldü ve Impact Map'e eklendi. (3) `stackfiles.go` yalnız gömülü baytları yazıyor, değişmesi gerekmiyor; sahte satır bırakmak yerine çıkarıldı.
 
 - **A-4 · 2026-09-04 · FR-009 sayımı 3 → 6, Impact Map +1 (`project/project.go`).** İlk ölçüm satır-tabanlı regex'ti; dizeyi çağrıdan sonraki satırda taşıyan üç ihlali kaçırdı. AST taraması altı buldu. `stack_bundle.go` zaten T003'ün Impact Map satırıydı; ihlali T005 kapsamında düzeltiliyor.
+
+- **A-5 · 2026-09-04 · Impact Map +1 (`internal/backend/init_test.go`).** T010 uygulanırken FR-010'un sınıfının ikinci örneği bulundu: `packLocalSDK` `npm pack` başarısızlığını KOŞULSUZ atlamaya çeviriyor (CI dahil). FR-010 bunu zaten talep ediyor; dosya Impact Map'te değildi.

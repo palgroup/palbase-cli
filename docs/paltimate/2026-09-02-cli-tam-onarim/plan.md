@@ -308,7 +308,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - [x] **Adım 3: `https` şartını kaldır** — `GeneratePalbaseTask.kt:108`: loopback (`http://127.0.0.1`, `http://localhost`) adreslerine izin ver; başka `http://` adres için mevcut reddi koru. Gerekçe yorumu: yerel yığın loopback üzerinden düz HTTP konuşur, `palbase start` bu yüzden android'de hiç çalışamıyordu.
 - [x] **Adım 4: Sözleşme dosyasının yolunu hizala** — `PalbaseCodegenPlugin.kt:11` `.palbase/openapi.json` bekliyor; CLI `.palbase/openapi/<env>.json` yazıyor ve bulut yolu eskisini siliyor (`cloud_environments.go:221`). Eklentinin convention'ını `.palbase/openapi/` altındaki **varsayılan ortamın** dosyasına çevir.
 - [x] **Adım 5: Yeşili gör** — Run: `./gradlew :codegen-gradle:test` · Beklenen: **PASS**; CLI tarafında `go test ./internal/backend/ -run 'Android|Native' -count=1` · Beklenen: **PASS**
-- [ ] **Adım 6: Commit (İKİ depo, ayrı ayrı)** — eklenti: `fix(codegen): çok-ortam config ve loopback HTTP okunuyor` · CLI: `fix(backend): android yuvası eklentinin okuduğu sözleşmeyi bırakıyor`
+- [x] **Adım 6: Commit (İKİ depo, ayrı ayrı)** — eklenti: `fix(codegen): çok-ortam config ve loopback HTTP okunuyor` · CLI: `fix(backend): android yuvası eklentinin okuduğu sözleşmeyi bırakıyor`
 
 ---
 
@@ -319,24 +319,24 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - Consumes: —
 - Produces: —
 
-- [ ] **Adım 1: Bayatlığı ölç** — Run: `npm view @palbase/backend dist-tags` · Beklenen: `latest` ve `next` **aynı** sürümü gösteriyor (2026-09-04: 27.1.0), yani `init.go:68`'in *"`latest` bilerek v1 hattında tutuluyor"* gerekçesi artık yanlış.
-- [ ] **Adım 2: Yorumu bugünün gerçeğine getir** — `internal/backend/init.go:68-71`'deki iddiayı sil; yerine neden hâlâ `versions` sorulduğunu yaz: bir dist-tag'in nereyi gösterdiği yayıncının kararıdır ve değişir; `versions` listesi bu binary'nin cevabını bir etikete bağımlı kılmaz. **Davranışı değiştirme** — yalnız gerekçeyi doğru yap.
-- [ ] **Adım 3: Derlemeyi doğrula** — Run: `go build ./... && go test ./internal/backend/ -run Init -count=1 -short` · Beklenen: **PASS**
-- [ ] **Adım 4: Commit** — `docs(init): sürüm seçme gerekçesi registry'nin bugünkü durumunu anlatıyor`
+- [x] **Adım 1: Bayatlığı ölç** — Run: `npm view @palbase/backend dist-tags` · Beklenen: `latest` ve `next` **aynı** sürümü gösteriyor (2026-09-04: 27.1.0), yani `init.go:68`'in *"`latest` bilerek v1 hattında tutuluyor"* gerekçesi artık yanlış.
+- [x] **Adım 2: Yorumu bugünün gerçeğine getir** — `internal/backend/init.go:68-71`'deki iddiayı sil; yerine neden hâlâ `versions` sorulduğunu yaz: bir dist-tag'in nereyi gösterdiği yayıncının kararıdır ve değişir; `versions` listesi bu binary'nin cevabını bir etikete bağımlı kılmaz. **Davranışı değiştirme** — yalnız gerekçeyi doğru yap.
+- [x] **Adım 3: Derlemeyi doğrula** — Run: `go build ./... && go test ./internal/backend/ -run Init -count=1 -short` · Beklenen: **PASS**
+- [x] **Adım 4: Commit** — `docs(init): sürüm seçme gerekçesi registry'nin bugünkü durumunu anlatıyor`
 
 ---
 
 ### T010: `npm install` hatası CI'da yeşile dönmesin + `-short` bütçesi
-<!-- deps: [] | files: [internal/backend/testdeps_test.go, internal/backend/build_test.go] | satisfies: [FR-010, FR-011] -->
+<!-- deps: [] | files: [internal/backend/testdeps_test.go, internal/backend/build_test.go, internal/backend/init_test.go] | satisfies: [FR-010, FR-011] -->
 
 **Interfaces:**
 - Consumes: —
 - Produces: `-short` bütçesine uyan test paketi
 
-- [ ] **Adım 1: Temel çizgiyi ölç** — Run: `go test ./internal/backend/ -count=1 -short 2>&1 | tail -3` · Beklenen: `ok` ve süre (bugün ~446 sn) — NFR-001'in bütçesi 180 sn.
-- [ ] **Adım 2: Kurulum hatasını CI'da ölümcül yap** — `internal/backend/testdeps_test.go:82` civarında `npm install` başarısızlığında `t.Skip` çağrılıyor. `os.Getenv("CI") != ""` iken `t.Fatalf` yap; atlama yalnız aracın PATH'te olmamasına kalsın. Gerekçe yorumu: registry kesintisi 21 testi sessizce yeşile boyuyordu.
-- [ ] **Adım 3: Uzun derlemeleri `-short` dışına al** — `internal/backend/build_test.go` içinde gerçek `bun build`/tsc koşan ve tek başına ≥10 sn süren testlerin başına `if testing.Short() { t.Skip("real bundler run — excluded from the -short budget") }` ekle. Fixture-izole olanlara (`t.TempDir()` kullananlara) `t.Parallel()` ekle.
-- [ ] **Adım 4: Bütçeyi doğrula** — Run: `go test ./internal/backend/ -count=1 -short 2>&1 | tail -3` · Beklenen: `ok` ve süre **≤ 180 sn**; ardından `go test ./internal/backend/ -count=1 2>&1 | tail -3` (short'suz) · Beklenen: **PASS** — atlanan testler tam koşuda hâlâ koşuyor
+- [x] **Adım 1: Temel çizgiyi ölç** — Run: `go test ./internal/backend/ -count=1 -short 2>&1 | tail -3` · Beklenen: `ok` ve süre (bugün ~446 sn) — NFR-001'in bütçesi 180 sn.
+- [x] **Adım 2: Kurulum hatasını CI'da ölümcül yap** — `internal/backend/testdeps_test.go:82` civarında `npm install` başarısızlığında `t.Skip` çağrılıyor. `os.Getenv("CI") != ""` iken `t.Fatalf` yap; atlama yalnız aracın PATH'te olmamasına kalsın. Gerekçe yorumu: registry kesintisi 21 testi sessizce yeşile boyuyordu.
+- [x] **Adım 3: Uzun derlemeleri `-short` dışına al** — `internal/backend/build_test.go` içinde gerçek `bun build`/tsc koşan ve tek başına ≥10 sn süren testlerin başına `if testing.Short() { t.Skip("real bundler run — excluded from the -short budget") }` ekle. Fixture-izole olanlara (`t.TempDir()` kullananlara) `t.Parallel()` ekle.
+- [x] **Adım 4: Bütçeyi doğrula** — Run: `go test ./internal/backend/ -count=1 -short 2>&1 | tail -3` · Beklenen: `ok` ve süre **≤ 180 sn**; ardından `go test ./internal/backend/ -count=1 2>&1 | tail -3` (short'suz) · Beklenen: **PASS** — atlanan testler tam koşuda hâlâ koşuyor
 - [ ] **Adım 5: Commit** — `test(backend): -short gerçekten kısa; npm hatası CI'da artık yeşile dönmüyor`
 
 ---

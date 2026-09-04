@@ -182,6 +182,16 @@ func npmInstallProject(t *testing.T, dir string, deps ...string) bool {
 	cmd := exec.Command(npm, args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// A FAILED INSTALL IS NOT A MISSING TOOL.
+		//
+		// Returning false here put both under one skip, so a registry outage or a
+		// broken tarball turned 23 tests green and said nothing. On a developer's
+		// machine skipping is still the kind answer — they may be on a plane. In
+		// CI there is no such excuse: the run exists to measure, and a measurement
+		// that could not be taken is not a pass.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("npm install failed in CI — this is a failure, not a skip: %v\n%s", err, out)
+		}
 		t.Logf("npm install failed (skipping cross-boundary extraction test): %v\n%s", err, out)
 		return false
 	}
