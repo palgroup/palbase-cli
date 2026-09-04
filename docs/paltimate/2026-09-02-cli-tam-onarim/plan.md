@@ -290,7 +290,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - [x] **Adım 3: `remove`'u çözücüye bağla** — `notifications.go:394`'teki DELETE'i `args[0]` yerine çözülen kimlikle koştur.
 - [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/notifications/ -count=1` · Beklenen: **PASS**
 - [x] **Adım 5: Ölü sembolleri sil** — `firstSecretName`, `sortedProviderNames`. Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/notifications/...` · Beklenen: **`0 issues`**
-- [ ] **Adım 6: Commit** — `fix(notifications): remove adı KİMLİĞE çözüyor — fiil ilk kez gerçekten siliyor`
+- [x] **Adım 6: Commit** — `fix(notifications): remove adı KİMLİĞE çözüyor — fiil ilk kez gerçekten siliyor`
 
 ---
 
@@ -303,11 +303,11 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 
 **Not (D-4):** Uyum sağlayan taraf TÜKETİCİ. CLI dört platforma tek şekil yazar; eklenti ona uyar. Ters yön, dördüncü bir şekil üretirdi.
 
-- [ ] **Adım 1: Eklentide kırmızıyı gör** — `../palbackend-android-src` içinde: Run: `./gradlew :codegen-gradle:test` · Beklenen: mevcut testler geçer (temel çizgi). Ardından çok-ortam bir fikstürle yeni test ekle → **FAIL** (`must be a JSON object` / `is missing app_id`).
-- [ ] **Adım 2: `validateConfig`'i çok-ortam okuyacak hâle getir** — `GeneratePalbaseTask.kt:90-108`: kök nesnede `app_id` yoksa `default_environment` + `environments[default]` üzerinden alanları çöz; ikisi de yoksa mevcut hatayı ver. Alan adları değişmiyor (`app_id`, `base_url`, `api_key`).
-- [ ] **Adım 3: `https` şartını kaldır** — `GeneratePalbaseTask.kt:108`: loopback (`http://127.0.0.1`, `http://localhost`) adreslerine izin ver; başka `http://` adres için mevcut reddi koru. Gerekçe yorumu: yerel yığın loopback üzerinden düz HTTP konuşur, `palbase start` bu yüzden android'de hiç çalışamıyordu.
-- [ ] **Adım 4: Sözleşme dosyasının yolunu hizala** — `PalbaseCodegenPlugin.kt:11` `.palbase/openapi.json` bekliyor; CLI `.palbase/openapi/<env>.json` yazıyor ve bulut yolu eskisini siliyor (`cloud_environments.go:221`). Eklentinin convention'ını `.palbase/openapi/` altındaki **varsayılan ortamın** dosyasına çevir.
-- [ ] **Adım 5: Yeşili gör** — Run: `./gradlew :codegen-gradle:test` · Beklenen: **PASS**; CLI tarafında `go test ./internal/backend/ -run 'Android|Native' -count=1` · Beklenen: **PASS**
+- [x] **Adım 1: Eklentide kırmızıyı gör** — `../palbackend-android-src` içinde: Run: `./gradlew :codegen-gradle:test` · Beklenen: mevcut testler geçer (temel çizgi). Ardından çok-ortam bir fikstürle yeni test ekle → **FAIL** (`must be a JSON object` / `is missing app_id`).
+- [x] **Adım 2: `validateConfig`'i çok-ortam okuyacak hâle getir** — `GeneratePalbaseTask.kt:90-108`: kök nesnede `app_id` yoksa `default_environment` + `environments[default]` üzerinden alanları çöz; ikisi de yoksa mevcut hatayı ver. Alan adları değişmiyor (`app_id`, `base_url`, `api_key`).
+- [x] **Adım 3: `https` şartını kaldır** — `GeneratePalbaseTask.kt:108`: loopback (`http://127.0.0.1`, `http://localhost`) adreslerine izin ver; başka `http://` adres için mevcut reddi koru. Gerekçe yorumu: yerel yığın loopback üzerinden düz HTTP konuşur, `palbase start` bu yüzden android'de hiç çalışamıyordu.
+- [x] **Adım 4: Sözleşme dosyasının yolunu hizala** — `PalbaseCodegenPlugin.kt:11` `.palbase/openapi.json` bekliyor; CLI `.palbase/openapi/<env>.json` yazıyor ve bulut yolu eskisini siliyor (`cloud_environments.go:221`). Eklentinin convention'ını `.palbase/openapi/` altındaki **varsayılan ortamın** dosyasına çevir.
+- [x] **Adım 5: Yeşili gör** — Run: `./gradlew :codegen-gradle:test` · Beklenen: **PASS**; CLI tarafında `go test ./internal/backend/ -run 'Android|Native' -count=1` · Beklenen: **PASS**
 - [ ] **Adım 6: Commit (İKİ depo, ayrı ayrı)** — eklenti: `fix(codegen): çok-ortam config ve loopback HTTP okunuyor` · CLI: `fix(backend): android yuvası eklentinin okuduğu sözleşmeyi bırakıyor`
 
 ---
