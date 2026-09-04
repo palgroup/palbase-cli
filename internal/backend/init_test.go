@@ -106,6 +106,7 @@ func TestAFreshGitCheckoutIsStillEmpty(t *testing.T) {
 // The package here is a REAL npm install of @palbase/backend, so what is copied
 // is what the published SDK actually ships. Skipped offline.
 func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -215,6 +216,7 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 // wrote nothing, and init then refused with "ships no template", a true sentence
 // pointing at entirely the wrong thing.
 func TestInitInsideATreeWithAnAncestorPackageJSON(t *testing.T) {
+	requiresRealToolchain(t)
 	parent := t.TempDir()
 	if err := os.WriteFile(filepath.Join(parent, "package.json"),
 		[]byte(`{"name":"an-unrelated-project","private":true}`), 0o644); err != nil {

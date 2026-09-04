@@ -47,7 +47,9 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 
 ### Takip döngüsü (bitiş kapısında kullanıcı onayıyla alındı — Changelog A-6)
 
-- **FR-019** WHEN `palbase push` bir artefakt yüklerse THEN istek SHALL bir `Idempotency-Key` taşısın ve zaman aşımına uğrayan bir yükleme AYNI anahtarla yeniden denensin; böylece inen ama cevabı kaybolan bir yükleme ikinci bir deploy'a dönüşmesin.
+- **FR-019** WHEN `palbase push` bir artefakt yüklerse THEN istek SHALL bir `Idempotency-Key` taşısın ve bu anahtar SHALL artefaktın kendisinden türesin, ki AYNI kodun aynı ortama ikinci push'u — ayrı bir süreçte bile — aynı anahtarı taşısın.
+  > **Retry yarısı KALDIRILDI, çünkü eklemek zararı ARTIRIRDI (Changelog A-8).** İlk metin "zaman aşımına uğrayan yükleme AYNI anahtarla yeniden denensin" diyordu. Bağımsız inceleme (C-1) sunucu tarafını ölçtü: `Idempotency-Key` kontrol düzleminde HİÇ okunmuyor — `v2-cloud/platform/server` altında tek eşleşme yok, ve `v2/internal/sealed/replay.go:20` bunu zaten yazıyor ("appears nowhere in this repository outside this package"). Anahtarı onurlandırmayan bir uca timeout'ta retry atmak, inen ama cevabı kaybolan yüklemeyi İKİNCİ KEZ uygulatır — yani FR'nin önlemek için var olduğu şeyi üretir. Bu bir güvenlik yolu muhakemesidir: belirsizse reddet. Retry, sunucu dedup'ı geldiği gün eklenir; **o yarım açık kalem olarak ADLANDIRILDI** (deviations.md · O-1), gizlenmedi.
+  > Anahtarın artefakttan türemesi ise bugün de doğru ve zararsız: operatörün `palbase push`'u tekrar koşması artık aynı anahtarı taşır, ve dedup geldiği gün asıl kurtarma yolu kendiliğinden güvenli olur.
 - **FR-020** WHEN `TestStartServesAndStopCleansUp` bir CI runner'ında koşarsa THEN yığın SHALL ayağa kalksın; bind-mount edilen durum dizini konteynerin kullanıcısı tarafından yazılabilir olsun ve test opt-in bayrağına ihtiyaç duymasın.
 - **FR-021** WHEN `tests/e2e` bir taban adres seçerse THEN varsayılan SHALL dağıtılmış bir adres olsun; hiç dağıtılmamış `api.dev.palbase.studio` varsayılan olmaktan çıksın.
 
@@ -178,3 +180,5 @@ Bkz. `./research.md` — 17 kod-tabanı iddiası (`file:line` + alıntı, donma 
 - **A-6 · 2026-09-04 · FR-019/020/021 eklendi.** Bitiş kapısında kullanıcı üç defter keşfini de aldı: `push`'un hiç göndermediği idempotency (D-03), CI'ın tam yığın kaldıramaması (D-04), ve e2e'nin ölü konağı (D-01). Impact Map +2; kalan dosyalar zaten verilmişti.
 
 - **A-7 · 2026-09-04 · FR-014'ün yükümlülük yönü düzeltildi; Impact Map −2.** Bağımsız inceleme (M-5) izlenebilirlik kusuru buldu: FR metni CLI'ı yükümlü tutuyordu ama D-4 kararı tüketiciyi yükümlü kılıyor ve düzeltme tümüyle eklentiye indi. İki CLI satırı Impact Map'ten çıkarıldı — bu artımda değişmediler.
+
+- **A-8 · 2026-09-04 · FR-019'un retry yarısı kaldırıldı, anahtar kararlı hâle getirildi.** C-1 ölçtü: kontrol düzlemi `Idempotency-Key`'i okumuyor. Onurlandırılmayan anahtarla retry, önlemeye çalıştığı ikinci deploy'u üretir. Sunucu dedup'ı O-1 olarak defterlendi.

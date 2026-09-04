@@ -828,6 +828,7 @@ func TestBundleInspectionDoesNotUseTheHTTPTrimmer(t *testing.T) {
 // sends somebody hunting through every table; this one has to point at the two
 // it means.
 func TestAPushEvaluatesTheSchemaItShips(t *testing.T) {
+	requiresRealToolchain(t)
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	buildableBackend(t, dir)
@@ -878,6 +879,7 @@ export default defineSchema("public", { tables: [airports, trips] });
 // Without this, narrowing the gate to "any table with two FKs" would look
 // identical from the test above and would break every legitimate schema.
 func TestAPushAcceptsANAMEDPairOfForeignKeys(t *testing.T) {
+	requiresRealToolchain(t)
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	buildableBackend(t, dir)

@@ -195,13 +195,6 @@ func TestPush_PlaneVerdict_IsSurfaced(t *testing.T) {
 	require.Len(t, f.calls, 1)
 }
 
-func TestNewIdempotencyKey_IsRandomAndHex(t *testing.T) {
-	a, b := transport.NewIdempotencyKey(), transport.NewIdempotencyKey()
-	require.NotEqual(t, a, b)
-	require.Len(t, a, 32)
-	require.NotContains(t, a, "-")
-}
-
 // ── github provider ─────────────────────────────────────────────────────────
 
 func TestPush_GitHubProvider_ExecsGitPush_AndNeverUploads(t *testing.T) {
@@ -464,5 +457,48 @@ func TestPushCarriesAnIdempotencyKey(t *testing.T) {
 	}
 	if upload.idempotencyKey == "" {
 		t.Fatalf("the upload to %s carries no Idempotency-Key — a timed-out retry becomes a second deploy", upload.path)
+	}
+}
+
+// pushKey runs one push and returns the key the upload carried.
+func pushKey(t *testing.T, artifact string) string {
+	t.Helper()
+	seedBackendDir(t)
+	f := &fakeDeploy{}
+	build, _ := stubBundler(nil)
+	pack := func(string) ([]byte, error) { return []byte(artifact), nil }
+	var out bytes.Buffer
+	require.NoError(t, runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: &out,
+		ctx: context.Background(), build: build, pack: pack,
+	}))
+	for i := range f.calls {
+		if f.calls[i].method == http.MethodPost {
+			return f.calls[i].idempotencyKey
+		}
+	}
+	t.Fatal("no upload call was made")
+	return ""
+}
+
+// THE KEY HAS TO SURVIVE THE PROCESS, and that is the half the first version of
+// this feature missed.
+//
+// FR-019's recovery path is a PERSON running `palbase push` again after an
+// upload whose answer was lost. A per-invocation random key was stable only
+// inside one process — so it was correct for a retry the CLI never performs, and
+// wrong for the retry that actually happens. Two runs of the same artifact
+// looked like two intended deploys, which is the case the key exists to
+// collapse.
+//
+// Measured with a random key: the two runs below returned different values.
+func TestTheIdempotencyKeyIsTheSameForTheSameArtifact(t *testing.T) {
+	first, second := pushKey(t, "the-same-bytes"), pushKey(t, "the-same-bytes")
+	if first != second {
+		t.Errorf("the same artifact pushed twice carried two keys (%s, %s) — the second run of "+
+			"`palbase push` is a SECOND logical deploy, which is what the key is for", first, second)
+	}
+	if other := pushKey(t, "different-bytes"); other == first {
+		t.Errorf("a different artifact carried the same key %s — two intended deploys would collapse into one", other)
 	}
 }

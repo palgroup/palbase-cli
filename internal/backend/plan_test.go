@@ -206,6 +206,7 @@ export default defineSchema(%q, { tables: [rows] });
 // nothing to validate" and carried on. A fixture that no push would accept was
 // proving something about a command whose whole job is to predict a push.
 func TestPlanWritesNOTHING(t *testing.T) {
+	requiresRealToolchain(t)
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	buildableBackend(t, dir)
@@ -321,6 +322,7 @@ func TestPushInAnAppCheckoutWritesNOTHING(t *testing.T) {
 // schema had drifted was told, by the verb whose only job is to say what would
 // change, that nothing would. The gap is closed rather than announced.
 func TestPlanCarriesEverySchema(t *testing.T) {
+	requiresRealToolchain(t)
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	buildableBackend(t, dir)
@@ -369,6 +371,7 @@ func TestPlanCarriesEverySchema(t *testing.T) {
 // TestPlanOfASingleSchemaSaysNothingExtra is the NEGATIVE CONTROL: the ordinary
 // project must not carry a caveat. A note on every plan is a note nobody reads.
 func TestPlanOfASingleSchemaSaysNothingExtra(t *testing.T) {
+	requiresRealToolchain(t)
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	buildableBackend(t, dir)

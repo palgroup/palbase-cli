@@ -67,6 +67,7 @@ func writeProjectSDK(t *testing.T, dir, declared, installed string) {
 // project's SDK, because `palbase env` went at the v2 cutover. What changes is
 // that the CLI now says what it did.
 func TestSDKSkewSaysTheTypecheckNoLongerDescribesTheBuild(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	writeProjectSDK(t, dir, "^24.0.0", "24.1.0")
 	srv := sdkSkewStack(t, "23.0.0")

@@ -119,3 +119,82 @@ sahipliği eşlemesi. Yani kırmızı olan şey ortam değil **borçtu** — ko�
 **Kabul edilen, düzeltilmeyen:** M-2 (barman dosya sonundaysa son newline düşer — bugün ısırmıyor),
 M-4 (Türkçe kapısı ASCII'ye indirgenmiş Türkçeyi görmüyor; bugün ihlal yok, kapı dürüst yeşil ama
 adının vaat ettiğinden dar), N-2/N-3 (yorum nitleri; N-2 zaten düzeltilmişti).
+
+---
+
+## İkinci bağımsız inceleme — iki denetçi, aynı yere bastı (2026-09-04)
+
+`final-reviewer` ve `fr-verifier` birbirinden bağımsız aynı kusuru buldu; `reviewer2` üçüncü bir açıdan
+aynı sınıfa değdi. Bulguları kabul ediyorum: **koşunun kendi tezi kendi planında ihlal edilmiş.**
+
+### D-05 · FR-011 KARŞILANMADI ve T010'un kutuları ÖLÇÜLMEDEN işaretlendi
+
+Bu, bu koşunun avladığı kusurun ta kendisi: **ölçülmemiş bir şeyin yeşil işaretlenmesi.** Merkez
+kanıtımız "kapı gerçek aracı çalıştırmak yerine taklit ettiği için düzeltmeyi düzeltme-olmayandan
+ayırt edemedi" idi; T010'da ben aynı şeyi elle yaptım — kutuyu ölçüm yerine niyetle işaretledim.
+
+- T010 Adım 3 (`testing.Short()` kapıları + `t.Parallel()`) `[x]` idi; `git diff a2fa8a9..HEAD --
+  internal/backend/build_test.go` YALNIZCA CI-fatal hunk'ını içeriyor. Tek bir skip, tek bir
+  `t.Parallel()` eklenmemiş. İki denetçi de bunu bağımsız ölçtü.
+- T010 Adım 4 ("süre ≤ 180 sn") `[x]` idi; ölçülen süreler 226 / 257 / 115 / >600 sn.
+- Adım 5'in GERÇEK commit mesajı (`6a20575`) planın vaat ettiği "`-short` gerçekten kısa" yarısını
+  dürüstçe düşürmüştü — mesaj küçülmüş, kutular küçülmemişti. Tutarsızlık tam oradaydı.
+
+**Yapılan:** iki kutu geri açıldı, iş gerçekten yapıldı, sonra TAZE ölçümle işaretlendi.
+
+### O-1 · AÇIK KALEM (sunucu tarafı, bu deponun DIŞINDA) — push'un idempotency'sini kimse okumuyor
+
+`reviewer2` ölçtü, ben doğruladım: `Idempotency-Key` kontrol düzleminde HİÇ okunmuyor.
+`v2-cloud/platform/server` altında tek eşleşme yok; `v2/internal/sealed/replay.go:20` bunu zaten
+yazıyor — *"`Idempotency-Key` appears nowhere in this repository outside this package."*
+
+Sonuç: CLI'ın gönderdiği başlık bugün hiçbir şeyi değiştirmiyor. Ve **retry eklemek zararı
+ARTIRIRDI**: anahtarı onurlandırmayan bir uca timeout'ta ikinci istek atmak, inen ama cevabı
+kaybolan yüklemeyi ikinci kez uygulatır — FR'nin önlemek için var olduğu şeyin ta kendisi. Güvenlik
+yolunda fail-open yapmama kuralı burada retry'ı YASAKLIYOR, emretmiyor.
+
+Bu yüzden FR-019'un retry yarısı kaldırıldı (spec Changelog A-8) ve yerine anahtarın ARTEFAKTTAN
+türemesi kondu — bugün de doğru, dedup geldiği gün asıl kurtarma yolunu kendiliğinden güvenli kılıyor.
+**Sunucu dedup'ı bu koşunun deposunun dışında ve orada eşdüzey oturumlar aktif; kullanıcıya
+teklif olarak sunuluyor, sessizce kapatılmıyor.**
+
+### D-05'in kapanışı — ölçümle, ve planın bir adımı ÇÜRÜTÜLEREK
+
+`requiresRealToolchain(t)` adında TEK bir kapı yazıldı (gerekçe bir yerde yaşıyor) ve gerçek
+araç koşan **23 teste** takıldı — 20'si ≥10 sn ölçülenler, 3'ü `-short` altında hâlâ `npm`e
+uzanırken yakalananlar (`TestBuildAcceptsAPlainModuleUnderConfig`,
+`TestBuildAcceptsATsconfigWithNoIncludeList`, `TestSDKSkewSaysTheTypecheckNoLongerDescribesTheBuild`).
+
+| Ölçüm | Önce | Sonra | Bütçe |
+|---|---|---|---|
+| `go test ./internal/backend/ -short` | **418,75 sn** | **107,41 sn** | — |
+| `go test ./... -short` (FR-011/NFR-001) | 226-600 sn (denetçi ölçümleri) | **148,35 sn** | 180 sn ✓ |
+| `-short` altında ağ (NFR-003) | 3 `npm` çağrısı | **0** ✓ | 0 |
+
+Kapı testleri ZAYIFLATMIYOR: CI `go test ./... -race` koşuyor, `-short` YOK — kapılananların hepsi
+her push'ta hâlâ koşuyor. `-short` bir suite'i hızlı soru ile kapsamlı soruya ayırır, kapsamlı
+olanı silmez.
+
+**Ama bu cümleyi ilk yazdığımda KANITLAMAMIŞTIM, ve kanıtlamaya kalkınca bir kusur çıktı.**
+Ölçüm: `internal/backend` yerelde ~600 sn, CI'da **85,4 sn** (`gh run view 33871859526 --log`).
+Yedi kat fark ya çok daha hızlı bir makinedir ya çok daha ince bir koşu — ve ikisi yeşil bir tikten
+ayırt edilemez. `hostNodePkgDir` node/npm PATH'te yoksa `t.Skip` ediyordu, yani bir runner'da araç
+eksik olsa gerçek-araç testlerinin TAMAMI koşudan sessizce düşer ve suite yine `ok` basardı — bu
+koşunun avladığı "yeşil görünen ama ölçmeyen kapı" şeklinin ta kendisi. `requireToolOnCI` eklendi:
+yerelde skip (node'u olmayan biri kalanı koşabilmeli), **CI'da `t.Fatalf`** — araç yokluğu orada
+mazur görülen bir test değil, bozuk bir kapıdır. İddia artık kanıtlanabilir.
+
+**Planın Adım 3'ünün ikinci yarısı ÇÜRÜTÜLDÜ, atlanmadı.** Adım "fixture-izole olanlara
+`t.Parallel()` ekle" diyordu. Yapılamaz: `seedBackendDir` `t.Chdir(dir)` çağırıyor ve
+`go doc testing.T.Chdir` bunu açıkça yasaklıyor — *"Because Chdir affects the whole process, it
+cannot be used in parallel tests or tests with parallel ancestors."* Eklenseydi bu testler panikle
+düşerdi. Bütçe zaten kapılarla tutuyor, yani `t.Parallel()` bir araçtı, hedef değil; hedef NFR-001
+ve ölçülerek karşılandı. Adım metni bu gerçeği söyleyecek şekilde düzeltildi.
+
+### O-2 · AÇIK KALEM — `PostMultipart` üretim çağıranı olmadan duruyor
+
+FR-019 çalışırken görüldü: `backend.REST` arayüzü `PostMultipart`'ı beyan ediyor ama onu çağıran
+üretim kodu yok (`grep` → yalnız arayüz beyanı). Bu koşunun ürettiği bir şey değil, önceden ölü.
+Aynı geçişte `NewIdempotencyKey` de ölü kaldı — **o benim değişikliğimin borcuydu ve ödendi**
+(üretici + testi silindi, ona yönlendiren iki yorum düzeltildi). `PostMultipart` kapsam dışı keşif:
+teklif olarak sunuluyor.

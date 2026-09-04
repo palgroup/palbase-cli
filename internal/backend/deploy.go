@@ -3,7 +3,9 @@ package backend
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +18,6 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -186,13 +187,12 @@ func runPush(d pushDeps) error {
 		Digest        string `json:"digest"`
 		EndpointCount int    `json:"endpointCount"`
 	}
-	// ONE KEY PER INVOCATION, and it must NOT change on a retry — that is the
-	// whole of what a replay key is for. Without it a push that timed out after
-	// the plane had accepted the artifact came back as a SECOND deploy.
+	// The key comes from the ARTIFACT, not from this invocation — see
+	// pushIdempotencyKey for why the difference is the whole feature.
 	if err := d.rest.DoIdempotent(ctx, http.MethodPost,
 		PushPath(d.sel.EnvironmentRef()),
 		map[string]any{"artifact": base64.StdEncoding.EncodeToString(tarball)}, &res,
-		transport.NewIdempotencyKey()); err != nil {
+		pushIdempotencyKey(d.sel.EnvironmentRef(), tarball)); err != nil {
 		return err
 	}
 
@@ -202,6 +202,33 @@ func runPush(d pushDeps) error {
 		d.sel.EnvironmentRef(), res.EndpointCount, short(res.Digest))
 	fmt.Fprintln(out, "  the contract just changed — run `palbase spec` to bring the committed client level")
 	return nil
+}
+
+// pushIdempotencyKey derives the replay key FROM THE ARTIFACT rather than
+// minting a fresh random one per invocation.
+//
+// A random key is stable only inside one process, and the process is not where
+// the retry happens: the recovery path for a push whose answer was lost is a
+// PERSON typing `palbase push` again. A per-invocation key made that second run
+// a different logical mutation — so it was correct for a retry this CLI never
+// performs, and wrong for the retry that actually happens. Deriving it from the
+// bytes makes the same code, pushed to the same environment, carry the same key
+// across processes and machines.
+//
+// The environment ref is hashed in because the same artifact deployed to staging
+// and to production is two intended deploys, not a replay of one.
+//
+// WHAT THIS DELIBERATELY DOES NOT DO IS RETRY. Measured 2026-09-04: the control
+// plane reads no `Idempotency-Key` — it appears nowhere under
+// v2-cloud/platform/server, and v2/internal/sealed/replay.go says the same of
+// the tenant plane. Retrying into an endpoint that does not honour the key would
+// apply a landed-but-unanswered upload a SECOND time, which is precisely the
+// outcome the key exists to prevent. So the key is carried and is already
+// correct for the day the plane dedupes; the retry is not written until it can
+// be honoured.
+func pushIdempotencyKey(environmentRef string, tarball []byte) string {
+	sum := sha256.Sum256(append([]byte(environmentRef+"\x00"), tarball...))
+	return hex.EncodeToString(sum[:16])
 }
 
 // cloneDeps are the injected collaborators for runClone.

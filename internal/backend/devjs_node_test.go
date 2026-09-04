@@ -140,6 +140,7 @@ func runDevJSSuite(t *testing.T, jsFile string) {
 // its build-check.js subprocess spawns go through scanTxPlanViolations() first,
 // which is a real parse — hence the parser provisioning in runDevJSSuite.
 func TestBuildCheckNodeSuite(t *testing.T) {
+	requiresRealToolchain(t)
 	runDevJSSuite(t, "build-check.test.js")
 }
 

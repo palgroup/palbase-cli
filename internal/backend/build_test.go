@@ -312,6 +312,7 @@ export class AppModule {}
 // message. The mutation twin (a valid zod schema) must PASS (exit 0). One
 // fixture install, both directions asserted — flipping the bug flips the exit.
 func TestCheckMode_CentauriClassIsCaught(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed — skew tests cover the rest")
@@ -347,6 +348,7 @@ func TestCheckMode_CentauriClassIsCaught(t *testing.T) {
 // Mutation (M5): make devNodePath return only the project's node_modules and
 // this goes RED with the parser error.
 func TestCheckMode_UserTypeScript7StillBuilds(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -437,6 +439,7 @@ export default class TodosController {
 // worth failing is an import NOTHING provides — which is the honest form of the
 // same guard, and the one a deploy would hit too.
 func TestCheckMode_AnImportNOTHINGProvidesFails(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
@@ -494,6 +497,7 @@ export type TodoSchema = z.infer<typeof TodoSchema>;
 // `export {}` printed "build OK" and then failed the deploy. Both directions: a
 // schema with no defineSchema() must FAIL, and a real one must PASS.
 func TestCheckMode_BrokenSchemaFails(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
@@ -553,6 +557,7 @@ func TestBundleSrcDirKeepsNames(t *testing.T) {
 // thrown away with it. This asserts the artifact reaches the place that makes it
 // useful: the checkout the editor reads.
 func TestRunBuild_LandsTheTypesInTheCheckout(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
@@ -652,6 +657,7 @@ func TestBuildIgnoresAConfigDirectoryEntirely(t *testing.T) {
 // expressible at all. What the gate must still do is REFUSE THE SAME THING THE
 // DEPLOY REFUSES, and name it.
 func TestAControllerNoModuleCanNameIsRefused(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelPack()
@@ -760,6 +766,7 @@ func fatSchemaControllerTS(fields int) string {
 // file is comfortably under the buffer and all of them passed while `palbase
 // build` refused a real project's main branch. A user found this in production.
 func TestCheckMode_ABigSchemaStillBuilds(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
@@ -782,6 +789,7 @@ func TestCheckMode_ABigSchemaStillBuilds(t *testing.T) {
 // üç rotayı. O çıktıda okunması gereken tek satır toplam sayıydı, ve onu ezbere
 // bilmek gerekiyordu.
 func TestCheckMode_AControllerThatRegistersNothingIsNamed(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
@@ -868,6 +876,7 @@ func TestRunBuild_AMultiSchemaProjectBuilds(t *testing.T) {
 // it: `palbase build`. "Invalid schema" would send them looking; this names the
 // file to write and where the move is written down.
 func TestRunBuild_TheLegacyLayoutIsRefusedByName(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	if !npmInstallBackend(t, dir) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
@@ -953,6 +962,7 @@ func TestBuildRefusesARetiredConfigDeclaration(t *testing.T) {
 // imported by `webhooks/stripe.ts`, nothing to do with palbase. A gate keyed on
 // the DIRECTORY would have refused a correct repository.
 func TestBuildAcceptsAPlainModuleUnderConfig(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "pricing.ts"),
@@ -992,6 +1002,7 @@ func TestBuildRefusesATsconfigThatSkipsACompiledDirectory(t *testing.T) {
 // include has none of its own, and resolving the chain to say so would be a
 // compiler's job, not a gate's.
 func TestBuildAcceptsATsconfigWithNoIncludeList(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "jobs", "sweep.ts"), []byte("export default class {}\n"), 0o644))
@@ -1024,6 +1035,7 @@ func TestBuildAcceptsATsconfigWithNoIncludeList(t *testing.T) {
 // kendi `class CoreService`'ini koydu (3/3 dosyada bir kopya), tek-girişli
 // derleme bir tane koydu.
 func TestASharedModuleIsNotDuplicatedPerBundle(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelPack()
@@ -1307,6 +1319,7 @@ export class BService {
 // mounted and never called — the same silence `assertNoOrphanEntryPoints`
 // refuses for controllers.
 func TestASurfaceClassIsOwnedByAModule(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelPack()
@@ -1426,6 +1439,7 @@ export default class OrphanWebhook {
 // when nothing crosses the threshold — a line on every build is a line people
 // stop reading.
 func TestModulePressureIsREPORTED(t *testing.T) {
+	requiresRealToolchain(t)
 	dir := t.TempDir()
 	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelPack()

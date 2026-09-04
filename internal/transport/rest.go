@@ -50,22 +50,9 @@ import (
 	"time"
 )
 
-// NewIdempotencyKey mints a fresh key for one logical mutation. crypto/rand —
-// never math/rand: a predictable key would let one caller replay another's
-// stored response if the scope hash were ever weakened.
-func NewIdempotencyKey() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is fatal-class; returning "" makes the client send
-		// no header (a plain, non-idempotent request) rather than a guessable one.
-		return ""
-	}
-	return hex.EncodeToString(b[:])
-}
-
 // NewOperationID mints a RFC 4122 v4 UUID for one logical durable mutation.
 //
-// Distinct from NewIdempotencyKey (32 hex chars) because the admin key-rotation
+// Distinct from an idempotency key (32 hex chars) because the admin key-rotation
 // endpoint validates its operationId as a UUID: the server derives the durable
 // mutation id from it, so a retry carrying the SAME value joins the same
 // rotation instead of minting a second key. crypto/rand for the same reason the
@@ -203,9 +190,13 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 // DoIdempotent is Do with an `Idempotency-Key` header. The v2 API REQUIRES one
 // on some mutations — API-key creation and rotation answer
 // `400 Idempotency-Key is required` without it — so those routes must call this
-// rather than Do. Mint the key with NewIdempotencyKey once per logical
-// mutation, and reuse the SAME key on a retry: a fresh key on a timed-out
-// request is how one intended mutation becomes two.
+// rather than Do.
+//
+// DERIVE the key from what is being mutated, do not mint a random one. A random
+// key is stable only inside one process, and the retry that actually happens is
+// a person running the command again — see backend.pushIdempotencyKey, which was
+// written after a per-invocation key made the second run of `palbase push` a
+// second logical deploy.
 func (c *Client) DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
 	return c.doWithIdempotency(ctx, method, path, body, out, idempotencyKey)
 }

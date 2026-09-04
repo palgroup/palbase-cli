@@ -25,12 +25,34 @@ var (
 	testDepDirs = map[string]string{}
 )
 
+// requireToolOnCI turns a missing external tool into a FAILURE on CI while
+// leaving it a skip on a developer's machine.
+//
+// Measured 2026-09-04: this package takes ~600 s locally and 85 s on CI. A gap
+// that size is either a much faster machine or a much thinner run, and the two
+// are indistinguishable from a green tick — so the thin run has to be made
+// impossible rather than assumed away.
+func requireToolOnCI(t *testing.T, tool string, err error) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("%s is not on PATH (%v) — on CI a missing toolchain is a broken gate, "+
+			"not an excused test: every real-toolchain test would vanish from a run that still prints ok", tool, err)
+	}
+}
+
 // hostNodePkgDir returns the package ROOT directory of an installed npm
 // package, resolving the host's own install first and falling back to the
 // cached test-dep prefix. Results are memoized for the test run.
 func hostNodePkgDir(t *testing.T, name string) string {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
+		// ON CI THIS IS FATAL, NOT A SKIP. A missing tool here silently removes
+		// every real-toolchain test from the run, and the suite still prints ok —
+		// which is the exact shape of a gate that measures nothing while looking
+		// green. Locally a skip is right: somebody without node can still run the
+		// rest. On CI, the tool is the runner's job and its absence is a broken
+		// gate, not an excused one.
+		requireToolOnCI(t, "node", err)
 		t.Skip("node not on PATH")
 	}
 	testDepMu.Lock()
@@ -63,6 +85,7 @@ process.stdout.write(d);`, name)
 	}
 	// 2) Cached prefix install — downloads once per machine, reused across runs.
 	if _, err := exec.LookPath("npm"); err != nil {
+		requireToolOnCI(t, "npm", err)
 		t.Skip("npm not on PATH")
 	}
 	prefix := filepath.Join(os.TempDir(), "palbase-cli-testdeps", name)
@@ -86,6 +109,30 @@ process.stdout.write(d);`, name)
 	}
 	testDepDirs[name] = pkgDir
 	return pkgDir
+}
+
+// requiresRealToolchain marks a test that runs the REAL bundler, type-checker or
+// npm rather than a stub, and keeps it out of the `-short` budget.
+//
+// `-short` exists so somebody can ask "did I break anything" in the time it
+// takes to read the answer. Measured 2026-09-04 it took 418.75 s in this package
+// alone against a 180 s budget, and 366 s of that sat in 23 tests that each shell
+// out to a real toolchain. They are not slow by accident — they are slow because
+// running the real thing is their whole point, which is exactly what makes them
+// the wrong tests for a fast loop.
+//
+// THEY ARE NOT WEAKENED AND THEY ARE NOT OPTIONAL: CI runs `go test ./... -race`
+// with no `-short`, so every one of these still runs on every push. The flag
+// splits one suite into a fast question and a thorough one; it does not delete
+// the thorough one.
+//
+// It also buys NFR-003 — no network under `-short`. The real-toolchain tests are
+// the ones that can reach for `npm i` when a machine's test-dep cache is cold.
+func requiresRealToolchain(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("runs the real toolchain (bundler/tsc/npm) — outside the -short budget")
+	}
 }
 
 // seedNodePkg symlinks an installed npm package into <root>/node_modules/<name>
