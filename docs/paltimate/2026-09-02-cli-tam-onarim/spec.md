@@ -20,7 +20,6 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 - **FR-005** WHEN CI koşarsa THEN `golangci-lint run` bulgu raporlarsa iş SHALL başarısız olsun (`continue-on-error` yok) — `.golangci.yml`'in kendi beyanını gerçek yapar.
 - **FR-006** WHEN CI koşarsa THEN `go vet -tags e2e ./tests/e2e/` başarısızsa iş SHALL başarısız olsun.
 - **FR-007** WHEN `tests/e2e` derlenirse THEN paket SHALL güncel `auth.LoadDPoPKey` imzasıyla derlensin.
-- **FR-008** — **ARTIM 2'YE ERTELENDİ (Changelog A-3).** Rota-literal ↔ sunucu-rota kapısı. Ölçüldü 2026-09-04: ölü rota `/api/v2/projects` hâlâ çağrılıyor (`internal/selection/resolve.go:192`) ve onu kaldıran iş Kol E'de, yani Artım 2'de. Kapı bugün konulsa **doğduğu gün kırmızı** olurdu; kırmızı doğan kapı ya CI'ı kilitler ya advisory'ye düşer — ikisi de bu artımın kaçındığı şey. Kapı, kendisini yeşil yapan işle birlikte gelir.
 - **FR-009** WHEN kapı koşarsa THEN test dışı kaynakta kullanıcıya basılan hiçbir dize SHALL Türkçe karakter taşımasın (yorumlar hariç); ölçülen üç ihlal (`transport/rest.go:313`, `auth/auth.go:322`, `auth/dpop_storage.go:73`) İngilizceye çevrilir.
 - **FR-010** IF bir testin `npm install` adımı başarısız olursa THEN CI ortamında test SHALL başarısız olsun, atlanmasın; atlama yalnız aracın hiç kurulu olmamasına izinlidir.
 - **FR-011** WHEN `go test ./... -short` koşarsa THEN toplam duvar saati NFR-001'deki bütçeyi aşmasın.
@@ -56,6 +55,7 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 - Sürüm/imaj pinlerinin **ağdan** çözülmesi (D-030, kullanıcı kararı).
 - SDK'nın npm'e yayımlanması — başka oturumun kulvarı. **Sonuç (2026-09-04): 26.0.0 hiç yayımlanmadı; yayımlanan 27.0.0 ve 27.1.0 oldu ve P0-2 bununla kapandı.** Bu şartname yayını üstlenmiyor, yalnız sonucunu FR-015 ile kapıya bağlıyor.
 - `pull`'un dosya-başına inceltilmesi ve git'siz projeler için içerik-hash defteri (K-05, K-06).
+- **Rota-literal ↔ sunucu-rota kapısı** (Changelog A-3; numarası boş bırakıldı). Ölçüldü 2026-09-04: ölü rota `/api/v2/projects` hâlâ çağrılıyor (`internal/selection/resolve.go:192`) ve onu kaldıran iş Kol E'de. Kapı bugün konulsa **doğduğu gün kırmızı** olurdu; kırmızı doğan kapı ya CI'ı kilitler ya advisory'ye düşer. Artım 2'de, kendisini yeşil yapan işle birlikte gelir. Numara yeniden kullanılmaz — izlenebilirlik için 008 boş bırakıldı.
 
 ## Sınır Durumları
 
@@ -87,7 +87,7 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 - **C-1 `composeConfigIsValid(t, path)`** (`internal/backend/stackfiles_test.go`) — Amaç: vendor'lanan dosyayı gerçek `docker compose config`'e vermek. Docker yoksa `t.Skip` + gerekçe. FR-001, FR-002 bunu paylaşır.
 - **C-2 `providerConfigID(ctx, name) (string, error)`** (`internal/notifications/notifications.go`) — Amaç: sağlayıcı adını yapılandırma kimliğine çözmek; `remove` tüketir. FR-013.
 
-*(C-3/C-4 idi: rota-literal kapısının iki yardımcısı — FR-008 Artım 2'ye ertelendiği için düştüler, Changelog A-3.)*
+*(C-3/C-4 idi: rota-literal kapısının iki yardımcısı — o kapı Artım 2'ye ertelendiği için düştüler, Changelog A-3.)*
 
 `[PLAN-FREE: test dosyası adları, yardımcı fonksiyon iç yapıları, CI adımlarının sırası ve iş adları, Türkçe-dize kapısının tarama regex'inin tam biçimi.]`
 
@@ -100,12 +100,12 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/backend/stackfiles_test.go` | modify | gerçek `docker compose config` negatif kontrolü (C-1); `withoutBarman` sınır düzeltmesi | FR-001, FR-002 |
 | `internal/backend/stackfiles/docker-compose.dev.yml` | modify | `barman` servisi ve `barmandata` bağı çıkar | FR-002 |
 | `.github/workflows/ci.yml` | modify | gofmt · vet · golangci-lint · `-tags e2e` derlemesi adımları | FR-003, FR-004, FR-005, FR-006 |
-| `tests/e2e/mgmt_api_test.go` | modify | `auth.LoadDPoPKey` çağrısı güncel imzaya | FR-007 |
+| `tests/e2e/mgmt_api_test.go` | modify | auth.LoadDPoPKey çağrısı güncel imzaya | FR-007 |
 | `cmd/palbase/surface_test.go` | modify | Türkçe-dize kapısı | FR-009 |
 | `internal/transport/rest.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
 | `internal/auth/auth.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
 | `internal/auth/dpop_storage.go` | modify | Türkçe hata metni İngilizceye | FR-009 |
-| `internal/backend/testdeps_test.go` | modify | CI'da `npm install` hatası `t.Fatal` | FR-010 |
+| `internal/backend/testdeps_test.go` | modify | CI'da npm install hatası t.Fatal | FR-010 |
 | `internal/backend/build_test.go` | modify | ağ isteyen/uzun testler `-short` dışına | FR-010, FR-011 |
 | `internal/flags/flags.go` | modify | zarf çözümü; ham-gövde fallback'i kalkar | FR-012 |
 | `internal/flags/flags_test.go` | modify | fikstür gerçek sunucu zarfına | FR-012 |
@@ -114,7 +114,7 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/backend/cloud_environments.go` | modify | android yolunda eklentinin okuduğu sözleşme dosyası korunur | FR-014 |
 | `internal/backend/app_environments.go` | modify | android yuvası eklentinin okuduğu alanları taşır | FR-014 |
 | `internal/backend/init.go` | modify | bayat `latest` yorumu düzeltilir | FR-017 |
-| `internal/backend/start.go` | modify | `.env` mühür yazımında `Close()` hatası kontrol edilir (E-3) + staticcheck | FR-018 |
+| `internal/backend/start.go` | modify | .env mühür yazımında Close() hatası kontrol edilir (E-3) + staticcheck | FR-018 |
 | `internal/backend/pull_spec.go` | modify | 5 ölü sembol silinir | FR-018 |
 | `internal/backend/deploy.go` | modify | 4 ölü alan silinir | FR-018 |
 | `internal/backend/stack_bundle.go` | modify | 1 ölü sembol + 1 staticcheck | FR-018 |
@@ -129,10 +129,10 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/logs/logs.go` | modify | 1 ölü sembol + 1 staticcheck | FR-018 |
 | `internal/project/gitroot.go` | modify | dosya tümüyle ölü — silinir | FR-018 |
 | `cmd/palbase/doctor.go` | modify | 1 staticcheck | FR-018 |
-| `internal/backend/scaffold_e2e_test.go` | create | yayımlanmış SDK'ya karşı `init`→`build` uçtan uca | FR-015 |
-| `internal/backend/start_e2e_test.go` | create | `start`→`/.well-known` 200→`stop` uçtan uca | FR-016 |
-| **ÇAPRAZ DEPO** `sdk/palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt` | modify | çok-ortam config okuma + `https` şartının kalkması | FR-014 |
-| **ÇAPRAZ DEPO** `sdk/palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt` | modify | sözleşme dosyası yolu CLI'ın yazdığıyla eşleşir | FR-014 |
+| `internal/backend/scaffold_e2e_test.go` | create | yayımlanmış SDK'ya karşı init→build uçtan uca | FR-015 |
+| `internal/backend/start_e2e_test.go` | create | start→well-known 200→stop uçtan uca | FR-016 |
+| **ÇAPRAZ DEPO** `../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt` | modify | çok-ortam config okuma + `https` şartının kalkması | FR-014 |
+| **ÇAPRAZ DEPO** `../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt` | modify | sözleşme dosyası yolu CLI'ın yazdığıyla eşleşir | FR-014 |
 
 ### Sıralama kısıtları
 
@@ -159,4 +159,4 @@ Bkz. `./research.md` — 17 kod-tabanı iddiası (`file:line` + alıntı, donma 
 
 - **A-1 · 2026-09-04 · FR-018 eklendi + Impact Map 15 satır büyüdü.** Planlama sırasında §7 taraması bir karar sızıntısı buldu: FR-005 lint kapısını bloklayıcı yapıyor ama borç ölçülmemişti. Ölçüm: 20 dosyada 48 bulgu (errcheck 2 · staticcheck 7 · unused 39), 15 dosya Impact Map dışında. Kapıyı borç ödenmeden açmak CI'ı kırardı; advisory'ye düşürmek yasak. Borç FR-018 olarak kapsama alındı, sınırı yazıldı (Kol E'nin büyük emeklilikleri Artım 2'de kalıyor). Kapsam büyüdüğü için kullanıcı onayına sunuldu.
 - **A-2 · 2026-09-04 · FR-015 karakteri değişti, P-1 çözüldü.** Yeniden doğrulamada CB-18 bayat çıktı: 26.0.0 hiç yayımlanmadı, 27.1.0 çıktı ve P0-2 kapandı (taze ölçüm CB-18a). FR düşürülmedi; düzeltme değil regresyon kapısı oldu.
-- **A-3 · 2026-09-04 · FR-008 Artım 2'ye ertelendi; FR-009 kapsamı ölçüldü; C-3/C-4 düştü; `stackfiles.go` Impact Map'ten çıktı.** Fidelity taraması üç şey buldu: (1) rota kapısı doğduğu gün kırmızı olurdu — ölü `/api/v2/projects` çağrısı `selection/resolve.go:192`'de duruyor ve onu kaldıran iş Kol E'de; kapı kendisini yeşil yapan işle birlikte gider. (2) Türkçe kapısının yeşil olması için üç kaynak dosyanın çevrilmesi gerekiyor — ölçüldü ve Impact Map'e eklendi. (3) `stackfiles.go` yalnız gömülü baytları yazıyor, değişmesi gerekmiyor; sahte satır bırakmak yerine çıkarıldı.
+- **A-3 · 2026-09-04 · rota kapısı Artım 2'ye ertelendi; FR-009 kapsamı ölçüldü; C-3/C-4 düştü; `stackfiles.go` Impact Map'ten çıktı.** Fidelity taraması üç şey buldu: (1) rota kapısı doğduğu gün kırmızı olurdu — ölü `/api/v2/projects` çağrısı `selection/resolve.go:192`'de duruyor ve onu kaldıran iş Kol E'de; kapı kendisini yeşil yapan işle birlikte gider. (2) Türkçe kapısının yeşil olması için üç kaynak dosyanın çevrilmesi gerekiyor — ölçüldü ve Impact Map'e eklendi. (3) `stackfiles.go` yalnız gömülü baytları yazıyor, değişmesi gerekmiyor; sahte satır bırakmak yerine çıkarıldı.
