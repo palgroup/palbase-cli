@@ -408,7 +408,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - [x] **[agent]** `palbase notifications remove <yapılandırılmamış-sağlayıcı>` → *"this stack has no … configured"* adlandırılmış hatası (404 değil) · Evidence: `palbase notifications remove fcm` → `this stack has no "fcm" provider configured — \`palbase notifications providers\` lists what it has` (404 değil)
 - [x] **[agent]** `GOTOOLCHAIN=go1.26.6 golangci-lint run` → **`0 issues`** · Evidence: `GOTOOLCHAIN=go1.26.6 golangci-lint run` → **`0 issues.`**
 - [x] **[agent]** `gh run list --limit 1` → son CI koşumu **yeşil**, dört yeni kapı adımı görünür · Evidence: run 33861042255 (`6d8686e`) → **success**; adımlar: Formatting ✓ Vet ✓ Vet-e2e ✓ golangci-lint ✓ Run tests ✓
-- [ ] **[user]** (dış depo yayını — geri alınamaz) Android eklentisinin değişikliği `palbackend-android-src`'ye push'lansın mı ve bir sürüm kesilsin mi · Evidence: _(kullanıcı onaylar)_
+- [x] **[user]** (dış depo yayını — geri alınamaz) Android eklentisinin değişikliği `palbackend-android-src`'ye push'lansın mı ve bir sürüm kesilsin mi · Evidence: **Kullanıcı onayladı (push + sürüm).** `c1918f4` `origin/main`'de doğrulandı; sürüm öncesi taze kanıt `./gradlew :codegen-gradle:test` → **BUILD SUCCESSFUL**; `v1.0.1` etiketi kesildi ve push'landı — `git ls-remote --tags origin` → `refs/tags/v1.0.1` → `c1918f4`
 
 ## Dependencies
 
