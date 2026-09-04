@@ -3,6 +3,7 @@ package roles
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -24,6 +25,12 @@ type userRolesBody struct {
 // is not defined yet, or the user id is wrong — so the message says which and,
 // for the first, what command defines it. "role_not_defined" alone is a code,
 // not a direction.
+// Kullanıcı ve rol adı da YOLA kaçırılarak giriyor — `rolePath`'in gerekçesi
+// birebir burada da geçerli, ve burada iki serbest parça var.
+func userRolesPath(uid string) string { return "/admin/users/" + url.PathEscape(uid) + "/roles" }
+
+func userRolePath(uid, role string) string { return userRolesPath(uid) + "/" + url.PathEscape(role) }
+
 func callUserRoles(cmd *cobra.Command, method, path string) (*userRolesBody, error) {
 	target, cred, err := resolveProject(cmd)
 	if err != nil {
@@ -59,7 +66,7 @@ func assignCmd() *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			uid, role := args[0], args[1]
-			out, err := callUserRoles(cmd, "PUT", "/admin/users/"+uid+"/roles/"+role)
+			out, err := callUserRoles(cmd, "PUT", userRolePath(uid, role))
 			if err != nil {
 				return err
 			}
@@ -78,7 +85,7 @@ func revokeCmd() *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			uid, role := args[0], args[1]
-			out, err := callUserRoles(cmd, "DELETE", "/admin/users/"+uid+"/roles/"+role)
+			out, err := callUserRoles(cmd, "DELETE", userRolePath(uid, role))
 			if err != nil {
 				return err
 			}
@@ -94,7 +101,7 @@ func revokeCmd() *cobra.Command {
 
 // printUserRoles is `roles list <userId>` — the assignment side of the same verb.
 func printUserRoles(cmd *cobra.Command, uid string, asJSON bool) error {
-	out, err := callUserRoles(cmd, "GET", "/admin/users/"+uid+"/roles")
+	out, err := callUserRoles(cmd, "GET", userRolesPath(uid))
 	if err != nil {
 		return err
 	}

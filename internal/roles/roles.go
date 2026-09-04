@@ -15,6 +15,7 @@ package roles
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -59,6 +60,17 @@ func resolveProject(cmd *cobra.Command) (backend.Target, backend.Credentials, er
 // refusal. The stack already explains itself — which permission was malformed,
 // which role is already the default, how many users a delete would revoke — and
 // swallowing that body would leave the caller with a status code and no idea.
+// rolePath, bir rol adını YOLA çevirir — birleştirerek değil, KAÇIRARAK.
+//
+// `"/admin/roles/" + name` bir URL kurmuyordu, bir dizgi kuruyordu; ve
+// `http.NewRequest` o dizgiyi URL olarak ayrıştırdığı için addaki bir `?`
+// sorgu dizesini başlatıyordu. Ölçüldü: `palbase roles delete 'x?confirm=true'`
+// uca `DELETE /admin/roles/x?confirm=true` olarak iniyor, yani FR-003'ün
+// veri-kaybı onayı hiç sorulmadan geçiliyor ve rolü taşıyan herkesin yetkisi
+// siliniyordu. Aynı koşudaki TS istemcisi (`clients/auth.ts`) bu dersi
+// `encodeURIComponent` ile zaten almıştı; Go tarafı almamıştı.
+func rolePath(name string) string { return "/admin/roles/" + url.PathEscape(name) }
+
 func call(cmd *cobra.Command, method, path string, body any) (*rolesBody, error) {
 	target, cred, err := resolveProject(cmd)
 	if err != nil {
@@ -142,7 +154,7 @@ func createCmd() *cobra.Command {
 				// and "unchanged" on the other.
 				"permissions": append([]string{}, permissions...),
 			}
-			out, err := call(cmd, "PUT", "/admin/roles/"+name, body)
+			out, err := call(cmd, "PUT", rolePath(name), body)
 			if err != nil {
 				return err
 			}
@@ -229,9 +241,11 @@ func deleteCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			path := "/admin/roles/" + name
+			// Onay bir SORGU parametresi, ve ad ne olursa olsun öyle kalır:
+			// yol kaçırılarak, onay ayrıca kurularak birleşiyor.
+			path := rolePath(name)
 			if yes {
-				path += "?confirm=true"
+				path += "?" + url.Values{"confirm": {"true"}}.Encode()
 			}
 			if _, err := call(cmd, "DELETE", path, nil); err != nil {
 				return err

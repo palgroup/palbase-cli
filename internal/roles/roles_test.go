@@ -185,3 +185,68 @@ func TestCmdIsWiredWithItsSubcommands(t *testing.T) {
 	}
 	_ = cobra.Command{}
 }
+
+// AD, YOLDAN ÇIKAMAZ — ve onay kapısını KENDİ ADIYLA açamaz.
+//
+// `path := "/admin/roles/" + name` kaçışsızdı. `http.NewRequest` verilen
+// dizgiyi bir URL olarak AYRIŞTIRIR, yani addaki bir `?` sorgu dizesini
+// başlatır: `palbase roles delete 'x?confirm=true'` ucun gözünde
+// `DELETE /admin/roles/x?confirm=true` olur ve FR-003'ün veri-kaybı onayı
+// hiç sorulmadan geçilir. Rolü taşıyan herkesin yetkisi silinir, CLI da
+// "✓ deleted" yazar.
+//
+// Aynı kaçışsızlık `..` ile rotayı da değiştirebiliyor: `../users/u/roles/r`
+// normalize edilip BAŞKA bir uca iner.
+func TestARoleNameCannotForgeTheConfirmationOrLeaveItsRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arg     string
+		wantErr bool
+	}{
+		{"onay sahtelenemez", "x?confirm=true", false},
+		{"rota terk edilemez", "../users/usr_1/roles/agent", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var path, query string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path, query = r.URL.EscapedPath(), r.URL.RawQuery
+				_, _ = w.Write([]byte(`{"roles":[]}`))
+			}))
+			defer srv.Close()
+			linkedProject(t, srv.URL)
+
+			if _, err := run(t, "delete", tc.arg); err != nil && !tc.wantErr {
+				t.Fatalf("delete failed: %v", err)
+			}
+			if query != "" {
+				t.Errorf("ad bir sorgu dizesi uydurdu: query=%q — onay kapısı atlandı", query)
+			}
+			if !strings.HasPrefix(path, "/admin/roles/") {
+				t.Errorf("ad rotasını terk etti: path=%q", path)
+			}
+		})
+	}
+}
+
+// NEGATİF KONTROL, aynı koşulda: sıradan bir ad hâlâ doğru yere gider ve
+// `--yes` onayı taşımaya devam eder. Yoksa yukarıdaki iddialar, her isteği
+// bozan bir kaçışla da sağlanırdı.
+func TestOrdinaryNamesStillReachTheirRouteEscaped(t *testing.T) {
+	var path, query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, query = r.URL.EscapedPath(), r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"roles":[]}`))
+	}))
+	defer srv.Close()
+	linkedProject(t, srv.URL)
+
+	if _, err := run(t, "delete", "moderator", "--yes"); err != nil {
+		t.Fatalf("delete --yes failed: %v", err)
+	}
+	if path != "/admin/roles/moderator" {
+		t.Errorf("path was %q; want /admin/roles/moderator", path)
+	}
+	if query != "confirm=true" {
+		t.Errorf("query was %q; want confirm=true", query)
+	}
+}
