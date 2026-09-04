@@ -810,3 +810,106 @@ func TestBundleInspectionDoesNotUseTheHTTPTrimmer(t *testing.T) {
 	require.NotContains(t, fn, "trimBody(",
 		"output yine HTTP gövde kırpıcısını kullanıyor — alet hatası 300 karakterde kesilir")
 }
+
+// TestAPushEvaluatesTheSchemaItShips is the 2026-09-04 outage, pinned at the
+// door it came through.
+//
+// `db/` was READ by the bundler and never RUN: a schema whose two foreign keys
+// to one table resolve to the same reverse relation name shipped, applied its
+// DDL, and then refused at BOOT inside `setSchema` — where the cure is a push
+// and the exit takes down palsvc, the process that accepts one. The gate
+// existed the whole time, in `palbase build`, a command nobody is required to
+// run before pushing.
+//
+// Live precedent 2026-08-30: exactly this schema pushed successfully and
+// reported `created table uat_two_fks`.
+//
+// It asserts the COLUMNS are named. A refusal that says "your schema is wrong"
+// sends somebody hunting through every table; this one has to point at the two
+// it means.
+func TestAPushEvaluatesTheSchemaItShips(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Two FKs to one table with no `reverseAs` — the reverse of both is "trips".
+	ambiguous := `import { defineSchema, defineTable, uuid, text } from "@palbase/backend";
+
+const airports = defineTable("airports", {
+  columns: { id: uuid(), name: text() },
+  primaryKey: ["id"],
+  rls: true,
+});
+
+const trips = defineTable("trips", {
+  columns: {
+    id: uuid(),
+    from_airport: uuid().references(() => airports.id),
+    to_airport: uuid().references(() => airports.id),
+  },
+  primaryKey: ["id"],
+  rls: true,
+});
+
+export default defineSchema("public", { tables: [airports, trips] });
+`
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(ambiguous), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	_, _, err := buildStackArtifact(context.Background(), dir, &out)
+	if err == nil {
+		t.Fatal("a schema that cannot form its relation graph was BUNDLED — it would refuse at boot, " +
+			"and the pod that refuses cannot accept the push that fixes it")
+	}
+	for _, want := range []string{"from_airport", "to_airport", "reverseAs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q — a person cannot act on it:\n%v", want, err)
+		}
+	}
+}
+
+// TestAPushAcceptsANAMEDPairOfForeignKeys is the negative control, in the same
+// conditions: the gate must refuse AMBIGUITY, not two foreign keys.
+//
+// Without this, narrowing the gate to "any table with two FKs" would look
+// identical from the test above and would break every legitimate schema.
+func TestAPushAcceptsANAMEDPairOfForeignKeys(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	named := `import { defineSchema, defineTable, uuid, text } from "@palbase/backend";
+
+const airports = defineTable("airports", {
+  columns: { id: uuid(), name: text() },
+  primaryKey: ["id"],
+  rls: true,
+});
+
+const trips = defineTable("trips", {
+  columns: {
+    id: uuid(),
+    from_airport: uuid().references(() => airports.id, { reverseAs: "departures" }),
+    to_airport: uuid().references(() => airports.id, { reverseAs: "arrivals" }),
+  },
+  primaryKey: ["id"],
+  rls: true,
+});
+
+export default defineSchema("public", { tables: [airports, trips] });
+`
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(named), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if _, _, err := buildStackArtifact(context.Background(), dir, &out); err != nil {
+		t.Fatalf("a LEGITIMATE pair of named foreign keys was refused: %v", err)
+	}
+}

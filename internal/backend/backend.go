@@ -917,7 +917,37 @@ func generateStackTypes(ctx context.Context, projectDir, nodeModules string, nam
 	return nil
 }
 
+// validateSchemaDeclaration evaluates db/ exactly as generateEnvTypes does and
+// throws the result away.
+//
+// PUSH NEEDS THE VERDICT AND MUST NOT LEAVE A FILE. `palbase build` writes
+// palbase-env.d.ts into the checkout on purpose — that file is what types the
+// author's editor. A push is not an authoring action; writing during one would
+// mean a refused push had already edited the tree, and this package's own rule
+// says a refusal arriving after a side effect is not a refusal.
+//
+// WHY PUSH VALIDATES AT ALL — measured 2026-09-04. This gate lived ONLY in
+// `palbase build`, a command a person may never run, so a schema whose relation
+// names are ambiguous pushed cleanly, applied its DDL, and then refused at BOOT
+// inside setSchema. The pod died on every start and took palsvc — the process
+// that accepts the fixing push — with it. Live precedent 2026-08-30: a push
+// carrying two unnamed FKs to one table reported `created table uat_two_fks`
+// and succeeded.
+func validateSchemaDeclaration(ctx context.Context, projectDir, nodeModules string) error {
+	tmp, err := os.MkdirTemp("", "palbase-envcheck-*")
+	if err != nil {
+		return err
+	}
+	defer removeTemp(tmp)
+	return runEnvGen(ctx, projectDir, nodeModules, filepath.Join(tmp, envTypesFile))
+}
+
+// generateEnvTypes writes the project's palbase-env.d.ts. See runEnvGen.
 func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
+	return runEnvGen(ctx, projectDir, nodeModules, filepath.Join(projectDir, envTypesFile))
+}
+
+func runEnvGen(ctx context.Context, projectDir, nodeModules, outPath string) error {
 	sources, err := ReadSchemaSources(projectDir)
 	if errors.Is(err, ErrNoSchema) {
 		return nil // no declaration → nothing to type, skip cleanly
@@ -959,7 +989,6 @@ func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error
 		return err
 	}
 
-	outPath := filepath.Join(projectDir, envTypesFile)
 	if err := runEnvGenBridge(ctx, projectDir, nodeModules, scriptPath, bundlePath, outPath); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,6 +169,31 @@ func (p *projectServer) writesSeen() []string {
 	return append([]string(nil), p.writes...)
 }
 
+// realSchema is the smallest db/ file a PUSH would accept — a real
+// `defineSchema()` result with one table.
+//
+// The fixtures here used to be `export default {}`, with a comment saying the
+// test only needed the file NAMES. That stopped being true on 2026-09-04, when
+// the push bundler began EVALUATING db/ instead of only reading it: a schema
+// that cannot form its relation graph used to ship and then refuse at boot,
+// where the cure is a push and the exit kills the process that accepts one.
+//
+// So this file follows the rule TestPlanWritesNOTHING already states about
+// controllers — a fixture no push would accept cannot prove anything about a
+// command whose job is to predict a push.
+func realSchema(name string) string {
+	return fmt.Sprintf(`import { defineSchema, defineTable, uuid, text } from "@palbase/backend";
+
+const rows = defineTable("%s_rows", {
+  columns: { id: uuid(), label: text() },
+  primaryKey: ["id"],
+  rls: true,
+});
+
+export default defineSchema(%q, { tables: [rows] });
+`, name, name)
+}
+
 // TestPlanWritesNOTHING is FR-035. The schema half is computed by the project,
 // which means a POST — so "writes nothing" cannot be checked by looking at the
 // method. It is checked by what the server was asked to CHANGE.
@@ -186,7 +212,7 @@ func TestPlanWritesNOTHING(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte("export default {}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realSchema("public")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,15 +327,11 @@ func TestPlanCarriesEverySchema(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Plain objects, not `defineSchema(...)` calls: runPlan BUNDLES the project
-	// and the bundle evaluates the schema module, so a fixture that calls an
-	// unimported symbol dies as a ReferenceError long before the assertion. What
-	// this test needs from the files is their NAMES.
-	for name, body := range map[string]string{
-		"public.ts":  "export default {};",
-		"billing.ts": "export default {};",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, "db", name), []byte(body), 0o644); err != nil {
+	// REAL declarations, not plain objects — see realSchema. The names still
+	// carry the assertion; what changed is that a fixture must now be something
+	// a push would accept.
+	for _, name := range []string{"public", "billing"} {
+		if err := os.WriteFile(filepath.Join(dir, "db", name+".ts"), []byte(realSchema(name)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -354,7 +376,7 @@ func TestPlanOfASingleSchemaSaysNothingExtra(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"),
-		[]byte("export default {};"), 0o644); err != nil {
+		[]byte(realSchema("public")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

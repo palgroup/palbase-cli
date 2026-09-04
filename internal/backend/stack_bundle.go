@@ -65,6 +65,21 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 			"(https://bun.sh). The stack runs Bun, so the bundle is built by the engine that will run it")
 	}
 
+	// THE SCHEMA IS EVALUATED BEFORE ANYTHING IS SHIPPED (measured 2026-09-04).
+	//
+	// `db/` was READ here and never RUN: the declarations went into the bundle
+	// verbatim, so a schema that cannot form its relation graph shipped, applied
+	// its DDL, and refused at BOOT — inside `setSchema`, where the cure is a
+	// push and the exit kills the process that accepts one. The gate existed the
+	// whole time in `palbase build`, a command nobody is required to run.
+	//
+	// The SAME evaluator `build` uses, not a second opinion about it: a gate
+	// that imitates the real tool passes what the real tool rejects. It writes
+	// nothing — see validateSchemaDeclaration.
+	if err := validateSchemaDeclaration(ctx, dir, filepath.Join(dir, "node_modules")); err != nil {
+		return nil, nil, fmt.Errorf("%s/ would refuse to boot: %w", SchemaDir, err)
+	}
+
 	sources, err := moduleSources(dir)
 	if err != nil {
 		return nil, nil, err
