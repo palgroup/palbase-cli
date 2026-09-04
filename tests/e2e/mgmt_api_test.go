@@ -46,11 +46,9 @@ func e2eConfig(t *testing.T) (base, pat string, key *auth.DPoPKey) {
 	if base == "" {
 		base = "https://api.dev.palbase.studio"
 	}
-	mode := os.Getenv("PALBASE_MODE")
-	if mode == "" {
-		mode = "dev"
-	}
-	k, err := auth.LoadDPoPKey(mode)
+	// No mode argument: `--mode` was retired with the v1 address space, and
+	// LoadDPoPKey now reads the one key this machine holds.
+	k, err := auth.LoadDPoPKey()
 	require.NoError(t, err, "load the keyring DPoP key the PAT is bound to (run `palbase login` first)")
 	return base, pat, k
 }
@@ -66,7 +64,17 @@ func uniqueSeed() string {
 // ref, and the KEY hangs off the ENVIRONMENT.
 func TestE2E_CreateResolveReveal_DPoPBound(t *testing.T) {
 	base, pat, key := e2eConfig(t)
-	c := transport.New(base, key, pat)
+	// The key is no longer passed to the client: transport signs through a
+	// package-level signer, the way cmd/palbase wires it at startup
+	// (wireDPoPSigner). The test wires the same seam with the key it loaded.
+	transport.DPoPSigner = func(method, url, accessToken string) (string, error) {
+		return key.NewProof(auth.ProofOptions{
+			HTTPMethod:  method,
+			URL:         url,
+			AccessToken: accessToken,
+		})
+	}
+	c := transport.New(base, pat)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 

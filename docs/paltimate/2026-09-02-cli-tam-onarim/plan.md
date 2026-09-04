@@ -96,7 +96,7 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 ```
 - [x] **Adım 4: Vendor'lanan dosyayı yeniden üret** — `barman:` servisini (`internal/backend/stackfiles/docker-compose.dev.yml` satır ~182-213, onu tanıtan yorum bloğu dâhil) ve `volumes:` bloğundaki öksüz Barman yorumunu sil. `barmandata` anahtarı zaten yok; servis gidince tutarlı olur.
 - [x] **Adım 5: Yeşil olduğunu GÖR** — Run: `go test ./internal/backend/ -run 'Vendored|Barman' -count=1` · Beklenen: **PASS** (hem yeni geçerlilik testi hem mevcut eşitlik testi).
-- [ ] **Adım 6: Commit** — `fix(start): vendor'lanan compose GEÇERLİ — ve kapı artık gerçek docker'a soruyor`
+- [x] **Adım 6: Commit** — `fix(start): vendor'lanan compose GEÇERLİ — ve kapı artık gerçek docker'a soruyor`
 
 ---
 
@@ -107,9 +107,9 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 - Consumes: `auth.LoadDPoPKey()` (argümansız — güncel imza)
 - Produces: derlenen `tests/e2e` paketi
 
-- [ ] **Adım 1: Kırmızıyı gör** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: **FAIL** — `too many arguments in call to auth.LoadDPoPKey / have (string) / want ()`
-- [ ] **Adım 2: Çağrıyı güncel imzaya getir** — `tests/e2e/mgmt_api_test.go:53`'teki `auth.LoadDPoPKey(<arg>)` çağrısından argümanı kaldır; argüman emekli `PALBASE_MODE` kablosundan geliyorsa onu taşıyan yerel değişken/kurulum satırlarını da sil (kullanılmayan değişken bırakma).
-- [ ] **Adım 3: Yeşili gör** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: **çıktı yok, exit 0**
+- [x] **Adım 1: Kırmızıyı gör** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: **FAIL** — `too many arguments in call to auth.LoadDPoPKey / have (string) / want ()`
+- [x] **Adım 2: Çağrıyı güncel imzaya getir** — `tests/e2e/mgmt_api_test.go:53`'teki `auth.LoadDPoPKey(<arg>)` çağrısından argümanı kaldır; argüman emekli `PALBASE_MODE` kablosundan geliyorsa onu taşıyan yerel değişken/kurulum satırlarını da sil (kullanılmayan değişken bırakma).
+- [x] **Adım 3: Yeşili gör** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: **çıktı yok, exit 0**
 - [ ] **Adım 4: Commit** — `fix(e2e): LoadDPoPKey çağrısı güncel imzaya — paket yeniden derleniyor`
 
 ---
