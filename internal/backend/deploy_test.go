@@ -432,8 +432,8 @@ func TestDeployVersion_IsShortened(t *testing.T) {
 // has a fixture step, so there is no ordering left to pin here.
 
 // The upload has to be REPLAYABLE. It carried no Idempotency-Key: the transport
-// has supported one since it was written (PostMultipart takes it, DoIdempotent
-// takes it) and the caller passed none, so an upload that timed out AFTER the
+// has supported one since it was written (DoIdempotent takes it) and the
+// caller passed none, so an upload that timed out AFTER the
 // plane accepted it came back as a second deploy of the same artifact.
 func TestPushCarriesAnIdempotencyKey(t *testing.T) {
 	seedBackendDir(t)

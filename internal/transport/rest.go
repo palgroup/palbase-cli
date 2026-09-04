@@ -43,9 +43,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"strings"
 	"time"
 )
@@ -323,73 +321,6 @@ const patPrefix = "pat_"
 // anlamayacağı bir 401 üretirdi.
 var DPoPSigner func(method, url, accessToken string) (string, error)
 
-// PostMultipart uploads a gzipped tarball to a Management-API endpoint as
-// multipart/form-data: a file part named `tarball` (filename bundle.tar.gz,
-// Content-Type application/gzip) plus one text field per fields entry. It
-// reuses the exact DPoP/PAT signing of every other request (newSignedRequest),
-// so the proof's htm/htu match this POST. Returns the raw 2xx response body;
-// a non-2xx is surfaced as an *APIError (same envelope shape as Do).
-//
-// idempotencyKey (when non-empty) rides the `Idempotency-Key` header: the same
-// key replayed on the same route by the same user returns the FIRST response
-// instead of running the mutation again. The deploy upload is the CLI's one
-// mutation with no server-side stable workflow id to collapse a double-submit,
-// so a timed-out push MUST be retried with the same key — never a new one.
-func (c *Client) PostMultipart(ctx context.Context, path string, tarball []byte, fields map[string]string, idempotencyKey string) ([]byte, error) {
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-
-	for k, v := range fields {
-		if err := mw.WriteField(k, v); err != nil {
-			return nil, fmt.Errorf("write multipart field %q: %w", k, err)
-		}
-	}
-
-	hdr := textproto.MIMEHeader{}
-	hdr.Set("Content-Disposition", `form-data; name="tarball"; filename="bundle.tar.gz"`)
-	hdr.Set("Content-Type", "application/gzip")
-	part, err := mw.CreatePart(hdr)
-	if err != nil {
-		return nil, fmt.Errorf("create multipart file part: %w", err)
-	}
-	if _, err := part.Write(tarball); err != nil {
-		return nil, fmt.Errorf("write tarball part: %w", err)
-	}
-	if err := mw.Close(); err != nil {
-		return nil, fmt.Errorf("close multipart writer: %w", err)
-	}
-
-	// Build + sign AFTER the body exists; the multipart Content-Type
-	// (with boundary) must be the writer's FormDataContentType().
-	req, err := c.newSignedRequest(ctx, http.MethodPost, path, &buf)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("management API request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseError(raw, resp.StatusCode)
-	}
-	return raw, nil
-}
-
-// parseError turns a non-2xx body into an *APIError. The body is normally
-// the standard error envelope; a non-envelope body (e.g. an HTML 502 from
-// a proxy) still yields a non-nil *APIError carrying the HTTP status so
-// the caller never loses the failure.
 func parseError(raw []byte, status int) error {
 	var env errorEnvelope
 	if json.Unmarshal(raw, &env) == nil && env.Code != "" {

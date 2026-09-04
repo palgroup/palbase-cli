@@ -3,7 +3,9 @@ package backend
 // start_test.go — what `start` leaves behind, and where.
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -790,5 +792,54 @@ func TestStackImagesTrackTheCoreVersion(t *testing.T) {
 				"yerel yığın buluttan farklı bir çekirdek koşar (imaj: %s)",
 				img.env, tag, core, img.fallback)
 		}
+	}
+}
+
+// failingCloser writes fine and fails only on Close — the shape of a real
+// delayed-allocation or network filesystem reporting ENOSPC at close time.
+type failingCloser struct {
+	w      io.Writer
+	closed bool
+}
+
+func (f *failingCloser) Write(p []byte) (int, error) { return f.w.Write(p) }
+func (f *failingCloser) Close() error {
+	if f.closed {
+		return errors.New("close called twice")
+	}
+	f.closed = true
+	return errors.New("no space left on device")
+}
+
+// A .env WRITTEN BUT NOT CLOSED is a half-sealed stack, and the caller has to
+// hear about it.
+//
+// appendSealingChain used `defer f.Close()`, which swallowed exactly the error
+// that says "your bytes did not land". The fix returns it — but for a while the
+// fix had no test: the happy path was the only thing measured, so dropping the
+// check again would not have turned anything red. This is that red.
+func TestAppendSealingChainRefusesAFailedClose(t *testing.T) {
+	env := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(env, []byte("PALBASE_ANON_KEY=abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var landed bytes.Buffer
+	original := openEnvForAppend
+	openEnvForAppend = func(string) (io.WriteCloser, error) {
+		return &failingCloser{w: &landed}, nil
+	}
+	t.Cleanup(func() { openEnvForAppend = original })
+
+	err := appendSealingChain(env, "PALBASE_SEALED_SIGNING_SEED=a\n")
+	if err == nil {
+		t.Fatal("a .env whose close failed was reported as written — the stack is half-sealed " +
+			"and nothing said so")
+	}
+	if !strings.Contains(err.Error(), "no space left on device") {
+		t.Errorf("the close error was replaced instead of carried: %v", err)
+	}
+	if !strings.Contains(err.Error(), env) {
+		t.Errorf("the error does not name the file it failed on: %v", err)
 	}
 }

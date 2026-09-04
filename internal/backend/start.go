@@ -968,12 +968,27 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 //
 // Ayrı bir fonksiyon, çünkü bozulma tam olarak BURADA oluyordu ve buna bir test
 // yazmak için docker'a gitmeyen bir giriş noktası gerekiyor.
+// openEnvForAppend is the seam that lets the Close-error path have a test.
+//
+// Close() returning an error is real (delayed-allocation and network file
+// systems report ENOSPC exactly there) but there is no portable way to PROVOKE
+// it from a test — so the branch that refuses to swallow it had no red of its
+// own, and a mutation that dropped the check stayed green. An independent
+// review said so and was right.
+//
+// A package-level opener is how the rest of this codebase already handles that
+// problem (transport.DPoPSigner, backend.CloudKeyFetcher): production keeps the
+// real one, the test substitutes a WriteCloser whose Close fails.
+var openEnvForAppend = func(name string) (io.WriteCloser, error) {
+	return os.OpenFile(name, os.O_APPEND|os.O_WRONLY, 0o600)
+}
+
 func appendSealingChain(envFile, chain string) error {
 	existing, err := os.ReadFile(envFile)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := openEnvForAppend(envFile)
 	if err != nil {
 		return err
 	}
@@ -986,10 +1001,7 @@ func appendSealingChain(envFile, chain string) error {
 	// dosya sistemleri ve ağ bağlı olanlar hatayı tam orada verir. Yutulduğunda
 	// .env SESSİZCE yarım mühürlü kalıyordu — mührün eksik olduğu bir yığın,
 	// hatası ancak çalışma anında ortaya çıkan bir yığındır.
-	//
-	// TEST EDİLEBİLİRLİĞİ AÇIK KALEM (deviations O-3): Close()'un hata döndüğü
-	// durumu taşınabilir biçimde tetiklemenin bir yolunu bulamadım, o yüzden bu
-	// yolun kendi kırmızısı yok — bağımsız inceleme bunu haklı olarak yazdı.
+
 	closed := false
 	closeErr := func() error {
 		if closed {
@@ -1006,11 +1018,11 @@ func appendSealingChain(envFile, chain string) error {
 	// Dosya newline ile bitmiyorsa, eklenen ilk satır önceki satırın DEVAMI olur
 	// ve iki değişken birden yok olur.
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
-		if _, err := f.WriteString("\n"); err != nil {
+		if _, err := io.WriteString(f, "\n"); err != nil {
 			return err
 		}
 	}
-	if _, err := f.WriteString(chain); err != nil {
+	if _, err := io.WriteString(f, chain); err != nil {
 		return err
 	}
 	return closeErr()

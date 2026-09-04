@@ -14,7 +14,7 @@ import (
 )
 
 // Compile-time guards: the real mgmt client must satisfy BOTH the deploy client
-// (PostMultipart with a context + an Idempotency-Key) and the backend REST
+// (a context + an Idempotency-Key) and the backend REST
 // accessor main.go wires in. A signature drift breaks the build HERE, not at the
 // wiring site.
 var (

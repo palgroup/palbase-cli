@@ -37,10 +37,6 @@ func (n *nameREST) DoIdempotent(ctx context.Context, method, path string, body, 
 	return n.Do(ctx, method, path, body, out)
 }
 
-func (n *nameREST) PostMultipart(context.Context, string, []byte, map[string]string, string) ([]byte, error) {
-	return nil, errors.New("bu testte kullanılmıyor")
-}
-
 func resolvers(rest REST) Resolvers {
 	return Resolvers{REST: func() REST { return rest }}
 }

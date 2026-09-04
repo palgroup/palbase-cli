@@ -72,16 +72,19 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 var buildCheckFS embed.FS
 
 // REST is the subset of the Management-API transport the provider-aware deploy
-// verbs (push/pull/clone) and the v2 reads use: PostMultipart for the
-// palbase-provider tarball deploy (with its Idempotency-Key) and Do for
-// everything else. *transport.Client satisfies it; tests substitute a stub.
+// verbs (push/pull/clone) and the v2 reads use. *transport.Client satisfies it;
+// tests substitute a stub.
+//
+// It carried a PostMultipart until 2026-09-04. The push stopped being a
+// multipart upload in a6dedc5 — it hands the plane a JSON artifact now — and
+// the method outlived its last caller by three months, declared in an interface
+// every stub had to implement for nothing.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
 	// DoIdempotent is Do with a replay key. The deploy upload rides it: a
 	// request that timed out AFTER the plane accepted it must not become a
 	// second deploy of the same artifact when it is retried.
 	DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error
-	PostMultipart(ctx context.Context, path string, tarball []byte, fields map[string]string, idempotencyKey string) ([]byte, error)
 }
 
 // Resolvers returns lazy accessors for the shared CLI globals, so the

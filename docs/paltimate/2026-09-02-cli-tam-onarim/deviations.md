@@ -191,7 +191,7 @@ cannot be used in parallel tests or tests with parallel ancestors."* Eklenseydi 
 düşerdi. Bütçe zaten kapılarla tutuyor, yani `t.Parallel()` bir araçtı, hedef değil; hedef NFR-001
 ve ölçülerek karşılandı. Adım metni bu gerçeği söyleyecek şekilde düzeltildi.
 
-### O-2 · AÇIK KALEM — `PostMultipart` üretim çağıranı olmadan duruyor
+### O-2 · KAPANDI — `PostMultipart` silindi
 
 FR-019 çalışırken görüldü: `backend.REST` arayüzü `PostMultipart`'ı beyan ediyor ama onu çağıran
 üretim kodu yok (`grep` → yalnız arayüz beyanı). Bu koşunun ürettiği bir şey değil, önceden ölü.
@@ -231,7 +231,7 @@ ağacında CI **success** (`33878577580`) ve suite şimdi 0 FAIL. Yani iddia son
 ben aynı hatayı, kapanış commit'inde, kanıtı ekranda dururken yaptım. Ölçüm ve ona dayanan karar
 aynı bloğa konmamalı: blok, çıktı okunmadan sonuna kadar koşar.
 
-### O-3 · AÇIK KALEM — `appendSealingChain`'in Close hata yolunun kendi kırmızısı yok
+### O-3 · KAPANDI — `appendSealingChain`'in Close hata yolu artık ölçülüyor
 
 `reviewer2` (I-1) haklı: FR-018'in "gerçek kusur" düzeltmesi mekanik olarak doğru (`return closeErr()`
 mutlu yolun sonunda, `closed` defteri sağlam) ama **ölçülmüyor** — `start_test.go:693` yalnız mutlu
@@ -243,3 +243,19 @@ test — mutasyonda yakalamayan bir test — bu koşunun tam olarak avladığı 
 yazmadım ve **eksikliği kodun içine adıyla yazdım**. İnceleme sırasında yorumun gerekçesinin de
 abartılı olduğu çıktı: "flush hatası yalnızca Close()'ta görünür" `bufio.Writer` için doğru, `os.File`
 için değil. Yorum düzeltildi.
+
+
+### O-2 ve O-3 kapandı (kullanıcı üçünü de aldı)
+
+**O-2.** `PostMultipart` silindi — implementasyon, `backend.REST` üyesi, test stub'ı ve iki bayat
+yorum atfı. Tarihi net: `a6dedc5`'te push multipart olmaktan çıkıp plane'e JSON artefakt vermeye
+başladı; metot son çağıranını ÜÇ AY önce kaybetmiş, bu arada bir arayüzde durup her stub'ın boşuna
+uygulamak zorunda kaldığı bir üye olmayı sürdürmüş.
+
+**O-3.** Close hata yolunun artık kendi kırmızısı var. `openEnvForAppend` paket düzeyinde bir seam —
+bu kod tabanının aynı sorunu zaten böyle çözdüğü yer var (`transport.DPoPSigner`,
+`backend.CloudKeyFetcher`): üretim gerçek açıcıyı tutar, test Close'u başarısız olan bir
+`io.WriteCloser` koyar. **Mutation kanıtı: `return closeErr()` → `_ = closeErr(); return nil`
+yapınca `TestAppendSealingChainRefusesAFailedClose` DÜŞÜYOR; geri alınca yeşil.** Yorumun abartılı
+gerekçesi de düzeltildi — `os.File` tamponlamaz, "flush hatası yalnızca Close()'ta görünür"
+`bufio.Writer` için doğruydu.
