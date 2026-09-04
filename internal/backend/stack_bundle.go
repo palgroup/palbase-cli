@@ -65,21 +65,6 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 			"(https://bun.sh). The stack runs Bun, so the bundle is built by the engine that will run it")
 	}
 
-	// THE SCHEMA IS EVALUATED BEFORE ANYTHING IS SHIPPED (measured 2026-09-04).
-	//
-	// `db/` was READ here and never RUN: the declarations went into the bundle
-	// verbatim, so a schema that cannot form its relation graph shipped, applied
-	// its DDL, and refused at BOOT — inside `setSchema`, where the cure is a
-	// push and the exit kills the process that accepts one. The gate existed the
-	// whole time in `palbase build`, a command nobody is required to run.
-	//
-	// The SAME evaluator `build` uses, not a second opinion about it: a gate
-	// that imitates the real tool passes what the real tool rejects. It writes
-	// nothing — see validateSchemaDeclaration.
-	if err := validateSchemaDeclaration(ctx, dir, filepath.Join(dir, "node_modules")); err != nil {
-		return nil, nil, fmt.Errorf("%s/ would refuse to boot: %w", SchemaDir, err)
-	}
-
 	sources, err := moduleSources(dir)
 	if err != nil {
 		return nil, nil, err
@@ -108,6 +93,29 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 		return nil, nil, err
 	}
 	defer func() { _ = os.RemoveAll(staged) }()
+
+	// THE SCHEMA IS EVALUATED BEFORE ANYTHING IS SHIPPED (measured 2026-09-04).
+	//
+	// `db/` was READ by this function and never RUN: the declarations went into
+	// the bundle verbatim, so a schema that cannot form its relation graph
+	// shipped, applied its DDL, and refused at BOOT — inside `setSchema`, where
+	// the cure is a push and the exit kills the process that accepts one. The
+	// gate existed the whole time in `palbase build`, a command nobody is
+	// required to run before pushing.
+	//
+	// The SAME evaluator `build` uses, not a second opinion about it: a gate
+	// that imitates the real tool passes what the real tool rejects. It writes
+	// nothing into the checkout — see validateSchemaDeclaration.
+	//
+	// AFTER stageControllers, and that placement is deliberate: this needs node,
+	// and stageControllers needs it first with a message that says what node is
+	// FOR here. Refusing above would have replaced a sentence about controllers'
+	// return types with one about db/, for a person whose actual problem is that
+	// they have no node at all. Nothing above touches the checkout, so the
+	// refusal still arrives before any side effect.
+	if err := validateSchemaDeclaration(ctx, dir, filepath.Join(dir, "node_modules")); err != nil {
+		return nil, nil, fmt.Errorf("%s/ would refuse to boot: %w", SchemaDir, err)
+	}
 
 	esmDir := filepath.Join(dir, ".palbase", "esm", "controllers")
 	if err := os.MkdirAll(esmDir, 0o755); err != nil {
