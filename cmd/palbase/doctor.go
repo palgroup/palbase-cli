@@ -70,8 +70,8 @@ func dockerProbes(ctx context.Context, look lookupFunc, run cmdRunner, home stri
 	}
 
 	store := credsStore(home)
-	switch {
-	case store == "":
+	switch store {
+	case "":
 		out = append(out, probeLine{ok: true, label: "creds", detail: "no credsStore configured (fine — docker will use plain config)"})
 	default:
 		helper := "docker-credential-" + store

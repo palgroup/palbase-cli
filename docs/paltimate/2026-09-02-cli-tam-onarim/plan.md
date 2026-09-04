@@ -137,7 +137,7 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 - [x] **Adım 4: staticcheck bulgularını düzelt** — ST1005 (hata metni noktalama/newline ile bitmemeli) `stack_bundle.go`, `stack_push.go`, `start.go`; QF1001/S1016 `archive.go`, `schema_sources.go`. Hata metinlerinin ANLAMINI değiştirme, yalnız biçimini.
 - [x] **Adım 5: Ölü sembolleri sil** — `pull_spec.go` (5), `deploy.go` (4 kullanılmayan alan), `stack_bundle.go` (1), `stack_bundle_test.go` (3 test yardımcısı), `plan_test.go` (2 test yardımcısı). Silmeden önce her biri için `grep -rn "<ad>" --include="*.go" .` koş ve sıfır çağıran olduğunu doğrula.
 - [x] **Adım 6: Yeşili gör** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/backend/...` · Beklenen: **`0 issues`**; ardından `go build ./... && go test ./internal/backend/ -count=1 -short` · Beklenen: **PASS**
-- [ ] **Adım 7: Commit** — `fix(backend): lint borcu ödendi — .env mühür yazımı artık Close hatasını yutmuyor`
+- [x] **Adım 7: Commit** — `fix(backend): lint borcu ödendi — .env mühür yazımı artık Close hatasını yutmuyor`
 
 ---
 
@@ -148,11 +148,11 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 - Consumes: —
 - Produces: bu paketlerde sıfır golangci-lint bulgusu
 
-- [ ] **Adım 1: Borcu listele** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/auth/... ./internal/storage/... ./internal/egress/... ./internal/logs/... ./internal/project/... ./cmd/... 2>&1 | tail -30` · Beklenen: unused 18 + staticcheck 2
-- [ ] **Adım 2: `internal/project/gitroot.go` dosyasını TÜMÜYLE sil** — `gitRunner`, `execGit`, `ensureGitRepo` üçü de ölü. Doğrula: `grep -rn "ensureGitRepo\|gitRunner" --include="*.go" .` → yalnız bu dosya. (`internal/backend/deploy.go`'da AYRI bir `execGit` var, o canlı — karıştırma.)
-- [ ] **Adım 3: config/*.ts döneminden kalan ölü sembolleri sil** — `storage.go`: `bucketDef`, `parseSizeLiteral`, `describe`, `humanBytes` · `egress.go`: `hostEntryRE`, `hostsArrayRE`, `lineCommentRE` · `logs.go`: `reverse` · `auth_test.go`: 7 ölü test yardımcısı. Her biri için önce sıfır çağıran doğrulaması.
-- [ ] **Adım 4: staticcheck'leri düzelt** — `logs.go` ve `cmd/palbase/doctor.go` (QF1002 tip switch biçimi).
-- [ ] **Adım 5: Yeşili gör** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/auth/... ./internal/storage/... ./internal/egress/... ./internal/logs/... ./internal/project/... ./cmd/...` · Beklenen: **`0 issues`**; `go build ./...` · Beklenen: exit 0
+- [x] **Adım 1: Borcu listele** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/auth/... ./internal/storage/... ./internal/egress/... ./internal/logs/... ./internal/project/... ./cmd/... 2>&1 | tail -30` · Beklenen: unused 18 + staticcheck 2
+- [x] **Adım 2: `internal/project/gitroot.go` dosyasını TÜMÜYLE sil** — `gitRunner`, `execGit`, `ensureGitRepo` üçü de ölü. Doğrula: `grep -rn "ensureGitRepo\|gitRunner" --include="*.go" .` → yalnız bu dosya. (`internal/backend/deploy.go`'da AYRI bir `execGit` var, o canlı — karıştırma.)
+- [x] **Adım 3: config/*.ts döneminden kalan ölü sembolleri sil** — `storage.go`: `bucketDef`, `parseSizeLiteral`, `describe`, `humanBytes` · `egress.go`: `hostEntryRE`, `hostsArrayRE`, `lineCommentRE` · `logs.go`: `reverse` · `auth_test.go`: 7 ölü test yardımcısı. Her biri için önce sıfır çağıran doğrulaması.
+- [x] **Adım 4: staticcheck'leri düzelt** — `logs.go` ve `cmd/palbase/doctor.go` (QF1002 tip switch biçimi).
+- [x] **Adım 5: Yeşili gör** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/auth/... ./internal/storage/... ./internal/egress/... ./internal/logs/... ./internal/project/... ./cmd/...` · Beklenen: **`0 issues`**; `go build ./...` · Beklenen: exit 0
 - [ ] **Adım 6: Commit** — `chore(lint): config/*.ts döneminin ölü sembolleri silindi (gitroot.go tümüyle)`
 
 ---

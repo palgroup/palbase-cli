@@ -261,7 +261,7 @@ new lines every 2s — Ctrl-C to stop.
 					return fmt.Errorf(
 						"%s does not run on this machine, so its logs are not here either.\n"+
 							"A self-hosted stack keeps its logs in its own containers; "+
-							"`palbase start` brings a stack up here if you want to watch one.",
+							"`palbase start` brings a stack up here if you want to watch one",
 						target.Describe())
 				}
 				if err := dockerAvailable(cmd.Context()); err != nil {
@@ -301,14 +301,6 @@ new lines every 2s — Ctrl-C to stop.
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Keep polling for new lines (Ctrl-C to stop)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON (one array, or one object per line with --follow)")
 	return cmd
-}
-
-func reverse(in []logLine) []logLine {
-	out := make([]logLine, 0, len(in))
-	for i := len(in) - 1; i >= 0; i-- {
-		out = append(out, in[i])
-	}
-	return out
 }
 
 func printLines(w interface{ Write([]byte) (int, error) }, lines []logLine, jsonOut bool) {

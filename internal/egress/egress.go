@@ -18,21 +18,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
-
-// hostEntryRE pulls the quoted host strings out of the hosts: [ ... ] array.
-var hostEntryRE = regexp.MustCompile(`"([^"]*)"`)
-
-// hostsArrayRE locates the hosts array body. Line comments are stripped first so
-// a commented-out host is not read back as a real one.
-var hostsArrayRE = regexp.MustCompile(`\bhosts\s*:\s*\[([^\]]*)\]`)
-
-var lineCommentRE = regexp.MustCompile(`(?m)//[^\n]*`)
 
 // Cmd returns the `palbase egress` parent command.
 // REST reaches the linked stack's management surface.

@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -426,76 +424,6 @@ func TestGetFreshToken_KeepsComfortableToken(t *testing.T) {
 }
 
 // --- Helpers ---
-
-func parseAuthURL(rawURL string) (*httpURL, error) {
-	// Simple URL parser for test
-	parts := strings.SplitN(rawURL, "?", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("no query params in URL")
-	}
-
-	vals := make(map[string]string)
-	for _, param := range strings.Split(parts[1], "&") {
-		kv := strings.SplitN(param, "=", 2)
-		if len(kv) == 2 {
-			decoded, _ := decodePercent(kv[1])
-			vals[kv[0]] = decoded
-		}
-	}
-
-	return &httpURL{query: vals}, nil
-}
-
-type httpURL struct {
-	query map[string]string
-}
-
-func (u *httpURL) Query() httpURLQuery {
-	return httpURLQuery(u.query)
-}
-
-type httpURLQuery map[string]string
-
-func (q httpURLQuery) Get(key string) string {
-	return q[key]
-}
-
-func decodePercent(s string) (string, error) {
-	// Use stdlib
-	result := strings.Builder{}
-	i := 0
-	for i < len(s) {
-		if s[i] == '%' && i+2 < len(s) {
-			// Parse hex
-			hi := unhex(s[i+1])
-			lo := unhex(s[i+2])
-			if hi >= 0 && lo >= 0 {
-				result.WriteByte(byte(hi<<4 | lo))
-				i += 3
-				continue
-			}
-		}
-		if s[i] == '+' {
-			result.WriteByte(' ')
-		} else {
-			result.WriteByte(s[i])
-		}
-		i++
-	}
-	return result.String(), nil
-}
-
-func unhex(c byte) int {
-	switch {
-	case '0' <= c && c <= '9':
-		return int(c - '0')
-	case 'a' <= c && c <= 'f':
-		return int(c - 'a' + 10)
-	case 'A' <= c && c <= 'F':
-		return int(c - 'A' + 10)
-	}
-	return -1
-}
 
 // Ensure io is imported (used by httptest setup)
 var _ = io.Discard

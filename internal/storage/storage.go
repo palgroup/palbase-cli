@@ -57,27 +57,6 @@ var unitBytes = map[string]int64{
 	"tb": 1024 * 1024 * 1024 * 1024,
 }
 
-// bucketDef is the CLI's in-memory model of one bucket — the same normalized
-// shape the SDK's BucketDef serializes (public, fileSizeLimit bytes-or-nil,
-// allowedMimeTypes list-or-nil).
-// The SPELLING is the module's, not a third one. The storage module reads
-// `fileSizeLimit` / `allowedMimeTypes`; this used to send snake_case, the
-// management layer forwards raw bytes, and nothing complained — the bucket was
-// created with no size limit and no type list, and the only way to notice was to
-// upload a file that should have been refused.
-type bucketDef struct {
-	Name             string   `json:"name"`
-	Public           bool     `json:"public"`
-	FileSizeLimit    *int64   `json:"fileSizeLimit,omitempty"`
-	AllowedMimeTypes []string `json:"allowedMimeTypes,omitempty"`
-
-	// SizeLiteral is the raw TS literal fileSizeLimit was written as in the file
-	// (`"25MB"` or `26214400`), kept so a rewrite re-emits it VERBATIM instead of
-	// normalizing an author's human string into bytes. Empty for a bucket the CLI
-	// is creating (the generator then falls back to the byte count).
-	SizeLiteral string `json:"-"`
-}
-
 // Cmd returns the `palbase storage` parent command. It takes no resolvers:
 // bucket authoring is purely local file I/O (no Studio / network). Buckets are
 // the only storage config, so the verbs hang directly off `storage` (no
@@ -239,25 +218,6 @@ func parseSize(raw string) (int64, error) {
 		return 0, fmt.Errorf("--max-size must not be negative")
 	}
 	return int64(bytes + 0.5), nil
-}
-
-// parseSizeLiteral converts a fileSizeLimit TS literal as written in
-// config/storage.ts — a quoted human string (`"25MB"`) or a bare byte count
-// (`26214400`) — to bytes. Both forms are valid SDK input, so both must read
-// back; parseSize handles the string form's units.
-func parseSizeLiteral(lit string) (int64, error) {
-	if strings.HasPrefix(lit, `"`) {
-		unq, err := strconv.Unquote(lit)
-		if err != nil {
-			return 0, fmt.Errorf("not a valid string literal")
-		}
-		n, err := parseSize(unq)
-		if err != nil {
-			return 0, fmt.Errorf("expected a size like \"5MB\" or \"1GB\"")
-		}
-		return n, nil
-	}
-	return strconv.ParseInt(lit, 10, 64)
 }
 
 func bucketsAddCmd(r Resolvers) *cobra.Command {
@@ -440,37 +400,4 @@ func parseMimes(raw string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// describe renders a one-line human summary of a bucket for list/add output.
-func describe(b bucketDef) string {
-	access := "private"
-	if b.Public {
-		access = "public"
-	}
-	size := "no size limit"
-	if b.FileSizeLimit != nil {
-		size = humanBytes(*b.FileSizeLimit)
-	}
-	mimes := "any type"
-	if len(b.AllowedMimeTypes) > 0 {
-		mimes = strings.Join(b.AllowedMimeTypes, ", ")
-	}
-	return fmt.Sprintf("%s, %s, %s", access, size, mimes)
-}
-
-// humanBytes renders a byte count using the same binary units the CLI accepts,
-// preferring the largest unit that divides evenly (so 5242880 -> "5MB").
-func humanBytes(n int64) string {
-	type unit struct {
-		name string
-		mult int64
-	}
-	units := []unit{{"TB", unitBytes["tb"]}, {"GB", unitBytes["gb"]}, {"MB", unitBytes["mb"]}, {"KB", unitBytes["kb"]}}
-	for _, u := range units {
-		if n >= u.mult && n%u.mult == 0 {
-			return fmt.Sprintf("%d%s", n/u.mult, u.name)
-		}
-	}
-	return fmt.Sprintf("%dB", n)
 }

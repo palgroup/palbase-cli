@@ -210,10 +210,10 @@ func TestStorageAddSendsDeclaredVariants(t *testing.T) {
 
 func TestStorageAddRefusesAMalformedVariant(t *testing.T) {
 	for _, bad := range []string{
-		"card",                     // = yok
-		"card=640",                 // boyut yok
-		"card=640x480",             // fit/format yok
-		"card=640x480:squish:webp", // geçersiz fit
+		"card",                      // = yok
+		"card=640",                  // boyut yok
+		"card=640x480",              // fit/format yok
+		"card=640x480:squish:webp",  // geçersiz fit
 		"card=640x480:cover:webp:x", // kalite sayı değil
 	} {
 		t.Run(bad, func(t *testing.T) {
