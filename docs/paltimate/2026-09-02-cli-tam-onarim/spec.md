@@ -31,6 +31,7 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 - **FR-013** WHEN `palbase notifications remove <provider>` koşarsa THEN sistem SHALL sağlayıcı adını önce yapılandırma kimliğine çözsün ve silmeyi o kimlikle istesin; ad hiçbir yapılandırmayla eşleşmezse adlandırılmış bir hata versin.
 - **FR-014** WHEN bir checkout android platformu için bağlanırsa THEN CLI SHALL Gradle eklentisinin okuduğu artefaktları yazsın: eklentinin beklediği yoldaki sözleşme dosyası ve `app_id`/`base_url`/`api_key` alanlarını taşıyan yapılandırma; ve yerel yığın adresleri için `https` şartı SHALL kaldırılsın.
 - **FR-015** WHEN yayımlanmış `@palbase/backend`'in en yeni kararlı sürümüyle boş bir dizinde `palbase init` koşulup ardından `palbase build` çalıştırılırsa THEN `build` SHALL sıfır çıkış koduyla bitsin.
+  > **Durum (2026-09-04 ölçümü): ZATEN SAĞLANIYOR.** P0-2, 27.1.0'ın yayımlanmasıyla kapandı — `init` → `build` yayındaki 0.53.0 ile exit 0 (kanıt: `research.md` CB-18a). FR düşürülmüyor, **karakteri değişiyor**: düzeltme değil **regresyon kapısı**. `scaffold_e2e_test.go` bu yüzden hâlâ gerekli — bu yol daha önce yayında sessizce kırıldı ve onu yakalayan bir kapı yoktu.
 - **FR-016** WHEN `palbase init` ile iskeleti kurulmuş bir projede `palbase start` koşulursa THEN yığın SHALL ayağa kalksın ve `/.well-known/palbase.json` 200 dönsün; ardından `palbase stop` yığını kapatsın ve `.palbase/local.json` kalmasın. *(Üretim giriş noktasından uçtan uca kanıt.)*
 
 ### Bayat metin
@@ -47,7 +48,7 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 
 - Kol B (ortam modeli), C (`start` doğruluğu), D (tek `link`), E (seçim emekliliği), F (modül sözleşmesi + güvenlik) — Artım 2 ve 3.
 - Sürüm/imaj pinlerinin **ağdan** çözülmesi (D-030, kullanıcı kararı).
-- `@palbase/backend@26.0.0`'ın npm'e yayımlanması — **başka bir oturum tarafından yürütülüyor**; bu şartname yalnız sonucunu FR-015 ile doğrular.
+- SDK'nın npm'e yayımlanması — başka oturumun kulvarı. **Sonuç (2026-09-04): 26.0.0 hiç yayımlanmadı; yayımlanan 27.0.0 ve 27.1.0 oldu ve P0-2 bununla kapandı.** Bu şartname yayını üstlenmiyor, yalnız sonucunu FR-015 ile kapıya bağlıyor.
 - `pull`'un dosya-başına inceltilmesi ve git'siz projeler için içerik-hash defteri (K-05, K-06).
 
 ## Sınır Durumları
@@ -121,7 +122,7 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 
 | # | Önkoşul | Durum |
 |---|---------|-------|
-| P-1 | `@palbase/backend@26.0.0` npm'e yayımlanmış olmalı (FR-015'in ölçtüğü şey) | **Yürütülüyor** — başka oturum, kullanıcı onayıyla |
+| P-1 | Modül raylı bir SDK npm'de yayımlanmış olmalı (FR-015'in ölçtüğü şey) | **ÇÖZÜLDÜ** — 27.1.0 yayında (`latest`=`next`=27.1.0); 26.0.0 hiç çıkmadı. Ölçüm: CB-18a |
 | P-2 | Compose artefaktını düzelten commit tek elden gelmeli (aynı dosyaya ikinci yazıcı olmaz) | Koordinasyon açık — bu şartname kapıyı (FR-001) üstlenir; artefakt (FR-002) hangisi önce gelirse |
 | P-3 | Android submodule'üne yazma erişimi (`sdk/palbackend-android-src`) | Var (yerel checkout) |
 | P-4 | CI'da `golangci-lint` için pinli sürüm seçimi | Karar bu şartnamede: `.golangci.yml` `version: "2"` ile uyumlu en son kararlı sürüm pinlenir |

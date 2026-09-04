@@ -90,10 +90,17 @@ CB-17 CLAIM: `init.go`'nun `latest` gerekçesi ARTIK YANLIŞ.
       RE-GROUNDED AT FREEZE: confirmed (yorum bizzat okundu; dist-tag ölçümü devralındı)
 
 CB-18 CLAIM: Repo 26.0.0 şablonu modül taşıyor ve TEMİZ kurulumda derleniyor.
-      CITE: sdk/palbase-ts/backend/package.json "version": "26.0.0" ; template/modules/{health/health.module.ts,notes/notes.module.ts} ;
+      CITE: sdk/palbase-ts/backend/package.json "version": "26.0.0" ; template/modules/{health,notes}/*.module.ts ;
       `npm pack` → temiz dizin → şablon kopyası → `palbase build` → "build OK — 5 route(s)", exit 0
-      HEM HEAD CLI (13bd760) HEM yayındaki 0.53.0 ile.
-      RE-GROUNDED AT FREEZE: confirmed (bizzat koşuldu 2026-09-03)
+      RE-GROUNDED 2026-09-04: **STALE** — 26.0.0 npm'e HİÇ yayımlanmadı. `npm view @palbase/backend versions`
+      → "25.1.0", "27.0.0", "27.1.0" (26 yok); `dist-tags` → { next: '27.1.0', latest: '27.1.0' }.
+      Depodaki sürüm de artık 27.1.0. Ölçüm doğruydu ama ölçtüğü sürüm sevk edilmedi.
+
+CB-18a CLAIM (CB-18'in yerine): P0-2 KAPANDI — yayımlanmış en yeni SDK ile temiz `init` → `build` yeşil.
+      CITE: boş dizin → `palbase init` (yayındaki 0.53.0) → "▸ @palbase/backend 27.1.0", iskelet `modules/` taşıyor →
+      `palbase build` → "✓ @palbase/backend 27.1.0" + "build OK — 5 route(s) across the controllers would deploy cleanly" ;
+      ayrı temiz koşumda `echo $?` → **0**
+      RE-GROUNDED AT FREEZE: confirmed (bizzat koşuldu 2026-09-04, yayındaki binary ve yayımlanmış paketle)
 ```
 
 ## Dış kaynak iddiaları
