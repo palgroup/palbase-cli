@@ -196,14 +196,37 @@ func TestTheSecretIsWrittenBeforeTheSender(t *testing.T) {
 }
 
 // TestRemoveActuallyRemoves.
-func TestRemoveActuallyRemoves(t *testing.T) {
+// The route deletes BY CONFIG ID (`WHERE id = $1`), so a person's provider NAME
+// has to be resolved first. This test used to assert the opposite — that the CLI
+// sends `/providers/apns` — which is why the defect survived: the test agreed
+// with the bug, and every real `remove` answered 404.
+func TestRemoveResolvesTheProviderNameToItsConfigID(t *testing.T) {
 	t.Chdir(t.TempDir())
-	rest := &fakeStack{status: http.StatusNoContent}
+	rest := &fakeStack{answer: `[{"id":"cfg_1","channel":"push","provider":"apns","configured":true}]`}
 
 	_, err := runWith(t, rest, "remove", "apns")
 	require.NoError(t, err)
+
+	calls := rest.all()
+	require.GreaterOrEqual(t, len(calls), 2, "remove must LOOK the configuration up before deleting it")
+	assert.Equal(t, http.MethodGet, calls[0].Method)
+	assert.Equal(t, "/v1/management/notifications/providers", calls[0].Path)
 	assert.Equal(t, http.MethodDelete, rest.last().Method)
-	assert.Equal(t, "/v1/management/notifications/providers/apns", rest.last().Path)
+	assert.Equal(t, "/v1/management/notifications/providers/cfg_1", rest.last().Path)
+}
+
+// A name the stack does not carry is NAMED, not sent as a path segment that
+// answers 404 with the route's words instead of ours.
+func TestRemoveNamesAProviderTheStackDoesNotHave(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeStack{answer: `[{"id":"cfg_1","channel":"push","provider":"apns"}]`}
+
+	_, err := runWith(t, rest, "remove", "fcm")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fcm")
+	for _, c := range rest.all() {
+		assert.NotEqual(t, http.MethodDelete, c.Method, "nothing may be deleted when the name does not resolve")
+	}
 }
 
 // TestProviders_MarksWhatTheStackHas.

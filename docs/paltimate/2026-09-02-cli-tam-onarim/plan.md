@@ -242,7 +242,7 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
   **Ham-gövde fallback'ini KALDIR:** "şekli basmak tahmin etmekten iyidir" gerekçesi burada sessiz bir yanlışa dönüşmüştü — boş listede `{"flags":[]}` basıp `this stack declares no flags` yolunu erişilemez kılıyordu.
 - [x] **Adım 3: Yeşili gör** — Run: `go test ./internal/flags/ -count=1` · Beklenen: **PASS**; boş küme testinde `this stack declares no flags` çıktısı
 - [x] **Adım 4: Ölü sembolleri sil** — `flagDef`, `buildFlagDef`, `parseVariants`, `describe` (config/*.ts kalıntısı, `add` çağırmıyor). Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/flags/...` · Beklenen: **`0 issues`**
-- [ ] **Adım 5: Commit** — `fix(flags): list zarfı çözüyor — boş liste yolu artık erişilebilir`
+- [x] **Adım 5: Commit** — `fix(flags): list zarfı çözüyor — boş liste yolu artık erişilebilir`
 
 ---
 
@@ -253,8 +253,8 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 - Consumes: `GET /v1/management/notifications/providers` → yapılandırma listesi, her satırda `id` ve `provider` (kanıt: `research.md` CB-12; rota kimlik bekliyor)
 - Produces: **C-2** `providerConfigID(ctx context.Context, name string) (string, error)`
 
-- [ ] **Adım 1: Testi yaz, kırmızıyı gör** — `notifications_test.go`'da sahte sunucu: `GET providers` → `[{"id":"cfg_1","provider":"apns","channel":"push"}]`, `DELETE /providers/cfg_1` → 204, `DELETE /providers/apns` → 404. `remove apns` çağrısının **cfg_1**'i sildiğini assert et. Run: `go test ./internal/notifications/ -count=1` · Beklenen: **FAIL** — CLI adı gönderiyor, 404 alıyor.
-- [ ] **Adım 2: Çözücüyü ekle** —
+- [x] **Adım 1: Testi yaz, kırmızıyı gör** — `notifications_test.go`'da sahte sunucu: `GET providers` → `[{"id":"cfg_1","provider":"apns","channel":"push"}]`, `DELETE /providers/cfg_1` → 204, `DELETE /providers/apns` → 404. `remove apns` çağrısının **cfg_1**'i sildiğini assert et. Run: `go test ./internal/notifications/ -count=1` · Beklenen: **FAIL** — CLI adı gönderiyor, 404 alıyor.
+- [x] **Adım 2: Çözücüyü ekle** —
 ```go
 // providerConfigID turns the provider NAME a person types into the CONFIG ID
 // the route deletes by. The two were conflated, so `remove` always 404'd: the
@@ -287,9 +287,9 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 	}
 }
 ```
-- [ ] **Adım 3: `remove`'u çözücüye bağla** — `notifications.go:394`'teki DELETE'i `args[0]` yerine çözülen kimlikle koştur.
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./internal/notifications/ -count=1` · Beklenen: **PASS**
-- [ ] **Adım 5: Ölü sembolleri sil** — `firstSecretName`, `sortedProviderNames`. Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/notifications/...` · Beklenen: **`0 issues`**
+- [x] **Adım 3: `remove`'u çözücüye bağla** — `notifications.go:394`'teki DELETE'i `args[0]` yerine çözülen kimlikle koştur.
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/notifications/ -count=1` · Beklenen: **PASS**
+- [x] **Adım 5: Ölü sembolleri sil** — `firstSecretName`, `sortedProviderNames`. Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/notifications/...` · Beklenen: **`0 issues`**
 - [ ] **Adım 6: Commit** — `fix(notifications): remove adı KİMLİĞE çözüyor — fiil ilk kez gerçekten siliyor`
 
 ---

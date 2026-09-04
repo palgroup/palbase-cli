@@ -391,33 +391,17 @@ leave the live provider in place, so "removed" and "still sending" were both tru
 at once.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := call(r, cmd, http.MethodDelete, providersPath+"/"+url.PathEscape(args[0]), nil); err != nil {
+			id, err := providerConfigID(r, cmd, args[0])
+			if err != nil {
+				return err
+			}
+			if _, err := call(r, cmd, http.MethodDelete, providersPath+"/"+url.PathEscape(id), nil); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ provider %q removed\n", args[0])
 			return nil
 		},
 	}
-}
-
-// firstSecretName returns a provider's first secret field name (for the remove
-// hint). Every provider has at least one secret in the catalog.
-func firstSecretName(provider string) string {
-	if spec := specByName(provider); spec != nil && len(spec.secrets) > 0 {
-		return spec.secrets[0].name
-	}
-	return ""
-}
-
-// sortedProviderNames returns the catalog provider names sorted (test helper +
-// stable iteration where needed).
-func sortedProviderNames() []string {
-	names := make([]string, 0, len(catalog))
-	for _, s := range catalog {
-		names = append(names, s.name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // templatesCmd is the door `config/notifications.ts` used to be.
@@ -532,4 +516,43 @@ your editor's problem rather than the stack's error message.`,
 
 	c.AddCommand(set, list)
 	return c
+}
+
+// providerConfigID turns the provider NAME a person types into the CONFIGURATION
+// ID the route deletes by.
+//
+// The two were conflated and `remove` therefore NEVER removed anything: the
+// module deletes `WHERE id = $1`, and no configuration's id is "apns". Every
+// invocation answered 404 while the help promised "It stops delivering". The
+// package's own test asserted the broken path, which is why it survived.
+func providerConfigID(r Resolvers, cmd *cobra.Command, name string) (string, error) {
+	raw, err := call(r, cmd, http.MethodGet, providersPath, nil)
+	if err != nil {
+		return "", err
+	}
+	var configured []struct {
+		ID       string `json:"id"`
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal(raw, &configured); err != nil {
+		return "", fmt.Errorf("could not read this stack's providers: %w", err)
+	}
+	var matches []string
+	for _, c := range configured {
+		if strings.EqualFold(strings.TrimSpace(c.Provider), strings.TrimSpace(name)) && c.ID != "" {
+			matches = append(matches, c.ID)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf(
+			"this stack has no %q provider configured — `palbase notifications providers` lists what it has", name)
+	case 1:
+		return matches[0], nil
+	default:
+		// Picking one would remove a sender the person did not name.
+		return "", fmt.Errorf(
+			"this stack carries %d %q configurations; remove them from the panel, where their ids are visible",
+			len(matches), name)
+	}
 }
