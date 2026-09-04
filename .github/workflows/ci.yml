@@ -58,5 +58,32 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # THE GATES BELOW MEASURE WITH THE REAL TOOL, and each was added the day
+      # the debt behind it was paid — a gate that is red on the day it lands is
+      # a gate somebody turns off.
+      - name: Formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The e2e suite is credential-gated and does not RUN here, but it must
+      # still COMPILE: it stopped compiling once and nothing noticed, because
+      # nothing ever built it.
+      - name: Vet the e2e package compiles
+        run: go vet -tags e2e ./tests/e2e/
+
+      # .golangci.yml has claimed "ci.yml runs this gate blocking" since it was
+      # written. It did not. This step is what makes that sentence true.
+      - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9.3.0
+        with:
+          version: v2.12.2
+
       - name: Run tests
         run: go test ./... -race -count=1
