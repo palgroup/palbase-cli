@@ -444,8 +444,8 @@ func stackStateDir(group string) (string, error) {
 // the file is a chain the running stack cannot see until it is recreated.
 func ensureBootValues(ctx context.Context, envFile string, out io.Writer) (bool, error) {
 	if _, err := os.Stat(envFile); err == nil {
-		// .env VAR — ama bu "yapacak bir sey yok" demek degil. Muhurleme zinciri bu
-		// dosyaya SONRADAN eklendi; onu tasimayan bir yigin onu buradan kazanir.
+		// .env VAR — ama bu "yapacak bir şey yok" demek değil. Mühürleme zinciri bu
+		// dosyaya SONRADAN eklendi; onu taşımayan bir yığın onu buradan kazanır.
 		return migrateSealingChainWithMint(ctx, envFile, out)
 	} else if !os.IsNotExist(err) {
 		return false, err
@@ -834,20 +834,20 @@ func groupOfLocalStack(url string) (string, bool) {
 // never reach each other's.
 func LocalStackProject(dir string) string { return "palbase-" + groupName(dir) }
 
-// sealingChainVars, bir yiginin muhurleme zincirini olusturan uc degisken.
+// sealingChainVars, bir yığının mühürleme zincirini oluşturan üç değişken.
 //
-// UCU BIRDEN ya da hicbiri. Yarim bir zincir, zinciri olmayan bir yigindan DAHA
-// kotudur: calisiyormus gibi gorunur ve dogrulanamayan belgeler uretir.
+// ÜÇÜ BİRDEN ya da hiçbiri. Yarım bir zincir, zinciri olmayan bir yığından DAHA
+// kötüdür: çalışıyormuş gibi görünür ve doğrulanamayan belgeler üretir.
 var sealingChainVars = []string{
 	"PALBASE_SEALED_SIGNING_SEED",
 	"PALBASE_SEALED_BINDING",
 	"PALBASE_SEALED_ROOT",
 }
 
-// sealingChainState, .env'in uc zincir degiskeninden kacini tasidigini soyler.
+// sealingChainState, .env'in üç zincir değişkeninden kaçını taşıdığını söyler.
 //
-// Dosya yoksa (0, nil): cagiran bunu "yeni yigin" olarak okur, hata olarak degil —
-// ensureBootValues'in normal uretim yolu tam olarak o durumdur.
+// Dosya yoksa (0, nil): çağıran bunu "yeni yığın" olarak okur, hata olarak değil —
+// ensureBootValues'in normal üretim yolu tam olarak o durumdur.
 func sealingChainState(envFile string) (int, error) {
 	body, err := os.ReadFile(envFile)
 	if err != nil {
@@ -871,9 +871,9 @@ func sealingChainState(envFile string) (int, error) {
 
 // migrateSealingChain, mevcut bir .env'in zincir durumunu YARGILAR.
 //
-// Uc sonuc: tam zincir (dokunulmaz), hic zincir yok (mint edilebilir), ya da YARIM —
-// ve yarim, yazilmamasi gereken tek durumdur. Eslesmeyen bir SEED'in yanina ikinci bir
-// BINDING eklemek, cogu .env okuyucusu icin son-deger-kazanir demektir; yani baska bir
+// Üç sonuç: tam zincir (dokunulmaz), hiç zincir yok (mint edilebilir), ya da YARIM —
+// ve yarım, yazılmaması gereken tek durumdur. Eşleşmeyen bir SEED'in yanına ikinci bir
+// BINDING eklemek, çoğu .env okuyucusu için son-değer-kazanır demektir; yani başka bir
 // kilikta uzerine yazma. Operatore soyleyip durmak, sessizce bozmaktan iyidir.
 func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) error {
 	present, err := sealingChainState(envFile)
@@ -893,7 +893,7 @@ func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) err
 //
 // Uretici yiginin kendisi (`--init-env`): burada ikinci bir uygulama yazmak, gecerli bir
 // anahtarin nasil gorundugu konusunda ikinci bir gorus olurdu, ve ikisinin anlasmadigi
-// gun bir yigin hicbir seyin kabul etmedigi bir anahtarla acilir.
+// gün bir yığın hiçbir şeyin kabul etmediği bir anahtarla açılır.
 func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Writer) (bool, error) {
 	if err := migrateSealingChain(ctx, envFile, out); err != nil {
 		return false, err
@@ -966,8 +966,8 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 
 // appendSealingChain, zinciri .env'in SONUNA ekler ve son satiri bozmaz.
 //
-// Ayri bir fonksiyon, cunku bozulma tam olarak BURADA oluyordu ve buna bir test
-// yazmak icin docker'a gitmeyen bir giris noktasi gerekiyor.
+// Ayrı bir fonksiyon, çünkü bozulma tam olarak BURADA oluyordu ve buna bir test
+// yazmak için docker'a gitmeyen bir giriş noktası gerekiyor.
 func appendSealingChain(envFile, chain string) error {
 	existing, err := os.ReadFile(envFile)
 	if err != nil {
@@ -978,9 +978,9 @@ func appendSealingChain(envFile, chain string) error {
 		return err
 	}
 	// KAPANIS HATASI YUTULMAZ. `defer f.Close()` idi ve bu YAZILAN bir dosya:
-	// kisa yazim ya da flush hatasi yalnizca Close()'ta gorunur, o yuzden
+	// kısa yazım ya da flush hatası yalnızca Close()'ta görünür, o yüzden
 	// yutulmasi .env'i SESSIZCE yarim muhurlu birakiyordu — muhurun eksik oldugu
-	// bir yigin, hatasi ancak calisma aninda ortaya cikan bir yigindir.
+	// bir yığın, hatası ancak çalışma anında ortaya çıkan bir yığındır.
 	closed := false
 	closeErr := func() error {
 		if closed {

@@ -95,8 +95,18 @@ func withoutBarman(doc string) (string, bool) {
 	// header is in the repository copy and was missing from the vendored one,
 	// and the parity gate could not see it because both sides pass through
 	// here. This is the symmetry of the walk-back above.
-	for end-1 > origin && (strings.HasPrefix(lines[end-1], "  #") || lines[end-1] == "") {
-		end--
+	//
+	// ONLY WHEN THERE IS A NEXT SERVICE. If barman were the LAST block in the
+	// file, `end` is len(lines) and the trailing "" that a final newline
+	// produces looks exactly like the blank line above a header — the walk would
+	// eat it and the vendored file would lose its final newline. Nothing hits
+	// this today (barman sits between two services), which is precisely why it
+	// is worth pinning: the day somebody moves it, the failure would be a
+	// one-byte diff nobody reads.
+	if end < len(lines) {
+		for end-1 > origin && (strings.HasPrefix(lines[end-1], "  #") || lines[end-1] == "") {
+			end--
+		}
 	}
 	kept := append(append([]string{}, lines[:start]...), lines[end:]...)
 	out := strings.Join(kept, "\n")
@@ -207,20 +217,20 @@ func TestOnlyTheEdgeIsPublished(t *testing.T) {
 	}
 }
 
-// GO SABITLERI ILE COMPOSE VARSAYILANLARI AYNI ETIKETI SOYLEMELI.
+// GO SABİTLERİ İLE COMPOSE VARSAYILANLARI AYNI ETİKETİ SÖYLEMELİ.
 //
-// Etiket IKI yerde yasiyor: stackImages'in fallback'i (bu paket, varlik kontrolu
-// ve `palbase upgrade` icin) ve compose belgesinin ${VAR:-default}'u (gercekte
-// KOSAN sey, cunku bu komut o degiskenleri export etmiyor).
+// Etiket İKİ yerde yaşıyor: stackImages'in fallback'i (bu paket, varlık kontrolü
+// ve `palbase upgrade` için) ve compose belgesinin ${VAR:-default}'u (gerçekte
+// KOŞAN şey, çünkü bu komut o değişkenleri export etmiyor).
 //
-// Olculdu 2026-08-29: yalniz Go sabiti 0.39.0'a tasindi, compose 0.36.1'de kaldi,
-// ve `palbase start` eski imaji kosmaya devam etti. Sonuc, storage semasi 4'e
-// gocmus bir veritabaninda:
+// Ölçüldü 2026-08-29: yalnız Go sabiti 0.39.0'a taşındı, compose 0.36.1'de kaldı,
+// ve `palbase start` eski imajı koşmaya devam etti. Sonuç, storage şeması 4'e
+// göçmüş bir veritabanında:
 //
 //	migrate module "storage": no migration found for version 4
 //
-// Bir sey hakkinda anlasmak zorunda olan iki yer, bir gun anlasmayi birakacak iki
-// yerdir. Bu, onu soyleyen test.
+// Bir şey hakkında anlaşmak zorunda olan iki yer, bir gün anlaşmayı bırakacak iki
+// yerdir. Bu, onu söyleyen test.
 func TestTheGoConstantsAndTheComposeDefaultsAgree(t *testing.T) {
 	doc := string(stackCompose)
 	for _, want := range stackImages {

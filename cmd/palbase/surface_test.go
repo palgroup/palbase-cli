@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -678,6 +679,26 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
 
 	const turkish = "çğıöşüÇĞİÖŞÜ"
+
+	// DIACRITICS ARE ONLY HALF THE ALPHABET, and the half that is easy to see.
+	//
+	// This gate is named "no user-facing string is Turkish", but for its first
+	// version it only ever asked "does this string contain ç, ğ, ı, ö, ş or ü".
+	// Turkish typed without them — "gecersiz deger", "dosya bulunamadi" — sailed
+	// straight through, and the gate would have reported silence while the thing
+	// it exists to prevent sat in the binary. A gate blind to half its subject is
+	// the same failure this whole run is about: it measures something adjacent to
+	// its promise and passes.
+	//
+	// So the ASCII fold is checked too, with WORD BOUNDARIES: "deger" is inside
+	// "ledger" and "icin" is inside "medicine", and a substring search would fail
+	// this gate on English prose. These are the words that actually appear in
+	// Turkish error text and appear nowhere in English as whole words.
+	turkishASCII := regexp.MustCompile(`(?i)\b(gecersiz|bulunamadi|basarisiz|` +
+		`olusturulamadi|yazilamadi|okunamadi|kullanici|sunucu|dosya|deger|degeri|` +
+		`icin|olmali|gerekli|eksik|bilinmeyen|baglanti|yetkisiz|calismiyor|` +
+		`yeniden|guncel|hata|yok|degil)\b`)
+
 	fset := token.NewFileSet()
 	var offenders []string
 
@@ -695,10 +716,17 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 			if !isLit || lit.Kind != token.STRING {
 				return true
 			}
-			if strings.ContainsAny(lit.Value, turkish) {
+			why := ""
+			switch {
+			case strings.ContainsAny(lit.Value, turkish):
+				why = "Turkish letters"
+			case turkishASCII.MatchString(lit.Value):
+				why = "Turkish word, ASCII-folded: " + turkishASCII.FindString(lit.Value)
+			}
+			if why != "" {
 				rel, _ := filepath.Rel(root, path)
-				offenders = append(offenders, fmt.Sprintf("%s:%d %s",
-					rel, fset.Position(lit.Pos()).Line, lit.Value))
+				offenders = append(offenders, fmt.Sprintf("%s:%d (%s) %s",
+					rel, fset.Position(lit.Pos()).Line, why, lit.Value))
 			}
 			return true
 		})

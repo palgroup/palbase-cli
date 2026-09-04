@@ -198,3 +198,22 @@ FR-019 çalışırken görüldü: `backend.REST` arayüzü `PostMultipart`'ı be
 Aynı geçişte `NewIdempotencyKey` de ölü kaldı — **o benim değişikliğimin borcuydu ve ödendi**
 (üretici + testi silindi, ona yönlendiren iki yorum düzeltildi). `PostMultipart` kapsam dışı keşif:
 teklif olarak sunuluyor.
+
+### Kalan üç bulgu da kapandı (M-2 · M-4 · N-3)
+
+**M-4 en değerlisiydi, çünkü kapının ADI vaadinden genişti.** `TestNoUserFacingStringIsTurkish`
+yalnızca `çğıöşüÇĞİÖŞÜ` arıyordu — diakritiksiz yazılmış Türkçe ("dosya bulunamadi", "gecersiz
+deger") kapıdan geçiyor, kapı da sessizlik rapor ediyordu. Bir kapının OKUDUĞU küme ile HAKKINDA
+KONUŞTUĞU küme ayrı sorudur; bu koşunun tezi tam olarak buydu ve kapının kendisi ondan muaf değil.
+ASCII kıvrımı kelime sınırlarıyla eklendi (`deger` "ledger"ın, `icin` "medicine"ın içinde geçtiği
+için alt-dizge araması bu kapıyı İngilizce düzyazıda kırmızıya döndürürdü). **İki yönlü negatif
+kontrol koştu:** `dosya bulunamadi` enjekte → `FAIL … (Turkish word, ASCII-folded: dosya)`;
+`"the ledger says medicine, yokohama and degrade"` enjekte → `ok`. Kapı doğduğu gün yeşil.
+
+**M-2** `withoutBarman`'ın geri yürüyüşü artık yalnız `end < len(lines)` iken koşuyor. Barman dosya
+sonunda olsaydı, son newline'ın ürettiği `""` bir başlık üstü boş satırdan ayırt edilemiyor ve
+yeniyordu. Bugün kimseyi ısırmıyor (barman iki servis arasında) — pinlemeye değmesinin sebebi tam
+da bu: taşındığı gün arıza, kimsenin okumadığı tek baytlık bir diff olurdu.
+
+**N-3** ASCII'ye indirgenmiş Türkçe yorumlar düzeltildi — `start.go`'da 16, `stackfiles_test.go`'da
+9 satır. N-3 tek bir satır sanıyordu; sayınca 25 çıktı.
