@@ -409,7 +409,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - [x] **Adım 2: Arayüzü genişlet** — `internal/backend/backend.go`'daki `REST` arayüzüne `DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error` ekle. Yorumdaki "with its Idempotency-Key" iddiası ilk kez doğru olacak.
 - [x] **Adım 3: `runPush`'u bağla** — `deploy.go:185`'teki `d.rest.Do(...)` çağrısını `d.rest.DoIdempotent(..., key)` yap; `key` invocation başına bir kez `transport.NewIdempotencyKey()` ile üretilsin (yeniden denemede DEĞİŞMESİN — anahtarın bütün anlamı bu).
 - [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'Push' -count=1` · Beklenen: **PASS**; ardından `go build ./... && go vet ./...` temiz.
-- [ ] **Adım 5: Commit** — `fix(push): yükleme artık Idempotency-Key taşıyor — düşen bir istek ikinci deploy değil`
+- [x] **Adım 5: Commit** — `fix(push): yükleme artık Idempotency-Key taşıyor — düşen bir istek ikinci deploy değil`
 
 ---
 
@@ -436,9 +436,9 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - Consumes: `internal/config`'in dağıtılmış bulut adresi `https://api.palbase.studio` (`config.go:49-50`)
 - Produces: dağıtılmış bir adrese düşen e2e varsayılanı
 
-- [ ] **Adım 1: Ölü konağı ölç** — Run: `curl -s -o /dev/null -w '%{http_code}' https://api.dev.palbase.studio/v1/cloud/config` · Beklenen: bağlanamama/DNS hatası (adres hiç dağıtılmadı); karşılaştırma: aynı komut `https://api.palbase.studio` için **200**.
-- [ ] **Adım 2: Varsayılanı düzelt** — `mgmt_api_test.go:47`'deki `https://api.dev.palbase.studio` yerine `internal/config`'in dağıtılmış varsayılanını kullan; dosya başındaki (`:4`, `:15`) ölü konağı anan yorumları da düzelt.
-- [ ] **Adım 3: Derlemeyi doğrula** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: çıktı yok, exit 0.
+- [x] **Adım 1: Ölü konağı ölç** — Run: `curl -s -o /dev/null -w '%{http_code}' https://api.dev.palbase.studio/v1/cloud/config` · Beklenen: bağlanamama/DNS hatası (adres hiç dağıtılmadı); karşılaştırma: aynı komut `https://api.palbase.studio` için **200**.
+- [x] **Adım 2: Varsayılanı düzelt** — `mgmt_api_test.go:47`'deki `https://api.dev.palbase.studio` yerine `internal/config`'in dağıtılmış varsayılanını kullan; dosya başındaki (`:4`, `:15`) ölü konağı anan yorumları da düzelt.
+- [x] **Adım 3: Derlemeyi doğrula** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: çıktı yok, exit 0.
 - [ ] **Adım 4: Commit** — `fix(e2e): varsayılan taban dağıtılmış adrese — api.dev.palbase.studio hiç var olmadı`
 
 ## UAT Checklist

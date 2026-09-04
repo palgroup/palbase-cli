@@ -1,7 +1,7 @@
 //go:build e2e
 
 // Package e2e exercises the Management-API command path end-to-end against a
-// real dev stack (api.dev.palbase.studio behind Kong → Studio /api/v2 → palauth
+// real cloud (api.palbase.studio → Studio /api/v2 → palauth
 // PAT+DPoP verify). It is gated by the `e2e` build tag AND requires live
 // credentials, so it never runs in the unit suite.
 //
@@ -12,7 +12,7 @@
 // Run:
 //
 //	export PALBASE_ACCESS_TOKEN=pat_…          # DPoP-bound PAT (Dashboard-issued)
-//	export PALBASE_PLATFORM_URL=https://api.dev.palbase.studio   # optional
+//	export PALBASE_PLATFORM_URL=https://api.palbase.studio   # optional
 //	export PALBASE_NO_KEYRING=1                # use file-backed key in CI
 //	go test -tags e2e -race ./tests/e2e/...
 //
@@ -44,7 +44,11 @@ func e2eConfig(t *testing.T) (base, pat string, key *auth.DPoPKey) {
 	}
 	base = os.Getenv("PALBASE_PLATFORM_URL")
 	if base == "" {
-		base = "https://api.dev.palbase.studio"
+		// The DEPLOYED cloud. `api.dev.palbase.studio` was the default here and
+		// that address was never deployed — measured 2026-09-04: it does not
+		// connect, while api.palbase.studio answers 200. A default nobody can
+		// reach makes every run of this suite a run against nothing.
+		base = "https://api.palbase.studio"
 	}
 	// No mode argument: `--mode` was retired with the v1 address space, and
 	// LoadDPoPKey now reads the one key this machine holds.
