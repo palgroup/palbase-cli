@@ -42,7 +42,11 @@ func callUserRoles(cmd *cobra.Command, method, path string) (*userRolesBody, err
 	}
 	if status < 200 || status >= 300 {
 		msg := describe(raw)
-		if strings.Contains(msg, "not defined") || strings.Contains(string(raw), "role_not_defined") {
+		// Yönlendirme KODA bakar, cümleye değil. Yanındaki metin eşlemesi
+		// (`strings.Contains(msg, "not defined")`) sunucunun cümlesi değiştiği
+		// gün sessizce düşerdi ve kimse fark etmezdi — kod ise sözleşmenin
+		// parçası.
+		if strings.Contains(string(raw), `"role_not_defined"`) {
 			return nil, fmt.Errorf("%s — define it first with `palbase roles create <name>`", msg)
 		}
 		return nil, fmt.Errorf("%s answered %d: %s", target.Describe(), status, msg)

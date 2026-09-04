@@ -158,17 +158,27 @@ func createCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			n := 0
+			// SAYIM YANITTAN GELİR, VE YANIT ROLÜ TAŞIMIYORSA SUSAR.
+			//
+			// `n := 0` başlangıcı, rolü yanıtta bulamayan bir turu başarılı bir
+			// "0 permission(s)" gibi yazdırıyordu — kullanıcı az önce üç izin
+			// verdiği rol için sıfır görüyordu ve doğru olan hangisiydi
+			// bilemiyordu. Bir sayı basmak, o sayıyı BİLMEYİ gerektirir.
+			n := -1
 			for _, r := range out.Roles {
 				if r.Name == name {
 					n = len(r.Permissions)
 				}
 			}
+			counted := fmt.Sprintf("%d permission(s)", n)
+			if n < 0 {
+				counted = "written"
+			}
 			suffix := ""
 			if isDefault {
 				suffix = " (default — every new sign-up gets it)"
 			}
-			cmd.Printf("✓ %s (%d permission(s))%s\n", name, n, suffix)
+			cmd.Printf("✓ %s (%s)%s\n", name, counted, suffix)
 			return nil
 		},
 	}
