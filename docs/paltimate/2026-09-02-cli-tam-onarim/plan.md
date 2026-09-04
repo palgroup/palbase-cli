@@ -392,7 +392,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - [x] **Adım 3: `start_e2e_test.go` yaz (FR-016)** — İskeleti kurulmuş dizinde `start` koştur; `.palbase/local.json`'daki adrese `GET /.well-known/palbase.json` at ve **200** bekle; sonra `stop` koştur ve `.palbase/local.json`'ın **kalmadığını** assert et. Docker yoksa atla ve atladığını yaz. Test bitiminde `stop` her hâlükârda koşsun (`t.Cleanup`).
 - [x] **Adım 4: Kanıtı gör** — Run: `go test ./internal/backend/ -run TestStartServesAndStopCleansUp -count=1` · Beklenen: **PASS**. **Bu adım T001'in gerçekten işe yaradığının tek kanıtıdır** — geçersiz compose ile `start` hiç ayağa kalkamıyordu.
 - [x] **Adım 5: Tam suiti koştur** — Run: `go build ./... && go test ./... -count=1 -short` · Beklenen: **PASS**, süre ≤ 180 sn
-- [ ] **Adım 6: Commit** — `test(e2e): init→build ve start→stop üretim giriş noktasından kapıya bağlandı`
+- [x] **Adım 6: Commit** — `test(e2e): init→build ve start→stop üretim giriş noktasından kapıya bağlandı`
 
 ---
 
@@ -400,14 +400,14 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 
 **Bu ortamda mevcut doğrulama araçları (etiketleme bu envanterden türetildi):** Bash (derlenmiş binary'yi koşturur), `docker` + `docker compose`, `go`/`golangci-lint`, `npm`, `curl`, `gh` (CI koşumları), dosya sistemi okuma. Bu araçların gözleyebildiği her kalem `[agent]`.
 
-- [ ] **[agent]** Boş dizinde `palbase init` sonra `palbase build` → `build OK` ve **exit 0** · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** İskelet dizinde `palbase start` → yığın ayağa kalkar, `curl <local>/.well-known/palbase.json` **200** · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** Ardından `palbase stop` → konteynerler iner, `.palbase/local.json` **yok** · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** Vendor'lanan compose `docker compose config --services` → **exit 0**, servisleri listeler · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** Linkli bir checkout'ta `palbase flags list` → boş kümede `this stack declares no flags`, dolu kümede **tablo** (ham JSON değil) · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** `palbase notifications remove <yapılandırılmamış-sağlayıcı>` → *"this stack has no … configured"* adlandırılmış hatası (404 değil) · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** `GOTOOLCHAIN=go1.26.6 golangci-lint run` → **`0 issues`** · Evidence: _(koşuda doldurulacak)_
-- [ ] **[agent]** `gh run list --limit 1` → son CI koşumu **yeşil**, dört yeni kapı adımı görünür · Evidence: _(koşuda doldurulacak)_
+- [x] **[agent]** Boş dizinde `palbase init` sonra `palbase build` → `build OK` ve **exit 0** · Evidence: `palbase init && palbase build` (derlenmiş fbc3ca2 binary) → `build OK — 5 route(s)`, **exit 0**
+- [x] **[agent]** İskelet dizinde `palbase start` → yığın ayağa kalkar, `curl <local>/.well-known/palbase.json` **200** · Evidence: `palbase start` → `http://127.0.0.1:64563`; `curl -o /dev/null -w %{http_code} …/.well-known/palbase.json` → **200**
+- [x] **[agent]** Ardından `palbase stop` → konteynerler iner, `.palbase/local.json` **yok** · Evidence: `palbase stop` → `▸ stopped`, `Network palbase-uat_edge Removed`; `.palbase/local.json` **yok**
+- [x] **[agent]** Vendor'lanan compose `docker compose config --services` → **exit 0**, servisleri listeler · Evidence: `docker compose -f <vendored> config --services` → **exit 0**, `postgres palsvc runtime envoy`
+- [x] **[agent]** Linkli bir checkout'ta `palbase flags list` → boş kümede `this stack declares no flags`, dolu kümede **tablo** (ham JSON değil) · Evidence: boş yığın → `this stack declares no flags`; bir flag eklendikten sonra → `flags on this stack: new_dashboard bool = false Roll out` (**tablo**, ham JSON değil)
+- [x] **[agent]** `palbase notifications remove <yapılandırılmamış-sağlayıcı>` → *"this stack has no … configured"* adlandırılmış hatası (404 değil) · Evidence: `palbase notifications remove fcm` → `this stack has no "fcm" provider configured — \`palbase notifications providers\` lists what it has` (404 değil)
+- [x] **[agent]** `GOTOOLCHAIN=go1.26.6 golangci-lint run` → **`0 issues`** · Evidence: `GOTOOLCHAIN=go1.26.6 golangci-lint run` → **`0 issues.`**
+- [x] **[agent]** `gh run list --limit 1` → son CI koşumu **yeşil**, dört yeni kapı adımı görünür · Evidence: run 33861042255 (`6d8686e`) → **success**; adımlar: Formatting ✓ Vet ✓ Vet-e2e ✓ golangci-lint ✓ Run tests ✓
 - [ ] **[user]** (dış depo yayını — geri alınamaz) Android eklentisinin değişikliği `palbackend-android-src`'ye push'lansın mı ve bir sürüm kesilsin mi · Evidence: _(kullanıcı onaylar)_
 
 ## Dependencies
