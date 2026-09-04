@@ -134,3 +134,27 @@ Register'da açık satır yok — beş kaydın beşi de `verified` (ikisi arşiv
 
 `scratchpad/rs-pin-priorart.md`, `rs-pin-risk.md`, `rs-trust.md`, `dossier-plane.md` — W1 (ağdan pin) kapsam dışı olduğu için Artım 1'in hiçbir FR'si bunlara dayanmıyor. Arşivde tutuluyorlar; iş açılırsa `decisions.md` D-006…D-029 ile birlikte hazır.
 `rs-envcheckout.md` ve `rs-supabase.md` → Artım 2 ve 3'ün girdisi.
+
+## Bitiş doğrulaması — CB-12'nin SUNUCU KAYNAĞINDAN teyidi (2026-09-04)
+
+CB-12, modülün iç davranışını okuyamadığı için "açık kalan" işaretliydi ve FR-013 ona
+bağımlı olmayacak şekilde yazılmıştı. Bitiş fazında modül bulundu ve iddia doğrudan ölçüldü.
+
+```
+CB-19 CLAIM: notify modülünün provider listesi ÇIPLAK DİZİ — `flags`'teki zarf kusuru burada TEKRARLAMIYOR.
+      CITE: v2/internal/modules/notify/internal/handler/provider.go:55-64 + "writeJSON(w, http.StatusOK, configs)"
+      RE-GROUNDED AT FREEZE: confirmed (team-lead, bizzat okundu)
+
+CB-20 CLAIM: silme rotası gerçekten KİMLİK alıyor ve kimlikle siliyor.
+      CITE: v2/internal/modules/notify/internal/server/server.go:509 + "r.Delete(\"/{id}\", providerHandler.Delete)" ;
+      internal/handler/provider.go:68 + "id := chi.URLParam(r, \"id\")" ;
+      internal/service/provider.go:125-126 + "func (s *ProviderService) Delete(ctx context.Context, id string) error { return s.repo.Delete(ctx, id) }"
+      RE-GROUNDED AT FREEZE: confirmed
+
+CB-21 CLAIM: liste satırları `id` ve `provider` alanlarını taşıyor — providerConfigID'nin okuduğu tam da bunlar.
+      CITE: v2/internal/modules/notify/internal/model/provider.go:78-81 + "ID string `json:\"id\"`" ve "Provider string `json:\"provider\"`"
+      RE-GROUNDED AT FREEZE: confirmed
+      YAN BULGU: aynı dosyada `AppID` var (`:65`), yani aynı (kanal, sağlayıcı) için BİRDEN FAZLA
+      yapılandırma olabilir. providerConfigID'nin 2+ eşleşmede REDDETMESİ bu yüzden doğru çıktı —
+      birini seçmek, kişinin adlandırmadığı bir göndericiyi silmek olurdu.
+```
