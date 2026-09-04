@@ -212,7 +212,7 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
   - `internal/auth/auth.go:322` → `fmt.Errorf("the identity response was not JSON: %w", err)`
   - `internal/auth/dpop_storage.go:73` → `fmt.Errorf("could not read %s: %w", DPoPKeyEnv, err)`
 - [x] **Adım 4: Yeşili gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **PASS**
-- [ ] **Adım 5: Commit** — `fix(cli): terminale düşen üç Türkçe dize İngilizceye — ve dönüşünü kapı engelliyor`
+- [x] **Adım 5: Commit** — `fix(cli): terminale düşen üç Türkçe dize İngilizceye — ve dönüşünü kapı engelliyor`
 
 ---
 
@@ -223,8 +223,8 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 - Consumes: sunucu şekli `{"flags":[{key,type,value,description}]}` (kanıt: `research.md` CB-10)
 - Produces: zarf çözen `flags list`
 
-- [ ] **Adım 1: Fikstürü GERÇEK sunucu şekline çevir ve kırmızıyı gör** — `internal/flags/flags_test.go:129` civarındaki fikstür bugün çıplak dizi döndürüyor; `{"flags":[…]}` zarfına çevir. Run: `go test ./internal/flags/ -count=1` · Beklenen: **FAIL** — CLI zarfı çözemediği için tablo yerine ham gövde basıyor.
-- [ ] **Adım 2: Zarfı çöz** — `internal/flags/flags.go:223` civarındaki çözümü değiştir:
+- [x] **Adım 1: Fikstürü GERÇEK sunucu şekline çevir ve kırmızıyı gör** — `internal/flags/flags_test.go:129` civarındaki fikstür bugün çıplak dizi döndürüyor; `{"flags":[…]}` zarfına çevir. Run: `go test ./internal/flags/ -count=1` · Beklenen: **FAIL** — CLI zarfı çözemediği için tablo yerine ham gövde basıyor.
+- [x] **Adım 2: Zarfı çöz** — `internal/flags/flags.go:223` civarındaki çözümü değiştir:
 ```go
 			var answer struct {
 				Flags []struct {
@@ -240,8 +240,8 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 			defs := answer.Flags
 ```
   **Ham-gövde fallback'ini KALDIR:** "şekli basmak tahmin etmekten iyidir" gerekçesi burada sessiz bir yanlışa dönüşmüştü — boş listede `{"flags":[]}` basıp `this stack declares no flags` yolunu erişilemez kılıyordu.
-- [ ] **Adım 3: Yeşili gör** — Run: `go test ./internal/flags/ -count=1` · Beklenen: **PASS**; boş küme testinde `this stack declares no flags` çıktısı
-- [ ] **Adım 4: Ölü sembolleri sil** — `flagDef`, `buildFlagDef`, `parseVariants`, `describe` (config/*.ts kalıntısı, `add` çağırmıyor). Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/flags/...` · Beklenen: **`0 issues`**
+- [x] **Adım 3: Yeşili gör** — Run: `go test ./internal/flags/ -count=1` · Beklenen: **PASS**; boş küme testinde `this stack declares no flags` çıktısı
+- [x] **Adım 4: Ölü sembolleri sil** — `flagDef`, `buildFlagDef`, `parseVariants`, `describe` (config/*.ts kalıntısı, `add` çağırmıyor). Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/flags/...` · Beklenen: **`0 issues`**
 - [ ] **Adım 5: Commit** — `fix(flags): list zarfı çözüyor — boş liste yolu artık erişilebilir`
 
 ---

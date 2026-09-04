@@ -126,7 +126,10 @@ func TestAddRefusesADefaultThatIsNotJSON(t *testing.T) {
 // TestListReadsTheStack.
 func TestListReadsTheStack(t *testing.T) {
 	t.Chdir(t.TempDir())
-	rest := &fakeREST{answer: `[{"key":"a","type":"boolean","value":true,"description":"first"}]`}
+	// The SERVER shape, not a convenient one: v2 answers with an envelope
+	// (ListFlags200JSONResponse{Flags: …}). The fixture used to be a bare array,
+	// so the test agreed with the CLI and BOTH were wrong about the stack.
+	rest := &fakeREST{answer: `{"flags":[{"key":"a","type":"boolean","value":true,"description":"first"}]}`}
 
 	out, err := runDefs(t, rest, "list")
 	if err != nil {
@@ -137,5 +140,20 @@ func TestListReadsTheStack(t *testing.T) {
 	}
 	if !strings.Contains(out, "a") || !strings.Contains(out, "first") {
 		t.Fatalf("the stack's answer did not reach the person:\n%s", out)
+	}
+}
+
+// An empty stack must reach the "no flags" path — it was UNREACHABLE while the
+// decode failed, because the failure printed the raw body instead.
+func TestListOnAStackWithNoFlags(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeREST{answer: `{"flags":[]}`}
+
+	out, err := runDefs(t, rest, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(out, "this stack declares no flags") {
+		t.Fatalf("an empty stack must say so, not print its wire shape:\n%s", out)
 	}
 }

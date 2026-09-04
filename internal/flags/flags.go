@@ -19,7 +19,6 @@
 package flags
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,7 +26,6 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -38,11 +36,6 @@ import (
 // CLI accepts is a key PalFlags accepts.
 var flagKeyRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 
-// flagDef is the CLI's in-memory model of one flag — the same normalized shape
-// the SDK's FlagDef serializes. DefaultLiteral is the raw TS literal for the
-// default value (`true` / `42` / `"light"`) so a round-trip through the
-// generated file is lossless; ParsedDefault is the decoded value used for
-// validation + display.
 // REST reaches the linked stack's management surface.
 type REST interface {
 	Do(ctx context.Context, method, path string, body []byte) (int, []byte, error)
@@ -72,14 +65,6 @@ func call(r Resolvers, cmd *cobra.Command, method, path string, body []byte) ([]
 		return nil, fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
 	}
 	return raw, nil
-}
-
-type flagDef struct {
-	Key            string   `json:"key"`
-	Type           string   `json:"type"`    // "boolean" | "number" | "string" | "json"
-	DefaultLiteral string   `json:"default"` // raw TS literal, e.g. `false`, `10`, `"light"`, `{"daily":10}`
-	Variants       []string `json:"variants,omitempty"`
-	Description    string   `json:"description,omitempty"`
 }
 
 // Cmd returns the `palbase flags` parent command.
@@ -220,17 +205,29 @@ func listCmd(r Resolvers) *cobra.Command {
 				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
 				return nil
 			}
-			var defs []struct {
-				Key         string          `json:"key"`
-				Type        string          `json:"type"`
-				Value       json.RawMessage `json:"value"`
-				Description string          `json:"description"`
+			// THE ENVELOPE, because that is what the stack sends:
+			// ListFlags200JSONResponse{Flags: …}. This decoded a BARE ARRAY, so
+			// every answer failed to unmarshal and fell through to "print the raw
+			// body" below — which meant `flags list` printed `{"flags":[]}` at a
+			// person forever, and the "no flags" line under it was unreachable.
+			//
+			// The raw-body fallback is GONE with it. "The stack's shape is the
+			// stack's" reads like humility, but here it turned a decode bug into
+			// a silently wrong answer that no test and no user could distinguish
+			// from a real one. A shape this CLI cannot read is an error.
+			var answer struct {
+				Flags []struct {
+					Key         string          `json:"key"`
+					Type        string          `json:"type"`
+					Value       json.RawMessage `json:"value"`
+					Description string          `json:"description"`
+				} `json:"flags"`
 			}
-			if err := json.Unmarshal(raw, &defs); err != nil {
-				// The stack's shape is the stack's; printing it beats guessing.
-				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
-				return nil
+			if err := json.Unmarshal(raw, &answer); err != nil {
+				return fmt.Errorf("this stack answered something `flags list` cannot read: %s",
+					strings.TrimSpace(string(raw)))
 			}
+			defs := answer.Flags
 			if len(defs) == 0 {
 				fmt.Fprintln(out, "this stack declares no flags")
 				fmt.Fprintln(out, "  add one: palbase flags add <key> --type boolean --default false")
@@ -250,115 +247,4 @@ func listCmd(r Resolvers) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print the stack's answer as JSON")
 	return cmd
-}
-
-// buildFlagDef validates the add-command inputs (mirroring the SDK's flag()
-// rules) and produces a normalized flagDef. The --default string is interpreted
-// per --type: a boolean parses "true"/"false"; a number parses a numeric
-// literal; a string is taken verbatim; json parses a JSON object. variants are
-// only valid for string and the default must be one of them.
-func buildFlagDef(key, typeFlag, defaultFlag, variantsFlag, descFlag string) (flagDef, error) {
-	switch typeFlag {
-	case "boolean", "number", "string", "json":
-	default:
-		return flagDef{}, fmt.Errorf("invalid --type %q — must be boolean, number, string, or json", typeFlag)
-	}
-
-	def := flagDef{Key: key, Type: typeFlag, Description: strings.TrimSpace(descFlag)}
-
-	switch typeFlag {
-	case "boolean":
-		switch strings.ToLower(strings.TrimSpace(defaultFlag)) {
-		case "true":
-			def.DefaultLiteral = "true"
-		case "false":
-			def.DefaultLiteral = "false"
-		default:
-			return flagDef{}, fmt.Errorf("--default for a boolean flag must be true or false (got %q)", defaultFlag)
-		}
-	case "number":
-		// Validate it's a finite numeric literal; re-emit the canonical form.
-		n, err := strconv.ParseFloat(strings.TrimSpace(defaultFlag), 64)
-		if err != nil {
-			return flagDef{}, fmt.Errorf("--default for a number flag must be a number (got %q)", defaultFlag)
-		}
-		def.DefaultLiteral = strconv.FormatFloat(n, 'f', -1, 64)
-	case "string":
-		def.DefaultLiteral = strconv.Quote(defaultFlag)
-	case "json":
-		// A JSON OBJECT, not any JSON: PalFlags' `object` value type decodes to a
-		// map and rejects an array or a scalar, so catch it here rather than at
-		// deploy time. Compacting normalises away whatever whitespace the shell
-		// carried in and re-emits a canonical one-line object literal (valid TS).
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(defaultFlag), &obj); err != nil {
-			return flagDef{}, fmt.Errorf("--default for a json flag must be a JSON object like '{\"daily\":10}' (got %q): %w", defaultFlag, err)
-		}
-		if obj == nil {
-			return flagDef{}, fmt.Errorf("--default for a json flag must be a JSON object, not null (got %q)", defaultFlag)
-		}
-		var buf bytes.Buffer
-		if err := json.Compact(&buf, []byte(defaultFlag)); err != nil {
-			return flagDef{}, fmt.Errorf("--default for a json flag must be valid JSON (got %q): %w", defaultFlag, err)
-		}
-		def.DefaultLiteral = buf.String()
-	}
-
-	// variants are only valid for string flags.
-	if variantsFlag != "" {
-		if typeFlag != "string" {
-			return flagDef{}, fmt.Errorf("--variants is only valid for --type string (got --type %s)", typeFlag)
-		}
-		variants, err := parseVariants(variantsFlag)
-		if err != nil {
-			return flagDef{}, err
-		}
-		def.Variants = variants
-		// default (a string) must be one of the variants.
-		found := false
-		for _, v := range variants {
-			if v == defaultFlag {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return flagDef{}, fmt.Errorf("--default %q is not one of --variants [%s]", defaultFlag, strings.Join(variants, ", "))
-		}
-	}
-
-	return def, nil
-}
-
-// parseVariants splits + validates a comma-separated --variants list. Dedupes
-// while preserving first-seen order; rejects an empty entry or an empty list.
-func parseVariants(raw string) ([]string, error) {
-	seen := map[string]bool{}
-	var out []string
-	for _, part := range strings.Split(raw, ",") {
-		v := strings.TrimSpace(part)
-		if v == "" {
-			return nil, fmt.Errorf("--variants must not contain an empty value")
-		}
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("--variants must list at least one value")
-	}
-	return out, nil
-}
-
-// describe renders a one-line human summary of a flag for list/add output.
-func describe(d flagDef) string {
-	parts := []string{fmt.Sprintf("%s = %s", d.Type, d.DefaultLiteral)}
-	if len(d.Variants) > 0 {
-		parts = append(parts, "variants: "+strings.Join(d.Variants, ", "))
-	}
-	if d.Description != "" {
-		parts = append(parts, strconv.Quote(d.Description))
-	}
-	return strings.Join(parts, ", ")
 }
