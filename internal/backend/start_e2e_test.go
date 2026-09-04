@@ -31,6 +31,11 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 		}
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
+		// THE DAEMON IS PART OF THE TOOLCHAIN. The loop above makes a missing
+		// docker BINARY fatal on CI and then this line let a missing DAEMON pass
+		// — the same absence, one layer down, excused. A runner whose docker
+		// cannot start is a runner where this gate measures nothing.
+		requireToolOnCI(t, "the docker daemon", err)
 		t.Skip("the docker daemon is not running")
 	}
 

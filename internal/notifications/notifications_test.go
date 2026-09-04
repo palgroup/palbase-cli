@@ -392,3 +392,47 @@ func TestProviderAddStaysReachable(t *testing.T) {
 	}
 	assert.True(t, wrote, "notifications add must POST %s — it is the door config/notifications.ts used to be", providersPath)
 }
+
+// TWO CONFIGURATIONS OF THE SAME SENDER IS A LEGAL SHAPE, and the refusal used
+// to be a dead end.
+//
+// `UNIQUE (channel, provider, app_id)` with a nullable app_id lets one stack
+// carry `apns` twice. `remove apns` then refuses — correctly, because picking
+// one would delete a sender nobody named — and the message says "their ids are
+// visible". But the id was not USABLE: the matcher only ever compared
+// `c.Provider`, so passing the id back was refused with the very same words. An
+// escape hatch needs a reachable caller.
+func TestRemoveAcceptsTheConfigIDWhenTheNameIsAmbiguous(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeStack{answer: `[{"id":"cfg_1","channel":"push","provider":"apns"},` +
+		`{"id":"cfg_2","channel":"push","provider":"apns"}]`}
+
+	// The NAME is still refused — two senders, and neither was named.
+	_, err := runWith(t, rest, "remove", "apns")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2")
+
+	// The ID the refusal points at now works.
+	rest2 := &fakeStack{answer: `[{"id":"cfg_1","channel":"push","provider":"apns"},` +
+		`{"id":"cfg_2","channel":"push","provider":"apns"}]`}
+	_, err = runWith(t, rest2, "remove", "cfg_2")
+	require.NoError(t, err, "the id the error told the person to use must be accepted")
+	assert.Equal(t, http.MethodDelete, rest2.last().Method)
+	assert.Equal(t, "/v1/management/notifications/providers/cfg_2", rest2.last().Path)
+}
+
+// AN ANSWER THIS COMMAND CANNOT READ IS NOT AN EMPTY STACK.
+//
+// `providers` decoded into a slice and dropped the error: `if Unmarshal(...) ==
+// nil`. Any answer of another shape — an error envelope, a wrapped list — left
+// `configured` empty and every sender printed as NOT configured. That is the
+// same silent wrong answer FR-012 removed from `flags list`, living in the same
+// file, one function away.
+func TestProvidersRefusesAnAnswerItCannotRead(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rest := &fakeStack{answer: `{"error":"unauthorized"}`}
+
+	out, err := runWith(t, rest, "providers")
+	require.Error(t, err, "an unreadable answer must not be printed as a stack with nothing configured")
+	assert.NotContains(t, out, "●", "nothing may be reported as configured from an answer nobody could read")
+}

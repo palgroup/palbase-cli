@@ -120,6 +120,11 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	var out strings.Builder
 	if err := runInit(ctx, dir, tarball, &out); err != nil {
 		if strings.Contains(err.Error(), "npm is not on PATH") || strings.Contains(err.Error(), "install") {
+			// A FAILED INSTALL IS NOT A MISSING TOOL. This substring net catches
+			// "install" in ANY message, so a registry outage — or a broken
+			// scaffold — read as "npm unavailable" and turned green. On CI that
+			// is the failure FR-010 exists to stop.
+			requireToolOnCI(t, "a working npm install", err)
 			t.Skipf("npm unavailable or the install failed: %v", err)
 		}
 		t.Fatalf("init: %v\n%s", err, out.String())

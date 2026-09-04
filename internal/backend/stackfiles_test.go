@@ -265,6 +265,7 @@ func TestTheGoConstantsAndTheComposeDefaultsAgree(t *testing.T) {
 func composeConfigIsValid(t *testing.T, path string) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
+		requireToolOnCI(t, "docker", err)
 		t.Skip("docker is not on PATH — the compose document was NOT validated")
 	}
 	cmd := exec.Command("docker", "compose", "-f", path, "config", "--services")

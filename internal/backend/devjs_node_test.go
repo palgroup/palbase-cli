@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -83,6 +84,7 @@ func runDevJSSuite(t *testing.T, jsFile string) {
 	}
 	tsDir := ensureParserTS(io.Discard)
 	if tsDir == "" {
+		requireToolOnCI(t, "the pinned typescript parser", errors.New("ensureParserTS returned no directory"))
 		t.Skip("could not provision the pinned typescript parser (no npm / offline) — see tsparser.go ensureParserTS")
 	}
 

@@ -259,3 +259,33 @@ bu kod tabanının aynı sorunu zaten böyle çözdüğü yer var (`transport.DP
 yapınca `TestAppendSealingChainRefusesAFailedClose` DÜŞÜYOR; geri alınca yeşil.** Yorumun abartılı
 gerekçesi de düzeltildi — `os.File` tamponlamaz, "flush hatası yalnızca Close()'ta görünür"
 `bufio.Writer` için doğruydu.
+
+---
+
+## Üçüncü tur inceleme — `reviewer2` + `verifier2` (2026-09-04)
+
+İki denetçi daha rapor verdi. Bir kısmı bu turda ZATEN kapanmıştı (I-1→O-3, M-7→O-2, FR-011);
+kalanların hepsi gerçek çıktı ve kapatıldı.
+
+**I-2 · `providerConfigID`'nin kaçış kapısının çağıranı yoktu.** `UNIQUE (channel, provider,
+app_id)` — `app_id` nullable — aynı sağlayıcı adının iki satırda olmasına izin veriyor. `remove apns`
+o durumda haklı olarak reddediyor ve "id'lerini kullan" diyordu; ama eşleştirici YALNIZ
+`c.Provider`'a bakıyordu, yani id'yi geri vermek AYNI sözlerle reddediliyordu. Kaçış kapısı
+ulaşılabilir bir çağıran ister. Id artık tam eşleşmeyle kısa devre yapıyor, ve hata metni id'leri
+ADLANDIRIYOR ("panelden bak" demek yerine). Mutation: kısa devreyi kaldır → test düşüyor.
+
+**M-4 · Aynı sessiz yanlış cevap, aynı dosyada, bir fonksiyon ötede.** `providers` komutu
+`if json.Unmarshal(raw, &live) == nil` yazıyordu — decode hatası düşünce harita boş kalıyor ve HER
+sağlayıcı "yapılandırılmamış" basılıyordu. FR-012'nin `flags list`'ten kaldırdığı kusurun birebir
+kardeşi. Artık adlandırılmış hata. Mutation: yutmayı geri koy → test düşüyor.
+
+**M-5 + FR-010 artıkları · CI'da sessizce atlayan DÖRT kapı.** Bu koşu `requireToolOnCI`'yi node/npm
+için yazmıştı; denetçiler aynı sınıfın dört yerde daha durduğunu buldu:
+- `start_e2e_test.go` docker BİNARY'sini CI'da zorunlu tutup DAEMON'ı atlıyordu — aynı yokluk, bir
+  kat aşağıda, mazur görülmüş.
+- `stackfiles_test.go` compose kapısı docker yoksa atlıyordu (kapının kendisi ölçmüyor demek).
+- `init_test.go` `strings.Contains(err, "install")` ile HER kurulum hatasını yutuyordu — registry
+  kesintisi de, bozuk şablon da yeşile dönüyordu. FR-010'un durdurmak için var olduğu şey.
+- `devjs_node_test.go` sabitlenmiş TypeScript parser'ı sağlayamazsa atlıyordu.
+Dördü de artık CI'da `t.Fatalf`. **Negatif kontrol iki yönlü:** `CI=1` + PATH'te docker yok → FAIL;
+`CI` boş + docker yok → SKIP.

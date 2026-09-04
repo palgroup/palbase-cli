@@ -142,14 +142,23 @@ func providersCmd(r Resolvers) *cobra.Command {
 				Provider string `json:"provider"`
 				Name     string `json:"name"`
 			}
-			if json.Unmarshal(raw, &live) == nil {
-				for _, p := range live {
-					key := p.Provider
-					if key == "" {
-						key = p.Name
-					}
-					configured[key] = true
+			// AN ANSWER THIS COMMAND CANNOT READ IS NOT AN EMPTY STACK.
+			//
+			// This was `if Unmarshal(...) == nil`, which dropped the error: any
+			// answer of another shape — an error envelope, a wrapped list — left
+			// the map empty and printed every sender as NOT configured. Same
+			// silent wrong answer FR-012 removed from `flags list`, same file,
+			// one function away.
+			if err := json.Unmarshal(raw, &live); err != nil {
+				return fmt.Errorf("this stack answered something `notifications providers` cannot read: %s",
+					strings.TrimSpace(string(raw)))
+			}
+			for _, p := range live {
+				key := p.Provider
+				if key == "" {
+					key = p.Name
 				}
+				configured[key] = true
 			}
 			fmt.Fprintln(out, "notification senders (● configured on this stack):")
 			fmt.Fprintln(out)
@@ -537,9 +546,22 @@ func providerConfigID(r Resolvers, cmd *cobra.Command, name string) (string, err
 	if err := json.Unmarshal(raw, &configured); err != nil {
 		return "", fmt.Errorf("could not read this stack's providers: %w", err)
 	}
+	// AN ID IS AN EXACT ANSWER, and it short-circuits the name search.
+	//
+	// Two configurations of the same sender is a LEGAL shape — `UNIQUE (channel,
+	// provider, app_id)` with a nullable app_id — and the refusal below tells the
+	// person to use the id instead. It used to be a dead end: the matcher only
+	// ever compared `c.Provider`, so handing the id back was refused with the
+	// very same words. A hatch nobody can reach is not a hatch.
+	wanted := strings.TrimSpace(name)
+	for _, c := range configured {
+		if c.ID != "" && c.ID == wanted {
+			return c.ID, nil
+		}
+	}
 	var matches []string
 	for _, c := range configured {
-		if strings.EqualFold(strings.TrimSpace(c.Provider), strings.TrimSpace(name)) && c.ID != "" {
+		if strings.EqualFold(strings.TrimSpace(c.Provider), wanted) && c.ID != "" {
 			matches = append(matches, c.ID)
 		}
 	}
@@ -552,7 +574,7 @@ func providerConfigID(r Resolvers, cmd *cobra.Command, name string) (string, err
 	default:
 		// Picking one would remove a sender the person did not name.
 		return "", fmt.Errorf(
-			"this stack carries %d %q configurations; remove them from the panel, where their ids are visible",
-			len(matches), name)
+			"this stack carries %d %q configurations — name the one to remove by its id (%s)",
+			len(matches), name, strings.Join(matches, ", "))
 	}
 }
