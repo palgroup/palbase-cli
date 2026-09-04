@@ -289,3 +289,35 @@ için yazmıştı; denetçiler aynı sınıfın dört yerde daha durduğunu buld
 - `devjs_node_test.go` sabitlenmiş TypeScript parser'ı sağlayamazsa atlıyordu.
 Dördü de artık CI'da `t.Fatalf`. **Negatif kontrol iki yönlü:** `CI=1` + PATH'te docker yok → FAIL;
 `CI` boş + docker yok → SKIP.
+
+### O-1 KAPANDI — ve Android tarafında bir kapının SİLİNMİŞ olduğu bulundu
+
+**O-1 · sunucu dedup'ı.** `POST /projects/{ref}/push` artık `Idempotency-Key`'i okuyor. Yeni bir
+dedup deposu KURULMADI: `cloud_jobs.idempotency_key` üstündeki UNIQUE kısıt ve `claimJob` bu işi
+filo yuvarlamasında zaten yapıyordu; `claimIdempotent` o deseni üç cevaba ayırıyor — `done` saklanan
+cevabı döner (artefakt bir daha GÖNDERİLMEZ), `running` 409 verir, `failed` devralınıp tekrar
+denenir (düzeltilmiş bir tekrar replay değildir). Sahipsiz `running` kilitlemiyor: filoda canlıda
+ölçülen ders (pod yeniden başlar, satır sonsuza kadar `running` kalır) `heartbeat_at` ile karşılandı.
+Anahtarsız istek reddedilmiyor — yayındaki eski CLI'ları 400'e düşürmek düzeltmeyi kesintiye
+çevirirdi. 6 test + iki mutation; typecheck'te benim dosyalarımda 0 hata (depoda önceden var olan 4
+hata değişmedi, ölçüldü).
+
+**Android I-3 · loopback izni yalnız KONTROLDE kalmıştı.** v1.0.2 `validateConfig`'e loopback'i
+kabul ettirdi; manifest hâlâ sabit `https` + `autoVerify="true"` yazıyordu. Derin bağlantı hiç
+tetiklenmez, ve `autoVerify` loopback bir konaktan assetlinks.json ister — hiçbir şeye bakan App
+Links doğrulaması. **Bir kontrolün taşınması, onu haklı çıkaran artefakt taşınmadıysa düzeltme
+değildir.**
+
+**Android I-4 · izin cihaza hiç ulaşmıyordu.** targetSdk 28'den beri cleartext kapalı, yani "legal"
+ilan edilen yerel yığın çalışma anında `CLEARTEXT communication not permitted` ile ölüyordu.
+network-security-config res olarak üretiliyor — `usesCleartextTraffic` DEĞİL, çünkü o tek bir yerel
+adres için uygulamanın TAMAMINI düz HTTP'ye açardı. Config emülatörün host alias'ını (`10.0.2.2`) da
+taşıyor. AGP kablosu tahmin değil: `Sources.getRes()` 8.10.1 jar'ında `javap` ile doğrulandı.
+
+**Ve asıl bulgu: o depoda CI SİLİNMİŞTİ.** `e09eb71` (2026-08-14) üç workflow'u
+*"pipelines are being rewritten from scratch"* diyerek kaldırmış; yeniden yazım gelmemiş. Son CI
+koşusu 2026-07-15. **v1.0.1 ve v1.0.2 o boşlukta çıktı ve ikisini de ben kestim** — deponun CI'sız
+olduğunu fark etmedim. İlk teşhisim de yanlıştı ("hiç CI yoktu"); `gh api` boş liste döndürüyordu
+ama git geçmişi kapının kasten kaldırıldığını söylüyor — **silinen kapı bilgisini de götürür.**
+CI yazıldı ve kendi negatif kontrolünü taşıyor: Gradle up-to-date bir görev için de `BUILD
+SUCCESSFUL` bastığı için koşan test SAYISI rapordan okunuyor. Doğduğu gün yeşil: `tests executed: 16`.
