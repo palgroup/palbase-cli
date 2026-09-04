@@ -230,3 +230,16 @@ ağacında CI **success** (`33878577580`) ve suite şimdi 0 FAIL. Yani iddia son
 **Ama doğru çıkması onu ölçülmüş yapmaz.** Bu koşunun tamamı "ölçmeden yeşil demek" hakkındaydı ve
 ben aynı hatayı, kapanış commit'inde, kanıtı ekranda dururken yaptım. Ölçüm ve ona dayanan karar
 aynı bloğa konmamalı: blok, çıktı okunmadan sonuna kadar koşar.
+
+### O-3 · AÇIK KALEM — `appendSealingChain`'in Close hata yolunun kendi kırmızısı yok
+
+`reviewer2` (I-1) haklı: FR-018'in "gerçek kusur" düzeltmesi mekanik olarak doğru (`return closeErr()`
+mutlu yolun sonunda, `closed` defteri sağlam) ama **ölçülmüyor** — `start_test.go:693` yalnız mutlu
+yolu sürüyor, ve Close'u yutan bir mutasyon o testi kırmızıya döndürmez.
+
+`os.File.Close()`'un hata döndüğü durumu taşınabilir biçimde tetiklemenin bir yolunu bulamadım
+(`os.File` tamponlamaz; ENOSPC'yi gecikmeli bildiren FS'ler ve ağ bağlı olanlar gerekir). Sahte bir
+test — mutasyonda yakalamayan bir test — bu koşunun tam olarak avladığı şey olurdu, o yüzden
+yazmadım ve **eksikliği kodun içine adıyla yazdım**. İnceleme sırasında yorumun gerekçesinin de
+abartılı olduğu çıktı: "flush hatası yalnızca Close()'ta görünür" `bufio.Writer` için doğru, `os.File`
+için değil. Yorum düzeltildi.

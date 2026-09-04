@@ -927,7 +927,7 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 		return false, err
 	}
 
-	// UCU BIRDEN, tek yazimda: yarim bir ekleme, yukarida reddettigimiz durumu kendi
+	// ÜÇÜ BİRDEN, tek yazımda: yarım bir ekleme, yukarıda reddettiğimiz durumu kendi
 	// elimizle yaratmak olurdu.
 	var chain strings.Builder
 	found := 0
@@ -977,10 +977,19 @@ func appendSealingChain(envFile, chain string) error {
 	if err != nil {
 		return err
 	}
-	// KAPANIS HATASI YUTULMAZ. `defer f.Close()` idi ve bu YAZILAN bir dosya:
-	// kısa yazım ya da flush hatası yalnızca Close()'ta görünür, o yüzden
-	// yutulmasi .env'i SESSIZCE yarim muhurlu birakiyordu — muhurun eksik oldugu
-	// bir yığın, hatası ancak çalışma anında ortaya çıkan bir yığındır.
+	// KAPANIŞ HATASI YUTULMAZ. `defer f.Close()` idi ve bu YAZILAN bir dosya.
+	//
+	// Gerekçenin doğrusu: `os.File` tamponlamaz, yani buradaki `WriteString`
+	// zaten syscall'a iner — ilk yazdığımda "flush hatası ancak Close()'ta
+	// görünür" demiştim, o `bufio.Writer` için doğru, bunun için değil. Close'un
+	// hata döndürmesi yine de gerçek bir olaydır: ENOSPC'yi gecikmeli bildiren
+	// dosya sistemleri ve ağ bağlı olanlar hatayı tam orada verir. Yutulduğunda
+	// .env SESSİZCE yarım mühürlü kalıyordu — mührün eksik olduğu bir yığın,
+	// hatası ancak çalışma anında ortaya çıkan bir yığındır.
+	//
+	// TEST EDİLEBİLİRLİĞİ AÇIK KALEM (deviations O-3): Close()'un hata döndüğü
+	// durumu taşınabilir biçimde tetiklemenin bir yolunu bulamadım, o yüzden bu
+	// yolun kendi kırmızısı yok — bağımsız inceleme bunu haklı olarak yazdı.
 	closed := false
 	closeErr := func() error {
 		if closed {
@@ -994,8 +1003,8 @@ func appendSealingChain(envFile, chain string) error {
 	}
 	defer func() { _ = closeErr() }()
 
-	// Dosya newline ile bitmiyorsa, eklenen ilk satir onceki satirin DEVAMI olur
-	// ve iki degisken birden yok olur.
+	// Dosya newline ile bitmiyorsa, eklenen ilk satır önceki satırın DEVAMI olur
+	// ve iki değişken birden yok olur.
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
 		if _, err := f.WriteString("\n"); err != nil {
 			return err
