@@ -457,14 +457,17 @@ func ensureBootValues(ctx context.Context, envFile string, out io.Writer) (bool,
 	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
 		palsvc = override
 	}
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+	runArgs := append([]string{"run", "--rm"}, dockerRunAsHostUser()...)
+	runArgs = append(runArgs,
 		"-v", dir+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
 		"--init-env", filepath.Base(envFile))
+	cmd := exec.CommandContext(ctx, "docker", runArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("generate the stack's keys: %w\n%s", err, output)
 	}
-	// The generator writes as root inside the container; the operator has to be
-	// able to read their own secrets afterwards.
+	// The generator now writes as the host user (dockerRunAsHostUser), so this
+	// is a narrowing rather than a rescue: the file must be readable by its
+	// owner and by nobody else.
 	if err := os.Chmod(envFile, 0o600); err != nil {
 		return false, err
 	}
@@ -911,9 +914,11 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
 		palsvc = override
 	}
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+	mintArgs := append([]string{"run", "--rm"}, dockerRunAsHostUser()...)
+	mintArgs = append(mintArgs,
 		"-v", tmp+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
 		"--init-env", ".env")
+	cmd := exec.CommandContext(ctx, "docker", mintArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("mint this stack's sealing chain: %w\n%s", err, output)
 	}
@@ -1000,4 +1005,25 @@ func appendSealingChain(envFile, chain string) error {
 		return err
 	}
 	return closeErr()
+}
+
+// dockerRunAsHostUser answers the `--user` arguments that make a container
+// write as the person who owns the directory it is writing into.
+//
+// Without it the generator runs as the container's root, and on a daemon with
+// user-namespace remapping — GitHub's runners, rootless Docker — that root maps
+// to an unprivileged host uid which cannot write into a 0700 directory owned by
+// somebody else. Measured: the stack's key minting died with
+// `write .env: open .env: permission denied` (CI run 33859855884) while the
+// same command worked on a developer's machine.
+//
+// Loosening the directory instead would be the wrong repair: it holds the
+// stack's service-role key, and 0700 is why the rest of the machine cannot read
+// it.
+func dockerRunAsHostUser() []string {
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid < 0 || gid < 0 {
+		return nil // not a POSIX host; leave docker's default alone
+	}
+	return []string{"--user", strconv.Itoa(uid) + ":" + strconv.Itoa(gid)}
 }

@@ -22,20 +22,6 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings a real stack up — excluded from -short")
 	}
-	// OPT-IN, and the reason is MEASURED rather than assumed.
-	//
-	// This brings four containers up on a bind-mounted state directory. On a
-	// GitHub runner the container's user cannot write into it — the stack's key
-	// minting dies with `write .env: open .env: permission denied` (run
-	// 33859855884). That is a UID-mapping property of the runner, not a defect
-	// in `palbase start`, which is proven here on any machine that can run it.
-	//
-	// The assertions are UNCHANGED: what is scoped is where they run, not what
-	// they demand. Set PALBASE_E2E_STACK=1 to run it — the deviation ledger
-	// carries the work that would let CI run it too.
-	if os.Getenv("PALBASE_E2E_STACK") == "" {
-		t.Skip("set PALBASE_E2E_STACK=1 — this test brings a real stack up")
-	}
 	for _, tool := range []string{"npm", "docker"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			if os.Getenv("CI") != "" {
