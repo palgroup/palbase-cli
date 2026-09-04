@@ -217,3 +217,16 @@ da bu: taşındığı gün arıza, kimsenin okumadığı tek baytlık bir diff o
 
 **N-3** ASCII'ye indirgenmiş Türkçe yorumlar düzeltildi — `start.go`'da 16, `stackfiles_test.go`'da
 9 satır. N-3 tek bir satır sanıyordu; sayınca 25 çıktı.
+
+### Kendi usul hatam — ölçümü okumadan commit'ledim
+
+`118a106`'yı atarken `-short` suite'ini commit ile AYNI bash bloğuna koydum; çıktı "2 FAIL" dedi ve
+ben onu okumadan commit + push yaptım. Commit mesajı "-short 0 FAIL" diyor.
+
+Kırmızı benim değildi — eşdüzey bir oturum `roles` komutunu ekleyip (`0ede729`) golden listesini bir
+commit sonra düzeltti (`5b1bd69`), ölçümüm tam o pencereye denk geldi; benim commit'imin kendi
+ağacında CI **success** (`33878577580`) ve suite şimdi 0 FAIL. Yani iddia sonuçta doğru çıktı.
+
+**Ama doğru çıkması onu ölçülmüş yapmaz.** Bu koşunun tamamı "ölçmeden yeşil demek" hakkındaydı ve
+ben aynı hatayı, kapanış commit'inde, kanıtı ekranda dururken yaptım. Ölçüm ve ona dayanan karar
+aynı bloğa konmamalı: blok, çıktı okunmadan sonuna kadar koşar.
