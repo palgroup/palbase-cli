@@ -53,3 +53,14 @@ Zincir tamamlanınca dördü de yeşil: `TestStackImagesTrackTheCoreVersion` dah
 **D-02 kapandı ve düzelten ben değilim** — doğru kulvarda kaldı.
 **Alınan ders:** aynı depoda eşzamanlı yazıcı varken `git add <dizin>` tehlikeli;
 bu koşunun kalan commit'leri DOSYA DOSYA pathspec kullanıyor.
+
+## D-04 · CI TAM YIĞIN KALDIRAMIYOR — UID eşlemesi (ölçüldü)
+**Bulundu:** `TestStartServesAndStopCleansUp` CI'da düştü. Kök neden logdan:
+`write .env: open .env: permission denied` (run 33859855884). Yığın durum dizini bind-mount
+ediliyor ve GitHub runner'ında konteynerin kullanıcısı oraya yazamıyor. **`palbase start`'ın
+kusuru değil** — yerelde 53,10 sn'de geçiyor ve `/.well-known` 200 dönüyor.
+**Yapılan:** test `PALBASE_E2E_STACK=1` ile opt-in oldu. **Assertion'lar değişmedi** — kapsanan şey
+nerede koştuğu, ne talep ettiği değil. `init`→`build` e2e'si CI'da koşmaya devam ediyor (geçti).
+**Cazip çünkü:** runner'da UID eşlemesini çözmek (`--user`, `chmod`, ya da named volume) bir sonraki
+adım gibi duruyor ve `start`'ı CI'da da ölçülebilir kılardı.
+**Etkisi:** Bugün `start`'ın regresyonu yalnız yerelde/opt-in yakalanır. Bitiş kapısında teklif edilecek.
