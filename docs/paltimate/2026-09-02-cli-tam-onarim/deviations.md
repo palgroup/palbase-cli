@@ -80,3 +80,42 @@ adım gibi duruyor ve `start`'ı CI'da da ölçülebilir kılardı.
   Opt-in bayrağı kaldırıldı; CI run 33867907256 `Run tests` **yeşil**.
 
 **Açık kalem kalmadı.** D-02 (çekirdek sürüm sürüklenmesi) başka bir oturum tarafından çözüldü.
+
+---
+
+## Bağımsız inceleme — düzeltme dalgası (2026-09-04)
+
+Taze bir gözden geçirici `a2fa8a9..HEAD`'i denetledi: 1 CRITICAL, 3 IMPORTANT, 6 MINOR, 3 NIT.
+
+**C-1 — ZATEN KAPALIYDI, ama TEŞHİSİM YANLIŞTI.** Gözden geçirici `--user` düzeltmesini önerdi;
+T014'te tam olarak o yapılmıştı (kapsamları dışındaydı). **Ama gerekçem yanlıştı:** D-04'te
+"`palbase start`'ın kusuru değil, runner özelliği" yazmıştım. Doğrusu: palsvc imajı
+`USER nonroot:nonroot` ile koşuyor (`v2/Dockerfile:101`) ve bind-mount UID'i eşlemeyen
+**her Linux konağında** aynı şekilde düşerdi. macOS'ta geçmesinin sebebi Docker Desktop'ın
+sahipliği eşlemesi. Yani kırmızı olan şey ortam değil **borçtu** — koşunun kendi tezi.
+
+**Düzeltilenler (hepsi ölçümle):**
+- **I-1** `flags list`: struct'a çözüm, `flags` anahtarı OLMAYAN her gövdeyi (`{"error":"unauthorized"}`,
+  `null`) temiz çözüp *"this stack declares no flags"* bastırıyordu — kaldırdığımı iddia ettiğim
+  sessiz yanlış cevap, başka kapıdan. `*[]…` işaretçisiyle "anahtar yok" ile "boş" ayrıldı; boş gövde
+  ayrıca adlandırıldı. Regresyon testi eklendi.
+- **I-2** `TestListReadsTheStack` kusur geri konunca GEÇİYORDU (`Contains(out,"a")` ham JSON'da da doğru).
+  Commit mesajım bu zayıflığı adlandırıp düzeltmemişti. Artık tablo başlığını ve `boolean = true`
+  satırını arıyor, ham şekli reddediyor. **Mutation: kusur geri konunca artık ÜÇ test birden düşüyor.**
+- **I-3** Android: ortam-başına sözleşme Gradle girdisi olarak beyan edilmiyordu → `palbase push`
+  sonrası task UP-TO-DATE sayılıp bayat istemci bırakıyordu. `openApiDir`/`openApiDirFiles` eklendi.
+- **M-1** `withoutBarman` bir SONRAKİ servisin yorum başlığını da yiyordu; `# ── palsvc ──` orijinalde
+  var, vendor'lanan kopyada yoktu ve parite kapısı göremiyordu (iki taraf da aynı fonksiyondan geçiyor).
+  Geri yürüyüşün simetriği eklendi, dosya yeniden üretildi.
+- **M-3** `release.yml` dört kapının hiçbirini koşmuyordu ve `ci.yml`'de `cancel-in-progress: true` var —
+  CI koşusu iptal edilmiş bir commit tag'lenirse kapıları hiç görmeden yayına çıkardı. **Bu koşuda
+  gerçekten bir run iptal oldu (33858199035).** Dört kapı release.yml'e de kondu.
+- **M-6 (güvenlik)** Android loopback izni prefix kontrolüydü: `http://localhost.evil.com` kabul
+  ediliyor ve publishable key'i düz HTTP ile uzak konağa taşıyan istemci üretiliyordu. Host parse
+  edilip tam eşleştiriliyor. Kırmızı testi eklendi. → **Android v1.0.2 kesildi.**
+- **M-5** FR-014'ün metni yükümlülüğü CLI'a veriyordu, D-4 kararı ise tüketiciye. Metin hizalandı,
+  Impact Map'ten iki değişmemiş satır çıkarıldı (Changelog A-7).
+
+**Kabul edilen, düzeltilmeyen:** M-2 (barman dosya sonundaysa son newline düşer — bugün ısırmıyor),
+M-4 (Türkçe kapısı ASCII'ye indirgenmiş Türkçeyi görmüyor; bugün ihlal yok, kapı dürüst yeşil ama
+adının vaat ettiğinden dar), N-2/N-3 (yorum nitleri; N-2 zaten düzeltilmişti).

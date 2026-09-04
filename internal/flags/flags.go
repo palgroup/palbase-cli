@@ -215,19 +215,32 @@ func listCmd(r Resolvers) *cobra.Command {
 			// stack's" reads like humility, but here it turned a decode bug into
 			// a silently wrong answer that no test and no user could distinguish
 			// from a real one. A shape this CLI cannot read is an error.
+			// A POINTER, so "no `flags` key at all" is distinguishable from "the
+			// key is there and empty". Decoding into a plain slice made every
+			// JSON object without that key — `{"error":"unauthorized"}`, `null`,
+			// a shape from some other route — unmarshal CLEANLY into len 0 and
+			// print "this stack declares no flags". That is the same silent wrong
+			// answer the raw-body fallback used to give, arriving through a
+			// different door.
 			var answer struct {
-				Flags []struct {
+				Flags *[]struct {
 					Key         string          `json:"key"`
 					Type        string          `json:"type"`
 					Value       json.RawMessage `json:"value"`
 					Description string          `json:"description"`
 				} `json:"flags"`
 			}
-			if err := json.Unmarshal(raw, &answer); err != nil {
-				return fmt.Errorf("this stack answered something `flags list` cannot read: %s",
-					strings.TrimSpace(string(raw)))
+			body := strings.TrimSpace(string(raw))
+			if body == "" {
+				return fmt.Errorf("this stack answered `flags list` with an empty body")
 			}
-			defs := answer.Flags
+			if err := json.Unmarshal(raw, &answer); err != nil {
+				return fmt.Errorf("this stack answered something `flags list` cannot read: %s", body)
+			}
+			if answer.Flags == nil {
+				return fmt.Errorf("this stack's answer carries no `flags`: %s", body)
+			}
+			defs := *answer.Flags
 			if len(defs) == 0 {
 				fmt.Fprintln(out, "this stack declares no flags")
 				fmt.Fprintln(out, "  add one: palbase flags add <key> --type boolean --default false")

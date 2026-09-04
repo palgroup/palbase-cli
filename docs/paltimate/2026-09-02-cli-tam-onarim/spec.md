@@ -29,7 +29,8 @@ Bu artımın hedefi: **kapılar gerçek araçla ölçsün, ve beş P0 kapansın.
 
 - **FR-012** WHEN `palbase flags list` bir yığından yanıt alırsa THEN sistem SHALL `{"flags":[…]}` zarfını çözsün ve insan tablosunu bassın; boş kümede *"this stack declares no flags"* yolu erişilebilir olsun.
 - **FR-013** WHEN `palbase notifications remove <provider>` koşarsa THEN sistem SHALL sağlayıcı adını önce yapılandırma kimliğine çözsün ve silmeyi o kimlikle istesin; ad hiçbir yapılandırmayla eşleşmezse adlandırılmış bir hata versin.
-- **FR-014** WHEN bir checkout android platformu için bağlanırsa THEN CLI SHALL Gradle eklentisinin okuduğu artefaktları yazsın: eklentinin beklediği yoldaki sözleşme dosyası ve `app_id`/`base_url`/`api_key` alanlarını taşıyan yapılandırma; ve yerel yığın adresleri için `https` şartı SHALL kaldırılsın.
+- **FR-014** WHEN bir checkout android platformu için bağlanırsa THEN Gradle eklentisi SHALL CLI'ın YAZDIĞI artefaktları okuyabilsin: çok-ortam yapılandırma (`default_environment` + `environments{…}`) ve ortam başına sözleşme (`.palbase/openapi/<env>.json`); ve loopback adresleri için `https` şartı SHALL kalksın.
+  > **Yükümlülük yönü düzeltildi (Changelog A-7).** İlk metin "CLI SHALL yazsın" diyordu, ama D-4 kararı tam tersini söylüyor: **uyum sağlayan taraf TÜKETİCİDİR** — CLI dört platforma tek şekil yazar. Düzeltmenin tamamı eklentiye indi ve `cloud_environments.go`/`app_environments.go` bu artımda hiç değişmedi; metin bunu yansıtacak şekilde hizalandı.
 - **FR-015** WHEN yayımlanmış `@palbase/backend`'in en yeni kararlı sürümüyle boş bir dizinde `palbase init` koşulup ardından `palbase build` çalıştırılırsa THEN `build` SHALL sıfır çıkış koduyla bitsin.
   > **Durum (2026-09-04 ölçümü): ZATEN SAĞLANIYOR.** P0-2, 27.1.0'ın yayımlanmasıyla kapandı — `init` → `build` yayındaki 0.53.0 ile exit 0 (kanıt: `research.md` CB-18a). FR düşürülmüyor, **karakteri değişiyor**: düzeltme değil **regresyon kapısı**. `scaffold_e2e_test.go` bu yüzden hâlâ gerekli — bu yol daha önce yayında sessizce kırıldı ve onu yakalayan bir kapı yoktu.
 - **FR-016** WHEN `palbase init` ile iskeleti kurulmuş bir projede `palbase start` koşulursa THEN yığın SHALL ayağa kalksın ve `/.well-known/palbase.json` 200 dönsün; ardından `palbase stop` yığını kapatsın ve `.palbase/local.json` kalmasın. *(Üretim giriş noktasından uçtan uca kanıt.)*
@@ -120,8 +121,6 @@ Yollar `sdk/cli/` köküne görelidir; çapraz-depo satırı ayrıca işaretlenm
 | `internal/flags/flags_test.go` | modify | fikstür gerçek sunucu zarfına | FR-012 |
 | `internal/notifications/notifications.go` | modify | ad→kimlik çözümü (C-4) | FR-013 |
 | `internal/notifications/notifications_test.go` | modify | fikstür zarf + kimlik | FR-013 |
-| `internal/backend/cloud_environments.go` | modify | android yolunda eklentinin okuduğu sözleşme dosyası korunur | FR-014 |
-| `internal/backend/app_environments.go` | modify | android yuvası eklentinin okuduğu alanları taşır | FR-014 |
 | `internal/backend/init.go` | modify | bayat `latest` yorumu düzeltilir | FR-017 |
 | `internal/backend/start.go` | modify | .env mühür yazımında Close() hatası kontrol edilir (E-3) + staticcheck | FR-018 |
 | `internal/backend/pull_spec.go` | modify | 5 ölü sembol silinir | FR-018 |
@@ -177,3 +176,5 @@ Bkz. `./research.md` — 17 kod-tabanı iddiası (`file:line` + alıntı, donma 
 - **A-5 · 2026-09-04 · Impact Map +1 (`internal/backend/init_test.go`).** T010 uygulanırken FR-010'un sınıfının ikinci örneği bulundu: `packLocalSDK` `npm pack` başarısızlığını KOŞULSUZ atlamaya çeviriyor (CI dahil). FR-010 bunu zaten talep ediyor; dosya Impact Map'te değildi.
 
 - **A-6 · 2026-09-04 · FR-019/020/021 eklendi.** Bitiş kapısında kullanıcı üç defter keşfini de aldı: `push`'un hiç göndermediği idempotency (D-03), CI'ın tam yığın kaldıramaması (D-04), ve e2e'nin ölü konağı (D-01). Impact Map +2; kalan dosyalar zaten verilmişti.
+
+- **A-7 · 2026-09-04 · FR-014'ün yükümlülük yönü düzeltildi; Impact Map −2.** Bağımsız inceleme (M-5) izlenebilirlik kusuru buldu: FR metni CLI'ı yükümlü tutuyordu ama D-4 kararı tüketiciyi yükümlü kılıyor ve düzeltme tümüyle eklentiye indi. İki CLI satırı Impact Map'ten çıkarıldı — bu artımda değişmediler.

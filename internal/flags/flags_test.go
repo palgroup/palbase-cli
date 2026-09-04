@@ -138,8 +138,17 @@ func TestListReadsTheStack(t *testing.T) {
 	if rest.method != http.MethodGet || rest.path != "/v1/management/flags" {
 		t.Fatalf("called %s %s", rest.method, rest.path)
 	}
-	if !strings.Contains(out, "a") || !strings.Contains(out, "first") {
-		t.Fatalf("the stack's answer did not reach the person:\n%s", out)
+	// The HUMAN TABLE, not "the bytes appeared somewhere". `Contains(out,"a")`
+	// passed against a raw JSON dump too, which is why the decode defect
+	// survived this test: the assertion agreed with both the fix and the bug.
+	if !strings.Contains(out, "flags on this stack:") {
+		t.Fatalf("the table header is missing — the answer was not rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "boolean = true") {
+		t.Fatalf("the flag's type and value were not rendered:\n%s", out)
+	}
+	if strings.Contains(out, `"flags"`) {
+		t.Fatalf("the wire shape reached the person instead of a table:\n%s", out)
 	}
 }
 
@@ -155,5 +164,29 @@ func TestListOnAStackWithNoFlags(t *testing.T) {
 	}
 	if !strings.Contains(out, "this stack declares no flags") {
 		t.Fatalf("an empty stack must say so, not print its wire shape:\n%s", out)
+	}
+}
+
+// A 200 whose body is not the flags envelope must be REFUSED, not read as an
+// empty stack. Decoding into a plain slice made `{"error":"unauthorized"}`
+// unmarshal cleanly into len 0 and print "this stack declares no flags" — the
+// silent wrong answer, back through a different door.
+func TestListRefusesAnAnswerThatIsNotTheFlagsEnvelope(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"unauthorized"}`,
+		`null`,
+		`{"items":[{"key":"a"}]}`,
+		``,
+	} {
+		t.Run(body, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			out, err := runDefs(t, &fakeREST{answer: body}, "list")
+			if err == nil {
+				t.Fatalf("body %q was accepted; output was:\n%s", body, out)
+			}
+			if strings.Contains(out, "declares no flags") {
+				t.Fatalf("body %q was read as an empty stack:\n%s", body, out)
+			}
+		})
 	}
 }

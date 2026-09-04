@@ -89,6 +89,15 @@ func withoutBarman(doc string) (string, bool) {
 			break
 		}
 	}
+	// GIVE THE NEXT SERVICE ITS HEADER BACK. The walk stops at the next
+	// top-level key, but the comment block introducing THAT service sits above
+	// it — so cutting to `end` also removed `# ── palsvc ──`, measured: the
+	// header is in the repository copy and was missing from the vendored one,
+	// and the parity gate could not see it because both sides pass through
+	// here. This is the symmetry of the walk-back above.
+	for end-1 > origin && (strings.HasPrefix(lines[end-1], "  #") || lines[end-1] == "") {
+		end--
+	}
 	kept := append(append([]string{}, lines[:start]...), lines[end:]...)
 	out := strings.Join(kept, "\n")
 	for _, line := range []string{

@@ -295,7 +295,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 ---
 
 ### T008: Android artefaktlarını eklentinin okuduğu şekle getir
-<!-- deps: [] | files: [internal/backend/cloud_environments.go, internal/backend/app_environments.go, ../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt, ../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt] | satisfies: [FR-014] -->
+<!-- deps: [] | files: [../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt, ../palbackend-android-src/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt] | satisfies: [FR-014] -->
 
 **Interfaces:**
 - Consumes: CLI'ın yazdığı çok-ortam belge `{default_environment, environments{<ad>:{app_id,base_url,api_key}}}` (kanıt: CB-15)
