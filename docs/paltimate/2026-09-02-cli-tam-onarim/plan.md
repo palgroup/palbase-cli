@@ -206,8 +206,8 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 	}
 }
 ```
-- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **FAIL**, üç ihlali adıyla listeler
-- [x] **Adım 3: Üç dizeyi çevir** —
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./cmd/palbase/ -run TestNoUserFacingStringIsTurkish -count=1` · Beklenen: **FAIL**, altı ihlali adıyla listeler (Changelog A-4: sayı üçten altıya çıktı — satır-bazlı ilk taramam `fmt.Errorf(` SONRAKİ satırdaki dizeleri görmüyordu)
+- [x] **Adım 3: Altı dizeyi çevir** —
   - `internal/transport/rest.go:313` → `fmt.Errorf("could not produce a DPoP proof: %w", perr)`
   - `internal/auth/auth.go:322` → `fmt.Errorf("the identity response was not JSON: %w", err)`
   - `internal/auth/dpop_storage.go:73` → `fmt.Errorf("could not read %s: %w", DPoPKeyEnv, err)`

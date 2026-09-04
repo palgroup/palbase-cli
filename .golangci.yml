@@ -14,8 +14,8 @@ linters:
       # A CLI's job is printing. A failed write to the command's output writer
       # means EPIPE (`palbase logs | head`) or a full disk — neither is
       # actionable inside the command, and threading ~370 error checks through
-      # the user-facing output would bury the errors that DO matter. This is
-      # finding, including every temp-dir cleanup.
+      # the user-facing output would bury the errors that DO matter. This exclusion
+      # covers every such finding, including every temp-dir cleanup.
       #
       # (io.ReadCloser).Close is the second and last exclusion: closing a
       # read side — an HTTP response body, a file opened for reading — can

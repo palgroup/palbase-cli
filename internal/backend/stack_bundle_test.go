@@ -409,14 +409,14 @@ export function __getRuntime() {}
 	}
 }
 
-// TestTheJobManifestIsWrittenFromTheBundle — the half palsvc actually schedules
-// from.
+// The entry has to carry the project's CHANNELS.
 //
-// The bundle carries the CODE; this file carries the fact Go cannot compute
-// without executing TypeScript: when each job is due. `palbase push` wrote
-// neither, so a tenant with four @Job classes had zero rows in
-// `jobs.job_definitions` and the scheduler had nothing to fire (measured
-// 2026-08-26, tenant `1jhp7jbrm`).
+// (The comment that used to stand here described the job manifest and opened
+// with the name of a test — `TestTheJobManifestIsWrittenFromTheBundle` — that no
+// longer exists: it went with the `bundleWithDefinitions` helper. A heading left
+// over a different test is worse than no heading, because it is read as this
+// one's. The job-manifest story is not lost; it lives above
+// TestTheJobManifestIsWrittenFromWhatTheContainerHolds, with its measurement.)
 func TestTheEntryShipsTheProjectsChannels(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "channels.ts"),

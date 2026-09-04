@@ -702,6 +702,7 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 
 	fset := token.NewFileSet()
 	var offenders []string
+	var unreadable []string
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") ||
@@ -710,11 +711,21 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 		}
 		parsed, perr := parser.ParseFile(fset, path, nil, 0) // no comments
 		if perr != nil {
+			// A FILE THIS GATE CANNOT READ IS NOT A FILE WITHOUT VIOLATIONS.
+			// Returning nil quietly shrank the gate's field of view to "every
+			// file that happens to parse", which is not what its name promises.
+			// In practice the compiler fails first — but a gate that reports
+			// silence for what it could not open is the shape this run exists
+			// to remove.
+			unreadable = append(unreadable, fmt.Sprintf("%s: %v", path, perr))
 			return nil
 		}
 		ast.Inspect(parsed, func(n ast.Node) bool {
 			lit, isLit := n.(*ast.BasicLit)
-			if !isLit || lit.Kind != token.STRING {
+			// STRING **and** CHAR: `'ş'` is a Turkish letter in the binary just
+			// as much as "şey" is, and the gate looked at only one of the two
+			// literal kinds that can carry one.
+			if !isLit || (lit.Kind != token.STRING && lit.Kind != token.CHAR) {
 				return true
 			}
 			why := ""
@@ -735,6 +746,10 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
+	}
+	if len(unreadable) > 0 {
+		t.Fatalf("this gate could not read %d file(s), so it cannot speak for them:\n%s",
+			len(unreadable), strings.Join(unreadable, "\n"))
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("user-facing strings must be English (sdk/cli/CLAUDE.md):\n%s",

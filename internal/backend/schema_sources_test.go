@@ -1,8 +1,10 @@
 package backend
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -162,4 +164,49 @@ func TestReadSchemaSourcesSkipsTestsAndTypeDeclarations(t *testing.T) {
 	if strings.Join(names, ",") != "billing,public" {
 		t.Fatalf("schema names = %v, want [billing public]", names)
 	}
+}
+
+// THE WIRE FORMAT IS A CONTRACT, and `wireSource(s)` is a conversion that keeps
+// no record of it.
+//
+// SchemaSourcesBody projects SchemaSource into a local struct with json tags.
+// The conversion is safe in ONE direction: if only one of the two types gains a
+// field, the compiler refuses it. If BOTH gain one — the likely shape, since a
+// new field usually wants to travel — the conversion keeps compiling and the
+// new field goes out on the wire without anybody deciding that it should.
+//
+// So the keys are asserted here rather than inferred from the types.
+func TestTheSchemaWireFormatSendsExactlyTheseKeys(t *testing.T) {
+	raw, err := SchemaSourcesBody([]SchemaSource{{Name: "public", Source: "export const x = 1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := keysOf(decoded); !slices.Equal(got, []string{"sources"}) {
+		t.Errorf("the body's top-level keys are %v, want [sources]", got)
+	}
+	list, ok := decoded["sources"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("sources is not a one-element list: %v", decoded["sources"])
+	}
+	entry, ok := list[0].(map[string]any)
+	if !ok {
+		t.Fatalf("a source is not an object: %v", list[0])
+	}
+	if got := keysOf(entry); !slices.Equal(got, []string{"name", "source"}) {
+		t.Errorf("a source carries %v, want [name source] — a field reached the wire "+
+			"without anybody choosing to send it", got)
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }

@@ -247,9 +247,15 @@ func isDeployArtifact(rel string) bool {
 		// read-only object it had already written. An idempotence bug was
 		// standing in for a data-loss bug.
 		//
-		// On `create` inside an existing repository the same entries produce the
-		// nested .git that `ensureGitRepo` had just printed "no nested .git
-		// created" about.
+		// On `create` inside an existing repository the same entries produce a
+		// NESTED .git — a repository inside a repository, where the outer one
+		// tracks the inner as an opaque gitlink and the developer's own history
+		// quietly stops covering their code.
+		//
+		// (This used to name `ensureGitRepo`, which printed a promise about
+		// exactly that. The function was deleted with its last caller and the
+		// reference outlived it — so the reason it guarded is written out here
+		// instead of pointed at.)
 		//
 		// Deploy version history lives on the server — `palbase deploys` — not in
 		// a .git the platform ships to you.

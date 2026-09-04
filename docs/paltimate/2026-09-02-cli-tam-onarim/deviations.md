@@ -321,3 +321,38 @@ olduğunu fark etmedim. İlk teşhisim de yanlıştı ("hiç CI yoktu"); `gh api
 ama git geçmişi kapının kasten kaldırıldığını söylüyor — **silinen kapı bilgisini de götürür.**
 CI yazıldı ve kendi negatif kontrolünü taşıyor: Gradle up-to-date bir görev için de `BUILD
 SUCCESSFUL` bastığı için koşan test SAYISI rapordan okunuyor. Doğduğu gün yeşil: `tests executed: 16`.
+
+### Son tur — iki MINOR, altı NIT (2026-09-04)
+
+`reviewer2`'nin kesilen raporunun kalanı. Hepsi ölçüldü; biri zaten kapanmıştı.
+
+**M-8 · silinen bilginin iki artığı.** `archive.go`'nun yorumu `ensureGitRepo`'yu adıyla anıyordu —
+sembol `fff88f2`'de son çağıranıyla birlikte silinmiş, atıf hayatta kalmış. Gerekçe artık işaret
+edilmek yerine YAZILI: nested `.git` neden ölümcül (dış depo iç olanı opak bir gitlink olarak izler,
+geliştiricinin geçmişi sessizce kendi kodunu kapsamayı bırakır). İkinci artık daha ince:
+`TestTheJobManifestIsWrittenFromTheBundle` adıyla açılan bir yorum bloğu, o test silindikten sonra
+**başka bir testin başlığı** olarak kalmıştı. Farklı bir testin üstünde duran başlık, başlıksızlıktan
+kötüdür — o testin başlığı diye okunur. Hikâyenin kendisi kaybolmamış:
+`TestTheJobManifestIsWrittenFromWhatTheContainerHolds`'un üstünde ölçümüyle yaşıyor.
+
+**M-9 · Android hatası emekli bir dosyaya yolluyordu.** Eksik-girdi hatası `.palbase/openapi.json`
+diyordu; `palbase link`'in bulut yolu o dosyayı SİLİYOR ve ortam başına sözleşme yazıyor — bu görevin
+okumayı öğrendiği değişikliğin ta kendisi. Artık `.palbase/openapi/<environment>.json`.
+
+**N-1 · Türkçe kapısının iki kör noktası.** ASCII yarısı bu koşuda zaten kapanmıştı (denetçi eski
+ağacı ölçmüş). Kalan gerçekti: kapı yalnız `token.STRING`'e bakıyordu, `'ş'` bir rune literal olarak
+geçiyordu. **Negatif kontrol:** `var _ = 'ş'` → `FAIL … (Turkish letters) 'ş'`.
+
+**N-2 · parse edilemeyen dosya sessizce atlanıyordu.** `if perr != nil { return nil }` kapının görüş
+alanını "parse edilebilen her dosya"ya daraltıyordu — adının vaat ettiği şey bu değil. Artık
+adlandırılmış hata. **Negatif kontrolü tam koşamadım ve bunu saklamıyorum:** bozuk bir `.go` dosyası
+derlemeyi önce kırıyor, yani bu kapı pratikte derleyiciyle örtüşüyor; yorumda da böyle yazıyor.
+
+**N-3** `.golangci.yml`'de düşmüş kelime tamamlandı. **N-4** plan T005 "üç dize" diyordu, A-4 sayıyı
+altıya çıkarmıştı — plan gerçeğe hizalandı. **N-5** bilgi kalemi, aksiyon yok.
+
+**N-6 · `wireSource(s)` tek yönlü güvenliydi.** Dönüşüm, TEK bir tip alan kazanırsa derlemeyi kırar
+(iyi taraf); ama İKİSİ birden kazanırsa — yeni alanlar genelde yolculuk etmek ister — derlenmeye
+devam eder ve alan tele kimse karar vermeden çıkar. Tel formatının anahtarları artık ölçülüyor.
+**Mutation:** `wireSource`'a `Leaked` alanı ekle → `a source carries [leaked name source], want
+[name source] — a field reached the wire without anybody choosing to send it`.
