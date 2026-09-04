@@ -65,11 +65,16 @@ Then:
 // package rather than embedded — and the version had no business being the one
 // thing still baked in.
 //
-// It cannot ask for `latest`. That tag is deliberately held on the v1 line,
-// because v1 projects carry `"@palbase/backend": "latest"` in their own
-// package.json and moving it would jump every one of them a major at their next
-// install. So it asks the question `latest` used to answer: what is the newest
-// version this package has.
+// It asks for the VERSION LIST rather than for `latest`, and that outlives the
+// reason it was first written for.
+//
+// The original reason was that `latest` was pinned to the v1 line while v2
+// shipped under `next` — measured 2026-09-04, that is no longer true: `latest`
+// and `next` both point at the same version. The question survives the reason:
+// where a dist-tag points is the PUBLISHER'S decision and it moves, sometimes
+// backwards, sometimes for a hotfix on an older line. Asking for the list keeps
+// this binary's answer a property of what EXISTS rather than of a label
+// somebody can repoint between two runs of `palbase init`.
 //
 // The version it returns decides only WHICH PACKAGE is fetched. What the new
 // project then declares is the range in that package's own template — so the
