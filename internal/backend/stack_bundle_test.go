@@ -409,88 +409,6 @@ export function __getRuntime() {}
 	}
 }
 
-// TestJobsTravelInTheEntry — the cron half of a deploy, which for a long time
-// did not travel at all.
-//
-// The line this locks used to read `export const jobs = [];`, hardcoded, with
-// nothing anywhere filling it. A project could carry four @Job classes, build
-// clean, deploy green, and never fire one of them. Measured 2026-08-26 on the
-// live tenant `1jhp7jbrm`: `jobs/` held four files, the pushed artifact carried
-// `var jobs = []`, `MacScalerJob` was not in the bundle at all, the runtime
-// printed no `[runtime] jobs:` line across five boots, and `jobs.job_definitions`
-// held ZERO rows while palsvc was running WITH the jobs module mounted. Nothing
-// in that chain reported an error — the scheduler simply had nothing to schedule.
-//
-// The very comment below this line in the generator says the same thing happened
-// to `webhooks` and was fixed; `jobs` was left sitting beside it.
-//
-// SHAPE IS THE CONTRACT: `{ name, job }`, the same pair the palbase repository's
-// bundle-controllers.sh emits, because the runtime's collectJobs() reads
-// `record.job` and resolves it through getJobConfig.
-func bundleWithDefinitions(t *testing.T, files map[string]string) (string, string) {
-	t.Helper()
-	if _, err := exec.LookPath("bun"); err != nil {
-		t.Skip("bun is not installed")
-	}
-	dir := t.TempDir()
-	write := func(rel, body string) {
-		p := filepath.Join(dir, rel)
-		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
-		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
-	}
-
-	write("node_modules/@palbase/backend/package.json",
-		`{"name":"@palbase/backend","version":"99.0.0","type":"module","main":"index.js"}`)
-	write("node_modules/@palbase/backend/index.js", `
-const REG = [];
-const JOB = Symbol.for("palbase.backend.jobMeta");
-const HOOK = Symbol.for("palbase.backend.hookMeta");
-export function Controller() { return (cls) => { REG.push(cls); return cls; }; }
-export function getRegisteredControllers() { return REG; }
-export function Job(o) { return (cls) => { cls[JOB] = o; return cls; }; }
-export function Hook(o) { return (cls) => { cls[HOOK] = o; return cls; }; }
-export function getJobConfig(c) {
-  const m = c[JOB];
-  if (!m) throw new Error("no @Job decorator");
-  return { schedule: m.schedule, timeout: m.timeout ?? 60, retry: m.retry ?? 0 };
-}
-export function getHookConfig(c) {
-  const m = c[HOOK];
-  if (!m) throw new Error("no @Hook decorator");
-  return { blocking: m.blocking ?? {}, listeners: m.listeners ?? {} };
-}
-export function __runWithRuntime() {}
-export function buildModuleClients() { return {}; }
-export const __requestALS = null;
-export function __getRuntime() {}
-`)
-	write("controllers/todo.controller.ts",
-		`import { Controller } from "@palbase/backend";
-@Controller("/todos") export default class TodoController { list() { return []; } }`)
-	for rel, body := range files {
-		write(rel, body)
-	}
-
-	entry := filepath.Join(dir, ".controllers-entry.ts")
-	require.NoError(t, os.WriteFile(entry,
-		[]byte(mustBundleEntry(t, dir, []string{filepath.Join(dir, "controllers", "todo.controller.ts")})), 0o644))
-
-	out := filepath.Join(dir, ".palbase", "esm", "controllers", "controllers.js")
-	require.NoError(t, os.MkdirAll(filepath.Dir(out), 0o755))
-	build := exec.Command("bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out)
-	build.Dir = dir
-	if b, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("bundle failed: %v\n%s", err, b)
-	}
-	return dir, out
-}
-
-func jobSource(schedule string) string {
-	return `import { Job } from "@palbase/backend";
-@Job({ schedule: "` + schedule + `", timeout: 60 })
-export default class J { async run() {} }`
-}
-
 // TestTheJobManifestIsWrittenFromTheBundle — the half palsvc actually schedules
 // from.
 //
@@ -660,16 +578,6 @@ func TestAnUnreadableDeclarationStopsTheBundle(t *testing.T) {
 	if strings.Contains(entry, "export const schemas") {
 		t.Error("a project with no declaration got a schemas export anyway")
 	}
-}
-
-// mustBundleEntry is bundleEntry for the tests that only care about the text.
-func mustBundleEntry(t *testing.T, dir string, sources []string) string {
-	t.Helper()
-	body, err := bundleEntry(dir, sources)
-	if err != nil {
-		t.Fatalf("bundleEntry: %v", err)
-	}
-	return body
 }
 
 // The entry carries MODULES and nothing that names a surface by its file.

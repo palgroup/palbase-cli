@@ -341,23 +341,6 @@ func moduleSources(root string) ([]string, error) {
 	return out, nil
 }
 
-// controllerSources lists a project's controllers in a stable order, so two
-// builds of one tree produce the same bytes.
-func controllerSources(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".controller.ts") {
-			out = append(out, filepath.Join(dir, e.Name()))
-		}
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
 // bundleEntry is the module the bundler starts from.
 //
 // It re-exports the SDK's request-scope hooks and the SDK namespace beside the
@@ -1039,7 +1022,7 @@ func checkSDKVersion(projectDir string) error {
 			"The %d line declares controllers differently, so a bundle built against it carries\n"+
 			"nothing and fails with an error about the bundler rather than about the version.\n\n"+
 			"  npm install @palbase/backend@latest\n\n"+
-			"`latest` is the right thing to write: it resolves to the line the runtime serves.",
+			"`latest` is the right thing to write: it resolves to the line the runtime serves",
 		pkg.Version, minimumSDKMajor, major)
 }
 

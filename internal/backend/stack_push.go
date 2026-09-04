@@ -199,7 +199,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 				"this bundle reaches ABI generation %d, and the stack did not answer when asked what it\n"+
 					"  can serve (%v). Pushing against an unknown ceiling could activate an artifact that\n"+
 					"  boots WITHOUT the machinery that generation needs.\n"+
-					"  The stack's runtime has to be serving before anything can be pushed to it.",
+					"  The stack's runtime has to be serving before anything can be pushed to it",
 				*reaches, ceilErr)
 		}
 	case errors.Is(ceilErr, errNoDeploymentYet):

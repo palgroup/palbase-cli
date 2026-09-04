@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
@@ -75,8 +74,11 @@ func DeploymentsPath(projectID, environmentRef string) string {
 // provider), the mgmt deploy client (palbase provider), the resolved
 // Project/Environment, and the writer success output is reported to.
 //
-// ctx, pollInterval and pollTimeout drive the wait-for-terminal loop; when unset
-// they default (background ctx, 1.5s, 5m) so tests can shrink them.
+// ctx carries cancellation. The poll/idempotency knobs this struct used to
+// declare (pollInterval, pollTimeout, idempotencyKey, uploadRetries) were
+// removed on 2026-09-04: NOTHING read them. They described an upload that
+// retries under one Idempotency-Key, and the upload does neither — see the
+// deviation ledger, the capability is missing rather than configurable.
 type pushDeps struct {
 	git       gitRunner
 	gitBranch gitBranchResolver
@@ -87,21 +89,16 @@ type pushDeps struct {
 	// build and pack are the bundling seam. Production builds this project with
 	// its own node_modules and packs the result; tests substitute both so the
 	// upload contract can be asserted without Bun and a real controller tree.
-	build        func(context.Context, string, io.Writer) ([]uploadUse, *int, error)
-	pack         func(string) ([]byte, error)
-	pollInterval time.Duration
-	pollTimeout  time.Duration
-	// idempotencyKey is the key the tarball upload rides. Empty => minted per
-	// invocation (production); tests pin it to assert the header.
-	idempotencyKey string
-	// uploadRetries bounds the same-key retries of a TIMED-OUT upload. Default 2.
-	uploadRetries int
+	build func(context.Context, string, io.Writer) ([]uploadUse, *int, error)
+	pack  func(string) ([]byte, error)
 }
 
 // runPush routes `palbase push` by the project's repository provider:
 //   - github:  exec `git push` (the webhook deploys into the mapped Environment).
 //   - palbase: tarball the cwd and POST it to the SELECTED Environment's deploy
-//     ingress, carrying an Idempotency-Key.
+//     ingress. NO Idempotency-Key rides today: the transport supports one
+//     (PostMultipart takes it) and this caller passes none, so a timed-out
+//     upload that actually landed is re-sent as a SECOND deploy.
 func runPush(d pushDeps) error {
 	out := d.out
 	if out == nil {

@@ -168,47 +168,6 @@ func (p *projectServer) writesSeen() []string {
 	return append([]string(nil), p.writes...)
 }
 
-// declaring writes an evaluated config with the given secret declarations, the
-// way `palbase build` produces it.
-func declaring(t *testing.T, dir string, required []string, optional []string) {
-	t.Helper()
-	type decl struct {
-		Name     string `json:"name"`
-		Required bool   `json:"required"`
-	}
-	var all []decl
-	for _, name := range required {
-		all = append(all, decl{name, true})
-	}
-	for _, name := range optional {
-		all = append(all, decl{name, false})
-	}
-	body, err := json.Marshal(map[string]any{"secrets": map[string]any{"secrets": all}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".palbase"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".palbase", "config.json"), body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// runningLocalStack points this checkout at a local stack holding `secrets` —
-// the state `palbase start` leaves, and the only source a push has for a value.
-func runningLocalStack(t *testing.T, secrets map[string]string) *projectServer {
-	t.Helper()
-	local := newProjectServer(t, secrets)
-	if err := WriteLocalTarget(Target{URL: local.URL}); err != nil {
-		t.Fatal(err)
-	}
-	if err := StoreCredential(local.URL, Credentials{Value: "local-key", Kind: KindKey}); err != nil {
-		t.Fatal(err)
-	}
-	return local
-}
-
 // TestPlanWritesNOTHING is FR-035. The schema half is computed by the project,
 // which means a POST — so "writes nothing" cannot be checked by looking at the
 // method. It is checked by what the server was asked to CHANGE.

@@ -13,48 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/palgroup/palbase-cli/internal/apps"
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
-
-// pullSpecConfigEntry is the single-ENVIRONMENT config the SDK code generators
-// consume (this CLI runs the SDK's palbase-swiftgen over it to emit
-// Palbase-Info.plist — the SwiftPM plugin that used to do that is gone; the
-// Gradle plugin and @palbase/web read it directly).
-//
-// It carries NO name for the project it points at, and no branch. The API KEY
-// carries the project's identity — `pb_<ref>_<scope><random>` — so a `ref` field
-// beside it would be a copy that has to equal its original, and the SDKs proved
-// what that costs: every one of them read the field and cross-checked it against
-// the key, and on 2026-08-16 `palbase link` wrote "selfhost" while minting a key
-// carrying "project", so the web generator refused to run at all and the iOS
-// realtime client joined a channel nobody published to.
-type pullSpecConfigEntry struct {
-	AppID         string                    `json:"app_id"`
-	Kind          string                    `json:"kind"`
-	BaseURL       string                    `json:"base_url"`
-	APIKey        string                    `json:"api_key"`
-	OAuth         *oauthConfigJSON          `json:"oauth,omitempty"`
-	Integrity     *apps.IntegrityConfig     `json:"integrity,omitempty"`
-	Notifications *apps.NotificationsConfig `json:"notifications,omitempty"`
-}
-
-// oauthConfigJSON mirrors apps.OAuthConfig field-for-field so the emitted JSON's
-// `oauth` block decodes identically to the plist's.
-type oauthConfigJSON struct {
-	Apple  *oauthAppleJSON  `json:"apple,omitempty"`
-	Google *oauthGoogleJSON `json:"google,omitempty"`
-}
-
-type oauthAppleJSON struct {
-	Enabled bool `json:"enabled"`
-}
-
-type oauthGoogleJSON struct {
-	Enabled     bool   `json:"enabled"`
-	ClientID    string `json:"client_id"`
-	RedirectURI string `json:"redirect_uri"`
-}
 
 // nativeArtifactsDir is the committed directory the NATIVE SDK generators read:
 // the per-environment contracts under openapi/ plus one per-platform slot (.palbase/ios, /macos,
@@ -421,60 +381,4 @@ func runPullSpec(
 		fmt.Fprintf(w, "✓ wrote %s\n", path)
 	}
 	return nil
-}
-
-// buildPullSpecConfig fetches the config artifact for the ONE selected
-// Environment — the binding whose environment_ref == environmentRef.
-func buildPullSpecConfig(
-	ctx context.Context,
-	list bindingLister,
-	fetch configArtifactFetch,
-	appID, environmentRef, publicHost string,
-) (*pullSpecConfigEntry, error) {
-	bindings, err := list(ctx, appID)
-	if err != nil {
-		return nil, fmt.Errorf("list app %q bindings: %w", appID, err)
-	}
-	bound := false
-	for i := range bindings {
-		if bindings[i].EnvironmentRef == environmentRef {
-			bound = true
-			break
-		}
-	}
-	if !bound {
-		return nil, fmt.Errorf("app %q is not bound to environment %q — run the platform link command again", appID, environmentRef)
-	}
-	art, err := fetch(ctx, appID, environmentRef)
-	if err != nil {
-		return nil, fmt.Errorf("fetch config artifact for %s: %w", environmentRef, err)
-	}
-	if err := apps.ValidateConfigArtifact(art, appID, environmentRef, publicHost); err != nil {
-		return nil, err
-	}
-	entry := &pullSpecConfigEntry{
-		AppID:         art.AppID,
-		Kind:          art.Kind,
-		BaseURL:       art.BaseURL,
-		APIKey:        art.APIKey,
-		Integrity:     art.Integrity,
-		Notifications: art.Notifications,
-	}
-	if art.OAuth != nil {
-		oc := &oauthConfigJSON{}
-		if art.OAuth.Apple != nil {
-			oc.Apple = &oauthAppleJSON{Enabled: art.OAuth.Apple.Enabled}
-		}
-		if art.OAuth.Google != nil {
-			oc.Google = &oauthGoogleJSON{
-				Enabled:     art.OAuth.Google.Enabled,
-				ClientID:    art.OAuth.Google.ClientID,
-				RedirectURI: art.OAuth.Google.RedirectURI,
-			}
-		}
-		if oc.Apple != nil || oc.Google != nil {
-			entry.OAuth = oc
-		}
-	}
-	return entry, nil
 }

@@ -144,7 +144,7 @@ func buildTarball(dir string, forStack bool) ([]byte, error) {
 		// The ignore check runs for FILES too, and `.palbase` is on that list —
 		// so a stack push has to say, once, that these particular entries are
 		// wanted. Everything else in the tree is judged exactly as before.
-		if (hasIgnoredSegment(rel) && !(forStack && stackWantsPalbase(rel))) ||
+		if (hasIgnoredSegment(rel) && (!forStack || !stackWantsPalbase(rel))) ||
 			matchesAny(filepath.ToSlash(rel), defaultIgnoreFiles) ||
 			matchesAny(filepath.ToSlash(rel), patterns) {
 			return nil

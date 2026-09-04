@@ -110,7 +110,7 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 - [x] **Adım 1: Kırmızıyı gör** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: **FAIL** — `too many arguments in call to auth.LoadDPoPKey / have (string) / want ()`
 - [x] **Adım 2: Çağrıyı güncel imzaya getir** — `tests/e2e/mgmt_api_test.go:53`'teki `auth.LoadDPoPKey(<arg>)` çağrısından argümanı kaldır; argüman emekli `PALBASE_MODE` kablosundan geliyorsa onu taşıyan yerel değişken/kurulum satırlarını da sil (kullanılmayan değişken bırakma).
 - [x] **Adım 3: Yeşili gör** — Run: `go vet -tags e2e ./tests/e2e/` · Beklenen: **çıktı yok, exit 0**
-- [ ] **Adım 4: Commit** — `fix(e2e): LoadDPoPKey çağrısı güncel imzaya — paket yeniden derleniyor`
+- [x] **Adım 4: Commit** — `fix(e2e): LoadDPoPKey çağrısı güncel imzaya — paket yeniden derleniyor`
 
 ---
 
@@ -121,8 +121,8 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 - Consumes: —
 - Produces: `internal/backend` paketinde sıfır golangci-lint bulgusu
 
-- [ ] **Adım 1: Bu paketin borcunu listele** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/backend/... 2>&1 | tail -40` · Beklenen: errcheck 2 (`start.go`), staticcheck 5 (`start.go`, `stack_push.go`, `stack_bundle.go`, `schema_sources.go`, `archive.go`), unused 15 (`pull_spec.go` 5, `deploy.go` 4, `stack_bundle.go` 1, `stack_bundle_test.go` 3, `plan_test.go` 2)
-- [ ] **Adım 2: GERÇEK KUSURU düzelt (E-3) — `.env` mühür yazımı** — `internal/backend/start.go` içinde sealing değerlerini ekleyen `defer f.Close()` kalıbını, hatayı döndüren açık kapanışa çevir:
+- [x] **Adım 1: Bu paketin borcunu listele** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/backend/... 2>&1 | tail -40` · Beklenen: errcheck 2 (`start.go`), staticcheck 5 (`start.go`, `stack_push.go`, `stack_bundle.go`, `schema_sources.go`, `archive.go`), unused 15 (`pull_spec.go` 5, `deploy.go` 4, `stack_bundle.go` 1, `stack_bundle_test.go` 3, `plan_test.go` 2)
+- [x] **Adım 2: GERÇEK KUSURU düzelt (E-3) — `.env` mühür yazımı** — `internal/backend/start.go` içinde sealing değerlerini ekleyen `defer f.Close()` kalıbını, hatayı döndüren açık kapanışa çevir:
 ```go
 	if _, err := f.WriteString(block); err != nil {
 		_ = f.Close()
@@ -133,10 +133,10 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 	}
 ```
   Gerekçe yorumu ekle: kısa yazım sessizce yarım mühürlü bir yığın bırakıyordu.
-- [ ] **Adım 3: İkinci errcheck'i düzelt** — `start.go`'daki `defer os.RemoveAll(...)` çağrısını hatayı kontrol eden bir yardımcıya bağla ya da `//nolint` yerine gerçek kontrol koy (paketin zaten `removeTemp` yardımcısı var — gerekçesi "en kötü ihtimalle OS süpürür"; o gerekçe geçerliyse `removeTemp` kullan).
-- [ ] **Adım 4: staticcheck bulgularını düzelt** — ST1005 (hata metni noktalama/newline ile bitmemeli) `stack_bundle.go`, `stack_push.go`, `start.go`; QF1001/S1016 `archive.go`, `schema_sources.go`. Hata metinlerinin ANLAMINI değiştirme, yalnız biçimini.
-- [ ] **Adım 5: Ölü sembolleri sil** — `pull_spec.go` (5), `deploy.go` (4 kullanılmayan alan), `stack_bundle.go` (1), `stack_bundle_test.go` (3 test yardımcısı), `plan_test.go` (2 test yardımcısı). Silmeden önce her biri için `grep -rn "<ad>" --include="*.go" .` koş ve sıfır çağıran olduğunu doğrula.
-- [ ] **Adım 6: Yeşili gör** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/backend/...` · Beklenen: **`0 issues`**; ardından `go build ./... && go test ./internal/backend/ -count=1 -short` · Beklenen: **PASS**
+- [x] **Adım 3: İkinci errcheck'i düzelt** — `start.go`'daki `defer os.RemoveAll(...)` çağrısını hatayı kontrol eden bir yardımcıya bağla ya da `//nolint` yerine gerçek kontrol koy (paketin zaten `removeTemp` yardımcısı var — gerekçesi "en kötü ihtimalle OS süpürür"; o gerekçe geçerliyse `removeTemp` kullan).
+- [x] **Adım 4: staticcheck bulgularını düzelt** — ST1005 (hata metni noktalama/newline ile bitmemeli) `stack_bundle.go`, `stack_push.go`, `start.go`; QF1001/S1016 `archive.go`, `schema_sources.go`. Hata metinlerinin ANLAMINI değiştirme, yalnız biçimini.
+- [x] **Adım 5: Ölü sembolleri sil** — `pull_spec.go` (5), `deploy.go` (4 kullanılmayan alan), `stack_bundle.go` (1), `stack_bundle_test.go` (3 test yardımcısı), `plan_test.go` (2 test yardımcısı). Silmeden önce her biri için `grep -rn "<ad>" --include="*.go" .` koş ve sıfır çağıran olduğunu doğrula.
+- [x] **Adım 6: Yeşili gör** — Run: `GOTOOLCHAIN=go1.26.6 golangci-lint run ./internal/backend/...` · Beklenen: **`0 issues`**; ardından `go build ./... && go test ./internal/backend/ -count=1 -short` · Beklenen: **PASS**
 - [ ] **Adım 7: Commit** — `fix(backend): lint borcu ödendi — .env mühür yazımı artık Close hatasını yutmuyor`
 
 ---

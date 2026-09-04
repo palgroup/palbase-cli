@@ -198,7 +198,7 @@ func SchemaSourcesBody(sources []SchemaSource) ([]byte, error) {
 		Sources []wireSource `json:"sources"`
 	}{Sources: make([]wireSource, 0, len(sources))}
 	for _, s := range sources {
-		wire.Sources = append(wire.Sources, wireSource{Name: s.Name, Source: s.Source})
+		wire.Sources = append(wire.Sources, wireSource(s))
 	}
 	return json.Marshal(wire)
 }

@@ -882,7 +882,7 @@ func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) err
 	}
 	return fmt.Errorf(
 		"this stack's .env carries %d of 3 sealing variables — half a chain is not a chain.\n"+
-			"  Remove %s from %s, then run `palbase start` again to mint a fresh one.",
+			"  Remove %s from %s, then run `palbase start` again to mint a fresh one",
 		present, strings.Join(sealingChainVars, ", "), envFile)
 }
 
@@ -905,7 +905,7 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 	if err != nil {
 		return false, err
 	}
-	defer os.RemoveAll(tmp)
+	defer removeTemp(tmp)
 
 	palsvc := stackImages[0].fallback
 	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
@@ -972,7 +972,23 @@ func appendSealingChain(envFile, chain string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// KAPANIS HATASI YUTULMAZ. `defer f.Close()` idi ve bu YAZILAN bir dosya:
+	// kisa yazim ya da flush hatasi yalnizca Close()'ta gorunur, o yuzden
+	// yutulmasi .env'i SESSIZCE yarim muhurlu birakiyordu — muhurun eksik oldugu
+	// bir yigin, hatasi ancak calisma aninda ortaya cikan bir yigindir.
+	closed := false
+	closeErr := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		if cerr := f.Close(); cerr != nil {
+			return fmt.Errorf("close %s after writing the sealing chain: %w", envFile, cerr)
+		}
+		return nil
+	}
+	defer func() { _ = closeErr() }()
+
 	// Dosya newline ile bitmiyorsa, eklenen ilk satir onceki satirin DEVAMI olur
 	// ve iki degisken birden yok olur.
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
@@ -980,6 +996,8 @@ func appendSealingChain(envFile, chain string) error {
 			return err
 		}
 	}
-	_, err = f.WriteString(chain)
-	return err
+	if _, err := f.WriteString(chain); err != nil {
+		return err
+	}
+	return closeErr()
 }
