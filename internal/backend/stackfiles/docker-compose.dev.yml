@@ -179,44 +179,6 @@ services:
     # `data` ONLY. Nothing that faces the outside shares a network with it.
     networks: [data]
     restart: unless-stopped
-  barman:
-    build:
-      context: ./barman
-      dockerfile: Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGHOST: postgres
-      PGUSER: palbase
-      PGDATABASE: palbase
-      PGPASSWORD: ${POSTGRES_PASSWORD:-}
-      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 3 * * *}
-      BACKUP_RETENTION: ${BACKUP_RETENTION:-RECOVERY WINDOW OF 30 DAYS}
-      BACKUP_TARGET: ${BACKUP_TARGET:-disk}
-      BACKUP_MAX_SLOT_WAL_KEEP: ${BACKUP_MAX_SLOT_WAL_KEEP:-2GB}
-      # Nesne depolama İÇİN AYRILDI — HENÜZ ÇALIŞMIYOR. BACKUP_TARGET=s3 verilirse
-      # servis açıkça REDDEDER (barman-cloud hook script'leri bu sürümde bağlanmadı).
-      # Değişkenler burada duruyor ki bağlandığında compose sözleşmesi değişmesin.
-      # Bugün yedekler barmandata volume'ünde; host kaybına karşı o volume'ü kendi
-      # yedekleme akışınıza dahil edin.
-      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
-      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
-      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
-      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
-    volumes:
-      - barmandata:/var/lib/barman
-    # Ölçülmüş tepe: 44.8 MiB. 128 MiB, 2.9x marj.
-    mem_limit: 128m
-    cpus: 0.5
-    networks: [data]
-    restart: unless-stopped
-
-  # ── palsvc ─────────────────────────────────────────────────────────────────
-  #
-  # Every module in one process — and ONLY that, now. Same image as the shipped
-  # stack, same role-mask, same everything: it is not the edge here either, and
-  # it publishes nothing.
   palsvc:
     # PULLED by default, so `palbase start` works on a machine that has never
     # seen this repository. Building locally? Set PALBASE_PALSVC_IMAGE to your

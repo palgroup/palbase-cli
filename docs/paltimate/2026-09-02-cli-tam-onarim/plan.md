@@ -35,7 +35,7 @@ Top 3 constraints: (1) **Kapı önce, düzeltme sonra** — T001'de kapı KIRMIZ
 - Consumes: —
 - Produces: `composeConfigIsValid(t *testing.T, path string)` — vendor'lanan compose'u gerçek `docker compose config`'e verir; docker yoksa `t.Skip` (C-1).
 
-- [ ] **Adım 1: Kapıyı yaz (henüz kırmızı olmalı)** — `internal/backend/stackfiles_test.go` sonuna ekle:
+- [x] **Adım 1: Kapıyı yaz (henüz kırmızı olmalı)** — `internal/backend/stackfiles_test.go` sonuna ekle:
 ```go
 // composeConfigIsValid hands the vendored document to the REAL tool.
 //
@@ -65,8 +65,8 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 	composeConfigIsValid(t, path)
 }
 ```
-- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run: `go test ./internal/backend/ -run TestTheVendoredComposeIsAValidComposeProject -count=1` · Beklenen: **FAIL**, çıktıda `service "barman" refers to undefined volume barmandata: invalid compose project`. Bu satır görülmeden Adım 3'e geçme.
-- [ ] **Adım 3: `withoutBarman`'ın sınır hatasını düzelt** — `internal/backend/stackfiles_test.go` içindeki blok-sonu aramasını, geri yürünen `start` yerine **orijinal** `barman:` satırından başlat:
+- [x] **Adım 2: Kırmızı olduğunu GÖR** — Run: `go test ./internal/backend/ -run TestTheVendoredComposeIsAValidComposeProject -count=1` · Beklenen: **FAIL**, çıktıda `service "barman" refers to undefined volume barmandata: invalid compose project`. Bu satır görülmeden Adım 3'e geçme.
+- [x] **Adım 3: `withoutBarman`'ın sınır hatasını düzelt** — `internal/backend/stackfiles_test.go` içindeki blok-sonu aramasını, geri yürünen `start` yerine **orijinal** `barman:` satırından başlat:
 ```go
 	origin := -1
 	for i, l := range lines {
@@ -94,8 +94,8 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 		}
 	}
 ```
-- [ ] **Adım 4: Vendor'lanan dosyayı yeniden üret** — `barman:` servisini (`internal/backend/stackfiles/docker-compose.dev.yml` satır ~182-213, onu tanıtan yorum bloğu dâhil) ve `volumes:` bloğundaki öksüz Barman yorumunu sil. `barmandata` anahtarı zaten yok; servis gidince tutarlı olur.
-- [ ] **Adım 5: Yeşil olduğunu GÖR** — Run: `go test ./internal/backend/ -run 'Vendored|Barman' -count=1` · Beklenen: **PASS** (hem yeni geçerlilik testi hem mevcut eşitlik testi).
+- [x] **Adım 4: Vendor'lanan dosyayı yeniden üret** — `barman:` servisini (`internal/backend/stackfiles/docker-compose.dev.yml` satır ~182-213, onu tanıtan yorum bloğu dâhil) ve `volumes:` bloğundaki öksüz Barman yorumunu sil. `barmandata` anahtarı zaten yok; servis gidince tutarlı olur.
+- [x] **Adım 5: Yeşil olduğunu GÖR** — Run: `go test ./internal/backend/ -run 'Vendored|Barman' -count=1` · Beklenen: **PASS** (hem yeni geçerlilik testi hem mevcut eşitlik testi).
 - [ ] **Adım 6: Commit** — `fix(start): vendor'lanan compose GEÇERLİ — ve kapı artık gerçek docker'a soruyor`
 
 ---

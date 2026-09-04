@@ -2,6 +2,7 @@ package backend
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -59,22 +60,30 @@ func TestTheVendoredComposeMatchesTheRepository(t *testing.T) {
 // image-default gates caught it.
 func withoutBarman(doc string) (string, bool) {
 	lines := strings.Split(doc, "\n")
-	start := -1
+	origin := -1
 	for i, l := range lines {
 		if l == "  barman:" {
-			start = i
+			origin = i
 			break
 		}
 	}
-	if start < 0 {
+	if origin < 0 {
 		return doc, false
 	}
+	start := origin
 	// Walk back over the comment block that introduces it.
 	for start > 0 && (strings.HasPrefix(lines[start-1], "  #") || lines[start-1] == "") {
 		start--
 	}
 	end := len(lines)
-	for i := start + 1; i < len(lines); i++ {
+	// SEARCH FROM THE SERVICE LINE, not from the comment we just walked back
+	// over. topLevelKey skips comments, so starting at start+1 walked forward
+	// through the comment block and matched `  barman:` ITSELF as the next
+	// top-level key — end landed ON the service, `lines[end:]` put it back, and
+	// the cut removed only the comment. The vendored file kept a service whose
+	// volume this function had already deleted, and `docker compose config`
+	// refused it in v0.52.0 and again in v0.53.0.
+	for i := origin + 1; i < len(lines); i++ {
 		if topLevelKey(lines[i]) {
 			end = i
 			break
@@ -225,4 +234,35 @@ func TestTheGoConstantsAndTheComposeDefaultsAgree(t *testing.T) {
 				want.env, want.fallback, got)
 		}
 	}
+}
+
+// composeConfigIsValid hands the vendored document to the REAL tool.
+//
+// The equality test above compares two strings that BOTH pass through
+// withoutBarman, so a defect in that function is invisible to it. Measured
+// twice: the invalid file shipped in v0.52.0, and its own fix shipped in
+// v0.53.0 with the file STILL invalid — the gate was green through both.
+// Only docker can say whether docker accepts this document.
+func composeConfigIsValid(t *testing.T, path string) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is not on PATH — the compose document was NOT validated")
+	}
+	cmd := exec.Command("docker", "compose", "-f", path, "config", "--services")
+	// The document interpolates these; without them compose fails on the
+	// substitution rather than on the structure we are measuring.
+	cmd.Env = append(os.Environ(), "PALBASE_HTTP_PORT=1", "PALBASE_PROJECT_DIR=/tmp")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker rejects the vendored compose document:\n%s", strings.TrimSpace(string(out)))
+	}
+}
+
+func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, composeFile)
+	if err := os.WriteFile(path, stackCompose, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	composeConfigIsValid(t, path)
 }
