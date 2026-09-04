@@ -25,6 +25,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/members"
 	"github.com/palgroup/palbase-cli/internal/notifications"
 	"github.com/palgroup/palbase-cli/internal/project"
+	"github.com/palgroup/palbase-cli/internal/roles"
 	"github.com/palgroup/palbase-cli/internal/secret"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/storage"
@@ -435,6 +436,7 @@ func newRootCmd() *cobra.Command {
 			REST: func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
 		}),
 		testuser.Cmd(),
+		roles.Cmd(),
 		// `palbase test` mints through testuser's own path, so the identities it
 		// exports are the same shape `test-user create --json` prints.
 		palbasetest.Cmd(palbasetest.Resolvers{
