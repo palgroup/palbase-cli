@@ -337,7 +337,7 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 - [x] **Adım 2: Kurulum hatasını CI'da ölümcül yap** — `internal/backend/testdeps_test.go:82` civarında `npm install` başarısızlığında `t.Skip` çağrılıyor. `os.Getenv("CI") != ""` iken `t.Fatalf` yap; atlama yalnız aracın PATH'te olmamasına kalsın. Gerekçe yorumu: registry kesintisi 21 testi sessizce yeşile boyuyordu.
 - [x] **Adım 3: Uzun derlemeleri `-short` dışına al** — `internal/backend/build_test.go` içinde gerçek `bun build`/tsc koşan ve tek başına ≥10 sn süren testlerin başına `if testing.Short() { t.Skip("real bundler run — excluded from the -short budget") }` ekle. Fixture-izole olanlara (`t.TempDir()` kullananlara) `t.Parallel()` ekle.
 - [x] **Adım 4: Bütçeyi doğrula** — Run: `go test ./internal/backend/ -count=1 -short 2>&1 | tail -3` · Beklenen: `ok` ve süre **≤ 180 sn**; ardından `go test ./internal/backend/ -count=1 2>&1 | tail -3` (short'suz) · Beklenen: **PASS** — atlanan testler tam koşuda hâlâ koşuyor
-- [ ] **Adım 5: Commit** — `test(backend): -short gerçekten kısa; npm hatası CI'da artık yeşile dönmüyor`
+- [x] **Adım 5: Commit** — `test(backend): -short gerçekten kısa; npm hatası CI'da artık yeşile dönmüyor`
 
 ---
 
@@ -350,8 +350,8 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 
 **Not (Kısıt 2):** Bu görev, kendisini yeşil yapan işler bitmeden koşulamaz. `deps` bunu zorluyor.
 
-- [ ] **Adım 1: Kapıların YEREL olarak yeşil olduğunu doğrula** — Run: `gofmt -l . | tee /dev/stderr | wc -l` (beklenen **0**) · `go vet ./...` (exit 0) · `GOTOOLCHAIN=go1.26.6 golangci-lint run` (**`0 issues`**) · `go vet -tags e2e ./tests/e2e/` (exit 0). Dördü yeşil değilse bu göreve girme.
-- [ ] **Adım 2: Adımları `ci.yml`'e ekle** — mevcut `Build`/`Run tests` adımlarının yanına, `continue-on-error` **olmadan**:
+- [x] **Adım 1: Kapıların YEREL olarak yeşil olduğunu doğrula** — Run: `gofmt -l . | tee /dev/stderr | wc -l` (beklenen **0**) · `go vet ./...` (exit 0) · `GOTOOLCHAIN=go1.26.6 golangci-lint run` (**`0 issues`**) · `go vet -tags e2e ./tests/e2e/` (exit 0). Dördü yeşil değilse bu göreve girme.
+- [x] **Adım 2: Adımları `ci.yml`'e ekle** — mevcut `Build`/`Run tests` adımlarının yanına, `continue-on-error` **olmadan**:
 ```yaml
       - name: Formatting
         run: |
@@ -372,9 +372,9 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
           version: v2.12.2
 ```
   **`<tam-sha>`:** `toolchain_contract_test.go` action referanslarının tam sha olmasını şart koşuyor — sha'yı `gh api repos/golangci/golangci-lint-action/git/ref/tags/v8 --jq .object.sha` ile al ve yaz.
-- [ ] **Adım 3: `.golangci.yml`'in beyanını doğrula** — Dosya satır 3'te "ci.yml runs this gate blocking (no continue-on-error)" diyor; bu görev o cümleyi ilk kez doğru hâle getiriyor. Cümleyi değiştirme — artık doğru.
-- [ ] **Adım 4: Sözleşme testini koştur** — Run: `go test ./cmd/palbase/ -run 'Workflow|Toolchain' -count=1` · Beklenen: **PASS** (pinler ve komutlar tutarlı)
-- [ ] **Adım 5: Commit ve CI'ı İZLE** — `ci(gates): gofmt · vet · golangci-lint · e2e derlemesi — dördü de bloklayıcı`; push sonrası Run: `gh run list --limit 1` ve işin **yeşil** bittiğini gör. Kırmızıysa görev bitmemiştir.
+- [x] **Adım 3: `.golangci.yml`'in beyanını doğrula** — Dosya satır 3'te "ci.yml runs this gate blocking (no continue-on-error)" diyor; bu görev o cümleyi ilk kez doğru hâle getiriyor. Cümleyi değiştirme — artık doğru.
+- [x] **Adım 4: Sözleşme testini koştur** — Run: `go test ./cmd/palbase/ -run 'Workflow|Toolchain' -count=1` · Beklenen: **PASS** (pinler ve komutlar tutarlı)
+- [x] **Adım 5: Commit ve CI'ı İZLE** — `ci(gates): gofmt · vet · golangci-lint · e2e derlemesi — dördü de bloklayıcı`; push sonrası Run: `gh run list --limit 1` ve işin **yeşil** bittiğini gör. Kırmızıysa görev bitmemiştir.
 
 ---
 
@@ -387,11 +387,11 @@ func providerConfigID(ctx context.Context, r Resolvers, cmd *cobra.Command, name
 
 **Not:** Bu, üretim giriş noktasından geçen tek görevdir — fonksiyonları elle sıralayan bir test değil, **derlenmiş binary'nin kendisi** koşturulur.
 
-- [ ] **Adım 1: `scaffold_e2e_test.go` yaz (FR-015)** — Boş bir `t.TempDir()`'de derlenmiş `palbase` binary'siyle `init` sonra `build` koştur; `build`'in **exit 0** verdiğini ve çıktısında `build OK` geçtiğini assert et. `testing.Short()` ve npm yokluğunda atla; `CI` set iken npm yoksa **fail**.
-- [ ] **Adım 2: Kanıtı gör** — Run: `go test ./internal/backend/ -run TestScaffoldBuildsEndToEnd -count=1` · Beklenen: **PASS** (2026-09-04 elle ölçümü: `build OK — 5 route(s)`, exit 0, `@palbase/backend 27.1.0`)
-- [ ] **Adım 3: `start_e2e_test.go` yaz (FR-016)** — İskeleti kurulmuş dizinde `start` koştur; `.palbase/local.json`'daki adrese `GET /.well-known/palbase.json` at ve **200** bekle; sonra `stop` koştur ve `.palbase/local.json`'ın **kalmadığını** assert et. Docker yoksa atla ve atladığını yaz. Test bitiminde `stop` her hâlükârda koşsun (`t.Cleanup`).
-- [ ] **Adım 4: Kanıtı gör** — Run: `go test ./internal/backend/ -run TestStartServesAndStopCleansUp -count=1` · Beklenen: **PASS**. **Bu adım T001'in gerçekten işe yaradığının tek kanıtıdır** — geçersiz compose ile `start` hiç ayağa kalkamıyordu.
-- [ ] **Adım 5: Tam suiti koştur** — Run: `go build ./... && go test ./... -count=1 -short` · Beklenen: **PASS**, süre ≤ 180 sn
+- [x] **Adım 1: `scaffold_e2e_test.go` yaz (FR-015)** — Boş bir `t.TempDir()`'de derlenmiş `palbase` binary'siyle `init` sonra `build` koştur; `build`'in **exit 0** verdiğini ve çıktısında `build OK` geçtiğini assert et. `testing.Short()` ve npm yokluğunda atla; `CI` set iken npm yoksa **fail**.
+- [x] **Adım 2: Kanıtı gör** — Run: `go test ./internal/backend/ -run TestScaffoldBuildsEndToEnd -count=1` · Beklenen: **PASS** (2026-09-04 elle ölçümü: `build OK — 5 route(s)`, exit 0, `@palbase/backend 27.1.0`)
+- [x] **Adım 3: `start_e2e_test.go` yaz (FR-016)** — İskeleti kurulmuş dizinde `start` koştur; `.palbase/local.json`'daki adrese `GET /.well-known/palbase.json` at ve **200** bekle; sonra `stop` koştur ve `.palbase/local.json`'ın **kalmadığını** assert et. Docker yoksa atla ve atladığını yaz. Test bitiminde `stop` her hâlükârda koşsun (`t.Cleanup`).
+- [x] **Adım 4: Kanıtı gör** — Run: `go test ./internal/backend/ -run TestStartServesAndStopCleansUp -count=1` · Beklenen: **PASS**. **Bu adım T001'in gerçekten işe yaradığının tek kanıtıdır** — geçersiz compose ile `start` hiç ayağa kalkamıyordu.
+- [x] **Adım 5: Tam suiti koştur** — Run: `go build ./... && go test ./... -count=1 -short` · Beklenen: **PASS**, süre ≤ 180 sn
 - [ ] **Adım 6: Commit** — `test(e2e): init→build ve start→stop üretim giriş noktasından kapıya bağlandı`
 
 ---
