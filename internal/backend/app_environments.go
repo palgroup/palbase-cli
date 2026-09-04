@@ -22,9 +22,11 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -210,6 +212,12 @@ func writeWebArtifacts(envs appEnvironments, specs map[string][]byte) (string, e
 		if err := os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"), spec, 0o644); err != nil {
 			return "", err
 		}
+		// The ROLE DEFINITIONS of the same environment, beside the contract they
+		// belong to. The generator reads one directory and must not have to be
+		// told twice which environment it is looking at.
+		if err := copyRolesToWeb(envs.Default); err != nil {
+			return "", err
+		}
 	}
 	return path, nil
 }
@@ -276,6 +284,184 @@ const removedEnvironmentRefField = "environment_ref"
 // specPath is where one environment's contract is committed.
 func specPath(env string) string {
 	return filepath.Join(nativeArtifactsDir, "openapi", env+".json")
+}
+
+// rolesPath is where one environment's ROLE DEFINITIONS are committed: beside
+// its contract, in the same directory, differing only in extension.
+//
+// Beside it rather than in a directory of its own because the two documents
+// describe the same environment at the same moment and are fetched by one act —
+// and because a generator handed the spec can then find the roles BY RULE
+// instead of by a second setting somebody has to keep in step. `palbase-swiftgen`
+// and `palbe-gen` live in other repositories and cannot call this function; the
+// rule is the only thing they can share.
+func rolesPath(env string) string {
+	return filepath.Join(nativeArtifactsDir, "openapi", env+".roles.json")
+}
+
+// webRolesPath is the same document where the web SDK reads it: beside the ONE
+// contract `palbe-gen` takes, for the same reason openapi.json is there.
+func webRolesPath() string { return filepath.Join(webArtifactsDir, "roles.json") }
+
+// stackRole is one role definition as the generators need it.
+//
+// WHAT IS NOT HERE IS THE POINT. `GET /admin/roles` also answers `userCount`,
+// and this artifact is COMMITTED: carrying a counter would rewrite the file
+// every time somebody signed up, produce a diff in every review, and none of it
+// would change a single generated type. A role's NAME, what it may do, and
+// whether new users get it are the definition; the rest is runtime state and
+// belongs to `palbase roles list`.
+type stackRole struct {
+	Name string `json:"name"`
+	// omitempty: a role whose name says everything needs no description, and
+	// writing "" would look like an empty one somebody wrote on purpose.
+	Description string   `json:"description,omitempty"`
+	IsDefault   bool     `json:"isDefault"`
+	Permissions []string `json:"permissions"`
+}
+
+// stackRoles is the artifact, and the shape both generators read.
+type stackRoles struct {
+	Roles []stackRole `json:"roles"`
+}
+
+// fetchStackRoles asks the stack which roles it defines and what each one grants.
+//
+// A 404 IS AN ANSWER, and treating it as one is the whole tolerance this needs.
+// A stack older than the roles surface has no such door, "this project defines
+// no roles" is the truth for it, and that comes back as an empty list with no
+// error — so the spec round it is part of succeeds. Refusing here would break
+// `palbase spec` in every project that has not adopted RBAC, which today is all
+// of them.
+//
+// Every OTHER refusal is "could not tell", and it returns an error. So does a
+// 200 with no `roles` key: a proxy's JSON page decodes into this struct without
+// complaint and would otherwise read as "no roles at all". The difference has to
+// survive to the write — see refreshRoles.
+func fetchStackRoles(ctx context.Context, target Target, cred Credentials) (stackRoles, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(target.URL, "/")+"/admin/roles", nil)
+	if err != nil {
+		return stackRoles{}, err
+	}
+	cred.Apply(req)
+	req.Header.Set("Accept", "application/json")
+
+	res, err := stackClient(target).Do(req)
+	if err != nil {
+		return stackRoles{}, fmt.Errorf("reach %s: %w", target.URL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	if err != nil {
+		return stackRoles{}, err
+	}
+
+	switch res.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return stackRoles{Roles: []stackRole{}}, nil
+	default:
+		return stackRoles{}, fmt.Errorf("the stack's roles came back %d: %s",
+			res.StatusCode, trimBody(body))
+	}
+
+	var doc struct {
+		Roles *[]stackRole `json:"roles"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return stackRoles{}, fmt.Errorf("the stack's roles did not parse: %w", err)
+	}
+	if doc.Roles == nil {
+		return stackRoles{}, errors.New("the stack answered about roles without a roles list")
+	}
+	return normalizeRoles(stackRoles{Roles: *doc.Roles}), nil
+}
+
+// normalizeRoles makes the artifact a function of the DEFINITIONS and nothing
+// else.
+//
+// It is committed, so two runs against an unchanged stack have to produce
+// identical bytes — a diff that depends on the order rows came back is a diff
+// nobody can read. The endpoint happens to order both today; ordering it here
+// means the committed file does not depend on that staying true.
+//
+// A nil list becomes an empty one: `null` reads as "unknown", `[]` reads as
+// "none", and only one of those is what a stack with no roles said.
+func normalizeRoles(in stackRoles) stackRoles {
+	out := stackRoles{Roles: make([]stackRole, 0, len(in.Roles))}
+	for _, role := range in.Roles {
+		perms := make([]string, len(role.Permissions))
+		copy(perms, role.Permissions)
+		sort.Strings(perms)
+		role.Permissions = perms
+		out.Roles = append(out.Roles, role)
+	}
+	sort.Slice(out.Roles, func(i, j int) bool { return out.Roles[i].Name < out.Roles[j].Name })
+	return out
+}
+
+// refreshRoles brings one environment's role definitions down beside its
+// contract.
+//
+// BEST EFFORT, AND NEVER FATAL ON THE FETCH. Fetching the contract is what a
+// spec round is for; the roles beside it are an addendum, and a stack that will
+// not answer about them is not a reason to refuse the refresh somebody asked
+// for.
+//
+// But "COULD NOT TELL" IS NOT "THERE ARE NONE", and that difference is why this
+// is not one line. On a 404 the stack has ANSWERED — it defines no roles — and
+// the empty artifact is the truth. On anything else the file on disk is left
+// exactly as it is: writing an empty list would delete definitions this run
+// could not produce, the generators would emit no constants from it, and the app
+// would compile with every permission check it used to make silently gone. The
+// reason is printed either way, because an artifact that quietly stopped
+// tracking its stack is the only failure mode here nobody would notice.
+func refreshRoles(ctx context.Context, target Target, cred Credentials, env string, w io.Writer) error {
+	roles, err := fetchStackRoles(ctx, target, cred)
+	if err != nil {
+		fmt.Fprintf(w, "roles: %s did not answer for %s — %v\n", target.URL, env, err)
+		fmt.Fprintf(w, "roles: %s keeps what it last held; the generated role types are NOT refreshed\n",
+			rolesPath(env))
+		return nil
+	}
+	if err := writeRolesArtifact(rolesPath(env), roles); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "✓ wrote %s (%d roles)\n", rolesPath(env), len(roles.Roles))
+	return nil
+}
+
+func writeRolesArtifact(path string, roles stackRoles) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	blob, err := json.MarshalIndent(roles, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(blob, '\n'), 0o644)
+}
+
+// copyRolesToWeb mirrors one environment's role definitions into the web SDK's
+// directory, beside the contract that came from the same environment.
+//
+// A COPY, not a second fetch: the round that wrote the native artifact already
+// asked, and asking twice is two chances for two files to disagree about one
+// stack. Nothing to copy leaves the web file alone — absence means "not
+// fetched", never "none", and the same rule refreshRoles keeps applies here.
+func copyRolesToWeb(env string) error {
+	raw, err := os.ReadFile(rolesPath(env))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(webRolesPath(), raw, 0o644)
 }
 
 // writeXcconfigs writes one build configuration per environment.
@@ -454,6 +640,9 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 	if err := writeSpec(primary, spec); err != nil {
 		return appEnvironments{}, nil, err
 	}
+	if err := refreshRoles(ctx, target, cred, primary, w); err != nil {
+		return appEnvironments{}, nil, err
+	}
 	specs[primary] = spec
 
 	// The stack on this machine, when there is one and it is not already the
@@ -489,6 +678,9 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 	envs.Environments[localEnvName] = localEnv
 	if localSpec, err := fetchStackSpec(ctx, localTarget, localCred); err == nil {
 		if err := writeSpec(localEnvName, localSpec); err != nil {
+			return appEnvironments{}, nil, err
+		}
+		if err := refreshRoles(ctx, localTarget, localCred, localEnvName, w); err != nil {
 			return appEnvironments{}, nil, err
 		}
 		specs[localEnvName] = localSpec

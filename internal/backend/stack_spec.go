@@ -71,6 +71,15 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "✓ wrote %s (%d bytes)\n", specPath(env), len(spec))
 
+	// THE ROLES ARE PART OF THE CONTRACT, so they are fetched by the same act.
+	// A generated client learns which roles and permissions exist here and
+	// nowhere else (FR-007); fetching them on a separate verb would mean the two
+	// documents could sit a deploy apart, and a name the stack no longer defines
+	// would go on compiling. refreshRoles never fails the round — see its note.
+	if err := refreshRoles(ctx, target, cred, env, w); err != nil {
+		return err
+	}
+
 	// The web SDK reads its contract from its own directory, and has no notion
 	// of build configurations to select one with — so it gets the environment
 	// that was just refreshed.
@@ -83,6 +92,9 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
 		fmt.Fprintf(w, "✓ wrote %s\n", path)
+		if err := copyRolesToWeb(env); err != nil {
+			return fmt.Errorf("write %s: %w", webRolesPath(), err)
+		}
 	}
 
 	// Apple is the only platform with no build-time generator of its own. Every
