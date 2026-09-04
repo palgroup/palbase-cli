@@ -119,7 +119,7 @@ func Cmd() *cobra.Command {
 			"Permissions are `resource.action` (for example `posts.delete_any`). There are no\n" +
 			"wildcards: a role has to name what it may do.",
 	}
-	cmd.AddCommand(createCmd(), listCmd(), deleteCmd())
+	cmd.AddCommand(createCmd(), listCmd(), deleteCmd(), assignCmd(), revokeCmd())
 	return cmd
 }
 
@@ -170,10 +170,16 @@ func createCmd() *cobra.Command {
 func listCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List this environment's role definitions",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "list [userId]",
+		Short: "List role definitions, or the roles one user holds",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Bir kullanıcı adlandırıldıysa soru DEĞİŞİR: ortamın tanımları değil,
+			// o kişinin taşıdıkları. İki ayrı fiil yerine tek fiil, çünkü soran
+			// kişi ikisini de "roller" diye arıyor.
+			if len(args) == 1 {
+				return printUserRoles(cmd, args[0], asJSON)
+			}
 			out, err := call(cmd, "GET", "/admin/roles", nil)
 			if err != nil {
 				return err
@@ -207,7 +213,7 @@ func listCmd() *cobra.Command {
 			return w.Flush()
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print the definitions as JSON and nothing else")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the answer as JSON and nothing else")
 	return cmd
 }
 
