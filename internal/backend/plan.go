@@ -171,6 +171,13 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 // and none of them fail. Saying "the pod will restart" without saying that would
 // read as an outage nobody is having.
 //
+// AND NOT NECESSARILY DURING THIS PUSH. The push carries the bundle to the
+// project's own management surface; the image is the plane's to change, and it
+// does so on its reconciliation round (within five minutes). Measured live
+// 2026-09-05 against the control plane itself: `plan` printed this line, the
+// push landed hot, and the pod was replaced afterwards. Saying "the pod is
+// replaced" full stop would promise a synchronous swap the push does not make.
+//
 // SILENT ON AN UNKNOWN CURRENT. The plane does not always answer with a running
 // version, and comparing "" against a real one is not a change — it is a missing
 // fact. Printing "→ 33.0.2" out of that would invent a migration that may not be
@@ -179,7 +186,7 @@ func writeImagePlan(w io.Writer, current, target string) {
 	if current == "" || current == target {
 		return
 	}
-	fmt.Fprintf(w, "image\n  %s → %s   (the pod is replaced; requests wait in the holder, none fail)\n",
+	fmt.Fprintf(w, "image\n  %s → %s   (the pod is replaced when the plane picks this up; requests wait in the holder, none fail)\n",
 		current, target)
 }
 
