@@ -777,8 +777,7 @@ func TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
 			})
 			rest := f.REST()
 			resolver := &selection.Resolver{
-				REST:        func() selection.REST { return rest },
-				ProjectFlag: "proj_1", // headless --project: Resolve() never reads the broken config itself
+				REST: func() selection.REST { return rest },
 			}
 			r := Resolvers{
 				REST:      func() REST { return rest },

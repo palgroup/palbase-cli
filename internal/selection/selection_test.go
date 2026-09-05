@@ -198,50 +198,25 @@ func TestResolve_LinkedDirectoryResolves(t *testing.T) {
 	require.NotEmpty(t, sel.EnvironmentRef())
 }
 
-// ── environment picking ─────────────────────────────────────────────────────
-
-func TestResolve_EnvironmentFlagMatchesExactSlugOrRef(t *testing.T) {
-	dir := selectiontest.Chdir(t)
-	fake := selectiontest.New(t)
-	fake.Environments["proj_1"] = append(fake.Environments["proj_1"],
-		selectiontest.Env("env_stg", "proj_1", "app1stg", "staging", "staging", false))
-	selectiontest.WriteConfig(t, dir, nil)
-
-	for _, want := range []string{"staging", "app1stg"} {
-		r := fake.Resolver()
-		r.Dir = dir
-		r.EnvironmentFlag = want
-		sel, err := r.Resolve(context.Background())
-		require.NoError(t, err, want)
-		require.Equal(t, "app1stg", sel.EnvironmentRef(), want)
-	}
-}
-
-func TestResolve_EnvironmentDisplayNameIsNotASelectorAlias(t *testing.T) {
-	dir := selectiontest.Chdir(t)
-	fake := selectiontest.New(t)
-	env := selectiontest.Env("env_stg", "proj_1", "app1stg", "staging", "staging", false)
-	env.Name = "Team Staging"
-	fake.Environments["proj_1"] = append(fake.Environments["proj_1"], env)
-	selectiontest.WriteConfig(t, dir, nil)
-
-	r := fake.Resolver()
-	r.Dir = dir
-	r.EnvironmentFlag = "Team Staging"
-	_, err := r.Resolve(context.Background())
-	require.ErrorContains(t, err, `no environment "Team Staging"`)
-}
-
+// A SELECTED ENVIRONMENT THAT NO LONGER EXISTS IS NAMED, and so are the ones
+// that do — a refusal that only says "not found" leaves the reader guessing what
+// to put instead.
+//
+// This used to arrive through `--environment nope`. The flag is gone (T010), but
+// the situation is not: a committed config can name an environment somebody
+// since deleted, and that is the case worth measuring.
 func TestResolve_UnknownEnvironmentListsTheRealOnes(t *testing.T) {
 	dir := selectiontest.Chdir(t)
 	fake := selectiontest.New(t)
-	selectiontest.WriteConfig(t, dir, nil)
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_gone",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
 
 	r := fake.Resolver()
 	r.Dir = dir
-	r.EnvironmentFlag = "nope"
 	_, err := r.Resolve(context.Background())
-	require.ErrorContains(t, err, `no environment "nope"`)
+	require.ErrorContains(t, err, "env_gone")
 	require.ErrorContains(t, err, "production")
 }
 
@@ -336,7 +311,7 @@ func TestResolve_DeletedEnvironmentIsNamed_NotSilentlyReplaced(t *testing.T) {
 	// The way out has to be a command the binary answers: this pinned
 	// `palbase env use`, which was retired at the v2 cutover, and pinning it is
 	// how the dead name survived a year of green runs.
-	require.ErrorContains(t, err, "palbase link <ref>")
+	require.ErrorContains(t, err, "palbase link <url>")
 }
 
 func TestResolve_ProjectWithoutAnEnvironmentIsNotAUsableRuntime(t *testing.T) {
@@ -349,27 +324,6 @@ func TestResolve_ProjectWithoutAnEnvironmentIsNotAUsableRuntime(t *testing.T) {
 	r.Dir = dir
 	_, err := r.Resolve(context.Background())
 	require.ErrorContains(t, err, "project proj_1 has no environments")
-}
-
-func TestResolve_ProjectFlagOverridesConfig(t *testing.T) {
-	dir := selectiontest.Chdir(t)
-	fake := selectiontest.New(t)
-	fake.Projects = append(fake.Projects, selectiontest.Project{ID: "proj_2", Name: "other", Mode: "github"})
-	fake.Environments["proj_2"] = []selection.Environment{
-		selectiontest.Env("env_p2", "proj_2", "app2prod", "production", "production", true),
-	}
-	selectiontest.WriteConfig(t, dir, nil)
-
-	r := fake.Resolver()
-	r.Dir = dir
-	r.ProjectFlag = "proj_2"
-	sel, err := r.Resolve(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "proj_2", sel.ProjectID)
-	require.Equal(t, "app2prod", sel.EnvironmentRef())
-	require.Equal(t, selection.ProviderGitHub, sel.RepositoryProvider)
-	_, fetched := fake.Find("GET /api/v2/projects/proj_2")
-	require.True(t, fetched, "--project must refresh the server-owned repository mode")
 }
 
 func TestResolve_ServerProviderOverridesStaleConfig(t *testing.T) {
@@ -412,9 +366,16 @@ func TestResolve_DefaultsToOldestDurableEnvironmentWithoutVisibleProduction(t *t
 	preview.Ephemeral = true
 	fake.Environments["proj_1"] = []selection.Environment{newer, preview, oldest}
 
+	// THE PROJECT COMES FROM THE CHECKOUT NOW (T010): `--project` resolved
+	// through a route the cloud does not serve, so it selected nothing. The
+	// config names an environment this fixture actually has, and the assertion
+	// below is still about which one the resolver DEFAULTS to.
+	selectiontest.WriteConfig(t, dir, &selection.Config{
+		ProjectID: "proj_1", EnvironmentID: "env_old",
+		RepositoryProvider: selection.ProviderPalbase,
+	})
 	r := fake.Resolver()
 	r.Dir = dir
-	r.ProjectFlag = "proj_1"
 	sel, err := r.Resolve(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, oldest.Ref, sel.EnvironmentRef())
@@ -462,78 +423,21 @@ func TestErrNotSelected_IsMatchable(t *testing.T) {
 	require.True(t, errors.As(selection.ErrNotSelected{}, &target))
 }
 
-// TestResolveProjectID_AcceptsWhatTheToolPrints.
+// THE ResolveProjectID TESTS WENT WITH THE FUNCTION (T010).
 //
-// ÖLÇÜLDÜ 25.08.2026: `--project` yalnız yönetim id'si kabul ediyordu ve o id
-// CLI'ın hiçbir yüzeyinde görünmüyor — `project list` ad ve ref basıyor, `--json`
-// bile id taşımıyor. Yani belgelenmiş bayrak, değerini hiçbir yerden alamayacağın
-// bir şey istiyordu: `project status <ref>` çalışırken `push --project <ref>`
-// "böyle bir proje yok" diyordu. Aynı kök `clone`'u da vuruyordu.
-func TestResolveProjectID_AcceptsWhatTheToolPrints(t *testing.T) {
-	fake := selectiontest.New(t)
-
-	// The id itself still works, and costs no lookup.
-	got, err := selection.ResolveProjectID(context.Background(), fake.REST(), "proj_1")
-	require.NoError(t, err)
-	require.Equal(t, "proj_1", got)
-
-	// The NAME, as `project list` prints it — case-insensitively, because a
-	// person reads a table rather than copying bytes.
-	for _, given := range []string{"todoapp", "TodoApp", "  todoapp  "} {
-		got, err = selection.ResolveProjectID(context.Background(), fake.REST(), given)
-		require.NoError(t, err, given)
-		require.Equal(t, "proj_1", got, given)
-	}
-
-	// The environment REF, the listing's other column.
-	got, err = selection.ResolveProjectID(context.Background(), fake.REST(), "app1prod")
-	require.NoError(t, err)
-	require.Equal(t, "proj_1", got)
-}
-
-// A value that matches nothing must say what this accepts, because "no such
-// project" sends somebody looking for a project that is right there.
-func TestResolveProjectID_SaysWhatItAccepts(t *testing.T) {
-	fake := selectiontest.New(t)
-	_, err := selection.ResolveProjectID(context.Background(), fake.REST(), "nosuchthing")
-	require.ErrorContains(t, err, "nosuchthing")
-	require.ErrorContains(t, err, "name")
-	require.ErrorContains(t, err, "ref")
-	require.ErrorContains(t, err, "id")
-}
-
-// Two projects under one name is not a tie to break: acting on either would act
-// on a project the person did not mean.
-func TestResolveProjectID_RefusesAnAmbiguousName(t *testing.T) {
-	fake := selectiontest.New(t)
-	fake.Projects = append(fake.Projects, selectiontest.Project{
-		ID: "proj_2", OrganizationID: "org_1", Name: "todoapp", Role: "owner", Mode: "platform",
-	})
-	_, err := selection.ResolveProjectID(context.Background(), fake.REST(), "todoapp")
-	require.ErrorContains(t, err, "2 projects")
-}
-
-// `--environment <ref>` ALONE names no project, and never could.
+// They measured a flag's ability to accept what the tool prints — a real
+// property, of a resolver that leaned on `GET /api/v2/projects`. The v2 cloud
+// does not serve that route, so `--project` selected nothing however well it
+// parsed its argument; the flag and the resolver are both gone.
 //
-// Seven shipped refusals offered it as the way to "act on one without linking".
-// It is not: with no --project, Resolve reads .palbase/selection.json for the
-// project id BEFORE it ever looks at the environment flag, and an unlinked
-// checkout has no such file. The flag narrows a project; it cannot name one.
+// What replaced them is in cmd/palbase: TestTheSelectionFlagsAreGone runs the
+// real binary, demands the flags are absent from --help, AND greps production
+// code for the dead route — because a flag can be removed while the call it
+// justified stays behind, wired to nothing.
+
+// THE --environment MATCHING TESTS WENT WITH THE FLAG (T010).
 //
-// This is the fact those strings were corrected against. It goes red the day
-// somebody makes --environment self-sufficient — which is the day the advice
-// would be worth printing again.
-func TestResolve_EnvironmentFlagAloneNamesNoProject(t *testing.T) {
-	dir := selectiontest.Chdir(t)
-	fake := selectiontest.New(t)
-
-	r := fake.Resolver()
-	r.Dir = dir
-	r.EnvironmentFlag = "abcd"
-
-	_, err := r.Resolve(context.Background())
-	require.Error(t, err, "--environment alone was accepted as a selection")
-	var notSelected selection.ErrNotSelected
-	require.ErrorAs(t, err, &notSelected,
-		"--environment alone must fail as an unmade SELECTION, not somewhere later")
-}
+// They measured that `--environment` accepted an exact ref or slug but not a
+// display name — a real distinction, and the right one, for a flag that no
+// longer exists. The environment now comes from what `link` wrote, and
+// pickEnvironment's selector argument is empty at every call site.

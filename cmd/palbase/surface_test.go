@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -225,11 +224,19 @@ func TestGolden_GlobalFlags(t *testing.T) {
 	var names []string
 	newRootCmd().PersistentFlags().VisitAll(func(f *pflag.Flag) { names = append(names, f.Name) })
 	sort.Strings(names)
-	// `--mode` is GONE. It selected between two clouds, only one of which was ever
-	// deployed, and it was the DEFAULT — so a fresh install pointed every command
-	// at a host that does not exist. A flag offering a choice the product does not
-	// have is a flag somebody will use.
-	require.Equal(t, []string{"environment", "project"}, names)
+	// THERE ARE NO GLOBAL FLAGS LEFT, and that is the deliverable.
+	//
+	// `--mode` went first: it selected between two clouds, only one of which was
+	// ever deployed, and it was the DEFAULT — a fresh install pointed every
+	// command at a host that does not exist.
+	//
+	// `--project` / `--environment` went in T010 for a sharper reason: they
+	// resolved through `GET /api/v2/projects`, which the v2 cloud does not
+	// serve. They parsed, they were documented, and they selected nothing.
+	//
+	// A flag offering a choice the product does not have is a flag somebody will
+	// use.
+	require.Empty(t, names)
 }
 
 // No command anywhere in the tree may take --branch, --group or --organization.
@@ -420,92 +427,6 @@ func TestGolden_EverySettingIsReachableWithoutAFile(t *testing.T) {
 			t.Errorf("`palbase %s` is gone — that setting is now reachable only from the panel", verb)
 		}
 	}
-}
-
-// --environment is REFUSED by the stack verbs, not quietly dropped.
-//
-// `backend.ResolveTarget` lets the link file win whenever it names a URL, so in
-// a linked checkout the selection flags decided nothing — and `palbase auth`,
-// `flags`, `storage`, `egress`, `notifications`, `test-user`, `status`,
-// `deploys`, `rollback` and `debug attach` all took them without a word. The
-// person who typed `--environment staging` got production, and the banner said
-// "production" while they read it as confirmation that the flag had been
-// applied. Four help strings told them the flag worked.
-//
-// Measured through openStackManagement because that is the ONE door every
-// module-settings verb opens; the refusal now lives upstream of it, in
-// PrintTargetFor, so the whole family is covered by one gate.
-func TestStackVerbsRefuseTheEnvironmentFlagInALinkedCheckout(t *testing.T) {
-	inScratchCheckout(t)
-	require.NoError(t, os.MkdirAll(".palbase", 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(".palbase", "project.json"),
-		[]byte(`{"url":"https://demo.palbase.studio"}`), 0o644))
-
-	root := newRootCmd()
-	require.NoError(t, root.PersistentFlags().Set("environment", "staging"))
-	var child *cobra.Command
-	for _, c := range root.Commands() {
-		if c.Name() == "auth" {
-			child = c
-		}
-	}
-	require.NotNil(t, child, "no `palbase auth` command")
-	child.SetErr(io.Discard)
-	child.SetOut(io.Discard)
-
-	_, err := openStackManagement(child)
-	require.Error(t, err, "--environment was accepted and would have been ignored")
-	require.Contains(t, err.Error(), "--environment")
-	require.Contains(t, err.Error(), "https://demo.palbase.studio")
-	// The way out has to be a command this binary answers. `palbase env <slug>`
-	// — what this refusal said before — is not one.
-	require.Contains(t, err.Error(), "palbase link")
-}
-
-// `palbase logs` is a stack verb too, and it was the one the gate did not reach.
-//
-// It never opens openStackManagement: it reads the link ITSELF, and when the
-// link names a cloud project it fetches THAT environment's lines from the
-// control plane. So `palbase logs --environment staging` in a checkout linked
-// to production printed production's logs, with the banner naming production —
-// the same silent substitution the module-settings verbs were fixed for, on the
-// one verb whose whole output is the data you asked for from a named place.
-func TestLogsRefusesTheEnvironmentFlagInALinkedCheckout(t *testing.T) {
-	inScratchCheckout(t)
-	require.NoError(t, os.MkdirAll(".palbase", 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(".palbase", "project.json"),
-		[]byte(`{"url":"https://demo.palbase.studio"}`), 0o644))
-
-	root := newRootCmd()
-	require.NoError(t, root.PersistentFlags().Set("environment", "staging"))
-	var logs *cobra.Command
-	for _, c := range root.Commands() {
-		if c.Name() == "logs" {
-			logs = c
-		}
-	}
-	require.NotNil(t, logs, "no `palbase logs` command")
-	logs.SetErr(io.Discard)
-	logs.SetOut(io.Discard)
-
-	err := logs.RunE(logs, nil)
-	require.Error(t, err, "--environment was accepted and would have been ignored")
-	require.Contains(t, err.Error(), "--environment")
-	require.Contains(t, err.Error(), "https://demo.palbase.studio")
-	require.Contains(t, err.Error(), "palbase link")
-}
-
-// inScratchCheckout runs the test in an empty directory with its own HOME, so
-// the CLI reads no real link file and no real credential store.
-func inScratchCheckout(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	require.NoError(t, os.Chdir(dir))
-	t.Setenv("HOME", t.TempDir())
 }
 
 // retiredConfigFiles are the author-facing declaration files @palbase/backend
@@ -823,3 +744,58 @@ func TestRetiredPlatformCommandsAreGone(t *testing.T) {
 		})
 	}
 }
+
+// THE SECOND ADDRESSING MECHANISM IS GONE (T010).
+//
+// `--project` and `--environment` were global overrides that resolved through
+// `GET /api/v2/projects` — a route the v2 cloud does not serve (measured
+// 2026-08-25: "No route matches this method and path"). So the flags were
+// documented, accepted, and quietly selected nothing in 15+ commands.
+//
+// What a checkout talks to is `.palbase/project.json`, written by `link`.
+func TestTheSelectionFlagsAreGone(t *testing.T) {
+	bin := buildPalbase(t)
+	out, err := exec.Command(bin, "--help").CombinedOutput()
+	if err != nil {
+		t.Fatalf("palbase --help failed: %v\n%s", err, out)
+	}
+	for _, flag := range []string{"--project", "--environment"} {
+		if strings.Contains(string(out), flag) {
+			t.Errorf("%s still appears in the global help:\n%s", flag, out)
+		}
+	}
+
+	// AND THE ROUTE THEY LEANED ON IS NOT CALLED ANY MORE. A flag can be removed
+	// while the call it justified stays behind, wired to nothing.
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grep := exec.Command("grep", "-rn", `"/api/v2/projects"`, "--include=*.go", root)
+	found, _ := grep.Output()
+	var live []string
+	for _, line := range strings.Split(strings.TrimSpace(string(found)), "\n") {
+		if line == "" || strings.Contains(line, "_test.go") || strings.Contains(line, "selectiontest") {
+			continue
+		}
+		// A MENTION IS NOT A CALL. transport/rest.go names the route in a doc
+		// comment as an example of what a path looks like; a gate that cannot
+		// tell prose from code reports a defect that is not there.
+		if _, code, ok := strings.Cut(line, ":"); ok {
+			if _, body, ok := strings.Cut(code, ":"); ok && strings.HasPrefix(strings.TrimSpace(body), "//") {
+				continue
+			}
+		}
+		live = append(live, line)
+	}
+	if len(live) > 0 {
+		t.Errorf("the dead route is still called from production code:\n%s", strings.Join(live, "\n"))
+	}
+}
+
+// THE "REFUSES THE ENVIRONMENT FLAG" TESTS WENT WITH THE FLAG (T010).
+//
+// They measured that a linked checkout refused `--environment` rather than
+// letting two authorities disagree about the target. Sound rule, and the flag it
+// guarded is gone — a checkout has one address and it is in .palbase/project.json.
+// A guard against a flag nobody can pass measures nothing.

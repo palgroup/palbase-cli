@@ -356,7 +356,7 @@ func TestNativeLink_ProjectFlagWithoutConfig_DoesNotOrphanOrDuplicate(t *testing
 	dir := selectiontest.Chdir(t)
 	// Deliberately no selectiontest.WriteConfig: this is the config-less
 	// directory `--project proj_1` resolves without ever touching disk
-	// (selection.Resolver.Resolve skips Config() once ProjectFlag is set).
+	// (the project comes from the checkout now — T010 removed --project).
 
 	var registered []map[string]any
 	var postCount int
@@ -437,8 +437,7 @@ func TestNativeLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
 			})
 			rest := f.REST()
 			resolver := &selection.Resolver{
-				REST:        func() selection.REST { return rest },
-				ProjectFlag: "proj_1", // headless --project: Resolve() never reads the broken config itself
+				REST: func() selection.REST { return rest },
 			}
 			r := Resolvers{
 				REST:      func() REST { return rest },

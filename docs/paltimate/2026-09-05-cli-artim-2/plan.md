@@ -265,13 +265,13 @@ veriyor.
 **Kanıt:** CB-39 — `app_environments.go:612 gatherEnvironments` ↔ `cloud_environments.go:167
 addLocalStack`; `native_link.go:381 resolveNativeApp` ↔ `web_link.go:148 resolveWebApp`.
 
-- [ ] **Adım 1: Örtüşmeyi ÖLÇ** — iki çiftin diff'ini al ve rapora yaz (tasarım "%95" ve "35 satırın
+- [x] **Adım 1: Örtüşmeyi ÖLÇ** — iki çiftin diff'ini al ve rapora yaz (tasarım "%95" ve "35 satırın
   30'u" diyor; bugünkü sayı ölçülecek — bayat olabilir, CB-46 gibi).
-- [ ] **Adım 2: Kırmızıyı yaz** — tek yardımcının her iki çağıranın davranışını da karşıladığını
+- [x] **Adım 2: Kırmızıyı yaz** — tek yardımcının her iki çağıranın davranışını da karşıladığını
   ölçen test.
-- [ ] **Adım 3: Birleştir** — tek uygulama kalır; ikinci kopya silinir.
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -count=1 -short`
-- [ ] **Adım 5: Commit** — pathspec ile dört dosya
+- [x] **Adım 3: Birleştir** — tek uygulama kalır; ikinci kopya silinir.
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -count=1 -short`
+- [x] **Adım 5: Commit** — pathspec ile dört dosya
 
 ---
 

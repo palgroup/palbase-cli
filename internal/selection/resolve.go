@@ -104,10 +104,10 @@ func (s Selection) Describe() string {
 type Resolver struct {
 	// REST is the Management-API client (lazy: main.go builds it per invocation).
 	REST func() REST
-	// ProjectFlag / EnvironmentFlag are the global --project / --environment
-	// headless overrides. EnvironmentFlag matches an exact ref or slug.
-	ProjectFlag     string
-	EnvironmentFlag string
+	// THE FLAGS ARE GONE (T010). ProjectFlag / EnvironmentFlag mirrored the
+	// global --project / --environment, which resolved through a route the v2
+	// cloud does not serve — documented, accepted, selecting nothing. Keeping
+	// the fields would keep a wire nobody drives.
 	// Dir is the directory holding .palbase/selection.json ("" = cwd).
 	Dir string
 
@@ -159,81 +159,6 @@ func GetProject(ctx context.Context, rest REST, projectID string) (ProjectDetail
 	return p, nil
 }
 
-// projectIDPrefix is what a management project id starts with. The management
-// API addresses a project by THIS, while the cloud API addresses it by ref and
-// `project list` prints its NAME — three identifiers for one thing.
-const projectIDPrefix = "proj_"
-
-// ResolveProjectID turns what a PERSON has into the id the management API needs.
-//
-// Accepts, in order: a management id (used as-is), a project NAME as
-// `palbase project list` prints it, and an environment REF as the same listing's
-// second column shows.
-//
-// ÖLÇÜLDÜ 25.08.2026: `--project` yalnız id kabul ediyordu ve o id CLI'ın
-// HİÇBİR yüzeyinde görünmüyor — `project list` de, `--json` çıktısı da yalnız ad
-// ve ref basıyor. Yani belgelenmiş bayrak, değerini hiçbir yerden alamayacağın
-// bir şey istiyordu: `project status 1jhp7jbrm` çalışırken `push --project
-// 1jhp7jbrm` "böyle bir proje yok" diyordu. Bir bayrak, aracın kendi bastığı
-// şeyi kabul etmelidir.
-//
-// The ref lookup costs one listing per project and runs ONLY when the name did
-// not match, because a ref lives on the environment rather than on the project.
-func ResolveProjectID(ctx context.Context, rest REST, given string) (string, error) {
-	given = strings.TrimSpace(given)
-	if given == "" {
-		return "", errors.New("no project given")
-	}
-	if strings.HasPrefix(given, projectIDPrefix) {
-		return given, nil
-	}
-
-	var projects []Project
-	if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects", nil, &projects); err != nil {
-		// A PLANE WITHOUT THIS LISTING IS NOT A PLANE WITHOUT THIS PROJECT.
-		//
-		// The management listing exists where projects HAVE management ids; the
-		// v2 cloud addresses a project by its ref and serves no such route
-		// (measured 2026-08-25: `/api/v2/projects` answers "No route matches
-		// this method and path"). Failing here would turn "this identifier could
-		// not be looked up" into "no such project", which is the class of lie
-		// this function exists to stop telling — so the value is handed back
-		// unchanged and whoever needs it answers for it.
-		return given, nil
-	}
-
-	var named []Project
-	for _, p := range projects {
-		if strings.EqualFold(strings.TrimSpace(p.Name), given) {
-			named = append(named, p)
-		}
-	}
-	if len(named) == 1 {
-		return named[0].ID, nil
-	}
-	if len(named) > 1 {
-		// Choosing one would act on a project the person did not mean.
-		return "", fmt.Errorf("%q is the name of %d projects — pass the id instead", given, len(named))
-	}
-
-	if IsCanonicalEnvironmentRef(given) {
-		for _, p := range projects {
-			envs, err := ListEnvironments(ctx, rest, p.ID)
-			if err != nil {
-				continue
-			}
-			for _, env := range envs {
-				if env.Ref == given {
-					return p.ID, nil
-				}
-			}
-		}
-	}
-	return "", fmt.Errorf(
-		"no project matches %q — pass the name or the ref `palbase project list` shows, or the project id",
-		given)
-}
-
 func (r *Resolver) rest() (REST, error) {
 	if r.REST == nil {
 		return nil, errors.New("management API client is not wired")
@@ -249,13 +174,6 @@ func (r *Resolver) rest() (REST, error) {
 // Commands that act on the Project (apps, members, project settings) use this
 // and never pay for an environments listing.
 func (r *Resolver) ProjectID(ctx context.Context) (string, error) {
-	if r.ProjectFlag != "" {
-		rest, err := r.rest()
-		if err != nil {
-			return "", err
-		}
-		return ResolveProjectID(ctx, rest, r.ProjectFlag)
-	}
 	cfg, err := r.Config()
 	if err != nil {
 		return "", err
@@ -278,21 +196,16 @@ func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 		return Selection{}, err
 	}
 
-	var cfg *Config
-	projectID := r.ProjectFlag
-	if projectID == "" {
-		cfg, err = r.Config()
-		if err != nil {
-			return Selection{}, err
-		}
-		projectID = cfg.ProjectID
-	} else {
-		// A flag must accept what the tool itself prints — see ResolveProjectID.
-		projectID, err = ResolveProjectID(ctx, rest, projectID)
-		if err != nil {
-			return Selection{}, err
-		}
+	// THE PROJECT COMES FROM THE CHECKOUT, and from nowhere else (T010).
+	//
+	// `--project` used to override this and resolve through `GET
+	// /api/v2/projects` — a route the v2 cloud does not serve, so the override
+	// silently selected nothing. One address, one place it is written down.
+	cfg, err := r.Config()
+	if err != nil {
+		return Selection{}, err
 	}
+	projectID := cfg.ProjectID
 	detail, err := GetProject(ctx, rest, projectID)
 	if err != nil {
 		return Selection{}, fmt.Errorf("get project %s: %w", projectID, err)
@@ -314,7 +227,7 @@ func (r *Resolver) Resolve(ctx context.Context) (Selection, error) {
 	if cfg != nil {
 		wantID = cfg.EnvironmentID
 	}
-	env, err := pickEnvironment(envs, r.EnvironmentFlag, wantID)
+	env, err := pickEnvironment(envs, "", wantID)
 	if err != nil {
 		return Selection{}, err
 	}
@@ -346,7 +259,7 @@ func pickEnvironment(envs []Environment, flag, wantID string) (Environment, erro
 		// since the v2 cutover. The reader is being told their selection is
 		// stale AND handed a command that fails — two dead ends in one line.
 		return Environment{}, fmt.Errorf(
-			"the selected environment (%s) no longer exists — re-select with `palbase link <ref>` or `--environment <ref>` (have: %s)",
+			"the selected environment (%s) no longer exists — re-link with `palbase link <url>` (have: %s)",
 			wantID, slugList(envs))
 	}
 	best, _ := DefaultEnvironment(envs)
