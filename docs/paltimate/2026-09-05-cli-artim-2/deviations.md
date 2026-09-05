@@ -141,3 +141,124 @@ edilmez.** Üç mutasyon da artık kırmızı: iki taşınmış-bizim-imaj + ups
 
 **Ders:** bir kuralın öznesi tahmin edilemez. "Bizim imajımız" bir önek deseni değil, bir olgudur ve
 veriye yazılmalıdır.
+
+---
+
+## Kapanıştan sonra: KOŞUNUN KENDİ ARTIKLARI
+
+Docs korpusunu hizalarken (rev-b I-6) bir iplik çekildi ve koşunun kendi
+sökümlerinin yarım kaldığı çıktı. Kullanıcı direktifi zaten yazılıydı:
+*"legacy ile karşılaşırsan sil, kendin legacy de yaratma."*
+
+### A-4 · T008 ARDINDA 3.969 SATIR ÖLÜ KOD BIRAKMIŞ
+
+T008 dört platform komut grubunun **kaydını** sildi, **gövdesini** bıraktı.
+`web_link.go`'nun 32 sembolünün hiçbirinin üretim çağıranı yoktu — 1.208
+satırlık bir ada. `golangci-lint`'in `unused` linter'ı onu göremiyordu, çünkü
+**1.477 satırlık `web_link_test.go` hepsini canlı tutuyordu.**
+
+> **Ders:** *test edilen ölü kod ölü görünmez.* `unused` reachability'yi test
+> dosyaları dahil hesaplıyor, yani bir sökümün artığını tam da onu ölçmesi
+> beklenen alet gizliyor. Üretim çağıranını AYRICA sormak gerekiyor.
+
+Silinen: `web_link.go` (1208) · `web_link_test.go` (1477) ·
+`platform_link_target(_test).go` (260) · `native_link.go`'nun komut yarısı ve
+testleri. Hayatta kalan iki sembol tek çağıranlarının yanına taşındı.
+
+**Kesilmeyen:** `linkNativeEnvironments` ölü sanılabilirdi — ikinci çağıranı
+`pull_spec.go:162`, yani `palbase pull`. Ölçmeden silseydim bulut ortam yolunu
+kırardım.
+
+### A-5 · Sökümün GÖTÜRDÜĞÜ KULLANICI YÜZEYİ — geri getirildi
+
+`palbase web link` sekiz adımlık kurulum yapıyordu (SDK kurulumu · ilk
+`palbe-gen` · predev/prebuild script'leri · entry import'u · Next providers.tsx
+ve proxy.ts · gitignore koruması). Şartname FR-008'i "artefaktları yazsın" ile
+sınırladığı için bu kayıp **hiç adlandırılmamıştı**: web projesi "başarıyla"
+linkleniyor, üretilmiş istemcisi olmuyor, Next uygulamasında tarayıcı paketi
+`pb`'yi hiç yapılandırmıyordu.
+
+Kullanıcıya soruldu (ürün kararı). **Karar: geri gelsin** — "tek yol oldu bu
+link işi; ios android nasılsa web'te öyle olacak platform tag'i ile."
+`runLink`'in web dalına bağlandı, `--entry`/`--out` bayrakları `link`e taşındı.
+Kanıt üretim yolundan: `TestLinkWiresAWebCheckoutEndToEnd`, mutasyon kırmızı.
+
+### A-6 · pre-push hook altsistemi — SİLİNDİ
+
+`hook.Ensure`'ün üretim çağıranı yoktu (hook yıllardır kurulmuyor), ama
+`palbase doctor` bunu KIRMIZI raporluyor ve çaresi olarak `palbase push` ya da
+`clone` öneriyordu — ikisi de kurmuyor. Her `doctor` koşusu, kullanıcının
+düzeltemeyeceği kalıcı bir yanlış alarmdı.
+
+Kullanıcı kararı: *"git hook ile hiçbir şey kalmaması lazım."* 494 satır gitti.
+Onunla birlikte tavsiye kapısının `palbase:frozen-fingerprint` istisnası da —
+bir kapının istisnası kendi silinmesini istemeli.
+
+### A-7 · İKİ IGNORE LİSTESİ BİRBİRİNDEN HABERSİZDİ
+
+`palbase build` → `.palbase-build-controllers/` yazıyor.
+Scaffold → `.palbase-staged-controllers/` ve `.palbase-serve-controllers/`
+ignore ediyordu. Yani **build'in gerçekten yarattığı dizin, ignore edilmeyen
+tek dizindi** (17 dosya / 88 KB, her biri bir controller'ın bayat kopyası); ve
+ikinci ad iki yeniden adlandırmadır hiçbir şeyin yazmadığı ölü bir isimdi.
+
+Aynı hikâye bir dizin içeride: `.palbase/` bilerek commit'leniyor ama
+`.palbase/esm|jobs|hooks` her build'in yeniden yazdığı ÇIKTI ve hiçbiri ignore
+edilmiyordu.
+
+Artık tek beyan (`generatedProjectPaths`), iki okuyucu (scaffold + onarım).
+Kapı iddiasını hatırlanan adlardan değil KODUN SABİTLERİNDEN kuruyor — eski
+test tam da hatırladığı iki adı doğruluyor, canlı olanı ıskalıyordu.
+
+### A-8 · BUNDLE ÇIKTISI KOMUTU YAŞIYORDU
+
+`.palbase/esm|jobs|hooks` iki komut arasında yaşamak zorunda değil: `push`
+bundle'ı üretip tar'ı aynı süreçte alıyor, `plan` üretip hiçbir şey
+göndermiyor. Geride kalanlar, kullanıcının commit'lemesi söylenen dizinin
+içinde duran build çıktısıydı — ve push yolunun kendi yorumuna göre diskte
+duran bayat bir bundle "yesterday's code under today's commit message" demek.
+Üç çağrı yerinde de temizleniyor artık.
+
+### A-9 · `clone <proj_id>` ADRESLENEMEZ CHECKOUT ÜRETİYORDU
+
+İd yolu bağlamayı yalnız `.palbase/selection.json`'a yazıyordu; FR-013 ile
+`ReadTarget` o dosyayı okumayı bıraktı. Klon iniyor, sonra o dizindeki HER
+fiil "this checkout is not linked" diyordu. Üstelik o dala girmek için
+`proj_…` yazmak gerekiyor — komutun kendi yorumunun dediği gibi "a value this
+CLI shows on no surface at all". Dal redde çevrildi, kapanımı silindi;
+`selection.json`'ın üretimdeki son yazıcısı da böylece gitti.
+
+### A-10 · ALETİN TAVANI PLATFORMUN SANILDI
+
+`golangci-lint` panic verdi. Sebep kodda değildi: Homebrew Go'yu **1.27.0**'a
+yükseltmiş, linter **go1.26.2** ile derlenmişti ve 1.27'nin stdlib'ini
+ayrıştıramıyordu. CI 1.26.6'ya pinli olduğu için orada sağlamdı. CI ile AYNI
+sürüm (v2.12.2) yerel Go ile yeniden derlendi — ve ilk temiz koşusunda
+`refuseUseOnBoundProject`'i buldu.
+
+### A-11 · ÇEKİRDEK KAYMASI: 0.42.0 → 0.42.1
+
+T003'te yazdığım parite kapısı kırmızı verdi: otorite (`version.env`,
+`V2_VERSION`) 0.42.1'e çıkmıştı, CLI'ın gömülü varsayılanları, vendor'lanan
+compose ve SDK tablosu 0.42.0'da kalmıştı — `palbase start` buluttan ESKİ bir
+çekirdek koşuyordu. Pinlemeden önce üç imajın da GHCR'de yayında olduğu
+manifest ile doğrulandı. Kapının var olma sebebi tam olarak buydu.
+
+### A-12 · DOCS KORPUSU + İKİNCİ KAPI
+
+On beş sayfada 66 satır emekli komut öğretiyordu; koşunun kendi değişiklikleri
+de altı bayat iddia bırakmıştı. Hepsi hizalandı ve
+`retired-commands.test.ts` kuruldu: korpusun öğrettiği her `palbase <word>`,
+CLI kaynağındaki cobra `Use:` alanlarından TÜRETİLEN kümeye karşı ölçülür.
+
+> **Ders (bu koşunun altıncı tekrarı):** *bir kuralın öznesi tahmin edilemez.*
+> Kapı önce SATIR bazlı yazıldı ve 14 ihlal saydı — on dördü de komutun var
+> olmadığını SÖYLEYEN cümlelerdi, çünkü düzyazı sarılıyor ve olumsuzlama bir
+> önceki satırda kalıyor. BLOK bazlı ölçüm sıfıra indirdi ve tek gerçek kusuru
+> bıraktı: `backend/channels.md`'nin "check `palbase version` first" tavsiyesi
+> — binary `unknown command "version"` diyor.
+
+Aynı sınıfın CLI tarafı için `cmd/palbase/advice_test.go`: shipped string'lerin
+verdiği tavsiyeler aynı türetilmiş kümeye karşı ölçülür, AST ile (yorumlar
+görünmez). İlk koşusunda `palbase pull`'un "run `palbase web link` … first"
+reddini buldu — çaresi yazılamayan bir ret.
