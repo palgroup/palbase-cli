@@ -318,6 +318,8 @@ services:
       DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
       DB_ROLE: ${RUNTIME_DB_ROLE:-backend_authenticated}
       DB_POOL_MAX: ${RUNTIME_DB_POOL_MAX:-32}
+      PALBASE_DB_COMMANDS: ${PALBASE_DB_COMMANDS:-false}
+      PALBASE_DB_DIAGNOSTICS: ${PALBASE_DB_DIAGNOSTICS:-false}
       AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://palsvc:8080/.well-known/jwks.json}
       MODULE_BASE_URL: ${MODULE_BASE_URL:-http://palsvc:8080}
       # YIĞININ KENDİ GENEL ADRESİ — ve onu YALNIZ operatör bilir.
