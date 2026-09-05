@@ -1041,7 +1041,7 @@ func sealingChainState(envFile string) (int, error) {
 // Üç sonuç: tam zincir (dokunulmaz), hiç zincir yok (mint edilebilir), ya da YARIM —
 // ve yarım, yazılmaması gereken tek durumdur. Eşleşmeyen bir SEED'in yanına ikinci bir
 // BINDING eklemek, çoğu .env okuyucusu için son-değer-kazanır demektir; yani başka bir
-// kilikta uzerine yazma. Operatore soyleyip durmak, sessizce bozmaktan iyidir.
+// kılıkta üzerine yazma. Operatöre söyleyip durmak, sessizce bozmaktan iyidir.
 func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) error {
 	present, err := sealingChainState(envFile)
 	if err != nil {
