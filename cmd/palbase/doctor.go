@@ -14,7 +14,6 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
-	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
@@ -185,21 +184,6 @@ func doctorCmd() *cobra.Command {
 				ok("link", target.Describe())
 			} else {
 				ok("link", "this directory is not linked — run `palbase link <url>` here")
-			}
-
-			// pre-push deploy-validation hook (report-only). Meaningful only in a
-			// github-mode checkout; elsewhere there's nothing to wire.
-			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
-				switch state, detail := hook.Status(cwd); state {
-				case "wired-v2":
-					ok("hook", fmt.Sprintf("hooks/pre-push v2 wired (%s)", detail))
-				case "outdated":
-					ok("hook", fmt.Sprintf("hooks/pre-push %s", detail))
-				case "foreign":
-					ok("hook", fmt.Sprintf("hooks/pre-push %s", detail))
-				default: // missing
-					bad("hook", "hooks/pre-push missing — run 'palbase push' or 'palbase clone' once to install it")
-				}
 			}
 
 			// Docker prerequisites, before Node: `palbase start` needs these and

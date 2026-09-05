@@ -129,22 +129,11 @@ func commandVocabulary(root string) (declared map[string]bool, advised []advised
 			strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		// ParseComments, not 0: the exemption below LIVES in a doc comment, and a
-		// parse that drops comments would silently exempt nothing at all.
-		parsed, perr := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		parsed, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-
-		// DECLARED EXEMPTIONS ONLY. `internal/hook` carries the byte-exact
-		// bodies of v1 hooks so it can RECOGNISE them on other people's disks;
-		// every command they name is meant to be gone, and rewriting them is the
-		// one edit that breaks the matching they exist for. The exemption is a
-		// marker on the declaration rather than a path this test remembers:
-		// guessing which literals were historical is how a gate ends up
-		// measuring something other than its subject.
-		frozen := frozenRanges(parsed)
 
 		ast.Inspect(parsed, func(n ast.Node) bool {
 			// `Use: "link <ref>"` → the command's first word.
@@ -164,7 +153,7 @@ func commandVocabulary(root string) (declared map[string]bool, advised []advised
 				return true
 			}
 			value, uerr := strconv.Unquote(lit.Value)
-			if uerr != nil || frozen.covers(lit.Pos()) {
+			if uerr != nil {
 				return true
 			}
 			for _, word := range advisedWords(value) {
@@ -180,30 +169,4 @@ func commandVocabulary(root string) (declared map[string]bool, advised []advised
 	// `palbase` is the root's own name and every command sits under it.
 	declared["palbase"] = true
 	return declared, advised, err
-}
-
-// frozenSpans are the declarations marked `palbase:frozen-fingerprint`.
-type frozenSpans []struct{ from, to token.Pos }
-
-func (f frozenSpans) covers(p token.Pos) bool {
-	for _, s := range f {
-		if p >= s.from && p <= s.to {
-			return true
-		}
-	}
-	return false
-}
-
-func frozenRanges(file *ast.File) frozenSpans {
-	var out frozenSpans
-	for _, decl := range file.Decls {
-		gen, isGen := decl.(*ast.GenDecl)
-		if !isGen || gen.Doc == nil {
-			continue
-		}
-		if strings.Contains(gen.Doc.Text(), "palbase:frozen-fingerprint") {
-			out = append(out, struct{ from, to token.Pos }{gen.Pos(), gen.End()})
-		}
-	}
-	return out
 }
