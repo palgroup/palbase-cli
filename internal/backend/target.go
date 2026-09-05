@@ -262,12 +262,18 @@ func ResolveTarget(ctx context.Context) (Target, error) {
 // falling back silently is how the stack becomes a property of the binary again,
 // which is the whole defect (D-035/D-039).
 func stackVersion(projectDir string) (string, error) {
+	// AN UNLINKED CHECKOUT IS THE NORMAL CASE FOR `start`, which brings a stack
+	// up and links to it — so a missing project file is not an error here, it is
+	// the state before the one this command creates. Measured: reading the target
+	// first made `palbase start` refuse a fresh `palbase init` with "this
+	// checkout is not linked", which is advice for the command the reader just
+	// ran.
 	target, err := ReadTarget()
-	if err != nil {
-		return "", err
-	}
-	if v := strings.TrimSpace(target.StackVersion); v != "" {
-		return v, nil
+	linked := err == nil
+	if linked {
+		if v := strings.TrimSpace(target.StackVersion); v != "" {
+			return v, nil
+		}
 	}
 
 	installed := installedBackendVersion(projectDir)
@@ -281,9 +287,14 @@ func stackVersion(projectDir string) (string, error) {
 		return "", fmt.Errorf("cannot read a major out of the installed %s version %q", backendPkg, installed)
 	}
 
-	target.StackVersion = major
-	if err := WriteTarget(target); err != nil {
-		return "", fmt.Errorf("write the derived stack version: %w", err)
+	// Persist only where there is a file to persist into. `start` writes the
+	// project file itself once the stack is up; forcing one here would put a
+	// half-formed target on disk before the address it names exists.
+	if linked {
+		target.StackVersion = major
+		if err := WriteTarget(target); err != nil {
+			return "", fmt.Errorf("write the derived stack version: %w", err)
+		}
 	}
 	return major, nil
 }

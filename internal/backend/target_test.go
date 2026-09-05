@@ -140,3 +140,29 @@ func TestStackVersionRefusesWhenNothingCanAnswer(t *testing.T) {
 		t.Errorf("the refusal does not name %s: %v", backendPkg, err)
 	}
 }
+
+// AN UNLINKED CHECKOUT IS THE NORMAL CASE FOR `start`.
+//
+// Caught by UAT, not by a unit test: reading the target first made `palbase
+// start` refuse a fresh `palbase init` with "this checkout is not linked" —
+// advice for the command the reader had just run. Every unit test passed,
+// because each half agreed with itself.
+func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	seedInstalledSDK(t, dir, "33.0.2")
+
+	got, err := stackVersion(".")
+	if err != nil {
+		t.Fatalf("an unlinked checkout was refused: %v", err)
+	}
+	if got != "33" {
+		t.Errorf("stackVersion = %q, want the derived 33", got)
+	}
+	// AND IT WRITES NOTHING: `start` creates the project file itself once the
+	// stack is up, and a half-formed target on disk names an address that does
+	// not exist yet.
+	if _, err := os.Stat(filepath.Join(dir, nativeArtifactsDir, "project.json")); !os.IsNotExist(err) {
+		t.Error("a project file was written before there was a project to name")
+	}
+}

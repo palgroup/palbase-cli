@@ -511,7 +511,10 @@ func TestLink_ResolvesABareRefToItsAddress(t *testing.T) {
 	})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"na1m7lt2m"})
+	// --platform names what this fixture is, because detection now runs BEFORE
+	// the network (a directory read needs nobody's permission) and an empty temp
+	// dir is not any kind of app. This test is about the ADDRESS, not detection.
+	cmd.SetArgs([]string{"na1m7lt2m", "--platform", "web"})
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 
 	err := cmd.Execute()

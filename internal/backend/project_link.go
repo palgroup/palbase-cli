@@ -204,6 +204,35 @@ func knownRefs(ctx context.Context, r Resolvers) ([]string, bool) {
 }
 
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
+	// BEFORE ANY NETWORK. A typo in --platform used to surface as a connection
+	// error from the address, which reads as "the stack is down" and sends the
+	// reader to the wrong problem entirely. What the caller typed can be judged
+	// without asking anybody.
+	if err := validatePlatforms(o.platforms); err != nil {
+		return err
+	}
+
+	// AND WHAT THIS CHECKOUT IS, also before any network. Reading a directory
+	// needs nobody's permission, and saying what was found first means a later
+	// connection error reads as "the stack is down" rather than as "link did not
+	// understand my project".
+	platforms := o.platforms
+	if len(platforms) == 0 {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		platforms = detectPlatforms(root)
+		if len(platforms) == 0 {
+			return fmt.Errorf(
+				"cannot tell what kind of app this is: looked for an Xcode project or workspace, "+
+					"an Android applicationId in build.gradle[.kts], and a package.json beside an "+
+					"index.html/public/src/app — found none in %s.\n  Name it with --platform if this "+
+					"checkout keeps them somewhere else", root)
+		}
+		fmt.Fprintf(w, "▸ %s\n", strings.Join(platforms, ", "))
+	}
+
 	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
 	if base == "" {
 		// A BOUND CHECKOUT ALREADY NAMES ITS ADDRESS. Re-linking is how you
@@ -286,27 +315,6 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// The platform list is not decoration: it says which toolchain is on the
 	// other end, and a link that ignores it is a link for one platform wearing
 	// a flag for four.
-	// WHAT THIS CHECKOUT IS, unless the caller asked for less.
-	if err := validatePlatforms(o.platforms); err != nil {
-		return err
-	}
-	platforms := o.platforms
-	if len(platforms) == 0 {
-		root, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		platforms = detectPlatforms(root)
-		if len(platforms) == 0 {
-			return fmt.Errorf(
-				"cannot tell what kind of app this is: looked for an Xcode project or workspace, "+
-					"an Android applicationId in build.gradle[.kts], and a package.json beside an "+
-					"index.html/public/src/app — found none in %s.\n  Name it with --platform if this "+
-					"checkout keeps them somewhere else", root)
-		}
-		fmt.Fprintf(w, "▸ %s\n", strings.Join(platforms, ", "))
-	}
-
 	apple := false
 	for _, platform := range platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))

@@ -119,7 +119,7 @@ func TestTheCommandActuallyResolvesTheName(t *testing.T) {
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
 	}
 	cmd := newLinkCmd(r)
-	cmd.SetArgs([]string{"todoapp"})
+	cmd.SetArgs([]string{"todoapp", "--platform", "web"})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SilenceUsage = true
