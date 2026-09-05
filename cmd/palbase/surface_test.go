@@ -765,6 +765,54 @@ func TestTheSelectionFlagsAreGone(t *testing.T) {
 		}
 	}
 
+	// EVERY COMMAND'S OWN HELP, NOT JUST THE ROOT'S.
+	//
+	// This gate read `palbase --help` and spoke about the whole CLI. The set it
+	// READ and the set it TALKED ABOUT were different questions, and four
+	// subcommands went on describing the flags in their own `Long` text:
+	//
+	//   The global --project / --environment flags select a CLOUD environment.
+	//   In a checkout linked to a project they do not apply, and saying so is
+	//   the point: a flag that is accepted and ignored is worse than one that
+	//   is refused.
+	//
+	// The irony is exact — the paragraph argues that an accepted-and-ignored
+	// flag is worse than a refused one, while describing a flag the binary no
+	// longer parses at all. `palbase push --help`, `spec`, `test-user` and
+	// `flags user` all carried it, and the root help was clean the whole time.
+	//
+	// The tree is walked in-process: a person reads `<command> --help`, and that
+	// text is the command's own, not the root's.
+	var stale []string
+	var walk func(cmd *cobra.Command, path string)
+	walk = func(cmd *cobra.Command, path string) {
+		name := strings.TrimSpace(path + " " + cmd.Name())
+		for _, text := range []struct{ where, body string }{
+			{"Short", cmd.Short}, {"Long", cmd.Long}, {"Example", cmd.Example},
+		} {
+			for _, gone := range []string{"--project", "--environment", "repository_provider"} {
+				if strings.Contains(text.body, gone) {
+					stale = append(stale, name+" "+text.where+" names "+gone)
+				}
+			}
+		}
+		cmd.Flags().VisitAll(func(f *pflag.Flag) {
+			if f.Name == "project" || f.Name == "environment" {
+				stale = append(stale, name+" declares --"+f.Name)
+			}
+		})
+		for _, sub := range cmd.Commands() {
+			walk(sub, name)
+		}
+	}
+	walk(newRootCmd(), "")
+	sort.Strings(stale)
+	if len(stale) > 0 {
+		t.Errorf("the second addressing mechanism is still described by the commands themselves:\n%s\n\n"+
+			"a reader who types `<command> --help` is told about a flag the binary answers with "+
+			"`unknown flag`", strings.Join(stale, "\n"))
+	}
+
 	// AND THE ROUTE THEY LEANED ON IS NOT CALLED ANY MORE. A flag can be removed
 	// while the call it justified stays behind, wired to nothing.
 	root, err := filepath.Abs("../..")

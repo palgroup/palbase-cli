@@ -84,11 +84,11 @@ so a fresh clone behaves the same as the machine that linked it.
 
 spec does NOT write the per-environment runtime config (palbase-config.json —
 base URL + key). That comes from ` + "`palbase <platform> link`" + ` and is re-written by
-` + "`palbase <platform> use <environment>`" + `.
+` + "`palbase link <ref>`" + `.
 
-The global --project / --environment flags select a CLOUD environment. In a
-checkout linked to a project they do not apply and are REFUSED — run
-` + "`palbase link <ref>`" + ` to point the checkout at another project.`,
+This acts on the project this checkout is bound to. There is one addressing
+mechanism — run ` + "`palbase link <ref>`" + ` to point the checkout at another
+project.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
 

@@ -331,18 +331,15 @@ func newPushCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "push",
 		Args:  cobra.NoArgs,
-		Short: "Deploy the current backend — to the linked stack, or to the selected environment",
+		Short: "Deploy the current backend to the project this checkout is linked to",
 		Long: `Deploy the backend in the current directory.
 
-  repository_provider = palbase: the directory is packaged and uploaded to the
-      SELECTED environment's deploy ingress, carrying an Idempotency-Key so a
-      timed-out push can be retried without deploying twice.
-  repository_provider = github: runs ` + "`git push`" + `; the webhook deploys into the
-      environment mapped to the pushed Git branch.
+The directory is packaged and uploaded to the linked project's deploy ingress,
+carrying an Idempotency-Key so a timed-out push can be retried without deploying
+twice. There is no repository-driven rail: ` + "`git push`" + ` deploys nothing.
 
-The global --project / --environment flags select a CLOUD environment. In a
-checkout linked to a project they do not apply, and saying so is the point: a
-flag that is accepted and ignored is worse than one that is refused.`,
+This acts on the project this checkout is bound to. There is one addressing
+mechanism — ` + "`palbase link`" + ` — and no flags that select a different one.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// TARGET-RELATIVE (design-management-api.md §10). A checkout linked
 			// to a stack pushes to THAT stack, which applies its own schema and

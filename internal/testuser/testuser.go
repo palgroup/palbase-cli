@@ -59,9 +59,9 @@ now — and it is the only door.
 Each environment verifies tokens against its OWN auth, so a minted token is only
 valid on the environment that minted it.
 
-The global --project / --environment flags select a CLOUD environment. In a
-checkout linked to a project they do not apply and are REFUSED — run
-` + "`palbase link <ref>`" + ` to point the checkout at another project.
+This acts on the project this checkout is bound to. There is one addressing
+mechanism — run ` + "`palbase link <ref>`" + ` to point the checkout at another
+project.
 
 The minted users are is_test; the server mints their passwords + access tokens.`,
 	}

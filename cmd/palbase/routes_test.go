@@ -89,12 +89,12 @@ var (
 
 // servedCloudRoutes reads the cloud controllers and returns their routes as
 // regexps, with `{param}` standing for one segment.
-func servedCloudRoutes(dir string) ([]*regexp.Regexp, error) {
+func servedCloudRoutes(dir string) ([]servedRoute, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	var out []*regexp.Regexp
+	var out []servedRoute
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".test.ts") {
 			continue
@@ -108,18 +108,32 @@ func servedCloudRoutes(dir string) ([]*regexp.Regexp, error) {
 		if m := controllerBase.FindStringSubmatch(text); m != nil {
 			base = m[1]
 		}
-		if !strings.HasPrefix(base, "/v1/cloud") {
+		// TWO PLANES, BOTH DECLARED IN THIS TREE. The gate read `/v1/cloud`
+		// only and named `/api/v2` as unmeasured — but `cli.controller.ts`
+		// declares that one right beside it, so "served elsewhere" was true of
+		// the tenant plane and merely unexamined here.
+		if !strings.HasPrefix(base, "/v1/cloud") && !strings.HasPrefix(base, "/api/v2") {
 			continue
 		}
 		for _, m := range routeMethod.FindAllStringSubmatch(text, -1) {
 			full := strings.TrimRight(base+m[1], "/")
-			quoted := regexp.QuoteMeta(full)
-			// A path parameter matches exactly one segment.
-			quoted = pathParam.ReplaceAllStringFunc(quoted, func(string) string { return `[^/]+` })
-			quoted = strings.ReplaceAll(quoted, `\{`, `{`)
-			quoted = strings.ReplaceAll(quoted, `\}`, `}`)
-			quoted = pathParam.ReplaceAllString(quoted, `[^/]+`)
-			out = append(out, regexp.MustCompile(`^`+quoted+`$`))
+			// QUOTE THE LITERAL PARTS, THEN JOIN WITH THE PARAMETER PATTERN.
+			//
+			// This used to QuoteMeta the whole path and then try to undo the
+			// escaping around `{param}`. It could not: QuoteMeta turns `{` into
+			// `\{`, the parameter regex then matched starting AT the brace and
+			// left the backslash behind, so the compiled pattern contained
+			// `\[^/]+` — a literal `[`. Every parameterised route therefore
+			// matched nothing, and the gate reported seven live routes as
+			// unserved the moment it was pointed at a plane that has any.
+			parts := pathParam.Split(full, -1)
+			for i := range parts {
+				parts[i] = regexp.QuoteMeta(parts[i])
+			}
+			out = append(out, servedRoute{
+				pattern: regexp.MustCompile(`^` + strings.Join(parts, `[^/]+`) + `$`),
+				raw:     full,
+			})
 		}
 	}
 	return out, nil
@@ -151,9 +165,9 @@ func cloudRouteLiterals(root string) (found []routeLiteral, unmeasured []string,
 			rel, _ := filepath.Rel(root, path)
 			where := rel + ":" + strconv.Itoa(fset.Position(lit.Pos()).Line)
 			switch {
-			case strings.HasPrefix(value, "/v1/cloud/"):
+			case strings.HasPrefix(value, "/v1/cloud/"), strings.HasPrefix(value, "/api/v2/"):
 				found = append(found, routeLiteral{where: where, path: strings.TrimRight(value, "/")})
-			case strings.HasPrefix(value, "/v1/") || strings.HasPrefix(value, "/api/v2/"):
+			case strings.HasPrefix(value, "/v1/"):
 				unmeasured = append(unmeasured, "  "+where+" "+value)
 			}
 			return true
@@ -166,18 +180,88 @@ func cloudRouteLiterals(root string) (found []routeLiteral, unmeasured []string,
 // servedBy reports whether any declared route matches this literal. A literal
 // built by concatenation ends at the last static segment, so a prefix match
 // against a declared route counts: the CLI appends the id at runtime.
-func servedBy(served []*regexp.Regexp, literal string) bool {
-	for _, re := range served {
-		if re.MatchString(literal) {
+func servedBy(served []servedRoute, literal string) bool {
+	for _, r := range served {
+		if r.pattern.MatchString(literal) {
 			return true
 		}
-		// `"/v1/cloud/projects/" + ref` reaches the AST as the static prefix.
-		if strings.HasSuffix(literal, "/") || !strings.Contains(literal[1:], "/") {
-			continue
-		}
-		if re.MatchString(literal + "/x") {
+		// A CONCATENATED LITERAL ENDS AT ITS LAST STATIC SEGMENT.
+		//
+		// `"/api/v2/apps/" + id + "/bindings"` reaches the AST as `/api/v2/apps`
+		// — the id and everything after it are appended at run time. Appending
+		// ONE segment and re-matching only covered routes whose parameter was
+		// last, so `/apps/{appId}/bindings` and `/environments/{ref}/openapi`
+		// were reported unserved while being served all along.
+		//
+		// The honest test is the declared route's own text: a literal that is a
+		// path-prefix of it, at a segment boundary, is the static head of a call
+		// to it.
+		if strings.HasPrefix(r.raw, strings.TrimRight(literal, "/")+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// servedRoute is one declared route: the pattern a full path must match, and the
+// text it was declared with — which is what a concatenated literal is a head of.
+type servedRoute struct {
+	pattern *regexp.Regexp
+	raw     string
+}
+
+// THE PATTERN BUILDER IS MEASURED DIRECTLY, because the corpus cannot measure it.
+//
+// A parameterised route used to compile to a pattern that matched NOTHING:
+// QuoteMeta turned `{` into `\{`, the parameter regex matched starting at the
+// brace and left the backslash behind, so `/api/v2/projects/{projectId}` became
+// `^/api/v2/projects/\[^/]+$` — a literal `[`. Every such route was reported
+// unserved the moment this gate was pointed at a plane that has any.
+//
+// It is asserted here rather than through the corpus because the prefix rule
+// (a concatenated literal is the static head of a declared route) MASKS the bug:
+// with both in place, `/api/v2/projects` is served either way. Breaking the
+// builder and re-running the gate stays green, so the gate alone cannot tell
+// anybody the builder is broken.
+func TestARouteWithAParameterCompilesToAPatternThatMatches(t *testing.T) {
+	dir := t.TempDir()
+	body := `@Controller("/api/v2", { auth: { required: true } })
+export class Fake {
+  @Get("/projects/{projectId}") one() {}
+  @Get("/projects/{projectId}/environments/{ref}/deployments") two() {}
+  @Get("/health") three() {}
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "fake.controller.ts"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	served, err := servedCloudRoutes(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(served) != 3 {
+		t.Fatalf("read %d routes, want 3 — the extraction is wrong", len(served))
+	}
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/api/v2/projects/proj_123", true},
+		{"/api/v2/projects/proj_123/environments/main/deployments", true},
+		{"/api/v2/health", true},
+		// One segment is one segment: a parameter must not swallow a slash.
+		{"/api/v2/projects/proj_123/environments", false},
+		{"/api/v2/projects", false},
+	} {
+		got := false
+		for _, r := range served {
+			if r.pattern.MatchString(tc.path) {
+				got = true
+				break
+			}
+		}
+		if got != tc.want {
+			t.Errorf("%s matched=%v, want %v — patterns: %v", tc.path, got, tc.want, served)
+		}
+	}
 }

@@ -81,7 +81,7 @@ func overrideCall(r Resolvers, cmd *cobra.Command, method, path string, body []b
 // ONE SEAM NOW. The definition half (list/add/remove) and the override half
 // (`flags user …`) both act on the linked project over REST; they were two
 // transports only because the override routes had no reachable client. Selection
-// remains for --project / --environment.
+// remains for ref validation and project lookup; the selection FLAGS are gone.
 type Resolvers struct {
 	REST      func(*cobra.Command) (REST, error)
 	Selection func() *selection.Resolver
@@ -154,9 +154,9 @@ a letter, then letters, digits and underscores.)
 The flag must already exist on the Environment: an override of an undeclared key
 is a 404 (` + "`key_not_found`" + `).
 
-The global --project / --environment flags select a CLOUD environment. In a
-checkout linked to a project they do not apply and are REFUSED — run
-` + "`palbase link <ref>`" + ` to point the checkout at another project.`,
+This acts on the project this checkout is bound to. There is one addressing
+mechanism — run ` + "`palbase link <ref>`" + ` to point the checkout at another
+project.`,
 	}
 	cmd.AddCommand(setUserCmd(r), unsetUserCmd(r), listUserCmd(r), clearUserCmd(r))
 	return cmd
