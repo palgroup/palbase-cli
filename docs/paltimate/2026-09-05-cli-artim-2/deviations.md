@@ -300,3 +300,40 @@ hem reddi hem DİSKTE HİÇBİR ŞEY kalmadığını ölçüyor; mutasyon kırm�
 düştü. `-short` tam takım değil — dördüncü bir fikstür (`requiresRealToolchain`
 altında, yerelde atlanan) aynı ön koşula takılıyordu. Kural zaten yazılıydı:
 YERELDE KOŞ, CI teyittir. Bu kez CI'ın koştuğu komutun aynısı yerelde koşuldu.
+
+### A-14 · I-3 KAPANDI — kapılar artık koştukları bir yere sahip
+
+Doğrulayıcının I-3'ü: rota kapısı, compose paritesi ve SDK tablosu CI'da HİÇ
+koşmuyordu. Ölçüldü (`git archive HEAD` ile izole bir ağaçta): `-short` koşusu
+**on kez** "not beside this checkout" bastı ve hiçbiri işi kırmızıya çevirmedi
+— `--- SKIP` yazılır, paket `ok` döner.
+
+> **Ders:** *bir kapının VARLIĞI ile CI'ın koştuğu YOLDA olması ayrı sorulardır.*
+> NFR-002 "her yeni kapı doğduğu gün yeşil olur" diyor; doğduğu gün yeşil olup
+> hiçbir zaman KOŞMAMAK o şartı sağlar ve hiçbir şey ölçmez.
+
+**Ev seçimi bir ölçümden çıktı:** `palbase-cli` GENEL, öbür üç depo ÖZEL. Genel
+bir depo özel komşuları jetonsuz klonlayamaz; tersi olur. `palbase-cloud` hem
+rota kapısının okuduğu ağacı taşıyor hem de kurulu App ile öbür ikisini
+çekebiliyor — ve o App zaten `palbase-ts/publish-backend.yml`'de kullanılıyordu
+(kanıtlanmış desen, yeni sır yok).
+
+Araştırma standard tierde koşuldu (kanıt satırları research.md, UD-101): app
+jetonunun `actions/checkout` `token:`inde başka depo için çalıştığı ÜRETİM
+kodunda okundu; `repositories:` çoklu liste alıyor ve `owner:` tek başına TÜM
+depolara açılıyor (o yüzden iki depo adlandırıldı, en az ayrıcalık).
+
+**Kapı adları TUTULMUYOR, kaynaktan türetiliyor** — atlama cümlesini içeren her
+test. Bir isim listesi kapılar yeniden adlandırıldıkça kayar ve kaydığı gün
+sessizce hiçbir şey ölçmez, ki bu iş akışının var olma sebebi tam olarak o.
+
+**İlk koşu iki şey öğretti.** Doğru çalıştı (dört checkout geçti) ve GERÇEK bir
+kayma yakaladı: vendor'lanan compose ile v2'nin kopyası UZAKTA ayrışmış (CLI
+deposunda push'lanmamış commit'ler var). Ve benim ölçüm hatamı gösterdi —
+"CI=true'da FAIL yok"u KOMŞUSUZ bir ağaçta ölçmüştüm, orada `bun` isteyen
+testler zaten atlıyordu; komşular gelince koştular. Kapsam türetilen kümeye
+daraltıldı.
+
+Üç kontrol, üçü de boş-koşuya karşı: türetme boşsa DÜŞ · atlama görünürse DÜŞ ·
+koşan sayısı türetilenden azsa DÜŞ (eşleşmeyen bir `-run` deseni de sıfır
+atlama üretir, yani ilk iki kontrol tek başına boş bir koşuyu geçirirdi).

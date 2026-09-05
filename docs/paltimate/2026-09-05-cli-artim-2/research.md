@@ -84,3 +84,45 @@ regex tabanlı ilk denemesi ham TypeScript dizeleri yüzünden yanlış sayım v
 
 Açık satır sayısı: **0**. (Bu dosya kapının aradığı literali kendi metninde taşımaz —
 Artım 1'de bir kapı tam olarak böyle yanlış tetiklenmişti.)
+
+---
+
+## Çapraz-depo kapılarının CI evi (I-3) — standard
+
+Stakes: geri alınabilirlik 1 · yanlışlığın maliyeti 1 · genişlik 1 = **3 → standard**.
+İki lane: resmi eylem dokümanları (WebFetch) + gerçek üretim kullanımı (grep MCP).
+Dördüncü soru araştırılmadı, **yerelde ÖLÇÜLDÜ** — dokümandan güçlü kanıt.
+
+CLAIM: `actions/create-github-app-token@v1`'in ürettiği jeton `actions/checkout`'un
+`token:` girdisinde BAŞKA bir depoyu klonlamak için çalışır → SOURCE:
+https://github.com/nocobase/nocobase/blob/main/.github/workflows/manual-npm-publish-license-kit.yml
+(`repository: nocobase/license-kit` + `token: ${{ steps.app-token.outputs.token }}`)
+→ VERIFIED: 2026-09-05, grep MCP ile üretim kodunda okundu → TIER: standard
+
+CLAIM: `repositories:` virgül ya da satır sonu ile AYRILMIŞ ÇOKLU depo alır; `owner:`
+tek başına verilirse kapsam kurulumdaki TÜM depolara açılır → SOURCE:
+https://github.com/actions/create-github-app-token README → VERIFIED: 2026-09-05,
+WebFetch → TIER: standard
+  ⚠ Bu yüzden `owner:` tek başına KULLANILMADI: en az ayrıcalık için iki depo adlandırıldı.
+
+CLAIM: GENEL bir ikincil depo jetonsuz checkout edilebilir; jeton yalnız ÖZEL ikincil
+depolar için gerekir ("the default token is scoped to the current repository") →
+SOURCE: https://github.com/actions/checkout README, "Checkout multiple repos (private)"
+→ VERIFIED: 2026-09-05, WebFetch → TIER: standard
+
+CLAIM: Çoklu depo yerleşimi için belgelenmiş iki desen var — "Side by side" (kök
+`path: main` ile) ve "Nested" (önce kök checkout, sonra alt dizin). Sıralamaya dair
+belgelenmiş bir uyarı YOK → SOURCE: https://github.com/actions/checkout README →
+VERIFIED: 2026-09-05, WebFetch → TIER: standard
+  → Karar: belgelenmiş "Nested" deseni izlendi (kök önce), çünkü kök checkout'un
+    workspace'i temizlemesi hâlinde alt dizinler ondan SONRA yazılmış olur.
+
+CLAIM (ÖLÇÜM, araştırma değil): atlanan bir Go testi paketi YEŞİL bırakır
+(`--- SKIP` yazılır ama `ok` döner); `go test -json` ise `"Action":"skip"` üretir, ve
+kardeş ağaç eksikken `-short` koşusu 10 kez "not beside this checkout" basar, ağaçlar
+yerindeyken **0** → VERIFIED: 2026-09-05, `git archive HEAD` ile izole bir ağaçta ve
+gerçek ağaçta iki kez koşuldu → TIER: ölçüm
+  → Karar: iş akışı kapı ADLARINI saymıyor (liste kayar); atlama CÜMLESİNİ ölçüyor.
+    Yeni bir çapraz-depo kapısı eklenirse kendiliğinden kapsama girer.
+
+UD-101 | çapraz-depo kapıları için CI evi: palbase-cloud + app-token | stakes 3 | tier standard | status: verified | evidence: bu bölüm
