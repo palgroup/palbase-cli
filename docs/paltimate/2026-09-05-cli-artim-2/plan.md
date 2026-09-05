@@ -245,17 +245,17 @@ göremiyor.
 **D-053:** "kaldırıldı" dalı YOK. Komut hiç var olmaz; cobra'nın bilinmeyen-komut hatası `exit ≠ 0`
 veriyor.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `surface_test.go`'nun golden listesinden `ios`/`macos`/`android`/
+- [x] **Adım 1: Kırmızıyı yaz** — `surface_test.go`'nun golden listesinden `ios`/`macos`/`android`/
   `web` çıkar; ve emekli komutların YOKLUĞUNU ölçen bir test: `palbase ios link` çalıştırıldığında
   `exit ≠ 0` ve çıktı bir "kaldırıldı/deprecated/use instead" cümlesi İÇERMEZ.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./cmd/palbase/ -run 'TestGolden|TestRetiredCommands' -count=1` ·
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./cmd/palbase/ -run 'TestGolden|TestRetiredCommands' -count=1` ·
   Beklenen: **FAIL** (komutlar hâlâ kayıtlı).
-- [ ] **Adım 3: Kaydı kaldır** — `backend.go:148-151`'den dört satır; `ios_use.go` **silinir**;
+- [x] **Adım 3: Kaydı kaldır** — `backend.go:148-151`'den dört satır; `ios_use.go` **silinir**;
   `native_link.go`/`web_link.go`/`android_link.go`'da yalnız komut sarmalayıcıları gider, ortak
   çözüm yardımcıları KALIR (T009 onları tekilleştirecek).
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./cmd/palbase/ ./internal/backend/ -count=1 -short` ·
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./cmd/palbase/ ./internal/backend/ -count=1 -short` ·
   Beklenen: `ok`, ve `go build ./...` temiz.
-- [ ] **Adım 5: Commit** — `git commit -- internal/backend/backend.go internal/backend/native_link.go internal/backend/web_link.go internal/backend/android_link.go internal/backend/ios_use.go cmd/palbase/main.go cmd/palbase/surface_test.go`
+- [x] **Adım 5: Commit** — `git commit -- internal/backend/backend.go internal/backend/native_link.go internal/backend/web_link.go internal/backend/android_link.go internal/backend/ios_use.go cmd/palbase/main.go cmd/palbase/surface_test.go`
 
 ---
 

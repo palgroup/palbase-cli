@@ -35,7 +35,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +76,7 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 	if err != nil {
 		return err
 	}
-	appID, err := resolveWebApp(ctx, rest, sel.ProjectID, persistedAppID, w)
+	appID, err := resolveApp(ctx, rest, sel.ProjectID, webPlatform, persistedAppID, "", w)
 	if err != nil {
 		return err
 	}
@@ -140,47 +139,6 @@ var webLinkArtifacts = func(ctx context.Context, r Resolvers, sel selection.Sele
 // bury the three lines that are actually about the reader's own code.
 func announceModified(w io.Writer, path string) {
 	fmt.Fprintf(w, "~ modified %s\n", path)
-}
-
-// resolveWebApp reuses the local web app id only when it still belongs to the
-// selected PROJECT as a web app. Otherwise it registers a replacement instead of
-// guessing another remote app.
-func resolveWebApp(
-	ctx context.Context,
-	rest restDoer,
-	projectID, persistedAppID string,
-	w io.Writer,
-) (string, error) {
-	var rows []nativeAppRow
-	if err := rest.Do(ctx, http.MethodGet,
-		"/api/v2/projects/"+projectID+"/apps", nil, &rows); err != nil {
-		return "", fmt.Errorf("list web apps: %w", err)
-	}
-	if persistedAppID != "" {
-		for _, app := range rows {
-			if app.ID != persistedAppID || app.DeletedAt != nil {
-				continue
-			}
-			if app.Platform == "web" {
-				fmt.Fprintf(w, "using linked web app %s (%s)\n", app.DisplayName, app.ID)
-				return persistedAppID, nil
-			}
-		}
-		fmt.Fprintf(w, "linked web app %s does not match the selected project and platform; registering a new one\n", persistedAppID)
-	}
-
-	name := "Web app"
-	if cwd, err := os.Getwd(); err == nil && filepath.Base(cwd) != "." {
-		name = filepath.Base(cwd)
-	}
-	var created nativeAppRow
-	if err := rest.Do(ctx, http.MethodPost,
-		"/api/v2/projects/"+projectID+"/apps",
-		map[string]any{"platform": "web", "displayName": name}, &created); err != nil {
-		return "", fmt.Errorf("create web app: %w", err)
-	}
-	fmt.Fprintf(w, "✓ registered web app %q (%s)\n", name, created.ID)
-	return created.ID, nil
 }
 
 // webCmd holds the resolvers for the web command group.

@@ -682,7 +682,7 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 
 // TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate exercises
 // the two real functions webLinkArtifacts calls before ever touching the
-// network for the spec/config — resolveWebApp and persistProjectAppSlot —
+// network for the spec/config — resolveApp and persistProjectAppSlot —
 // going AROUND the webLinkArtifacts stub every other test in this file
 // installs (stubArtifactsFunc never calls either). Every other web-link test
 // stubs webLinkArtifacts wholesale, so this exact bug shipped with CI green:
@@ -721,7 +721,7 @@ func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *test
 	// selected" even though the directory had no config a moment ago.
 	firstPersistedID, err := persistedAppIDFor("web", sel)
 	require.NoError(t, err)
-	appID, err := resolveWebApp(context.Background(), rest, sel.ProjectID, firstPersistedID, io.Discard)
+	appID, err := resolveApp(context.Background(), rest, sel.ProjectID, webPlatform, firstPersistedID, "", io.Discard)
 	require.NoError(t, err)
 	require.NoError(t, persistProjectAppSlot("web", appID, &sel, false),
 		"registering the app remotely must not leave the run failing with 'no project selected'")
@@ -734,7 +734,7 @@ func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *test
 	// Second run: mirrors webLinkArtifacts re-reading the persisted app id.
 	secondPersistedID, err := persistedAppIDFor("web", sel)
 	require.NoError(t, err)
-	appID2, err := resolveWebApp(context.Background(), rest, sel.ProjectID, secondPersistedID, io.Discard)
+	appID2, err := resolveApp(context.Background(), rest, sel.ProjectID, webPlatform, secondPersistedID, "", io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, appID, appID2)
 	require.NoError(t, persistProjectAppSlot("web", appID2, &sel, false))
@@ -744,9 +744,9 @@ func TestWebLink_ResolveAndPersist_ConfiglessDirDoesNotOrphanOrDuplicate(t *test
 // TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp is the web-link
 // equivalent of the native test of the same shape: a `.palbase/selection.json`
 // that exists but fails to load (corrupt JSON, an unsupported version) must
-// abort the command BEFORE webLinkArtifacts ever calls resolveWebApp. Before
+// abort the command BEFORE webLinkArtifacts ever calls resolveApp. Before
 // persistedAppIDFor gated on the error, this Load failure was swallowed into
-// "" and resolveWebApp registered an app remotely that persistProjectAppSlot
+// "" and resolveApp registered an app remotely that persistProjectAppSlot
 // then failed to persist against the SAME broken config — an orphan.
 // `--project proj_1` is required to reach this: without it, Resolver.Resolve
 // reads the same broken file itself and fails first, which would pass this

@@ -186,7 +186,7 @@ func runNativeLink(ctx context.Context, d nativeLinkDeps, opts nativeLinkOpts, w
 		// committed api_key.
 		linkedAppID = appIDFromPlatformSlot(opts.platform)
 	}
-	appID, err := resolveNativeApp(ctx, d, opts.projectID, opts.platform, linkedAppID, opts.identifier, w)
+	appID, err := resolveApp(ctx, d.rest, opts.projectID, opts.platform, linkedAppID, opts.identifier, w)
 	if err != nil {
 		return nil, err
 	}
@@ -348,19 +348,23 @@ func persistProjectAppSlot(platform, appID string, sel *selection.Selection, ret
 	return nil
 }
 
-// resolveNativeApp reuses the locally persisted app id only when it still
-// belongs to the selected PROJECT and platform. A missing, deleted, or
-// mismatched id is replaced with a fresh registration; remote apps are never
-// guessed or mutated.
-func resolveNativeApp(
+// resolveApp finds this checkout's app in the project, or registers one.
+//
+// ONE function, because there was only ever one behaviour. resolveNativeApp and
+// resolveWebApp listed the same route, matched the same persisted id the same
+// way, printed the same three sentences and created the same row. What differed
+// was a platform string, an optional identifier, and which fallback name to use
+// when the directory has none — three parameters wearing the disguise of two
+// functions, and two places for one answer to drift.
+func resolveApp(
 	ctx context.Context,
-	d nativeLinkDeps,
+	rest restDoer,
 	projectID, platform, persistedAppID, identifier string,
 	w io.Writer,
 ) (string, error) {
 	var rows []nativeAppRow
-	if err := d.rest.Do(ctx, http.MethodGet, "/api/v2/projects/"+projectID+"/apps", nil, &rows); err != nil {
-		return "", fmt.Errorf("list apps: %w", err)
+	if err := rest.Do(ctx, http.MethodGet, "/api/v2/projects/"+projectID+"/apps", nil, &rows); err != nil {
+		return "", fmt.Errorf("list %s apps: %w", platform, err)
 	}
 	if persistedAppID != "" {
 		for _, app := range rows {
@@ -372,20 +376,25 @@ func resolveNativeApp(
 				return persistedAppID, nil
 			}
 		}
-		fmt.Fprintf(w, "linked %s app %s does not match the selected project and platform; registering a new one\n", platform, persistedAppID)
+		fmt.Fprintf(w, "linked %s app %s does not match the selected project and platform; registering a new one\n",
+			platform, persistedAppID)
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
+
+	// The directory's name, and a platform-shaped fallback when it has none —
+	// a registered app called "." helps nobody read the console later.
+	name := platform + " app"
+	if cwd, err := os.Getwd(); err == nil {
+		if base := filepath.Base(cwd); base != "." && base != string(filepath.Separator) {
+			name = base
+		}
 	}
-	name := filepath.Base(cwd)
 	body := map[string]any{"platform": platform, "displayName": name}
 	if identifier != "" {
 		body["identifier"] = identifier
 	}
 	var created nativeAppRow
-	if err := d.rest.Do(ctx, http.MethodPost, "/api/v2/projects/"+projectID+"/apps", body, &created); err != nil {
-		return "", fmt.Errorf("create app: %w", err)
+	if err := rest.Do(ctx, http.MethodPost, "/api/v2/projects/"+projectID+"/apps", body, &created); err != nil {
+		return "", fmt.Errorf("create %s app: %w", platform, err)
 	}
 	fmt.Fprintf(w, "✓ registered %s app %q (%s)\n", platform, name, created.ID)
 	return created.ID, nil

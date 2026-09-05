@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -508,4 +509,64 @@ func TestPersistedAppIDFor_BrokenConfigReturnsAnError(t *testing.T) {
 			require.Empty(t, id)
 		})
 	}
+}
+
+// ONE RESOLVER, because there was only ever one behaviour.
+//
+// resolveNativeApp and resolveWebApp listed the same route, matched the same
+// persisted id the same way, printed the same three sentences and created the
+// same row. What differed was a platform string, an optional identifier, and
+// which fallback name to use when the directory has none — three parameters
+// wearing the disguise of two functions.
+func TestResolveAppServesBothPlatforms(t *testing.T) {
+	t.Run("reuses a linked app", func(t *testing.T) {
+		rest := &appRowsREST{rows: `[{"id":"app_1","platform":"web","displayName":"Site"}]`}
+		var out bytes.Buffer
+		got, err := resolveApp(context.Background(), rest, "proj_1", "web", "app_1", "", &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "app_1" {
+			t.Errorf("resolveApp = %q, want the linked app_1", got)
+		}
+		if !strings.Contains(out.String(), "using linked web app") {
+			t.Errorf("reuse was not announced: %s", out.String())
+		}
+	})
+
+	t.Run("registers when the platform does not match", func(t *testing.T) {
+		rest := &appRowsREST{rows: `[{"id":"app_1","platform":"web","displayName":"Site"}]`, created: `{"id":"app_2"}`}
+		var out bytes.Buffer
+		got, err := resolveApp(context.Background(), rest, "proj_1", "ios", "app_1", "com.example", &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "app_2" {
+			t.Errorf("resolveApp = %q, want the newly registered app_2", got)
+		}
+		// THE IDENTIFIER TRAVELS. Native links carry a bundle id; dropping it
+		// registers an app nothing can be matched against later.
+		if !strings.Contains(rest.lastBody, "com.example") {
+			t.Errorf("the identifier did not reach the registration: %s", rest.lastBody)
+		}
+	})
+}
+
+// appRowsREST answers the two calls resolveApp makes.
+type appRowsREST struct {
+	rows     string
+	created  string
+	lastBody string
+}
+
+func (f *appRowsREST) Do(_ context.Context, method, _ string, body, out any) error {
+	if method == http.MethodGet {
+		return json.Unmarshal([]byte(f.rows), out)
+	}
+	raw, _ := json.Marshal(body)
+	f.lastBody = string(raw)
+	if f.created == "" {
+		f.created = `{"id":"app_new"}`
+	}
+	return json.Unmarshal([]byte(f.created), out)
 }
