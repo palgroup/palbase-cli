@@ -197,6 +197,9 @@ func writeWebArtifacts(envs appEnvironments, specs map[string][]byte, w io.Write
 		"base_url": env.BaseURL,
 		"api_key":  env.APIKey,
 	}
+	if env.SealedRoot != "" {
+		cfg["sealed_root"] = env.SealedRoot
+	}
 	if len(env.OAuth) > 0 {
 		cfg["oauth"] = env.OAuth
 	}
@@ -253,7 +256,7 @@ func mergeWebConfigWithExisting(next map[string]any) map[string]any {
 		// left the file naming the OLD environment (measured 2026-08-25,
 		// palai-cloud: `"environment_ref": "palaicloudm"` survived a re-link to
 		// a project called something else entirely).
-		if k == removedEnvironmentRefField {
+		if k == removedEnvironmentRefField || k == "sealed_root" {
 			continue
 		}
 		out[k] = v

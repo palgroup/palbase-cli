@@ -266,10 +266,20 @@ func copyTemplate(from, to string) ([]string, error) {
 		if err != nil {
 			return err
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		// npm preserves executable scripts, including the scaffold's npm test
+		// entry point. Keep those bits when copying into the new project.
+		mode := fs.FileMode(0o644) | (info.Mode().Perm() & 0o111)
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(dest, body, 0o644); err != nil {
+		if err := os.WriteFile(dest, body, mode); err != nil {
+			return err
+		}
+		if err := os.Chmod(dest, mode); err != nil {
 			return err
 		}
 		written = append(written, rel)
