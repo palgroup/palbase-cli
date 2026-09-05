@@ -929,22 +929,13 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 	if outFile == "" {
 		outFile = "palbe.gen.ts"
 	}
-	// NO PROJECT TO WIRE IS NOT A FAILED LINK. An Apple checkout that is not an
-	// Xcode project still gets its slot and its build configurations written;
-	// refusing here would make `--platform web` the one platform that can undo
-	// the whole command — and it would refuse AFTER the artifacts were already
-	// on disk, which is a half-done link reported as an error.
-	//
-	// Detection never asks for this: `hasWeb` requires a package.json, so the
-	// only way to arrive without one is to name --platform web deliberately.
-	// Say what was skipped and why, and leave the contract where it was written.
+	// A PRECONDITION, not a decision. `runLink` refuses `--platform web` in a
+	// directory with no package.json BEFORE it writes anything (see
+	// refuseUnsupportedPlatforms), so this branch is the guard for a caller that
+	// skipped it rather than a policy about what a link means.
 	if _, err := os.Stat("package.json"); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(w, "note: no package.json here, so nothing was wired — "+
-				"%s and %s are written and `palbe-gen` reads them from the web app's own root\n",
-				filepath.Join(webArtifactsDir, "palbase-config.json"),
-				filepath.Join(webArtifactsDir, "openapi.json"))
-			return nil
+			return errors.New("the web wiring needs a package.json in the current directory")
 		}
 		return err
 	}

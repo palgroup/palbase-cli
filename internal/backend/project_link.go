@@ -218,6 +218,14 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := validatePlatforms(o.platforms); err != nil {
 		return err
 	}
+	// AND A PLATFORM THIS DIRECTORY CANNOT SUPPORT, also before anything is
+	// written. The refusal used to arrive from inside the web wiring — AFTER
+	// the contract and the config were already on disk — so a typo in
+	// `--platform` produced a half-done link reported as an error. What the
+	// caller typed can be judged against what is here without asking anybody.
+	if err := refuseUnsupportedPlatforms(o.platforms); err != nil {
+		return err
+	}
 
 	// AND WHAT THIS CHECKOUT IS, also before any network. Reading a directory
 	// needs nobody's permission, and saying what was found first means a later
@@ -618,4 +626,23 @@ func ensurePalbaseGitignored(path string) error {
 		return fmt.Errorf("stat %s: %w", path, statErr)
 	}
 	return os.WriteFile(path, []byte(updated), mode)
+}
+
+// refuseUnsupportedPlatforms rejects a NAMED platform this directory has no way
+// to carry. Only the explicit list is judged: detection never yields web
+// without a package.json, so the only way to arrive here is to have asked.
+func refuseUnsupportedPlatforms(platforms []string) error {
+	for _, p := range platforms {
+		if strings.ToLower(strings.TrimSpace(p)) != webPlatform {
+			continue
+		}
+		if !exists("package.json") {
+			cwd, _ := os.Getwd()
+			return fmt.Errorf(
+				"--platform web was asked for, and %s has no package.json.\n"+
+					"  A web checkout is linked from its app root; run `palbase link` there, "+
+					"or name a platform this directory does have", cwd)
+		}
+	}
+	return nil
 }

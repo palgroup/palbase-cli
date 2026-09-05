@@ -154,8 +154,16 @@ checkout linked to a project they do not apply and are REFUSED — run
 					platform = "android"
 				}
 				// The COMMITTED slot names the app, so a fresh clone refreshes
-				// without ever having run `link` on this machine. The local
-				// selection is only the fallback.
+				// without ever having run `link` on this machine.
+				//
+				// AND THE FALLBACK BELOW READS A FILE NOTHING WRITES ANY MORE.
+				// `.palbase/selection.json` lost its last producer when `clone`
+				// stopped taking a management project id, and it left the
+				// addressing chain with the second mechanism (FR-013). It is
+				// kept for one reason: a checkout an OLDER CLI left behind still
+				// has one, and refusing those would strand them. It is a
+				// migration affordance, not a live mechanism — nothing here
+				// should grow to depend on it.
 				appID := appIDFromPlatformSlot(platform)
 				if appID == "" {
 					cfg, err := selection.Load("")

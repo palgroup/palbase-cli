@@ -512,9 +512,12 @@ func TestLink_ResolvesABareRefToItsAddress(t *testing.T) {
 	})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	// --platform names what this fixture is, because detection now runs BEFORE
-	// the network (a directory read needs nobody's permission) and an empty temp
-	// dir is not any kind of app. This test is about the ADDRESS, not detection.
+	// A REAL WEB CHECKOUT, because `--platform web` in a directory with no
+	// package.json is now refused before any network — the web wiring has a
+	// prerequisite and saying so early beats a half-done link. This test is
+	// about the ADDRESS, so the fixture is the cheapest thing that IS an app.
+	writeFile(t, "package.json", `{"name":"app"}`)
+	writeFile(t, "index.html", "<!doctype html>")
 	cmd.SetArgs([]string{"na1m7lt2m", "--platform", "web"})
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 
@@ -554,6 +557,12 @@ func TestLink_RefusesSomethingThatIsNeitherAddressNorRef(t *testing.T) {
 // bir hata da yoktu: her adım başarıyla döndü.
 func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	inScratchCheckout(t)
+	// A web link needs a web project — AFTER the chdir, or the files land
+	// wherever the suite happened to be. This fixture used to be a bare temp
+	// dir, which is not a web checkout, and only got through because the
+	// prerequisite was checked from inside the wiring, after the artifacts were
+	// already on disk.
+	seedWebCheckout(t)
 	t.Setenv("HOME", t.TempDir())
 
 	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
@@ -612,6 +621,12 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 // preserving what the contract deleted.
 func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 	inScratchCheckout(t)
+	// A web link needs a web project — AFTER the chdir, or the files land
+	// wherever the suite happened to be. This fixture used to be a bare temp
+	// dir, which is not a web checkout, and only got through because the
+	// prerequisite was checked from inside the wiring, after the artifacts were
+	// already on disk.
+	seedWebCheckout(t)
 
 	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
 	srv := stackServing(t, anon, nil)
@@ -901,5 +916,60 @@ func TestLinkWiresAWebCheckoutEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(ignore), ".palbase/local.json") {
 		t.Errorf(".gitignore does not keep the per-machine address out of git:\n%s", ignore)
+	}
+}
+
+// writeFile writes one file in the current (scratch) checkout.
+func writeFile(t *testing.T, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(name, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedWebCheckout makes the current directory the thing a web link acts on.
+func seedWebCheckout(t *testing.T) {
+	t.Helper()
+	writeFile(t, "package.json", `{"name":"app"}`)
+	writeFile(t, "index.html", "<!doctype html>")
+}
+
+// A REFUSAL THAT ARRIVES AFTER THE WRITES IS A HALF-DONE LINK.
+//
+// `--platform web` in a directory with no package.json used to be judged from
+// inside the web wiring, which runs LAST: the contract and the config were
+// already on disk, and the command then reported an error. The reader was left
+// with a checkout that was partly linked and a message saying it had failed.
+//
+// The prerequisite is now checked beside `--platform`'s own validation, before
+// the network and before the first byte. This asserts both halves — it refuses,
+// and it left nothing behind.
+func TestAnUnsupportedPlatformIsRefusedBeforeAnythingIsWritten(t *testing.T) {
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+
+	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
+	srv := stackServing(t, anon, nil)
+
+	var out strings.Builder
+	err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out)
+	if err == nil {
+		t.Fatalf("a web link in a directory with no package.json was accepted:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "package.json") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+
+	// NOTHING ON DISK. These are what the write path produces, in order; any of
+	// them existing means the refusal came too late.
+	for _, left := range []string{
+		filepath.Join(webArtifactsDir, "palbase-config.json"),
+		filepath.Join(webArtifactsDir, "openapi.json"),
+		filepath.Join(dir, ".palbase", "project.json"),
+		filepath.Join(dir, ".gitignore"),
+	} {
+		if _, statErr := os.Stat(left); statErr == nil {
+			t.Errorf("%s was written before the refusal — the link is half done", left)
+		}
 	}
 }
