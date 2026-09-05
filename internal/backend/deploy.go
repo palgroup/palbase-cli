@@ -216,72 +216,6 @@ func pushIdempotencyKey(environmentRef string, tarball []byte) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// cloneDeps are the injected collaborators for runClone.
-type cloneDeps struct {
-	git      gitRunner
-	provider string
-	repoURL  string
-	dir      string
-	// download, when set, fetches+extracts the palbase-provider bundle into dir.
-	download func(dir string) error
-	// insideRepo reports whether dir already sits in a git work tree; nil uses
-	// the real probe. Tests substitute it to drive both branches.
-	insideRepo func(dir string) bool
-	out        io.Writer
-	writeCfg   func(dir string, cfg *selection.Config) error
-	cfg        *selection.Config
-}
-
-// runClone routes `palbase clone` by the project's repository provider:
-//   - github:  `git clone <url> <dir>`, then write config v2 into <dir>.
-//   - palbase: delegate to the injected bundle downloader.
-func runClone(d cloneDeps) error {
-	if d.download == nil {
-		return fmt.Errorf("palbase-provider clone is not available (bundle download not wired)")
-	}
-	if err := d.download(d.dir); err != nil {
-		return err
-	}
-	// The bundle no longer carries the platform's own .git (it used to, and
-	// pulling it over a checkout was a data-loss bug wearing an idempotence
-	// costume). A palbase-provider clone therefore has to start the repository
-	// itself — but only when nothing already contains this path, so cloning into
-	// a monorepo does not plant a nested .git.
-	insideRepo := d.insideRepo
-	if insideRepo == nil {
-		insideRepo = dirIsInsideGitRepo
-	}
-	out := d.out
-	if out == nil {
-		out = os.Stdout
-	}
-	if !insideRepo(d.dir) {
-		if err := quietGit(d.dir, "init", "-b", "main"); err != nil {
-			fmt.Fprintf(out, "note: could not initialise a git repository in %s (%v)\n", d.dir, err)
-		} else {
-			fmt.Fprintln(out, "initialized a git repository (branch main)")
-		}
-	}
-	return d.writeCfg(d.dir, d.cfg)
-}
-
-// quietGit runs git without wiring the user's terminal to it. The probe below
-// EXPECTS a failure outside a repository, and execGit would print git's "fatal:
-// not a git repository" straight at someone who did nothing wrong.
-func quietGit(dir string, args ...string) error {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	return cmd.Run()
-}
-
-// dirIsInsideGitRepo reports whether dir already sits inside a work tree, so a
-// clone into a monorepo subdirectory reuses that repository instead of nesting.
-// A git that is missing or errors counts as "not a repo" — the worst case is an
-// init that then fails and is reported.
-func dirIsInsideGitRepo(dir string) bool {
-	return quietGit(dir, "rev-parse", "--is-inside-work-tree") == nil
-}
-
 // pullDeps are the injected collaborators for runPull.
 type pullDeps struct {
 	git       gitRunner
@@ -612,46 +546,20 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 				return inDir(dir, func() error { return WriteTarget(target) })
 			}
 
-			projectID := given
-			detail, err := selection.GetProject(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			envs, err := selection.ListEnvironments(ctx, r.REST(), projectID)
-			if err != nil {
-				return err
-			}
-			target, ok := selection.DefaultEnvironment(envs)
-			if !ok {
-				return fmt.Errorf("project %s has no visible environment yet", projectID)
-			}
-			provider, err := detail.RepositoryProvider()
-			if err != nil {
-				return err
-			}
-			dir := dirFlag
-			if dir == "" {
-				dir = target.Slug
-				if detail.GithubRepo != "" {
-					dir = repoDirFromFullName(detail.GithubRepo)
-				}
-			}
-			cfg := &selection.Config{
-				ProjectID:          projectID,
-				EnvironmentID:      target.ID,
-				RepositoryProvider: provider,
-			}
-			return runClone(cloneDeps{
-				git:      execGit,
-				provider: provider,
-				repoURL:  repoURLFromFullName(detail.GithubRepo),
-				dir:      dir,
-				cfg:      cfg,
-				writeCfg: selection.Save,
-				download: func(dst string) error {
-					return PullBundle(ctx, r, target.Ref, dst, cmd.OutOrStdout())
-				},
-			})
+			// A MANAGEMENT PROJECT ID IS NOT SOMETHING ANYBODY CAN TYPE.
+			//
+			// This used to be the whole command, and it went through
+			// `/api/v2/projects/{id}` to resolve the project, then wrote the
+			// clone's binding into `.palbase/selection.json` — a file
+			// `ReadTarget` stopped reading when the second addressing mechanism
+			// was retired (FR-013). So the branch produced a directory that
+			// every later verb reported as "not linked", reached by a value the
+			// CLI prints on no surface at all, not even in
+			// `project list --json`. Refusing names what to type instead.
+			return fmt.Errorf(
+				"%q is a management project id, and nothing in this CLI prints one.\n"+
+					"  `palbase project list` prints the NAME and the REF — clone takes either",
+				given)
 		},
 	}
 	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the repo or environment name)")
