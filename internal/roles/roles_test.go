@@ -250,3 +250,40 @@ func TestOrdinaryNamesStillReachTheirRouteEscaped(t *testing.T) {
 		t.Errorf("query was %q; want confirm=true", query)
 	}
 }
+
+// RET, KULLANICININ YAZABİLECEĞİ ŞEYİ ADLANDIRIR.
+//
+// Sunucunun cümlesi "repeat with confirm=true" diyor — ve `confirm=true` bir
+// SORGU PARAMETRESİ, CLI'da öyle bir şey yok. Kullanıcı onu `--yes`'e kendisi
+// çevirmek zorunda kalıyor, ve çeviremezse kapının çaresi VARKEN yokmuş gibi
+// görünüyor. Aynı cümle hem HTTP çağıranına hem CLI kullanıcısına
+// söylenemez — bu uçta duran taraf CLI, ve çeviriyi o yapmalı.
+func TestTheRefusalNamesTheFlagTheUserCanType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"role_has_assignments","error_description":"7 user(s) hold \"moderator\"; deleting it revokes them — repeat with confirm=true"}`))
+	}))
+	defer srv.Close()
+	linkedProject(t, srv.URL)
+
+	_, err := run(t, "delete", "moderator")
+	if err == nil {
+		t.Fatal("delete succeeded although the server refused")
+	}
+
+	// YALNIZ HATA METNİ: komutun çıktısı cobra'nın kullanım dökümünü de taşıyor
+	// ve orada `--yes` zaten geçiyor — ona bakan bir iddia doğru cevabı YANLIŞ
+	// SEBEPLE alırdı.
+	msg := err.Error()
+	if !strings.Contains(msg, "--yes") {
+		t.Errorf("ret `--yes` bayrağını adlandırmıyor:\n%s", msg)
+	}
+	if strings.Contains(msg, "confirm=true") {
+		t.Errorf("ret hâlâ tel parametresini gösteriyor; kullanıcı onu yazamaz:\n%s", msg)
+	}
+	// SAYI KAYBOLMAZ: kaç kişinin yetkisinin gideceği kararın kendisi.
+	if !strings.Contains(msg, "7") {
+		t.Errorf("ret sayıyı düşürdü:\n%s", msg)
+	}
+}

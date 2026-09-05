@@ -14,6 +14,7 @@ package roles
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -258,7 +259,16 @@ func deleteCmd() *cobra.Command {
 				path += "?" + url.Values{"confirm": {"true"}}.Encode()
 			}
 			if _, err := call(cmd, "DELETE", path, nil); err != nil {
-				return err
+				// ÇEVİRİ BURADA YAPILIR, ÇÜNKÜ UÇTA DURAN TARAF BU.
+				//
+				// Sunucunun cümlesi `confirm=true` diyor — doğru, o bir sorgu
+				// parametresi ve HTTP çağıranının yazacağı şey. Ama CLI
+				// kullanıcısının yazabileceği şey `--yes`, ve `confirm=true`
+				// onun için var olmayan bir çare. Aynı cümlenin iki çağırana
+				// birden söylenememesi, çevirinin nerede duracağını da
+				// söylüyor.
+				return errors.New(strings.ReplaceAll(err.Error(),
+					"repeat with confirm=true", "repeat with --yes"))
 			}
 			cmd.Printf("✓ %s deleted\n", name)
 			return nil
