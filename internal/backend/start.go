@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +63,7 @@ const composeFile = "docker-compose.dev.yml"
 // risk — this checked `palbase-runtime` while compose used `palbase-runtime-dev`
 // and passed anyway, because another stack on the machine happened to have built
 // the right one.
-var stackImages = []struct{ env, fallback, build string }{
+var stackImages = []stackImage{
 	{"PALBASE_PALSVC_IMAGE", "ghcr.io/palgroup/palbase/palsvc:0.42.0",
 		"cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
 	{"PALBASE_RUNTIME_IMAGE", "ghcr.io/palgroup/palbase/runtime-dev:0.42.0",
@@ -85,6 +86,56 @@ var stackImages = []struct{ env, fallback, build string }{
 	// Upstream image, so the recovery line is a pull rather than a build.
 	{"PALBASE_POSTGRES_IMAGE", "pgvector/pgvector:pg16",
 		"docker pull pgvector/pgvector:pg16"},
+}
+
+// stackImage is one container's pin: the variable that overrides it, the
+// reference it defaults to, and the line that tells somebody how to get it.
+type stackImage struct{ env, fallback, build string }
+
+// imagesFor reads the version→image table out of the INSTALLED SDK.
+//
+// The tags used to be compiled into this binary, so they aged at the speed of
+// CLI releases while the stack moved at its own — two colleagues on two CLI
+// versions ran two different stacks against one source tree, and nothing said
+// so. Shipping the table inside @palbase/backend makes refreshing it `npm i`:
+// no network call of our own, no server route, no CLI upgrade (D-023).
+//
+// TWO REFUSALS, BOTH LOUD. An unknown version is NAMED rather than rounded to
+// the nearest one — serving a stack nobody asked for is worse than serving
+// none. And a missing table does not fall back to whatever this binary carries,
+// because that fallback IS the defect being removed here.
+func imagesFor(projectDir, version string) ([]stackImage, error) {
+	path := filepath.Join(projectDir, "node_modules", "@palbase", "backend", "stack-images.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%s here carries no stack image table (%s) — install a version that does: `npm install %s@latest`",
+			backendPkg, path, backendPkg)
+	}
+	var byMajor map[string][]struct {
+		Env   string `json:"env"`
+		Ref   string `json:"ref"`
+		Build string `json:"build"`
+	}
+	if err := json.Unmarshal(raw, &byMajor); err != nil {
+		return nil, fmt.Errorf("%s is not a readable image table: %w", path, err)
+	}
+	entries, ok := byMajor[version]
+	if !ok {
+		known := make([]string, 0, len(byMajor))
+		for k := range byMajor {
+			known = append(known, k)
+		}
+		sort.Strings(known)
+		return nil, fmt.Errorf(
+			"%s knows no stack images for version %q — it carries: %s",
+			backendPkg, version, strings.Join(known, ", "))
+	}
+	images := make([]stackImage, 0, len(entries))
+	for _, e := range entries {
+		images = append(images, stackImage{env: e.Env, fallback: e.Ref, build: e.Build})
+	}
+	return images, nil
 }
 
 func newStartCmd() *cobra.Command {
@@ -146,7 +197,26 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	if err := imagesPresent(ctx); err != nil {
+	// WHICH STACK, AND SAY IT.
+	//
+	// This command printed the project name and nothing else, so "start ran but
+	// the wrong stack came up" stayed invisible until something downstream
+	// failed. The version comes from the project (T001) and the images from the
+	// installed SDK's table — neither from this binary.
+	version, err := stackVersion(dir)
+	if err != nil {
+		return err
+	}
+	images, err := imagesFor(dir, version)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "▸ stack %s\n", version)
+	for _, img := range images {
+		fmt.Fprintf(out, "  %s\n", img.fallback)
+	}
+
+	if err := imagesPresent(ctx, images); err != nil {
 		return err
 	}
 
@@ -359,8 +429,8 @@ func stackDirectory(group string) (string, error) {
 
 // imagesPresent refuses BEFORE compose does, because compose's own failure for a
 // missing image is a pull error from a registry that was never going to have it.
-func imagesPresent(ctx context.Context) error {
-	for _, want := range stackImages {
+func imagesPresent(ctx context.Context, images []stackImage) error {
+	for _, want := range images {
 		image := want.fallback
 		if override := strings.TrimSpace(os.Getenv(want.env)); override != "" {
 			image = override

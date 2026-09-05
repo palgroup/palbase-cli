@@ -5,6 +5,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -861,5 +862,113 @@ func TestAppendSealingChainRefusesAFailedClose(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), env) {
 		t.Errorf("the error does not name the file it failed on: %v", err)
+	}
+}
+
+// seedImageTable writes a stack-images.json into a fake installed SDK.
+func seedImageTable(t *testing.T, dir, body string) {
+	t.Helper()
+	pkg := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "stack-images.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// THE TABLE TRAVELS WITH THE SDK, NOT WITH THIS BINARY.
+//
+// Tags compiled into the CLI age at the speed of CLI releases while the stack
+// moves at its own, so two colleagues on two CLI versions ran two different
+// stacks against one source tree. Reading the table out of the installed
+// package means refreshing it is `npm i` — no network call of our own, no
+// server route, no CLI upgrade (D-023, Expo's move).
+func TestImagesForReadsTheInstalledTable(t *testing.T) {
+	dir := t.TempDir()
+	seedImageTable(t, dir, `{"33":[
+		{"env":"PALBASE_PALSVC_IMAGE","ref":"ghcr.io/palgroup/palbase/palsvc:0.42.0","build":"x"},
+		{"env":"PALBASE_POSTGRES_IMAGE","ref":"pgvector/pgvector:pg16","build":"docker pull pgvector/pgvector:pg16"}
+	]}`)
+
+	got, err := imagesFor(dir, "33")
+	if err != nil {
+		t.Fatalf("the installed table was refused: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("imagesFor returned %d images, want 2", len(got))
+	}
+	if got[0].env != "PALBASE_PALSVC_IMAGE" || got[0].fallback != "ghcr.io/palgroup/palbase/palsvc:0.42.0" {
+		t.Errorf("first image came back wrong: %+v", got[0])
+	}
+}
+
+// AN UNKNOWN VERSION IS NAMED, NOT ROUNDED. Serving the nearest version would
+// bring up a stack nobody asked for and say nothing about the substitution.
+func TestImagesForRefusesAVersionTheTableDoesNotCarry(t *testing.T) {
+	dir := t.TempDir()
+	seedImageTable(t, dir, `{"33":[{"env":"A","ref":"x/y:1"}]}`)
+
+	_, err := imagesFor(dir, "31")
+	if err == nil {
+		t.Fatal("a version outside the table was accepted")
+	}
+	if !strings.Contains(err.Error(), "31") || !strings.Contains(err.Error(), "33") {
+		t.Errorf("the refusal names neither the asked version nor what the table carries: %v", err)
+	}
+}
+
+// NO TABLE, NO SILENT FALLBACK to whatever this binary happens to carry — that
+// fallback IS the defect this task removes.
+func TestImagesForRefusesWhenTheTableIsMissing(t *testing.T) {
+	_, err := imagesFor(t.TempDir(), "33")
+	if err == nil {
+		t.Fatal("a project with no image table got images anyway")
+	}
+	if !strings.Contains(err.Error(), backendPkg) {
+		t.Errorf("the refusal does not name %s: %v", backendPkg, err)
+	}
+}
+
+// THE TWO PLACES THAT NAME IMAGES MUST AGREE.
+//
+// `stackImages` keeps compose honest (the parity gate loops over it) and the
+// SDK's table decides what `start` actually runs. Two lists about one subject
+// are two lists that will disagree one day — measured on 2026-08-29, when the Go
+// constant moved to 0.39.0 and compose stayed on 0.36.1 and `palbase start` kept
+// running the old image.
+//
+// Skips when the SDK tree is not beside this checkout, for the same reason its
+// neighbour does: the pin can only be measured where both trees are.
+func TestTheSDKTableAndTheGoConstantsAgree(t *testing.T) {
+	const table = "../../../palbase-ts/backend/stack-images.json"
+	raw, err := os.ReadFile(table)
+	if err != nil {
+		t.Skipf("the SDK tree is not beside this checkout: %v", err)
+	}
+	var byMajor map[string][]struct {
+		Env string `json:"env"`
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal(raw, &byMajor); err != nil {
+		t.Fatalf("%s is not readable: %v", table, err)
+	}
+	for major, entries := range byMajor {
+		inTable := map[string]string{}
+		for _, e := range entries {
+			inTable[e.Env] = e.Ref
+		}
+		for _, want := range stackImages {
+			ref, ok := inTable[want.env]
+			if !ok {
+				t.Errorf("major %s of the SDK table carries no %s — `start` would bring up a stack "+
+					"the parity gate never checked", major, want.env)
+				continue
+			}
+			if ref != want.fallback {
+				t.Errorf("major %s: the SDK table says %s=%s, the Go constant says %s — two lists "+
+					"about one subject, already disagreeing", major, want.env, ref, want.fallback)
+			}
+		}
 	}
 }
