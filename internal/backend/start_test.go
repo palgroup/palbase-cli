@@ -5,7 +5,6 @@ package backend
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -355,10 +354,18 @@ func TestTheImageCheckAsksForTheTAGCOMPOSEUSES(t *testing.T) {
 	}
 
 	for _, want := range stackImages {
-		// The variable and its default, exactly as the compose file spells them.
-		spelling := "${" + want.env + ":-" + want.fallback + "}"
-		if !strings.Contains(string(compose), spelling) {
-			t.Errorf("the compose file does not resolve %s — this check would look for an image it never pulls", spelling)
+		// The variable, exactly as the compose file spells it — and REQUIRED.
+		// `:?` makes compose refuse to start without a value; a `:-` default
+		// would be a SECOND source of the version, silently overriding the
+		// installed SDK the moment the CLI forgets to pass one. That default is
+		// what this run removed (2026-09-05), and this half of the check keeps
+		// it removed.
+		required := "${" + want.env + ":?"
+		if !strings.Contains(string(compose), required) {
+			t.Errorf("the compose file does not demand %s — this check would look for an image it never pulls", required)
+		}
+		if strings.Contains(string(compose), "${"+want.env+":-") {
+			t.Errorf("%s has a default in the compose file — a default is a second version source, and it is the one that goes stale", want.env)
 		}
 		if want.build == "" {
 			t.Errorf("%s has no build command, so its refusal cannot say how to fix it", want.env)
@@ -634,7 +641,7 @@ func TestEnsureBootValuesJudgesAnExistingEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ensureBootValues(context.Background(), env, io.Discard)
+	_, err := ensureBootValues(context.Background(), env, "33.0.2", io.Discard)
 	if err == nil {
 		t.Fatal("mevcut .env icin ensureBootValues hicbir sey yapmadi; yarim zinciri reddetmeliydi")
 	}
@@ -661,7 +668,7 @@ func TestEnsureBootValuesReportsThatItMigrated(t *testing.T) {
 	if err := os.WriteFile(env, []byte(full), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := ensureBootValues(context.Background(), env, io.Discard)
+	migrated, err := ensureBootValues(context.Background(), env, "33.0.2", io.Discard)
 	if err != nil {
 		t.Fatalf("tam zincir hata verdi: %v", err)
 	}
@@ -739,80 +746,38 @@ func TestStartBannerSaysHowToApplyTheSchema(t *testing.T) {
 	}
 }
 
-// YEREL YIĞININ İMAJLARI ÇEKİRDEĞİN TEK KAYNAĞIYLA AYNI SÜRÜMDE OLMALI.
+// SÜRÜM TEK KAYNAKTAN GELİR — VE BU LİSTEDE İKİNCİ BİR KAYNAK OLAMAZ.
 //
-// CANLIDA ÖLÇÜLDÜ (2026-09-01): `palbase db plan` ve `db apply` bu deponun
-// KENDİ backend'inde düşüyordu —
+// Bu test eskiden `v2-cloud/bootstrap/images/version.env`'i okur ve her pinin
+// çekirdek sürümünü taşıdığını ölçerdi. O dosya 2026-09-05'te SİLİNDİ: aynı
+// şeyin sürümü beş ayrı yerde beş ayrı sayıydı (SDK 33.0.2 · version.env 0.42.1
+// · stack-images.json 0.42.0 · control-plane.yaml 0.33.1 · compose 0.43.0) ve
+// bu dosya onlardan biriydi. Artık etiket KURULU `@palbase/backend`'in
+// sürümüdür ve başka hiçbir yerde yazmaz.
 //
-//	db/schema.ts did not evaluate: Expected ";" but found ":" (422)
+// Ölçülen şey bu yüzden değişti: "pin doğru mu" değil, "PİN VAR MI". Bizim bir
+// imajımıza gömülü etiket, tam olarak silinen o ikinci kaynağın geri gelmesidir
+// ve bu binary'nin yayın hızıyla yaşlanır — ölçülen ayrışma buydu.
 //
-// — ve o dizinde `db/schema.ts` diye bir dosya YOK; `db/public.ts` var. Mesajı
-// üreten palsvc'ydi: koşan binary `db/schema.ts` dizesini 11 kez taşıyor,
-// `db/public.ts`'i SIFIR kez. Yani yerel yığın DSL göçünden ÖNCEKİ bir raile
-// bakıyordu ve geliştirici yerel şemasını hiç ilerletemiyordu.
-//
-// TUZAK, PİNİN ESKİ OLMASI DEĞİL — NUMARASININ BÜYÜK OLMASI: `0.39.0`
-// 29.08.2026'da yayımlandı, `0.36.5` ise 31.08'de. Sıralamada büyük görünen
-// etiket terk edilmiş bir seriden geliyordu, ve "daha yeni" sanıldı.
-//
-// Bu yüzden test sürümleri KARŞILAŞTIRMIYOR, EŞİTLİK istiyor ve otoriteyi
-// deponun tek çekirdek sürüm beyanından okuyor. `version.env`'in kendi başlığı
-// zaten bunu söylüyor: "iki yerde ayrı ayrı yazılsaydı biri güncellenip diğeri
-// unutulduğunda aynı ortamda İKİ FARKLI çekirdek koşardı ve bunu hiçbir hata
-// mesajı söylemezdi." `start.go` tam olarak o ikinci yazandı.
-//
-// Ve dev = prod aynası olduğu için bu bir tercih değil: geliştiricinin yığını
-// bulutun koştuğu çekirdekten geri kalırsa, yerelde geçen şey yayında düşer.
-func TestStackImagesTrackTheCoreVersion(t *testing.T) {
-	const authority = "../../../../v2-cloud/bootstrap/images/version.env"
-	raw, err := os.ReadFile(authority)
-	if err != nil {
-		// Otorite palbase deposunda yaşıyor ve bu CLI kendi başına da klonlanır
-		// (her CI runner'ı öyle). Komşusu `TestTheVendoredComposeMatchesTheRepository`
-		// aynı sebeple ATLIYOR: pin YALNIZ iki ağacın yan yana olduğu yerde —
-		// yani pinin gerçekten düzenlendiği geliştirici makinesinde — ölçülebilir.
-		// Okunamayan bir girdi karşısında DÜŞMEK, ölçemediği şeyi kırmızı
-		// göstermek olurdu.
-		t.Skipf("palbase deposu bu checkout'un yanında değil: %v", err)
-	}
-	var core string
-	for _, line := range strings.Split(string(raw), "\n") {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "V2_VERSION="); ok {
-			core = strings.TrimSpace(rest)
-			break
-		}
-	}
-	if core == "" {
-		t.Fatalf("%s içinde V2_VERSION yok — bu dosya artık otorite değilse test de yanlış yerde", authority)
-	}
-
-	// BİZİM İMAJLARIMIZ ile UPSTREAM İMAJLAR AYRI SORULAR.
-	//
-	// Bu döngü "her pin çekirdek sürümünü taşımalı" diyordu ve `postgres` pin
-	// listesine katılana kadar (2026-09-05) doğruydu — o güne dek listedeki her
-	// imajı biz üretiyorduk. `pgvector/pgvector:pg16`'nın etiketi PostgreSQL'in
-	// majörü; bizim çekirdek sürümümüzle eşleşmesi için hiçbir sebep yok ve
-	// eşleşmesini istemek onu her çekirdek yayınında yanlış yere taşırdı.
-	//
-	// Muafiyet DAR, KENDİ ölçüsünü taşıyor ve BEYANA dayanıyor: girdinin
-	// `upstream` alanı ne olduğunu söyler. Önce ref'in ÖNEKİNE bakıyordu ve
-	// bağımsız inceleme onu kırdı — bizim bir imajımız başka bir yola taşınınca
-	// (`ghcr.io/palgroup/palbase-edge`, `docker.io/palgroup/palsvc`) sessizce
-	// "upstream" sayılıp çekirdek-eşitlik kontrolünden tamamen çıkıyordu. Bir
-	// kuralın öznesi tahmin edilemez.
+// Muafiyet DAR ve BEYANA dayanır: `upstream` alanı ne olduğunu söyler. Önce
+// ref'in ÖNEKİNE bakıyordu ve bağımsız inceleme onu kırdı — bizim bir imajımız
+// başka bir yola taşınınca (`ghcr.io/palgroup/palbase-edge`) sessizce "upstream"
+// sayılıp kontrolden tamamen çıkıyordu. Bir kuralın öznesi tahmin edilemez.
+func TestOnlyUpstreamImagesCarryATagOfTheirOwn(t *testing.T) {
 	for _, img := range stackImages {
-		tag := img.fallback[strings.LastIndex(img.fallback, ":")+1:]
-		if !img.upstream {
-			if tag != core {
-				t.Errorf("%s varsayılanı %q sürümünü pinliyor, çekirdek ise %q — "+
-					"yerel yığın buluttan farklı bir çekirdek koşar (imaj: %s)",
-					img.env, tag, core, img.fallback)
+		if strings.Contains(img.repo, ":") {
+			t.Errorf("%s deposu bir etiket içeriyor (%q) — ref iki kez etiketlenir", img.env, img.repo)
+		}
+		if img.upstream {
+			if img.pinned == "" || img.pinned == "latest" {
+				t.Errorf("%s upstream bir imajı SABİT etiketlemiyor (%q) — `latest` bir pin değildir "+
+					"ve iki makinede iki farklı veritabanı demektir", img.env, img.pinned)
 			}
 			continue
 		}
-		if tag == "" || tag == "latest" || !strings.Contains(img.fallback, ":") {
-			t.Errorf("%s upstream bir imajı SABİT etiketlemiyor (%s) — `latest` bir pin değildir "+
-				"ve iki makinede iki farklı veritabanı demektir", img.env, img.fallback)
+		if img.pinned != "" {
+			t.Errorf("%s kendi etiketini taşıyor (%q) — bizim imajlarımızın etiketi kurulu "+
+				"@palbase/backend'in sürümüdür; gömülü bir pin o kuralı sessizce deler", img.env, img.pinned)
 		}
 	}
 }
@@ -863,114 +828,6 @@ func TestAppendSealingChainRefusesAFailedClose(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), env) {
 		t.Errorf("the error does not name the file it failed on: %v", err)
-	}
-}
-
-// seedImageTable writes a stack-images.json into a fake installed SDK.
-func seedImageTable(t *testing.T, dir, body string) {
-	t.Helper()
-	pkg := filepath.Join(dir, "node_modules", "@palbase", "backend")
-	if err := os.MkdirAll(pkg, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pkg, "stack-images.json"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// THE TABLE TRAVELS WITH THE SDK, NOT WITH THIS BINARY.
-//
-// Tags compiled into the CLI age at the speed of CLI releases while the stack
-// moves at its own, so two colleagues on two CLI versions ran two different
-// stacks against one source tree. Reading the table out of the installed
-// package means refreshing it is `npm i` — no network call of our own, no
-// server route, no CLI upgrade (D-023, Expo's move).
-func TestImagesForReadsTheInstalledTable(t *testing.T) {
-	dir := t.TempDir()
-	seedImageTable(t, dir, `{"33":[
-		{"env":"PALBASE_PALSVC_IMAGE","ref":"ghcr.io/palgroup/palbase/palsvc:0.42.0","build":"x"},
-		{"env":"PALBASE_POSTGRES_IMAGE","ref":"pgvector/pgvector:pg16","build":"docker pull pgvector/pgvector:pg16"}
-	]}`)
-
-	got, err := imagesFor(dir, "33")
-	if err != nil {
-		t.Fatalf("the installed table was refused: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("imagesFor returned %d images, want 2", len(got))
-	}
-	if got[0].env != "PALBASE_PALSVC_IMAGE" || got[0].fallback != "ghcr.io/palgroup/palbase/palsvc:0.42.0" {
-		t.Errorf("first image came back wrong: %+v", got[0])
-	}
-}
-
-// AN UNKNOWN VERSION IS NAMED, NOT ROUNDED. Serving the nearest version would
-// bring up a stack nobody asked for and say nothing about the substitution.
-func TestImagesForRefusesAVersionTheTableDoesNotCarry(t *testing.T) {
-	dir := t.TempDir()
-	seedImageTable(t, dir, `{"33":[{"env":"A","ref":"x/y:1"}]}`)
-
-	_, err := imagesFor(dir, "31")
-	if err == nil {
-		t.Fatal("a version outside the table was accepted")
-	}
-	if !strings.Contains(err.Error(), "31") || !strings.Contains(err.Error(), "33") {
-		t.Errorf("the refusal names neither the asked version nor what the table carries: %v", err)
-	}
-}
-
-// NO TABLE, NO SILENT FALLBACK to whatever this binary happens to carry — that
-// fallback IS the defect this task removes.
-func TestImagesForRefusesWhenTheTableIsMissing(t *testing.T) {
-	_, err := imagesFor(t.TempDir(), "33")
-	if err == nil {
-		t.Fatal("a project with no image table got images anyway")
-	}
-	if !strings.Contains(err.Error(), backendPkg) {
-		t.Errorf("the refusal does not name %s: %v", backendPkg, err)
-	}
-}
-
-// THE TWO PLACES THAT NAME IMAGES MUST AGREE.
-//
-// `stackImages` keeps compose honest (the parity gate loops over it) and the
-// SDK's table decides what `start` actually runs. Two lists about one subject
-// are two lists that will disagree one day — measured on 2026-08-29, when the Go
-// constant moved to 0.39.0 and compose stayed on 0.36.1 and `palbase start` kept
-// running the old image.
-//
-// Skips when the SDK tree is not beside this checkout, for the same reason its
-// neighbour does: the pin can only be measured where both trees are.
-func TestTheSDKTableAndTheGoConstantsAgree(t *testing.T) {
-	const table = "../../../palbase-ts/backend/stack-images.json"
-	raw, err := os.ReadFile(table)
-	if err != nil {
-		t.Skipf("the SDK tree is not beside this checkout: %v", err)
-	}
-	var byMajor map[string][]struct {
-		Env string `json:"env"`
-		Ref string `json:"ref"`
-	}
-	if err := json.Unmarshal(raw, &byMajor); err != nil {
-		t.Fatalf("%s is not readable: %v", table, err)
-	}
-	for major, entries := range byMajor {
-		inTable := map[string]string{}
-		for _, e := range entries {
-			inTable[e.Env] = e.Ref
-		}
-		for _, want := range stackImages {
-			ref, ok := inTable[want.env]
-			if !ok {
-				t.Errorf("major %s of the SDK table carries no %s — `start` would bring up a stack "+
-					"the parity gate never checked", major, want.env)
-				continue
-			}
-			if ref != want.fallback {
-				t.Errorf("major %s: the SDK table says %s=%s, the Go constant says %s — two lists "+
-					"about one subject, already disagreeing", major, want.env, ref, want.fallback)
-			}
-		}
 	}
 }
 
@@ -1033,5 +890,147 @@ func TestStopUsesTheStackFileThatIsAlreadyThere(t *testing.T) {
 	}
 	if string(after) != theirs {
 		t.Errorf("the file was rewritten:\n%s", after)
+	}
+}
+
+// KURULU PAKETİN SÜRÜMÜ, İMAJIN ETİKETİDİR (FR-006, D-015).
+//
+// Eskiden burada bir tablo vardı: `@palbase/backend` içindeki
+// `stack-images.json`, SDK major'ı → dört imaj. Tablo, paketin ZATEN bildiği
+// bir sayıyı ikinci kez yazmaktan başka bir şey yapmıyordu — ve ikinci kopya
+// ayrıştı (tablo 0.42.0'da kalırken çekirdek 0.42.1'e geçti; ölçülen ayrışma
+// beş kolluydu).
+func TestInstalledSDKVersion(t *testing.T) {
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "package.json"),
+		[]byte(`{"version":"33.0.2"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := installedSDKVersion(dir)
+	if err != nil {
+		t.Fatalf("beklenmeyen hata: %v", err)
+	}
+	if got != "33.0.2" {
+		t.Fatalf("sürüm %q, beklenen 33.0.2", got)
+	}
+}
+
+// KURULU PAKET YOKSA ADIYLA REDDET (FR-007).
+//
+// Yuvarlama yok, varsayılan yok: kimsenin istemediği bir yığın sunmak, hiç
+// sunmamaktan kötüdür.
+func TestInstalledSDKVersionRefusesWhenAbsent(t *testing.T) {
+	_, err := installedSDKVersion(t.TempDir())
+	if err == nil {
+		t.Fatal("kurulu paket yokken hata bekleniyordu")
+	}
+	if !strings.Contains(err.Error(), backendPkg) {
+		t.Fatalf("hata paketi ADIYLA söylemeli, dedi ki: %v", err)
+	}
+}
+
+// SÜRÜM BOŞSA DA REDDET: alanı olmayan bir package.json, "sürüm yok" demektir.
+func TestInstalledSDKVersionRefusesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installedSDKVersion(dir); err == nil {
+		t.Fatal("sürümsüz pakette hata bekleniyordu")
+	}
+}
+
+// HER İMAJ AYNI SÜRÜMÜ TAŞIR — UPSTREAM HARİÇ (FR-003, F-008).
+//
+// Upstream imaj (postgres) bizim sürüm hattımızda değil ve kendi pinini taşır.
+// Ayrım `upstream` alanında AÇIKÇA bildirilir, ref'in önekinden TAHMİN EDİLMEZ.
+func TestStackImageRefsCarryOneVersion(t *testing.T) {
+	const v = "33.0.2"
+	want := map[string]string{
+		"PBC_PALSVC_IMAGE":   "ghcr.io/palgroup/palbase/palsvc:" + v,
+		"PBC_RUNTIME_IMAGE":  "ghcr.io/palgroup/palbase/runtime-dev:" + v,
+		"PBC_EDGE_IMAGE":     "ghcr.io/palgroup/palbase/edge:" + v,
+		"PBC_POSTGRES_IMAGE": "pgvector/pgvector:pg16",
+	}
+	if len(stackImages) != len(want) {
+		t.Fatalf("imaj sayısı %d, beklenen %d", len(stackImages), len(want))
+	}
+	for _, img := range stackImages {
+		w, ok := want[img.env]
+		if !ok {
+			t.Fatalf("beklenmeyen değişken: %s", img.env)
+		}
+		if got := img.ref(v); got != w {
+			t.Fatalf("%s → %q, beklenen %q", img.env, got, w)
+		}
+	}
+}
+
+// COMPOSE'A DEĞER ULAŞMAZSA HİÇBİR ŞEY AÇILMAZ — ve bu kapı onu ölçer.
+//
+// Belge dört imaj değişkenini `${VAR:?…}` ile ZORUNLU okuyor (varsayılan yok,
+// çünkü varsayılan sürümün ikinci kaynağıdır). Değeri veren tek yer
+// `recordStackImages`; yazmayı unutursa `docker compose up` yorumlamada düşer
+// ve `palbase start` hiçbir yığın açmaz. Kapı, çözülen sürümün dosyaya
+// GERÇEKTEN indiğini söylüyor.
+func TestRecordStackImagesWritesEveryVariable(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("PALBASE_HTTP_PORT=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordStackImages(envFile, "33.0.2"); err != nil {
+		t.Fatalf("beklenmeyen hata: %v", err)
+	}
+	raw, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	for _, img := range stackImages {
+		want := img.env + "=" + img.ref("33.0.2")
+		if !strings.Contains(doc, want) {
+			t.Errorf(".env %q taşımıyor — compose o değişkeni zorunlu okuyor, yığın açılmaz:\n%s", want, doc)
+		}
+	}
+	// VAR OLAN DEĞER KORUNUR: bu dosya yığının portunu ve mühürleme zincirini de
+	// taşıyor, ve onları silmek yığını yeniden doğurmak olurdu.
+	if !strings.Contains(doc, "PALBASE_HTTP_PORT=1") {
+		t.Errorf("kayıt dosyanın geri kalanını sildi:\n%s", doc)
+	}
+}
+
+// HER `start` YENİDEN YAZAR — SDK değiştiği gün imaj da değişsin.
+//
+// Dosya bir KAYIT, bir otorite değil. Eski sürümün satırı kalırsa compose onu
+// okur ve müşteri SDK'sını güncellediği hâlde eski yığında koşmaya devam eder —
+// bu koşunun bitirdiği ayrışmanın tam olarak kendisi.
+func TestRecordStackImagesReplacesAnOlderVersion(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("PALBASE_HTTP_PORT=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordStackImages(envFile, "32.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordStackImages(envFile, "33.0.2"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), ":32.0.0") {
+		t.Errorf("eski sürüm dosyada kaldı — compose onu okur:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), ":33.0.2") {
+		t.Errorf("yeni sürüm dosyaya inmedi:\n%s", raw)
 	}
 }

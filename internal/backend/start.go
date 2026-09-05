@@ -34,7 +34,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,35 +63,42 @@ const composeFile = "docker-compose.dev.yml"
 // risk — this checked `palbase-runtime` while compose used `palbase-runtime-dev`
 // and passed anyway, because another stack on the machine happened to have built
 // the right one.
+// HER İMAJ AYNI SÜRÜMDEN TÜRER — TEK SAYI (FR-003/006, D-015).
+//
+// Eskiden burada her imajın kendi `fallback` etiketi vardı ve o etiketler
+// `0.43.0`'da donmuştu; ölçülen ayrışma BEŞ kolluydu (SDK 33.0.2 ·
+// version.env 0.42.1 · stack-images.json 0.42.0 · control-plane 0.33.1 ·
+// bu tablo 0.43.0). Artık sürüm tek yerden gelir: kurulu @palbase/backend.
+//
+// `repo` alanı sabittir, SÜRÜM değil — ve ayrım önemli: bir imajın ADI neredeyse
+// hiç değişmez, sürümü her yayında değişir. Değişeni dışarı, sabiti içeri.
 var stackImages = []stackImage{
-	{env: "PALBASE_PALSVC_IMAGE", fallback: "ghcr.io/palgroup/palbase/palsvc:0.43.0",
+	{env: "PBC_PALSVC_IMAGE", repo: "ghcr.io/palgroup/palbase/palsvc",
 		build: "cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
-	{env: "PALBASE_RUNTIME_IMAGE", fallback: "ghcr.io/palgroup/palbase/runtime-dev:0.43.0",
+	// RUNTIME'IN `-dev` HEDEFİ: bundler'ı ve TypeScript derleyici API'sini o
+	// taşıyor; onsuz hiçbir proje derlenmez (v2/runtime/Dockerfile:83-140).
+	// Son ek imajın ADININ parçası, sürümün değil.
+	{env: "PBC_RUNTIME_IMAGE", repo: "ghcr.io/palgroup/palbase/runtime-dev",
 		build: "cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
 	// The EDGE, and it belongs here for the same reason the other two do: it is
 	// the one container that publishes, so a stack without it has no address at
 	// all. Absent from this list, a missing edge image surfaced as docker's raw
 	// pull error at `compose up` instead of this command's own refusal with the
 	// line that builds it.
-	{env: "PALBASE_EDGE_IMAGE", fallback: "ghcr.io/palgroup/palbase/edge:0.43.0",
+	{env: "PBC_EDGE_IMAGE", repo: "ghcr.io/palgroup/palbase/edge",
 		build: "cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge ."},
-	// THE DATABASE, and it was outside this list until 2026-09-05.
-	//
-	// Not an oversight with no consequence: the parity gate loops over THIS
-	// slice, so an image compose named without a variable was not a
-	// disagreement the gate tolerated — it was one the gate could not express.
-	// Measured: `grep -rn pgvector` over the Go sources returned nothing, while
-	// compose ran `pgvector/pgvector:pg16` as a bare literal.
-	//
-	// Upstream image, so the recovery line is a pull rather than a build.
-	{env: "PALBASE_POSTGRES_IMAGE", fallback: "pgvector/pgvector:pg16",
+	// THE DATABASE: upstream, bizim sürüm hattımızda DEĞİL. `pinned` alanı tam
+	// bunun için — core sürümü ona uygulanmaz.
+	{env: "PBC_POSTGRES_IMAGE", repo: "pgvector/pgvector", pinned: "pg16",
 		build: "docker pull pgvector/pgvector:pg16", upstream: true},
 }
 
-// stackImage is one container's pin: the variable that overrides it, the
-// reference it defaults to, and the line that tells somebody how to get it.
+// stackImage is one container: the variable that carries it to compose, the
+// repository it lives in, and the line that tells somebody how to build it.
 type stackImage struct {
-	env, fallback, build string
+	env, repo, build string
+	// pinned, upstream imajların KENDİ etiketi — core sürümü onlara uygulanmaz.
+	pinned string
 	// upstream marks an image somebody else publishes, so the core-version rule
 	// does not apply to it.
 	//
@@ -105,51 +111,40 @@ type stackImage struct {
 	upstream bool
 }
 
-// imagesFor reads the version→image table out of the INSTALLED SDK.
+// installedSDKVersion, kurulu paketin TAM sürümünü verir — imajın etiketi budur.
 //
-// The tags used to be compiled into this binary, so they aged at the speed of
-// CLI releases while the stack moved at its own — two colleagues on two CLI
-// versions ran two different stacks against one source tree, and nothing said
-// so. Shipping the table inside @palbase/backend makes refreshing it `npm i`:
-// no network call of our own, no server route, no CLI upgrade (D-023).
+// Eskiden bir TABLO okunuyordu (`stack-images.json`, SDK major'ı → dört imaj).
+// Tablo, paketin ZATEN bildiği bir sayıyı ikinci kez yazmaktan başka bir şey
+// yapmıyordu, ve ikinci kopya ayrıştı (ölçülen ayrışma beş kolluydu).
 //
-// TWO REFUSALS, BOTH LOUD. An unknown version is NAMED rather than rounded to
-// the nearest one — serving a stack nobody asked for is worse than serving
-// none. And a missing table does not fall back to whatever this binary carries,
-// because that fallback IS the defect being removed here.
-func imagesFor(projectDir, version string) ([]stackImage, error) {
-	path := filepath.Join(projectDir, "node_modules", "@palbase", "backend", "stack-images.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"%s here carries no stack image table (%s) — install a version that does: `npm install %s@latest`",
-			backendPkg, path, backendPkg)
+// OKUMAYI KENDİ YAZMIYOR: `installedBackendVersion` bu işi zaten yapıyordu
+// (build.go). Bu sarmalayıcı yalnız SESSİZ boşluğu GÜRÜLTÜLÜ bir redde çeviriyor
+// — o fonksiyon okuyamadığında "" döner ve çağıranı sessizce yanlış yola sokar.
+//
+// İKİ RED, İKİSİ DE ADIYLA: kurulu paket yoksa da, sürümsüz bir paket de
+// reddedilir. Yuvarlama yok, varsayılan yok — kimsenin istemediği bir yığın
+// sunmak, hiç sunmamaktan kötüdür.
+func installedSDKVersion(projectDir string) (string, error) {
+	v := strings.TrimSpace(installedBackendVersion(projectDir))
+	if v == "" {
+		return "", fmt.Errorf(
+			"%s is not installed here, or declares no version (%s) — run `npm install %s`",
+			backendPkg, filepath.Join(projectDir, "node_modules", "@palbase", "backend", "package.json"), backendPkg)
 	}
-	var byMajor map[string][]struct {
-		Env      string `json:"env"`
-		Ref      string `json:"ref"`
-		Build    string `json:"build"`
-		Upstream bool   `json:"upstream"`
+	return v, nil
+}
+
+// ref, bu girdinin çekilebilir referansı.
+//
+// Upstream imajlar KENDİ pinlerini taşır (core sürümü onlara uygulanmaz);
+// bizimkiler kurulu SDK'nın sürümünü alır. Ayrım `upstream` alanında AÇIKÇA
+// bildirilir, ref'in önekinden tahmin EDİLMEZ — o tahmin bir kez sessizce
+// yanıldı ve bayat bir core pinini kapıdan geçirdi.
+func (i stackImage) ref(version string) string {
+	if i.upstream {
+		return i.repo + ":" + i.pinned
 	}
-	if err := json.Unmarshal(raw, &byMajor); err != nil {
-		return nil, fmt.Errorf("%s is not a readable image table: %w", path, err)
-	}
-	entries, ok := byMajor[version]
-	if !ok {
-		known := make([]string, 0, len(byMajor))
-		for k := range byMajor {
-			known = append(known, k)
-		}
-		sort.Strings(known)
-		return nil, fmt.Errorf(
-			"%s knows no stack images for version %q — it carries: %s",
-			backendPkg, version, strings.Join(known, ", "))
-	}
-	images := make([]stackImage, 0, len(entries))
-	for _, e := range entries {
-		images = append(images, stackImage{env: e.Env, fallback: e.Ref, build: e.Build, upstream: e.Upstream})
-	}
-	return images, nil
+	return i.repo + ":" + version
 }
 
 // runtimeIsHealthy reads `docker compose ps --format json` and answers the one
@@ -279,16 +274,16 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	images, err := imagesFor(dir, version)
+	sdkVersion, err := installedSDKVersion(dir)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "▸ stack %s\n", version)
-	for _, img := range images {
-		fmt.Fprintf(out, "  %s\n", img.fallback)
+	fmt.Fprintf(out, "▸ stack %s (SDK %s)\n", version, sdkVersion)
+	for _, img := range stackImages {
+		fmt.Fprintf(out, "  %s\n", img.ref(sdkVersion))
 	}
 
-	if err := imagesPresent(ctx, images); err != nil {
+	if err := imagesPresent(ctx, stackImages, sdkVersion); err != nil {
 		return err
 	}
 
@@ -297,8 +292,11 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 		return err
 	}
 	envFile := filepath.Join(state, ".env")
-	envChanged, err := ensureBootValues(ctx, envFile, out)
+	envChanged, err := ensureBootValues(ctx, envFile, sdkVersion, out)
 	if err != nil {
+		return err
+	}
+	if err := recordStackImages(envFile, sdkVersion); err != nil {
 		return err
 	}
 
@@ -383,7 +381,7 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, upArgs...); err != nil {
 		return err
 	}
-	if err := waitForStack(ctx, url, stackDir, project, 90*time.Second); err != nil {
+	if err := waitForStack(ctx, url, stackDir, project, envFile, 90*time.Second); err != nil {
 		return fmt.Errorf("%w\nThe containers are still up — `docker compose -p %s logs` says what happened", err, project)
 	}
 
@@ -502,12 +500,15 @@ func stackDirectory(group string) (string, error) {
 
 // imagesPresent refuses BEFORE compose does, because compose's own failure for a
 // missing image is a pull error from a registry that was never going to have it.
-func imagesPresent(ctx context.Context, images []stackImage) error {
+func imagesPresent(ctx context.Context, images []stackImage, version string) error {
 	for _, want := range images {
-		image := want.fallback
-		if override := strings.TrimSpace(os.Getenv(want.env)); override != "" {
-			image = override
-		}
+		// EZME YOK. Burada bir `os.Getenv(want.env)` kaçamağı vardı: aynı
+		// değişken adı, ama bu sefer sürüm kuralını sessizce delen bir ikinci
+		// kaynak olarak. Kullanıcının kararı ve bu koşunun tezi aynı — imajı
+		// belirleyen tek şey kurulu SDK'nın sürümü. Aynı adı CLI'ın KENDİSİ
+		// yığının .env'ine yazıyor (recordStackImages); okunacak bir ezme değil,
+		// yazılacak bir kayıt.
+		image := want.ref(version)
 		// A REGISTRY reference is compose's job — it pulls, and a pull is the
 		// whole reason `palbase start` works on a machine that has never seen
 		// this repository. Already on the machine, nothing to check.
@@ -523,8 +524,8 @@ func imagesPresent(ctx context.Context, images []stackImage) error {
 					"%s cannot be pulled on this machine.\n"+
 						"  If it is private, `docker login ghcr.io` first — or ask for the package to be made public.\n"+
 						"  Building it yourself instead: %s\n"+
-						"  and then: %s=<your tag>",
-					image, want.build, want.env)
+						"  and then tag it as %s — the version comes from the installed %s and nothing overrides it.",
+					image, want.build, image, backendPkg)
 			}
 			continue
 		}
@@ -604,21 +605,18 @@ func stackStateDir(group string) (string, error) {
 // Returns whether it CHANGED the .env. The caller needs that: compose does not
 // re-read --env-file for containers that already exist, so a chain written into
 // the file is a chain the running stack cannot see until it is recreated.
-func ensureBootValues(ctx context.Context, envFile string, out io.Writer) (bool, error) {
+func ensureBootValues(ctx context.Context, envFile, sdkVersion string, out io.Writer) (bool, error) {
 	if _, err := os.Stat(envFile); err == nil {
 		// .env VAR — ama bu "yapacak bir şey yok" demek değil. Mühürleme zinciri bu
 		// dosyaya SONRADAN eklendi; onu taşımayan bir yığın onu buradan kazanır.
-		return migrateSealingChainWithMint(ctx, envFile, out)
+		return migrateSealingChainWithMint(ctx, envFile, sdkVersion, out)
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}
 
 	fmt.Fprintln(out, "▸ generating this stack's keys")
 	dir := filepath.Dir(envFile)
-	palsvc := stackImages[0].fallback
-	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
-		palsvc = override
-	}
+	palsvc := stackImages[0].ref(sdkVersion)
 	runArgs := append([]string{"run", "--rm"}, dockerRunAsHostUser()...)
 	runArgs = append(runArgs,
 		"-v", dir+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
@@ -635,6 +633,28 @@ func ensureBootValues(ctx context.Context, envFile string, out io.Writer) (bool,
 	}
 	// A brand-new .env: nothing to recreate, the containers do not exist yet.
 	return false, nil
+}
+
+// recordStackImages, çözülen dört imajı yığının .env'ine yazar.
+//
+// Compose belgesi bu değişkenleri `${VAR:?…}` ile ZORUNLU okuyor: varsayılan
+// yok, çünkü varsayılan sürümün ikinci kaynağıdır ve bayatlayan taraf odur
+// (ölçüldü: Go sabiti 0.39.0'a taşındı, compose 0.36.1'de kaldı ve `start` eski
+// imajı koşmaya devam etti). Değeri veren tek yer burası, kaynağı da tek:
+// kurulu `@palbase/backend`.
+//
+// SÜREÇ ORTAMINA DEĞİL DOSYAYA. `compose` her fiili `--env-file` ile çağırıyor,
+// yani `stop` ve `ps` de bu dosyayı okuyor — ve onların SDK'nın kurulu olmasına
+// ihtiyacı kalmıyor. Bir yığını durdurmak için önce onu kurmak gerekseydi,
+// `node_modules`'ı silen herkes yığınını durduramaz hâle gelirdi.
+//
+// Her `start` yeniden yazar: dosya bir kayıt, bir otorite değil.
+func recordStackImages(envFile, sdkVersion string) error {
+	values := make(map[string]string, len(stackImages))
+	for _, img := range stackImages {
+		values[img.env] = img.ref(sdkVersion)
+	}
+	return setEnvValues(envFile, values)
 }
 
 // rememberPort keeps the first address this group was given, for as long as
@@ -745,7 +765,7 @@ func (p *prefixed) Write(b []byte) (int, error) {
 // migration. Waiting on it would report a stack as ready and hand the person a
 // 503 on their first real request. /readyz routes to the palsvc cluster, so a
 // 200 there is palsvc saying so.
-func waitForStack(ctx context.Context, url, stackDir, project string, limit time.Duration) error {
+func waitForStack(ctx context.Context, url, stackDir, project, envFile string, limit time.Duration) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(limit)
 	var last string
@@ -772,8 +792,14 @@ func waitForStack(ctx context.Context, url, stackDir, project string, limit time
 				// bundle handed to it. The runtime knows a state nobody else
 				// does — loaded and answering — and compose asks it; read the
 				// verdict before saying ready.
+				// `--env-file` BURADA DA: belge imaj değişkenlerini `:?` ile
+				// zorunlu okuyor, yani onlarsız `ps` yorumlamada düşer. Düşen
+				// `ps`'in tek sonucu bu dalın SESSİZCE atlanması olurdu —
+				// yani banner'ın runtime yüklenmeden "hazır" demesi, ki bu
+				// dalın var olma sebebi tam olarak odur.
 				ps := exec.CommandContext(ctx, "docker", "compose",
-					"-f", filepath.Join(stackDir, composeFile), "-p", project, "ps", "--format", "json")
+					"-f", filepath.Join(stackDir, composeFile), "-p", project,
+					"--env-file", envFile, "ps", "--format", "json")
 				out, psErr := ps.Output()
 				if psErr == nil {
 					healthy, hErr := runtimeIsHealthy(out)
@@ -1074,7 +1100,7 @@ func migrateSealingChain(ctx context.Context, envFile string, out io.Writer) err
 // Uretici yiginin kendisi (`--init-env`): burada ikinci bir uygulama yazmak, gecerli bir
 // anahtarin nasil gorundugu konusunda ikinci bir gorus olurdu, ve ikisinin anlasmadigi
 // gün bir yığın hiçbir şeyin kabul etmediği bir anahtarla açılır.
-func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Writer) (bool, error) {
+func migrateSealingChainWithMint(ctx context.Context, envFile, sdkVersion string, out io.Writer) (bool, error) {
 	if err := migrateSealingChain(ctx, envFile, out); err != nil {
 		return false, err
 	}
@@ -1090,10 +1116,7 @@ func migrateSealingChainWithMint(ctx context.Context, envFile string, out io.Wri
 	}
 	defer removeTemp(tmp)
 
-	palsvc := stackImages[0].fallback
-	if override := strings.TrimSpace(os.Getenv(stackImages[0].env)); override != "" {
-		palsvc = override
-	}
+	palsvc := stackImages[0].ref(sdkVersion)
 	mintArgs := append([]string{"run", "--rm"}, dockerRunAsHostUser()...)
 	mintArgs = append(mintArgs,
 		"-v", tmp+":/w", "-w", "/w", "--entrypoint", "/palsvc", palsvc,
