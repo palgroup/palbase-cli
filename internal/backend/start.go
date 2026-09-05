@@ -65,16 +65,16 @@ const composeFile = "docker-compose.dev.yml"
 // and passed anyway, because another stack on the machine happened to have built
 // the right one.
 var stackImages = []stackImage{
-	{env: "PALBASE_PALSVC_IMAGE", fallback: "ghcr.io/palgroup/palbase/palsvc:0.42.0",
+	{env: "PALBASE_PALSVC_IMAGE", fallback: "ghcr.io/palgroup/palbase/palsvc:0.42.1",
 		build: "cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
-	{env: "PALBASE_RUNTIME_IMAGE", fallback: "ghcr.io/palgroup/palbase/runtime-dev:0.42.0",
+	{env: "PALBASE_RUNTIME_IMAGE", fallback: "ghcr.io/palgroup/palbase/runtime-dev:0.42.1",
 		build: "cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
 	// The EDGE, and it belongs here for the same reason the other two do: it is
 	// the one container that publishes, so a stack without it has no address at
 	// all. Absent from this list, a missing edge image surfaced as docker's raw
 	// pull error at `compose up` instead of this command's own refusal with the
 	// line that builds it.
-	{env: "PALBASE_EDGE_IMAGE", fallback: "ghcr.io/palgroup/palbase/edge:0.42.0",
+	{env: "PALBASE_EDGE_IMAGE", fallback: "ghcr.io/palgroup/palbase/edge:0.42.1",
 		build: "cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge ."},
 	// THE DATABASE, and it was outside this list until 2026-09-05.
 	//
@@ -126,9 +126,10 @@ func imagesFor(projectDir, version string) ([]stackImage, error) {
 			backendPkg, path, backendPkg)
 	}
 	var byMajor map[string][]struct {
-		Env   string `json:"env"`
-		Ref   string `json:"ref"`
-		Build string `json:"build"`
+		Env      string `json:"env"`
+		Ref      string `json:"ref"`
+		Build    string `json:"build"`
+		Upstream bool   `json:"upstream"`
 	}
 	if err := json.Unmarshal(raw, &byMajor); err != nil {
 		return nil, fmt.Errorf("%s is not a readable image table: %w", path, err)
@@ -146,7 +147,7 @@ func imagesFor(projectDir, version string) ([]stackImage, error) {
 	}
 	images := make([]stackImage, 0, len(entries))
 	for _, e := range entries {
-		images = append(images, stackImage{env: e.Env, fallback: e.Ref, build: e.Build})
+		images = append(images, stackImage{env: e.Env, fallback: e.Ref, build: e.Build, upstream: e.Upstream})
 	}
 	return images, nil
 }
@@ -539,7 +540,7 @@ func imagesPresent(ctx context.Context, images []stackImage) error {
 
 // isRegistryImage says whether docker would go and FETCH this reference.
 //
-// A SLASH is the whole rule: `ghcr.io/palgroup/palbase/palsvc:0.42.0` and
+// A SLASH is the whole rule: `ghcr.io/palgroup/palbase/palsvc:0.42.1` and
 // `pgvector/pgvector:pg16` are both fetched, the first from ghcr and the second
 // from Docker Hub, while `palbase-palsvc` is a tag somebody built here.
 //
