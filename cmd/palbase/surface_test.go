@@ -119,6 +119,10 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// layers and shipped no way to run them together.
 		"test",
 		"test-user",
+		// unlink: `link`in tersi ve bağın kendisi .palbase/project.json.
+		// Öncesinde `web unlink` altında yaşıyordu ve SEÇİM dosyasını siliyordu —
+		// yani bağı değil, yanındaki başka bir şeyi.
+		"unlink",
 		// upgrade: bir projeyi KANITLANMIŞ filo imajına taşır — Studio'daki
 		// yuvarlama düğmesinin CLI karşılığı. Kapı bu komutu da yakaladı ve
 		// yakalaması doğruydu: yeni bir verb bu listeye BİLEREK yazılır.

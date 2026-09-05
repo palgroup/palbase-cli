@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -794,4 +795,51 @@ func TestDetectPlatformsReadsTheCheckout(t *testing.T) {
 			t.Errorf("detectPlatforms invented %v for an empty directory", got)
 		}
 	})
+}
+
+// AN UNKNOWN PLATFORM IS NAMED, not accepted and quietly ignored.
+//
+// `--platform bogus` used to sail through: the loop simply never matched it, so
+// the run wrote nothing for that entry and said nothing about it. A flag that
+// accepts anything teaches the reader that their typo worked.
+func TestPlatformFlagRefusesWhatItCannotBuild(t *testing.T) {
+	if err := validatePlatforms([]string{"ios", "web"}); err != nil {
+		t.Fatalf("valid platforms were refused: %v", err)
+	}
+	err := validatePlatforms([]string{"ios", "bogus"})
+	if err == nil {
+		t.Fatal("`bogus` was accepted as a platform")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "bogus") {
+		t.Errorf("the refusal does not name the offending value: %s", msg)
+	}
+	for _, valid := range []string{"ios", "macos", "android", "web"} {
+		if !strings.Contains(msg, valid) {
+			t.Errorf("the refusal does not list %q as a choice: %s", valid, msg)
+		}
+	}
+}
+
+// UNLINK REMOVES THE BOND, and the bond is the committed project file.
+//
+// The old `web unlink` deleted the SELECTION instead — a file that is going away
+// entirely — and told the reader to re-link with `palbase web link`, a command
+// that is going away too. What makes a checkout linked is .palbase/project.json;
+// that is what unlink has to remove.
+func TestUnlinkRemovesTheProjectFile(t *testing.T) {
+	dir := seedProject(t, Target{URL: "https://app1prod.palbase.studio", Project: "proj_1"})
+
+	var out bytes.Buffer
+	if err := runUnlink(&out); err != nil {
+		t.Fatalf("unlink failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, nativeArtifactsDir, "project.json")); !os.IsNotExist(err) {
+		t.Error("project.json survived the unlink — the checkout is still linked")
+	}
+
+	// AN UNLINKED CHECKOUT IS NOT AN ERROR, it is already where you asked to be.
+	if err := runUnlink(&out); err != nil {
+		t.Errorf("unlinking an unlinked checkout was an error: %v", err)
+	}
 }

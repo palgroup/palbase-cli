@@ -166,6 +166,7 @@ func Commands(r Resolvers) []*cobra.Command {
 		// after that is unchanged — it is told where the stack is, once, and asks
 		// the stack itself for the rest.
 		newLinkCmd(r),
+		newUnlinkCmd(),
 		newPlanCmd(),
 		newInitCmd(),
 		newStartCmd(),

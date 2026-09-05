@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -277,6 +278,9 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// other end, and a link that ignores it is a link for one platform wearing
 	// a flag for four.
 	// WHAT THIS CHECKOUT IS, unless the caller asked for less.
+	if err := validatePlatforms(o.platforms); err != nil {
+		return err
+	}
 	platforms := o.platforms
 	if len(platforms) == 0 {
 		root, err := os.Getwd()
@@ -356,6 +360,65 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 // webPlatform is the one platform whose generator lives in an SDK rather than
 // in this CLI, and whose committed config is flat rather than per-environment.
 const webPlatform = "web"
+
+// knownPlatforms is the closed set `link` can actually build for.
+var knownPlatforms = []string{"ios", "macos", "android", webPlatform}
+
+// validatePlatforms refuses a value this CLI cannot build for, BY NAME.
+//
+// `--platform bogus` used to sail straight through: the loop below simply never
+// matched it, so the run wrote nothing for that entry and said nothing about it.
+// A flag that accepts anything teaches the reader that their typo worked, and
+// they find out later — from a missing file rather than from the flag.
+func validatePlatforms(platforms []string) error {
+	for _, p := range platforms {
+		name := strings.ToLower(strings.TrimSpace(p))
+		if !slices.Contains(knownPlatforms, name) {
+			return fmt.Errorf("%q is not a platform this can link: choose from %s",
+				p, strings.Join(knownPlatforms, ", "))
+		}
+	}
+	return nil
+}
+
+// runUnlink removes the bond, and the bond is the committed project file.
+//
+// The old `web unlink` deleted the SELECTION — a second addressing mechanism on
+// its way out — and pointed the reader at `palbase web link`, a command on its
+// way out too. What makes a checkout linked is .palbase/project.json.
+//
+// AN ALREADY-UNLINKED CHECKOUT IS NOT AN ERROR: the caller asked to end up
+// somewhere, and it is already there.
+func runUnlink(w io.Writer) error {
+	path := projectPath()
+	switch err := os.Remove(path); {
+	case err == nil:
+		fmt.Fprintf(w, "✓ unlinked — removed %s\n", path)
+	case os.IsNotExist(err):
+		fmt.Fprintln(w, "this checkout was not linked")
+		return nil
+	default:
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	// Remove .palbase/ when nothing else lives there.
+	if entries, err := os.ReadDir(nativeArtifactsDir); err == nil && len(entries) == 0 {
+		_ = os.Remove(nativeArtifactsDir)
+	}
+	fmt.Fprintln(w, "  generated clients and their imports are left in place")
+	fmt.Fprintln(w, "  re-link with `palbase link <url>`")
+	return nil
+}
+
+func newUnlinkCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unlink",
+		Args:  cobra.NoArgs,
+		Short: "Detach this checkout from its Palbase project",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runUnlink(cmd.OutOrStdout())
+		},
+	}
+}
 
 // isApplePlatform reports whether a platform is built by Xcode — the only ones
 // an xcconfig, an Info.plist requirement, or a Swift client mean anything to.
