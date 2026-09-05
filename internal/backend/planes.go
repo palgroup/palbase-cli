@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -207,4 +208,26 @@ func detectPlatforms(dir string) []string {
 		found = append(found, webPlatform)
 	}
 	return found
+}
+
+var androidApplicationIDPattern = regexp.MustCompile(`(?m)applicationId\s*(?:=\s*)?["']([^"']+)["']`)
+
+func detectAndroidApplicationID(root string) (string, error) {
+	candidates := []string{
+		filepath.Join(root, "app", "build.gradle.kts"),
+		filepath.Join(root, "app", "build.gradle"),
+		filepath.Join(root, "build.gradle.kts"),
+		filepath.Join(root, "build.gradle"),
+	}
+	for _, candidate := range candidates {
+		contents, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		match := androidApplicationIDPattern.FindSubmatch(contents)
+		if len(match) == 2 {
+			return string(match[1]), nil
+		}
+	}
+	return "", fmt.Errorf("applicationId not found in the Android Gradle files; pass --package-name")
 }

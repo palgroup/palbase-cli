@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func write(t *testing.T, dir, rel string) {
@@ -149,5 +151,22 @@ func TestATrueBackendIsStillAccepted(t *testing.T) {
 	}
 	if err := RequireBackendPlane(dir); err != nil {
 		t.Fatalf("a legitimate multi-schema backend was refused: %v", err)
+	}
+}
+
+func TestDetectAndroidApplicationID_KotlinAndGroovy(t *testing.T) {
+	for _, tc := range []struct{ name, filename, contents string }{
+		{"kotlin", "build.gradle.kts", `android { defaultConfig { applicationId = "com.example.kotlin" } }`},
+		{"groovy", "build.gradle", `android { defaultConfig { applicationId 'com.example.groovy' } }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			appDir := filepath.Join(root, "app")
+			require.NoError(t, os.MkdirAll(appDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(appDir, tc.filename), []byte(tc.contents), 0o644))
+			got, err := detectAndroidApplicationID(root)
+			require.NoError(t, err)
+			require.Contains(t, tc.contents, got)
+		})
 	}
 }

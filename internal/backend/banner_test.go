@@ -3,10 +3,11 @@ package backend
 import (
 	"bytes"
 	"context"
-	"github.com/spf13/cobra"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestPrintTargetNamesTheLocalStack: while a stack is up, that is where the verb

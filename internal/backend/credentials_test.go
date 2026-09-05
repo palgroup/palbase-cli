@@ -5,13 +5,14 @@ package backend
 
 import (
 	"errors"
-	"github.com/stretchr/testify/require"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestTheEnvironmentWinsAndTouchesNoFile is the AI-in-a-container case: a token

@@ -3,12 +3,14 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,6 +22,12 @@ import (
 // the per-environment contracts under openapi/ plus one per-platform slot (.palbase/ios, /macos,
 // /android). The web SDK reads its own directory instead — webArtifactsDir.
 const nativeArtifactsDir = ".palbase"
+
+// webArtifactsDir is the committed directory the WEB SDK generator reads —
+// openapi.json + palbase-config.json under ./Palbase. It lived in web_link.go
+// until the `palbase web` command group was retired (FR-009); the directory
+// outlived the command because `link`, `spec` and `pull` all write into it.
+const webArtifactsDir = "Palbase"
 
 // linkedPlatforms reports which platforms this checkout is linked for, read from
 // the COMMITTED slot files rather than from `.palbase/config.json` (which is
@@ -105,8 +113,14 @@ checkout linked to a project they do not apply and are REFUSED — run
 
 			web, apple, android := linkedPlatforms()
 			if !web && !apple && !android {
-				return fmt.Errorf(
-					"this directory is not linked to a Palbase project — run `palbase web link`, `palbase ios link`, `palbase macos link` or `palbase android link` first")
+				// NAME A CURE THAT EXISTS. This used to advise `palbase web link`
+				// and its three siblings; the platform command groups were
+				// retired (FR-009), so the advice sent the reader to
+				// `unknown command "web" for "palbase"` — a refusal whose only
+				// remedy could not be typed.
+				return errors.New(
+					"this directory is not linked to a Palbase project — run `palbase link` first, " +
+						"which detects what this checkout is and writes the slots this command reads")
 			}
 
 			// Apple regenerates from this refresh, so verify it CAN before any
@@ -151,7 +165,9 @@ checkout linked to a project they do not apply and are REFUSED — run
 					appID = cfg.AppID(platform)
 				}
 				if appID == "" {
-					return fmt.Errorf("no %s app linked — run `palbase %s link` first", platform, platform)
+					return fmt.Errorf(
+						"no %s app linked — run `palbase link` first (it writes .palbase/%s/palbase-config.json, "+
+							"which is where this command reads the app from)", platform, platform)
 				}
 				if err := linkNativeEnvironments(
 					cmd.Context(), deps, platform, appID, sel.EnvironmentRef(), sel.ProjectID, out,
@@ -381,4 +397,48 @@ func runPullSpec(
 		fmt.Fprintf(w, "✓ wrote %s\n", path)
 	}
 	return nil
+}
+
+// appIDFromPlatformSlot reads the app id out of the committed platform config
+// (`.palbase/<platform>/palbase-config.json`). Returns "" when the file is
+// absent or carries no id — the genuine first-link case, where registering a
+// new app is correct.
+func appIDFromPlatformSlot(platform string) string {
+	data, err := os.ReadFile(filepath.Join(".palbase", platform, "palbase-config.json"))
+	if err != nil {
+		return ""
+	}
+	// TWO SHAPES, ONE ANSWER. The web slot is a flat object with `app_id`; a
+	// native slot carries every environment and each names the app. Reading only
+	// the flat field made a fresh clone look UNLINKED after the native config
+	// went multi-environment — and an unlinked clone registers a SECOND app for
+	// the same project and rewrites the committed key.
+	var slot struct {
+		AppID        string                    `json:"app_id"`
+		Default      string                    `json:"default_environment"`
+		Environments map[string]appEnvironment `json:"environments"`
+	}
+	if err := json.Unmarshal(data, &slot); err != nil {
+		return ""
+	}
+	if slot.AppID != "" {
+		return slot.AppID
+	}
+	if e, ok := slot.Environments[slot.Default]; ok && e.AppID != "" && e.AppID != projectAppID {
+		return e.AppID
+	}
+	// The default may be the LOCAL stack, whose app id is the stack's own
+	// identity rather than a registration in the cloud. Deterministic order so
+	// two runs of the same checkout never disagree.
+	names := make([]string, 0, len(slot.Environments))
+	for name := range slot.Environments {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if e := slot.Environments[name]; e.AppID != "" && e.AppID != projectAppID {
+			return e.AppID
+		}
+	}
+	return ""
 }

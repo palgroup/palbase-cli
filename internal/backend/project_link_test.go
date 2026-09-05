@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/palgroup/palbase-cli/internal/config"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/palgroup/palbase-cli/internal/config"
 
 	"github.com/stretchr/testify/require"
 )

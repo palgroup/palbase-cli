@@ -77,6 +77,10 @@ exit 0
 //
 // A rename sweep will want to touch them. TestTheV1FingerprintsAreFrozen pins
 // them by hash so the sweep fails loudly instead of succeeding quietly.
+// palbase:frozen-fingerprint — the advice gate (cmd/palbase/advice_test.go)
+// skips the literals below. They are a HASH OF THE PAST, not advice: every
+// command they name is supposed to be one this CLI no longer has, because that
+// is what makes them match the hooks already on disk.
 var knownV1Bodies = []string{
 	// db.go prePushHook const.
 	`#!/bin/sh

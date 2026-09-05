@@ -26,9 +26,10 @@ import (
 	"regexp"
 	"strings"
 
+	"time"
+
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/spf13/cobra"
-	"time"
 )
 
 // refPattern is the plane's own rule for a project ref, copied here for one
