@@ -44,6 +44,21 @@ type Target struct {
 	// boot generated. Remembered rather than retyped, because a flag somebody
 	// has to repeat is a flag they will eventually paste at the wrong project.
 	Insecure bool `json:"insecure,omitempty"`
+	// StackVersion is the MAJOR of the SDK generation this project runs on, and
+	// it decides which images `palbase start` brings up.
+	//
+	// ONE field, not one per service. Handing somebody a tag per container hands
+	// them a compatibility matrix — Supabase hides all 14 of its image fields
+	// behind `toml:"-"` for exactly that reason, and that is a considered refusal
+	// rather than an oversight (D-036).
+	//
+	// The MAJOR rather than the full version: a table keyed by every patch
+	// release is a table nobody maintains.
+	//
+	// It lives in the COMMITTED file on purpose. Supabase writes the equivalent
+	// to `.temp/`, which `supabase init` gitignores — so a fresh clone and every
+	// CI runner silently get a different stack than the machine that linked it.
+	StackVersion string `json:"stackVersion,omitempty"`
 	// Local is true when this target came from a running dev stack rather than
 	// from the committed file. Not serialised — it is a fact about right now.
 	Local bool `json:"-"`
@@ -236,4 +251,39 @@ func ResolveTarget(ctx context.Context) (Target, error) {
 		}
 	}
 	return target, err
+}
+
+// stackVersion answers which stack generation this checkout runs, and WRITES the
+// answer down when it had to work it out.
+//
+// Deriving without persisting would leave the next run free to derive something
+// else — the same drift the field exists to end, one layer down. And a project
+// that can neither declare nor derive gets a REFUSAL, not an embedded default:
+// falling back silently is how the stack becomes a property of the binary again,
+// which is the whole defect (D-035/D-039).
+func stackVersion(projectDir string) (string, error) {
+	target, err := ReadTarget()
+	if err != nil {
+		return "", err
+	}
+	if v := strings.TrimSpace(target.StackVersion); v != "" {
+		return v, nil
+	}
+
+	installed := installedBackendVersion(projectDir)
+	if installed == "" {
+		return "", fmt.Errorf(
+			"this project declares no stackVersion and %s is not installed here — run `npm install`, "+
+				"or set stackVersion in %s", backendPkg, projectPath())
+	}
+	major, _, _ := strings.Cut(installed, ".")
+	if major == "" {
+		return "", fmt.Errorf("cannot read a major out of the installed %s version %q", backendPkg, installed)
+	}
+
+	target.StackVersion = major
+	if err := WriteTarget(target); err != nil {
+		return "", fmt.Errorf("write the derived stack version: %w", err)
+	}
+	return major, nil
 }
