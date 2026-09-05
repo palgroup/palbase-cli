@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,11 +167,10 @@ func TestARegistryReferenceIsRecognised(t *testing.T) {
 	}{
 		{"ghcr.io/palgroup/palbase/palsvc:0.29.1", true},
 		{"localhost:5000/palsvc", true},
-		// Docker Hub's short form: docker does pull it, but the first segment is
-		// an ORG, not a host — and nothing in this stack defaults to one, so
-		// treating it as local (and letting the inspect refuse) is the safe way
-		// round.
-		{"pgvector/pgvector:pg16", false},
+		// Docker Hub's short form. This expected false while nothing in the stack
+		// defaulted to one; `postgres` does now, and calling it local would make
+		// a fresh machine refuse to start over an image docker pulls in seconds.
+		{"pgvector/pgvector:pg16", true},
 		{"palbase-palsvc", false},
 		{"palbase-runtime-dev:latest", false},
 	} {
@@ -285,4 +285,45 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	composeConfigIsValid(t, path)
+}
+
+// EVERY IMAGE THE STACK RUNS MUST BE PINNED IN ONE PLACE — and the gate that
+// checks the pins has to be able to SEE all of them.
+//
+// TestTheGoConstantsAndTheComposeDefaultsAgree loops over `stackImages`, so it
+// measures exactly the images Go already knows about. An image compose names
+// WITHOUT a variable is therefore invisible to it: not a disagreement it
+// tolerates, one it cannot express. Measured 2026-09-05: `postgres` ran
+// `pgvector/pgvector:pg16` as a bare literal, and `grep -rn pgvector` over the
+// Go sources returned nothing at all.
+//
+// This test starts from the COMPOSE side instead, so a new service arrives
+// pinned or arrives red.
+func TestEveryComposeImageIsPinnedInOnePlace(t *testing.T) {
+	known := map[string]bool{}
+	for _, img := range stackImages {
+		known[img.env] = true
+	}
+
+	var unpinned []string
+	for i, line := range strings.Split(string(stackCompose), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "image:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "image:"))
+		if !strings.HasPrefix(value, "${") {
+			unpinned = append(unpinned, fmt.Sprintf("%s:%d %s (no variable at all)", composeFile, i+1, value))
+			continue
+		}
+		env, _, _ := strings.Cut(strings.TrimPrefix(value, "${"), ":-")
+		if !known[env] {
+			unpinned = append(unpinned, fmt.Sprintf("%s:%d reads %s, which Go does not carry", composeFile, i+1, env))
+		}
+	}
+
+	if len(unpinned) > 0 {
+		t.Errorf("these images are outside the one place that pins them, so no gate can measure "+
+			"them:\n%s", strings.Join(unpinned, "\n"))
+	}
 }

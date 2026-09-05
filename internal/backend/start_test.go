@@ -785,12 +785,32 @@ func TestStackImagesTrackTheCoreVersion(t *testing.T) {
 		t.Fatalf("%s içinde V2_VERSION yok — bu dosya artık otorite değilse test de yanlış yerde", authority)
 	}
 
+	// BİZİM İMAJLARIMIZ ile UPSTREAM İMAJLAR AYRI SORULAR.
+	//
+	// Bu döngü "her pin çekirdek sürümünü taşımalı" diyordu ve `postgres` pin
+	// listesine katılana kadar (2026-09-05) doğruydu — o güne dek listedeki her
+	// imajı biz üretiyorduk. `pgvector/pgvector:pg16`'nın etiketi PostgreSQL'in
+	// majörü; bizim çekirdek sürümümüzle eşleşmesi için hiçbir sebep yok ve
+	// eşleşmesini istemek onu her çekirdek yayınında yanlış yere taşırdı.
+	//
+	// Muafiyet DAR ve KENDİ ölçüsünü taşıyor: bizim önekimizi taşıyan imajlar
+	// çekirdeğe EŞİT olmalı; taşımayanlar SABİT bir etiket taşımalı (`latest`
+	// bir pin değildir). Yani upstream imaj kontrolden çıkmıyor, BAŞKA bir
+	// kontrole giriyor.
+	const ourPrefix = "ghcr.io/palgroup/palbase/"
 	for _, img := range stackImages {
 		tag := img.fallback[strings.LastIndex(img.fallback, ":")+1:]
-		if tag != core {
-			t.Errorf("%s varsayılanı %q sürümünü pinliyor, çekirdek ise %q — "+
-				"yerel yığın buluttan farklı bir çekirdek koşar (imaj: %s)",
-				img.env, tag, core, img.fallback)
+		if strings.HasPrefix(img.fallback, ourPrefix) {
+			if tag != core {
+				t.Errorf("%s varsayılanı %q sürümünü pinliyor, çekirdek ise %q — "+
+					"yerel yığın buluttan farklı bir çekirdek koşar (imaj: %s)",
+					img.env, tag, core, img.fallback)
+			}
+			continue
+		}
+		if tag == "" || tag == "latest" || !strings.Contains(img.fallback, ":") {
+			t.Errorf("%s upstream bir imajı SABİT etiketlemiyor (%s) — `latest` bir pin değildir "+
+				"ve iki makinede iki farklı veritabanı demektir", img.env, img.fallback)
 		}
 	}
 }

@@ -40,13 +40,13 @@ işle birlikte — yerine konur.
 **Kanıt:** CB-44 (`project.json` commit'lenir, `local.json` gitignore'lanır) · CB-45 (`Target`'ta
 sürüm alanı yok, `target.go:34-49`).
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `internal/backend/target_test.go`'ya: alan taşıyan bir
+- [x] **Adım 1: Kırmızıyı yaz** — `internal/backend/target_test.go`'ya: alan taşıyan bir
   `project.json` için `stackVersion` onu döndürür; alansız dosya + kurulu SDK için TÜRETİR ve
   DOSYAYA YAZAR (ikinci çağrı ağa/npm'e gitmeden aynı değeri döndürür); SDK yoksa hata mesajı
   `@palbase/backend` adını GEÇİRİR.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestStackVersion -count=1` ·
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestStackVersion -count=1` ·
   Beklenen: **FAIL**, `undefined: stackVersion`.
-- [ ] **Adım 3: `Target`'a alanı ekle** — `target.go`'da struct'a:
+- [x] **Adım 3: `Target`'a alanı ekle** — `target.go`'da struct'a:
   ```go
   // StackVersion is the semantic version of the stack this project runs.
   //
@@ -59,17 +59,45 @@ sürüm alanı yok, `target.go:34-49`).
   // runner silently get a different stack than the machine that linked it.
   StackVersion string `json:"stackVersion,omitempty"`
   ```
-- [ ] **Adım 4: `stackVersion` yaz** — alan varsa döndür; yoksa `installedBackendVersion(dir)`'den
+- [x] **Adım 4: `stackVersion` yaz** — alan varsa döndür; yoksa `installedBackendVersion(dir)`'den
   majörü türet, `Target`'a yaz, dosyayı kaydet, döndür. SDK yoksa:
   `fmt.Errorf("this checkout declares no stack version and %s is not installed — run `npm install` first, or set stackVersion in .palbase/project.json", backendPkg)`.
-- [ ] **Adım 5: Yeşili gör** — Run: `go test ./internal/backend/ -run TestStackVersion -count=1` ·
+- [x] **Adım 5: Yeşili gör** — Run: `go test ./internal/backend/ -run TestStackVersion -count=1` ·
   Beklenen: `ok`.
-- [ ] **Adım 6: Commit** — `git commit -- internal/backend/target.go internal/backend/target_test.go`
+- [x] **Adım 6: Commit** — `git commit -- internal/backend/target.go internal/backend/target_test.go`
+
+---
+
+### T014: Sürüm→imaj tablosunu `@palbase/backend` paketine KOY
+<!-- deps: [] | files: [../palbase-ts/backend/stack-images.json, ../palbase-ts/backend/package.json, ../palbase-ts/backend/__tests__/stack-images.test.ts] | satisfies: [FR-002] -->
+
+**Neden bu görev var (Changelog A-3):** pre-flight ölçümü, paketin (v33.0.0) böyle bir tablo
+TAŞIMADIĞINI gösterdi. Yalnız CLI yarısını yazmak `palbase start`'ı KIRARDI — tablo yok, imaj yok,
+yığın kalkmaz. Kullanıcı kararı: tablo pakete girer, sürüm kesilir.
+
+**AYRI DEPO:** `sdk/palbase-ts` kendi git'i olan bir depo. Commit'ler orada, pathspec ile.
+
+**Interfaces**
+- Produces: `stack-images.json` — `{"<major>": [{"env": "...", "ref": "...", "build": "..."}]}`
+  şeklinde; bugün CLI'ın `stackImages`'inde duran dört imajın aynısı (T003 sonrası `postgres` dâhil).
+
+- [ ] **Adım 1: Kırmızıyı yaz** — `__tests__/stack-images.test.ts`: tablo JSON olarak
+  ayrıştırılabilir; şu anki majör için DÖRT imaj taşır; her girdi `env` ve `ref` alanlarını taşır;
+  her `ref` bir registry adresi (`/` içerir) — yerel etiket DEĞİL.
+- [ ] **Adım 2: Kırmızıyı gör** — Run: `cd ../palbase-ts && npx vitest run backend/__tests__/stack-images.test.ts` ·
+  Beklenen: **FAIL**, dosya yok.
+- [ ] **Adım 3: Tabloyu yaz** — `stack-images.json`, CLI'daki dört pinin ETİKETLERİYLE birebir
+  (kaynak: `internal/backend/start.go` `stackImages` + compose'un `postgres` satırı).
+- [ ] **Adım 4: `files`'a ekle** — `package.json`'ın `files` dizisine `stack-images.json`; yoksa
+  paket yayınlanınca tablo GİTMEZ ve CLI onu bulamaz.
+- [ ] **Adım 5: Yeşili gör** — Run: `cd ../palbase-ts && npx vitest run backend/__tests__/stack-images.test.ts` ·
+  Beklenen: `ok`. Ayrıca `npm pack --dry-run` çıktısında `stack-images.json` GÖRÜNMELİ.
+- [ ] **Adım 6: Commit (SDK deposunda, pathspec ile)** — `git -C ../palbase-ts commit -- backend/stack-images.json backend/package.json backend/__tests__/stack-images.test.ts`
 
 ---
 
 ### T002: Sürüm→imaj tablosu `@palbase/backend`'den okunsun ve `start` onu KULLANSIN
-<!-- deps: [T001] | files: [internal/backend/start.go, internal/backend/start_test.go] | satisfies: [FR-002, FR-003] -->
+<!-- deps: [T001, T014, T003] | files: [internal/backend/start.go, internal/backend/start_test.go] | satisfies: [FR-002, FR-003] -->
 
 **Interfaces**
 - Consumes: `stackVersion(dir string) (string, error)` (T001).
@@ -106,7 +134,7 @@ gerekmez) · D-030 (ağ ucu YOK).
 ---
 
 ### T003: Dört pinin DÖRDÜ de tek mekanizmada; parite kapısı hepsini görsün
-<!-- deps: [] | files: [internal/backend/stackfiles.go, internal/backend/stackfiles/docker-compose.dev.yml, internal/backend/stackfiles_test.go] | satisfies: [FR-005] -->
+<!-- deps: [] | files: [internal/backend/stackfiles/docker-compose.dev.yml, internal/backend/stackfiles_test.go, ../../v2/deploy/docker-compose.dev.yml, internal/backend/start.go] | satisfies: [FR-005] -->
 
 **Kanıt:** CB-46 — compose dört `image:` taşıyor; `postgres`'inki `pgvector/pgvector:pg16` SABİT
 (değişkensiz), `stackImages` üç eleman, `grep -rn pgvector --include="*.go" internal/` → boş. Parite
@@ -118,8 +146,17 @@ göremiyor.
   `postgres` bunu ihlal ediyor.
 - [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestEveryComposeImageIsPinnedInOnePlace -count=1` ·
   Beklenen: **FAIL**, `postgres` satırını adıyla listeler.
-- [ ] **Adım 3: `postgres` pinini değişkene bağla** — compose'da:
-  `image: ${PALBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}` ve `stackImages`'e dördüncü eleman.
+- [ ] **Adım 3: `postgres` pinini değişkene bağla — İKİ dosyada** — vendor'lanan kopyada VE
+  `v2/deploy`'daki orijinalde (parite kapısı ikisini karşılaştırıyor; yalnız birini değiştirmek onu
+  kırar — Changelog A-4): `image: ${PALBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}`. Varsayılan
+  AYNI kalıyor, yani koşan yığın değişmiyor. Ayrıca `stackImages`'e dördüncü eleman —
+  **`stackImages` `start.go:65`'te yaşıyor, `stackfiles.go`'da değil** (plan ilk yazımda yanlış
+  dosyayı gösteriyordu; ölçüldü).
+- [ ] **Adım 3b: `isRegistryImage` Docker Hub kısa formunu TANISIN** — `postgres`'i pin listesine
+  eklemek Artım 1'in gerekçesini çürütüyor: yorum *"nothing in this stack defaults to one"* diyordu,
+  artık ediyor. Düzeltilmezse `ensureImages` `pgvector/pgvector:pg16`'yı YEREL sanıp ilk koşuda
+  *"image is not on this machine"* ile düşerdi — çalışan bir komutu kırmak. Kural sadeleşiyor: slash
+  varsa registry referansıdır. `stackfiles_test.go:174`'teki beklenti ve gerekçe yorumu da düzelir.
 - [ ] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestEveryComposeImage|TestTheGoConstants|TestTheVendoredCompose' -count=1` ·
   Beklenen: `ok` — ve `docker compose config` hâlâ geçiyor.
 - [ ] **Adım 5: Negatif kontrol** — `postgres`'i sabite geri döndür, testin KIRMIZIYA döndüğünü gör,
@@ -314,7 +351,7 @@ sıralayan bir test SAYILMAZ.
 
 ## Dependencies
 
-`T001 → T002 → T004` zinciri `start.go`'yu paylaştığı için seri. `T003` (compose/stackfiles) ve
+`T014` (SDK tablosu, ayrı depo) ile `T001` paralel; `T001+T014 → T002 → T004` zinciri `start.go`'yu paylaştığı için seri. `T003` (compose/stackfiles) ve
 `T005` (upgrade.go) hiçbir şeye dokunmuyor → wave 1'de paralel. Kol D (`T006 → T007 → T008 → T009`)
 `project_link.go` ve link dosyalarını paylaştığı için seri; Kol E (`T010 → T011`) onların söktüğü
 yüzeyin ardından gelir. `T012` **T011'den sonra** — ertelenen kapının tüm sebebi bu. `T013` her şeyi
@@ -323,6 +360,7 @@ yüzeyin ardından gelir. `T012` **T011'den sonra** — ertelenen kapının tüm
 ```mermaid
 graph TD
   T001 --> T002 --> T004
+  T014 --> T002
   T003
   T005
   T006 --> T007 --> T008 --> T009 --> T010 --> T011 --> T012
@@ -338,7 +376,7 @@ graph TD
 | FR | Görev |
 |---|---|
 | FR-001 | T001 |
-| FR-002 | T002 |
+| FR-002 | T014, T002 |
 | FR-003 | T002 |
 | FR-004 | T004 |
 | FR-005 | T003 |
@@ -381,7 +419,7 @@ graph TD
 
 ## Fidelity Audit
 
-- **Şartnamede karşılığı olmayan öğe:** none.
+- **Şartnamede karşılığı olmayan öğe:** none — T014'ün üç dosyası A-3 ile Impact Map'e girdi.
 - **`C-n`'den farklı imza:** none — `stackVersion`, `imagesFor`, `detectPlatforms`, `routeLiterals`
   dördü de spec'in Bileşen Yüzeyi'nden birebir alındı (`imagesFor`'a `dir` parametresi eklendi;
   spec'in `[PLAN-FREE: iç yardımcılar]` işareti bunu kapsıyor — tablo kurulu paketten okunuyor ve

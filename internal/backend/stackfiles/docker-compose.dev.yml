@@ -159,7 +159,7 @@ services:
   # half before a real one exists, and whatever `service_healthy` releases
   # connects into that gap.
   postgres:
-    image: pgvector/pgvector:pg16
+    image: ${PALBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     environment:
       POSTGRES_USER: palbase
       POSTGRES_DB: palbase

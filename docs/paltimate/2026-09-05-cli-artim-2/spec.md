@@ -187,9 +187,9 @@ yapıların yerel şekli.]`
 | `internal/backend/upgrade_test.go` | modify | yerel yığında ölü ucun ölçüsü | FR-006 |
 | `internal/backend/project_link_test.go` | modify | algılama, `--platform` doğrulaması, `unlink` ölçüleri | FR-008, FR-010, FR-011 |
 | `internal/backend/backend.go` | modify | emekli komut grupları kayıttan düşer | FR-009 |
-| `internal/backend/start.go` | modify | sürüm→imaj çözümü, kaldırılan imajların yazımı, hazırlık, `stop` | FR-001…FR-005, FR-007 |
-| `internal/backend/stackfiles.go` | modify | pin mekanizması dördü de kapsar | FR-005 |
+| `internal/backend/start.go` | modify | `stackImages` ve `isRegistryImage` burada yaşıyor | FR-002, FR-003, FR-004, FR-005, FR-007 |
 | `internal/backend/stackfiles/docker-compose.dev.yml` | modify | `postgres` pini değişkene bağlanır | FR-005 |
+| `../../v2/deploy/docker-compose.dev.yml` | modify | vendor'lananın ORİJİNALİ; parite kapısı ikisini karşılaştırıyor | FR-005 |
 | `internal/backend/stackfiles_test.go` | modify | parite kapısı dördü de görür | FR-005 |
 | `internal/backend/upgrade.go` | modify | yerel yığında ölü uç | FR-006 |
 | `internal/backend/project_link.go` | modify | tek `link`, platform algılama, `--platform` doğrulaması, `unlink` | FR-008, FR-010, FR-011 |
@@ -211,6 +211,9 @@ yapıların yerel şekli.]`
 | `cmd/palbase/routes_test.go` | create | FR-016'nın rota kapısı | FR-016 |
 | `tests/e2e/mgmt_api_test.go` | modify | seçim katmanı bağımlılığı kalkar (D-051) | FR-013 |
 | `internal/backend/link_e2e_test.go` | create | FR-017'nin uçtan uca zinciri | FR-017 |
+| `../palbase-ts/backend/stack-images.json` | create | sürüm→imaj tablosunun kendisi | FR-002 |
+| `../palbase-ts/backend/package.json` | modify | tablo yayınlanan dosyalara girer | FR-002 |
+| `../palbase-ts/backend/__tests__/stack-images.test.ts` | create | tablonun şekli ve dört imajı ölçülür | FR-002 |
 
 ### Sıralama kısıtları
 
@@ -225,10 +228,11 @@ yapıların yerel şekli.]`
 
 ## Önkoşullar (kullanıcı/dış kaynaklı)
 
-- **`@palbase/backend`'in sürüm→imaj tablosu.** FR-002 onu paketten okur; tabloyu pakete koyan iş
-  SDK deposunda. **Bu artım tabloyu paketten OKUR; koymak ayrı bir iştir ve bu artımın kapsamında
-  değilse plan onu bir spike ile ölçmeli.** → *çözüldü: FR-002'nin kabul ölçütü, tablo yoksa CLI'ın
-  ne yapamadığını adıyla söylemesi; tablo geldiğinde aynı yol çalışır.*
+- **`@palbase/backend`'in sürüm→imaj tablosu — ÇÖZÜLDÜ, kapsama alındı (Changelog A-3).**
+  Pre-flight ölçümü: paket (v33.0.0) böyle bir tablo TAŞIMIYOR. Yalnız CLI tarafını yazmak `palbase
+  start`'ı kırardı — tablo yok, imaj yok, yığın kalkmaz. Kullanıcı kararı: tablo SDK paketine
+  eklenir ve sürüm kesilir (D-023'ün tasarladığı şekil). Tablo bu artımın kapsamında; yayın D-048
+  gereği plan içinden yapılır, ad-hoc değil.
 - Ek kimlik/erişim gerekmiyor: bu artım ağ ucu eklemiyor (D-030).
 
 ---
@@ -241,6 +245,26 @@ temellendirildi (`confirmed`/`stale`).
 ---
 
 ## Changelog
+
+- **A-5 · 2026-09-05 · `stackfiles.go` haritadan çıktı, `start.go` girdi; `isRegistryImage` T003'e katıldı.**
+  İki ölçüm: (1) `stackImages` `start.go:65`'te yaşıyor, `stackfiles.go`'da değil — harita yanlış
+  dosyayı gösteriyordu. (2) `postgres`'i pin listesine eklemek `isRegistryImage`'in gerekçesini
+  çürütüyor (*"nothing in this stack defaults to one"* — artık ediyor); düzeltilmezse `ensureImages`
+  Docker Hub kısa formunu YEREL sanıp `palbase start`'ı ilk koşuda kırardı. Kural sadeleşti: slash
+  varsa registry referansıdır.
+
+- **A-4 · 2026-09-05 · Impact Map +1: `v2/deploy/docker-compose.dev.yml` (execute, T003 önü).**
+  Vendor'lanan compose, Artım 1'in parite kapısıyla (`TestTheVendoredComposeMatchesTheRepository`)
+  `v2/deploy`'daki ORİJİNALİNE bağlı. `postgres` pinini yalnız vendor'lanan kopyada değişkene
+  bağlamak o kapıyı KIRARDI. Orijinal de değişir; **varsayılan aynı kalıyor**
+  (`${PALBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}`), yani koşan yığının davranışı değişmez —
+  yalnız override edilebilir ve Go tarafından görülebilir hâle gelir.
+
+- **A-3 · 2026-09-05 · Sürüm→imaj tablosu kapsama alındı; Impact Map +3 satır.** Execute'un
+  pre-flight taraması bir regresyon riski buldu: `@palbase/backend` v33.0.0 bir sürüm→imaj tablosu
+  taşımıyor, yani FR-002'nin CLI yarısı tek başına inseydi `palbase start` çalışmayı bırakırdı.
+  Kullanıcıya soruldu (kapsam kenarı, pre-flight'ın tam amacı) → tablo SDK paketine eklenir ve sürüm
+  kesilir. Üç satır Impact Map'e girdi; plan T014'ü kazandı ve T002 ona bağlandı.
 
 - **A-2 · 2026-09-05 · Impact Map +6 satır; iki metin düzeltmesi (planlama sırasında, `validate` bulgusu).**
   `plan-tools validate` beş test dosyasının ve `backend.go`'nun haritada olmadığını gösterdi — plan

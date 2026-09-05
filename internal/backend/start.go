@@ -74,6 +74,17 @@ var stackImages = []struct{ env, fallback, build string }{
 	// line that builds it.
 	{"PALBASE_EDGE_IMAGE", "ghcr.io/palgroup/palbase/edge:0.42.0",
 		"cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge ."},
+	// THE DATABASE, and it was outside this list until 2026-09-05.
+	//
+	// Not an oversight with no consequence: the parity gate loops over THIS
+	// slice, so an image compose named without a variable was not a
+	// disagreement the gate tolerated — it was one the gate could not express.
+	// Measured: `grep -rn pgvector` over the Go sources returned nothing, while
+	// compose ran `pgvector/pgvector:pg16` as a bare literal.
+	//
+	// Upstream image, so the recovery line is a pull rather than a build.
+	{"PALBASE_POSTGRES_IMAGE", "pgvector/pgvector:pg16",
+		"docker pull pgvector/pgvector:pg16"},
 }
 
 func newStartCmd() *cobra.Command {
@@ -386,15 +397,23 @@ func imagesPresent(ctx context.Context) error {
 
 // isRegistryImage says whether docker would go and FETCH this reference.
 //
-// The rule docker itself uses: a name whose first path segment carries a dot or
-// a colon — or is `localhost` — is a registry host. `palbase-palsvc` is a local
-// tag; `ghcr.io/palgroup/palbase/palsvc:0.36.5` is not.
+// A SLASH is the whole rule: `ghcr.io/palgroup/palbase/palsvc:0.42.0` and
+// `pgvector/pgvector:pg16` are both fetched, the first from ghcr and the second
+// from Docker Hub, while `palbase-palsvc` is a tag somebody built here.
+//
+// It used to demand a dot or a colon in the first segment, which excluded Docker
+// Hub's `org/image` short form. The comment justified that with "nothing in this
+// stack defaults to one" — true when it was written, and FALSE from the moment
+// `postgres` joined stackImages with `pgvector/pgvector:pg16` as its default.
+// Left alone, ensureImages would have called the database image local, found it
+// absent on a fresh machine and refused to start a stack docker could have
+// pulled in seconds.
+//
+// The lesson is the premise, not the predicate: a rule whose reason names what
+// the codebase "does not do today" expires the day the codebase does it.
 func isRegistryImage(image string) bool {
-	head, _, hasSlash := strings.Cut(image, "/")
-	if !hasSlash {
-		return false
-	}
-	return strings.ContainsAny(head, ".:") || head == "localhost"
+	_, _, hasSlash := strings.Cut(image, "/")
+	return hasSlash
 }
 
 // groupName is what this stack is called on this machine: the linked project's
