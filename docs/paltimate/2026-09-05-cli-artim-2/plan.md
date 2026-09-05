@@ -108,15 +108,15 @@ yığın kalkmaz. Kullanıcı kararı: tablo pakete girer, sürüm kesilir.
 **Kanıt:** D-023 (tablo SDK paketinde — Expo'nun hamlesi; tazelemek için `npm i` yeter, CLI sürümü
 gerekmez) · D-030 (ağ ucu YOK).
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `start_test.go`'ya: tablo dosyası taşıyan sahte bir
+- [x] **Adım 1: Kırmızıyı yaz** — `start_test.go`'ya: tablo dosyası taşıyan sahte bir
   `node_modules/@palbase/backend` için `imagesFor` dört imajı döndürür; tabloda olmayan bir sürüm
   için hata **sürümü adıyla** geçirir; tablo dosyası yoksa hata `@palbase/backend`'i adlandırır.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestImagesFor -count=1` ·
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestImagesFor -count=1` ·
   Beklenen: **FAIL**, `undefined: imagesFor`.
-- [ ] **Adım 3: `imagesFor` yaz** — `node_modules/@palbase/backend/stack-images.json`'ı okur,
+- [x] **Adım 3: `imagesFor` yaz** — `node_modules/@palbase/backend/stack-images.json`'ı okur,
   `version` anahtarıyla çözer. Bulunamayan sürüm:
   `fmt.Errorf("%s knows no stack images for version %q — the versions it carries are: %s", backendPkg, version, strings.Join(known, ", "))`.
-- [ ] **Adım 4: `start` çözülen imajları YAZSIN** — `runStart`'ta, `▸ starting %s` satırından sonra
+- [x] **Adım 4: `start` çözülen imajları YAZSIN** — `runStart`'ta, `▸ starting %s` satırından sonra
   her imajı etiketiyle bas:
   ```go
   // WHAT IT ACTUALLY BRINGS UP, NAMED.
@@ -127,9 +127,9 @@ gerekmez) · D-030 (ağ ucu YOK).
       fmt.Fprintf(out, "  %s\n", img.ref)
   }
   ```
-- [ ] **Adım 5: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestImagesFor|TestStart' -count=1` ·
+- [x] **Adım 5: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestImagesFor|TestStart' -count=1` ·
   Beklenen: `ok`.
-- [ ] **Adım 6: Commit** — `git commit -- internal/backend/start.go internal/backend/start_test.go`
+- [x] **Adım 6: Commit** — `git commit -- internal/backend/start.go internal/backend/start_test.go`
 
 ---
 
@@ -211,13 +211,13 @@ göremiyor.
 **Kanıt:** CB-40 — `planes.go:132 hasApple`, `planes.go:153 hasWeb`,
 `native_link.go:429 detectAndroidApplicationID`.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — Apple+web taşıyan bir fikstürde `detectPlatforms` ikisini de
+- [x] **Adım 1: Kırmızıyı yaz** — Apple+web taşıyan bir fikstürde `detectPlatforms` ikisini de
   döndürür; hiçbiri yoksa boş döner ve `link` ne aradığını + nerede bulamadığını SÖYLER.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestDetectPlatforms -count=1`
-- [ ] **Adım 3: `detectPlatforms` yaz + `link`'e bağla** — çıplak `link` algılananların hepsi için
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestDetectPlatforms -count=1`
+- [x] **Adım 3: `detectPlatforms` yaz + `link`'e bağla** — çıplak `link` algılananların hepsi için
   artefakt yazsın.
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestDetectPlatforms|TestLink' -count=1`
-- [ ] **Adım 5: Commit** — `git commit -- internal/backend/project_link.go internal/backend/planes.go internal/backend/project_link_test.go`
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestDetectPlatforms|TestLink' -count=1`
+- [x] **Adım 5: Commit** — `git commit -- internal/backend/project_link.go internal/backend/planes.go internal/backend/project_link_test.go`
 
 ---
 

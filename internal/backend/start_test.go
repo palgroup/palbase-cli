@@ -972,3 +972,65 @@ func TestTheSDKTableAndTheGoConstantsAgree(t *testing.T) {
 		}
 	}
 }
+
+// READY MEANS THE RUNTIME SAYS SO, not that the edge answered.
+//
+// `/readyz` on the edge routes to the palsvc cluster, so the banner could print
+// "ready" while the runtime was still refusing every bundle handed to it. The
+// runtime knows two states nobody else does — alive, and LOADED AND ANSWERING —
+// and serves them on its own probe port.
+func TestRuntimeHealthIsReadFromComposeState(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		json  string
+		ready bool
+	}{
+		{"healthy", `[{"Service":"runtime","Health":"healthy"},{"Service":"palsvc","Health":"healthy"}]`, true},
+		{"still starting", `[{"Service":"runtime","Health":"starting"}]`, false},
+		{"unhealthy", `[{"Service":"runtime","Health":"unhealthy"}]`, false},
+		// A stack whose runtime is not in the listing at all has not reached the
+		// question yet; saying "ready" there is the defect, not the fix.
+		{"absent", `[{"Service":"palsvc","Health":"healthy"}]`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := runtimeIsHealthy([]byte(c.json))
+			if err != nil {
+				t.Fatalf("compose state was unreadable: %v", err)
+			}
+			if got != c.ready {
+				t.Errorf("runtimeIsHealthy = %v, want %v for %s", got, c.ready, c.json)
+			}
+		})
+	}
+}
+
+// A STOP MUST NOT REWRITE THE STACK IT IS TAKING DOWN.
+//
+// runStop called stackDirectory, which writes the vendored compose before
+// returning its path. So a CLI upgraded since `start` took the stack down with
+// a DIFFERENT definition than the one that brought it up — and any service
+// renamed in between simply stayed running, unreferenced by the file docker was
+// handed.
+func TestStopUsesTheStackFileThatIsAlreadyThere(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, composeFile)
+	const theirs = "# somebody else's definition\nservices: {}\n"
+	if err := os.WriteFile(path, []byte(theirs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := existingStackDirectory(dir)
+	if err != nil {
+		t.Fatalf("an existing stack file was refused: %v", err)
+	}
+	if got != dir {
+		t.Errorf("existingStackDirectory = %q, want %q", got, dir)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != theirs {
+		t.Errorf("the file was rewritten:\n%s", after)
+	}
+}

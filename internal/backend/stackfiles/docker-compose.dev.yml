@@ -292,6 +292,19 @@ services:
     # The DEV target, pulled: it carries the bundler and TypeScript the stager
     # needs. The production image comes up healthy and then refuses every save.
     image: ${PALBASE_RUNTIME_IMAGE:-ghcr.io/palgroup/palbase/runtime-dev:0.42.0}
+    # READINESS IS THE RUNTIME'S OWN ANSWER, not the edge's.
+    #
+    # `/readyz` on the edge routes to palsvc, so the banner could say "ready"
+    # while the runtime was still refusing every bundle it was handed. The
+    # runtime serves its own probes on 4006 and distinguishes the two states it
+    # knows and nobody else does: alive (/healthz) and LOADED AND ANSWERING
+    # (/readyz).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4006/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
     environment:
       # The switch. With it set, the artifact path is not taken at all — there
       # is no ARTIFACT_BLOB_URL here and nothing looks for one.

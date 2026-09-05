@@ -23,6 +23,7 @@ package backend
 //	                             commits.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -136,6 +137,64 @@ func imagesFor(projectDir, version string) ([]stackImage, error) {
 		images = append(images, stackImage{env: e.Env, fallback: e.Ref, build: e.Build})
 	}
 	return images, nil
+}
+
+// runtimeIsHealthy reads `docker compose ps --format json` and answers the one
+// question the edge cannot: has the RUNTIME loaded and started answering.
+//
+// `/readyz` on the edge routes to the palsvc cluster, so a banner built on it
+// could say "ready" while the runtime was still refusing every bundle. The
+// runtime distinguishes alive from LOADED AND ANSWERING and serves both on its
+// own probe port; compose's healthcheck asks it, and this reads the verdict.
+//
+// A runtime ABSENT from the listing is not ready either: it has not reached the
+// question yet, and calling that ready is the defect rather than the fix.
+func runtimeIsHealthy(composePS []byte) (bool, error) {
+	type service struct {
+		Service string `json:"Service"`
+		Health  string `json:"Health"`
+	}
+	trimmed := bytes.TrimSpace(composePS)
+	var services []service
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &services); err != nil {
+			return false, fmt.Errorf("read compose state: %w", err)
+		}
+	} else {
+		// Older compose prints one JSON object per line.
+		for _, line := range bytes.Split(trimmed, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+			var one service
+			if err := json.Unmarshal(line, &one); err != nil {
+				return false, fmt.Errorf("read compose state: %w", err)
+			}
+			services = append(services, one)
+		}
+	}
+	for _, svc := range services {
+		if svc.Service == "runtime" {
+			return svc.Health == "healthy", nil
+		}
+	}
+	return false, nil
+}
+
+// existingStackDirectory returns the directory holding the stack file WITHOUT
+// writing one.
+//
+// `stop` used to call stackDirectory, which writes the vendored compose before
+// handing back its path — so a CLI upgraded since `start` took the stack down
+// with a DIFFERENT definition than the one that brought it up. Any service
+// renamed in between simply stayed running, unreferenced by the file docker was
+// handed.
+func existingStackDirectory(dir string) (string, error) {
+	if _, err := os.Stat(filepath.Join(dir, composeFile)); err != nil {
+		return "", fmt.Errorf("no %s in %s — nothing to take down here", composeFile, dir)
+	}
+	return dir, nil
 }
 
 func newStartCmd() *cobra.Command {
@@ -311,7 +370,7 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, upArgs...); err != nil {
 		return err
 	}
-	if err := waitForStack(ctx, url, 90*time.Second); err != nil {
+	if err := waitForStack(ctx, url, stackDir, project, 90*time.Second); err != nil {
 		return fmt.Errorf("%w\nThe containers are still up — `docker compose -p %s logs` says what happened", err, project)
 	}
 
@@ -371,11 +430,12 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 	group := groupName(dir)
 	project := "palbase-" + group
 
-	stackDir, err := stackDirectory(group)
+	state, err := stackStateDir(group)
 	if err != nil {
 		return err
 	}
-	state, err := stackStateDir(group)
+	// THE FILE THAT IS ALREADY THERE, not a fresh copy of this binary's.
+	stackDir, err := existingStackDirectory(state)
 	if err != nil {
 		return err
 	}
@@ -672,7 +732,7 @@ func (p *prefixed) Write(b []byte) (int, error) {
 // migration. Waiting on it would report a stack as ready and hand the person a
 // 503 on their first real request. /readyz routes to the palsvc cluster, so a
 // 200 there is palsvc saying so.
-func waitForStack(ctx context.Context, url string, limit time.Duration) error {
+func waitForStack(ctx context.Context, url, stackDir, project string, limit time.Duration) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(limit)
 	var last string
@@ -692,6 +752,24 @@ func waitForStack(ctx context.Context, url string, limit time.Duration) error {
 			// would read that as a ready stack — the precise silence the move to
 			// /readyz was made to end.
 			if res.StatusCode == http.StatusOK {
+				// THE EDGE ANSWERING IS NOT THE RUNTIME BEING READY.
+				//
+				// /readyz routes to the palsvc cluster, so this branch used to
+				// print the banner while the runtime was still refusing every
+				// bundle handed to it. The runtime knows a state nobody else
+				// does — loaded and answering — and compose asks it; read the
+				// verdict before saying ready.
+				ps := exec.CommandContext(ctx, "docker", "compose",
+					"-f", filepath.Join(stackDir, composeFile), "-p", project, "ps", "--format", "json")
+				out, psErr := ps.Output()
+				if psErr == nil {
+					healthy, hErr := runtimeIsHealthy(out)
+					if hErr == nil && !healthy {
+						last = "the edge answers but the runtime has not loaded yet"
+						time.Sleep(time.Second)
+						continue
+					}
+				}
 				return nil
 			}
 			last = fmt.Sprintf("%s answered %d", url, res.StatusCode)

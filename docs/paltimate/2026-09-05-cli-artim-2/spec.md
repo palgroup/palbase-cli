@@ -50,8 +50,11 @@ birlikte — yerine konur.
 - **FR-006** WHEN `palbase upgrade` yerel bir yığında koşarsa THEN SHALL yapabileceğini yapsın ya da
   yapamadığını ADIYLA söylesin; bugün `refFromTargetURL` loopback adreste `""` döndüğü için komut
   ölü uca düşüyor.
-- **FR-007** WHEN `palbase stop` koşarsa THEN `.palbase/local.json`'ı silmeden ÖNCE SHALL başarılı
-  olsun ve vendor'lanan compose belgesini SHALL ezmesin.
+- **FR-007** WHEN `palbase stop` koşarsa THEN vendor'lanan compose belgesini SHALL ezmesin.
+  > **"Dosyaları silmeden önce başarılı ol" yarısı ÇÜRÜTÜLDÜ (Changelog A-7).** Tasarım §3 mevcut
+  > sırayı kusur sayıyordu; kod bilinçli olarak öyle yazılmış ve gerekçesi ölçülmüş: dosya önce
+  > silinirse yarım kalan bir `stop` "yerel yığın yok" bırakır, compose önce inerse ölü bir adrese
+  > işaret eden `local.json` bırakır ve sonraki HER fiil ona gider. İkincisi daha kötü.
 
 ### Kol D — Tek `palbase link`
 
@@ -245,6 +248,12 @@ temellendirildi (`confirmed`/`stale`).
 ---
 
 ## Changelog
+
+- **A-7 · 2026-09-05 · FR-007'nin yarısı çürütüldü; FR-004'ün mekanizması bulundu (execute, T004).**
+  (1) `stop`'un dosya-önce sırası ölçülmüş bir karar, kusur değil — o yarı kaldırıldı; compose'u
+  yeniden yazması ise gerçek ve duruyor. (2) Pre-flight'ta "runtime'ın hazırlık ucu yok" diye
+  ölçmüştüm, yanlıştı: `grep` `node_modules`'a düşmüştü. `v2/runtime/src/server.ts:12` — runtime
+  port 4006'da `/readyz` servis ediyor ("loaded and answering"). Eksik olan compose'daki healthcheck.
 
 - **A-6 · 2026-09-05 · C-3'ün dönüş tipi `[]Platform` → `[]string` (execute, T006).** Kod tabanı
   platformu `string` taşıyor (`o.platforms []string`, `isApplePlatform(string)`); yeni bir named tip
