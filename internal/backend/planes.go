@@ -155,9 +155,25 @@ func hasWeb(dir string) bool {
 	if !exists(filepath.Join(dir, "package.json")) {
 		return false
 	}
-	return exists(filepath.Join(dir, "index.html")) ||
-		isDir(filepath.Join(dir, "public")) ||
-		isDir(filepath.Join(dir, "src", "app")) // next.js app router
+	if exists(filepath.Join(dir, "index.html")) || isDir(filepath.Join(dir, "public")) {
+		return true
+	}
+	// NEXT'S APP ROUTER LIVES AT `app/` BY DEFAULT — `src/app/` is the opt-in
+	// variant, and only that one was checked. Measured in a plain Next checkout:
+	// `palbase link` answered "cannot tell what kind of app this is" for the
+	// most common shape the framework ships.
+	//
+	// The LAYOUT file is what makes it a router, not the directory name: `app/`
+	// is a common enough folder that treating it alone as a web signal would
+	// classify somebody's backend as a web app.
+	for _, root := range []string{"app", filepath.Join("src", "app")} {
+		for _, ext := range []string{".tsx", ".jsx", ".ts", ".js"} {
+			if exists(filepath.Join(dir, root, "layout"+ext)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasModuleFile reports whether any `*.module.ts` lives under dir — the same

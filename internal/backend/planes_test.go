@@ -170,3 +170,50 @@ func TestDetectAndroidApplicationID_KotlinAndGroovy(t *testing.T) {
 		})
 	}
 }
+
+// THE SHAPE NEXT.JS SHIPS BY DEFAULT.
+//
+// `hasWeb` checked `src/app/` and not `app/`. `src/` is Next's OPT-IN layout;
+// `app/` at the root is what `create-next-app` produces unless you ask
+// otherwise — so the most common web project in the world answered:
+//
+//	cannot tell what kind of app this is: looked for an Xcode project or
+//	workspace, an Android applicationId in build.gradle[.kts], and a
+//	package.json beside an index.html/public/src/app — found none
+//
+// Measured through the shipped binary in a plain Next checkout. The signal is
+// the LAYOUT file rather than the directory: `app/` alone is a folder name
+// anybody might use, and treating it as web would classify a backend as one.
+func TestWebDetectionFindsNextsDefaultLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{"app router at the root", []string{"package.json", "app/layout.tsx"}, true},
+		{"app router under src", []string{"package.json", "src/app/layout.tsx"}, true},
+		{"javascript, not typescript", []string{"package.json", "app/layout.jsx"}, true},
+		{"a plain html entry", []string{"package.json", "index.html"}, true},
+		{"a public directory", []string{"package.json", "public/favicon.ico"}, true},
+		// The negative half, which is what keeps the rule honest.
+		{"an app directory with no layout", []string{"package.json", "app/notes.ts"}, false},
+		{"a backend, which is also a package.json", []string{"package.json", "controllers/todo.controller.ts"}, false},
+		{"no package.json at all", []string{"app/layout.tsx"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tc.files {
+				path := filepath.Join(dir, f)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := hasWeb(dir); got != tc.want {
+				t.Errorf("hasWeb(%v) = %v, want %v", tc.files, got, tc.want)
+			}
+		})
+	}
+}
