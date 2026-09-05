@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +15,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selection"
-	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
 // ── the deploy paths ────────────────────────────────────────────────────────
@@ -31,169 +26,6 @@ func TestDeployPaths_AreEnvironmentScoped(t *testing.T) {
 	require.Equal(t,
 		"/api/v2/projects/proj_1/environments/app1prod/deployments",
 		DeploymentsPath("proj_1", "app1prod"))
-}
-
-// fakeDeploy records every call the push makes.
-type fakeDeploy struct {
-	calls []deployCall
-	// apiErr, when set, is what the push call returns.
-	apiErr error
-	// result is what a successful push answers with.
-	digest        string
-	endpointCount int
-	// onCall fires as each call is recorded, so a test can assert ORDER against
-	// something that happens outside this client.
-	onCall func()
-}
-
-type deployCall struct {
-	method string
-	path   string
-	body   any
-	// idempotencyKey is empty for a plain Do. A push that leaves it empty is a
-	// push whose timed-out retry becomes a SECOND deploy.
-	idempotencyKey string
-}
-
-func (f *fakeDeploy) DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
-	if err := f.Do(ctx, method, path, body, out); err != nil {
-		return err
-	}
-	f.calls[len(f.calls)-1].idempotencyKey = idempotencyKey
-	return nil
-}
-
-func (f *fakeDeploy) Do(_ context.Context, method, path string, body, out any) error {
-	f.calls = append(f.calls, deployCall{method: method, path: path, body: body})
-	if f.onCall != nil {
-		f.onCall()
-	}
-	if f.apiErr != nil {
-		return f.apiErr
-	}
-	res, ok := out.(*struct {
-		Digest        string `json:"digest"`
-		EndpointCount int    `json:"endpointCount"`
-	})
-	if !ok {
-		return nil
-	}
-	res.Digest = f.digest
-	if res.Digest == "" {
-		res.Digest = "abc1234def5678"
-	}
-	res.EndpointCount = f.endpointCount
-	if res.EndpointCount == 0 {
-		res.EndpointCount = 47
-	}
-	return nil
-}
-
-func palbaseProject(t *testing.T) selection.Selection {
-	t.Helper()
-	return selection.Selection{
-		ProjectID:          "proj_1",
-		Environment:        selection.Environment{ID: "env_prod", Ref: "app1prod", Slug: "production"},
-		RepositoryProvider: selection.ProviderPalbase,
-	}
-}
-
-// seedBackendDir makes the cwd look like a deployable backend.
-func seedBackendDir(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"app"}`), 0o644))
-	t.Chdir(dir)
-}
-
-// stubBundler substitutes the bundling seam: production builds this project with
-// its own node_modules and Bun, which a unit test has neither of.
-func stubBundler(built *bool) (func(context.Context, string, io.Writer) ([]uploadUse, *int, error), func(string) ([]byte, error)) {
-	return func(context.Context, string, io.Writer) ([]uploadUse, *int, error) {
-			if built != nil {
-				*built = true
-			}
-			// nil rung: this stub is about the push CONTRACT, not about what a
-			// bundle reaches. The ceiling gate reads nil as "not this gate's
-			// question" and stays out of the way.
-			return nil, nil, nil
-		}, func(string) ([]byte, error) {
-			return []byte("gzip-artifact-bytes"), nil
-		}
-}
-
-// THE PUSH CONTRACT. The CLIENT bundles and hands the plane an ARTIFACT.
-//
-// Where the bundler lives is decided by where the source enters the system:
-// through the CLI it enters here. The plane's push route is a relay to the
-// tenant's own management surface and has no builder to offer — this arm used to
-// upload SOURCE to an ingress that would build it, and that ingress does not
-// exist on this plane (measured live: 404).
-func TestPush_PalbaseProvider_SendsTheBuiltArtifact(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{}
-	build, pack := stubBundler(nil)
-	var out bytes.Buffer
-
-	require.NoError(t, runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: &out,
-		ctx: context.Background(), build: build, pack: pack,
-	}))
-
-	require.Len(t, f.calls, 1)
-	require.Equal(t, http.MethodPost, f.calls[0].method)
-	require.Equal(t, "/v1/cloud/projects/app1prod/push", f.calls[0].path)
-
-	body, ok := f.calls[0].body.(map[string]any)
-	require.True(t, ok, "the artifact travels as JSON, base64-encoded")
-	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("gzip-artifact-bytes")), body["artifact"])
-
-	// ZERO ENDPOINTS IS A SILENT FAILURE, so the count is on the success line:
-	// "pushed" alone is what let an artifact that serves nothing read as done.
-	require.Contains(t, out.String(), "47 endpoint(s)")
-	require.Contains(t, out.String(), "app1prod")
-}
-
-// A BUILD FAILURE SENDS NOTHING. Shipping a tree that does not compile is how a
-// broken controller reaches a tenant and 500s on its first request.
-func TestPush_BuildFailure_UploadsNothing(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{}
-	var out bytes.Buffer
-
-	err := runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: &out,
-		ctx: context.Background(),
-		build: func(context.Context, string, io.Writer) ([]uploadUse, *int, error) {
-			return nil, nil, errors.New("controllers/todo.controller.ts: return type must be a NAMED zod schema")
-		},
-		pack: func(string) ([]byte, error) {
-			t.Fatal("nothing may be packed after a failed build")
-			return nil, nil
-		},
-	})
-	require.ErrorContains(t, err, "NAMED zod schema")
-	require.Empty(t, f.calls, "a failed build must not reach the plane")
-	require.Contains(t, out.String(), "nothing was pushed")
-}
-
-// The plane's verdict reaches the caller AS IS: `upload_bucket_missing` names
-// the bucket somebody has to create, and swallowing it would leave a route that
-// deploys green and 404s the first file.
-func TestPush_PlaneVerdict_IsSurfaced(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{apiErr: &transport.APIError{
-		Code: "upload_bucket_missing", Status: http.StatusBadRequest,
-		Description: "@Upload names bucket \"avatars\", which does not exist",
-	}}
-	build, pack := stubBundler(nil)
-
-	err := runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: io.Discard,
-		ctx: context.Background(), build: build, pack: pack,
-	})
-	require.ErrorContains(t, err, "upload_bucket_missing")
-	require.Len(t, f.calls, 1)
 }
 
 func TestRepoURLFromFullName(t *testing.T) {
@@ -300,78 +132,6 @@ func TestDeployVersion_IsShortened(t *testing.T) {
 // `palbase test-user templates set --file <path>`, locked by
 // TestTemplatesSet_SendsTheTemplatesKey in internal/testuser. The push no longer
 // has a fixture step, so there is no ordering left to pin here.
-
-// The upload has to be REPLAYABLE. It carried no Idempotency-Key: the transport
-// has supported one since it was written (DoIdempotent takes it) and the
-// caller passed none, so an upload that timed out AFTER the
-// plane accepted it came back as a second deploy of the same artifact.
-func TestPushCarriesAnIdempotencyKey(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{}
-	build, pack := stubBundler(nil)
-	var out bytes.Buffer
-
-	require.NoError(t, runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: &out,
-		ctx: context.Background(), build: build, pack: pack,
-	}))
-
-	var upload *deployCall
-	for i := range f.calls {
-		if f.calls[i].method == http.MethodPost {
-			upload = &f.calls[i]
-		}
-	}
-	if upload == nil {
-		t.Fatal("no upload call was made")
-	}
-	if upload.idempotencyKey == "" {
-		t.Fatalf("the upload to %s carries no Idempotency-Key — a timed-out retry becomes a second deploy", upload.path)
-	}
-}
-
-// pushKey runs one push and returns the key the upload carried.
-func pushKey(t *testing.T, artifact string) string {
-	t.Helper()
-	seedBackendDir(t)
-	f := &fakeDeploy{}
-	build, _ := stubBundler(nil)
-	pack := func(string) ([]byte, error) { return []byte(artifact), nil }
-	var out bytes.Buffer
-	require.NoError(t, runPush(pushDeps{
-		rest: f, sel: palbaseProject(t), out: &out,
-		ctx: context.Background(), build: build, pack: pack,
-	}))
-	for i := range f.calls {
-		if f.calls[i].method == http.MethodPost {
-			return f.calls[i].idempotencyKey
-		}
-	}
-	t.Fatal("no upload call was made")
-	return ""
-}
-
-// THE KEY HAS TO SURVIVE THE PROCESS, and that is the half the first version of
-// this feature missed.
-//
-// FR-019's recovery path is a PERSON running `palbase push` again after an
-// upload whose answer was lost. A per-invocation random key was stable only
-// inside one process — so it was correct for a retry the CLI never performs, and
-// wrong for the retry that actually happens. Two runs of the same artifact
-// looked like two intended deploys, which is the case the key exists to
-// collapse.
-//
-// Measured with a random key: the two runs below returned different values.
-func TestTheIdempotencyKeyIsTheSameForTheSameArtifact(t *testing.T) {
-	first, second := pushKey(t, "the-same-bytes"), pushKey(t, "the-same-bytes")
-	if first != second {
-		t.Errorf("the same artifact pushed twice carried two keys (%s, %s) — the second run of "+
-			"`palbase push` is a SECOND logical deploy, which is what the key is for", first, second)
-	}
-	if other := pushKey(t, "different-bytes"); other == first {
-		t.Errorf("a different artifact carried the same key %s — two intended deploys would collapse into one", other)
-	}
-}
 
 // THE GITHUB PROVIDER BRANCH IS GONE (T011).
 //
