@@ -99,10 +99,22 @@ func palbaseProject(t *testing.T) selection.Selection {
 }
 
 // seedBackendDir makes the cwd look like a deployable backend.
+// seedBackendDir stands up the smallest directory a push will accept.
+//
+// THE INSTALLED SDK IS PART OF THAT MINIMUM since 2026-09-05: the push sends the
+// version that decides the tenant's image, and it reads it from the installed
+// package — the same place `palbase start` reads it. A project without it cannot
+// push, and that is the truth this helper now models rather than papering over.
+const seededSDKVersion = "33.0.2"
+
 func seedBackendDir(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"app"}`), 0o644))
+	pkg := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	require.NoError(t, os.MkdirAll(pkg, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(pkg, "package.json"),
+		[]byte(`{"version":"`+seededSDKVersion+`"}`), 0o644))
 	t.Chdir(dir)
 }
 
@@ -415,3 +427,73 @@ func TestDeployVerbsHaveOneProviderPath(t *testing.T) {
 
 // TestRunPull_RoutesByProvider went with the routing (T011): there is one
 // provider now, so there is no route to take.
+
+// THE PUSH CARRIES THE VERSION THAT DECIDES THE IMAGE.
+//
+// The plane swaps the tenant's image BEFORE it applies the bundle — a new bundle
+// can need a new runtime, and the reverse order is an outage a push cannot cure.
+// It deliberately does not open the tarball to learn the version (a second
+// reader of the bundler's format is a second opinion about it), so the number
+// travels with the request. Without this field the far side refuses the push by
+// name; this gate is cheaper than that round trip, and it pins the SOURCE: the
+// installed package, the same number `palbase start` runs against.
+func TestPushSendsTheInstalledSDKVersion(t *testing.T) {
+	seedBackendDir(t)
+	f := &fakeDeploy{}
+	build, pack := stubBundler(nil)
+	var out bytes.Buffer
+
+	require.NoError(t, runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: &out,
+		ctx: context.Background(), build: build, pack: pack,
+	}))
+
+	var upload *deployCall
+	for i := range f.calls {
+		if f.calls[i].method == http.MethodPost {
+			upload = &f.calls[i]
+		}
+	}
+	if upload == nil {
+		t.Fatal("no upload call was made")
+	}
+	body, ok := upload.body.(map[string]any)
+	if !ok {
+		t.Fatalf("the upload body is %T, not a map", upload.body)
+	}
+	if got := body["sdkVersion"]; got != seededSDKVersion {
+		t.Fatalf("the push sent sdkVersion=%v, want %s — the plane cannot choose an image without it",
+			got, seededSDKVersion)
+	}
+}
+
+// NO INSTALLED SDK, NO PUSH — and the refusal names the package.
+//
+// Rounding to a nearest version, or letting the plane pick, is exactly the
+// mechanism this run removed: the tenant's image is the tenant's SDK, and
+// nothing else may decide it.
+func TestPushRefusesWithoutAnInstalledSDK(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"app"}`), 0o644))
+	t.Chdir(dir)
+
+	f := &fakeDeploy{}
+	build, pack := stubBundler(nil)
+	var out bytes.Buffer
+
+	err := runPush(pushDeps{
+		rest: f, sel: palbaseProject(t), out: &out,
+		ctx: context.Background(), build: build, pack: pack,
+	})
+	if err == nil {
+		t.Fatal("a project with no installed @palbase/backend pushed anyway")
+	}
+	if !strings.Contains(err.Error(), backendPkg) {
+		t.Fatalf("the refusal does not name %s: %v", backendPkg, err)
+	}
+	for _, c := range f.calls {
+		if c.method == http.MethodPost {
+			t.Fatal("the artifact was uploaded before the version was known")
+		}
+	}
+}

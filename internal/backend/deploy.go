@@ -174,9 +174,27 @@ func runPush(d pushDeps) error {
 	}
 	// The key comes from the ARTIFACT, not from this invocation — see
 	// pushIdempotencyKey for why the difference is the whole feature.
+	// THE VERSION TRAVELS WITH THE ARTIFACT, and it decides the tenant's image.
+	//
+	// The plane swaps the image BEFORE it applies the bundle (a new bundle can
+	// need a new runtime, and the reverse order is an outage that a push cannot
+	// cure), so it has to know the version before the artifact is unpacked. It
+	// deliberately does not open the tarball to find out — a second reader of the
+	// bundler's format is a second opinion about it — so the number is sent.
+	//
+	// It is THE SAME NUMBER `palbase start` pulls locally and `palbase plan`
+	// prints: the installed @palbase/backend. That is the whole point — what you
+	// tested against is what the push carries.
+	sdkVersion, err := installedSDKVersion(cwd)
+	if err != nil {
+		return err
+	}
 	if err := d.rest.DoIdempotent(ctx, http.MethodPost,
 		PushPath(d.sel.EnvironmentRef()),
-		map[string]any{"artifact": base64.StdEncoding.EncodeToString(tarball)}, &res,
+		map[string]any{
+			"artifact":   base64.StdEncoding.EncodeToString(tarball),
+			"sdkVersion": sdkVersion,
+		}, &res,
 		pushIdempotencyKey(d.sel.EnvironmentRef(), tarball)); err != nil {
 		return err
 	}
