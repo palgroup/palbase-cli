@@ -183,3 +183,28 @@ func hasModuleFile(dir string) bool {
 	})
 	return found
 }
+
+// detectPlatforms answers what this checkout IS, so `link` stops asking the
+// reader to repeat it.
+//
+// `--platform` defaulted to `ios`, which meant `palbase link` in a web-only
+// checkout wrote Apple artifacts and nothing else — silently, because a default
+// that is wrong looks exactly like a default that is right. Every piece of
+// material needed to answer the question was already in this package; it was
+// simply never asked.
+//
+// AN EMPTY RESULT IS AN ANSWER. The caller has to tell "this is a web app" from
+// "I could not tell", because only the second one deserves a sentence.
+func detectPlatforms(dir string) []string {
+	var found []string
+	if hasApple(dir) {
+		found = append(found, "ios")
+	}
+	if _, err := detectAndroidApplicationID(dir); err == nil {
+		found = append(found, "android")
+	}
+	if hasWeb(dir) {
+		found = append(found, webPlatform)
+	}
+	return found
+}

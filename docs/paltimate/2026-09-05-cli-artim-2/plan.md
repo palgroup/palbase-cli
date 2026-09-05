@@ -81,18 +81,18 @@ yığın kalkmaz. Kullanıcı kararı: tablo pakete girer, sürüm kesilir.
 - Produces: `stack-images.json` — `{"<major>": [{"env": "...", "ref": "...", "build": "..."}]}`
   şeklinde; bugün CLI'ın `stackImages`'inde duran dört imajın aynısı (T003 sonrası `postgres` dâhil).
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `__tests__/stack-images.test.ts`: tablo JSON olarak
+- [x] **Adım 1: Kırmızıyı yaz** — `__tests__/stack-images.test.ts`: tablo JSON olarak
   ayrıştırılabilir; şu anki majör için DÖRT imaj taşır; her girdi `env` ve `ref` alanlarını taşır;
   her `ref` bir registry adresi (`/` içerir) — yerel etiket DEĞİL.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `cd ../palbase-ts && npx vitest run backend/__tests__/stack-images.test.ts` ·
+- [x] **Adım 2: Kırmızıyı gör** — Run: `cd ../palbase-ts && npx vitest run backend/__tests__/stack-images.test.ts` ·
   Beklenen: **FAIL**, dosya yok.
-- [ ] **Adım 3: Tabloyu yaz** — `stack-images.json`, CLI'daki dört pinin ETİKETLERİYLE birebir
+- [x] **Adım 3: Tabloyu yaz** — `stack-images.json`, CLI'daki dört pinin ETİKETLERİYLE birebir
   (kaynak: `internal/backend/start.go` `stackImages` + compose'un `postgres` satırı).
-- [ ] **Adım 4: `files`'a ekle** — `package.json`'ın `files` dizisine `stack-images.json`; yoksa
+- [x] **Adım 4: `files`'a ekle** — `package.json`'ın `files` dizisine `stack-images.json`; yoksa
   paket yayınlanınca tablo GİTMEZ ve CLI onu bulamaz.
-- [ ] **Adım 5: Yeşili gör** — Run: `cd ../palbase-ts && npx vitest run backend/__tests__/stack-images.test.ts` ·
+- [x] **Adım 5: Yeşili gör** — Run: `cd ../palbase-ts && npx vitest run backend/__tests__/stack-images.test.ts` ·
   Beklenen: `ok`. Ayrıca `npm pack --dry-run` çıktısında `stack-images.json` GÖRÜNMELİ.
-- [ ] **Adım 6: Commit (SDK deposunda, pathspec ile)** — `git -C ../palbase-ts commit -- backend/stack-images.json backend/package.json backend/__tests__/stack-images.test.ts`
+- [x] **Adım 6: Commit (SDK deposunda, pathspec ile)** — `git -C ../palbase-ts commit -- backend/stack-images.json backend/package.json backend/__tests__/stack-images.test.ts`
 
 ---
 
@@ -141,27 +141,27 @@ gerekmez) · D-030 (ağ ucu YOK).
 kapısı (`stackfiles_test.go:236`) yalnız `stackImages`'i döngülüyor, yani o pini YAPISAL OLARAK
 göremiyor.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `stackfiles_test.go`'ya: compose'daki HER `image:` satırının bir
+- [x] **Adım 1: Kırmızıyı yaz** — `stackfiles_test.go`'ya: compose'daki HER `image:` satırının bir
   `${VAR:-default}` taşıdığını ve o VAR'ın Go tarafında bilindiğini ölçen bir test. Bugün
   `postgres` bunu ihlal ediyor.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestEveryComposeImageIsPinnedInOnePlace -count=1` ·
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestEveryComposeImageIsPinnedInOnePlace -count=1` ·
   Beklenen: **FAIL**, `postgres` satırını adıyla listeler.
-- [ ] **Adım 3: `postgres` pinini değişkene bağla — İKİ dosyada** — vendor'lanan kopyada VE
+- [x] **Adım 3: `postgres` pinini değişkene bağla — İKİ dosyada** — vendor'lanan kopyada VE
   `v2/deploy`'daki orijinalde (parite kapısı ikisini karşılaştırıyor; yalnız birini değiştirmek onu
   kırar — Changelog A-4): `image: ${PALBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}`. Varsayılan
   AYNI kalıyor, yani koşan yığın değişmiyor. Ayrıca `stackImages`'e dördüncü eleman —
   **`stackImages` `start.go:65`'te yaşıyor, `stackfiles.go`'da değil** (plan ilk yazımda yanlış
   dosyayı gösteriyordu; ölçüldü).
-- [ ] **Adım 3b: `isRegistryImage` Docker Hub kısa formunu TANISIN** — `postgres`'i pin listesine
+- [x] **Adım 3b: `isRegistryImage` Docker Hub kısa formunu TANISIN** — `postgres`'i pin listesine
   eklemek Artım 1'in gerekçesini çürütüyor: yorum *"nothing in this stack defaults to one"* diyordu,
   artık ediyor. Düzeltilmezse `ensureImages` `pgvector/pgvector:pg16`'yı YEREL sanıp ilk koşuda
   *"image is not on this machine"* ile düşerdi — çalışan bir komutu kırmak. Kural sadeleşiyor: slash
   varsa registry referansıdır. `stackfiles_test.go:174`'teki beklenti ve gerekçe yorumu da düzelir.
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestEveryComposeImage|TestTheGoConstants|TestTheVendoredCompose' -count=1` ·
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestEveryComposeImage|TestTheGoConstants|TestTheVendoredCompose' -count=1` ·
   Beklenen: `ok` — ve `docker compose config` hâlâ geçiyor.
-- [ ] **Adım 5: Negatif kontrol** — `postgres`'i sabite geri döndür, testin KIRMIZIYA döndüğünü gör,
+- [x] **Adım 5: Negatif kontrol** — `postgres`'i sabite geri döndür, testin KIRMIZIYA döndüğünü gör,
   geri al. *(Kapı gerçekten ölçüyor mu — Artım 1'in merkez dersi.)*
-- [ ] **Adım 6: Commit** — `git commit -- internal/backend/stackfiles.go internal/backend/stackfiles/docker-compose.dev.yml internal/backend/stackfiles_test.go`
+- [x] **Adım 6: Commit** — `git commit -- internal/backend/stackfiles.go internal/backend/stackfiles/docker-compose.dev.yml internal/backend/stackfiles_test.go`
 
 ---
 
@@ -191,13 +191,13 @@ göremiyor.
 **Kanıt:** CB-42 — `upgrade.go:52-62`, `len(labels) < 3 || !refPattern.MatchString(labels[0])` → `""`.
 `localhost` tek label; `127.0.0.1`'in ilk label'ı desene uymuyor.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — loopback hedefli bir checkout'ta `upgrade`'in ne yapamadığını
+- [x] **Adım 1: Kırmızıyı yaz** — loopback hedefli bir checkout'ta `upgrade`'in ne yapamadığını
   ADIYLA söylediğini ölçen test (bugün boş ref ile ölü uca düşüyor).
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestUpgradeOnALocalStack -count=1`
-- [ ] **Adım 3: Ölü ucu kapat** — ref çözülemiyorsa komut, yerel bir yığında bu fiilin ne anlama
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run TestUpgradeOnALocalStack -count=1`
+- [x] **Adım 3: Ölü ucu kapat** — ref çözülemiyorsa komut, yerel bir yığında bu fiilin ne anlama
   geldiğini söyleyerek reddetsin; boş ref'le devam etmesin.
-- [ ] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run TestUpgrade -count=1`
-- [ ] **Adım 5: Commit** — `git commit -- internal/backend/upgrade.go internal/backend/upgrade_test.go`
+- [x] **Adım 4: Yeşili gör** — Run: `go test ./internal/backend/ -run TestUpgrade -count=1`
+- [x] **Adım 5: Commit** — `git commit -- internal/backend/upgrade.go internal/backend/upgrade_test.go`
 
 ---
 

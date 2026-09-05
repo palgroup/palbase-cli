@@ -169,7 +169,7 @@ birlikte — yerine konur.
   yoksa kurulu SDK'dan türetir, dosyaya yazar ve yazdığını döndürür.
 - **C-2** `func imagesFor(version string) ([]stackImage, error)` — sürüm→imaj tablosunu
   `@palbase/backend` paketinden çözer. Bilinmeyen sürüm hata döndürür, yuvarlamaz.
-- **C-3** `func detectPlatforms(dir string) []Platform` — checkout'ta hangi platformların olduğunu
+- **C-3** `func detectPlatforms(dir string) []string` — checkout'ta hangi platformların olduğunu
   söyler. `hasApple`/`hasWeb`/`detectAndroidApplicationID` bunun altına iner.
 - **C-4** `func routeLiterals(root string) ([]RouteLiteral, error)` — FR-016'nın kapısı için: kaynak
   ağacındaki HTTP rota literallerini `file:line` ile toplar (AST, regex değil — Artım 1'in dersi).
@@ -245,6 +245,10 @@ temellendirildi (`confirmed`/`stale`).
 ---
 
 ## Changelog
+
+- **A-6 · 2026-09-05 · C-3'ün dönüş tipi `[]Platform` → `[]string` (execute, T006).** Kod tabanı
+  platformu `string` taşıyor (`o.platforms []string`, `isApplePlatform(string)`); yeni bir named tip
+  her çağıranı değiştirmek ve bir soyutlamayı bedava saymak olurdu. İmza gerçeğe hizalandı.
 
 - **A-5 · 2026-09-05 · `stackfiles.go` haritadan çıktı, `start.go` girdi; `isRegistryImage` T003'e katıldı.**
   İki ölçüm: (1) `stackImages` `start.go:65`'te yaşıyor, `stackfiles.go`'da değil — harita yanlış

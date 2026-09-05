@@ -124,7 +124,12 @@ boot generated.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.url, "url", "", "the stack's base URL (e.g. https://127.0.0.1)")
-	f.StringSliceVar(&o.platforms, "platform", []string{"ios"}, "ios, macos, android or web")
+	// NO DEFAULT: an empty list means "read the checkout", and a default of
+	// `ios` meant `palbase link` in a web-only project wrote Apple artifacts and
+	// nothing else — silently, because a wrong default looks exactly like a
+	// right one. The flag stays for the case where somebody wants LESS than
+	// what is here, not to make them repeat what is already true.
+	f.StringSliceVar(&o.platforms, "platform", nil, "limit to ios, macos, android or web (default: whatever this checkout is)")
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
 	f.BoolVar(&o.tokenStdin, "token-stdin", false,
 		"read this stack's key from stdin and remember it for this address (self-hosted stacks)")
@@ -271,8 +276,26 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// The platform list is not decoration: it says which toolchain is on the
 	// other end, and a link that ignores it is a link for one platform wearing
 	// a flag for four.
+	// WHAT THIS CHECKOUT IS, unless the caller asked for less.
+	platforms := o.platforms
+	if len(platforms) == 0 {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		platforms = detectPlatforms(root)
+		if len(platforms) == 0 {
+			return fmt.Errorf(
+				"cannot tell what kind of app this is: looked for an Xcode project or workspace, "+
+					"an Android applicationId in build.gradle[.kts], and a package.json beside an "+
+					"index.html/public/src/app — found none in %s.\n  Name it with --platform if this "+
+					"checkout keeps them somewhere else", root)
+		}
+		fmt.Fprintf(w, "▸ %s\n", strings.Join(platforms, ", "))
+	}
+
 	apple := false
-	for _, platform := range o.platforms {
+	for _, platform := range platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))
 		var (
 			path string

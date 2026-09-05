@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -733,4 +734,64 @@ func TestAStackWithNoSealingRootStillLinks(t *testing.T) {
 	if got := slot.Environments[slot.Default].SealedRoot; got != "" {
 		t.Errorf("kok bildirmeyen yigin icin sealed_root yazildi: %q", got)
 	}
+}
+
+// A CHECKOUT ALREADY SAYS WHAT IT IS — the flag was asking the reader to repeat it.
+//
+// `--platform` defaulted to `ios`, so `palbase link` in a web-only checkout
+// wrote Apple artifacts and nothing else, silently. The material to answer the
+// question was already here (hasApple, hasWeb, detectAndroidApplicationID); it
+// was simply never asked.
+func TestDetectPlatformsReadsTheCheckout(t *testing.T) {
+	t.Run("an Apple checkout", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "App.xcodeproj"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got := detectPlatforms(dir)
+		if !slices.Contains(got, "ios") {
+			t.Errorf("detectPlatforms = %v, want ios in it", got)
+		}
+	})
+
+	t.Run("a web checkout", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, f := range []string{"package.json", "index.html"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := detectPlatforms(dir)
+		if !slices.Contains(got, webPlatform) {
+			t.Errorf("detectPlatforms = %v, want web in it", got)
+		}
+		if slices.Contains(got, "ios") {
+			t.Errorf("detectPlatforms found ios in a web-only checkout: %v", got)
+		}
+	})
+
+	t.Run("an Android checkout", func(t *testing.T) {
+		dir := t.TempDir()
+		app := filepath.Join(dir, "app")
+		if err := os.MkdirAll(app, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "android {\n  defaultConfig {\n    applicationId = \"com.example.app\"\n  }\n}\n"
+		if err := os.WriteFile(filepath.Join(app, "build.gradle.kts"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := detectPlatforms(dir)
+		if !slices.Contains(got, "android") {
+			t.Errorf("detectPlatforms = %v, want android in it", got)
+		}
+	})
+
+	// NOTHING FOUND IS AN ANSWER, not an empty guess. The caller has to be able
+	// to tell "this is a web app" from "I could not tell", because the second
+	// one deserves a sentence and the first one does not.
+	t.Run("a checkout with none of them", func(t *testing.T) {
+		if got := detectPlatforms(t.TempDir()); len(got) != 0 {
+			t.Errorf("detectPlatforms invented %v for an empty directory", got)
+		}
+	})
 }
