@@ -138,6 +138,9 @@ func runPush(d pushDeps) error {
 	}
 
 	uses, _, err := build(ctx, cwd, out)
+	// Same contract as the stack push: pack() reads the bundle below, and
+	// nothing reads it after this function returns.
+	defer removeBundleOutput(cwd)
 	if err != nil {
 		fmt.Fprintln(out, "✗ build failed — nothing was pushed (fix the errors above)")
 		return err

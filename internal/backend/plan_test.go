@@ -402,3 +402,42 @@ func (p *projectServer) schemaPlanBody() []byte {
 	defer p.mu.Unlock()
 	return p.planBody
 }
+
+// THE PROJECT IS LEFT AS THE PERSON TYPED IT.
+//
+// `plan` and `push` both run buildStackArtifact, which writes the compiled
+// controllers and the two manifests under `.palbase/`. They exist for the
+// length of one command — push tars them in the same process, plan ships
+// nothing at all — and they used to survive it. What was left behind was build
+// output sitting inside the directory the docs tell people to COMMIT, which is
+// how a repository ends up carrying a compiled copy of its own source; and the
+// push path already says out loud that shipping "whatever a previous build left
+// on disk" is how somebody deploys yesterday's code.
+//
+// This runs the real bundler through the real command and then looks.
+func TestPlanLeavesNoBuildOutputBehind(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+
+	target := newProjectServer(t, map[string]string{})
+	cred := Credentials{Value: "k", Kind: KindKey}
+
+	var out strings.Builder
+	if err := runPlan(context.Background(), dir, Target{URL: target.URL}, cred, &out); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out.String())
+	}
+
+	for _, sub := range bundleOutputDirs {
+		path := filepath.Join(dir, ".palbase", sub)
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("%s survived the command that built it — build output was left in the project", path)
+		}
+	}
+	// And what IS meant to be committed is untouched: this cleanup must not
+	// reach the contract or the platform slots beside it.
+	if _, err := os.Stat(filepath.Join(dir, ".palbase")); err != nil && !os.IsNotExist(err) {
+		t.Errorf(".palbase/ itself is unreadable after the cleanup: %v", err)
+	}
+}

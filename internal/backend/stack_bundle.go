@@ -43,6 +43,27 @@ import (
 // in a controller into a path outside the project.
 const deployStagingDir = ".palbase-staged-controllers"
 
+// bundleOutputDirs is what the bundler writes into the project: the compiled
+// controllers and the two manifests.
+//
+// They exist for the length of ONE command. `push` builds them and tars them in
+// the same process — a stack takes an artifact and cannot make one — and `plan`
+// builds them to answer a question and never ships anything. Nothing reads them
+// across invocations, and leaving them behind is worse than litter: the push
+// path says out loud that shipping "whatever a previous build left on disk is
+// how somebody edits a controller, pushes, and deploys yesterday's code under
+// today's commit message".
+var bundleOutputDirs = []string{"esm", "jobs", "hooks"}
+
+// removeBundleOutput deletes them. Best effort by design: it runs after the
+// artifact is already sent, and a failed cleanup has nowhere useful to go —
+// reporting it would displace the result the person is waiting for.
+func removeBundleOutput(dir string) {
+	for _, sub := range bundleOutputDirs {
+		_ = os.RemoveAll(filepath.Join(dir, ".palbase", sub))
+	}
+}
+
 // bundleEntryHeader is the first line of the generated entry. It is asserted by
 // a golden test: the entry's SHAPE is the contract between this bundler and the
 // runtime that loads its output.
@@ -137,9 +158,7 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 			// The manifests go with it: a refused build must leave NOTHING to
 			// deploy, and a surviving jobs.manifest.json would let the next push
 			// ship a schedule its bundle no longer carries.
-			for _, sub := range []string{"esm", "jobs", "hooks"} {
-				_ = os.RemoveAll(filepath.Join(dir, ".palbase", sub))
-			}
+			removeBundleOutput(dir)
 		}
 	}()
 

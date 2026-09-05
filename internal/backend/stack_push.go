@@ -168,6 +168,11 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	// previous build left on disk is how somebody edits a controller, pushes, and
 	// deploys yesterday's code under today's commit message.
 	uses, reaches, err := buildStackArtifact(ctx, dir, w)
+	// The tarball is assembled and sent below, inside this function, so the
+	// deferred cleanup runs after the artifact has left — and the project is
+	// left exactly as the person typed it, with no build output to commit,
+	// ignore, or mistake for source.
+	defer removeBundleOutput(dir)
 	if err != nil {
 		return err
 	}

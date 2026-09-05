@@ -76,6 +76,10 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// it is a check whose passing means nothing.
 	fmt.Fprintln(out, "code")
 	uses, _, err := buildStackArtifact(ctx, dir, indent(out))
+	// `plan` answers a question and ships nothing, so the bundle it just built
+	// has no reader at all — leaving it would put a stale artifact where the
+	// next push would find one and have to distrust it.
+	defer removeBundleOutput(dir)
 	if err != nil {
 		return err
 	}
