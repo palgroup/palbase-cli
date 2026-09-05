@@ -193,16 +193,19 @@ serving.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// HEDEF-GÖRELİ, `push` ve `status` gibi: bir projeye bağlı checkout
 			// O projeyi yükseltir. Tek fiil, iki yol değil.
+			//
+			// ONE READ, THREE QUESTIONS. This used to call ReadTarget() twice in
+			// a row, and the two answers are not guaranteed to be the same one:
+			// a `palbase start` or `stop` between them writes or removes
+			// `.palbase/local.json`, which is the file ReadTarget PREFERS. The
+			// flag refusal would then be judging a different target from the one
+			// the local-stack refusal names, and the message would describe a
+			// checkout the reader is not in.
+			ref := ""
 			if target, err := ReadTarget(); err == nil {
 				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
 					return err
 				}
-			}
-			// A LINKED CHECKOUT ALREADY NAMES ITS PROJECT — in its address.
-			// Reading it back is what makes `upgrade` behave like `push` and
-			// `status`: the checkout you linked is the project you act on.
-			ref := ""
-			if target, err := ReadTarget(); err == nil {
 				// LOCAL FIRST: a loopback target is a linked checkout, not an
 				// unlinked one, and the generic "link first" below is advice for
 				// a situation this reader is not in.
