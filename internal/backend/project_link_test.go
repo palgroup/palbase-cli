@@ -920,8 +920,23 @@ func TestLinkWiresAWebCheckoutEndToEnd(t *testing.T) {
 }
 
 // writeFile writes one file in the current (scratch) checkout.
+//
+// AND REFUSES TO WRITE ANYWHERE ELSE. Called before the chdir, it seeded
+// `package.json` and `index.html` into `internal/backend/` itself — the package
+// source tree — where they survived the run and made `hasWeb()` answer true for
+// this repository. A leftover like that is inherited by every later test on the
+// machine and by the next build's binary, and CI never sees it because a clean
+// runner has none. The guard is cheaper than the hunt.
 func writeFile(t *testing.T, name, body string) {
 	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(cwd, os.TempDir()) && !strings.HasPrefix(cwd, "/private"+os.TempDir()) {
+		t.Fatalf("writeFile would write %s into %s, which is not a scratch directory — "+
+			"call inScratchCheckout(t) or t.Chdir(t.TempDir()) first", name, cwd)
+	}
 	if err := os.WriteFile(name, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
