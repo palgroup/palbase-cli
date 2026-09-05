@@ -152,7 +152,7 @@ birlikte — yerine konur.
   **Karar:** paket kalır; içindeki seçim-katmanı bağımlılığı kaldırılır. Bu, tasarımın amacını
   (ikinci adresleme mekanizmasının emekliliği) tam karşılar ve kapıyı korur.
   **Ölçüm (2026-09-05):** `tests/e2e` 163 satır, tek dosya (`mgmt_api_test.go`), Artım 1'de ölü
-  konağı düzeltildi (FR-021).
+  konağı Artım 1'de düzeltildi.
 - **D-052 · Pin sayısı DÖRT, yedi değil.** Tasarım §3 "pgvector dâhil yedi pin" diyor; ölçüldü
   (2026-09-05): compose dört `image:` satırı taşıyor (`envoy`→`${PALBASE_EDGE_IMAGE}`,
   `postgres`→`pgvector/pgvector:pg16` **sabit**, `palsvc`, `runtime`), `docker compose config
@@ -182,6 +182,11 @@ yapıların yerel şekli.]`
 | Dosya | İşlem | Neden | FR |
 |---|---|---|---|
 | `internal/backend/target.go` | modify | `Target` yığın sürümü alanını taşır | FR-001 |
+| `internal/backend/target_test.go` | modify | sürüm alanının ölçüsü | FR-001 |
+| `internal/backend/start_test.go` | modify | tablo çözümü, imaj yazımı, hazırlık, `stop` ölçüleri | FR-002, FR-003, FR-004, FR-007 |
+| `internal/backend/upgrade_test.go` | modify | yerel yığında ölü ucun ölçüsü | FR-006 |
+| `internal/backend/project_link_test.go` | modify | algılama, `--platform` doğrulaması, `unlink` ölçüleri | FR-008, FR-010, FR-011 |
+| `internal/backend/backend.go` | modify | emekli komut grupları kayıttan düşer | FR-009 |
 | `internal/backend/start.go` | modify | sürüm→imaj çözümü, kaldırılan imajların yazımı, hazırlık, `stop` | FR-001…FR-005, FR-007 |
 | `internal/backend/stackfiles.go` | modify | pin mekanizması dördü de kapsar | FR-005 |
 | `internal/backend/stackfiles/docker-compose.dev.yml` | modify | `postgres` pini değişkene bağlanır | FR-005 |
@@ -197,7 +202,7 @@ yapıların yerel şekli.]`
 | `internal/backend/cloud_environments.go` | modify | `addLocalStack` tekilleşir | FR-012 |
 | `internal/backend/deploy.go` | modify | github kolu söküldü | FR-014 |
 | `internal/selection/resolve.go` | modify | ölü rota çağrısı ve seçim çözümü kalkar | FR-013, FR-015 |
-| `internal/selection/config.go` | modify | `selection.json` okuyucusu/yazıcısı kalkar | FR-013 |
+| `internal/selection/config.go` | modify | seçim dosyasının okuyucusu/yazıcısı kalkar | FR-013 |
 | `internal/selectiontest/fake.go` | modify | ölü rotanın fikstürü kalkar | FR-013, FR-015 |
 | `internal/apps/` | delete | 617 satır, seçim katmanına dayanıyor | FR-014 |
 | `internal/hook/` | delete | 494 satır, çağıranı seçim katmanı | FR-014 |
@@ -236,6 +241,12 @@ temellendirildi (`confirmed`/`stale`).
 ---
 
 ## Changelog
+
+- **A-2 · 2026-09-05 · Impact Map +6 satır; iki metin düzeltmesi (planlama sırasında, `validate` bulgusu).**
+  `plan-tools validate` beş test dosyasının ve `backend.go`'nun haritada olmadığını gösterdi — plan
+  onları yazacaktı, yani harita eksikti. Ayrıca iki metin kusuru: "Neden" sütununda backtick içine
+  yazılan dosya adı validator tarafından bir YOL sanılıyordu, ve Artım 1'in bir gereksinim numarasına yapılan atıf
+  bu şartnamenin kapsama tablosunu kirletiyordu (burada tanımsız bir numara). Üçü de düzeltildi.
 
 - **A-1 · 2026-09-05 · Şartname yazıldı.** Kol C+D+E kapsama alındı; tasarımın "yedi pin" ve
   "`tests/e2e` silinir" iddiaları ölçümle düzeltildi (D-051, D-052).
