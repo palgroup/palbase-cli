@@ -61,6 +61,29 @@ func refFromTargetURL(raw string) string {
 	return labels[0]
 }
 
+// localStackUpgradeRefusal turns a dead end into a direction.
+//
+// `upgrade` calls a CLOUD route, so a checkout pointed at a stack on this
+// machine has no project for it to move. That much was already right:
+// refFromTargetURL yields "" for a loopback address rather than guessing a ref.
+//
+// What was wrong is what came next — the caller fell through to "run `palbase
+// link <project>` first", and the checkout WAS linked, to a local stack. The
+// reader is told to do the thing they already did, which is how a refusal
+// becomes a dead end rather than an instruction.
+//
+// A local stack moves by DECLARING a different stack version and starting
+// again, so the refusal names that path instead.
+func localStackUpgradeRefusal(target Target) error {
+	if !target.OnThisMachine() {
+		return nil
+	}
+	return fmt.Errorf(
+		"this checkout points at a stack on this machine (%s), and `upgrade` moves a CLOUD "+
+			"project's runtime.\n  To move this stack: set stackVersion in %s and run `palbase start`",
+		target.URL, projectPath())
+}
+
 // upgradeResult, düzlemin cevabı.
 //
 // `Changed` AYRI BİR ALAN çünkü "zaten o imajdaydı" ile "taşındı" kullanıcı için
@@ -165,6 +188,12 @@ serving.`,
 			// `status`: the checkout you linked is the project you act on.
 			ref := ""
 			if target, err := ReadTarget(); err == nil {
+				// LOCAL FIRST: a loopback target is a linked checkout, not an
+				// unlinked one, and the generic "link first" below is advice for
+				// a situation this reader is not in.
+				if err := localStackUpgradeRefusal(target); err != nil {
+					return err
+				}
 				ref = refFromTargetURL(target.URL)
 			}
 			if ref == "" {

@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/palgroup/palbase-cli/internal/transport"
@@ -116,4 +117,40 @@ type restFunc func(ctx context.Context, method, path string, body, out any) erro
 
 func (f restFunc) Do(ctx context.Context, method, path string, body, out any) error {
 	return f(ctx, method, path, body, out)
+}
+
+// A LOCAL STACK IS NOT AN UNLINKED CHECKOUT, and telling the reader to link is
+// advice for a situation they are not in.
+//
+// `refFromTargetURL` correctly yields "" for `http://127.0.0.1:54321` — a
+// loopback address carries no ref and guessing one would aim the upgrade at a
+// project id that does not exist. But the caller then fell through to "no
+// project to upgrade: run `palbase link <project>` first", and the checkout WAS
+// linked: to a stack on this machine. The reader is told to do the thing they
+// already did.
+//
+// The same class of defect this file's first test fixed on 2026-09-01, one
+// target-kind further along.
+func TestUpgradeOnALocalStackSaysWhatItIsAndWhatToDoInstead(t *testing.T) {
+	local := Target{URL: "http://127.0.0.1:54321"}
+
+	err := localStackUpgradeRefusal(local)
+	if err == nil {
+		t.Fatal("a loopback target was accepted for a cloud upgrade")
+	}
+	msg := err.Error()
+	for _, want := range []string{"this machine", "stackVersion", "palbase start"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not mention %q — it has to say what this checkout IS and "+
+				"what moves a local stack: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "palbase link") {
+		t.Errorf("the refusal tells a LINKED checkout to link: %s", msg)
+	}
+
+	// A cloud target passes through untouched.
+	if err := localStackUpgradeRefusal(Target{URL: "https://app1prod.palbase.studio"}); err != nil {
+		t.Errorf("a cloud target was refused: %v", err)
+	}
 }
