@@ -11,6 +11,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// writeBody writes a file with real content, for the rules that READ it.
+func writeBody(t *testing.T, dir, rel, body string) {
+	t.Helper()
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func write(t *testing.T, dir, rel string) {
 	t.Helper()
 	path := filepath.Join(dir, rel)
@@ -43,7 +55,16 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 		}, PlaneBackend},
 
 		{"an Xcode app", func(t *testing.T, d string) { mkdir(t, d, "MyApp.xcodeproj") }, PlaneApp},
-		{"an xcodegen app before generating", func(t *testing.T, d string) { write(t, d, "project.yml") }, PlaneApp},
+		// A REAL SPEC, not a filename. This fixture used to write an EMPTY
+		// `project.yml` and expect "app", which is exactly the rule that was
+		// wrong: several unrelated tools use that name, and any repository
+		// carrying one was classified as an Xcode checkout.
+		{"an xcodegen app before generating", func(t *testing.T, d string) {
+			writeBody(t, d, "project.yml", "name: App\ntargets:\n  App:\n    platform: iOS\n")
+		}, PlaneApp},
+		{"somebody else's project.yml is not an app", func(t *testing.T, d string) {
+			writeBody(t, d, "project.yml", "service: my-api\nprovider:\n  name: aws\n")
+		}, PlaneNone},
 		{"an Android app", func(t *testing.T, d string) { write(t, d, "build.gradle.kts") }, PlaneApp},
 		{"a web app", func(t *testing.T, d string) {
 			write(t, d, "package.json")
@@ -213,6 +234,63 @@ func TestWebDetectionFindsNextsDefaultLayout(t *testing.T) {
 			}
 			if got := hasWeb(dir); got != tc.want {
 				t.Errorf("hasWeb(%v) = %v, want %v", tc.files, got, tc.want)
+			}
+		})
+	}
+}
+
+// APPLE DETECTION ANSWERS THREE QUESTIONS IT USED TO GUESS AT.
+//
+// The old `hasApple` returned a bool that the caller turned into "ios". That
+// made three wrong answers possible at once: a macOS-only app got an iOS slot,
+// every cross-platform layout (React Native, Expo, Flutter — all of which keep
+// the Xcode project in `ios/`) was invisible, and any repository carrying a
+// `project.yml` was classified as an app checkout on the strength of a
+// filename several unrelated tools also use.
+func TestAppleDetectionReadsTheProjectRatherThanGuessing(t *testing.T) {
+	// pbxproj bodies are enormous; what matters is the SDK line Xcode writes.
+	const iosProj = `objects = { A = { SDKROOT = iphoneos; }; };`
+	const macProj = `objects = { A = { SDKROOT = macosx; }; };`
+	const bothProj = `objects = { A = { SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx"; }; };`
+
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  []string
+	}{
+		{"a plain iOS app at the root", map[string]string{"App.xcodeproj/project.pbxproj": iosProj}, []string{"ios"}},
+		{"a macOS-only app", map[string]string{"App.xcodeproj/project.pbxproj": macProj}, []string{"macos"}},
+		{"one project, both platforms", map[string]string{"App.xcodeproj/project.pbxproj": bothProj}, []string{"ios", "macos"}},
+		{"react native / expo / flutter", map[string]string{"ios/App.xcodeproj/project.pbxproj": iosProj}, []string{"ios"}},
+		{"a flutter desktop target too", map[string]string{
+			"ios/App.xcodeproj/project.pbxproj":   iosProj,
+			"macos/App.xcodeproj/project.pbxproj": macProj,
+		}, []string{"ios", "macos"}},
+		{"an xcodegen spec that has not been generated", map[string]string{
+			"project.yml": "name: App\ntargets:\n  App:\n    platform: iOS\n",
+		}, []string{"ios"}},
+		// THE NEGATIVES, which are what the old rule got wrong.
+		{"somebody else's project.yml", map[string]string{
+			"project.yml": "service: my-api\nprovider:\n  name: aws\n",
+		}, nil},
+		{"a backend, which has no Xcode anything", map[string]string{
+			"package.json": "{}", "controllers/todo.controller.ts": "export {}",
+		}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				path := filepath.Join(dir, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := applePlatforms(dir)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("applePlatforms = %v, want %v", got, tc.want)
 			}
 		})
 	}

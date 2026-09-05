@@ -71,7 +71,7 @@ func PlaneOf(dir string) Plane {
 	// `modules/<name>/` with "this is not a backend checkout", after `build`
 	// had already validated 85 routes in it. Measured 2026-09-02.
 	backend := hasModuleFile(dir) && HasSchemaDeclaration(dir)
-	app := hasApple(dir) || exists(filepath.Join(dir, "build.gradle")) ||
+	app := len(applePlatforms(dir)) > 0 || exists(filepath.Join(dir, "build.gradle")) ||
 		exists(filepath.Join(dir, "build.gradle.kts")) || hasWeb(dir)
 
 	switch {
@@ -127,26 +127,138 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-// hasApple looks for an Xcode project or workspace, which is a DIRECTORY with a
-// known suffix rather than a file — the one shape a plain `os.Stat` on a name
-// would miss.
-func hasApple(dir string) bool {
+// applePlatforms reports which Apple platforms this checkout targets, and it
+// answers three things the old `hasApple` could not.
+//
+//  1. IT CAN SAY macos. The detector returned a bool and the caller turned true
+//     into "ios", so a macOS-only app was handed an iOS slot and an iOS
+//     xcconfig — silently, because the two look identical until something reads
+//     the platform.
+//
+//  2. IT LOOKS WHERE CROSS-PLATFORM PROJECTS KEEP IT. React Native, Expo and
+//     Flutter all put the Xcode project in `ios/` (and `macos/`), never at the
+//     root — so `palbase link` in the root of any of them found no Apple
+//     platform at all and said "cannot tell what kind of app this is".
+//
+//  3. IT READS THE PROJECT INSTEAD OF GUESSING. The platform comes from the
+//     pbxproj's own SDKROOT / SUPPORTED_PLATFORMS. A `project.yml` used to count
+//     as Apple on the strength of its FILENAME, which is a common enough name
+//     that any repository carrying one was classified as an app checkout; now
+//     the file has to actually look like an XcodeGen spec.
+func applePlatforms(dir string) []string {
+	seen := map[string]bool{}
+	// The root first, then the two directories the cross-platform toolchains
+	// use. `dir` itself is checked with an empty prefix so a plain Xcode app is
+	// found exactly as before.
+	for _, sub := range []string{"", "ios", "macos", "apple"} {
+		root := dir
+		if sub != "" {
+			root = filepath.Join(dir, sub)
+			if !isDir(root) {
+				continue
+			}
+		}
+		for _, platform := range applePlatformsIn(root) {
+			seen[platform] = true
+		}
+	}
+	var out []string
+	for _, platform := range []string{"ios", "macos"} { // deterministic order
+		if seen[platform] {
+			out = append(out, platform)
+		}
+	}
+	return out
+}
+
+// applePlatformsIn inspects ONE directory for an Xcode project and reports what
+// it builds for.
+func applePlatformsIn(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		return nil
 	}
+	seen := map[string]bool{}
 	for _, e := range entries {
 		name := e.Name()
-		if filepath.Ext(name) == ".xcodeproj" || filepath.Ext(name) == ".xcworkspace" {
-			return true
-		}
-		// xcodegen projects are a spec file until the project is generated, and
-		// a checkout that has not generated one yet is still an app checkout.
-		if name == "project.yml" && exists(filepath.Join(dir, "project.yml")) {
-			return true
+		switch {
+		case filepath.Ext(name) == ".xcodeproj":
+			for _, p := range platformsFromPBXProj(filepath.Join(dir, name, "project.pbxproj")) {
+				seen[p] = true
+			}
+		case filepath.Ext(name) == ".xcworkspace":
+			// A workspace names its projects rather than its platforms; the
+			// projects beside it are read on their own pass above. Treat the
+			// workspace as an Apple signal whose platform is unknown.
+			seen["ios"] = true
+		case name == "project.yml":
+			for _, p := range platformsFromXcodeGenSpec(filepath.Join(dir, name)) {
+				seen[p] = true
+			}
 		}
 	}
-	return false
+	var out []string
+	for _, platform := range []string{"ios", "macos"} {
+		if seen[platform] {
+			out = append(out, platform)
+		}
+	}
+	return out
+}
+
+// platformsFromPBXProj reads the SDK the project builds against. Xcode writes
+// `SDKROOT = iphoneos;` / `macosx`, and a multiplatform target lists both in
+// SUPPORTED_PLATFORMS.
+//
+// A project that cannot be read, or that names neither, is reported as `ios`:
+// that is what every such checkout got before this function existed, and
+// answering "no Apple platform" for a directory holding an .xcodeproj would
+// turn a wrong slot into a refused link.
+func platformsFromPBXProj(path string) []string {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return []string{"ios"}
+	}
+	text := string(body)
+	var out []string
+	if strings.Contains(text, "iphoneos") || strings.Contains(text, "iphonesimulator") {
+		out = append(out, "ios")
+	}
+	if strings.Contains(text, "macosx") {
+		out = append(out, "macos")
+	}
+	if len(out) == 0 {
+		return []string{"ios"}
+	}
+	return out
+}
+
+// platformsFromXcodeGenSpec reads an XcodeGen spec — which is a project that has
+// not been generated yet, and still an app checkout.
+//
+// The FILENAME is not the signal: `project.yml` belongs to several unrelated
+// tools. An XcodeGen spec declares `targets:`, and each target names its
+// platform.
+func platformsFromXcodeGenSpec(path string) []string {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	text := string(body)
+	if !strings.Contains(text, "targets:") {
+		return nil // some other tool's project.yml
+	}
+	var out []string
+	if strings.Contains(text, "platform: iOS") || strings.Contains(text, "platform: [iOS") {
+		out = append(out, "ios")
+	}
+	if strings.Contains(text, "platform: macOS") || strings.Contains(text, "macOS") {
+		out = append(out, "macos")
+	}
+	if len(out) == 0 {
+		return []string{"ios"}
+	}
+	return out
 }
 
 // hasWeb is package.json AND an html entry: a package.json alone is every
@@ -214,9 +326,10 @@ func hasModuleFile(dir string) bool {
 // "I could not tell", because only the second one deserves a sentence.
 func detectPlatforms(dir string) []string {
 	var found []string
-	if hasApple(dir) {
-		found = append(found, "ios")
-	}
+	// EVERY Apple platform this checkout targets, not just the first. Returning
+	// a bool here is what made `macos` unreachable: true became "ios", and a
+	// macOS-only app was given an iOS slot.
+	found = append(found, applePlatforms(dir)...)
 	if _, err := detectAndroidApplicationID(dir); err == nil {
 		found = append(found, "android")
 	}
