@@ -377,3 +377,38 @@ dolaylı yol bu koşuda tam olarak bir grep'in altından kaçtı.
 **AÇIK KALEM:** kesimin ardından bulut push makinesi (`runPush`/`pushDeps`/
 `deployClient`) da ölü kaldı — üretim çağıranı yok, yedi testi canlı tutuyor.
 Adres yolu (`runStackPush`) aynı buluta gidiyor. Ayrı bir kalem olarak duruyor.
+
+### A-16 · Kesimin bıraktığı kalıntıyı keserken BAŞKASININ CANLI SANDIĞI ÖZELLİĞİ bulduk
+
+A-15'in kesimi bulut push makinesini (`runPush`/`pushDeps`/`deployClient`) ölü
+bıraktı: üretim çağıranı yok, yedi test canlı tutuyor, ve `palbase push`'un
+gerçek yolu `ReadTarget → runStackPush`. Kesmeye giderken ölçüm başka bir şey
+gösterdi.
+
+Eşdüzey oturum aynı saatlerde `push`'un gövdesine `sdkVersion` ekledi —
+kontrol düzleminin kiracı imajını bundle'ı UYGULAMADAN ÖNCE takas edebilmesi
+için, gerekçesi sağlam. Ama ekleme `deploy.go:159/167`'de, yani **`runPush`'un
+gövdesinde**; canlı `runStackPush` o alanı göndermiyor:
+
+```
+deploy.go:159   sdkVersion, err := installedSDKVersion(cwd)
+deploy.go:167       "sdkVersion": sdkVersion,
+grep sdkVersion stack_push.go → (boş)
+grep "runPush(" (test dışı)   → (boş)
+```
+
+Yani özellik kullanıcının koştuğu yolda HİÇ ateşlemiyor. İki testi yeşil,
+çünkü ikisi de `runPush`'u DOĞRUDAN çağırıyor —
+[[feedback_tested_dead_code_does_not_look_dead]]'in bu koşudaki ÜÇÜNCÜ görülüşü.
+
+**Ve bu benim kesimimden ÖNCE de böyleydi:** o dala girmek `Resolve()`'un
+başarmasını, o da `.palbase/selection.json`'ı gerektiriyordu; dosyayı hiçbir şey
+yazmıyor. Kesim yalnız GÖRÜNÜR yaptı.
+
+> **Ders:** *bir kesim, kestiği şeyin ardında başkasının canlı sandığı bir
+> özellik bırakabilir.* Ölü kodu silmeden önce, onu KİMİN yeni yazdığına bak —
+> `git log -1 --format=%cr` o dosyada saatler değil dakikalar gösteriyorsa,
+> silmek bir teslimatı sessizce geri almaktır.
+
+Kesim TUTULDU ve özelliğin sahibine iki seçenekle soruldu (canlı yola taşımak,
+ya da rayı ulaşılabilir bir çağıranla geri getirmek). Tek taraflı silinmedi.
