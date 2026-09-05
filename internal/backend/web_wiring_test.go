@@ -442,8 +442,26 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 
 // TestWebLink_EnsuresProjectConfigGitignored: link keeps the per-machine
 // project selection out of git while generated .palbase inputs stay trackable.
+// THE IGNORE FILE IS ASSERTED AGAINST ITS PRODUCER, not against a literal.
+//
+// The bug this closes was two lists disagreeing: `palbase build` wrote
+// `.palbase-build-controllers/` and the ignore list named two OTHER staging
+// directories, one of which nothing had written for two renames. A test that
+// spells the expected file out in a string literal is a third list, and would
+// have drifted the same way. So it reads generatedProjectPaths — the one
+// declaration both the scaffolder and the repair path read.
 func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
-	t.Run("creates .gitignore when absent", func(t *testing.T) {
+	ours := func() []string {
+		var out []string
+		for _, e := range generatedProjectPaths {
+			if e.ours {
+				out = append(out, e.path)
+			}
+		}
+		return out
+	}
+
+	t.Run("covers everything the CLI generates, when absent", func(t *testing.T) {
 		t.Chdir(t.TempDir())
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
@@ -452,20 +470,27 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, ".palbase/local.json\n", string(body))
+		for _, entry := range ours() {
+			require.Contains(t, string(body), entry,
+				"a path the CLI writes into the project is not ignored")
+		}
 	})
 
-	t.Run("appends to an existing .gitignore", func(t *testing.T) {
+	t.Run("appends without disturbing what was there", func(t *testing.T) {
 		t.Chdir(t.TempDir())
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
-		require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n"), 0o644))
+		require.NoError(t, os.WriteFile(".gitignore", []byte("node_modules/\n# mine\ndist/\n"), 0o644))
 
 		runWebLinkWithGitignore(t)
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, "node_modules/\n.palbase/local.json\n", string(body))
+		require.Contains(t, string(body), "# mine\ndist/\n", "somebody's curated file was rewritten")
+		require.NotContains(t, string(body), "*.log", "an ecosystem rule was appended to a file that did not ask for it")
+		for _, entry := range ours() {
+			require.Contains(t, string(body), entry)
+		}
 	})
 
 	t.Run("does not duplicate on re-link", func(t *testing.T) {
@@ -478,7 +503,10 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, 1, strings.Count(string(body), ".palbase/local.json"))
+		for _, entry := range ours() {
+			require.Equal(t, 1, strings.Count(string(body), entry+"\n"),
+				"%s appears more than once after a re-link", entry)
+		}
 	})
 
 	t.Run("narrows an existing directory rule", func(t *testing.T) {
@@ -491,13 +519,11 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, "node_modules/\n.palbase/local.json\n", string(body))
+		require.NotContains(t, string(body), "\n.palbase/\n",
+			"the directory-wide rule survived — the contract and the platform slots stay uncommittable")
+		require.Contains(t, string(body), ".palbase/local.json")
 	})
 }
-
-// TestWebLink_GitignoreWarning: prints a loud warning when .gitignore ignores
-// the gen file. The offending rule is reported, never edited (the only write
-// is the appended .palbase/local.json entry).
 func TestWebLink_GitignoreWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

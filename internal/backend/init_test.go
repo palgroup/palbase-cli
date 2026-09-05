@@ -344,7 +344,19 @@ func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
 // source, is read by nothing, and goes stale the moment a controller changes.
 // Measured 2026-08-24 on a real project: 17 files, 88 KB, all 17 different from
 // the controllers beside them.
-func TestGitignoreCoversBothStagingNames(t *testing.T) {
+// THE SCAFFOLD IGNORES WHAT THE CLI ACTUALLY WRITES.
+//
+// This test used to demand two staging names — the deploy stager's and
+// `.palbase-serve-controllers/`, which nothing has written for two renames —
+// while the directory `palbase build` REALLY creates
+// (`.palbase-build-controllers/`) was in neither the list nor the file. So the
+// gate was green, the remembered name was ignored forever, and the live one was
+// committed. A rule that pins names from memory measures the memory.
+//
+// It now reads the constants the writers use, so a rename moves the assertion
+// with the code, and `init`'s scaffold — which runs on a BRAND NEW project that
+// never met an older CLI — carries no name nothing writes.
+func TestTheScaffoldIgnoresEveryPathTheCLIGenerates(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeGitignore(dir); err != nil {
 		t.Fatalf("write: %v", err)
@@ -353,9 +365,29 @@ func TestGitignoreCoversBothStagingNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	for _, name := range []string{".palbase-staged-controllers/", ".palbase-serve-controllers/"} {
+	// The constants the code writes with, named here so a rename breaks THIS
+	// instead of a user's repository.
+	for _, name := range []string{
+		stagedControllersDir + "/",                           // build-check.js stages here
+		deployStagingDir + "/",                               // the deploy stager stages here
+		envTypesFile,                                         // generated from the project's secrets
+		".palbase/esm/", ".palbase/jobs/", ".palbase/hooks/", // the bundle
+		".palbase/local.json",
+	} {
 		if !strings.Contains(string(body), name) {
-			t.Errorf("%s is not ignored:\n%s", name, body)
+			t.Errorf("%s is written by the CLI and not ignored:\n%s", name, body)
 		}
+	}
+	// And the committed half stays committed: a scaffold that ignored these
+	// would produce a repository the next clone cannot build.
+	for _, committed := range []string{".palbase/project.json", ".palbase/openapi"} {
+		if strings.Contains(string(body), committed) {
+			t.Errorf("%s is meant to be COMMITTED and the scaffold ignores it:\n%s", committed, body)
+		}
+	}
+	// The retired name is gone: nothing writes it, and a fresh project never
+	// had one.
+	if strings.Contains(string(body), ".palbase-serve-controllers") {
+		t.Errorf("the scaffold still carries a staging name nothing writes:\n%s", body)
 	}
 }

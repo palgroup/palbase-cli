@@ -278,28 +278,53 @@ func copyTemplate(from, to string) ([]string, error) {
 	return written, err
 }
 
-// writeGitignore covers the three things a backend project must not commit: the
-// dependencies, the CLI's local state, and logs.
+// generatedProjectPaths is EVERY path this CLI writes into someone's project
+// that is not meant to be committed — one declaration, read by the scaffolder
+// and by the rule that repairs an existing checkout.
 //
-// `.palbase/local.json` rather than `.palbase/` — project.json is committed on
-// purpose, so a colleague who clones this reaches the same project.
+// It exists because the two drifted. `palbase build` stages a
+// return-binding-injected copy of the controller tree at
+// `.palbase-build-controllers/`, and the ignore list named
+// `.palbase-staged-controllers/` (the deploy stager's directory) and
+// `.palbase-serve-controllers/` (a name nothing has written for two renames) —
+// so the directory `build` ACTUALLY creates was the one nobody ignored.
+// Measured on a real project: 17 files, 88 KB, every one of them a stale second
+// copy of a controller, reading as source and read by nothing.
+//
+// The bundle is the same story one directory in. `.palbase/` is committed on
+// purpose — the contract and the platform slots live there and are what let a
+// colleague clone and build — but `.palbase/esm`, `/jobs` and `/hooks` are
+// build output that every `palbase build` rewrites, and nothing ignored them
+// either.
+// `ours` says whether the repair path adds this entry to a checkout that
+// already has a .gitignore. `node_modules/` and `*.log` are the ecosystem's,
+// not ours — every project already handles them, and appending them to
+// somebody's curated file is noise. The distinction is DECLARED rather than
+// derived from the string: a rule whose subject is guessed is a rule that
+// measures something else.
+var generatedProjectPaths = []struct {
+	path, why string
+	ours      bool
+}{
+	{"node_modules/", "dependencies", false},
+	{".palbase/local.json", "the stack running on THIS machine; project.json is committed on purpose", true},
+	{".palbase/esm/", "the compiled bundle — rewritten by every build, read only by the tarball", true},
+	{".palbase/jobs/", "the job manifest — same", true},
+	{".palbase/hooks/", "the hook manifest — same", true},
+	{stagedControllersDir + "/", "`palbase build`'s staging tree; removed on exit, left behind by a SIGKILL", true},
+	{deployStagingDir + "/", "the deploy stager's tree, same lifetime", true},
+	{envTypesFile, "generated from this project's secrets on every build, like next-env.d.ts", true},
+	{"*.log", "logs", false},
+}
+
+// writeGitignore scaffolds the ignore file from that one list.
 func writeGitignore(dir string) error {
-	// BOTH STAGING NAMES. The stager writes `.palbase-staged-controllers/`
-	// today and wrote `.palbase-serve-controllers/` before it; the ignore list
-	// followed the rename and the old name did not, so every project that had
-	// ever run the older CLI kept a directory nothing ignored.
-	//
-	// What lands there is generated: each controller with its return-schema
-	// bindings appended. Committed, it is a second copy of the WHOLE controller
-	// tree that reads as source, is read by nothing, and goes stale the moment a
-	// controller changes. Measured 2026-08-24 on a real project: 17 files, 88 KB,
-	// all 17 different from the controllers beside them.
-	const body = `node_modules/
-.palbase/local.json
-.palbase-staged-controllers/
-.palbase-serve-controllers/
-*.log
-`
+	var b strings.Builder
+	for _, e := range generatedProjectPaths {
+		b.WriteString(e.path)
+		b.WriteString("\n")
+	}
+	body := b.String()
 	path := filepath.Join(dir, ".gitignore")
 	if existing, err := os.ReadFile(path); err == nil {
 		if strings.Contains(string(existing), "node_modules") {

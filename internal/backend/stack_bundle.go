@@ -36,6 +36,13 @@ import (
 	"strings"
 )
 
+// deployStagingDir is the deploy stager's in-project tree. A sibling of
+// controllers/ by necessity: module resolution walks UP, so a staging directory
+// in /tmp cannot see the project's node_modules and the very first import — the
+// SDK itself — fails, and one nested a level deeper turns every `../services`
+// in a controller into a path outside the project.
+const deployStagingDir = ".palbase-staged-controllers"
+
 // bundleEntryHeader is the first line of the generated entry. It is asserted by
 // a golden test: the entry's SHAPE is the contract between this bundler and the
 // runtime that loads its output.
@@ -907,7 +914,7 @@ func stageControllers(ctx context.Context, dir string, w io.Writer) (string, err
 	// (.palbase/staged) turns every `../services` in a controller into a path
 	// outside the project. The deploy stager stages a sibling for the same two
 	// reasons.
-	stageDir := filepath.Join(dir, ".palbase-staged-controllers")
+	stageDir := filepath.Join(dir, deployStagingDir)
 	if err := os.RemoveAll(stageDir); err != nil {
 		return "", err
 	}

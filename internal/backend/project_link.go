@@ -560,34 +560,52 @@ func insecureTransport() http.RoundTripper {
 // narrowing to it would have ignored a file nothing writes while leaving the
 // per-machine address committed for everyone else to trip over.
 func ensurePalbaseGitignored(path string) error {
-	const entry = ".palbase/local.json"
-
 	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
+	// STEP 1 — NARROW. A `.gitignore` carrying `.palbase` or `.palbase/` takes
+	// the contract, the platform slots and the link itself with it, and the next
+	// clone resolves no project and generates no client. The directory-wide rule
+	// becomes the one file inside it that is genuinely per-machine.
+	const local = ".palbase/local.json"
 	lines := strings.Split(string(content), "\n")
-	normalized := make([]string, 0, len(lines)+1)
-	found := false
+	kept := make([]string, 0, len(lines)+len(generatedProjectPaths))
+	present := map[string]bool{}
+	narrowed := false
 	for _, line := range lines {
-		switch strings.TrimSpace(line) {
-		case entry, ".palbase", ".palbase/":
-			if !found {
-				normalized = append(normalized, entry)
-				found = true
+		switch t := strings.TrimSpace(line); t {
+		case ".palbase", ".palbase/":
+			if !narrowed {
+				kept = append(kept, local)
+				present[local] = true
+				narrowed = true
 			}
 		default:
-			normalized = append(normalized, line)
+			if t != "" {
+				present[t] = true
+			}
+			kept = append(kept, line)
 		}
 	}
 
-	updated := strings.Join(normalized, "\n")
-	if !found {
+	// STEP 2 — COVER WHAT WE WRITE. Everything this CLI generates into the
+	// project and nothing else; `node_modules/` and `*.log` are the ecosystem's
+	// and are left to whoever curated this file.
+	var missing []string
+	for _, e := range generatedProjectPaths {
+		if e.ours && !present[strings.TrimSpace(e.path)] {
+			missing = append(missing, e.path)
+		}
+	}
+
+	updated := strings.Join(kept, "\n")
+	if len(missing) > 0 {
 		if updated != "" && !strings.HasSuffix(updated, "\n") {
 			updated += "\n"
 		}
-		updated += entry + "\n"
+		updated += strings.Join(missing, "\n") + "\n"
 	}
 	if updated == string(content) {
 		return nil
