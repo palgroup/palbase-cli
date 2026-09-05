@@ -12,11 +12,12 @@ import (
 	"bytes"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
@@ -35,11 +36,22 @@ func runLogs(t *testing.T, entries []map[string]any, args ...string) (url.Values
 			selectiontest.WriteOK(w, http.StatusOK, map[string]any{"entries": entries})
 		})
 
+	// THE ADDRESS PATH, which is the one that ships. These tests used to reach
+	// `showCloud` through the selection resolver; FR-013 retired that, and the
+	// route it exercised is still live — a linked checkout whose address IS a
+	// cloud ref takes it. So the rig binds the checkout instead of selecting it.
+	if err := os.MkdirAll(".palbase", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(".palbase", "project.json"),
+		[]byte(`{"url":"https://app1prod.palbase.studio"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	rest := f.REST()
-	resolver := f.Resolver()
 	cmd := Cmd(Resolvers{
-		REST:      func() REST { return rest },
-		Selection: func() *selection.Resolver { return resolver },
+		REST:     func() REST { return rest },
+		CloudRef: func(string) (string, bool) { return "app1prod", true },
 	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)

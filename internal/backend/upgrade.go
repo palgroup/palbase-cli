@@ -214,13 +214,9 @@ serving.`,
 				}
 				ref = refFromTargetURL(target.URL)
 			}
-			if ref == "" {
-				sel, err := r.resolve(cmd.Context())
-				if err != nil {
-					return unlinkedOrCloudError(err)
-				}
-				ref = sel.EnvironmentRef()
-			}
+			// FR-013: there is no selection to fall back on — a checkout says
+			// which project it is in `.palbase/project.json`, and if it says
+			// nothing the refusal below names what to type.
 			if ref == "" {
 				return errors.New(
 					"no project to upgrade: run `palbase link <project>` first — upgrade moves ONE project's runtime and needs to know which")

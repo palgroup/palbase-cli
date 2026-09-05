@@ -14,7 +14,6 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/backend"
-	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
 // runCombined is the production cmdRunner: it captures stderr too, because
@@ -221,25 +220,22 @@ func openCmd() *cobra.Command {
 		Short: "Open the selected Project/Environment in Studio (falls back to the dashboard root)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			u := studioSelectionURL(cmd.Context(), resolved.Endpoints.Studio, sel)
+			u := studioSelectionURL(cmd.Context(), resolved.Endpoints.Studio)
 			fmt.Fprintf(cmd.OutOrStdout(), "Opening %s …\n", u)
 			return auth.OpenURL(u)
 		},
 	}
 }
 
-// studioSelectionURL resolves the local selection and returns its canonical
-// Studio deep-link. A resolution failure (not linked, no --project) is NOT an
-// error for `open` — canonicalStudioURL then returns the Studio root so the
-// escape hatch still opens the UI.
-func studioSelectionURL(ctx context.Context, studioRoot string, r *selection.Resolver) string {
-	var projectID, ref string
-	if r != nil {
-		if s, err := r.Resolve(ctx); err == nil {
-			projectID, ref = s.ProjectID, s.EnvironmentRef()
-		}
-	}
-	return canonicalStudioURL(studioRoot, projectID, ref)
+// studioSelectionURL returns the Studio URL `open` should hit.
+//
+// It used to build a deep-link from `.palbase/selection.json` — the per-machine
+// selection FR-013 retired. Nothing writes that file any more, so the deep-link
+// could only ever be built for a pre-cutover checkout, and every other run took
+// the fallback below. The fallback is now the whole answer, which is what the
+// published docs already say: `palbase open` opens the Studio root.
+func studioSelectionURL(_ context.Context, studioRoot string) string {
+	return canonicalStudioURL(studioRoot, "", "")
 }
 
 // canonicalStudioURL builds <studio>/projects/{projectId}/environments/{ref} —

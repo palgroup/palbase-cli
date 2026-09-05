@@ -91,44 +91,6 @@ func TestHumanizeAgo(t *testing.T) {
 
 // ── deploys ─────────────────────────────────────────────────────────────────
 
-func TestDeploys_ReadsTheV2EnvironmentHistory(t *testing.T) {
-	r := newRig(t)
-	const route = "/api/v2/projects/proj_1/environments/app1prod/deployments"
-	r.Fake.OK("GET "+route, map[string]any{
-		"deployments": []map[string]any{
-			{"status": "failed", "trigger": "cli", "error": "42P07: relation exists\nsecond line",
-				"createdAt": "2026-07-01T10:00:00Z"},
-			{"status": "succeeded", "version": "abc1234", "trigger": "webhook",
-				"error": "zero endpoints collected", "createdAt": "2026-07-01T09:00:00Z"},
-		},
-	})
-
-	out, err := r.Run(t, "deploys")
-	require.NoError(t, err)
-
-	req, ok := r.Fake.Find("GET " + route)
-	require.True(t, ok, "got %v", r.Fake.Routes())
-	require.Equal(t, "limit=20", req.Query)
-
-	require.Contains(t, out, "FAILED")
-	require.Contains(t, out, "42P07: relation exists")
-	require.NotContains(t, out, "second line", "the table shows the FIRST line; --json carries the rest")
-	// A succeeded row carrying an error is WARN, never a clean success.
-	require.Contains(t, out, "WARN")
-	// There is no BRANCH column left to print.
-	require.NotContains(t, out, "BRANCH")
-	requireNoV1(t, r.Fake)
-}
-
-func TestDeploys_Empty(t *testing.T) {
-	r := newRig(t)
-	r.Fake.OK("GET /api/v2/projects/proj_1/environments/app1prod/deployments",
-		map[string]any{"deployments": []any{}})
-	out, err := r.Run(t, "deploys")
-	require.NoError(t, err)
-	require.Contains(t, out, "no deploy attempts yet")
-}
-
 func TestTruncateNote(t *testing.T) {
 	require.Equal(t, "abc", truncateNote("abc", 10))
 	require.Equal(t, "abc…", truncateNote("abcdef", 4))

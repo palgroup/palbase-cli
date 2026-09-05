@@ -70,7 +70,6 @@ func (r *rig) Resolvers() Resolvers {
 	return Resolvers{
 		REST:      func() REST { return rest },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
-		Selection: func() *selection.Resolver { return r.Resolver },
 	}
 }
 
@@ -91,20 +90,6 @@ func (r *rig) Run(t *testing.T, name string, args ...string) (string, error) {
 	}
 	t.Fatalf("no top-level command %q", name)
 	return "", nil
-}
-
-// requireNoV1 asserts that nothing the command did rode a retired path. This is
-// the anti-silent-404 guard: a leftover /api/v1 or /branches call 404s on the
-// fake, but a command that swallows the error would still "pass" its behaviour
-// test — so we assert on the WIRE, not the outcome.
-func requireNoV1(t *testing.T, f *selectiontest.Fake) {
-	t.Helper()
-	for _, route := range f.Routes() {
-		require.NotContains(t, route, "/api/v1/", "the CLI must not call v1 (admin excepted, and admin is another package)")
-		require.NotContains(t, route, "/branches", "the Palbase branch is gone as a resource")
-		require.NotContains(t, route, "/groups/", "groups are gone — apps and members hang off the PROJECT")
-		require.NotContains(t, route, "/api/trpc/", "tRPC is gone — every verb speaks REST")
-	}
 }
 
 func TestLookupBackendTarget_RejectsAnUnboundPublishableKey(t *testing.T) {

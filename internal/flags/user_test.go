@@ -11,8 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
-
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
 )
 
 // stackCall is one recorded request: its method, path, and the RAW body bytes.
@@ -68,8 +66,7 @@ func runFlags(t *testing.T, f *fakeStack, args ...string) (string, error) {
 	t.Helper()
 	t.Chdir(t.TempDir())
 	cmd := Cmd(Resolvers{
-		REST:      func(*cobra.Command) (REST, error) { return f, nil },
-		Selection: selectiontest.Selected(t),
+		REST: func(*cobra.Command) (REST, error) { return f, nil },
 	})
 	var out bytes.Buffer
 	cmd.SetOut(&out)

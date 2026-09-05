@@ -31,9 +31,6 @@ type AppBinding struct {
 	AttestEnforce   bool   `json:"attest_enforce"`
 }
 
-// bindingLister lists an app's (app × Environment) bindings.
-type bindingLister func(ctx context.Context, appID string) ([]AppBinding, error)
-
 // studioConfigArtifactFetch is the production configArtifactFetch: the v2
 // config-artifact route for the (app × Environment) pair — the SAME route
 // `palbase apps config` uses.
@@ -53,17 +50,6 @@ func studioConfigArtifactFetch(rest restDoer, publicHost string) configArtifactF
 		oauth, _ := fetchOAuthProviders(ctx, art.BaseURL, art.APIKey)
 		art.OAuth = swiftOAuthToApps(oauth)
 		return art, nil
-	}
-}
-
-// studioBindingLister is the production bindingLister: the v2 bindings route.
-func studioBindingLister(rest restDoer) bindingLister {
-	return func(ctx context.Context, appID string) ([]AppBinding, error) {
-		var bindings []AppBinding
-		if err := rest.Do(ctx, http.MethodGet, "/api/v2/apps/"+appID+"/bindings", nil, &bindings); err != nil {
-			return nil, err
-		}
-		return bindings, nil
 	}
 }
 

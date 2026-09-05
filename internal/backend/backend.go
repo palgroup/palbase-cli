@@ -103,22 +103,6 @@ type Resolvers struct {
 	// Lazy (a func) like the other accessors, and only CALLED at RunE time —
 	// constructing the command tree with a zero-value Resolvers must not panic.
 	REST func() REST
-	// Selection resolves (--project, --environment, .palbase/config.json) into
-	// the Project + Environment every command below acts on.
-	Selection func() *selection.Resolver
-}
-
-// resolve is the one-liner every RunE opens with. It exists so a nil Selection
-// accessor (the structural registration tests build the tree with a zero-value
-// Resolvers) fails with a clear error instead of a nil dereference.
-func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
-	if r.Selection == nil || r.Selection() == nil {
-		// `--environment <ref>` is not the second way in: it narrows a project
-		// the resolver has already found, and here there is none.
-		return selection.Selection{}, errors.New(
-			"no project selected — run `palbase link <project>`, or `palbase link <ref>` for one environment of it")
-	}
-	return r.Selection().Resolve(ctx)
 }
 
 // Commands returns the flat, top-level command set the root mounts
@@ -311,55 +295,14 @@ func newDeploysCmd(r Resolvers) *cobra.Command {
 				return err
 			}
 
-			sel, err := r.resolve(cmd.Context())
-			if err != nil {
-				return unlinkedOrCloudError(err)
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			var resp struct {
-				Deployments []deployRow `json:"deployments"`
-			}
-			if err := r.REST().Do(cmd.Context(), http.MethodGet,
-				DeploymentsPath(sel.ProjectID, sel.EnvironmentRef())+"?limit=20", nil, &resp); err != nil {
-				return fmt.Errorf("list deployments: %w", err)
-			}
-			out := cmd.OutOrStdout()
-			if jsonOut {
-				return json.NewEncoder(out).Encode(resp.Deployments)
-			}
-			if len(resp.Deployments) == 0 {
-				fmt.Fprintln(out, "(no deploy attempts yet — deploy with `palbase push`)")
-				return nil
-			}
-			fmt.Fprintf(out, "%-11s %-8s %-20s %-12s %s\n",
-				"STATUS", "VERSION", "WHEN", "TRIGGER", "NOTE")
-			for _, d := range resp.Deployments {
-				fmt.Fprintf(out, "%-11s %-8s %-20s %-12s %s\n",
-					deployStatusLabel(d),
-					deployVersion(d.Version),
-					deployWhen(d.CreatedAt),
-					d.Trigger,
-					deployNote(d),
-				)
-			}
-			return nil
+			// NO SECOND WAY IN (FR-013). The address path above serves every
+			// checkout this CLI can produce; what followed resolved through
+			// `.palbase/selection.json`, which nothing writes.
+			return selection.ErrNotSelected{}
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON (full untruncated notes/errors)")
 	return cmd
-}
-
-// deployStatusLabel uppercases the status; a succeeded row that still carries an
-// error is "WARN" — the deploy landed but the runtime flagged something (e.g.
-// zero endpoints collected), which must not read as a clean success.
-func deployStatusLabel(d deployRow) string {
-	if d.Status == "succeeded" && d.Error != nil && *d.Error != "" {
-		return "WARN"
-	}
-	if d.Status == "" {
-		return "UNKNOWN"
-	}
-	return strings.ToUpper(d.Status)
 }
 
 func deployVersion(v *string) string {
@@ -371,31 +314,6 @@ func deployVersion(v *string) string {
 	// the line. Twelve is what every other surface prints and what `git log`
 	// taught everyone to read.
 	return short(*v)
-}
-
-// deployWhen renders the createdAt (RFC3339 from the JSON API) as a local
-// timestamp; an unparseable value falls back to the raw string rather than a
-// bogus zero-time.
-func deployWhen(ts string) string {
-	t, err := time.Parse(time.RFC3339, ts)
-	if err != nil {
-		return ts
-	}
-	return t.Local().Format("2006-01-02 15:04:05")
-}
-
-// deployNote is the last column: the FIRST line of the deploy error (the
-// server-side failure reason — the whole reason this reads control-pg and not
-// Store A), truncated to ~100 chars for the table. `--json` carries the full
-// text. A clean success with no error falls back to the commit message.
-func deployNote(d deployRow) string {
-	if d.Error != nil && *d.Error != "" {
-		return truncateNote(firstLine(*d.Error), 100)
-	}
-	if d.CommitMessage != nil {
-		return truncateNote(firstLine(*d.CommitMessage), 100)
-	}
-	return ""
 }
 
 func firstLine(s string) string {
@@ -671,17 +589,6 @@ type fetchOpts struct {
 	totalBudget    time.Duration
 	minBackoff     time.Duration
 	progress       io.Writer // optional: a line is written before each retry
-}
-
-// defaultFetchOpts sizes the loop for a Free-tier cold wake. A scaled-to-zero
-// br-<ref> pod is woken synchronously by Kong (up to ~90s plugin hold) and, when
-// node capacity is starved, the orchestrator returns 503 backend_unavailable
-// (Retry-After: 5) until a node is provisioned. 120s per attempt covers the
-// hold; the 150s total budget allows ~2 short 503 retries on top.
-var defaultFetchOpts = fetchOpts{
-	attemptTimeout: 120 * time.Second,
-	totalBudget:    150 * time.Second,
-	minBackoff:     2 * time.Second,
 }
 
 // fetchOpenAPISpecOpts is the wake-aware core. It retries ONLY on signals that

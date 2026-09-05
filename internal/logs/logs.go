@@ -44,8 +44,7 @@ type REST interface {
 // Resolvers carries the lazily-built REST client + the shared selection
 // resolver.
 type Resolvers struct {
-	REST      func() REST
-	Selection func() *selection.Resolver
+	REST func() REST
 	// CloudRef, bir yığın adresinin BULUT projesi olup olmadığını ve ref'ini
 	// söyler. Adres şeklinden okunur, ağdan değil: ulaşılamayan bir düzlem,
 	// bulut projesini "bulut değil" yapmaz.
@@ -282,15 +281,11 @@ new lines every 2s — Ctrl-C to stop.
 				}, cmd.OutOrStdout())
 			}
 
-			sel, err := r.Selection().Resolve(cmd.Context())
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			return showCloud(cmd, r, sel.EnvironmentRef(), showCloudOpts{
-				source: source, levels: levels, since: since,
-				query: query, limit: limit, follow: follow, jsonOut: jsonOut,
-			})
+			// NO SECOND WAY IN (FR-013). Above this line a bound checkout has
+			// already been served — by address for a cloud project, by the local
+			// stack for one running here. What used to follow resolved through
+			// `.palbase/selection.json`, and nothing writes that file any more.
+			return selection.ErrNotSelected{}
 		},
 	}
 	cmd.Flags().StringVar(&source, "source", "", "Only this source (e.g. backend)")

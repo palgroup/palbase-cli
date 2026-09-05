@@ -27,7 +27,6 @@ import (
 	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/roles"
 	"github.com/palgroup/palbase-cli/internal/secret"
-	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/palgroup/palbase-cli/internal/storage"
 	palbasetest "github.com/palgroup/palbase-cli/internal/test"
 	"github.com/palgroup/palbase-cli/internal/testuser"
@@ -41,7 +40,6 @@ var Version = "dev"
 // sel is the shared selection resolver every context-bound command reads. Built
 // once per invocation in PersistentPreRunE so a command that needs both the
 // Project and the Environment pays for ONE environments listing.
-var sel *selection.Resolver
 
 // resolved is populated in PersistentPreRunE and consumed by subcommands.
 var resolved config.Resolved
@@ -209,33 +207,6 @@ func openStackManagement(cmd *cobra.Command) (authadmin.REST, error) {
 	return stackManagementREST{target: target, cred: cred, client: backend.HTTPClient(target)}, nil
 }
 
-// selectedProjectTarget turns the caller's SELECTION into a project address.
-//
-// This is what lets one implementation serve both halves of every
-// target-relative verb. Before it, a command that found no `.palbase/project.json`
-// fell through to a second, tRPC-shaped path against the Studio — a different
-// protocol, a different door, and a different response shape for the same
-// question. There is one door now: the project's own management surface, at
-// `<ref>.<PublicHost>`, opened by the key CloudKeyFetcher brokers.
-//
-// Silent on failure, deliberately. "No project selected" is the SELECTION's
-// error to report, phrased with the advice that fixes it; a target resolver
-// inventing its own wording would be a second, worse copy of that message.
-func selectedProjectTarget(ctx context.Context) (backend.Target, bool) {
-	if sel == nil || resolved.Endpoints.PublicHost == "" {
-		return backend.Target{}, false
-	}
-	s, err := sel.Resolve(ctx)
-	if err != nil {
-		return backend.Target{}, false
-	}
-	ref := s.EnvironmentRef()
-	if ref == "" {
-		return backend.Target{}, false
-	}
-	return backend.Target{URL: "https://" + ref + "." + resolved.Endpoints.PublicHost}, true
-}
-
 func linkedTarget() (linkedProject, error) {
 	t, err := backend.ReadTarget()
 	if err != nil {
@@ -270,11 +241,6 @@ func (cloudFacts) TenantDomain(ctx context.Context) (string, error) {
 	}
 	return boot.TenantDomain, nil
 }
-
-// selectionResolver hands every command package the ONE resolver built in
-// PersistentPreRunE. It is a func (not the value) because the command tree is
-// constructed BEFORE PersistentPreRunE runs.
-func selectionResolver() *selection.Resolver { return sel }
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -341,13 +307,6 @@ func newRootCmd() *cobra.Command {
 				_, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
 				return ok
 			}
-			sel = &selection.Resolver{
-				REST: func() selection.REST { return managementREST() },
-			}
-			// The second authority for "which project am I acting on" (see
-			// backend.SelectedProject): a checkout with no `link` still has a
-			// selection, and a selection resolves to an address like any other.
-			backend.SelectedProject = selectedProjectTarget
 			return nil
 		},
 	}
@@ -366,8 +325,7 @@ func newRootCmd() *cobra.Command {
 		Endpoints: func() config.Endpoints { return resolved.Endpoints },
 		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
 		// project/apikey) for the provider-aware push/pull/clone verbs.
-		REST:      func() backend.REST { return managementREST() },
-		Selection: selectionResolver,
+		REST: func() backend.REST { return managementREST() },
 	}
 
 	rootCmd.AddCommand(
@@ -390,8 +348,7 @@ func newRootCmd() *cobra.Command {
 			REST: func(cmd *cobra.Command) (versions.REST, error) { return openStackManagement(cmd) },
 		}),
 		logs.Cmd(logs.Resolvers{
-			REST:      func() logs.REST { return managementREST() },
-			Selection: selectionResolver,
+			REST: func() logs.REST { return managementREST() },
 			// Adresten ref: `tenantRefOf` bunu ŞEKİLDEN okuyor ve `push`,
 			// `link`, kimlik yolu hep aynı fonksiyonu kullanıyor. İkinci bir
 			// çözücü yazmak, aynı soruya iki cevap üretirdi.
@@ -411,8 +368,7 @@ func newRootCmd() *cobra.Command {
 			// One seam: definitions AND per-user overrides both act on the linked
 			// project over REST. The overrides rode Studio only while nothing could
 			// open their service-role gate.
-			REST:      func(cmd *cobra.Command) (flags.REST, error) { return openStackManagement(cmd) },
-			Selection: selectionResolver,
+			REST: func(cmd *cobra.Command) (flags.REST, error) { return openStackManagement(cmd) },
 		}),
 		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement}),
 		egress.Cmd(egress.Resolvers{REST: openStackEgress}),

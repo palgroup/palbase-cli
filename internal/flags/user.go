@@ -44,7 +44,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
@@ -83,8 +82,7 @@ func overrideCall(r Resolvers, cmd *cobra.Command, method, path string, body []b
 // transports only because the override routes had no reachable client. Selection
 // remains for ref validation and project lookup; the selection FLAGS are gone.
 type Resolvers struct {
-	REST      func(*cobra.Command) (REST, error)
-	Selection func() *selection.Resolver
+	REST func(*cobra.Command) (REST, error)
 }
 
 // overrideKeyRE mirrors palflags' own key rule
@@ -205,10 +203,6 @@ succeed with the wrong type.`,
 			if err != nil {
 				return err
 			}
-			ref, err := envRef(cmd, r)
-			if err != nil {
-				return err
-			}
 
 			body, err := json.Marshal(map[string]any{"value": raw})
 			if err != nil {
@@ -220,7 +214,7 @@ succeed with the wrong type.`,
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ %s = %s for user %s (%s)\n", res.Key, res.Value, userID, ref)
+			fmt.Fprintf(out, "✓ %s = %s for user %s\n", res.Key, res.Value, userID)
 			// `config/flags.ts` is what this line named, and that file has been
 			// inert since flag definitions moved onto the Environment. The
 			// contrast the line is drawing is still real — override vs
@@ -250,10 +244,6 @@ Environment value that now applies is printed back.`,
 			if err := checkOverrideKey(key); err != nil {
 				return err
 			}
-			ref, err := envRef(cmd, r)
-			if err != nil {
-				return err
-			}
 
 			res, err := overrideCall(r, cmd, http.MethodDelete, overridePath(userID, key), nil)
 			if err != nil {
@@ -261,7 +251,7 @@ Environment value that now applies is printed back.`,
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "✓ removed override %s for user %s (%s)\n", key, userID, ref)
+			fmt.Fprintf(out, "✓ removed override %s for user %s\n", key, userID)
 			fmt.Fprintf(out, "  user now sees the environment value: %s\n", res.Value)
 			return nil
 		},
@@ -283,10 +273,6 @@ prompt — but check the user id, because it is not undone for you.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userID := args[0]
-			ref, err := envRef(cmd, r)
-			if err != nil {
-				return err
-			}
 
 			raw, err := call(r, cmd, http.MethodDelete, userFlagsPath(userID), nil)
 			if err != nil {
@@ -297,7 +283,7 @@ prompt — but check the user id, because it is not undone for you.`,
 				return fmt.Errorf("read the answer: %w", err)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ removed %d override(s) for user %s (%s)\n", res.Deleted, userID, ref)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ removed %d override(s) for user %s\n", res.Deleted, userID)
 			return nil
 		},
 	}
@@ -333,10 +319,6 @@ as the Environment is therefore indistinguishable from no override, and reads as
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userID := args[0]
-			ref, err := envRef(cmd, r)
-			if err != nil {
-				return err
-			}
 
 			rawMerged, err := call(r, cmd, http.MethodGet, userFlagsPath(userID), nil)
 			if err != nil {
@@ -385,10 +367,10 @@ as the Environment is therefore indistinguishable from no override, and reads as
 				return enc.Encode(rows)
 			}
 			if len(rows) == 0 {
-				fmt.Fprintf(out, "no flags on environment %s\n", ref)
+				fmt.Fprintln(out, "no flags on this project")
 				return nil
 			}
-			fmt.Fprintf(out, "flag values for user %s on %s:\n\n", userID, ref)
+			fmt.Fprintf(out, "flag values for user %s:\n\n", userID)
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "KEY\tVALUE\tSOURCE\tENVIRONMENT")
 			for _, row := range rows {
@@ -468,16 +450,6 @@ func checkOverrideKey(key string) error {
 			key)
 	}
 	return nil
-}
-
-// envRef resolves the selected (or --environment / --project overridden)
-// Environment to its wire ref.
-func envRef(cmd *cobra.Command, r Resolvers) (string, error) {
-	sel, err := r.Selection().Resolve(cmd.Context())
-	if err != nil {
-		return "", err
-	}
-	return sel.EnvironmentRef(), nil
 }
 
 // sameJSON compares two raw JSON values by their compacted bytes. Both sides

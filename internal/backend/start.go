@@ -524,7 +524,7 @@ func imagesPresent(ctx context.Context, images []stackImage, version string) err
 					"%s cannot be pulled on this machine.\n"+
 						"  If it is private, `docker login ghcr.io` first — or ask for the package to be made public.\n"+
 						"  Building it yourself instead: %s\n"+
-						"  and then tag it as %s — the version comes from the installed %s and nothing overrides it.",
+						"  and then tag it as %s — the version comes from the installed %s and nothing overrides it",
 					image, want.build, image, backendPkg)
 			}
 			continue

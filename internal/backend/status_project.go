@@ -166,17 +166,6 @@ func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error
 	}
 	cancelSDK()
 
-	if attempt := lastPushAttempt(ctx, r); attempt != nil {
-		if line := formatLastDeploy(&lastDeploy{
-			Status:    attempt.Status,
-			Error:     attempt.Error,
-			Version:   attempt.Version,
-			UpdatedAt: &attempt.CreatedAt,
-		}, time.Now()); line != "" {
-			fmt.Fprint(out, line)
-		}
-	}
-
 	reportKeyDrift(ctx, target, cred, out)
 	reportCommittedDrift(out)
 
@@ -296,7 +285,6 @@ func statusAsJSON(ctx context.Context, cmd *cobra.Command, r Resolvers, target T
 		doc.SDK = running
 	}
 	cancelSDK()
-	doc.LastAttempt = lastPushAttempt(ctx, r)
 	fmt.Fprintln(cmd.OutOrStdout(), renderJSON(doc))
 	return nil
 }
@@ -323,38 +311,4 @@ func appKeyState(ctx context.Context, target Target) string {
 		return "current"
 	}
 	return "stale"
-}
-
-// lastPushAttempt is the newest row in the PLANE's push ledger for the selected
-// Environment, or nil when there is no selection to ask about.
-//
-// It is a different question from "what is this project serving", and status has
-// to answer both: a push that failed before the artifact ever reached the
-// project leaves the project's own history untouched, so reading only that
-// history reports a healthy, months-old deploy and says nothing about the three
-// failures since. This is the visibility half.
-//
-// Best-effort by design. A checkout linked straight to an address has no project
-// id and therefore no ledger to read, and a plane that cannot be reached is not
-// a reason to refuse a status about the project in front of you — so every
-// failure here is silence, and the deployment block above still answers.
-func lastPushAttempt(ctx context.Context, r Resolvers) *deployRow {
-	if r.Selection == nil || r.REST == nil {
-		return nil
-	}
-	sel, err := r.resolve(ctx)
-	if err != nil || sel.ProjectID == "" || sel.EnvironmentRef() == "" {
-		return nil
-	}
-	var resp struct {
-		Deployments []deployRow `json:"deployments"`
-	}
-	if err := r.REST().Do(ctx, http.MethodGet,
-		DeploymentsPath(sel.ProjectID, sel.EnvironmentRef())+"?limit=1", nil, &resp); err != nil {
-		return nil
-	}
-	if len(resp.Deployments) == 0 {
-		return nil
-	}
-	return &resp.Deployments[0]
 }

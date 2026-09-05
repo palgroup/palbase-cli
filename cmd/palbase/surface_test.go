@@ -847,3 +847,74 @@ func TestTheSelectionFlagsAreGone(t *testing.T) {
 // letting two authorities disagree about the target. Sound rule, and the flag it
 // guarded is gone — a checkout has one address and it is in .palbase/project.json.
 // A guard against a flag nobody can pass measures nothing.
+
+// FR-013: NOTHING IN PRODUCTION TOUCHES `.palbase/selection.json`.
+//
+// The requirement says the flags AND the file "SHALL NOT exist", and its edge
+// case is explicit: an old checkout carrying one is simply "no longer read".
+// The flags went; the file did not. It kept ONE reader for months — and not the
+// one anybody would grep for. `pull_spec.go` called `selection.Load` directly,
+// which is easy to find; the resolver reached it INDIRECTLY, through
+// `Resolver.Resolve → r.Config() → Load(r.Dir)`, and five commands called that.
+//
+// So a grep for `selection.Load(` reported the file was almost gone while the
+// mechanism was still wired into `push`, `pull`, `logs`, `flags user` and
+// `open`. This gate does not grep for one call: it asserts that no production
+// file imports the file API at all.
+//
+// It also fixed a live defect on the way: `palbase flags user` asked the
+// resolver for an environment ref it used ONLY to decorate a success message,
+// and the lookup gated the whole command — so in a checkout linked by
+// `palbase link` the command answered "this directory is not linked to a
+// project". Measured before and after through the shipped binary.
+func TestNothingInProductionReadsTheRetiredSelectionFile(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file")
+	}
+	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+
+	// The file API — the reader, the writer, and the resolver that wraps them.
+	retired := []string{
+		"selection.Load(", "selection.Save(", "selection.ConfigPath(",
+		"selection.ApplySelection(", "selection.Config{", "selection.Resolver",
+	}
+	var offences []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() || !strings.HasSuffix(path, ".go") ||
+			strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		// The package that DEFINES the API, and the test-only fake, are not
+		// production callers — they are the thing being retired and the harness
+		// that still exercises what is left of it.
+		if strings.HasPrefix(rel, "internal/selection/") || strings.HasPrefix(rel, "internal/selectiontest/") {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue // prose about the retirement is the point, not a call
+			}
+			for _, name := range retired {
+				if strings.Contains(line, name) {
+					offences = append(offences, rel+":"+strconv.Itoa(i+1)+" uses "+name)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(offences)
+	if len(offences) > 0 {
+		t.Errorf("production still reaches the retired selection file (FR-013):\n%s\n\n"+
+			"the target comes from .palbase/project.json, and .palbase/local.json while a "+
+			"stack runs here — there is no second mechanism", strings.Join(offences, "\n"))
+	}
+}

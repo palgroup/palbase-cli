@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -37,20 +36,6 @@ func managedSpecPath(environmentRef string) string {
 // this package keeps its narrow dependency on restDoer and does not import the
 // transport package (see restDoer's comment).
 type statusCoder interface{ StatusCode() int }
-
-// managedSpecFetch is the production specFetch: the contract through the
-// Management API, wake-aware.
-//
-// UYANMA BEKLENİR, ÇÖKME BEKLENMEZ. Boşa indirilmiş bir tenant uyanırken düzlem
-// `503 spec_unavailable` döndürüyor ve bu GEÇEN bir durumdur; 4xx ise geçmez ve
-// beklemek yalnız insanın vaktini alır. Ayrım tam olarak burada yapılıyor.
-func managedSpecFetch(rest restDoer) specFetch {
-	return func(ctx context.Context, environmentRef string, w io.Writer) ([]byte, error) {
-		opts := defaultFetchOpts
-		opts.progress = w
-		return fetchManagedSpec(ctx, rest, environmentRef, opts)
-	}
-}
 
 // fetchManagedSpec is the testable core of managedSpecFetch.
 func fetchManagedSpec(ctx context.Context, rest restDoer, environmentRef string, opts fetchOpts) ([]byte, error) {

@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 
@@ -34,32 +33,6 @@ type deployClient interface {
 	// request that timed out AFTER the plane accepted it is not retried into a
 	// second deploy of the same bytes.
 	DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error
-}
-
-// gitRunner runs an external command (default: git). Injected so the
-// github-mode path is testable without forking a real git push.
-type gitRunner func(name string, args ...string) error
-
-type gitBranchResolver func() (string, error)
-
-// execGit forks a real command, wiring std streams so git's prompts and
-// progress reach the user's terminal.
-func execGit(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
-}
-
-func currentGitBranch() (string, error) {
-	out, err := exec.Command("git", "branch", "--show-current").Output()
-	if err != nil {
-		return "", fmt.Errorf("read current Git branch: %w", err)
-	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "" {
-		return "", fmt.Errorf("current checkout is detached — switch to the Git branch mapped to the selected environment")
-	}
-	return branch, nil
 }
 
 // PushPath is where an ARTIFACT is handed to the plane for one Environment.
@@ -85,12 +58,10 @@ func DeploymentsPath(projectID, environmentRef string) string {
 // retries under one Idempotency-Key, and the upload does neither — see the
 // deviation ledger, the capability is missing rather than configurable.
 type pushDeps struct {
-	git       gitRunner
-	gitBranch gitBranchResolver
-	rest      deployClient
-	sel       selection.Selection
-	out       io.Writer
-	ctx       context.Context
+	rest deployClient
+	sel  selection.Selection
+	out  io.Writer
+	ctx  context.Context
 	// build and pack are the bundling seam. Production builds this project with
 	// its own node_modules and packs the result; tests substitute both so the
 	// upload contract can be asserted without Bun and a real controller tree.
@@ -232,22 +203,6 @@ func runPush(d pushDeps) error {
 func pushIdempotencyKey(environmentRef string, tarball []byte) string {
 	sum := sha256.Sum256(append([]byte(environmentRef+"\x00"), tarball...))
 	return hex.EncodeToString(sum[:16])
-}
-
-// pullDeps are the injected collaborators for runPull.
-type pullDeps struct {
-	git       gitRunner
-	gitBranch gitBranchResolver
-	sel       selection.Selection
-	refetch   func() error
-}
-
-// runPull routes `palbase pull` by the project's repository provider.
-func runPull(d pullDeps) error {
-	if d.refetch == nil {
-		return fmt.Errorf("palbase-provider pull is not available (bundle refetch not wired)")
-	}
-	return d.refetch()
 }
 
 // SourcePath is where a project hands back the tree one of its versions was
@@ -401,19 +356,12 @@ mechanism — ` + "`palbase link`" + ` — and no flags that select a different 
 						"compatibility gate, and this push goes to a cloud environment, which has " +
 						"no such gate to open. Drop the flag, or run the push from a linked checkout")
 			}
-			sel, err := r.Selection().Resolve(cmd.Context())
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			return runPush(pushDeps{
-				git:       execGit,
-				gitBranch: currentGitBranch,
-				rest:      r.REST(),
-				sel:       sel,
-				out:       cmd.OutOrStdout(),
-				ctx:       cmd.Context(),
-			})
+			// NO SECOND WAY IN (FR-013). Above this line a bound checkout has
+			// already been served, by the address its committed file names. What
+			// used to follow resolved through `.palbase/selection.json` — a file
+			// nothing writes any more, so only a pre-cutover checkout could enter
+			// here, and it entered a SECOND path to the same cloud.
+			return selection.ErrNotSelected{}
 		},
 	}
 
@@ -478,21 +426,12 @@ func newPullCmd(r Resolvers) *cobra.Command {
 					cmd.Context(), target, cred, target.URL, cwd, cmd.OutOrStdout())
 			}
 
-			sel, err := r.Selection().Resolve(cmd.Context())
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", sel.Describe())
-			refetch := func() error {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				return pullBundle(cmd.Context(), r, sel.EnvironmentRef(), cwd, cmd.OutOrStdout())
-			}
-			return runPull(pullDeps{
-				git: execGit, gitBranch: currentGitBranch, sel: sel, refetch: refetch,
-			})
+			// NO SECOND WAY IN (FR-013). Above this line a bound checkout has
+			// already been served, by the address its committed file names. What
+			// used to follow resolved through `.palbase/selection.json` — a file
+			// nothing writes any more, so only a pre-cutover checkout could enter
+			// here, and it entered a SECOND path to the same cloud.
+			return selection.ErrNotSelected{}
 		},
 	}
 }
