@@ -92,7 +92,7 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
 		fmt.Fprintf(w, "✓ wrote %s\n", path)
-		if err := copyRolesToWeb(env); err != nil {
+		if err := copyRolesToWeb(env, w); err != nil {
 			return fmt.Errorf("write %s: %w", webRolesPath(), err)
 		}
 	}

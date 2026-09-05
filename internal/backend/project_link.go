@@ -279,7 +279,7 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 			err  error
 		)
 		if platform == webPlatform {
-			path, err = writeWebArtifacts(envs, specs)
+			path, err = writeWebArtifacts(envs, specs, w)
 		} else {
 			path, err = writeAppEnvironments(platform, envs)
 		}

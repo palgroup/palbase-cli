@@ -184,7 +184,7 @@ func mergeWithExisting(dir string, next appEnvironments) appEnvironments {
 // The contract goes in beside it: the native path commits one spec per
 // environment under `.palbase/openapi/`, and `palbe-gen` reads exactly one,
 // `Palbase/openapi.json`.
-func writeWebArtifacts(envs appEnvironments, specs map[string][]byte) (string, error) {
+func writeWebArtifacts(envs appEnvironments, specs map[string][]byte, w io.Writer) (string, error) {
 	env, ok := envs.Environments[envs.Default]
 	if !ok {
 		return "", fmt.Errorf("internal: no %q environment to write the web config from", envs.Default)
@@ -215,7 +215,7 @@ func writeWebArtifacts(envs appEnvironments, specs map[string][]byte) (string, e
 		// The ROLE DEFINITIONS of the same environment, beside the contract they
 		// belong to. The generator reads one directory and must not have to be
 		// told twice which environment it is looking at.
-		if err := copyRolesToWeb(envs.Default); err != nil {
+		if err := copyRolesToWeb(envs.Default, w); err != nil {
 			return "", err
 		}
 	}
@@ -450,9 +450,21 @@ func writeRolesArtifact(path string, roles stackRoles) error {
 // asked, and asking twice is two chances for two files to disagree about one
 // stack. Nothing to copy leaves the web file alone — absence means "not
 // fetched", never "none", and the same rule refreshRoles keeps applies here.
-func copyRolesToWeb(env string) error {
+func copyRolesToWeb(env string, w io.Writer) error {
 	raw, err := os.ReadFile(rolesPath(env))
 	if errors.Is(err, os.ErrNotExist) {
+		// YOKLUK SESSİZ OLAMAZ — ve buradaki yokluk normaldir, bu yüzden hata
+		// değil bir CÜMLE.
+		//
+		// `link` yayımlanabilir anahtarla koşuyor, rol ucu ise service_role
+		// kapılı: link rolleri çekemez ve çekmemeli. Ama sessizce geçtiğinde
+		// geliştiricinin gördüğü şey şuydu — link "başarılı" diyor, `palbe-gen`
+		// koşuyor, ve üretilen istemcide `Roles`/`Permissions` sabitleri hiç
+		// olmuyor. Kimse sebebini söylemiyor, ve eksik bir sabit derleme hatası
+		// bile vermiyor: kod düz string yazmaya devam ediyor, yani sunucunun
+		// 403'lediği bir izin adı sessizce yaşıyor.
+		fmt.Fprintf(w, "roles: %s yok — `palbase spec` koşulmadan rol tanımları indirilmez;\n", rolesPath(env))
+		fmt.Fprintf(w, "roles: üretilen istemci `Roles`/`Permissions` sabitlerini TAŞIMAZ\n")
 		return nil
 	}
 	if err != nil {
