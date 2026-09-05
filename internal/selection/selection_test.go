@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -404,19 +403,6 @@ func TestResolve_IsCached(t *testing.T) {
 }
 
 // ── gitignore ───────────────────────────────────────────────────────────────
-
-func TestEnsureGitignored_NarrowsADirectoryWideRule(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, ".gitignore")
-	require.NoError(t, os.WriteFile(path, []byte("node_modules\n.palbase\n"), 0o644))
-	require.NoError(t, selection.EnsureGitignored(path))
-
-	raw, err := os.ReadFile(path)
-	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	require.Equal(t, []string{"node_modules", ".palbase/selection.json"}, lines,
-		"generated artifacts under .palbase must stay trackable")
-}
 
 func TestErrNotSelected_IsMatchable(t *testing.T) {
 	var target selection.ErrNotSelected

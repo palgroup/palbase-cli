@@ -25,7 +25,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // Version is the only config schema the CLI writes or accepts.
@@ -188,50 +187,4 @@ func (c *Config) SetAppID(platform, appID string) error {
 		return fmt.Errorf("unsupported app slot %q", platform)
 	}
 	return nil
-}
-
-// EnsureGitignored keeps the per-machine selection out of git while leaving
-// generated artifacts under .palbase (openapi.json, platform configs)
-// trackable. An existing directory-wide `.palbase` rule is narrowed in place.
-func EnsureGitignored(path string) error {
-	const entry = ".palbase/selection.json"
-
-	content, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	lines := strings.Split(string(content), "\n")
-	normalized := make([]string, 0, len(lines)+1)
-	found := false
-	for _, line := range lines {
-		switch strings.TrimSpace(line) {
-		case entry, ".palbase", ".palbase/":
-			if !found {
-				normalized = append(normalized, entry)
-				found = true
-			}
-		default:
-			normalized = append(normalized, line)
-		}
-	}
-
-	updated := strings.Join(normalized, "\n")
-	if !found {
-		if updated != "" && !strings.HasSuffix(updated, "\n") {
-			updated += "\n"
-		}
-		updated += entry + "\n"
-	}
-	if updated == string(content) {
-		return nil
-	}
-
-	mode := os.FileMode(0o644)
-	if info, statErr := os.Stat(path); statErr == nil {
-		mode = info.Mode().Perm()
-	} else if !os.IsNotExist(statErr) {
-		return fmt.Errorf("stat %s: %w", path, statErr)
-	}
-	return os.WriteFile(path, []byte(updated), mode)
 }

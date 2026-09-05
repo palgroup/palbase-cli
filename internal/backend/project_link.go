@@ -50,6 +50,11 @@ type linkOpts struct {
 	platforms  []string
 	insecure   bool
 	tokenStdin bool
+	// Web only, and both optional: where the generated client's import goes,
+	// and what it is called. They travelled with `palbase web link`; the work
+	// they steer moved into this command with the rest of the web wiring.
+	entry string
+	out   string
 }
 
 func newLinkCmd(r Resolvers) *cobra.Command {
@@ -134,6 +139,8 @@ boot generated.`,
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
 	f.BoolVar(&o.tokenStdin, "token-stdin", false,
 		"read this stack's key from stdin and remember it for this address (self-hosted stacks)")
+	f.StringVar(&o.entry, "entry", "", "web: entry file to wire the generated client into (auto-detected when absent)")
+	f.StringVar(&o.out, "out", "", "web: name for the generated client (default: palbe.gen.ts)")
 	return cmd
 }
 
@@ -297,6 +304,12 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 
+	// Before a single artifact is written: a repository that ignores the whole
+	// .palbase directory is a repository the next clone cannot build, and every
+	// platform's slot goes with it — not just web's.
+	if err := ensurePalbaseGitignored(".gitignore"); err != nil {
+		return fmt.Errorf("update .gitignore: %w", err)
+	}
 	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", nativeArtifactsDir, err)
 	}
@@ -316,6 +329,7 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// other end, and a link that ignores it is a link for one platform wearing
 	// a flag for four.
 	apple := false
+	web := false
 	for _, platform := range platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))
 		var (
@@ -332,6 +346,9 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 		if isApplePlatform(platform) {
 			apple = true
+		}
+		if platform == webPlatform {
+			web = true
 		}
 		written := strings.Join(envs.names(), ", ")
 		if platform == webPlatform {
@@ -351,6 +368,17 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 			return err
 		}
 		reportInfoPlistRequirement(root, envs, w)
+	}
+
+	// THE SAME STEP APPLE GETS, FOR WEB. An Apple checkout leaves here with
+	// build configurations and a compiled Swift client; a web checkout used to
+	// leave with two JSON files and nothing that reads them. Its wiring lived
+	// behind `palbase web link` and went unreachable when that command was
+	// retired — so the platform that needs the most setup got the least.
+	if web {
+		if err := wireWebProject(ctx, o.entry, o.out, w); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
@@ -515,4 +543,61 @@ func trimBody(b []byte) string {
 // addresses would be a tool that stops verifying them.
 func insecureTransport() http.RoundTripper {
 	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in, documented above
+}
+
+// ensurePalbaseGitignored narrows a directory-wide `.palbase` ignore rule to the
+// ONE file inside it that must not be committed.
+//
+// `.palbase/` is meant to be committed: the contract, the platform slots and the
+// link itself live there, and that is what lets a colleague clone the repository
+// and build without logging in or re-linking. A `.gitignore` carrying `.palbase`
+// or `.palbase/` takes all of it, and the next clone resolves no project and
+// generates no client.
+//
+// The narrowed entry is `.palbase/local.json` — the stack running on THIS
+// machine, which is per-machine by definition. It used to be
+// `.palbase/selection.json`; that file no longer decides anything (FR-013), so
+// narrowing to it would have ignored a file nothing writes while leaving the
+// per-machine address committed for everyone else to trip over.
+func ensurePalbaseGitignored(path string) error {
+	const entry = ".palbase/local.json"
+
+	content, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	normalized := make([]string, 0, len(lines)+1)
+	found := false
+	for _, line := range lines {
+		switch strings.TrimSpace(line) {
+		case entry, ".palbase", ".palbase/":
+			if !found {
+				normalized = append(normalized, entry)
+				found = true
+			}
+		default:
+			normalized = append(normalized, line)
+		}
+	}
+
+	updated := strings.Join(normalized, "\n")
+	if !found {
+		if updated != "" && !strings.HasSuffix(updated, "\n") {
+			updated += "\n"
+		}
+		updated += entry + "\n"
+	}
+	if updated == string(content) {
+		return nil
+	}
+
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat %s: %w", path, statErr)
+	}
+	return os.WriteFile(path, []byte(updated), mode)
 }

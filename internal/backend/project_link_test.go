@@ -847,3 +847,59 @@ func TestUnlinkRemovesTheProjectFile(t *testing.T) {
 		t.Errorf("unlinking an unlinked checkout was an error: %v", err)
 	}
 }
+
+// THE WEB WIRING IS REACHED FROM THE COMMAND, not just from its own tests.
+//
+// This is the failure the whole restoration exists to prevent: `palbase web
+// link` did eight setup steps, the command was retired, and the steps became
+// 1.208 lines nothing could call — while their own tests went on passing. A
+// suite that only drives wireWebProject directly would have stayed green
+// through exactly that.
+//
+// So this runs the PRODUCTION path — runLink, the function the command's RunE
+// calls — in a real web checkout, and asserts on what only the wiring produces:
+// the package.json scripts that regenerate the client on the next build.
+func TestLinkWiresAWebCheckoutEndToEnd(t *testing.T) {
+	inScratchCheckout(t)
+	stubInstall(t)
+
+	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
+	srv := stackServing(t, anon, nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	// A web checkout: package.json beside an entry file. Detection would find
+	// this on its own; the platform is named so the test says what it means.
+	if err := os.WriteFile("package.json", []byte(`{"name":"app","scripts":{"dev":"next dev"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
+
+	pkg, err := os.ReadFile("package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range []string{"predev", "prebuild"} {
+		if !strings.Contains(string(pkg), `"`+hook+`"`) {
+			t.Errorf("package.json carries no %s script after `link` — the web wiring did not run:\n%s\n\n%s",
+				hook, pkg, out.String())
+		}
+	}
+	// And the existing script survived byte-for-byte: the patcher splices, it
+	// does not round-trip somebody's file through a JSON encoder.
+	if !strings.Contains(string(pkg), `"dev":"next dev"`) {
+		t.Errorf("the project's own script did not survive the patch:\n%s", pkg)
+	}
+
+	// The ignore rule was narrowed for every platform, not just web.
+	ignore, err := os.ReadFile(".gitignore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ignore), ".palbase/local.json") {
+		t.Errorf(".gitignore does not keep the per-machine address out of git:\n%s", ignore)
+	}
+}
