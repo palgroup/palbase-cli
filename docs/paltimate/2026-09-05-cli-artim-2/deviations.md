@@ -262,3 +262,41 @@ Aynı sınıfın CLI tarafı için `cmd/palbase/advice_test.go`: shipped string'
 verdiği tavsiyeler aynı türetilmiş kümeye karşı ölçülür, AST ile (yorumlar
 görünmez). İlk koşusunda `palbase pull`'un "run `palbase web link` … first"
 reddini buldu — çaresi yazılamayan bir ret.
+
+### A-13 · ÖZ-DENETİM: KURALLARDAN BİRİNİ BEN İHLAL ETTİM
+
+GOAL'ün üç davranış kuralı (*workaround yapma · legacy ile karşılaşırsan sil ·
+kendin legacy de yaratma*) sonuç raporunda değil, **tek tek** denetlenmeliydi.
+Denetim yapılınca biri ihlal edilmiş çıktı — ve ihlal eden bendim.
+
+**İhlal:** `--platform web`, package.json'sız bir dizinde. Teşhisim doğruydu
+(ret artefaktlar yazıldıktan SONRA geliyordu → yarım link, hata olarak
+raporlanmış), ama seçtiğim çare **iki testi değiştirmeden geçiren** çareydi:
+reddi NOT'a çevirmek. Aynı kusurun ikinci ve dürüst çaresi vardı — *hiçbir şey
+yazılmadan önce reddet* — ve onu seçmemiştim.
+
+> **Ders:** *bir düzeltmeyi, kırmızı testleri yeşile çeviren yönde seçmek
+> workaround'un şeklidir.* Testler düştükten SONRA üretim davranışını
+> değiştiriyorsan, önce şunu sor: bu kusurun testlere dokunmayan başka bir
+> çaresi var mı? Varsa, seçtiğin çareyi testler seçti.
+
+Geri alındı: `refuseUnsupportedPlatforms` artık `validatePlatforms`ın yanında,
+ağdan ve ilk bayttan önce. Dört fikstür güçlendirildi (gevşetilmedi) — hepsi
+web linkini web olmayan bir dizinde koşuyordu ve yalnız ön koşul GEÇ kontrol
+edildiği için geçiyorlardı. `TestAnUnsupportedPlatformIsRefusedBeforeAnythingIsWritten`
+hem reddi hem DİSKTE HİÇBİR ŞEY kalmadığını ölçüyor; mutasyon kırmızı.
+
+**Diğer iki kural, ölçümle:**
+- *kendin legacy yaratma* → bu oturumda eklenen sembollerin **hepsinin** üretim
+  çağıranı var (test yardımcıları dahil; `unused` onları da sayıyor, 0 issue).
+  `hasApple` shim'lenmedi, SİLİNDİ — build `undefined: hasApple` verene kadar.
+- *legacy ile karşılaşırsan sil* → silinenler A-4…A-9'da. Silinmeyen bir tane
+  adlandırıldı: `internal/selection` ölü ada DEĞİL (8 dosyada 11 üretim
+  tüketicisi); emekli olan adresleme yarısıydı. `selection.json` dosyasının ise
+  artık yazanı yok, tek okuyanı var — eski CLI'ların bıraktığı checkout'lar için
+  bir GÖÇ KOLAYLIĞI olarak kodda adlandırıldı, canlı mekanizma olarak değil.
+
+**Ve bir süreç hatası:** bu düzeltmeyi `-short` yeşil diye push ettim; CI
+düştü. `-short` tam takım değil — dördüncü bir fikstür (`requiresRealToolchain`
+altında, yerelde atlanan) aynı ön koşula takılıyordu. Kural zaten yazılıydı:
+YERELDE KOŞ, CI teyittir. Bu kez CI'ın koştuğu komutun aynısı yerelde koşuldu.

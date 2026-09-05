@@ -80,7 +80,15 @@ func ConfigPath(dir string) string {
 type ErrNotSelected struct{}
 
 func (ErrNotSelected) Error() string {
-	return "no project selected — run `palbase link <project>` in this directory, or pass --project/--environment"
+	// NAME A CURE THAT EXISTS. `--project` and `--environment` were removed with
+	// the second addressing mechanism (FR-013): the binary does not parse them,
+	// so this line sent the reader to `unknown flag`. One `link` is the whole
+	// mechanism, and it takes a name, a ref or an address.
+	return "this directory is not linked to a project.\n" +
+		"  palbase link <project>        a project in the cloud, by name\n" +
+		"  palbase link <ref>            one environment of it, by ref\n" +
+		"  palbase link <url>            something running on this machine\n" +
+		"  palbase start                 bring one up here and link to it"
 }
 
 // Load reads the current config from dir. A missing file yields ErrNotSelected.

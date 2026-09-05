@@ -47,15 +47,34 @@ func TestTheWholeChainFromInitToLink(t *testing.T) {
 	//
 	// Derived from the installed SDK and written to the committed file. A
 	// derivation nobody writes down is one the next run is free to disagree with.
-	linked := exec.Command(bin, "link", "--url", "http://127.0.0.1:1")
+	//
+	// AGAINST A STACK THAT ANSWERS. This used to point at a dead address, so
+	// `link` never got far enough to write anything — and the assertion below
+	// read a file that never existed and SKIPPED ITSELF. The box was ticked and
+	// nothing was measured, which is the exact failure this run exists to stop.
+	// The fake stack is the one the unit tests use; the binary reaches it over
+	// loopback like any other address.
+	srv := stackServing(t, "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0", nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	linkedAs(t, srv.URL, "a-credential")
+
+	linked := exec.Command(bin, "link", "--url", srv.URL)
 	linked.Dir = dir
-	linkOut, _ := linked.CombinedOutput()
-	// The address is deliberately dead: this asserts on WHAT LINK SAYS about the
-	// checkout, not on a stack being up. What must not happen is the old
-	// behaviour — silently writing Apple artifacts because `--platform`
-	// defaulted to `ios` in a project that is not an Apple checkout.
-	if strings.Contains(string(linkOut), "ios") && !strings.Contains(string(linkOut), "cannot tell") {
-		t.Errorf("link claimed an Apple platform in a backend checkout:\n%s", linkOut)
+	linked.Env = append(os.Environ(), "HOME="+home)
+	linkOut, linkErr := linked.CombinedOutput()
+	if linkErr != nil {
+		t.Fatalf("palbase link: %v\n%s", linkErr, linkOut)
+	}
+	// A backend checkout has no client app, and `link` must say so and bind
+	// anyway — the binding is what `push` reads. The old behaviour it must not
+	// return to is silently writing Apple artifacts because `--platform`
+	// defaulted to `ios`.
+	if !strings.Contains(string(linkOut), "no client app here") {
+		t.Errorf("link did not say what it looked for in a backend checkout:\n%s", linkOut)
+	}
+	if strings.Contains(string(linkOut), "Palbase/Config") {
+		t.Errorf("link wrote Apple artifacts in a backend checkout:\n%s", linkOut)
 	}
 
 	// ── start: names the version AND the images (FR-002/FR-003) ─────────────
@@ -72,11 +91,18 @@ func TestTheWholeChainFromInitToLink(t *testing.T) {
 	}
 
 	// ── the committed file carries the version ──────────────────────────────
+	//
+	// NO SILENT SKIP. This read used to be wrapped in `if err == nil`, and the
+	// file never existed, so the one assertion this test was written for never
+	// ran once. A missing file is now the failure it always was.
 	projectFile := filepath.Join(dir, ".palbase", "project.json")
-	if body, err := os.ReadFile(projectFile); err == nil {
-		if !strings.Contains(string(body), "stackVersion") {
-			t.Errorf("%s carries no stackVersion after link:\n%s", projectFile, body)
-		}
+	body, err := os.ReadFile(projectFile)
+	if err != nil {
+		t.Fatalf("link wrote no %s, so the checkout is not bound and `push` cannot work: %v\n%s",
+			projectFile, err, linkOut)
+	}
+	if !strings.Contains(string(body), "stackVersion") {
+		t.Errorf("%s carries no stackVersion after link:\n%s", projectFile, body)
 	}
 
 	// ── the retired surface is not reachable from the shipped binary ────────

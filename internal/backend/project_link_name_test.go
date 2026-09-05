@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -118,6 +119,16 @@ func TestTheCommandActuallyResolvesTheName(t *testing.T) {
 		REST:      func() REST { return rest },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
 	}
+	// A REAL WEB CHECKOUT, in a scratch directory. `--platform web` is here to
+	// keep detection out of a test about NAME RESOLUTION — and the web wiring's
+	// prerequisite is now checked before the network, so the flag needs a
+	// directory that can carry it. Without the chdir this ran in the package's
+	// own source tree, which is not a web app and never was.
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("package.json", []byte(`{"name":"app"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cmd := newLinkCmd(r)
 	cmd.SetArgs([]string{"todoapp", "--platform", "web"})
 	cmd.SetOut(io.Discard)

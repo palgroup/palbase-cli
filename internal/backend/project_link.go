@@ -239,13 +239,24 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 		platforms = detectPlatforms(root)
 		if len(platforms) == 0 {
-			return fmt.Errorf(
-				"cannot tell what kind of app this is: looked for an Xcode project or workspace, "+
-					"an Android applicationId in build.gradle[.kts], and a package.json beside an "+
-					"index.html/public/src/app — found none in %s.\n  Name it with --platform if this "+
-					"checkout keeps them somewhere else", root)
+			// NO CLIENT IS NOT NO LINK. Binding a checkout to a stack and
+			// writing a client's artifacts are two jobs, and only the second one
+			// needs a platform. This used to REFUSE, which broke the flow the
+			// product is built around: `palbase init` scaffolds a backend, a
+			// backend has no Xcode project and no package.json beside an
+			// index.html, so `link` refused it — while `push` in the same
+			// directory said "run `palbase link` in this directory". The two
+			// commands pointed at each other and neither could be satisfied.
+			//
+			// Say what was looked for, then bind. An explicitly NAMED platform
+			// this directory cannot carry is still refused, before any write —
+			// that is a typo, not a backend.
+			fmt.Fprintf(w, "▸ no client app here (looked for an Xcode project or workspace, an "+
+				"Android applicationId in build.gradle[.kts], and a package.json beside an "+
+				"index.html/public/src/app) — linking the backend only\n")
+		} else {
+			fmt.Fprintf(w, "▸ %s\n", strings.Join(platforms, ", "))
 		}
-		fmt.Fprintf(w, "▸ %s\n", strings.Join(platforms, ", "))
 	}
 
 	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
@@ -302,6 +313,19 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// reaches the same stack without being told which one it is.
 	if err := WriteTarget(target); err != nil {
 		return err
+	}
+	// AND THE VERSION THE PROJECT DECLARES (FR-001). The field is a property of
+	// the committed file, not of the command that happens to need it: it was
+	// written only on the `start` path, so a checkout bound to a CLOUD project
+	// never carried one and "the file says which generation this project runs"
+	// was true for local stacks only.
+	//
+	// BEST EFFORT, DELIBERATELY. Deriving it reads the installed
+	// @palbase/backend, and a checkout that has not run `npm install` yet has
+	// none — turning a working link into an error over a field `start` would
+	// fill in later would be a refusal nobody needs.
+	if root, err := os.Getwd(); err == nil {
+		_, _ = stackVersion(root)
 	}
 
 	// EVERY environment, not the one being linked. An app that holds only the
@@ -402,9 +426,14 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	reportContractDrift(specs, w)
 
-	if apple {
+	switch {
+	case apple:
 		fmt.Fprintln(w, "commit .palbase/ and Palbase/Generated/")
-	} else {
+	case len(platforms) == 0:
+		// There is no Palbase/ in a backend-only checkout, and naming a
+		// directory that does not exist sends the reader looking for it.
+		fmt.Fprintln(w, "commit .palbase/")
+	default:
 		fmt.Fprintln(w, "commit .palbase/ and Palbase/")
 	}
 	return nil
