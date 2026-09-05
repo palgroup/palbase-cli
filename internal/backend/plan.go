@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -97,6 +98,25 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 		fmt.Fprintf(indent(out), "%d @Upload route(s), every bucket exists\n", len(uses))
 	}
 
+	// IMAGE, before the schema, because it is the coarser change: a pod replaced
+	// is a bigger thing to know about than a column added, and a plan reads
+	// top-down. Both sides are read here rather than inside the writer so the
+	// writer stays a pure formatter with a test that needs no network.
+	//
+	// The target is the SDK INSTALLED IN THIS CHECKOUT — the same number
+	// `palbase start` resolves locally, which is the whole point: what you tested
+	// against is what the push carries. The current is what the project SAYS it
+	// runs; silent when it will not say, and the writer treats that silence as
+	// "unknown", not as "changing".
+	if installed, err := installedSDKVersion(dir); err == nil {
+		sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
+		running, sdkErr := projectSDKVersion(sdkCtx, target, cred)
+		cancelSDK()
+		if sdkErr == nil {
+			writeImagePlan(out, running, installed)
+		}
+	}
+
 	// SCHEMA, computed by the project against its own database.
 	//
 	// EVERY declaration goes. It used to send the public file alone and print a
@@ -137,6 +157,30 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// nothing to say about them: they are already in effect. What a push carries
 	// is code and schema, and that is what this shows.
 	return nil
+}
+
+// writeImagePlan says what the push will do to the pod — and only when it will
+// do something (FR-017/018).
+//
+// THE IMAGE TAG IS THE SDK VERSION. Nothing else moves it: not a release of the
+// platform, not an operator, not a schedule. So the one moment a tenant's pod is
+// replaced is the moment they change the version in their own package.json, and
+// this is the line that says so before it happens.
+//
+// A WARNING, NOT AN ALARM. The swap goes through the holder route: requests wait
+// and none of them fail. Saying "the pod will restart" without saying that would
+// read as an outage nobody is having.
+//
+// SILENT ON AN UNKNOWN CURRENT. The plane does not always answer with a running
+// version, and comparing "" against a real one is not a change — it is a missing
+// fact. Printing "→ 33.0.2" out of that would invent a migration that may not be
+// happening.
+func writeImagePlan(w io.Writer, current, target string) {
+	if current == "" || current == target {
+		return
+	}
+	fmt.Fprintf(w, "image\n  %s → %s   (the pod is replaced; requests wait in the holder, none fail)\n",
+		current, target)
 }
 
 // schemaPlanWire is the project's SchemaPlan.

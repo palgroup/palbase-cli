@@ -4,6 +4,7 @@ package backend
 // during a plan, and replace a secret nobody named.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -439,5 +440,39 @@ func TestPlanLeavesNoBuildOutputBehind(t *testing.T) {
 	// reach the contract or the platform slots beside it.
 	if _, err := os.Stat(filepath.Join(dir, ".palbase")); err != nil && !os.IsNotExist(err) {
 		t.Errorf(".palbase/ itself is unreadable after the cleanup: %v", err)
+	}
+}
+
+// THE PLAN SAYS WHAT WILL CHANGE (FR-017) — AND STAYS QUIET WHEN NOTHING WILL
+// (FR-018).
+//
+// A line printed "always" shows an unchanging field as though it were moving,
+// which destroys the reason anyone reads a plan. The image only changes when the
+// installed SDK does, so on a push that carries the same version the pod is
+// never touched and there is nothing to warn about.
+func TestPlanImageLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, current, target string
+		want                  bool
+	}{
+		{"changing", "33.0.1", "33.0.2", true},
+		{"unchanged", "33.0.2", "33.0.2", false},
+		// THE PLANE WOULD NOT SAY. `projectSDKVersion` is deliberately silent
+		// when it cannot be read (status does the same), and an empty string
+		// compared against a real version is not a change — it is an unknown.
+		// Printing "→ 33.0.2" from nothing would invent a migration.
+		{"unknown current", "", "33.0.2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			writeImagePlan(&buf, tc.current, tc.target)
+			got := strings.Contains(buf.String(), "image")
+			if got != tc.want {
+				t.Fatalf("line present=%v, want %v — output: %q", got, tc.want, buf.String())
+			}
+			if tc.want && !strings.Contains(buf.String(), tc.target) {
+				t.Fatalf("the target version is not in the output: %q", buf.String())
+			}
+		})
 	}
 }
