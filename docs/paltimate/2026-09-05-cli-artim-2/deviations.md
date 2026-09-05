@@ -121,3 +121,23 @@ Bulut projesine bağlı bir checkout'ta dev yığın koşarken `ReadTarget` yere
 **Not:** `w1-a` SDK deposunda benim olmayan bir kusuru doğru teşhis etti (`docs.test.ts`,
 commit'lenmemiş `services.md`); sınırının dışında olduğu için dokunmadı. Bugün ölçtüm: **10/10 geçiyor**,
 başka bir oturum kapatmış.
+
+### I-2 · Muafiyet BEYANA değil TAHMİNE dayanıyordu
+
+T003'te "muafiyet kör değil, kendi ölçüsünü taşıyor" demiştim. Doğruydu ama eksikti: ayrım imaj
+girdisinin BEYAN ettiği bir şeye değil, **ref'in önekine** bakıyordu. Gözden geçirenin iki mutasyonunu
+kendim koştum ve ikisi de yeşil geçti:
+
+```
+edge   → ghcr.io/palgroup/palbase-edge:0.1.0    → ok   (önek ıskalandı)
+palsvc → docker.io/palgroup/palsvc:0.1.0        → ok   (önek ıskalandı)
+```
+
+Yani bizim bir imajımız başka bir yola yayımlanınca sessizce "upstream" sayılıp çekirdek-eşitlik
+kontrolünden **tamamen çıkıyordu** — ve o kontrolün tek işi bayat bir çekirdek pinini yakalamak.
+
+`stackImage` artık açık bir `upstream bool` taşıyor: **girdi ne olduğunu SÖYLER, ref'inden tahmin
+edilmez.** Üç mutasyon da artık kırmızı: iki taşınmış-bizim-imaj + upstream'in `:latest`'i.
+
+**Ders:** bir kuralın öznesi tahmin edilemez. "Bizim imajımız" bir önek deseni değil, bir olgudur ve
+veriye yazılmalıdır.

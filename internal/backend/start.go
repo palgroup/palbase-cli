@@ -65,17 +65,17 @@ const composeFile = "docker-compose.dev.yml"
 // and passed anyway, because another stack on the machine happened to have built
 // the right one.
 var stackImages = []stackImage{
-	{"PALBASE_PALSVC_IMAGE", "ghcr.io/palgroup/palbase/palsvc:0.42.0",
-		"cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
-	{"PALBASE_RUNTIME_IMAGE", "ghcr.io/palgroup/palbase/runtime-dev:0.42.0",
-		"cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
+	{env: "PALBASE_PALSVC_IMAGE", fallback: "ghcr.io/palgroup/palbase/palsvc:0.42.0",
+		build: "cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
+	{env: "PALBASE_RUNTIME_IMAGE", fallback: "ghcr.io/palgroup/palbase/runtime-dev:0.42.0",
+		build: "cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
 	// The EDGE, and it belongs here for the same reason the other two do: it is
 	// the one container that publishes, so a stack without it has no address at
 	// all. Absent from this list, a missing edge image surfaced as docker's raw
 	// pull error at `compose up` instead of this command's own refusal with the
 	// line that builds it.
-	{"PALBASE_EDGE_IMAGE", "ghcr.io/palgroup/palbase/edge:0.42.0",
-		"cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge ."},
+	{env: "PALBASE_EDGE_IMAGE", fallback: "ghcr.io/palgroup/palbase/edge:0.42.0",
+		build: "cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge ."},
 	// THE DATABASE, and it was outside this list until 2026-09-05.
 	//
 	// Not an oversight with no consequence: the parity gate loops over THIS
@@ -85,13 +85,25 @@ var stackImages = []stackImage{
 	// compose ran `pgvector/pgvector:pg16` as a bare literal.
 	//
 	// Upstream image, so the recovery line is a pull rather than a build.
-	{"PALBASE_POSTGRES_IMAGE", "pgvector/pgvector:pg16",
-		"docker pull pgvector/pgvector:pg16"},
+	{env: "PALBASE_POSTGRES_IMAGE", fallback: "pgvector/pgvector:pg16",
+		build: "docker pull pgvector/pgvector:pg16", upstream: true},
 }
 
 // stackImage is one container's pin: the variable that overrides it, the
 // reference it defaults to, and the line that tells somebody how to get it.
-type stackImage struct{ env, fallback, build string }
+type stackImage struct {
+	env, fallback, build string
+	// upstream marks an image somebody else publishes, so the core-version rule
+	// does not apply to it.
+	//
+	// DECLARED, NOT GUESSED. The parity gate used to infer this from the ref's
+	// prefix, which meant one of OUR images published to a different path
+	// silently became "upstream" and left the equality check altogether —
+	// measured: `ghcr.io/palgroup/palbase-edge:0.1.0` and
+	// `docker.io/palgroup/palsvc:0.1.0` both passed a gate whose whole job is to
+	// catch a stale core pin. An entry says what it IS.
+	upstream bool
+}
 
 // imagesFor reads the version→image table out of the INSTALLED SDK.
 //

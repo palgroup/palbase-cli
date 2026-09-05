@@ -794,14 +794,15 @@ func TestStackImagesTrackTheCoreVersion(t *testing.T) {
 	// majörü; bizim çekirdek sürümümüzle eşleşmesi için hiçbir sebep yok ve
 	// eşleşmesini istemek onu her çekirdek yayınında yanlış yere taşırdı.
 	//
-	// Muafiyet DAR ve KENDİ ölçüsünü taşıyor: bizim önekimizi taşıyan imajlar
-	// çekirdeğe EŞİT olmalı; taşımayanlar SABİT bir etiket taşımalı (`latest`
-	// bir pin değildir). Yani upstream imaj kontrolden çıkmıyor, BAŞKA bir
-	// kontrole giriyor.
-	const ourPrefix = "ghcr.io/palgroup/palbase/"
+	// Muafiyet DAR, KENDİ ölçüsünü taşıyor ve BEYANA dayanıyor: girdinin
+	// `upstream` alanı ne olduğunu söyler. Önce ref'in ÖNEKİNE bakıyordu ve
+	// bağımsız inceleme onu kırdı — bizim bir imajımız başka bir yola taşınınca
+	// (`ghcr.io/palgroup/palbase-edge`, `docker.io/palgroup/palsvc`) sessizce
+	// "upstream" sayılıp çekirdek-eşitlik kontrolünden tamamen çıkıyordu. Bir
+	// kuralın öznesi tahmin edilemez.
 	for _, img := range stackImages {
 		tag := img.fallback[strings.LastIndex(img.fallback, ":")+1:]
-		if strings.HasPrefix(img.fallback, ourPrefix) {
+		if !img.upstream {
 			if tag != core {
 				t.Errorf("%s varsayılanı %q sürümünü pinliyor, çekirdek ise %q — "+
 					"yerel yığın buluttan farklı bir çekirdek koşar (imaj: %s)",
