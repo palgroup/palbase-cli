@@ -463,8 +463,8 @@ func copyRolesToWeb(env string, w io.Writer) error {
 		// olmuyor. Kimse sebebini söylemiyor, ve eksik bir sabit derleme hatası
 		// bile vermiyor: kod düz string yazmaya devam ediyor, yani sunucunun
 		// 403'lediği bir izin adı sessizce yaşıyor.
-		fmt.Fprintf(w, "roles: %s yok — `palbase spec` koşulmadan rol tanımları indirilmez;\n", rolesPath(env))
-		fmt.Fprintf(w, "roles: üretilen istemci `Roles`/`Permissions` sabitlerini TAŞIMAZ\n")
+		fmt.Fprintf(w, "roles: no %s — role definitions are fetched by `palbase spec`, not by link\n", rolesPath(env))
+		fmt.Fprintf(w, "roles: until you run it, the generated client carries NO Roles/Permissions constants\n")
 		return nil
 	}
 	if err != nil {
