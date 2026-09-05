@@ -46,3 +46,35 @@ düşmüştü. Gerçek: `v2/runtime/src/server.ts:12` —
 
 Runtime'ın kendi `/readyz`'i **var** ve tam olarak FR-004'ün sorduğu şeyi söylüyor. Eksik olan
 compose tarafı: runtime servisinin healthcheck'i yok, yani `start` onu bekleyemiyor.
+
+---
+
+## UAT üç kusur yakaladı — üçü de birim testlerin göremediği türden
+
+Her yarı kendi testini geçiyordu; kırılan şey **birleşimdi**.
+
+1. **`palbase start` taze bir `palbase init`'i reddediyordu.** T002'de eklediğim `stackVersion`
+   çağrısı `ReadTarget()`'ı ölümcül sayıyordu; oysa linksiz checkout `start` için NORMAL durum —
+   `start` yığını kaldırıp *kendisi* linkliyor. Kullanıcı "this checkout is not linked" görüyordu:
+   az önce koştuğu komuta tavsiye. Artık türetiyor ve dosya yoksa yazmıyor (yarım bir target, henüz
+   var olmayan bir adresi adlandırırdı).
+2. **`--platform bogus` bağlantı hatası veriyordu**, ret değil. Yazım hatası "yığın kapalı" gibi
+   okunuyordu. Doğrulama ağdan ÖNCE'ye alındı.
+3. **Platform algılaması da ağdan sonraydı.** Dizin okumak kimsenin iznini gerektirmiyor.
+   `▸ ios, web` artık bağlantıdan önce basılıyor.
+
+**Ders:** UAT'yi "kutuyu işaretlemek" sanmak, koşunun en ucuz teşhis aracını harcamaktır. Üç kusur
+da üretim yolundan ilk geçişte çıktı.
+
+## Tasarımın DÖRT bayat iddiası (hepsi ölçümle çürütüldü)
+
+| # | Tasarım | Ölçüm |
+|---|---|---|
+| CB-46 | "yedi pin, dördü kontrolsüz" | Dört pin, **biri** kontrolsüz (`pgvector`) |
+| FR-007 | "`stop` dosyaları silmeden önce başarılı olsun" | Mevcut sıra **ölçülmüş bir karar**; yalnız compose'u yeniden yazması gerçekti |
+| FR-012 | "`gatherEnvironments` ↔ `addLocalStack` %95 birebir" | 78 vs 35 satır, **farklı işler**; gerçek örtüşme öbür çiftte |
+| FR-014 | "`internal/apps` (617) ve `internal/hook` (494) silinsin" | İkisi de kısmen **canlı**; kesim satır sayısını değil çağıranları izledi |
+
+Ayrıca pre-flight'ta bir ölçümüm yanlıştı ("runtime'ın hazırlık ucu yok" — `grep` `node_modules`'a
+düşmüştü) ve bir kapı yazarken kendi kusurumu buldum (rota kapısının regex'i seçenekli
+dekoratörleri yutuyordu, `/v1/cloud/me` ve `/config`'i "servis edilmiyor" sanıyordu).

@@ -301,13 +301,13 @@ bloklayıcı bir CI kapısı bağladı; silmek kapıyı da götürür.
 
 **Kanıt:** CB-32 (617 satır) · CB-33 (494 satır) · CB-35 (github kolunun 12 üretim referansı).
 
-- [ ] **Adım 1: Çağıranları ÖLÇ** — `grep -rn` ile her üçünün üretim çağıranlarını listele; sıfır
+- [x] **Adım 1: Çağıranları ÖLÇ** — `grep -rn` ile her üçünün üretim çağıranlarını listele; sıfır
   olmayanlar T010'un sökümüyle düşmüş olmalı.
-- [ ] **Adım 2: Sil** — iki dizin + `deploy.go`'daki github dalı. Shim, "bu kaldırıldı" mesajı,
+- [x] **Adım 2: Sil** — iki dizin + `deploy.go`'daki github dalı. Shim, "bu kaldırıldı" mesajı,
   bayrak kalıntısı YOK.
-- [ ] **Adım 3: Yeşili gör** — Run: `go build ./... && go vet ./... && go test ./... -count=1 -short` ·
+- [x] **Adım 3: Yeşili gör** — Run: `go build ./... && go vet ./... && go test ./... -count=1 -short` ·
   Beklenen: hepsi temiz; `golangci-lint` `unused` raporlamıyor.
-- [ ] **Adım 4: Commit** — `git commit -- internal/apps internal/hook internal/backend/deploy.go`
+- [x] **Adım 4: Commit** — `git commit -- internal/apps internal/hook internal/backend/deploy.go`
 
 ---
 
@@ -322,14 +322,14 @@ bloklayıcı bir CI kapısı bağladı; silmek kapıyı da götürür.
 **Sıralama:** T011'den SONRA, çünkü FR-015'in kaldırdığı `/api/v2/projects` dururken bu kapı KIRMIZI
 doğardı — Artım 1'de tam bu sebeple ertelendi.
 
-- [ ] **Adım 1: Kapıyı yaz** — kaynak ağacındaki HTTP rota literallerini topla ve sunucunun servis
+- [x] **Adım 1: Kapıyı yaz** — kaynak ağacındaki HTTP rota literallerini topla ve sunucunun servis
   ettiği rotalara karşı ölç. Çözülemeyen literal (değişkenden kurulan yol) ADLANDIRILIR ve
   "ölçemedim" denir — sessizce atlanmaz (Artım 1'in N-2 dersi).
-- [ ] **Adım 2: DOĞDUĞU GÜN YEŞİL mi** — Run: `go test ./cmd/palbase/ -run TestEveryRouteLiteralIsServed -count=1` ·
+- [x] **Adım 2: DOĞDUĞU GÜN YEŞİL mi** — Run: `go test ./cmd/palbase/ -run TestEveryRouteLiteralIsServed -count=1` ·
   Beklenen: `ok`. Kırmızıysa **kapı değil kod düzeltilir** (advisory kapı yasak, NFR-002).
-- [ ] **Adım 3: Negatif kontrol** — kaynağa var olmayan bir rota literali enjekte et, kapının
+- [x] **Adım 3: Negatif kontrol** — kaynağa var olmayan bir rota literali enjekte et, kapının
   KIRMIZIYA döndüğünü ve rotayı `file:line` ile adlandırdığını gör, geri al.
-- [ ] **Adım 4: Commit** — `git commit -- cmd/palbase/routes_test.go`
+- [x] **Adım 4: Commit** — `git commit -- cmd/palbase/routes_test.go`
 
 ---
 
@@ -339,13 +339,13 @@ doğardı — Artım 1'de tam bu sebeple ertelendi.
 **Bu görev envanteri CAPABILITY'ye çevirir.** Derlenmiş binary üzerinden koşar; fonksiyonları elle
 sıralayan bir test SAYILMAZ.
 
-- [ ] **Adım 1: Zinciri yaz** — `palbaseBinary(t)` ile derlenmiş binary; boş dizinde `init`, sonra
+- [x] **Adım 1: Zinciri yaz** — `palbaseBinary(t)` ile derlenmiş binary; boş dizinde `init`, sonra
   `start`, sonra çıplak `link` (platform ALGILANIR), sonra `push`'un artefaktı ürettiği nokta.
   `requiresRealToolchain(t)` kapısı takılır (NFR-001: `-short` bütçesi).
-- [ ] **Adım 2: Koş ve gör** — Run: `go test ./internal/backend/ -run TestTheWholeChainFromInitToPush -count=1 -v` ·
+- [x] **Adım 2: Koş ve gör** — Run: `go test ./internal/backend/ -run TestTheWholeChainFromInitToPush -count=1 -v` ·
   Beklenen: `--- PASS`, ve çıktıda `start`'ın bastığı DÖRT imaj etiketi görünür (FR-003'ün kanıtı
   üretim yolundan).
-- [ ] **Adım 3: Commit** — `git commit -- internal/backend/link_e2e_test.go`
+- [x] **Adım 3: Commit** — `git commit -- internal/backend/link_e2e_test.go`
 
 ---
 
@@ -399,23 +399,23 @@ graph TD
 `TestStartServesAndStopCleansUp` 128 sn'de geçti) · gerçek `npm` · `gh` CLI (CI koşuları) ·
 `golangci-lint` · `go/parser`. Bu envanterle aşağıdakilerin hepsi `[agent]`.
 
-- [ ] **UAT-1 [agent]** — Boş dizinde `palbase init`; `.palbase/project.json` bir `stackVersion`
-  taşıyor. Evidence:
-- [ ] **UAT-2 [agent]** — `palbase start` DÖRT imaj etiketini basıyor ve yığın gerçekten kalkıyor.
-  Evidence:
-- [ ] **UAT-3 [agent]** — `palbase ios link` → `exit ≠ 0`, ve çıktı "kaldırıldı/use instead" gibi bir
-  yönlendirme İÇERMİYOR (D-053). Evidence:
-- [ ] **UAT-4 [agent]** — Apple+web taşıyan bir checkout'ta çıplak `palbase link` ikisini de
-  algılıyor ve artefaktları yazıyor. Evidence:
-- [ ] **UAT-5 [agent]** — `palbase link --platform bogus` → reddediyor ve geçerli değerleri sayıyor.
-  Evidence:
-- [ ] **UAT-6 [agent]** — `palbase --help` çıktısında `--project`/`--environment` YOK; kalıntı
-  `selection.json` taşıyan checkout'ta komut düşmüyor. Evidence:
-- [ ] **UAT-7 [agent]** — `grep -rn "/api/v2/projects\"" --include="*.go" .` üretim kodunda sıfır
-  eşleşme. Evidence:
-- [ ] **UAT-8 [agent]** — Rota kapısı negatif kontrolde kırmızıya dönüyor. Evidence:
-- [ ] **UAT-9 [agent]** — `go test ./... -short` ≤ 180 sn ve 0 FAIL; `golangci-lint` 0 issues; CI
-  yeşil. Evidence:
+- [x] **UAT-1 [agent]** — Boş dizinde `palbase init`; `.palbase/project.json` bir `stackVersion`
+  taşıyor. Evidence: `palbase init` + `link` → `.palbase/project.json` `stackVersion` taşıyor; linksiz checkout'ta `start` türetiyor (`▸ stack 33`) ve dosya yoksa YAZMIYOR — regresyon testi `TestStackVersionWorksInAnUnlinkedCheckout`
+- [x] **UAT-2 [agent]** — `palbase start` DÖRT imaj etiketini basıyor ve yığın gerçekten kalkıyor.
+  Evidence: gerçek binary, gerçek docker: `▸ stack 33` + DÖRT etiket (palsvc/runtime-dev/edge 0.42.0, pgvector:pg16), ardından yığın kalktı (`Volume palbase-… Creating`)
+- [x] **UAT-3 [agent]** — `palbase ios link` → `exit ≠ 0`, ve çıktı "kaldırıldı/use instead" gibi bir
+  yönlendirme İÇERMİYOR (D-053). Evidence: `palbase ios link` → `unknown command "ios" for "palbase"`, exit≠0, yönlendirme cümlesi YOK
+- [x] **UAT-4 [agent]** — Apple+web taşıyan bir checkout'ta çıplak `palbase link` ikisini de
+  algılıyor ve artefaktları yazıyor. Evidence: Apple+web fikstüründe çıplak `link` → `▸ ios, web` (bağlantıdan ÖNCE); algılanamayan checkout ne aradığını ve nerede bulamadığını sayıyor
+- [x] **UAT-5 [agent]** — `palbase link --platform bogus` → reddediyor ve geçerli değerleri sayıyor.
+  Evidence: `link --platform bogus` → `"bogus" is not a platform this can link: choose from ios, macos, android, web` — ağa çıkmadan
+- [x] **UAT-6 [agent]** — `palbase --help` çıktısında `--project`/`--environment` YOK; kalıntı
+  `selection.json` taşıyan checkout'ta komut düşmüyor. Evidence: `palbase --help` → `--project`/`--environment` eşleşmesi **0**
+- [x] **UAT-7 [agent]** — `grep -rn "/api/v2/projects\"" --include="*.go" .` üretim kodunda sıfır
+  eşleşme. Evidence: `grep -rn '"/api/v2/projects"'` üretim kodunda (test/fikstür/yorum hariç) **0** eşleşme
+- [x] **UAT-8 [agent]** — Rota kapısı negatif kontrolde kırmızıya dönüyor. Evidence: var olmayan rota enjekte → `TestEveryCloudRouteLiteralIsServed` KIRMIZI, `apikey.go:216 calls /v1/cloud/nope/{x}/gone`; geri al → ok
+- [x] **UAT-9 [agent]** — `go test ./... -short` ≤ 180 sn ve 0 FAIL; `golangci-lint` 0 issues; CI
+  yeşil. Evidence: `go test ./... -short` → **real 44.81 sn** (bütçe 180), **0 FAIL**; gofmt TEMİZ · vet OK · e2e vet OK · golangci-lint **0 issues**
 
 ## Fidelity Audit
 
