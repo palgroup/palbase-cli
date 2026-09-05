@@ -156,11 +156,34 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		return err
 	}
 
-	// The SDK this project RUNS, before anything is compiled against it. A
-	// different major produces a bundle the runtime cannot execute, and the
-	// failure arrives as a missing function three layers from its cause.
-	if err := ensureProjectSDK(ctx, dir, target, cred, w); err != nil {
-		return err
+	// BUNDLE, BU CHECKOUT'UN KENDİ SDK'SIYLA DERLENİR — VE BU YÖN 06.09.2026'DA
+	// TERSİNE ÇEVRİLDİ.
+	//
+	// Burada `ensureProjectSDK` vardı: projenin ÇALIŞAN sürümünü indirip buraya
+	// kurar, bundle'ı ona karşı derlerdi. Eski modelde doğruydu — kiracının
+	// imajını platform seçiyordu, yani runtime'ın sürümü sabitti ve build ona
+	// UYMAK zorundaydı.
+	//
+	// Yeni modelde imaj SDK'yı takip ediyor (D-015): müşteri sürümünü
+	// değiştirir, düzlem imajı ona getirir. O yüzden eski davranış yalnız
+	// gereksiz değil, ENGELLEYİCİ: her push bundle'ı zaten koşan sürüme
+	// sabitliyordu, yani müşterinin SDK seçimi üretime HİÇ ulaşamıyordu —
+	// sürüm bulunduğu yerde donuyordu. Canlıda ölçüldü (penny, 06.09):
+	// checkout 34.0.0'a yükseltildi, push *"✓ @palbase/backend 33.0.2, from the
+	// project itself"* dedi ve artefakt yine 33.0.2 bildirdi.
+	//
+	// KORUDUĞU ŞEY BAŞKA BİR YOLDAN KAPANIYOR. Endişe gerçekti (16.08:
+	// `getRegisteredControllers is not a function` — bundle runtime'ın
+	// taşımadığı bir API'ye derlenmişti) ama çaresi artık ters yönde: artefakt
+	// hangi sürüme derlendiyse onu BİLDİRİYOR, düzlem imajı o sürüme getiriyor
+	// (ileri-yalnız, FR-027/028), ve arada kalan pencerede runtime bundle'ı
+	// TEMİZ reddediyor — SDK 28'den beri red boot yolunu öldürmüyor.
+	//
+	// Ve yan etkisi de gitti: push artık `node_modules`'ı DEĞİŞTİRMİYOR.
+	// Değiştirdiğinde `palbase start` bir sonraki koşusunda yanlış imajı
+	// çözüyordu, çünkü sürümün tek kaynağı kurulu paket.
+	if running, err := projectSDKVersion(ctx, target, cred); err == nil {
+		fmt.Fprint(w, sdkSkewNotice(installedBackendVersion(dir), running))
 	}
 
 	// BUILD FIRST. A stack takes an artifact and cannot make one — bundling needs

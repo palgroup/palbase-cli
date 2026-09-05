@@ -144,8 +144,9 @@ func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error
 
 	// WHICH SDK THIS PROJECT IS ON — from the document `push` itself reads.
 	//
-	// projectSDKVersion is the function ensureProjectSDK calls to decide whether
-	// to reinstall the checkout's node_modules, and it asks
+	// projectSDKVersion is the function `push` calls to decide whether the image
+	// is about to move (the checkout's SDK is what ships, and the plane brings
+	// the image to it), and it asks
 	// /.well-known/palbase.json, which the stack answers from a LIVE probe of the
 	// runtime (v2 internal/server/wellknown.go). status used to report the
 	// artifact's number instead, and the two diverge the moment a project is
