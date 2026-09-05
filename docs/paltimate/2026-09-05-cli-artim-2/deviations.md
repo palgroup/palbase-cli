@@ -337,3 +337,43 @@ daraltıldı.
 Üç kontrol, üçü de boş-koşuya karşı: türetme boşsa DÜŞ · atlama görünürse DÜŞ ·
 koşan sayısı türetilenden azsa DÜŞ (eşleşmeyen bir `-run` deseni de sıfır
 atlama üretir, yani ilk iki kontrol tek başına boş bir koşuyu geçirirdi).
+
+### A-15 · I-1 KAPANDI — ve raporladığım şey yanlıştı
+
+Doğrulayıcının I-1'i: FR-013 yarım. Ben "son yazıcı silindi, tek okuyucu
+adlandırıldı" diye RAPOR ettim. Ölçünce ikisi de eksik çıktı.
+
+**Birincisi, onaylı bir kararı amend etmeden yeniden yorumlamışım.** Şartname
+net: FR-013 dosyanın "var olmamasını", sınır durumu "artık okunmaz"ını, Impact
+Map "okuyucusu/yazıcısı kalkar"ı söylüyor. Ben bir okuyucuyu "göç kolaylığı"
+diye bıraktım. Bu bir sapma; sapma defterine yazılıp şartname amend edilmeliydi
+ya da — doğrusu — uygulanmalıydı.
+
+**İkincisi ve daha önemlisi: GREP'İM YANLIŞ ŞEYİ ÖLÇTÜ.**
+
+> **Ders:** *bir mekanizmanın DOLAYLI yolu, doğrudan çağrısını arayan grep'in
+> altından geçer.* `selection.Load(` için grep attım ve "tek okuyucu kaldı"
+> dedim. Dosya asıl olarak `Resolver.Resolve → r.Config() → Load(r.Dir)`
+> zincirinden okunuyordu ve **beş komut** o zincirden geçiyordu. Bir yüzeyin
+> gittiğini iddia etmeden önce YÜZEYİN TAMAMINI ara — tipini, sarmalayıcısını,
+> taşıyıcı alanını; tek bir fonksiyon adını değil.
+
+**Yolda bulunan CANLI kusur:** `palbase flags user`, `palbase link` ile
+linklenmiş bir checkout'ta bile "this directory is not linked to a project"
+diyordu. `envRef` resolver'dan bir ortam ref'i alıyordu ve o ref YALNIZ başarı
+mesajını süslüyordu — istekte hiç kullanılmıyordu. Süs amaçlı bir arama,
+komutun tamamını hiçbir şeyin yazmadığı bir dosyaya bağlamıştı.
+
+**Kesim (-818 satır)** davranış koruyucu ve bu ÖLÇÜLDÜ: bu dalların hepsi zaten
+yalnız `ErrNotSelected` üretiyordu. Bulut ADRESTEN erişiliyor ve öyle kalıyor —
+`logs`, `spec`, `deploys`, `upgrade` linkli bir checkout'ta üretim binary'siyle
+koşuldu, dördü de `▸ https://<ref>…` ile devam ediyor. `logs`'un dört bulut
+testi silinmedi, adres yoluna rig'lendi.
+
+**Kapı:** `TestNothingInProductionReadsTheRetiredSelectionFile` doğrudan çağrıyı
+değil TÜM yüzeyi ölçüyor (Load/Save/ConfigPath/ApplySelection/Config/Resolver) —
+dolaylı yol bu koşuda tam olarak bir grep'in altından kaçtı.
+
+**AÇIK KALEM:** kesimin ardından bulut push makinesi (`runPush`/`pushDeps`/
+`deployClient`) da ölü kaldı — üretim çağıranı yok, yedi testi canlı tutuyor.
+Adres yolu (`runStackPush`) aynı buluta gidiyor. Ayrı bir kalem olarak duruyor.
