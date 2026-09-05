@@ -135,28 +135,36 @@ func topLevelKey(l string) bool {
 	return strings.HasSuffix(trimmed, ":") && !strings.HasPrefix(trimmed, " ")
 }
 
-// The images must be NAMED as registry references by default. A local tag as
-// the default is exactly what made `palbase start` require this repository:
-// docker cannot fetch `palbase-palsvc` from anywhere, so the command only worked
-// on a machine where somebody had already built it.
+// The images must be NAMED as registry references. A local tag is exactly what
+// made `palbase start` require this repository: docker cannot fetch
+// `palbase-palsvc` from anywhere, so the command only worked on a machine where
+// somebody had already built it.
 //
-// It reads the compose file and nothing else, so it says the default POINTS at a
-// registry — not that the registry will serve it. Worth stating because the two
-// came apart on 2026-08-18: the edge package was created private by ghcr, this
-// test was green, and an anonymous `docker manifest inspect` answered
+// THE SUBJECT MOVED, THE RULE DID NOT (2026-09-05). The reference used to live
+// in the compose file as a `${VAR:-<ref>}` default, and this test read it there.
+// Defaults are gone — a default is a second source of the version, and the one
+// that goes stale — so the reference now lives in exactly one place, the Go
+// table, and is completed with the installed SDK's version. That is where it is
+// measured.
+//
+// It reads our own declaration and nothing else, so it says the reference POINTS
+// at a registry — not that the registry will serve it. Worth stating because the
+// two came apart on 2026-08-18: the edge package was created private by ghcr,
+// this test was green, and an anonymous `docker manifest inspect` answered
 // `unauthorized`. Whether a stranger can actually pull is a property of the
 // registry, and the only honest place to assert it is against the registry.
 func TestTheVendoredStackPullsItsImages(t *testing.T) {
-	for _, want := range []string{
-		"ghcr.io/palgroup/palbase/palsvc:",
-		"ghcr.io/palgroup/palbase/runtime-dev:",
-		// The edge is a third image now, and it carries the route table — a
-		// stack that cannot pull it has no door.
-		"ghcr.io/palgroup/palbase/edge:",
-	} {
-		if !strings.Contains(string(stackCompose), want) {
-			t.Errorf("no default image at %s — the default must name a registry, or `palbase start` needs this repository", want)
+	for _, img := range stackImages {
+		ref := img.ref("0.0.0")
+		if !isRegistryImage(ref) {
+			t.Errorf("%s resolves to %q, which docker cannot fetch from anywhere — "+
+				"`palbase start` would need this repository", img.env, ref)
 		}
+	}
+	// AND THE COMPOSE FILE MUST NOT ANSWER THE QUESTION ITSELF. A default there
+	// would override the table silently the day the CLI forgets to export one.
+	if strings.Contains(string(stackCompose), "_IMAGE:-") {
+		t.Error("the vendored compose carries an image default — the version has one source, and this is not it")
 	}
 }
 
@@ -217,40 +225,26 @@ func TestOnlyTheEdgeIsPublished(t *testing.T) {
 	}
 }
 
-// GO SABİTLERİ İLE COMPOSE VARSAYILANLARI AYNI ETİKETİ SÖYLEMELİ.
+// COMPOSE'UN OKUDUĞU DEĞİŞKENLER İLE GO TABLOSUNUNKİLER AYNI OLMALI.
 //
-// Etiket İKİ yerde yaşıyor: stackImages'in fallback'i (bu paket, varlık kontrolü
-// ve `palbase upgrade` için) ve compose belgesinin ${VAR:-default}'u (gerçekte
-// KOŞAN şey, çünkü bu komut o değişkenleri export etmiyor).
+// Bu test eskiden iki ETİKETİ karşılaştırıyordu: `stackImages`'in fallback'i ve
+// compose'un `${VAR:-<etiket>}` varsayılanı. Ölçüldü 2026-08-29: yalnız Go
+// sabiti 0.39.0'a taşındı, compose 0.36.1'de kaldı, ve `palbase start` eski
+// imajı koşmaya devam etti — storage şeması 4'e göçmüş bir veritabanında
+// `migrate module "storage": no migration found for version 4`.
 //
-// Ölçüldü 2026-08-29: yalnız Go sabiti 0.39.0'a taşındı, compose 0.36.1'de kaldı,
-// ve `palbase start` eski imajı koşmaya devam etti. Sonuç, storage şeması 4'e
-// göçmüş bir veritabanında:
-//
-//	migrate module "storage": no migration found for version 4
-//
-// Bir şey hakkında anlaşmak zorunda olan iki yer, bir gün anlaşmayı bırakacak iki
-// yerdir. Bu, onu söyleyen test.
-func TestTheGoConstantsAndTheComposeDefaultsAgree(t *testing.T) {
+// 2026-09-05'te ikinci etiket TÜMÜYLE kaldırıldı: sürümün tek kaynağı kurulu
+// `@palbase/backend`. Karşılaştırılacak iki sayı kalmadı — ama iki ADIN
+// buluşması hâlâ gerekiyor: CLI `PBC_PALSVC_IMAGE` export ederken compose
+// başka bir ad okuyorsa, `:?` sayesinde stack AÇILMAZ. Kapının ölçtüğü şey bu.
+func TestTheComposeDemandsEveryImageVariable(t *testing.T) {
 	doc := string(stackCompose)
 	for _, want := range stackImages {
-		// compose satiri: image: ${VAR:-<etiket>}
-		marker := "${" + want.env + ":-"
-		i := strings.Index(doc, marker)
-		if i < 0 {
-			t.Errorf("compose %s degiskenini hic okumuyor", want.env)
-			continue
-		}
-		rest := doc[i+len(marker):]
-		j := strings.IndexByte(rest, '}')
-		if j < 0 {
-			t.Errorf("compose %s satiri kapanmamis", want.env)
-			continue
-		}
-		got := rest[:j]
-		if got != want.fallback {
-			t.Errorf("%s: Go sabiti %q, compose varsayilani %q — `palbase start` compose'unkini kosar",
-				want.env, want.fallback, got)
+		// `:?` = compose değeri OLMADAN başlamayı reddeder. Bu, kuralın
+		// kendisi: değeri veren tek yer CLI, o da kurulu SDK'dan alıyor.
+		required := "${" + want.env + ":?"
+		if !strings.Contains(doc, required) {
+			t.Errorf("compose %s degiskenini ZORUNLU olarak okumuyor — CLI'in verdigi deger bir yere varmiyor", want.env)
 		}
 	}
 }
@@ -270,8 +264,15 @@ func composeConfigIsValid(t *testing.T, path string) {
 	}
 	cmd := exec.Command("docker", "compose", "-f", path, "config", "--services")
 	// The document interpolates these; without them compose fails on the
-	// substitution rather than on the structure we are measuring.
-	cmd.Env = append(os.Environ(), "PALBASE_HTTP_PORT=1", "PALBASE_PROJECT_DIR=/tmp")
+	// substitution rather than on the structure we are measuring. The image
+	// variables became `:?` — REQUIRED — on 2026-09-05, so they belong here too;
+	// their values are irrelevant to the structure, and giving them a real
+	// version here would put a second source of the version in a test file.
+	env := append(os.Environ(), "PALBASE_HTTP_PORT=1", "PALBASE_PROJECT_DIR=/tmp")
+	for _, img := range stackImages {
+		env = append(env, img.env+"=placeholder")
+	}
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker rejects the vendored compose document:\n%s", strings.TrimSpace(string(out)))
@@ -290,7 +291,7 @@ func TestTheVendoredComposeIsAValidComposeProject(t *testing.T) {
 // EVERY IMAGE THE STACK RUNS MUST BE PINNED IN ONE PLACE — and the gate that
 // checks the pins has to be able to SEE all of them.
 //
-// TestTheGoConstantsAndTheComposeDefaultsAgree loops over `stackImages`, so it
+// TestTheComposeDemandsEveryImageVariable loops over `stackImages`, so it
 // measures exactly the images Go already knows about. An image compose names
 // WITHOUT a variable is therefore invisible to it: not a disagreement it
 // tolerates, one it cannot express. Measured 2026-09-05: `postgres` ran
@@ -316,7 +317,14 @@ func TestEveryComposeImageIsPinnedInOnePlace(t *testing.T) {
 			unpinned = append(unpinned, fmt.Sprintf("%s:%d %s (no variable at all)", composeFile, i+1, value))
 			continue
 		}
-		env, _, _ := strings.Cut(strings.TrimPrefix(value, "${"), ":-")
+		// `${VAR:?mesaj}` ve `${VAR:-varsayilan}` — ikisinde de ad, ilk
+		// noktalama işaretinde biter. `:-` arayan hâli varsayılanlar
+		// kaldırılınca (2026-09-05) DEĞİŞKEN ADINI mesajla birlikte okudu ve
+		// dördünü de "Go bilmiyor" diye bildirdi.
+		env := strings.TrimPrefix(value, "${")
+		if i := strings.IndexAny(env, ":-}"); i >= 0 {
+			env = env[:i]
+		}
 		if !known[env] {
 			unpinned = append(unpinned, fmt.Sprintf("%s:%d reads %s, which Go does not carry", composeFile, i+1, env))
 		}

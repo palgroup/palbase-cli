@@ -73,8 +73,12 @@
 # time it is recreated. palsvc's image is byte-identical in both stacks, so it
 # keeps the plain name.
 #
-# PALBASE_PALSVC_IMAGE / PALBASE_RUNTIME_IMAGE override both, for a published
-# image or a second build.
+# İmajlar CLI tarafından verilir; sürümün tek kaynağı kurulu @palbase/backend'in
+# kendi sürümüdür (FR-005/008). Varsayılan YOK ve olmamalı: bir varsayılan, o
+# kuralı sessizce delen ikinci bir sürüm kaynağıdır — burada tam olarak öyle
+# oldu, bu satırlar 0.43.0'da donmuştu (F-005).
+# Eskiden bu satırlar PALBASE_*_IMAGE ile ezilebiliyordu ve varsayılanları
+# kendi sürümlerini taşıyordu; ikisi de kalktı.
 #
 # ── before the first `docker compose up` ────────────────────────────────────
 #
@@ -135,7 +139,7 @@ services:
   # for no certificate. The route table it reads is the shipped table, from the
   # same file inside the same image.
   envoy:
-    image: ${PALBASE_EDGE_IMAGE:-ghcr.io/palgroup/palbase/edge:0.43.0}
+    image: ${PBC_EDGE_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
     command: ["-c", "/etc/envoy/bootstrap.dev.yaml"]
     ports:
       # PALBASE_HTTP_BIND is 127.0.0.1 unless somebody deliberately widened it
@@ -159,7 +163,7 @@ services:
   # half before a real one exists, and whatever `service_healthy` releases
   # connects into that gap.
   postgres:
-    image: ${PALBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    image: ${PBC_POSTGRES_IMAGE:?set by the CLI}
     environment:
       POSTGRES_USER: palbase
       POSTGRES_DB: palbase
@@ -186,10 +190,11 @@ services:
   # stack, same role-mask, same everything: it is not the edge here either, and
   # it publishes nothing.
   palsvc:
-    # PULLED by default, so `palbase start` works on a machine that has never
-    # seen this repository. Building locally? Set PALBASE_PALSVC_IMAGE to your
-    # own tag — the CLI prints the build command when an image is missing.
-    image: ${PALBASE_PALSVC_IMAGE:-ghcr.io/palgroup/palbase/palsvc:0.43.0}
+    # İmajı CLI verir: kurulu @palbase/backend'in sürümünden türetir ve bu
+    # değişkeni doldurur. Kendi derlediğini denemek istiyorsan değişkeni elle
+    # ez — ama o an lokalin buluttan AYRIŞIR, ve bu koşunun bütün amacı o
+    # ayrışmayı bitirmekti. CLI, imaj bulunamazsa derleme komutunu yazdırır.
+    image: ${PBC_PALSVC_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
     command:
       - "--modules"
       # Katalogun TAMAMI. `jobs` 2026-08-26'da eklendi: self-host'un maskesinde
@@ -291,7 +296,7 @@ services:
   runtime:
     # The DEV target, pulled: it carries the bundler and TypeScript the stager
     # needs. The production image comes up healthy and then refuses every save.
-    image: ${PALBASE_RUNTIME_IMAGE:-ghcr.io/palgroup/palbase/runtime-dev:0.43.0}
+    image: ${PBC_RUNTIME_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
     # READINESS IS THE RUNTIME'S OWN ANSWER, not the edge's.
     #
     # `/readyz` on the edge routes to palsvc, so the banner could say "ready"
