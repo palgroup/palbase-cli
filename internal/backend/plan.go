@@ -199,9 +199,10 @@ type schemaPlanWire struct {
 		Table   string `json:"table"`
 		Column  string `json:"column"`
 		Rows    int64  `json:"rows"`
-		NonNull int64  `json:"non_null"`
+		NonNull *int64 `json:"non_null"`
 	} `json:"destructive"`
-	Unsupported []string `json:"unsupported"`
+	Unsupported  []string `json:"unsupported"`
+	Incompatible []string `json:"incompatible"`
 }
 
 func renderSchemaPlan(out io.Writer, body []byte) {
@@ -210,26 +211,47 @@ func renderSchemaPlan(out io.Writer, body []byte) {
 		fmt.Fprintf(out, "  (unreadable plan: %s)\n", trimBody(body))
 		return
 	}
-	if plan.InSync && len(plan.Changes) == 0 && len(plan.Destructive) == 0 {
+	if plan.InSync && len(plan.Changes) == 0 && len(plan.Destructive) == 0 &&
+		len(plan.Unsupported) == 0 && len(plan.Incompatible) == 0 {
 		fmt.Fprintln(out, "  in sync")
 		return
 	}
 	for _, change := range plan.Changes {
 		fmt.Fprintf(out, "  %s\n", change)
 	}
-	for _, drop := range plan.Destructive {
-		if drop.Column != "" {
-			fmt.Fprintf(out, "  ⚠ drop %s.%s — %d value(s) in %d row(s)\n",
-				drop.Table, drop.Column, drop.NonNull, drop.Rows)
-		} else {
-			fmt.Fprintf(out, "  ⚠ drop table %s — %d row(s)\n", drop.Table, drop.Rows)
+	// The server's formatted changes already describe drops and which require
+	// approval. Printing the structured list again both duplicates them and
+	// incorrectly labels empty columns/tables as requiring data-loss approval.
+	if len(plan.Changes) == 0 {
+		for _, drop := range plan.Destructive {
+			needsApproval := drop.Rows > 0
+			if drop.Column != "" {
+				if drop.NonNull != nil {
+					needsApproval = *drop.NonNull > 0
+					fmt.Fprintf(out, "  drop %s.%s — %d value(s) in %d row(s)",
+						drop.Table, drop.Column, *drop.NonNull, drop.Rows)
+				} else {
+					fmt.Fprintf(out, "  drop %s.%s — %d row(s), value count unknown",
+						drop.Table, drop.Column, drop.Rows)
+				}
+			} else {
+				fmt.Fprintf(out, "  drop table %s — %d row(s)", drop.Table, drop.Rows)
+			}
+			if needsApproval {
+				fmt.Fprint(out, " — needs --approve")
+			}
+			fmt.Fprintln(out)
 		}
 	}
 	for _, item := range plan.Unsupported {
 		fmt.Fprintf(out, "  not applied by this rail: %s\n", item)
 	}
-	if len(plan.Destructive) > 0 {
-		fmt.Fprintln(out, "  the ⚠ changes need --approve")
+	if len(plan.Incompatible) > 0 {
+		fmt.Fprintln(out, "  push blocked while the current release is serving:")
+		for _, reason := range plan.Incompatible {
+			fmt.Fprintf(out, "    %s\n", reason)
+		}
+		fmt.Fprintln(out, "  --approve does not bypass release compatibility; deploy a compatible transition first")
 	}
 }
 

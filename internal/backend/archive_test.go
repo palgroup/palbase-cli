@@ -440,6 +440,8 @@ func TestBuildTarball_ExcludesStagedControllers(t *testing.T) {
 	write("controllers/todos.controller.ts", "export default class T {}")
 	write(stagedControllersDir+"/todos.controller.ts", "STAGED_COPY_CANARY")
 	write(stagedControllersDir+"/nested/deep.ts", "STAGED_COPY_CANARY")
+	write(deployStagingDir+"/modules/todos.controller.ts", "STAGED_COPY_CANARY")
+	write("nested/"+deployStagingDir+"/modules/todos.controller.ts", "STAGED_COPY_CANARY")
 
 	tarball, err := BuildTarball(dir)
 	require.NoError(t, err)
@@ -449,6 +451,8 @@ func TestBuildTarball_ExcludesStagedControllers(t *testing.T) {
 	for _, n := range names {
 		require.NotContains(t, n, stagedControllersDir,
 			"the build staging tree must never enter the deploy tarball (got %q)", n)
+		require.NotContains(t, n, deployStagingDir,
+			"an old deploy staging tree must never enter the deploy tarball (got %q)", n)
 	}
 }
 

@@ -36,11 +36,9 @@ import (
 	"strings"
 )
 
-// deployStagingDir is the deploy stager's in-project tree. A sibling of
-// controllers/ by necessity: module resolution walks UP, so a staging directory
-// in /tmp cannot see the project's node_modules and the very first import — the
-// SDK itself — fails, and one nested a level deeper turns every `../services`
-// in a controller into a path outside the project.
+// deployStagingDir is the staging tree older CLIs wrote into the project.
+// Keep excluding it from archives and generated-file ignores for old leftovers.
+// New builds stage outside the checkout.
 const deployStagingDir = ".palbase-staged-controllers"
 
 // bundleOutputDirs is what the bundler writes into the project: the compiled
@@ -193,7 +191,10 @@ func buildStackArtifact(ctx context.Context, dir string, w io.Writer) ([]uploadU
 		return nil, nil, err
 	}
 
-	if err := run(ctx, dir, "bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out); err != nil {
+	// Bun labels bundled sources relative to its working directory. Building
+	// from the stage keeps random temp directory names out of those labels and
+	// gives identical sources an identical artifact on the same toolchain.
+	if err := run(ctx, staged, "bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out); err != nil {
 		return nil, nil, fmt.Errorf("the bundle did not build: %w", err)
 	}
 
@@ -374,7 +375,11 @@ func moduleSources(root string) ([]string, error) {
 		if d.IsDir() || name == "node_modules" || name == "dist" || name == ".git" {
 			if path != root && (name == "node_modules" || name == "dist" || name == ".git" ||
 				strings.HasPrefix(name, ".palbase")) {
-				return filepath.SkipDir
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				// SkipDir on a symlink skips its remaining siblings as well.
+				return nil
 			}
 			return nil
 		}
@@ -926,19 +931,28 @@ func stageControllers(ctx context.Context, dir string, w io.Writer) (string, err
 		return "", fmt.Errorf("extract the stager: %w", err)
 	}
 
-	// Staged as a SIBLING of controllers/, which is what makes both kinds of
-	// import resolve. Module resolution walks UP from the file being bundled, so
-	// a staging directory in /tmp cannot see the project's node_modules and the
-	// very first import — the SDK itself — fails; and one nested a level deeper
-	// (.palbase/staged) turns every `../services` in a controller into a path
-	// outside the project. The deploy stager stages a sibling for the same two
-	// reasons.
-	stageDir := filepath.Join(dir, deployStagingDir)
-	if err := os.RemoveAll(stageDir); err != nil {
+	// The whole relative source tree travels together, so it can live outside
+	// the checkout. Linking the installed dependencies preserves bare imports
+	// without copying node_modules. A unique directory also prevents two builds
+	// from replacing each other's staged sources.
+	stageDir, err := os.MkdirTemp("", "palbase-staged-controllers-*")
+	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+	staged := false
+	defer func() {
+		if !staged {
+			removeTemp(stageDir)
+		}
+	}()
+	modules, err := filepath.Abs(filepath.Join(dir, "node_modules"))
+	if err != nil {
 		return "", err
+	}
+	if _, err := os.Stat(modules); err == nil {
+		if err := os.Symlink(modules, filepath.Join(stageDir, "node_modules")); err != nil {
+			return "", fmt.Errorf("make the project's dependencies reachable: %w", err)
+		}
 	}
 
 	script := filepath.Join(tools, "stage-for-push.js")
@@ -959,12 +973,12 @@ func stageControllers(ctx context.Context, dir string, w io.Writer) (string, err
 	cmd.Env = append(os.Environ(), "NODE_PATH="+devNodePath(dir, w))
 	blob, err := cmd.CombinedOutput()
 	if err != nil {
-		_ = os.RemoveAll(stageDir)
 		return "", fmt.Errorf("%s", strings.TrimSpace(trimBody(blob)))
 	}
 	if summary := strings.TrimSpace(string(blob)); summary != "" {
 		fmt.Fprintln(w, summary)
 	}
+	staged = true
 	return stageDir, nil
 }
 

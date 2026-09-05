@@ -17,17 +17,10 @@ var defaultIgnoreDirs = map[string]bool{
 	".palbase":     true,
 	"node_modules": true,
 	".next":        true, // Next.js build output — bloat, never part of the backend bundle
-	// `palbase build` stages a return-binding-injected COPY of controllers/ here
-	// (it must sit beside controllers/ so the copies' ../models relative imports
-	// still resolve). It is removed on exit, but a SIGKILL leaves it behind — and
-	// an orphan in the project root would otherwise ride along in the next deploy
-	// tarball as a second, shadow copy of every controller.
+	// Staging trees left by older commands must never ship as source, even when
+	// a killed build left them behind or the project's ignore file omits them.
 	stagedControllersDir: true,
-	// `palbase build` stages a return-binding-injected COPY of controllers/ here
-	// (it must sit beside controllers/ so the copies' ../models relative imports
-	// still resolve). It is removed on exit, but a SIGKILL leaves it behind — and
-	// an orphan in the project root would otherwise ride along in the next deploy
-	// tarball as a second, shadow copy of every controller.
+	deployStagingDir:     true,
 }
 
 // stagedControllersDir is the in-project staging tree build-check.js writes.

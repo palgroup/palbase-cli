@@ -322,7 +322,7 @@ var generatedProjectPaths = []struct {
 	{".palbase/jobs/", "the job manifest — same", true},
 	{".palbase/hooks/", "the hook manifest — same", true},
 	{stagedControllersDir + "/", "`palbase build`'s staging tree; removed on exit, left behind by a SIGKILL", true},
-	{deployStagingDir + "/", "the deploy stager's tree, same lifetime", true},
+	{deployStagingDir + "/", "staged sources left by older CLIs; new deploy builds use a temp directory", true},
 	{envTypesFile, "generated from this project's secrets on every build, like next-env.d.ts", true},
 	{"*.log", "logs", false},
 }
