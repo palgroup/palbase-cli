@@ -206,6 +206,15 @@ func knownRefs(ctx context.Context, r Resolvers) ([]string, bool) {
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
 	if base == "" {
+		// A BOUND CHECKOUT ALREADY NAMES ITS ADDRESS. Re-linking is how you
+		// refresh generated clients after a contract change, and demanding the
+		// URL again asks the reader to retype what the committed file says —
+		// which is also how the two drift apart.
+		if target, err := ReadTarget(); err == nil && strings.TrimSpace(target.URL) != "" {
+			base = strings.TrimRight(strings.TrimSpace(target.URL), "/")
+		}
+	}
+	if base == "" {
 		return errors.New("--url is required: the address the stack serves on")
 	}
 	// What is at this address, and does it answer at all. One request, no

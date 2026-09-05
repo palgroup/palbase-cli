@@ -171,17 +171,17 @@ göremiyor.
 **Kanıt:** CB-43 — `start.go:584` yorumu: *"/readyz routes to the palsvc cluster"*; yani banner
 "hazır" derken runtime bundle'ı reddediyor olabilir.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — palsvc 200 ama runtime hazır değilken `waitReady`'nin hazır
+- [x] **Adım 1: Kırmızıyı yaz** — palsvc 200 ama runtime hazır değilken `waitReady`'nin hazır
   DEMEDİĞİNİ ölçen test; ve `stop`'un `local.json`'ı silmeden önce compose'un indiğini doğruladığını
   ölçen test.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run 'TestReady|TestStop' -count=1` ·
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run 'TestReady|TestStop' -count=1` ·
   Beklenen: **FAIL**.
-- [ ] **Adım 3: Hazırlığı runtime'a da sor** — `/readyz`'e ek olarak runtime'ın kendi hazırlık
+- [x] **Adım 3: Hazırlığı runtime'a da sor** — `/readyz`'e ek olarak runtime'ın kendi hazırlık
   ucunu yokla; ikisi de yeşil olmadan banner basılmasın.
-- [ ] **Adım 4: `stop` sırasını düzelt** — `.palbase/local.json` silinmesi, compose'un başarıyla
+- [x] **Adım 4: `stop` sırasını düzelt** — `.palbase/local.json` silinmesi, compose'un başarıyla
   indiği doğrulandıktan SONRA; ve `stop` vendor'lanan compose belgesini yeniden YAZMASIN.
-- [ ] **Adım 5: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestReady|TestStop' -count=1`
-- [ ] **Adım 6: Commit** — `git commit -- internal/backend/start.go internal/backend/start_test.go`
+- [x] **Adım 5: Yeşili gör** — Run: `go test ./internal/backend/ -run 'TestReady|TestStop' -count=1`
+- [x] **Adım 6: Commit** — `git commit -- internal/backend/start.go internal/backend/start_test.go`
 
 ---
 
@@ -226,12 +226,12 @@ göremiyor.
 
 **Kanıt:** CB-41 — `project_link.go:127`, `StringSliceVar(..., []string{"ios"}, ...)`, doğrulama yok.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `--platform bogus` reddedilir ve mesaj geçerli değerleri sayar;
+- [x] **Adım 1: Kırmızıyı yaz** — `--platform bogus` reddedilir ve mesaj geçerli değerleri sayar;
   `unlink` bağı kaldırır ve bağsız checkout'ta ne bulamadığını söyler.
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run 'TestPlatformFlag|TestUnlink' -count=1`
-- [ ] **Adım 3: Doğrulama + `unlink` yaz**
-- [ ] **Adım 4: Yeşili gör** — aynı komut, `ok`
-- [ ] **Adım 5: Commit** — `git commit -- internal/backend/project_link.go internal/backend/project_link_test.go`
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/backend/ -run 'TestPlatformFlag|TestUnlink' -count=1`
+- [x] **Adım 3: Doğrulama + `unlink` yaz**
+- [x] **Adım 4: Yeşili gör** — aynı komut, `ok`
+- [x] **Adım 5: Commit** — `git commit -- internal/backend/project_link.go internal/backend/project_link_test.go`
 
 ---
 

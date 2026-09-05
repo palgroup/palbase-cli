@@ -77,13 +77,9 @@ func minimalPkgJSON() string {
 // `web link` exposes NO --ref: the project + environment come from the selection
 // (or the global --project / --environment).
 func TestWebLinkCommandFlags(t *testing.T) {
-	cmd := newWebCmd(noopResolvers())
+	cmd := (&webCmd{r: noopResolvers()}).newWebLinkCmd()
 	var linkFlags []string
-	for _, child := range cmd.Commands() {
-		if child.Name() == "link" {
-			child.Flags().VisitAll(func(flag *pflag.Flag) { linkFlags = append(linkFlags, flag.Name) })
-		}
-	}
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) { linkFlags = append(linkFlags, flag.Name) })
 	require.Equal(t, []string{"entry", "out"}, linkFlags)
 }
 
@@ -111,11 +107,15 @@ func writePkgJSON(t *testing.T, content string) {
 // runWebLink executes `web link` with the given extra args and returns stdout.
 func runWebLink(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := newWebCmd(webRig(t))
+	// THE GROUP COMMAND IS GONE, the work is not. `palbase web link` retired in
+	// favour of one `palbase link` that reads what the checkout is (T008), so
+	// these tests drive the link path directly rather than through a surface
+	// that no longer ships.
+	cmd := (&webCmd{r: webRig(t)}).newWebLinkCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs(append([]string{"link"}, args...))
+	cmd.SetArgs(args)
 	require.NoError(t, cmd.Execute())
 	return out.String()
 }
@@ -137,11 +137,11 @@ func TestWebLink_NoPkgJSON(t *testing.T) {
 	t.Chdir(t.TempDir())
 	installStubCodegen(t, "// gen")
 
-	cmd := newWebCmd(webRig(t))
+	cmd := (&webCmd{r: webRig(t)}).newWebLinkCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"link"})
+	cmd.SetArgs(nil)
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "package.json not found")
@@ -564,10 +564,10 @@ func TestWebLink_FetchesForTheSelectedEnvironment(t *testing.T) {
 	require.NoError(t, os.WriteFile(palbeGenBin, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	writePkgJSON(t, minimalPkgJSON())
 
-	cmd := newWebCmd(r)
+	cmd := (&webCmd{r: r}).newWebLinkCmd()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"link"})
+	cmd.SetArgs(nil)
 	require.NoError(t, cmd.Execute())
 
 	require.Equal(t, "proj_1", gotSel.ProjectID)
@@ -786,10 +786,10 @@ func TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
 				Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "dev.palbase.studio"} },
 			}
 
-			cmd := newWebCmd(r)
+			cmd := (&webCmd{r: r}).newWebLinkCmd()
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
-			cmd.SetArgs([]string{"link"})
+			cmd.SetArgs(nil)
 			err := cmd.Execute()
 			require.Error(t, err, "a broken local config must fail the command")
 			require.Equal(t, 0, postCount, "no app may be registered before the broken config is surfaced")
@@ -799,9 +799,16 @@ func TestWebLink_BrokenConfig_AbortsBeforeRegisteringAnyApp(t *testing.T) {
 
 // TestWebUnlink_RemovesConfig: `web unlink` removes .palbase/selection.json and
 // the .palbase/ dir (when empty), leaves gen file and scripts.
+// UNLINK REMOVES THE BOND, and the bond moved (T007).
+//
+// This asserted on `.palbase/config.json` — the SELECTION — because that is what
+// `web unlink` used to delete. What makes a checkout linked is
+// `.palbase/project.json`, so that is what the test seeds and what unlink takes.
 func TestWebUnlink_RemovesConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
 	require.NoError(t, os.WriteFile("palbe.gen.ts", []byte("// gen"), 0o644))
+	require.NoError(t, os.MkdirAll(nativeArtifactsDir, 0o755))
+	require.NoError(t, os.WriteFile(projectPath(), []byte(`{"url":"https://app1prod.palbase.studio"}`), 0o644))
 	writePkgJSON(t, `{
   "name": "myapp",
   "scripts": {
@@ -810,16 +817,16 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
   }
 }`)
 
-	cmd := newWebCmd(noopResolvers())
+	cmd := newUnlinkCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"unlink"})
+	cmd.SetArgs(nil)
 	require.NoError(t, cmd.Execute())
 
 	// config.json removed.
 	_, err := os.Stat(filepath.Join(".palbase", "config.json"))
-	require.True(t, os.IsNotExist(err), "config.json should be gone")
+	require.True(t, os.IsNotExist(err), "the selection is not what unlink removes any more")
 
 	// gen file untouched.
 	_, err = os.Stat("palbe.gen.ts")
@@ -833,7 +840,7 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 	// Output mentions what was left — generic wording (unlink has no --out
 	// knowledge, so it must not hardcode palbe.gen.ts).
 	outStr := out.String()
-	require.Contains(t, outStr, "generated client file")
+	require.Contains(t, outStr, "generated clients")
 	require.NotContains(t, outStr, "palbe.gen.ts")
 }
 
@@ -841,11 +848,11 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 func TestWebUnlink_Idempotent(t *testing.T) {
 	t.Chdir(t.TempDir())
 	// No config.json at all.
-	cmd := newWebCmd(noopResolvers())
+	cmd := newUnlinkCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"unlink"})
+	cmd.SetArgs(nil)
 	require.NoError(t, cmd.Execute(), "unlink with no config must exit 0")
 }
 

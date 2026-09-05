@@ -24,6 +24,16 @@ import (
 // this was the one verb that was not.
 func TestPlatformLinkFollowsTheBoundProject(t *testing.T) {
 	inScratchCheckout(t)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// AN iOS CHECKOUT, because `link` now reads what the checkout IS rather than
+	// taking the platform from the command name (T006). The old `ios link` said
+	// "ios" in its path; the new one looks for an Xcode project.
+	if err := os.MkdirAll(filepath.Join(dir, "App.xcodeproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 
 	if err := WriteTarget(Target{URL: srv.URL}); err != nil {
@@ -36,7 +46,7 @@ func TestPlatformLinkFollowsTheBoundProject(t *testing.T) {
 	// The cloud resolver is deliberately absent: if the command reaches for it,
 	// this fails as a nil dereference or an auth error rather than passing by
 	// accident.
-	cmd := newIOSCmd(Resolvers{})
+	cmd := newLinkCmd(Resolvers{})
 	link, _, err := cmd.Find([]string{"link"})
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +146,7 @@ func TestWebLinkOnABoundProjectStillDoesTheWebWork(t *testing.T) {
 
 	// Resolvers deliberately empty: reaching for the cloud fails loudly instead
 	// of passing by accident.
-	cmd := newWebCmd(Resolvers{})
+	cmd := (&webCmd{r: Resolvers{}}).newWebLinkCmd()
 	link, _, err := cmd.Find([]string{"link"})
 	if err != nil {
 		t.Fatal(err)

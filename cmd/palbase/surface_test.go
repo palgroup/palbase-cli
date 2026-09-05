@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -77,7 +78,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		//
 		// No alias, no hidden command: an alias would keep a removed surface
 		// alive in muscle memory and in scripts.
-		"android",
 		"apikey", "auth", "build",
 		"clone",
 		"db",
@@ -89,14 +89,12 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// deploy's fail-closed validator rejects only surfaced as a failed
 		// deploy. It is a management endpoint now, like every other setting.
 		"egress", "endpoints", "flags", "init",
-		"ios",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
 		// somebody runs, with no project to select and no control plane to ask.
 		"link",
 		"login",
 		"logout",
 		"logs",
-		"macos",
 		"members",
 		"notifications",
 		"open",
@@ -130,7 +128,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// f668ec6'de eklendi ve bu listeye yazılmamıştı — kapı o commit'ten beri
 		// kırmızıydı. Kapının işi tam da bu: yeni bir komut BİLEREK buraya yazılır.
 		"versions",
-		"web",
 		"whoami",
 	}, topLevel(t))
 }
@@ -758,5 +755,71 @@ func TestNoUserFacingStringIsTurkish(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Fatalf("user-facing strings must be English (sdk/cli/CLAUDE.md):\n%s",
 			strings.Join(offenders, "\n"))
+	}
+}
+
+// buildPalbase compiles the real binary, because a retired command has to be
+// absent from what SHIPS — not from a cobra tree assembled in a test.
+func buildPalbase(t *testing.T) string {
+	t.Helper()
+	requireRealToolchainCmd(t)
+	bin := filepath.Join(t.TempDir(), "palbase")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build palbase: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// requireRealToolchainCmd keeps a compile out of the -short budget, the way its
+// namesake does in internal/backend.
+func requireRealToolchainCmd(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("compiles the binary — outside the -short budget")
+	}
+}
+
+// A RETIRED COMMAND IS A COMMAND THAT IS NOT THERE.
+//
+// `palbase ios link`, `web link`, `android link`, `macos link` and
+// `<platform> use` were retired in favour of one `palbase link` that reads what
+// the checkout IS. The temptation is a friendly stub — "this moved, use X" —
+// and that stub is the retired surface still shipping, one indirection along.
+// Cobra already says the true thing and exits non-zero.
+//
+// This test measures the ABSENCE, because absence is the deliverable.
+func TestRetiredPlatformCommandsAreGone(t *testing.T) {
+	bin := buildPalbase(t)
+	for _, argv := range [][]string{
+		{"ios", "link"}, {"macos", "link"}, {"android", "link"}, {"web", "link"},
+		{"ios", "use", "staging"}, {"android", "use", "staging"}, {"web", "use", "staging"},
+	} {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			out, err := exec.Command(bin, argv...).CombinedOutput()
+			if err == nil {
+				t.Fatalf("`palbase %s` still runs:\n%s", strings.Join(argv, " "), out)
+			}
+			// A NON-ZERO EXIT IS NOT ENOUGH, and the first version of this test
+			// proved it: every one of these already exited non-zero for its own
+			// reasons (missing credentials, missing argument) while the command
+			// was still registered — so the test passed against exactly the
+			// surface it was written to remove.
+			//
+			// Cobra says the true thing when a command does not exist. Demand
+			// THAT sentence.
+			lower := strings.ToLower(string(out))
+			if !strings.Contains(lower, "unknown command") {
+				t.Fatalf("`palbase %s` failed for some OTHER reason, so this proves nothing "+
+					"about the command being gone:\n%s", strings.Join(argv, " "), out)
+			}
+			// AND IT MUST NOT BE A SIGNPOST. A "moved, use X instead" branch is
+			// the old surface wearing a new coat.
+			for _, banned := range []string{"instead", "moved", "deprecated", "renamed", "kaldırıldı"} {
+				if strings.Contains(lower, banned) {
+					t.Errorf("the refusal reads like a redirect (%q):\n%s", banned, out)
+				}
+			}
+		})
 	}
 }

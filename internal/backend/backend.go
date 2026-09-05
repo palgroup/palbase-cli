@@ -145,10 +145,6 @@ func (r Resolvers) resolve(ctx context.Context) (selection.Selection, error) {
 // Android's Gradle plugin run from their own build steps.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
-		newWebCmd(r),
-		newIOSCmd(r),
-		newMacOSCmd(r),
-		newAndroidCmd(r),
 		newBuildCmd(r),
 		newDeploysCmd(r),
 		newRollbackCmd(r),

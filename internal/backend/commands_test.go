@@ -28,7 +28,7 @@ func TestCommands_FlatSurface(t *testing.T) {
 
 	// Present, top-level, flat. Deploy is GitHub-native (`git push`), so the
 	// CLI keeps the pre-deploy validator + observation/control verbs only.
-	for _, want := range []string{"build", "deploys", "rollback", "status", "spec", "web", "ios", "macos"} {
+	for _, want := range []string{"build", "deploys", "rollback", "status", "spec", "link", "unlink"} {
 		require.True(t, got[want], "expected top-level command %q in flat surface, got %v", want, keys(got))
 	}
 
@@ -46,56 +46,6 @@ func TestCommands_FlatSurface(t *testing.T) {
 	for _, gone := range []string{"deploy", "dev", "disable", "enable", "backend", "config", "merge", "list", "types", "gen-types", "pull-spec", "gen"} {
 		require.False(t, got[gone], "command %q must NOT exist after the flat redesign", gone)
 	}
-}
-
-func TestCommands_MacOSGroup(t *testing.T) {
-	for _, c := range Commands(noopResolvers()) {
-		if c.Name() != "macos" {
-			continue
-		}
-		var names []string
-		for _, child := range c.Commands() {
-			names = append(names, child.Name())
-		}
-		require.ElementsMatch(t, []string{"link"}, names)
-		return
-	}
-	t.Fatal("macos group not found in flat surface")
-}
-
-func TestCommands_AndroidGroup(t *testing.T) {
-	for _, c := range Commands(noopResolvers()) {
-		if c.Name() != "android" {
-			continue
-		}
-		var names []string
-		for _, child := range c.Commands() {
-			names = append(names, child.Name())
-		}
-		require.ElementsMatch(t, []string{"link", "use"}, names)
-		return
-	}
-	t.Fatal("android group not found in flat surface")
-}
-
-// TestCommands_WebGroup pins the `web` group's children: link/unlink/use — no
-// `generate` and no `spec`. Web's client comes from @palbase/web's `palbe-gen`
-// (over the committed Palbase/ inputs); the contract itself is refreshed by the
-// shared top-level `palbase spec`, which writes every linked platform's
-// directory in one run.
-func TestCommands_WebGroup(t *testing.T) {
-	for _, c := range Commands(noopResolvers()) {
-		if c.Name() != "web" {
-			continue
-		}
-		var names []string
-		for _, sub := range c.Commands() {
-			names = append(names, sub.Name())
-		}
-		require.ElementsMatch(t, []string{"link", "unlink", "use"}, names)
-		return
-	}
-	t.Fatal("web group not found in flat surface")
 }
 
 // TestCommands_IncludesGitNativeVerbs pins that the provider-aware deploy verbs
@@ -132,3 +82,16 @@ func keys(m map[string]bool) []string {
 	}
 	return out
 }
+
+// THE PLATFORM GROUPS ARE GONE, and their group tests went with them (T008).
+//
+// TestCommands_MacOSGroup, _AndroidGroup and _WebGroup each asserted a group
+// existed and carried a `link` child. One `palbase link` reads what the checkout
+// IS, so there is no group to assert — and a test kept alive against a surface
+// that no longer ships is a test that measures nothing.
+//
+// What replaced them is stronger and lives in cmd/palbase:
+// TestRetiredPlatformCommandsAreGone runs the REAL binary and demands cobra's
+// "unknown command" — because a non-zero exit alone proved nothing. The first
+// version of that test passed while every one of these commands was still
+// registered, since they each failed for their own reasons anyway.

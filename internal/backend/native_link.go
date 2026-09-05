@@ -70,32 +70,6 @@ type nativeLinkOpts struct {
 	identifier         string // bundle id / Android applicationId
 }
 
-// newIOSCmd builds the `palbase ios` command group.
-func newIOSCmd(r Resolvers) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "ios",
-		Short: "Wire an iOS app to a Palbase project",
-	}
-	cmd.AddCommand(newIOSLinkCmd(r), newIOSUseCmd(r))
-	return cmd
-}
-
-// newMacOSCmd exposes the same native registration flow for a distinct macOS
-// app. App Attest is intentionally absent on macOS.
-func newMacOSCmd(r Resolvers) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "macos",
-		Short: "Wire a macOS app to a Palbase project",
-	}
-	cmd.AddCommand(newNativeLinkCmd(r, "macos"))
-	return cmd
-}
-
-// newIOSLinkCmd builds `palbase ios link`.
-func newIOSLinkCmd(r Resolvers) *cobra.Command {
-	return newNativeLinkCmd(r, "ios")
-}
-
 func newNativeLinkCmd(r Resolvers, platform string) *cobra.Command {
 	var jsonOut bool
 	var packageName string

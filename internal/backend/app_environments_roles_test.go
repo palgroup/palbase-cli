@@ -157,3 +157,13 @@ func mustRead(t *testing.T, path string) []byte {
 	require.NoError(t, err)
 	return raw
 }
+
+// isolatedCheckout gives a test its own directory to link inside. It lived in
+// native_use_test.go until `<platform> use` retired (T008); the helper outlived
+// the surface that introduced it.
+func isolatedCheckout(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	return dir
+}
