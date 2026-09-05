@@ -222,6 +222,20 @@ services:
       PALBASE_SEALED_SIGNING_SEED: ${PALBASE_SEALED_SIGNING_SEED:-}
       PALBASE_SEALED_BINDING: ${PALBASE_SEALED_BINDING:-}
       PALBASE_SEALED_ROOT: ${PALBASE_SEALED_ROOT:-}
+      # ZORLAMANIN ANAHTARI — ve yokluğu, zincirin dördüncü kopuk halkasıydı.
+      #
+      # Yukarıdaki üç değişken 09-01'de buraya taşındı; bu dördüncüsü
+      # taşınmadı. Sonucu: `palbase start` ile kalkan bir yığında mühür
+      # zorlaması KAPATILAMIYOR (boş bırakmak AÇIK demek), ve `/auth/*`
+      # önekinin tamamı mühürsüz gövdeyi 415 ile reddediyor. Web SDK'sında
+      # gövde mühürleme kodu YOK — ölçüldü: gerçek `pb.auth.signUp` → 415
+      # `sealed_required`. Yani yerel geliştirmede web istemcisiyle kaydolmak
+      # ya da giriş yapmak tümüyle imkânsızdı, ve hata mesajı ne sebebi ne
+      # çareyi adlandırıyordu.
+      #
+      # Yayınlanan compose bunu taşıyor (docker-compose.yml). Varsayılan yine
+      # BOŞ, yani güvenli taraf değişmiyor: kapatmak isteyen açıkça yazar.
+      PALBASE_SEALED_REQUIRED: ${PALBASE_SEALED_REQUIRED:-}
       PEPPER: ${PEPPER:-}
       REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:-palbase}
