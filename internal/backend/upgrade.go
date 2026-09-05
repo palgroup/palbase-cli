@@ -78,6 +78,20 @@ func localStackUpgradeRefusal(target Target) error {
 	if !target.OnThisMachine() {
 		return nil
 	}
+	// WHICH LOCAL STACK, AND HOW TO GET BACK TO THE CLOUD ONE.
+	//
+	// A checkout can be linked to a cloud project AND have a dev stack running:
+	// ReadTarget prefers the local one, so this fires while the reader's project
+	// is in the cloud. Telling them to edit stackVersion is then advice for a
+	// situation they are not in — the same class this refusal exists to close.
+	// So it names the running stack and the verb that puts it away.
+	if linked, err := readLinkedProject(); err == nil && linked.Project != "" {
+		return fmt.Errorf(
+			"a stack is running on this machine (%s) and every verb targets it, so `upgrade` cannot "+
+				"reach the cloud project %q.\n  Run `palbase stop` first, or move the local stack by "+
+				"setting stackVersion in %s and running `palbase start`",
+			target.URL, linked.Project, projectPath())
+	}
 	return fmt.Errorf(
 		"this checkout points at a stack on this machine (%s), and `upgrade` moves a CLOUD "+
 			"project's runtime.\n  To move this stack: set stackVersion in %s and run `palbase start`",

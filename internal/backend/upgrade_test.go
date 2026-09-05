@@ -1,7 +1,10 @@
 package backend
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,5 +155,70 @@ func TestUpgradeOnALocalStackSaysWhatItIsAndWhatToDoInstead(t *testing.T) {
 	// A cloud target passes through untouched.
 	if err := localStackUpgradeRefusal(Target{URL: "https://app1prod.palbase.studio"}); err != nil {
 		t.Errorf("a cloud target was refused: %v", err)
+	}
+}
+
+// THE REFUSAL HAS TO BE ON THE PATH THE USER RUNS, not just in a function.
+//
+// An independent review measured this: deleting the call site in RunE left the
+// WHOLE repository green, because the only test called
+// localStackUpgradeRefusal directly. A guard nothing reaches through the
+// command is a guard that can be removed by accident.
+func TestUpgradeCommandRefusesALocalStack(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "project.json"),
+		[]byte(`{"url":"http://127.0.0.1:54321"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newUpgradeCmd(Resolvers{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(nil)
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("`palbase upgrade` ran against a stack on this machine")
+	}
+	for _, want := range []string{"this machine", "stackVersion", "palbase start"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "palbase link") {
+		t.Errorf("a linked checkout was told to link: %v", err)
+	}
+}
+
+// A CLOUD PROJECT WITH A DEV STACK RUNNING GETS A DIFFERENT SENTENCE.
+//
+// ReadTarget prefers local.json, so this refusal fires while the reader's
+// project is in the cloud. "Set stackVersion" is then advice for a situation
+// they are not in — so the message names the running stack and `palbase stop`.
+func TestUpgradeRefusalNamesTheRunningStackForACloudProject(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "project.json"),
+		[]byte(`{"project":"myproj","env":"prod"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := localStackUpgradeRefusal(Target{URL: "http://127.0.0.1:54321", Local: true})
+	if err == nil {
+		t.Fatal("a local target was accepted")
+	}
+	for _, want := range []string{"myproj", "palbase stop"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
 	}
 }

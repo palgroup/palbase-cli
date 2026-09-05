@@ -166,3 +166,48 @@ func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
 		t.Error("a project file was written before there was a project to name")
 	}
 }
+
+// A RUNNING DEV STACK MUST NOT EAT THE PROJECT BOND.
+//
+// ReadTarget PREFERS .palbase/local.json; WriteTarget writes .palbase/project.json.
+// Reading through the first and writing through the second replaces a colleague's
+// committed project with a localhost address — the exact thing WriteLocalTarget's
+// comment twelve lines above warns about: "Writing one through the other is how a
+// `palbase start` ends up committing a localhost address into a colleague's
+// checkout."
+//
+// Not a rare edge: WriteLocalTarget only ever writes Target{URL}, so the local
+// target NEVER carries a StackVersion — every repeat `palbase start` on a running
+// stack re-derives and re-writes.
+func TestStackVersionDoesNotClobberTheProjectWithALocalStack(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const committed = `{"project":"myproj","env":"prod"}`
+	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "project.json"), []byte(committed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "local.json"),
+		[]byte(`{"url":"http://127.0.0.1:54321"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedInstalledSDK(t, dir, "33.0.0")
+
+	if _, err := stackVersion("."); err != nil {
+		t.Fatalf("stackVersion failed: %v", err)
+	}
+
+	after, err := ReadProjectTargetForTest()
+	if err != nil {
+		t.Fatalf("the committed project file is unreadable after stackVersion: %v", err)
+	}
+	if after.Project != "myproj" || after.Env != "prod" {
+		t.Errorf("the project bond was overwritten: project=%q env=%q url=%q — a running dev stack "+
+			"just committed a localhost address into this checkout", after.Project, after.Env, after.URL)
+	}
+	if after.URL != "" {
+		t.Errorf("the local stack's address leaked into the committed file: %q", after.URL)
+	}
+}

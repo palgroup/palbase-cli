@@ -262,13 +262,21 @@ func ResolveTarget(ctx context.Context) (Target, error) {
 // falling back silently is how the stack becomes a property of the binary again,
 // which is the whole defect (D-035/D-039).
 func stackVersion(projectDir string) (string, error) {
+	// THE COMMITTED FILE, NOT THE RUNNING STACK.
+	//
+	// ReadTarget PREFERS .palbase/local.json while WriteTarget writes
+	// .palbase/project.json, so reading through the first and writing through
+	// the second replaced a colleague's project with a localhost address —
+	// measured: {"project":"myproj","env":"prod"} became
+	// {"url":"http://127.0.0.1:54321","stackVersion":"33"}. WriteLocalTarget's
+	// comment twelve lines above warns about exactly this, and the warning was
+	// right. The stack version is a property of the PROJECT, so it is read from
+	// and written to the project's own file.
+	//
 	// AN UNLINKED CHECKOUT IS THE NORMAL CASE FOR `start`, which brings a stack
-	// up and links to it — so a missing project file is not an error here, it is
-	// the state before the one this command creates. Measured: reading the target
-	// first made `palbase start` refuse a fresh `palbase init` with "this
-	// checkout is not linked", which is advice for the command the reader just
-	// ran.
-	target, err := ReadTarget()
+	// up and links to it — a missing project file is the state before the one
+	// that command creates, not an error.
+	target, err := readLinkedProject()
 	linked := err == nil
 	if linked {
 		if v := strings.TrimSpace(target.StackVersion); v != "" {
@@ -298,3 +306,7 @@ func stackVersion(projectDir string) (string, error) {
 	}
 	return major, nil
 }
+
+// ReadProjectTargetForTest reads the COMMITTED project file, bypassing the local
+// stack's preference — the asymmetry that made stackVersion clobber it.
+func ReadProjectTargetForTest() (Target, error) { return readLinkedProject() }

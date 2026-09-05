@@ -78,3 +78,46 @@ da üretim yolundan ilk geçişte çıktı.
 Ayrıca pre-flight'ta bir ölçümüm yanlıştı ("runtime'ın hazırlık ucu yok" — `grep` `node_modules`'a
 düşmüştü) ve bir kapı yazarken kendi kusurumu buldum (rota kapısının regex'i seçenekli
 dekoratörleri yutuyordu, `/v1/cloud/me` ve `/config`'i "servis edilmiyor" sanıyordu).
+
+---
+
+## Bağımsız inceleme — bir VERİ KAYBI kusuru buldu
+
+Üç gözden geçirici rapor verdi. En ağırı:
+
+### C-1 · `stackVersion` proje bağını EZİYORDU (benim T001 kodum)
+
+`ReadTarget()` `.palbase/local.json`'ı **tercih eder**; `WriteTarget()` `.palbase/project.json`'a
+**yazar**. Birinden okuyup öbürüne yazmak, bir meslektaşın commit'li projesini localhost adresiyle
+değiştiriyordu. Kendi gözümle yeniden ürettim:
+
+```
+ÖNCE:  {"project":"myproj","env":"prod"}
+SONRA: {"url":"http://127.0.0.1:54321","stackVersion":"33"}
+```
+
+**Nadir bir kenar değil:** `WriteLocalTarget` yalnız `Target{URL}` yazdığı için yerel hedefte
+`StackVersion` hiçbir zaman dolu olmaz — koşan bir yığında atılan **her** `palbase start` yeniden
+türetir ve yeniden yazar.
+
+Ve `target.go`'nun kendi yorumu bunu on iki satır yukarıda uyarıyordu: *"Writing one through the
+other is how a `palbase start` ends up committing a localhost address into a colleague's checkout."*
+**Uyarı oradaydı; ben okumadan üstünden geçtim.** Düzeltme tek satır: `readLinkedProject()`.
+
+### C-2 (rev-b) · `upgrade`'in wiring'i ölçülmüyordu — DOĞRULANDI
+Çağrı yerini silip **tüm depoyu** koştum: **0 FAIL**. Tek test yardımcıyı doğrudan çağırıyordu; hiçbir
+şey komutu kurmuyordu. Artık `newUpgradeCmd`'i kuran bir test var ve mutation kırmızı veriyor.
+
+### rev-b'nin diğer iki bulgusu — ölçünce KAPANMIŞ çıktı
+- **C-2 (algılama wiring'i):** `b158580`'de ölçülmüş; UAT sırasında algılamayı ağdan öne alınca
+  kapsama girmiş. Bugün geri alınca **3 test** düşüyor.
+- **I-2 (yarım-link):** algılama artık satır 225'te, ilk yazım 288'de — yazımdan **önce**.
+
+### I-3 · Ret, okuyucunun içinde olmadığı duruma tavsiye veriyordu
+Bulut projesine bağlı bir checkout'ta dev yığın koşarken `ReadTarget` yereli tercih ediyor ve ret
+"stackVersion ayarla" diyordu. Artık koşan yığını ve projeyi ADIYLA anıyor, `palbase stop`'u
+öneriyor — T005'in kapattığı sınıfın bir kaynak-türü ötesi.
+
+**Not:** `w1-a` SDK deposunda benim olmayan bir kusuru doğru teşhis etti (`docs.test.ts`,
+commit'lenmemiş `services.md`); sınırının dışında olduğu için dokunmadı. Bugün ölçtüm: **10/10 geçiyor**,
+başka bir oturum kapatmış.
