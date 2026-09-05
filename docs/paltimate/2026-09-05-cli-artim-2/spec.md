@@ -75,9 +75,15 @@ birlikte — yerine konur.
 - **FR-013** WHEN bir komut hedefini belirlerse THEN hedef SHALL `.palbase/project.json`'dan (ve
   koşan yığın varsa `.palbase/local.json`'dan) gelsin; `--project`/`--environment` bayrakları ve
   `.palbase/selection.json` SHALL var olmasın.
-- **FR-014** THEN `internal/apps` (617 satır), `internal/hook` (494 satır) ve deploy'un github
-  `repository_provider` kolu (12 üretim referansı) SHALL silinsin — çağıranlarıyla birlikte, shim
-  bırakmadan.
+- **FR-014** THEN deploy'un github `repository_provider` kolu ve `internal/apps`'in ÖLÜ komut
+  grubu SHALL silinsin — çağıranlarıyla birlikte, shim bırakmadan.
+  > **Kapsam ölçümle daraldı (Changelog A-8).** Tasarım "`internal/apps` (617) ve `internal/hook`
+  > (494) silinsin" diyordu; ikisi de tümüyle ölü DEĞİL. `apps.Cmd` hiçbir yerde kayıtlı değil
+  > (komut grubu ölü) ama paketin altı sembolü canlı: `ConfigArtifact`, `ConfigArtifactPath`,
+  > `OAuthApple`, `OAuthConfig`, `OAuthGoogle`, `ValidateConfigArtifact` — `mobile_ios_capabilities.go`
+  > onları kullanıyor. `internal/hook` ise `deploy.go`'nun CLONE yolundan ve `doctor.go`'dan
+  > çağrılıyor; yalnız github dalındaki kullanımı gidiyor. Bir paketi "seçim katmanına dayanıyor"
+  > diye silmek, içindeki canlı yüzeyi de silmek olurdu.
 - **FR-015** WHEN CLI bir projeyi çözerse THEN sunucuda olmayan `GET /api/v2/projects` çağrısı
   (`internal/selection/resolve.go:192`) SHALL yapılmasın.
 - **FR-016** WHEN kaynak kodda bir HTTP rota literali varsa THEN bir kapı SHALL onun sunucunun
@@ -248,6 +254,11 @@ temellendirildi (`confirmed`/`stale`).
 ---
 
 ## Changelog
+
+- **A-8 · 2026-09-05 · FR-014'ün kapsamı ölçümle daraldı (execute, T011).** Tasarım iki paketin
+  tümden silinmesini söylüyordu; ölçüm ikisinin de kısmen CANLI olduğunu gösterdi — `apps`'in komut
+  grubu ölü ama altı sembolü kullanımda, `hook` clone ve doctor yollarından çağrılıyor. Silinen:
+  github kolu + `apps.Cmd` ve ona bağlı ölü kod. Bu, tasarımın bu koşudaki dördüncü bayat iddiası.
 
 - **A-7 · 2026-09-05 · FR-007'nin yarısı çürütüldü; FR-004'ün mekanizması bulundu (execute, T004).**
   (1) `stop`'un dosya-önce sırası ölçülmüş bir karar, kusur değil — o yarı kaldırıldı; compose'u

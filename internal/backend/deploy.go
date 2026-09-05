@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/palgroup/palbase-cli/internal/hook"
 	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
@@ -112,23 +111,6 @@ func runPush(d pushDeps) error {
 	ctx := d.ctx
 	if ctx == nil {
 		ctx = context.Background()
-	}
-
-	if d.sel.RepositoryProvider == selection.ProviderGitHub {
-		if err := requireMappedGitBranch(d.sel, d.gitBranch); err != nil {
-			return err
-		}
-		// Wire (or self-heal to v2) the pre-push hook before pushing so the
-		// deploy-validation gate runs on THIS push. Best-effort — never blocks the
-		// push. Only a github-provider project has a git checkout to hook.
-		if cwd, err := os.Getwd(); err == nil {
-			hook.Ensure(cwd, out)
-		}
-		if err := d.git("git", "push"); err != nil {
-			return err
-		}
-		fmt.Fprintln(out, "✓ pushed to GitHub — the mapped environment deploys via webhook")
-		return nil
 	}
 
 	cwd, err := os.Getwd()
@@ -251,15 +233,6 @@ type cloneDeps struct {
 //   - github:  `git clone <url> <dir>`, then write config v2 into <dir>.
 //   - palbase: delegate to the injected bundle downloader.
 func runClone(d cloneDeps) error {
-	if d.provider == selection.ProviderGitHub {
-		if err := d.git("git", "clone", d.repoURL, d.dir); err != nil {
-			return err
-		}
-		// Wire core.hooksPath now rather than waiting for the first `npm install`
-		// (prepare) — a fresh clone should push through the gate immediately.
-		hook.Ensure(d.dir, os.Stdout)
-		return d.writeCfg(d.dir, d.cfg)
-	}
 	if d.download == nil {
 		return fmt.Errorf("palbase-provider clone is not available (bundle download not wired)")
 	}
@@ -316,52 +289,10 @@ type pullDeps struct {
 
 // runPull routes `palbase pull` by the project's repository provider.
 func runPull(d pullDeps) error {
-	if d.sel.RepositoryProvider == selection.ProviderGitHub {
-		if err := requireMappedGitBranch(d.sel, d.gitBranch); err != nil {
-			return err
-		}
-		return d.git("git", "pull")
-	}
 	if d.refetch == nil {
 		return fmt.Errorf("palbase-provider pull is not available (bundle refetch not wired)")
 	}
 	return d.refetch()
-}
-
-func requireMappedGitBranch(sel selection.Selection, resolve gitBranchResolver) error {
-	mapped := ""
-	if sel.Environment.SourceGitBranch != nil {
-		mapped = strings.TrimSpace(*sel.Environment.SourceGitBranch)
-	}
-	label := sel.Environment.Slug
-	if label == "" {
-		label = sel.EnvironmentRef()
-	}
-	if mapped == "" {
-		// It used to say `palbase env branch <git-branch>`. That command went
-		// with the v2 cutover, and nothing replaced it: NO verb in this CLI
-		// writes source_git_branch — the mapping is a property of the
-		// environment, set where the environment is. Naming a command that does
-		// not exist costs the reader the time it takes to discover that.
-		return fmt.Errorf(
-			"selected environment %q has no mapped Git branch, and this project deploys by branch.\n"+
-				"  Nothing in this CLI sets the mapping — `palbase open` goes to the environment where it is configured",
-			label)
-	}
-	if resolve == nil {
-		resolve = currentGitBranch
-	}
-	current, err := resolve()
-	if err != nil {
-		return err
-	}
-	if current != mapped {
-		return fmt.Errorf(
-			"selected environment %q maps Git branch %q, but the current branch is %q — switch branches or select the matching environment",
-			label, mapped, current,
-		)
-	}
-	return nil
 }
 
 // SourcePath is where a project hands back the tree one of its versions was

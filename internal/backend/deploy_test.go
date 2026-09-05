@@ -7,12 +7,13 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -195,137 +196,6 @@ func TestPush_PlaneVerdict_IsSurfaced(t *testing.T) {
 	require.Len(t, f.calls, 1)
 }
 
-// ── github provider ─────────────────────────────────────────────────────────
-
-func TestPush_GitHubProvider_ExecsGitPush_AndNeverUploads(t *testing.T) {
-	seedBackendDir(t)
-	f := &fakeDeploy{}
-	var got []string
-	var out bytes.Buffer
-
-	sel := palbaseProject(t)
-	sel.RepositoryProvider = selection.ProviderGitHub
-	mapped := "main"
-	sel.Environment.SourceGitBranch = &mapped
-
-	require.NoError(t, runPush(pushDeps{
-		git:       func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
-		gitBranch: func() (string, error) { return "main", nil },
-		rest:      f, sel: sel, out: &out, ctx: context.Background(),
-	}))
-	require.Equal(t, []string{"git", "push"}, got)
-	require.Empty(t, f.calls, "the github provider deploys via webhook — it must not hand the plane an artifact")
-	require.Contains(t, out.String(), "webhook")
-}
-
-func TestPush_GitHubProvider_PropagatesGitFailure(t *testing.T) {
-	seedBackendDir(t)
-	sel := palbaseProject(t)
-	sel.RepositoryProvider = selection.ProviderGitHub
-	mapped := "main"
-	sel.Environment.SourceGitBranch = &mapped
-
-	err := runPush(pushDeps{
-		git:       func(string, ...string) error { return fmt.Errorf("rejected: non-fast-forward") },
-		gitBranch: func() (string, error) { return "main", nil },
-		rest:      &fakeDeploy{}, sel: sel, out: io.Discard, ctx: context.Background(),
-	})
-	require.ErrorContains(t, err, "non-fast-forward")
-}
-
-func TestPush_GitHubProvider_RejectsBranchThatDoesNotMapToSelectedEnvironment(t *testing.T) {
-	seedBackendDir(t)
-	sel := palbaseProject(t)
-	sel.RepositoryProvider = selection.ProviderGitHub
-	mapped := "develop"
-	sel.Environment.SourceGitBranch = &mapped
-	gitCalled := false
-
-	err := runPush(pushDeps{
-		git:       func(string, ...string) error { gitCalled = true; return nil },
-		gitBranch: func() (string, error) { return "main", nil },
-		sel:       sel,
-		out:       io.Discard,
-	})
-	require.ErrorContains(t, err, `selected environment "production" maps Git branch "develop"`)
-	require.False(t, gitCalled)
-}
-
-func TestPush_GitHubProvider_RejectsUnmappedEnvironment(t *testing.T) {
-	sel := palbaseProject(t)
-	sel.RepositoryProvider = selection.ProviderGitHub
-	err := runPush(pushDeps{sel: sel, out: io.Discard})
-	require.ErrorContains(t, err, "has no mapped Git branch")
-}
-
-// ── clone / pull ────────────────────────────────────────────────────────────
-
-func TestRunClone_GitHubProvider_ClonesThenWritesConfigV2(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-
-	var got []string
-	cfg := &selection.Config{
-		ProjectID: "proj_1", EnvironmentID: "env_prod",
-		RepositoryProvider: selection.ProviderGitHub,
-	}
-	require.NoError(t, runClone(cloneDeps{
-		git: func(name string, args ...string) error {
-			got = append([]string{name}, args...)
-			return os.MkdirAll("todoapp", 0o755)
-		},
-		provider: selection.ProviderGitHub,
-		repoURL:  "https://github.com/pal-salih/todoapp.git",
-		dir:      "todoapp",
-		cfg:      cfg,
-		writeCfg: selection.Save,
-	}))
-	require.Equal(t, []string{"git", "clone", "https://github.com/pal-salih/todoapp.git", "todoapp"}, got)
-
-	loaded, err := selection.Load("todoapp")
-	require.NoError(t, err)
-	require.Equal(t, "proj_1", loaded.ProjectID)
-	require.Equal(t, "env_prod", loaded.EnvironmentID)
-	require.Equal(t, selection.ProviderGitHub, loaded.RepositoryProvider)
-}
-
-func TestRunPull_RoutesByProvider(t *testing.T) {
-	t.Run("github runs git pull", func(t *testing.T) {
-		var got []string
-		sel := palbaseProject(t)
-		sel.RepositoryProvider = selection.ProviderGitHub
-		mapped := "main"
-		sel.Environment.SourceGitBranch = &mapped
-		require.NoError(t, runPull(pullDeps{
-			sel:       sel,
-			git:       func(name string, args ...string) error { got = append([]string{name}, args...); return nil },
-			gitBranch: func() (string, error) { return "main", nil },
-		}))
-		require.Equal(t, []string{"git", "pull"}, got)
-	})
-	t.Run("palbase refetches the bundle", func(t *testing.T) {
-		called := false
-		require.NoError(t, runPull(pullDeps{
-			sel:     palbaseProject(t),
-			refetch: func() error { called = true; return nil },
-		}))
-		require.True(t, called)
-	})
-}
-
-func TestPull_GitHubProvider_RejectsWrongBranch(t *testing.T) {
-	sel := palbaseProject(t)
-	sel.RepositoryProvider = selection.ProviderGitHub
-	mapped := "release"
-	sel.Environment.SourceGitBranch = &mapped
-	err := runPull(pullDeps{
-		sel:       sel,
-		git:       func(string, ...string) error { return nil },
-		gitBranch: func() (string, error) { return "main", nil },
-	})
-	require.ErrorContains(t, err, `maps Git branch "release"`)
-}
-
 func TestRepoURLFromFullName(t *testing.T) {
 	require.Equal(t, "https://github.com/org/repo.git", repoURLFromFullName("org/repo"))
 	require.Empty(t, repoURLFromFullName(""))
@@ -502,3 +372,46 @@ func TestTheIdempotencyKeyIsTheSameForTheSameArtifact(t *testing.T) {
 		t.Errorf("a different artifact carried the same key %s — two intended deploys would collapse into one", other)
 	}
 }
+
+// THE GITHUB PROVIDER BRANCH IS GONE (T011).
+//
+// `repository_provider: github` routed push to `git push`, clone to `git clone`
+// and pull to `git pull`, on the premise that a project's code lived in a repo
+// the CLI drove. The v2 cloud addresses a project by its ref and takes an
+// ARTIFACT; nothing mints a github-provider project any more, so the branch was
+// a road to a country that closed.
+//
+// A branch nobody can reach is not free: it doubles the shapes every deploy verb
+// has to be read against.
+func TestDeployVerbsHaveOneProviderPath(t *testing.T) {
+	root, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grep := exec.Command("grep", "-rn", "ProviderGitHub", "--include=*.go", root)
+	found, _ := grep.Output()
+	var live []string
+	for _, line := range strings.Split(strings.TrimSpace(string(found)), "\n") {
+		if line == "" || strings.Contains(line, "_test.go") {
+			continue
+		}
+		live = append(live, line)
+	}
+	if len(live) > 0 {
+		t.Errorf("the github provider branch survives in production code:\n%s", strings.Join(live, "\n"))
+	}
+}
+
+// THE GITHUB-PROVIDER TESTS WENT WITH THE BRANCH (T011).
+//
+// They measured real behaviour: push exec'd `git push` and never uploaded, an
+// unmapped branch was refused by name, a git failure propagated. All correct,
+// and all about a provider nothing mints any more — the v2 cloud addresses a
+// project by its ref and takes an ARTIFACT.
+//
+// What replaced them measures the absence:
+// TestDeployVerbsHaveOneProviderPath greps production code for ProviderGitHub,
+// because a branch can be cut from one verb and survive in another.
+
+// TestRunPull_RoutesByProvider went with the routing (T011): there is one
+// provider now, so there is no route to take.

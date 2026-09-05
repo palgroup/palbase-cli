@@ -282,17 +282,17 @@ addLocalStack`; `native_link.go:381 resolveNativeApp` ↔ `web_link.go:148 resol
 **D-051:** `tests/e2e` SİLİNMEZ — seçim-katmanı bağımlılığından arındırılır. Artım 1 o pakete
 bloklayıcı bir CI kapısı bağladı; silmek kapıyı da götürür.
 
-- [ ] **Adım 1: Kırmızıyı yaz** — `--project`/`--environment` bayraklarının ARTIK OLMADIĞINI ve
+- [x] **Adım 1: Kırmızıyı yaz** — `--project`/`--environment` bayraklarının ARTIK OLMADIĞINI ve
   `selection.json`'ın OKUNMADIĞINI ölçen test; kalıntı `selection.json` taşıyan checkout'ta komut
   DÜŞMEZ, dosyanın okunmadığını söyler (spec sınır durumu).
-- [ ] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/selection/ ./internal/backend/ -run 'TestSelection|TestNoSelectionFlags' -count=1`
-- [ ] **Adım 3: Sök** — bayraklar, `selection.json` okuyucusu/yazıcısı, ve `resolve.go:192`'deki
+- [x] **Adım 2: Kırmızıyı gör** — Run: `go test ./internal/selection/ ./internal/backend/ -run 'TestSelection|TestNoSelectionFlags' -count=1`
+- [x] **Adım 3: Sök** — bayraklar, `selection.json` okuyucusu/yazıcısı, ve `resolve.go:192`'deki
   `GET /api/v2/projects` çağrısı gider. `selectiontest/fake.go`'dan o rotanın fikstürü gider.
-- [ ] **Adım 4: `tests/e2e`'yi arındır** — seçim katmanına bağlı kalan varsa kaldır; paket
+- [x] **Adım 4: `tests/e2e`'yi arındır** — seçim katmanına bağlı kalan varsa kaldır; paket
   DERLENMEYE devam etsin.
-- [ ] **Adım 5: Yeşili gör** — Run: `go test ./... -count=1 -short` **ve** `go vet -tags e2e ./tests/e2e/` ·
+- [x] **Adım 5: Yeşili gör** — Run: `go test ./... -count=1 -short` **ve** `go vet -tags e2e ./tests/e2e/` ·
   Beklenen: ikisi de temiz.
-- [ ] **Adım 6: Commit** — pathspec ile dört dosya
+- [x] **Adım 6: Commit** — pathspec ile dört dosya
 
 ---
 
