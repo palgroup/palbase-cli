@@ -412,3 +412,33 @@ yazmıyor. Kesim yalnız GÖRÜNÜR yaptı.
 
 Kesim TUTULDU ve özelliğin sahibine iki seçenekle soruldu (canlı yola taşımak,
 ya da rayı ulaşılabilir bir çağıranla geri getirmek). Tek taraflı silinmedi.
+
+### A-16 KAPANDI · ve kalıntı üç katman derinmiş
+
+Özelliğin sahibi "A — kes" dedi ve kendi satırlarını `b4fecd3` ile geri aldı.
+Gerekçesi kayda değer, çünkü benim önerimi DÜZELTTİ: sürüme ihtiyacı olan taraf
+kiracının runtime'ı değil KONTROL DÜZLEMİ, ve o kiracıya `readActiveArtifact`
+ile zaten soruyor — yani doğru kablo CLI'dan hiç geçmiyor. `runStackPush`'a bir
+şey EKLENMEDİ.
+
+Kesim üç katman sürdü, her katmanı ölçüm açtı:
+  1. `runPush` · `pushDeps` · `pushIdempotencyKey` (üretim, 142 satır)
+  2. yedi test + yardımcıları (`fakeDeploy`, `seedBackendDir`, `stubBundler`)
+  3. `managed_spec.go` — kesimden SONRA ada oldu (89 satır, testleri `unused`'ı
+     susturuyordu; bu koşuda ÜÇÜNCÜ kez)
+
+**Giden bir yetenek var ve adlandırılıyor:** CLI artık push için idempotency
+anahtarı hesaplamıyor. Canlı yol onu zaten taşımıyordu ve kodun kendi ölçümü
+(04.09) her iki düzlemin de o başlığı OKUMADIĞINI söylüyor. Okunmayan bir
+başlığı canlı yola taşımak, sevk edilmeyen bir beyan üretmek olurdu
+([[feedback_a_declaration_nothing_ships_is_not_a_feature]]). Bir düzlem anahtarı
+onurlandırdığı gün canlı rayda yazılır.
+
+> **Ders:** *bir kesimin kalıntısı tek katman değildir.* Her katmanı silmek bir
+> sonrakini görünür yapar, ve `unused` linter'ı testler yüzünden yalnız birini
+> gösterir. Kesimden sonra ADA TARAMASI yap — üretim çağıranı olmayan dosya,
+> linter sessiz olsa da vardır.
+
+Toplam bu koşuda silinen: 3.969 (T008 artığı) + 494 (hook) + 818 (FR-013) +
+474 (bulut push + managed_spec) ≈ **5.755 satır**, hiçbiri yerine bir şey
+konmadan — çünkü hepsinin işini zaten başka bir yol yapıyordu.
