@@ -10,7 +10,9 @@ package logs
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,7 +20,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/palgroup/palbase-cli/internal/selectiontest"
+	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
 // runLogs drives `palbase logs` against a fake project and returns what the
@@ -26,15 +28,17 @@ import (
 func runLogs(t *testing.T, entries []map[string]any, args ...string) (url.Values, string) {
 	t.Helper()
 	t.Chdir(t.TempDir())
-	f := selectiontest.New(t)
-	selectiontest.WriteConfig(t, ".", nil)
-
 	var got url.Values
-	f.Handle("GET /v1/panel/environments/app1prod/logs",
-		func(w http.ResponseWriter, r *http.Request) {
-			got = r.URL.Query()
-			selectiontest.WriteOK(w, http.StatusOK, map[string]any{"entries": entries})
-		})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/panel/environments/app1prod/logs" {
+			http.NotFound(w, r)
+			return
+		}
+		got = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
+	}))
+	t.Cleanup(srv.Close)
 
 	// THE ADDRESS PATH, which is the one that ships. These tests used to reach
 	// `showCloud` through the selection resolver; FR-013 retired that, and the
@@ -48,7 +52,7 @@ func runLogs(t *testing.T, entries []map[string]any, args ...string) (url.Values
 		t.Fatal(err)
 	}
 
-	rest := f.REST()
+	rest := transport.New(srv.URL, "tok_test")
 	cmd := Cmd(Resolvers{
 		REST:     func() REST { return rest },
 		CloudRef: func(string) (string, bool) { return "app1prod", true },

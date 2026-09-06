@@ -37,7 +37,7 @@ const buildTempPrefix = "palbase-build-"
 // required) is caught before it produces a FAILED deploy. Non-interactive, no
 // Studio auth, NO network call. Exit 0 = PASSED (or environment couldn't run it —
 // warned); exit 1 = user-code validation error.
-func newBuildCmd(_ Resolvers) *cobra.Command {
+func newBuildCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "build",
 		Short: "Validate the backend locally the way a deploy would (catches broken pushes before they ship)",

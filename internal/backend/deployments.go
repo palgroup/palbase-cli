@@ -13,7 +13,6 @@ package backend
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,20 +37,26 @@ type projectDeployment struct {
 	ServingDigest string `json:"serving_digest"`
 }
 
-// deploysOfProject lists what a linked project has deployed. Returns false when
-// there is no linked project, so the caller falls through to the cloud arm.
-func deploysOfProject(cmd *cobra.Command) (bool, error) {
-	target, cred, ok, err := openLinked(cmd)
-	if !ok || err != nil {
-		return ok, err
+// deploysOfProject lists the linked project's deployments.
+func deploysOfProject(cmd *cobra.Command) error {
+	target, cred, err := openLinked(cmd)
+	if err != nil {
+		return err
 	}
 
 	ctx := cmd.Context()
 	deployments, err := listProjectDeployments(ctx, target, cred)
 	if err != nil {
-		return true, err
+		return err
 	}
 	out := cmd.OutOrStdout()
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	if jsonOut {
+		if deployments == nil {
+			deployments = []projectDeployment{}
+		}
+		return json.NewEncoder(out).Encode(deployments)
+	}
 	if len(deployments) == 0 {
 		// Same rule `status` follows: a stack started here serves this directory
 		// and never activates an artifact, so an empty history is its permanent
@@ -63,7 +68,7 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 		} else {
 			fmt.Fprintln(out, "nothing deployed yet — `palbase push`")
 		}
-		return true, nil
+		return nil
 	}
 
 	// NO ENDPOINTS COLUMN. A manifest never recorded a count, so only the row the
@@ -83,7 +88,7 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 			orDash(d.SDKVersion))
 	}
 	if err := table.Flush(); err != nil {
-		return true, err
+		return err
 	}
 	// The count comes from `current`, not from the history: a manifest never
 	// recorded one, so the listing cannot carry it, and only the runtime can say
@@ -98,23 +103,14 @@ func deploysOfProject(cmd *cobra.Command) (bool, error) {
 		}
 	}
 	fmt.Fprintf(out, "\n`palbase rollback %s` serves that version again\n", short(deployments[len(deployments)-1].Digest))
-	return true, nil
+	return nil
 }
 
-// rollbackOnProject activates a version the project already has. Unlike
-// `deploys` it has no second authority to fall back to — the plane's ledger
-// records what was PUSHED, it does not serve anything — so a checkout that names
-// no project is an error here rather than a fall-through.
-func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
-	target, cred, ok, err := openLinked(cmd)
+// rollbackOnProject activates a version the linked project already has.
+func rollbackOnProject(cmd *cobra.Command, digest string) error {
+	target, cred, err := openLinked(cmd)
 	if err != nil {
-		return true, err
-	}
-	if !ok {
-		// `--environment <ref>` could never answer this: with nothing linked
-		// there is no project for it to narrow.
-		return true, errors.New(
-			"no project to roll back: run `palbase link <project>`, or `palbase link <ref>` for one environment of it")
+		return err
 	}
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
@@ -124,11 +120,11 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 	// how the wrong version gets activated.
 	deployments, err := listProjectDeployments(ctx, target, cred)
 	if err != nil {
-		return true, err
+		return err
 	}
 	full, err := resolveDigest(digest, deployments)
 	if err != nil {
-		return true, err
+		return err
 	}
 
 	// The project's activate now WAITS for the runtime to confirm it is
@@ -138,19 +134,19 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 	status, body, err := managementCall(ctx, target, cred, http.MethodPost,
 		"/v1/management/deployments/"+full+"/activate", nil, "")
 	if err != nil {
-		return true, err
+		return err
 	}
 	switch status {
 	case http.StatusOK, http.StatusNoContent:
 	case http.StatusNotFound:
-		return true, fmt.Errorf("%s has no version %s", target.Describe(), short(full))
+		return fmt.Errorf("%s has no version %s", target.Describe(), short(full))
 	case http.StatusUnprocessableEntity:
 		// The pointer moved and the runtime never came, or came and served
 		// nothing. Refused rather than reported as a rollback, because the state
 		// this leaves is the one a rollback was trying to escape.
-		return true, fmt.Errorf("%s: %s", short(full), describeError(body))
+		return fmt.Errorf("%s: %s", short(full), describeError(body))
 	default:
-		return true, fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
+		return fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
 	}
 
 	fmt.Fprintf(out, "▸ %s is active\n", short(full))
@@ -158,7 +154,7 @@ func rollbackOnProject(cmd *cobra.Command, digest string) (bool, error) {
 	if json.Unmarshal(body, &confirmed) == nil && confirmed.EndpointCount != nil {
 		fmt.Fprintf(out, "  serving %d endpoint(s)\n", *confirmed.EndpointCount)
 	}
-	return true, nil
+	return nil
 }
 
 // describeError reads the stack's error envelope, falling back to the body.
@@ -219,24 +215,18 @@ func listProjectDeployments(ctx context.Context, target Target, cred Credentials
 	return answer.Deployments, nil
 }
 
-// openLinked resolves the target and credential these two verbs share, and
-// announces where they are acting.
-//
-// The target comes from the link OR the selection (ResolveTarget). A `false`
-// means neither named a project — `deploys` then reads the PLANE's ledger, which
-// is a different authority answering a different question, while `rollback` has
-// nowhere else to go and reports the error ResolveTarget gave.
-func openLinked(cmd *cobra.Command) (Target, Credentials, bool, error) {
-	target, err := ResolveTargetFor(cmd)
+// openLinked resolves the target and its credential, then announces the address.
+func openLinked(cmd *cobra.Command) (Target, Credentials, error) {
+	target, err := ReadTarget()
 	if err != nil {
-		return Target{}, Credentials{}, false, err
+		return Target{}, Credentials{}, err
 	}
 	cred, _, err := Credential(target.URL)
 	if err != nil {
-		return Target{}, Credentials{}, true, err
+		return Target{}, Credentials{}, err
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
-	return target, cred, true, nil
+	return target, cred, nil
 }
 
 func short(digest string) string {

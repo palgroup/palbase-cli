@@ -88,6 +88,35 @@ func TestVerbsReachTheEndpointsTheContractPublishes(t *testing.T) {
 	}
 }
 
+func TestResourceArgumentsStayInOnePathSegment(t *testing.T) {
+	const id = "resource/with?reserved#characters%"
+	for _, tc := range []struct {
+		args           []string
+		prefix, suffix string
+	}{
+		{[]string{"providers", "enable", id}, "/providers/", ""},
+		{[]string{"providers", "config", "clear", id}, "/providers/", "/config"},
+		{[]string{"sessions", "revoke", id}, "/sessions/", ""},
+		{[]string{"sessions", "revoke-all", id}, "/users/", "/sessions/revoke-all"},
+		{[]string{"templates", "get", id}, "/templates/", ""},
+		{[]string{"mfa", "get", id}, "/users/", "/mfa"},
+		{[]string{"mfa", "reset", id}, "/users/", "/mfa"},
+	} {
+		t.Run(strings.Join(tc.args[:len(tc.args)-1], " "), func(t *testing.T) {
+			rest := &fakeREST{}
+			run(t, rest, tc.args...)
+			want := "/v1/management/auth" + tc.prefix + url.PathEscape(id) + tc.suffix
+			if rest.path != want {
+				t.Fatalf("called %q, want %q", rest.path, want)
+			}
+			u, err := url.Parse(rest.path)
+			if err != nil || u.RawQuery != "" || u.Fragment != "" {
+				t.Fatalf("the resource argument changed URL structure: %s (%v)", rest.path, err)
+			}
+		})
+	}
+}
+
 // TestAnswersAreMachineReadable closes FR-026 on the CLI side: the same surface
 // serves a panel and a script, so what comes out of a script's end of it has to
 // be parseable rather than prose with a JSON body somewhere inside.

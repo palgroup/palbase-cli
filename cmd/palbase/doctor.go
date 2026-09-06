@@ -119,7 +119,7 @@ func toolchainProbes(ctx context.Context, look lookupFunc, run cmdRunner) []prob
 	if node, err := look("node"); err != nil {
 		out = append(out, probeLine{
 			label:  "node",
-			detail: "not found on PATH — `palbase build` and `palbase db types` need Node.js",
+			detail: "not found on PATH — `palbase build` needs Node.js",
 		})
 	} else {
 		v, _ := run(ctx, node, "--version")
@@ -141,14 +141,14 @@ func toolchainProbes(ctx context.Context, look lookupFunc, run cmdRunner) []prob
 
 // doctorCmd is the environment triage verb: one command that answers "why is
 // the CLI not working for me" — endpoints, login state, headless PAT,
-// project link, and the two JS engines the CLI drives: Node (`build`, `db
-// types`) and Bun (`push`'s bundler). Informative
+// project link, and the two JS engines the CLI drives: Node (`build`)
+// and Bun (`push`'s bundler). Informative
 // only (always exit 0): doctor diagnoses, the failing command still owns its
 // error.
 func doctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the CLI environment (cloud, login, link, Docker, Node)",
+		Short: "Show cloud addresses and diagnose login, link, Docker, Node and Bun",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
@@ -156,8 +156,9 @@ func doctorCmd() *cobra.Command {
 			bad := func(label, detail string) { fmt.Fprintf(out, "  ✗ %-10s %s\n", label, detail) }
 
 			fmt.Fprintf(out, "palbase %s\n", Version)
-			ok("cloud", fmt.Sprintf("studio %s, api %s, projects <ref>.%s",
-				resolved.Endpoints.Studio, resolved.Endpoints.PlatformAPI, resolved.Endpoints.PublicHost))
+			ok("cloud", fmt.Sprintf("studio %s, auth %s, api %s, projects <ref>.%s",
+				resolved.Endpoints.Studio, resolved.Endpoints.Auth,
+				resolved.Endpoints.PlatformAPI, resolved.Endpoints.PublicHost))
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
@@ -208,44 +209,16 @@ func doctorCmd() *cobra.Command {
 	}
 }
 
-// openCmd opens Studio in the browser at the CANONICAL page for the selected
-// Project/Environment (`/projects/{id}/environments/{ref}`) — not the bare
-// dashboard root. `palbase open` from a production vs a staging context must
-// land on that Environment's page (UAT CLI-011), so it resolves the local
-// selection and deep-links. Outside a linked directory (nothing selected) it
-// falls back to the Studio root, so it still works as a plain "open the UI".
+// openCmd opens the configured Studio dashboard.
 func openCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "open",
-		Short: "Open the selected Project/Environment in Studio (falls back to the dashboard root)",
+		Short: "Open Studio in your browser",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			u := studioSelectionURL(cmd.Context(), resolved.Endpoints.Studio)
+			u := strings.TrimRight(resolved.Endpoints.Studio, "/")
 			fmt.Fprintf(cmd.OutOrStdout(), "Opening %s …\n", u)
 			return auth.OpenURL(u)
 		},
 	}
-}
-
-// studioSelectionURL returns the Studio URL `open` should hit.
-//
-// It used to build a deep-link from `.palbase/selection.json` — the per-machine
-// selection FR-013 retired. Nothing writes that file any more, so the deep-link
-// could only ever be built for a pre-cutover checkout, and every other run took
-// the fallback below. The fallback is now the whole answer, which is what the
-// published docs already say: `palbase open` opens the Studio root.
-func studioSelectionURL(_ context.Context, studioRoot string) string {
-	return canonicalStudioURL(studioRoot, "", "")
-}
-
-// canonicalStudioURL builds <studio>/projects/{projectId}/environments/{ref} —
-// the same deep-link Studio itself uses. With no selected Project/Environment
-// it returns the Studio root (the plain "open the dashboard" fallback). Pure,
-// so the deep-link shape is locked by a unit test.
-func canonicalStudioURL(studioRoot, projectID, ref string) string {
-	root := strings.TrimRight(studioRoot, "/")
-	if projectID == "" || ref == "" {
-		return root
-	}
-	return fmt.Sprintf("%s/projects/%s/environments/%s", root, projectID, ref)
 }

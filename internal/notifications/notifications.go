@@ -1,18 +1,5 @@
-// Package notifications provides the `palbase notifications` subcommand group:
-// providers / add / remove. These commands are GUIDED authoring for the
-// notifications config-as-code surface — they read/write config/notifications.ts
-// (the typed DSL from @palbase/backend) AND upload each provider's cert/key
-// secret to a reserved encrypted env var, so an author declares providers
-// without hand-writing TypeScript and without ever putting a secret in git.
-//
-// On `git push`, the deploy evals config/notifications.ts, resolves each enabled
-// provider's reserved secret (PB_NOTIFICATIONS_<PROVIDER>_<FIELD>), and creates
-// the missing providers via the PalNotify admin API (create-only; never deletes).
-//
-// The CLI is the SOLE author of config/notifications.ts: every write regenerates
-// the whole file from the current provider set (deterministic template). The
-// non-secret fields go in the file; the secret goes to env via the SAME env.set
-// mutation `palbase secret set --file` uses (isSecret=true).
+// Package notifications configures senders and templates through the linked
+// project's management API. Sender credentials are stored in its secret vault.
 package notifications
 
 import (
@@ -30,35 +17,14 @@ import (
 	"golang.org/x/term"
 )
 
-// Resolvers carries the transport these verbs act through.
-//
-// There used to be two: a REST client for the senders and a Studio client that
-// uploaded their secrets over `env.set`. The secrets live in the project's own
-// vault now — the same door `palbase secret set` uses — so both halves of
-// "configure a sender" go to the same authority, and a secret can no longer be
-// written somewhere the stack does not read.
+// Resolvers carries the linked project's transport.
 type Resolvers struct {
-	// REST is where the senders live now that config/notifications.ts is gone.
 	REST func(*cobra.Command) (REST, error)
 }
 
-// Cmd returns the `palbase notifications` parent command.
-// providerEntry is one sender as the CLI assembles it before sending: whether it
-// is on, and the non-secret fields it needs. Secrets never travel in it — they
-// go to the vault and the stack reads them from there.
-//
-// It moved here when the config-file layer was deleted; this is the only place
-// that builds one now.
+// providerEntry holds a sender's non-secret fields for validation.
 type providerEntry struct {
-	enabled bool
-	fields  map[string]string
-}
-
-// MarshalJSON emits the shape the module reads. Written out rather than relying
-// on struct tags because the fields are unexported — they were never meant to
-// cross a package boundary and still are not.
-func (e providerEntry) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{"enabled": e.enabled, "fields": e.fields})
+	fields map[string]string
 }
 
 // REST reaches the linked stack's management surface.
@@ -204,7 +170,7 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			}
 
 			// 1. Collect non-secret fields from flags; validate required ones.
-			entry := providerEntry{enabled: true, fields: map[string]string{}}
+			entry := providerEntry{fields: map[string]string{}}
 			for _, f := range spec.fields {
 				raw, _ := cmd.Flags().GetString(f.flag)
 				if f.isBool {

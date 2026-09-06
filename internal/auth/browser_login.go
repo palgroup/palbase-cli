@@ -7,13 +7,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/palgroup/palbase-cli/internal/config"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/palgroup/palbase-cli/internal/config"
 )
 
 // SIGNING IN OPENS A BROWSER. It does not ask for a password.
@@ -91,20 +92,6 @@ func (c *Client) BrowserLogin(ctx context.Context, create bool) (*Credentials, e
 		return nil, err
 	}
 	return plane.ExchangeCode(ctx, boot, code, redirectURI, verifier)
-}
-
-// printSignInBanner is what a person sees while signing in.
-//
-// It used to read like a debug trace: the resolved mode, where the
-// configuration came from, the cloud address, then a raw URL carrying a UUID.
-// None of that is for the person in front of it — where the config came from is
-// this process's business, and the request id is a machine's.
-//
-// Three things are theirs: that a browser is opening, what to do if it does not,
-// and that the terminal is waiting on them rather than stuck.
-// PrintSignInBannerForDemo exposes the banner for a doc/demo caller.
-func PrintSignInBannerForDemo(w io.Writer, handoff string, create bool) {
-	printSignInBanner(w, handoff, create)
 }
 
 func printSignInBanner(w io.Writer, handoff string, create bool) {

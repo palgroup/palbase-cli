@@ -57,7 +57,7 @@ const (
 // somewhere else, so this returns the error that says which of the two ways to
 // name a project is missing.
 func resolveProject(cmd *cobra.Command) (backend.Target, backend.Credentials, error) {
-	target, err := backend.ResolveTargetFor(cmd)
+	target, err := backend.ReadTarget()
 	if err != nil {
 		return backend.Target{}, backend.Credentials{}, err
 	}

@@ -1,10 +1,7 @@
 package config
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
-	"path/filepath"
 )
 
 type Endpoints struct {
@@ -51,15 +48,6 @@ var theCloud = Endpoints{
 	PublicHost:  "palbase.studio",
 }
 
-// File is ~/.palbase/config.json.
-//
-// It used to carry a `mode`, and nothing carries anything now: there is one
-// cloud, so the file has no choice left to record. Kept as a type because the
-// file itself still exists on real machines — a stale `{"mode":"dev"}` decodes
-// to an empty struct and is ignored, which is the whole point of not failing on
-// unknown fields here.
-type File struct{}
-
 // DefaultPlatformAPI is the control plane this binary is built for.
 //
 // Exported so a caller can tell "the configured cloud" from "somewhere else":
@@ -74,52 +62,6 @@ func DefaultPlatformAPI() string { return theCloud.PlatformAPI }
 // PlatformAPI, and a caller that compares "the cloud I signed in to" against
 // the platform address goes quietly wrong the day the two split.
 func DefaultAuth() string { return theCloud.Auth }
-
-func Path() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
-	}
-	return filepath.Join(home, ".palbase", "config.json"), nil
-}
-
-func Load() (File, error) {
-	path, err := Path()
-	if err != nil {
-		return File{}, err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return File{}, nil
-		}
-		return File{}, fmt.Errorf("read config: %w", err)
-	}
-
-	var f File
-	if err := json.Unmarshal(data, &f); err != nil {
-		return File{}, fmt.Errorf("parse config: %w", err)
-	}
-	return f, nil
-}
-
-func Save(f File) error {
-	path, err := Path()
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	return os.WriteFile(path, data, 0600)
-}
 
 // Resolved is where this CLI acts. One cloud, one address set — see theCloud.
 type Resolved struct {

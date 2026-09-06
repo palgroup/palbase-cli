@@ -140,7 +140,7 @@ func TestTheLocalPointerIsIgnoredButTheProjectFileIsNOT(t *testing.T) {
 // start, every verb acts locally without a flag, and after stop they all go back.
 func TestALocalStackWinsOverTheLinkedProject(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{Project: "todoapp", Env: "production"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "todoapp", Env: "production"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -366,9 +366,6 @@ func TestTheImageCheckAsksForTheTAGCOMPOSEUSES(t *testing.T) {
 		}
 		if strings.Contains(string(compose), "${"+want.env+":-") {
 			t.Errorf("%s has a default in the compose file — a default is a second version source, and it is the one that goes stale", want.env)
-		}
-		if want.build == "" {
-			t.Errorf("%s has no build command, so its refusal cannot say how to fix it", want.env)
 		}
 	}
 }

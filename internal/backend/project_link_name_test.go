@@ -34,10 +34,6 @@ func (n *nameREST) Do(_ context.Context, _ string, path string, _ any, out any) 
 	return json.Unmarshal(blob, out)
 }
 
-func (n *nameREST) DoIdempotent(ctx context.Context, method, path string, body, out any, _ string) error {
-	return n.Do(ctx, method, path, body, out)
-}
-
 func resolvers(rest REST) Resolvers {
 	return Resolvers{REST: func() REST { return rest }}
 }

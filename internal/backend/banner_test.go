@@ -2,12 +2,9 @@ package backend
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 // TestPrintTargetNamesTheLocalStack: while a stack is up, that is where the verb
@@ -15,7 +12,7 @@ import (
 // push is not going to the cloud.
 func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{Project: "todoapp", Env: "main"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "todoapp", Env: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(localPath(), []byte(`{"url":"http://localhost:54321"}`), 0o644); err != nil {
@@ -23,7 +20,7 @@ func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	target, err := PrintTarget(context.Background(), &out)
+	target, err := PrintTarget(&out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,12 +37,12 @@ func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 // `todoapp` alone does not distinguish staging from production.
 func TestPrintTargetNamesTheCloudEnvironment(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{Project: "todoapp", Env: "staging"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://staging.palbase.studio", Project: "todoapp", Env: "staging"}); err != nil {
 		t.Fatal(err)
 	}
 
 	var out bytes.Buffer
-	if _, err := PrintTarget(context.Background(), &out); err != nil {
+	if _, err := PrintTarget(&out); err != nil {
 		t.Fatal(err)
 	}
 	if got := out.String(); got != "▸ todoapp/staging\n" {
@@ -61,7 +58,7 @@ func TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn(t *testing.T) {
 	inScratchCheckout(t)
 
 	var out bytes.Buffer
-	_, err := PrintTarget(context.Background(), &out)
+	_, err := PrintTarget(&out)
 	if err == nil {
 		t.Fatal("an unlinked checkout was accepted")
 	}
@@ -72,36 +69,6 @@ func TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("a target was announced before one was resolved: %q", out.String())
-	}
-}
-
-func TestTheCloudSelectionFlagsAreRefusedRatherThanIgnored(t *testing.T) {
-	inScratchCheckout(t)
-	target := Target{URL: "https://127.0.0.1"}
-
-	root := &cobra.Command{Use: "palbase"}
-	root.PersistentFlags().String("project", "", "")
-	root.PersistentFlags().String("environment", "", "")
-	child := &cobra.Command{Use: "push"}
-	root.AddCommand(child)
-
-	if err := refuseCloudSelectionFlags(child, target); err != nil {
-		t.Fatalf("an untouched flag was refused: %v", err)
-	}
-
-	if err := root.PersistentFlags().Set("project", "bogus"); err != nil {
-		t.Fatal(err)
-	}
-	err := refuseCloudSelectionFlags(child, target)
-	if err == nil {
-		t.Fatal("--project was accepted and would have been ignored")
-	}
-	if !strings.Contains(err.Error(), "--project") || !strings.Contains(err.Error(), target.Describe()) {
-		t.Errorf("the refusal does not say what was ignored or where it is pointed: %v", err)
-	}
-	// Named once, not twice: the flag lives on both the command and its root.
-	if strings.Count(err.Error(), "--project") != 1 {
-		t.Errorf("the flag is named more than once: %v", err)
 	}
 }
 
@@ -128,8 +95,7 @@ func TestTheUnlinkedRefusalsOfferNoFlagThatCannotSelect(t *testing.T) {
 		t.Fatal("an unlinked checkout resolved a target")
 	}
 	for name, err := range map[string]error{
-		"ReadTarget":           readErr,
-		"unlinkedOrCloudError": unlinkedOrCloudError(readErr),
+		"ReadTarget": readErr,
 	} {
 		if strings.Contains(err.Error(), "--environment") {
 			t.Errorf("%s offers --environment, which selects nothing without --project: %v", name, err)

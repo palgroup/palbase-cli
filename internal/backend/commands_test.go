@@ -10,7 +10,7 @@ import (
 // construct the command tree (constructors don't touch the clients until
 // RunE fires), which is all the structural tests below need.
 func noopResolvers() Resolvers {
-	return Resolvers{Auth: nil, Endpoints: nil}
+	return Resolvers{}
 }
 
 // TestCommands_FlatSurface pins the CLI-1 flat redesign: the backend

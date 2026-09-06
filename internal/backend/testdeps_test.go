@@ -10,8 +10,6 @@ package backend
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,12 +187,4 @@ func mustWrite(t *testing.T, root, rel, body string) {
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// httptestServer starts a server and returns its URL.
-func httptestServer(t *testing.T, h http.HandlerFunc) string {
-	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	return srv.URL
 }

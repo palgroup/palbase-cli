@@ -1,17 +1,5 @@
-// Package backend provides the top-level backend lifecycle commands
-// (build / push / pull / clone / deploys / rollback / status / spec / types /
-// the platform link commands). palbase IS the backend CLI — there is no
-// `backend` parent command.
-//
-// EVERY one of them acts on ONE environment: the one this checkout is linked to
-// (`palbase link <project>`, or `palbase link <ref>` for a single environment of
-// it), and otherwise the selection the global --project / --environment narrow.
-// The link WINS, and the flags are refused rather than dropped when it answers.
-// (`palbase env use` is what this said; it was retired at the v2 cutover.)
-//
-// There is no `--branch`: the Palbase branch is gone as a resource, and a Git
-// branch is never a runtime selector — it only maps to an Environment for
-// auto-deploy.
+// Package backend provides commands for building, linking and deploying a project.
+// Target-relative commands act on the checkout's linked address.
 package backend
 
 import (
@@ -23,35 +11,15 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/auth"
 	"github.com/palgroup/palbase-cli/internal/config"
-	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
-
-// defaultHTTPClient is reused by the platform `spec`/`link` commands' spec + OAuth-
-// provider fetches, the SDK-major check `build` runs against npm, and any
-// future direct HTTP we add. There is no `palbase web gen` — @palbase/web's
-// own `palbe-gen` owns client codegen (see web_link.go). 30s read timeout
-// matches the SDK side so a slow Kong response surfaces consistently.
-var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
-
-func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	return req, nil
-}
 
 // buildCheckFS embeds the Node.js side of `palbase build`. Shipped beside the
 // CLI binary so validation works without an internet round trip; copied to a
@@ -71,76 +39,28 @@ func newJSONRequest(ctx context.Context, method, url string, body io.Reader) (*h
 //go:embed devjs/build-check.js devjs/env-gen.js devjs/stack-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js devjs/generics.js
 var buildCheckFS embed.FS
 
-// REST is the subset of the Management-API transport the provider-aware deploy
-// verbs (push/pull/clone) and the v2 reads use. *transport.Client satisfies it;
-// tests substitute a stub.
-//
-// It carried a PostMultipart until 2026-09-04. The push stopped being a
-// multipart upload in a6dedc5 — it hands the plane a JSON artifact now — and
-// the method outlived its last caller by three months, declared in an interface
-// every stub had to implement for nothing.
+// REST is the control-plane transport used to resolve cloud project names.
 type REST interface {
 	Do(ctx context.Context, method, path string, body, out any) error
-	// DoIdempotent is Do with a replay key. The deploy upload rides it: a
-	// request that timed out AFTER the plane accepted it must not become a
-	// second deploy of the same artifact when it is retried.
-	DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error
 }
 
-// Resolvers returns lazy accessors for the shared CLI globals, so the
-// `backend` command tree can be wired into cobra at startup without the auth
-// client having been initialised yet (cobra's PersistentPreRunE on the root
-// command is what populates it).
-//
-// A Studio client used to live here too. Every verb that held one has a REST
-// route now — the project's own management surface for what a project knows,
-// the plane's for what the plane knows — so there is one protocol and one door
-// per question instead of two of each.
+// Resolvers supplies cloud configuration at command execution time.
 type Resolvers struct {
-	Auth      func() *auth.Client
 	Endpoints func() config.Endpoints
-	// REST returns the authed Management-API client used by push/pull/clone.
-	// Lazy (a func) like the other accessors, and only CALLED at RunE time —
-	// constructing the command tree with a zero-value Resolvers must not panic.
-	REST func() REST
+	REST      func() REST
 }
 
-// Commands returns the flat, top-level command set the root mounts
-// directly — there is no `backend` parent anymore (palbase IS the
-// backend CLI). Subcommands call the resolvers at action time, after
-// PersistentPreRunE has finished.
-//
-// There is no `init`/`enable`/`disable`: the Project is only the SaaS control-
-// plane container and link anchor. Backend runtimes live on its Environments;
-// every runtime command below resolves one concrete Environment first.
-//
-// push/pull/clone are mode-aware deploy verbs: for a github-mode project they
-// shell out to git (push/pull/clone → webhook → orchestrator deploys); for a
-// platform-mode project they upload/fetch a tarball bundle via the Management
-// API. `merge` stays retired (the old go-git merge verb is gone). Alongside
-// them the CLI keeps the pre-deploy validator (`build`) and the
-// observation/control verbs (deploys, rollback, status).
-//
-// `spec` is ONE command: fetching the contract is one act, and where it lands
-// is a fact about the checkout (read from the committed platform slots), not a
-// question for the caller. It writes each linked platform's directory and runs
-// the one generator the CLI owns — the SDK's swiftgen, for Apple, which is the
-// only platform with no build-time generator of its own. Web's palbe-gen and
-// Android's Gradle plugin run from their own build steps.
+// Commands returns the backend commands mounted at the CLI root.
 func Commands(r Resolvers) []*cobra.Command {
 	return []*cobra.Command{
-		newBuildCmd(r),
-		newDeploysCmd(r),
-		newRollbackCmd(r),
-		newStatusCmd(r),
-		newSpecCmd(r),
+		newBuildCmd(),
+		newDeploysCmd(),
+		newRollbackCmd(),
+		newStatusCmd(),
+		newSpecCmd(),
 		newCloneCmd(r),
-		newPullCmd(r),
-		newPushCmd(r),
-		// FR-090/091: proje sahibinin kendi runtime tazelemesi. Filo
-		// yuvarlamasının müşteri tarafı — operatör kendi hızında yuvarlarken
-		// beklemek istemeyen proje bugün geçebilsin.
-		newUpgradeCmd(r),
+		newPullCmd(),
+		newPushCmd(),
 		// Takes the resolvers for ONE reason: a bare Environment ref has to become
 		// an address, and only the configured cloud knows the suffix. Everything
 		// after that is unchanged — it is told where the stack is, once, and asks
@@ -152,14 +72,6 @@ func Commands(r Resolvers) []*cobra.Command {
 		newStartCmd(),
 		newStopCmd(),
 	}
-}
-
-// backendTarget is the resolved (URL + publishable key) for one ENVIRONMENT's
-// backend. Used by lookupBackendTarget (which the platform `spec` and link
-// commands' artifact fetch share) to address the deployed tenant host.
-type backendTarget struct {
-	URL    string
-	APIKey string
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -264,56 +176,17 @@ func ensureBuildCheckTools(dir string) {
 	}
 }
 
-// deployRow mirrors one control-pg `deployments` attempt as the deployments v2
-// route returns it. This is the canonical attempt log — a FAILED attempt (or a
-// pod that never went Ready) has no git commit but does have a row here, so it
-// never hides a failure behind "(no versions)". succeeded + a non-empty Error =
-// "deployed with warnings".
-type deployRow struct {
-	Status        string  `json:"status"`
-	Version       *string `json:"version"`
-	Trigger       string  `json:"trigger"`
-	Error         *string `json:"error"`
-	CommitMessage *string `json:"commitMessage"`
-	CreatedAt     string  `json:"createdAt"`
-}
-
-func newDeploysCmd(r Resolvers) *cobra.Command {
-	var jsonOut bool
+func newDeploysCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deploys",
 		Args:  cobra.NoArgs,
-		Short: "Show the selected environment's deploy history (newest first)",
+		Short: "Show the linked project's deploy history (newest first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TARGET-RELATIVE, like push and status.
-			if target, err := ReadTarget(); err == nil {
-				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
-					return err
-				}
-			}
-			if handled, err := deploysOfProject(cmd); handled {
-				return err
-			}
-
-			// NO SECOND WAY IN (FR-013). The address path above serves every
-			// checkout this CLI can produce; what followed resolved through
-			// `.palbase/selection.json`, which nothing writes.
-			return selection.ErrNotSelected{}
+			return deploysOfProject(cmd)
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON (full untruncated notes/errors)")
+	cmd.Flags().Bool("json", false, "Print deployment history as JSON")
 	return cmd
-}
-
-func deployVersion(v *string) string {
-	if v == nil || *v == "" {
-		return "-"
-	}
-	// SHORTENED, because on this plane a version is an artifact DIGEST — 64 hex
-	// characters, which overruns the column and pushes every field after it off
-	// the line. Twelve is what every other surface prints and what `git log`
-	// taught everyone to read.
-	return short(*v)
 }
 
 func firstLine(s string) string {
@@ -323,119 +196,30 @@ func firstLine(s string) string {
 	return s
 }
 
-func truncateNote(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-1] + "…"
-}
-
-func newRollbackCmd(r Resolvers) *cobra.Command {
+func newRollbackCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rollback <version-sha>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Roll back the selected environment to a previous version",
+		Short: "Roll back the linked project to a previous version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TARGET-RELATIVE, like push and status.
-			if target, err := ReadTarget(); err == nil {
-				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
-					return err
-				}
-			}
-			_, err := rollbackOnProject(cmd, args[0])
-			return err
+			return rollbackOnProject(cmd, args[0])
 		},
 	}
 	return cmd
 }
 
-// lastDeploy mirrors backend.status's `lastDeploy` field: the newest deploy row
-// for the environment (from control-pg.deployments). Nil when it has never been
-// deployed. This is the visibility surface — a server-side deploy failure that
-// only lived in logs shows up in `palbase status`.
-type lastDeploy struct {
-	Status    string  `json:"status"`
-	Error     *string `json:"error"`
-	Version   *string `json:"version"`
-	UpdatedAt *string `json:"updatedAt"`
-}
-
-func newStatusCmd(r Resolvers) *cobra.Command {
+func newStatusCmd() *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Args:  cobra.NoArgs,
-		Short: "Show the selected environment's active version + deploy state",
+		Short: "Show the linked project's active version and deploy state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TARGET-RELATIVE, like push and spec: a checkout linked to a
-			// project reports on THAT project. One verb either way.
-			if target, err := ReadTarget(); err == nil {
-				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
-					return err
-				}
-			}
-			_, err := statusOfProject(cmd, r, jsonOut)
-			return err
+			return statusOfProject(cmd, jsonOut)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit status as JSON")
 	return cmd
-}
-
-// formatLastDeploy renders the human "last deploy" block for `palbase status`.
-// Returns "" when there is no deploy to report (nil), so the caller prints
-// nothing for a never-deployed branch. This is the centauri surface: a FAILED
-// (or succeeded-with-warnings) deploy carries the server-side error to the
-// user's terminal instead of it dying in the logs.
-func formatLastDeploy(d *lastDeploy, now time.Time) string {
-	if d == nil {
-		return ""
-	}
-	// succeeded + a non-null error means the deploy landed but the runtime
-	// flagged something (e.g. zero endpoints collected) — call that out so a
-	// green-looking deploy that silently produced no routes doesn't read as fine.
-	label := d.Status
-	if label == "" {
-		label = "unknown"
-	}
-	if d.Status == "succeeded" && d.Error != nil && *d.Error != "" {
-		label = "succeeded with warnings"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "last deploy: %s%s\n", strings.ToUpper(label), deployMeta(d, now))
-	if d.Error != nil && *d.Error != "" {
-		fmt.Fprintf(&b, "  error: %s\n", *d.Error)
-	}
-	return b.String()
-}
-
-// deployMeta formats the " (3m ago)" suffix. The age is dropped when the
-// timestamp is missing or unparseable rather than printing a bogus duration.
-// There is no branch to name — the environment IS the deploy target.
-func deployMeta(d *lastDeploy, now time.Time) string {
-	if d.UpdatedAt == nil {
-		return ""
-	}
-	t, err := time.Parse(time.RFC3339, *d.UpdatedAt)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf(" (%s)", humanizeAgo(now.Sub(t)))
-}
-
-// humanizeAgo renders a coarse "3m ago" / "2h ago" / "5d ago" relative age.
-// ponytail: coarse buckets, no library — a deploy age never needs seconds.
-func humanizeAgo(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
 }
 
 // renderJSON pretty-prints a value for `--json` output paths if a
@@ -446,266 +230,6 @@ func renderJSON(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
-}
-
-// lookupBackendTarget resolves an Environment's URL and publishable key directly
-// from its Environment ref.
-func lookupBackendTarget(ctx context.Context, rest selection.REST, endpoints config.Endpoints, ref string) (backendTarget, error) {
-	if !selection.IsCanonicalEnvironmentRef(ref) {
-		return backendTarget{}, fmt.Errorf("environment ref %q is non-canonical", ref)
-	}
-	var resp struct {
-		EnvironmentRef string `json:"environment_ref"`
-		PublishableKey string `json:"publishable_key"`
-	}
-	// YÖNETİM API'SİNDEN, STUDIO'NUN tRPC YÜZEYİNDEN DEĞİL.
-	//
-	// Eskiden `apikey.reveal` Studio'ya DPoP'la bağlanmış bir TARAYICI oturumu
-	// istiyordu. Headless bir koşumda öyle bir oturum yok ve komut
-	// "acquire token: refresh tokens: 401 — invalid_token" ile ölüyordu — oysa
-	// bu CLI'ın kendi yardım metni şunu söylüyor: "For a headless run — CI, an
-	// agent in a container — there is no sign-in at all: set
-	// PALBASE_ACCESS_TOKEN and every command resolves it." O söz, `link` ve
-	// `spec` için tutulmuyordu.
-	//
-	// REST istemcisi headless token'ı zaten çözüyor, ve bu uç yalnız
-	// YAYINLANABİLİR anahtarı döndürüyor — bir checkout'u bağlamak için gereken
-	// tam olarak o.
-	if err := rest.Do(ctx, http.MethodGet, "/api/v2/environments/"+ref+"/apikey", nil, &resp); err != nil {
-		return backendTarget{}, fmt.Errorf("read environment key: %w", err)
-	}
-	if err := selection.ValidateRuntimeBinding(ref, resp.EnvironmentRef, resp.PublishableKey); err != nil {
-		return backendTarget{}, fmt.Errorf("apikey.reveal returned an invalid Environment binding: %w", err)
-	}
-	return backendTarget{
-		URL:    fmt.Sprintf("https://%s.%s", ref, endpoints.PublicHost),
-		APIKey: resp.PublishableKey,
-	}, nil
-}
-
-// fetchOAuthProviders calls palauth's public `/auth/oauth/providers`
-// endpoint (anon-key authed, secret-free) and lowers the response into a
-// swiftOAuthConfig. After the config cutover this is mapped onto the per-env
-// Palbase-Info.plist's `oauth` block (via swiftOAuthToApps), the SOLE config
-// source the iOS SDK reads.
-//
-// Best-effort: a 404 (older palauth without the endpoint), a
-// non-OAuth-providers response, or a network failure all return
-// (nil, nil) — the codegen continues without an `oauth` block, and
-// the SDK's zero-arg `signInWithGoogle()` overload short-circuits at
-// runtime. We only return an error for things callers genuinely need
-// to act on (malformed JSON from a 2xx response).
-//
-// Apple's response carries only `enabled` because the iOS SDK doesn't
-// need credentials to drive AuthenticationServices — the id_token
-// exchange happens server-side. Google's response carries
-// `client_id`, and we derive the standard reversed-DNS redirectURI
-// (`com.googleusercontent.apps.<numeric-id>:/oauthredirect`) from
-// it so customer apps don't have to hand-author the value too.
-func fetchOAuthProviders(ctx context.Context, baseURL, apiKey string) (*swiftOAuthConfig, error) {
-	if baseURL == "" || apiKey == "" {
-		return nil, nil
-	}
-	url := strings.TrimRight(baseURL, "/") + "/auth/oauth/providers"
-	req, err := newJSONRequest(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, nil // best-effort: caller continues without oauth
-	}
-	req.Header.Set("apikey", apiKey)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := defaultHTTPClient.Do(req)
-	if err != nil {
-		return nil, nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil
-	}
-	var raw struct {
-		Providers map[string]struct {
-			Enabled  bool   `json:"enabled"`
-			ClientID string `json:"client_id,omitempty"`
-		} `json:"providers"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("decode /auth/oauth/providers: %w", err)
-	}
-	if len(raw.Providers) == 0 {
-		return nil, nil
-	}
-	out := &swiftOAuthConfig{}
-	if apple, ok := raw.Providers["apple"]; ok && apple.Enabled {
-		out.Apple = &swiftOAuthApple{Enabled: true}
-	}
-	if google, ok := raw.Providers["google"]; ok && google.Enabled && google.ClientID != "" {
-		out.Google = &swiftOAuthGoogle{
-			Enabled:     true,
-			ClientID:    google.ClientID,
-			RedirectURI: googleRedirectURIFromClientID(google.ClientID),
-		}
-	}
-	// All providers came back disabled / unconfigured — collapse to nil
-	// so the JSON omits the empty `oauth: {}` block.
-	if out.Apple == nil && out.Google == nil {
-		return nil, nil
-	}
-	return out, nil
-}
-
-// googleRedirectURIFromClientID builds the standard reversed-DNS
-// callback URL Google issues for iOS OAuth clients:
-//
-//	1234567890-abc.apps.googleusercontent.com
-//	→ com.googleusercontent.apps.1234567890-abc:/oauthredirect
-//
-// Customers can override per-call with the explicit
-// `pb.auth.signInWithGoogle(clientID:redirectURI:)` overload if their
-// Google OAuth client uses a non-standard scheme.
-func googleRedirectURIFromClientID(clientID string) string {
-	// Strip the .apps.googleusercontent.com suffix and prepend the
-	// reversed domain. If the suffix is missing (unusual), fall back
-	// to the raw client_id — the SDK error message will surface the
-	// mismatch clearly.
-	const suffix = ".apps.googleusercontent.com"
-	id := strings.TrimSuffix(clientID, suffix)
-	return "com.googleusercontent.apps." + id + ":/oauthredirect"
-}
-
-// fetchOpts tunes the wake-aware retry loop in fetchOpenAPISpecOpts.
-//
-//   - attemptTimeout caps a single GET. It must comfortably exceed the
-//     gateway's wake-and-hold (~90s) so a slow-but-OK cold wake returns on the
-//     held connection instead of being aborted client-side.
-//   - totalBudget caps the whole loop (all attempts + backoff) so codegen never
-//     blocks an Xcode build forever.
-//   - minBackoff is the floor between retries when the backend gives no
-//     Retry-After hint.
-type fetchOpts struct {
-	attemptTimeout time.Duration
-	totalBudget    time.Duration
-	minBackoff     time.Duration
-	progress       io.Writer // optional: a line is written before each retry
-}
-
-// fetchOpenAPISpecOpts is the wake-aware core. It retries ONLY on signals that
-// mean "the backend pod is still waking" — HTTP 502/503 and per-attempt
-// timeouts — honoring a Retry-After header when present. Everything else fails
-// immediately: a connection-refused returns fast rather than burning the
-// budget, and a hard 4xx (e.g. 401 invalid_apikey) is a real error, not a wake.
-func fetchOpenAPISpecOpts(ctx context.Context, specURL, apiKey string, opts fetchOpts) ([]byte, error) {
-	deadline := time.Now().Add(opts.totalBudget)
-	var lastErr error
-	attempt := 0
-	for {
-		attempt++
-		body, retryAfter, err := fetchOnce(ctx, specURL, apiKey, opts.attemptTimeout)
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-		if !errors.As(err, new(wakeRetryable)) {
-			return nil, err // hard error (conn-refused, 4xx, body read) — no retry
-		}
-		// Wake in progress. Back off (Retry-After if the gateway gave one, else
-		// the floor) but never past the total budget.
-		wait := opts.minBackoff
-		if retryAfter > wait {
-			wait = retryAfter
-		}
-		if time.Now().Add(wait).After(deadline) {
-			return nil, fmt.Errorf("fetch %s: backend did not wake within %s (last: %w)", specURL, opts.totalBudget, lastErr)
-		}
-		if opts.progress != nil {
-			fmt.Fprintf(opts.progress, "backend waking (attempt %d): %v — retrying in %s\n", attempt, err, wait.Round(time.Second))
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(wait):
-		}
-	}
-}
-
-// wakeRetryable marks an error returned by fetchOnce as a transient "pod is
-// waking" condition (502/503 or a per-attempt timeout) that fetchOpenAPISpecOpts
-// should retry, as opposed to a hard failure.
-type wakeRetryable struct{ err error }
-
-func (w wakeRetryable) Error() string { return w.err.Error() }
-func (w wakeRetryable) Unwrap() error { return w.err }
-
-// httpStatusError marks a fetchOnce failure where the server ANSWERED with a
-// non-2xx status (excluding the wake-retryable 502/503), so callers can
-// distinguish "it is up but erroring" from "nothing listening" (connection
-// refused). pullTSTypes's auto-fallback wording depends on the split.
-type httpStatusError struct {
-	status int
-	err    error
-}
-
-func (e httpStatusError) Error() string { return e.err.Error() }
-func (e httpStatusError) Unwrap() error { return e.err }
-
-// fetchOnce does a single GET with its own timeout. The second return is a
-// parsed Retry-After (0 if absent/unparseable).
-func fetchOnce(ctx context.Context, specURL, apiKey string, timeout time.Duration) ([]byte, time.Duration, error) {
-	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	req, err := newJSONRequest(attemptCtx, "GET", specURL, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("apikey", apiKey)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := defaultHTTPClient.Do(req)
-	if err != nil {
-		// Caller cancelled → surface as-is (do not mask as retryable).
-		if ctx.Err() != nil {
-			return nil, 0, ctx.Err()
-		}
-		// Per-attempt timeout while a cold pod is held → retryable wake signal.
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, 0, wakeRetryable{fmt.Errorf("fetch %s: attempt timed out after %s", specURL, timeout)}
-		}
-		// Connection-refused / DNS / TLS etc. — a hard error (e.g. local serve
-		// down). Fail fast so the caller falls back without retrying.
-		return nil, 0, fmt.Errorf("fetch %s: %w", specURL, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, 0, fmt.Errorf("read body: %w", err)
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway {
-		return nil, parseRetryAfter(resp.Header.Get("Retry-After")),
-			wakeRetryable{fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, strings.TrimSpace(string(body)))}
-	}
-	if resp.StatusCode/100 != 2 {
-		return nil, 0, httpStatusError{
-			status: resp.StatusCode,
-			err:    fmt.Errorf("fetch %s: %d %s", specURL, resp.StatusCode, string(body)),
-		}
-	}
-	return body, 0, nil
-}
-
-// parseRetryAfter reads a delta-seconds Retry-After value. We only honor the
-// numeric form (the gateway emits retry_after_seconds=5); an HTTP-date form or
-// garbage yields 0 and the caller's floor backoff applies.
-func parseRetryAfter(v string) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	secs, err := strconv.Atoi(v)
-	if err != nil || secs < 0 {
-		return 0
-	}
-	return time.Duration(secs) * time.Second
 }
 
 // envGenExternals are kept external when bundling db/*.ts so the bundle

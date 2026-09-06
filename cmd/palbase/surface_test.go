@@ -87,7 +87,7 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// command — it had to be hand-written into a file, and a host the
 		// deploy's fail-closed validator rejects only surfaced as a failed
 		// deploy. It is a management endpoint now, like every other setting.
-		"egress", "endpoints", "flags", "init",
+		"egress", "flags", "init",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
 		// somebody runs, with no project to select and no control plane to ask.
 		"link",
@@ -120,10 +120,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// Öncesinde `web unlink` altında yaşıyordu ve SEÇİM dosyasını siliyordu —
 		// yani bağı değil, yanındaki başka bir şeyi.
 		"unlink",
-		// upgrade: bir projeyi KANITLANMIŞ filo imajına taşır — Studio'daki
-		// yuvarlama düğmesinin CLI karşılığı. Kapı bu komutu da yakaladı ve
-		// yakalaması doğruydu: yeni bir verb bu listeye BİLEREK yazılır.
-		"upgrade",
 		// f668ec6'de eklendi ve bu listeye yazılmamıştı — kapı o commit'ten beri
 		// kırmızıydı. Kapının işi tam da bu: yeni bir komut BİLEREK buraya yazılır.
 		"versions",
@@ -169,6 +165,9 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 // the prose gate carried its own three-name copy.
 var retiredCommands = []string{
 	"branch", "groups", "group", "org", "organization", "serve", "dev", "apps", "env", "github",
+	"endpoints",       // doctor reports all configured cloud addresses.
+	"archive", "wake", // the cloud manages idle projects automatically.
+	"upgrade", // the cloud reconciles the runtime with the project's SDK.
 }
 
 // GOLDEN: `palbase project --help` — the canonical Project surface.
@@ -189,17 +188,7 @@ func TestGolden_ProjectSurface(t *testing.T) {
 		subcommands(t, "project"))
 }
 
-// GOLDEN: `palbase env --help` — the canonical Environment surface. It replaces
-// the retired `branch` group, and it has NO `switch` (that was the branch verb).
-// `branch` here is the GIT-branch mapping verb, not that resource: it writes the
-// value push/pull and the deploy webhook both route on.
-// TestGolden_EnvSurface — `env` takes a slug and switches; it has no
-// subcommands.
-//
-// Creating, archiving, waking and deleting an environment are control-plane acts
-// with a web surface that does them better (confirmations, membership, billing
-// consequences). What the CLI keeps is the one that belongs in a checkout:
-// WHICH environment this code acts on.
+// subcommands returns the sorted child names of a top-level command.
 func subcommands(t *testing.T, parent string) []string {
 	t.Helper()
 	for _, c := range newRootCmd().Commands() {
@@ -332,23 +321,6 @@ func isWordByte(b byte) bool {
 // narrates what was retired and why (`env` is discussed by name a dozen times,
 // in two languages), and a gate that read comments would be deleted within a
 // week for being unusable.
-// unreachableCommandSurfaces are files whose cobra builders NOTHING registers,
-// so nothing in them can be printed at a terminal.
-//
-// `internal/apps` is the whole list: its `Cmd()` has no caller — main.go wires
-// the other fifteen groups and not this one — and the package survives only for
-// the config-artifact types `backend` reads. Its Long still describes eight
-// `palbase apps …` verbs.
-//
-// THE SKIP IS SAFE BECAUSE IT IS PAIRED. `apps` is one of retiredCommands, so
-// the moment somebody registers that builder, TestGolden_RetiredCommandsAreGone
-// above fails — there is no arrangement in which this list hides a string a
-// person can reach. Deleting the ~450 dead lines is its own commit; leaving them
-// unscanned is not the same as leaving them uncounted.
-var unreachableCommandSurfaces = map[string]bool{
-	"internal/apps/apps.go": true,
-}
-
 func TestNoShippedStringNamesARetiredCommand(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	require.NoError(t, err)
@@ -359,9 +331,6 @@ func TestNoShippedStringNamesARetiredCommand(t *testing.T) {
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		if rel, _ := filepath.Rel(root, path); unreachableCommandSurfaces[rel] {
 			return nil
 		}
 		fset := token.NewFileSet()
@@ -531,7 +500,7 @@ func TestNoShippedStringNamesARetiredConfigFile(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		if unreachableCommandSurfaces[rel] || rel == retirementRegistry {
+		if rel == retirementRegistry {
 			return nil
 		}
 		fset := token.NewFileSet()
@@ -886,12 +855,6 @@ func TestNothingInProductionReadsTheRetiredSelectionFile(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		// The package that DEFINES the API, and the test-only fake, are not
-		// production callers — they are the thing being retired and the harness
-		// that still exercises what is left of it.
-		if strings.HasPrefix(rel, "internal/selection/") || strings.HasPrefix(rel, "internal/selectiontest/") {
-			return nil
-		}
 		body, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return nil

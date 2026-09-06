@@ -12,29 +12,6 @@ import (
 	"time"
 )
 
-// Signing in to the v2 cloud.
-//
-// The v1 flow is browser OAuth against a pre-registered `palbase-cli` client
-// with five loopback redirect URIs seeded into palauth. The v2 control plane is
-// a Palbase stack in its own right: it HAS an OIDC provider (discovery even
-// advertises a device-authorization endpoint), but no client is registered, so
-// that door is shut until one is.
-//
-// What is open, and proven end-to-end through the public gateway, is the
-// stack's own `/auth/login`. Using it keeps a recorded decision intact — the
-// management identity comes from the stack's OWN auth module, never a second
-// identity system.
-//
-// Two things make this more than a POST:
-//
-//   - The anon apikey. `/auth/*` refuses a request without one. Its VALUE is
-//     per-environment, so it is fetched from the control plane's bootstrap
-//     endpoint rather than compiled in: a baked-in key means one build per
-//     environment and a silent lockout the day it rotates.
-//   - Proof of work. The first attempt comes back 403 with a challenge; the
-//     same request is replayed with the solution. This is the platform's
-//     anti-stuffing gate and it is not optional.
-
 // Bootstrap is what a client may know before it has any identity.
 type Bootstrap struct {
 	AnonKey      string `json:"anonKey"`
@@ -42,17 +19,8 @@ type Bootstrap struct {
 	TenantDomain string `json:"tenantDomain"`
 }
 
-type sessionResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	User         struct {
-		ID    string `json:"id"`
-		Email string `json:"email"`
-	} `json:"user"`
-}
-
-// CloudClient talks to one v2 control plane.
+// CloudClient bootstraps browser authorization and redeems the callback code
+// through the control plane's OIDC endpoints.
 type CloudClient struct {
 	BaseURL string
 	// HTTP is the INTERFACE, not *http.Client: the auth client injects its own
@@ -103,27 +71,23 @@ func (c *CloudClient) Bootstrap(ctx context.Context) (Bootstrap, error) {
 // subjectOf reads the `sub` claim without verifying the signature — the token
 // came straight from the server over TLS, and the claim is used only to label
 // the stored credential.
-func subjectOf(token, fallbackEmail string) (string, string) {
+func subjectOf(token string) (string, string) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return "", fallbackEmail
+		return "", ""
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fallbackEmail
+		return "", ""
 	}
 	var claims struct {
 		Sub   string `json:"sub"`
 		Email string `json:"email"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fallbackEmail
+		return "", ""
 	}
-	email := claims.Email
-	if email == "" {
-		email = fallbackEmail
-	}
-	return claims.Sub, email
+	return claims.Sub, claims.Email
 }
 
 // describeFailure turns the server's error envelope into one readable line,
@@ -218,7 +182,7 @@ func (c *CloudClient) ExchangeCode(ctx context.Context, boot Bootstrap, code, re
 			res.StatusCode, describeFailure(raw))
 	}
 
-	var s sessionResponse
+	var s TokenResponse
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("the response is not a session: %w", err)
 	}
@@ -229,10 +193,7 @@ func (c *CloudClient) ExchangeCode(ctx context.Context, boot Bootstrap, code, re
 	if s.ExpiresIn <= 0 {
 		lifetime = time.Hour
 	}
-	id, mail := s.User.ID, s.User.Email
-	if id == "" {
-		id, mail = subjectOf(s.AccessToken, "")
-	}
+	id, mail := subjectOf(s.AccessToken)
 	return &Credentials{
 		AccessToken:  s.AccessToken,
 		RefreshToken: s.RefreshToken,

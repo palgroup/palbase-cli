@@ -100,6 +100,7 @@ func TestExchangeCodeSendsTheVerifier(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": testToken(t, "usr_1", "who@plane.test"),
 			"expires_in":   3600,
+			"user":         map[string]string{"id": "obsolete", "email": "obsolete@plane.test"},
 		})
 	}))
 	t.Cleanup(srv.Close)
@@ -109,7 +110,7 @@ func TestExchangeCodeSendsTheVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
-	if creds.User.ID != "usr_1" {
+	if creds.User.ID != "usr_1" || creds.User.Email != "who@plane.test" {
 		t.Fatalf("identity not read from the token: %+v", creds.User)
 	}
 	if creds.IsExpired() {

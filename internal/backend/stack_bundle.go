@@ -1210,7 +1210,8 @@ func pushCeilingRefusal(measured *int, serves *int) string {
 		"this bundle reaches ABI generation %d and the stack's runtime serves at most %d.\n"+
 			"  Pushing it would activate an artifact that boots WITHOUT the machinery that\n"+
 			"  generation needs — every injected dependency would arrive undefined.\n"+
-			"  Upgrade the stack's runtime first (`palbase upgrade`), then push.",
+			"  The runtime must support this project's SDK before the bundle can be pushed.\n"+
+			"  For a self-hosted stack, install the matching runtime version and retry.",
 		*measured, ceiling)
 }
 

@@ -156,7 +156,7 @@ func topLevelKey(l string) bool {
 func TestTheVendoredStackPullsItsImages(t *testing.T) {
 	for _, img := range stackImages {
 		ref := img.ref("0.0.0")
-		if !isRegistryImage(ref) {
+		if !strings.Contains(ref, "/") {
 			t.Errorf("%s resolves to %q, which docker cannot fetch from anywhere — "+
 				"`palbase start` would need this repository", img.env, ref)
 		}
@@ -165,26 +165,6 @@ func TestTheVendoredStackPullsItsImages(t *testing.T) {
 	// would override the table silently the day the CLI forgets to export one.
 	if strings.Contains(string(stackCompose), "_IMAGE:-") {
 		t.Error("the vendored compose carries an image default — the version has one source, and this is not it")
-	}
-}
-
-func TestARegistryReferenceIsRecognised(t *testing.T) {
-	for _, c := range []struct {
-		image string
-		want  bool
-	}{
-		{"ghcr.io/palgroup/palbase/palsvc:0.29.1", true},
-		{"localhost:5000/palsvc", true},
-		// Docker Hub's short form. This expected false while nothing in the stack
-		// defaulted to one; `postgres` does now, and calling it local would make
-		// a fresh machine refuse to start over an image docker pulls in seconds.
-		{"pgvector/pgvector:pg16", true},
-		{"palbase-palsvc", false},
-		{"palbase-runtime-dev:latest", false},
-	} {
-		if got := isRegistryImage(c.image); got != c.want {
-			t.Errorf("isRegistryImage(%q) = %v, want %v", c.image, got, c.want)
-		}
 	}
 }
 

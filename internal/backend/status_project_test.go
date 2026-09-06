@@ -178,9 +178,9 @@ func TestStatusAsksTheRouteThatEXISTS(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetContext(context.Background())
 
-	handled, err := statusOfProject(cmd, Resolvers{}, false)
-	if !handled || err != nil {
-		t.Fatalf("handled=%v err=%v", handled, err)
+	err := statusOfProject(cmd, false)
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 	for _, path := range asked {
 		if path == "/v1/management/deployment" {
@@ -276,7 +276,7 @@ func TestStatusJSONIsARealDocument(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	cmd.SetContext(context.Background())
 
-	if _, err := statusOfProject(cmd, Resolvers{}, true); err != nil {
+	if err := statusOfProject(cmd, true); err != nil {
 		t.Fatalf("status --json: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestStatusJSONSaysNothingDeployedYet(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	cmd.SetContext(context.Background())
 
-	if _, err := statusOfProject(cmd, Resolvers{}, true); err != nil {
+	if err := statusOfProject(cmd, true); err != nil {
 		t.Fatalf("status --json: %v", err)
 	}
 	var doc statusJSON

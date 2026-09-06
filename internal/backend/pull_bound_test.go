@@ -73,7 +73,7 @@ func TestPullFollowsTheBoundProject(t *testing.T) {
 
 	// The cloud resolver is deliberately absent: reaching for it fails loudly
 	// instead of passing by accident.
-	cmd := newPullCmd(Resolvers{})
+	cmd := newPullCmd()
 	var out strings.Builder
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

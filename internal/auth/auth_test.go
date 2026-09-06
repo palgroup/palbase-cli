@@ -301,7 +301,6 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	t.Setenv("PALBASE_NO_KEYRING", "1")
 
 	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "expired",
@@ -318,109 +317,6 @@ func TestGetValidToken_Expired_RefreshesAutomatically(t *testing.T) {
 	token, err := client.GetValidToken(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "refreshed_token", token)
-}
-
-// --- ExpiresSoon (refresh-ahead threshold) Tests ---
-
-func TestCredentials_ExpiresSoon(t *testing.T) {
-	cases := []struct {
-		name   string
-		until  time.Duration // time left until ExpiresAt (negative = already expired)
-		within time.Duration
-		want   bool
-	}{
-		{"already expired", -1 * time.Minute, 5 * time.Minute, true},
-		{"inside window", 20 * time.Second, 5 * time.Minute, true},
-		{"on the far side", 30 * time.Minute, 5 * time.Minute, false},
-		{"comfortable margin", 6 * time.Minute, 5 * time.Minute, false},
-		// A non-positive window collapses to IsExpired: only a past ExpiresAt counts.
-		{"zero window, valid", 10 * time.Second, 0, false},
-		{"zero window, expired", -10 * time.Second, 0, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			creds := &Credentials{ExpiresAt: time.Now().Add(tc.until)}
-			assert.Equal(t, tc.want, creds.ExpiresSoon(tc.within))
-		})
-	}
-}
-
-// TestGetFreshToken_RefreshesAhead is the refresh-AHEAD counterpart to
-// TestGetValidToken_Expired_RefreshesAutomatically: the token still has life
-// left (so GetValidToken would NOT refresh and would hand back the stale token),
-// but it's inside the minRemaining window, so GetFreshToken refreshes proactively.
-func TestGetFreshToken_RefreshesAhead(t *testing.T) {
-	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/cloud/config" {
-			_ = json.NewEncoder(w).Encode(Bootstrap{AnonKey: "pb_anon"})
-			return
-		}
-		assert.Equal(t, "/oauth/token", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(TokenResponse{
-			AccessToken:  "ahead_refreshed_token",
-			RefreshToken: "new_refresh",
-			ExpiresIn:    900,
-		})
-	}))
-	defer authServer.Close()
-
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	_, err := EnsureDPoPKey()
-	require.NoError(t, err)
-
-	// Token is NOT yet expired (20s left) — GetValidToken would return it as-is.
-	require.NoError(t, SaveCredentials(&Credentials{
-		AccessToken:  "still_valid_but_soon",
-		RefreshToken: "old_refresh",
-		ExpiresAt:    time.Now().Add(20 * time.Second),
-	}))
-
-	var output bytes.Buffer
-	client := NewClient(Config{
-		AuthURL:  authServer.URL,
-		ClientID: "palbase-cli",
-	}, &output)
-
-	// Sanity: GetValidToken sees a non-expired token and does NOT refresh.
-	stale, err := client.GetValidToken(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "still_valid_but_soon", stale, "GetValidToken must not refresh a non-expired token")
-
-	// GetFreshToken with a 5m floor refreshes ahead because 20s < 5m.
-	fresh, err := client.GetFreshToken(context.Background(), 5*time.Minute)
-	require.NoError(t, err)
-	assert.Equal(t, "ahead_refreshed_token", fresh, "GetFreshToken must refresh a soon-to-expire token")
-}
-
-// TestGetFreshToken_KeepsComfortableToken verifies GetFreshToken does NOT
-// refresh when the token has more than minRemaining left (no needless churn).
-func TestGetFreshToken_KeepsComfortableToken(t *testing.T) {
-	refreshCalled := false
-	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		refreshCalled = true
-		_ = json.NewEncoder(w).Encode(TokenResponse{AccessToken: "should_not_be_used", ExpiresIn: 900})
-	}))
-	defer authServer.Close()
-
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	require.NoError(t, SaveCredentials(&Credentials{
-		AccessToken: "comfortable_token",
-		ExpiresAt:   time.Now().Add(30 * time.Minute),
-	}))
-
-	var output bytes.Buffer
-	client := NewClient(Config{AuthURL: authServer.URL, ClientID: "palbase-cli"}, &output)
-
-	token, err := client.GetFreshToken(context.Background(), 5*time.Minute)
-	require.NoError(t, err)
-	assert.Equal(t, "comfortable_token", token)
-	assert.False(t, refreshCalled, "GetFreshToken must not refresh a token with comfortable margin")
 }
 
 // --- Helpers ---

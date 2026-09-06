@@ -23,7 +23,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/palgroup/palbase-cli/internal/backend"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,9 +30,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/palgroup/palbase-cli/internal/backend"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
+	"github.com/spf13/cobra"
 )
 
 // REST is the management transport subset the logs command needs.
@@ -208,84 +207,40 @@ new lines every 2s — Ctrl-C to stop.
   palbase logs --follow                 tail live`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// THE LINK ANSWERS THIS, so the selection flags do not — and being
-			// dropped here costs more than anywhere else: everything below
-			// prints the lines of a place the reader did not name.
-			if err := backend.RefuseSelectionFlagsWhenLinked(cmd); err != nil {
+			target, err := backend.ReadTarget()
+			if err != nil {
 				return err
 			}
-			// A LINKED PROJECT HAS NO LOG SURFACE, and saying so beats resolving
-			// a cloud environment nobody asked for. Measured: in a checkout
-			// linked to a project, this silently ignored the link, resolved the
-			// selected cloud environment instead, and printed ITS logs — or
-			// refused with "run palbase project use" — a command that does not
-			// exist — which is advice for a
-			// different question entirely.
-			// A LINKED STACK'S LOGS ARE ITS CONTAINERS', and this used to say so
-			// and stop — pointing at `docker logs <project>-runtime-1` and
-			// leaving the person to work out which of three containers held what
-			// they came for. The management surface still has no log operation;
-			// that was never the reason to decline, because the containers ARE
-			// the store and this command already knows which stack a checkout
-			// belongs to.
-			if target, err := backend.ReadTarget(); err == nil {
-				// BU MAKİNEDE OLMAYAN BİR YIĞININ KONTEYNERLERİ DE BURADA
-				// DEĞİL. Ayrım yokken bu komut bulut projesinde
-				// "No such container: <proje>-runtime-1" diyordu — hiç var
-				// olmayacak bir konteynerin adını vererek (canlıda ölçüldü
-				// 2026-08-21). Docker'ın hatası, sorunun ne olduğunu SÖYLEMİYOR.
-				//
-				// Uzak yığının yönetim yüzeyinde bir log işlemi HENÜZ YOK
-				// (ölçüldü: /v1/management/logs, /admin/logs → 404). Doğru
-				// davranış, olmayan bir şeyi aramak değil, ne olduğunu söylemek.
-				if !target.OnThisMachine() {
-					// BULUT PROJESİNİN LOGLARI DÜZLEMDE. Yukarıdaki yorumun
-					// dayandığı ölçüm ("uzak yığının yönetim yüzeyinde log
-					// işlemi YOK") KİRACININ yüzeyi içindi ve hâlâ doğru — ama
-					// kontrol düzlemi artık `/v1/panel/environments/<ref>/logs`
-					// sunuyor (ölçüldü canlı 25.08.2026, 200). Aynı proje
-					// SEÇİMLE zaten okunabiliyordu; yalnız LİNKLİ bir checkout
-					// reddediliyordu, yani cevap linkin varlığına göre
-					// değişiyordu.
-					if ref, ok := cloudRefOf(r, target.URL); ok {
-						fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
-						return showCloud(cmd, r, ref, showCloudOpts{
-							source: source, levels: levels, since: since,
-							query: query, limit: limit, follow: follow, jsonOut: jsonOut,
-						})
-					}
-					// KENDİ YIĞININI KOŞTURAN BİRİ İÇİN DEĞİŞEN BİR ŞEY YOK:
-					// onun logları konteynerlerinde ve o konteynerler burada
-					// değil.
-					return fmt.Errorf(
-						"%s does not run on this machine, so its logs are not here either.\n"+
-							"A self-hosted stack keeps its logs in its own containers; "+
-							"`palbase start` brings a stack up here if you want to watch one",
-						target.Describe())
+			if !target.OnThisMachine() {
+				if ref, ok := cloudRefOf(r, target.URL); ok {
+					fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+					return showCloud(cmd, r, ref, showCloudOpts{
+						source: source, levels: levels, since: since,
+						query: query, limit: limit, follow: follow, jsonOut: jsonOut,
+					})
 				}
-				if err := dockerAvailable(cmd.Context()); err != nil {
-					return err
-				}
-				dir, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
-				return ShowLocal(cmd.Context(), backend.LocalStackProject(dir), LocalOptions{
-					Service: source,
-					Since:   since,
-					Limit:   limit,
-					Query:   query,
-					Levels:  splitLevels(levels),
-					Follow:  follow,
-				}, cmd.OutOrStdout())
+				return fmt.Errorf(
+					"%s does not run on this machine, so its logs are not here either.\n"+
+						"A self-hosted stack keeps its logs in its own containers; "+
+						"`palbase start` brings a stack up here if you want to watch one",
+					target.Describe())
 			}
-
-			// NO SECOND WAY IN (FR-013). Above this line a bound checkout has
-			// already been served — by address for a cloud project, by the local
-			// stack for one running here. What used to follow resolved through
-			// `.palbase/selection.json`, and nothing writes that file any more.
-			return selection.ErrNotSelected{}
+			if err := dockerAvailable(cmd.Context()); err != nil {
+				return err
+			}
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+			return ShowLocal(cmd.Context(), backend.LocalStackProject(dir), LocalOptions{
+				Service: source,
+				Since:   since,
+				Limit:   limit,
+				Query:   query,
+				Levels:  splitLevels(levels),
+				Follow:  follow,
+			}, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&source, "source", "", "Only this source (e.g. backend)")

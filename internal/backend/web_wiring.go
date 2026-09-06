@@ -206,15 +206,6 @@ func locatePackageJSONScripts(data []byte) (scriptsLocation, error) {
 	return loc, nil
 }
 
-// patchPackageJSONScripts adds scripts.predev / scripts.prebuild via byte
-// splice. Hooks already set to a different value are warned about and left
-// untouched; when nothing is missing the file is not rewritten at all — and
-// then nothing is announced either, which is what makes the `~ modified` line
-// worth reading.
-func patchPackageJSONScripts(pkgPath string, w io.Writer) error {
-	return patchPackageJSONScriptsWithCommand(pkgPath, webTypesCmd, w)
-}
-
 func patchPackageJSONScriptsWithCommand(pkgPath, typesCmd string, w io.Writer) error {
 	data, err := os.ReadFile(pkgPath)
 	if err != nil {

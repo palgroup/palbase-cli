@@ -6,7 +6,31 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestBrokenLocalTargetNeverFallsBackToCloud(t *testing.T) {
+	for _, raw := range []string{`{"url":`, `{}`, `{"url":" "}`, "directory"} {
+		t.Run(raw, func(t *testing.T) {
+			seedProject(t, Target{URL: "https://project.palbase.studio"})
+			if raw == "directory" {
+				require.NoError(t, os.Mkdir(localPath(), 0o755))
+			} else {
+				require.NoError(t, os.WriteFile(localPath(), []byte(raw), 0o644))
+			}
+			target, err := ReadTarget()
+			require.ErrorContains(t, err, ".palbase/local.json")
+			require.Empty(t, target.URL, "a broken local target must not send an operation to the cloud")
+		})
+	}
+}
+
+func TestTargetWithoutAddressRequiresRelinking(t *testing.T) {
+	seedProject(t, Target{Project: "old-project", Env: "prod"})
+	_, err := ReadTarget()
+	require.ErrorContains(t, err, "palbase link <ref>")
+}
 
 // BİR HEDEFİN BU MAKİNEDE OLUP OLMADIĞI, ADRESİNDEN OKUNUR.
 //
@@ -199,7 +223,7 @@ func TestStackVersionDoesNotClobberTheProjectWithALocalStack(t *testing.T) {
 		t.Fatalf("stackVersion failed: %v", err)
 	}
 
-	after, err := ReadProjectTargetForTest()
+	after, err := readLinkedProject()
 	if err != nil {
 		t.Fatalf("the committed project file is unreadable after stackVersion: %v", err)
 	}

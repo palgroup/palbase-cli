@@ -12,11 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestKey mints a real keyring DPoP key so the transport signs with
-// the same path production uses. No mock crypto.
-// Every request carries the session token as a plain Bearer credential, and
-// nothing else: one scheme, one place, so "how does this CLI authenticate" has
-// exactly one answer.
+// Browser sessions use a Bearer credential.
 func TestREST_Do_SendsBearerToken(t *testing.T) {
 	var gotAuth, gotAccept string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

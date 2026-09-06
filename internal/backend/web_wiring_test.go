@@ -323,7 +323,7 @@ func TestWebPatchPackageJSON_Golden(t *testing.T) {
 		path := filepath.Join(dir, "package.json")
 		require.NoError(t, os.WriteFile(path, []byte(input), 0o644))
 		var warn strings.Builder
-		require.NoError(t, patchPackageJSONScripts(path, &warn))
+		require.NoError(t, patchPackageJSONScriptsWithCommand(path, webTypesCmd, &warn))
 		body, err := os.ReadFile(path)
 		require.NoError(t, err)
 		require.Equal(t, expected, string(body))

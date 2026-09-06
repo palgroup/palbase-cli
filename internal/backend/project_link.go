@@ -32,7 +32,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/palgroup/palbase-cli/internal/selection"
 	"github.com/spf13/cobra"
 )
 
@@ -114,7 +113,7 @@ boot generated.`,
 				if ref := refByProjectName(cmd.Context(), r, o.url); ref != "" {
 					o.url = ref
 				}
-				if !selection.IsCanonicalEnvironmentRef(o.url) {
+				if !isCanonicalProjectRef(o.url) {
 					return fmt.Errorf(
 						"%q is neither a stack address nor an environment ref "+
 							"(a ref is 4-24 lowercase letters and digits)", o.url)

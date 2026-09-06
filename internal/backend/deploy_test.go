@@ -19,21 +19,6 @@ import (
 
 // ── the deploy paths ────────────────────────────────────────────────────────
 
-func TestDeployPaths_AreEnvironmentScoped(t *testing.T) {
-	// The push route names the Environment and nothing else: on this plane an
-	// Environment IS a tenant.
-	require.Equal(t, "/v1/cloud/projects/app1prod/push", PushPath("app1prod"))
-	require.Equal(t,
-		"/api/v2/projects/proj_1/environments/app1prod/deployments",
-		DeploymentsPath("proj_1", "app1prod"))
-}
-
-func TestRepoURLFromFullName(t *testing.T) {
-	require.Equal(t, "https://github.com/org/repo.git", repoURLFromFullName("org/repo"))
-	require.Empty(t, repoURLFromFullName(""))
-	require.Equal(t, "repo", repoDirFromFullName("org/repo"))
-}
-
 // `palbase pull` brings back the SOURCE the project deployed, from the project.
 //
 // It used to ask the Studio over tRPC, and the Studio kept a copy of every push.
@@ -107,18 +92,6 @@ func tinyTarGz(t *testing.T) []byte {
 	require.NoError(t, tw.Close())
 	require.NoError(t, gw.Close())
 	return buf.Bytes()
-}
-
-// A VERSION ON THIS PLANE IS AN ARTIFACT DIGEST — 64 hex characters. Printed in
-// full it overruns the column and pushes every field after it off the line,
-// which is what `palbase deploys` did the first time it had a real row to show.
-func TestDeployVersion_IsShortened(t *testing.T) {
-	full := "26420de2c2ef675c1e8116cb5bd5ed881761c32038af4573febbb9c6b1642188"
-	require.Equal(t, "26420de2c2ef", deployVersion(&full))
-
-	shortSHA := "abc1234"
-	require.Equal(t, "abc1234", deployVersion(&shortSHA), "a value already short is left alone")
-	require.Equal(t, "-", deployVersion(nil), "a failed attempt has no version and says so")
 }
 
 // THE FIXTURE-SHIPPING TESTS ARE GONE WITH THE BEHAVIOUR THEY LOCKED.

@@ -57,7 +57,7 @@ func TestEveryCommandTheCLIAdvisesExists(t *testing.T) {
 	if len(declared) < 40 {
 		t.Fatalf("found only %d declared commands — the Use: extraction is broken, not the code", len(declared))
 	}
-	for _, must := range []string{"link", "push", "start", "init", "unlink", "upgrade"} {
+	for _, must := range []string{"link", "push", "start", "init", "unlink", "spec"} {
 		if !declared[must] {
 			t.Errorf("`%s` is a command this CLI ships, but the extraction did not see it", must)
 		}

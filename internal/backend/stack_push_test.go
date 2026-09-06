@@ -283,7 +283,7 @@ func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
 			return nil
 		}
 
-		cmd := newPushCmd(Resolvers{})
+		cmd := newPushCmd()
 		cmd.SetArgs(tc.args)
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
@@ -298,38 +298,5 @@ func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
 		if gotBreak != tc.wantBreak {
 			t.Errorf("%v → accept-breaking=%v, beklenen %v", tc.args, gotBreak, tc.wantBreak)
 		}
-	}
-}
-
-// BULUT YOLUNDA BAYRAK SESSİZCE YUTULMAZ.
-//
-// `--accept-breaking` bağlı bir yığının uyumluluk kapısını açıyor ve o kapı yalnız
-// yığında var. Bulut yolunda hiçbir şeye ulaşmıyordu: kabul ediliyor, düşürülüyor,
-// ve push sıradan kurallarla gidiyordu — operatör zorladığını sanarken. Komutun
-// kendi help metni bunu yasaklıyor: kabul edilip yok sayılan bir bayrak, hiç
-// olmayandan beterdir.
-func TestPushCmd_CloudPathRefusesAcceptBreaking(t *testing.T) {
-	// Bağlı yığın YOK: .palbase/local.json olmayan bir dizin bulut dalına düşer.
-	dir := t.TempDir()
-	prev, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-
-	cmd := newPushCmd(Resolvers{})
-	cmd.SetArgs([]string{"--accept-breaking"})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	err := cmd.Execute()
-
-	if err == nil {
-		t.Fatal("bulut yolu --accept-breaking'i sessizce yuttu")
-	}
-	if !strings.Contains(err.Error(), "accept-breaking") {
-		t.Errorf("red bayrağı ADIYLA anmalı: %v", err)
-	}
-	if !strings.Contains(err.Error(), "linked") {
-		t.Errorf("red ne yapılacağını söylemeli: %v", err)
 	}
 }

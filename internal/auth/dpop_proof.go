@@ -13,21 +13,15 @@ import (
 	"github.com/go-jose/go-jose/v4"
 )
 
-// ProofOptions controls DPoP proof generation. Every field except Nonce
-// is required; a missing AccessToken is a bug (use NewUnboundProof for
-// pre-token requests like /oauth/token exchange).
+// ProofOptions binds a machine-identity proof to a request and its token.
 type ProofOptions struct {
 	// HTTPMethod is the upper-case request method (GET, POST, ...).
 	HTTPMethod string
 	// URL is the fully-qualified request URL. Canonicalisation strips
 	// the query+fragment to match RFC 9449 §4.3 before signing.
 	URL string
-	// AccessToken is the access token the proof is bound to. Empty for
-	// the first /oauth/token request (no access token exists yet).
+	// AccessToken is the machine token the proof is bound to.
 	AccessToken string
-	// Nonce is the value the server returned via DPoP-Nonce. Empty for
-	// the first request; servers may require nonce on subsequent calls.
-	Nonce string
 	// Now is an override for deterministic tests. Production callers
 	// leave it unset and time.Now() is used.
 	Now func() time.Time
@@ -37,8 +31,8 @@ type ProofOptions struct {
 // header. Every call produces a fresh jti + iat; palauth's replay cache
 // ensures single-use semantics server-side.
 func (k *DPoPKey) NewProof(opts ProofOptions) (string, error) {
-	if opts.HTTPMethod == "" || opts.URL == "" {
-		return "", fmt.Errorf("dpop proof: method and url are required")
+	if opts.HTTPMethod == "" || opts.URL == "" || opts.AccessToken == "" {
+		return "", fmt.Errorf("dpop proof: method, url, and access token are required")
 	}
 	canonicalURL, err := canonicalProofURL(opts.URL)
 	if err != nil {
@@ -59,12 +53,7 @@ func (k *DPoPKey) NewProof(opts ProofOptions) (string, error) {
 		"htm": strings.ToUpper(opts.HTTPMethod),
 		"htu": canonicalURL,
 		"iat": now().Unix(),
-	}
-	if opts.AccessToken != "" {
-		payload["ath"] = accessTokenHash(opts.AccessToken)
-	}
-	if opts.Nonce != "" {
-		payload["nonce"] = opts.Nonce
+		"ath": accessTokenHash(opts.AccessToken),
 	}
 
 	body, err := json.Marshal(payload)
@@ -79,7 +68,7 @@ func (k *DPoPKey) NewProof(opts ProofOptions) (string, error) {
 		WithType("dpop+jwt").
 		WithHeader("jwk", k.publicJWK())
 	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.ES256, Key: k.privateJoseJWK().Key},
+		jose.SigningKey{Algorithm: jose.ES256, Key: k.private},
 		signerOpts,
 	)
 	if err != nil {

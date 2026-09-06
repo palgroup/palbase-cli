@@ -104,20 +104,39 @@ Store or Play — a store counts downloads, this counts installations that
 actually reached this stack.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if days < 0 || days > 90 {
+				return fmt.Errorf("--days must be between 0 and 90 (0 shows only the current distribution)")
+			}
 			raw, err := call(r, cmd, currentPath)
 			if err != nil {
 				return err
 			}
 
-			out := cmd.OutOrStdout()
-			if jsonOut && days == 0 {
-				fmt.Fprintln(out, strings.TrimSpace(string(raw)))
-				return nil
-			}
-
 			var dist distribution
 			if err := json.Unmarshal(raw, &dist); err != nil {
 				return fmt.Errorf("the stack answered something this CLI cannot read: %w", err)
+			}
+			var curveRaw []byte
+			var curve []dailyRow
+			if days > 0 {
+				curveRaw, err = call(r, cmd, fmt.Sprintf("%s?days=%d", dailyPath, days))
+				if err != nil {
+					return err
+				}
+				if err := json.Unmarshal(curveRaw, &curve); err != nil {
+					return fmt.Errorf("the stack answered something this CLI cannot read: %w", err)
+				}
+			}
+
+			out := cmd.OutOrStdout()
+			if jsonOut {
+				if days == 0 {
+					return json.NewEncoder(out).Encode(json.RawMessage(raw))
+				}
+				return json.NewEncoder(out).Encode(struct {
+					Current json.RawMessage `json:"current"`
+					Daily   json.RawMessage `json:"daily"`
+				}{Current: raw, Daily: curveRaw})
 			}
 
 			if len(dist.Buckets) == 0 {
@@ -150,18 +169,6 @@ actually reached this stack.`,
 				return nil
 			}
 
-			curveRaw, err := call(r, cmd, fmt.Sprintf("%s?days=%d", dailyPath, days))
-			if err != nil {
-				return err
-			}
-			if jsonOut {
-				fmt.Fprintln(out, strings.TrimSpace(string(curveRaw)))
-				return nil
-			}
-			var curve []dailyRow
-			if err := json.Unmarshal(curveRaw, &curve); err != nil {
-				return fmt.Errorf("the stack answered something this CLI cannot read: %w", err)
-			}
 			if len(curve) == 0 {
 				fmt.Fprintln(out, "\nNo day has been rolled up yet.")
 				return nil
@@ -177,7 +184,7 @@ actually reached this stack.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print raw JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print JSON; with --days, include current and daily fields")
 	cmd.Flags().IntVar(&days, "days", 0, "Also print the adoption curve for this many days (max 90)")
 	return cmd
 }

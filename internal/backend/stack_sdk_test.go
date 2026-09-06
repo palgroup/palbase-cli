@@ -113,8 +113,7 @@ func TestStatusSDKComesFromTheSameSourceAsPush(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SetContext(context.Background())
-	handled, err := statusOfProject(cmd, Resolvers{}, false)
-	require.True(t, handled)
+	err := statusOfProject(cmd, false)
 	require.NoError(t, err)
 
 	// SAME SOURCE, asserted against the function push itself calls rather than

@@ -34,24 +34,8 @@ const (
 	PlaneBoth
 )
 
-func (p Plane) String() string {
-	switch p {
-	case PlaneBackend:
-		return "backend"
-	case PlaneApp:
-		return "app"
-	case PlaneBoth:
-		return "backend and app"
-	default:
-		return "neither"
-	}
-}
-
 // HasBackend reports whether backend verbs apply here.
 func (p Plane) HasBackend() bool { return p == PlaneBackend || p == PlaneBoth }
-
-// HasApp reports whether app verbs apply here.
-func (p Plane) HasApp() bool { return p == PlaneApp || p == PlaneBoth }
 
 // PlaneOf inspects a directory.
 //

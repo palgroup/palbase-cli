@@ -76,6 +76,36 @@ func history() []projectDeployment {
 	}
 }
 
+func TestDeploysJSONContainsFullHistory(t *testing.T) {
+	for _, rows := range [][]projectDeployment{history(), {}} {
+		srv, _ := deployingProject(t, rows)
+		linkedToProject(t, srv.URL)
+		cmd := newDeploysCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetArgs([]string{"--json"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		var got []projectDeployment
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("--json output cannot be parsed: %v\n%s", err, out.String())
+		}
+		if len(got) != len(rows) {
+			t.Fatalf("got %d deployments, want %d", len(got), len(rows))
+		}
+		for i, row := range got {
+			if row.Digest != rows[i].Digest || row.SDKVersion != rows[i].SDKVersion || row.Active != rows[i].Active {
+				t.Errorf("deployment was truncated or changed: %+v", row)
+			}
+		}
+		if len(rows) == 0 && strings.TrimSpace(out.String()) != "[]" {
+			t.Errorf("an empty history must be a JSON array: %s", out.String())
+		}
+	}
+}
+
 // TestDeploysMarksTheOneThatIsServing: a history without that mark is a list of
 // hashes.
 func TestDeploysMarksTheOneThatIsServing(t *testing.T) {
@@ -83,9 +113,9 @@ func TestDeploysMarksTheOneThatIsServing(t *testing.T) {
 	linkedToProject(t, srv.URL)
 
 	var out, errOut bytes.Buffer
-	handled, err := deploysOfProject(commandIn(t, &out, &errOut))
-	if !handled || err != nil {
-		t.Fatalf("handled=%v err=%v", handled, err)
+	err := deploysOfProject(commandIn(t, &out, &errOut))
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 	body := out.String()
 	for _, line := range strings.Split(body, "\n") {
@@ -113,9 +143,9 @@ func TestRollbackTakesTheDigestTheListingPRINTS(t *testing.T) {
 	linkedToProject(t, srv.URL)
 
 	var out, errOut bytes.Buffer
-	handled, err := rollbackOnProject(commandIn(t, &out, &errOut), "bbbb11112222")
-	if !handled || err != nil {
-		t.Fatalf("handled=%v err=%v\n%s", handled, err, out.String())
+	err := rollbackOnProject(commandIn(t, &out, &errOut), "bbbb11112222")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
 	}
 	if *activated != history()[1].Digest {
 		t.Errorf("activated %q", *activated)
@@ -134,7 +164,7 @@ func TestAnUnknownVersionListsTheKnownOnes(t *testing.T) {
 	linkedToProject(t, srv.URL)
 
 	var out, errOut bytes.Buffer
-	_, err := rollbackOnProject(commandIn(t, &out, &errOut), "cccc")
+	err := rollbackOnProject(commandIn(t, &out, &errOut), "cccc")
 	if err == nil {
 		t.Fatal("an unknown version was accepted")
 	}
@@ -166,9 +196,9 @@ func TestNothingDeployedIsAStateNotAnError(t *testing.T) {
 	linkedToProject(t, srv.URL)
 
 	var out, errOut bytes.Buffer
-	handled, err := deploysOfProject(commandIn(t, &out, &errOut))
-	if !handled || err != nil {
-		t.Fatalf("handled=%v err=%v", handled, err)
+	err := deploysOfProject(commandIn(t, &out, &errOut))
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 	if !strings.Contains(out.String(), "palbase push") {
 		t.Errorf("an empty history does not say what fills it:\n%s", out.String())
@@ -195,7 +225,7 @@ func TestRollbackRefusesWhenTheRuntimeNeverPicksItUp(t *testing.T) {
 	linkedToProject(t, srv.URL)
 
 	var out, errOut bytes.Buffer
-	_, err := rollbackOnProject(commandIn(t, &out, &errOut), "bbbb11112222")
+	err := rollbackOnProject(commandIn(t, &out, &errOut), "bbbb11112222")
 	if err == nil {
 		t.Fatal("a rollback nothing picked up was reported as success")
 	}

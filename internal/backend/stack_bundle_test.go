@@ -748,7 +748,7 @@ func TestDIGenerationCeilingRefusal(t *testing.T) {
 		require.Contains(t, why, "at most 2")
 		// The fix, not just the fault: a refusal that does not say what to type
 		// next costs the reader the next hour.
-		require.Contains(t, why, "palbase upgrade")
+		require.Contains(t, why, "matching runtime version")
 		// And WHY it matters — an operator weighing whether to force it needs to
 		// know the failure is silent, not loud.
 		require.Contains(t, why, "undefined")

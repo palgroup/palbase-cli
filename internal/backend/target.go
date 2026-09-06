@@ -21,7 +21,6 @@ package backend
 // locally, then push" a two-word switch rather than a re-link.
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,17 +146,29 @@ func WriteLocalTarget(t Target) error {
 // disk rather than a flag on every command — and every verb prints what it
 // resolved, so nobody has to remember.
 func ReadTarget() (Target, error) {
-	if raw, err := os.ReadFile(localPath()); err == nil {
+	raw, err := os.ReadFile(localPath())
+	if err == nil {
 		var local Target
 		if err := json.Unmarshal(raw, &local); err != nil {
 			return Target{}, fmt.Errorf("read %s: %w", localPath(), err)
 		}
-		if local.URL != "" {
-			local.Local = true
-			return local, nil
+		if strings.TrimSpace(local.URL) == "" {
+			return Target{}, fmt.Errorf("%s has no address — run `palbase start` again", localPath())
 		}
+		local.Local = true
+		return local, nil
 	}
-	return readLinkedProject()
+	if !errors.Is(err, os.ErrNotExist) {
+		return Target{}, fmt.Errorf("read %s: %w", localPath(), err)
+	}
+	target, err := readLinkedProject()
+	if err != nil {
+		return Target{}, err
+	}
+	if strings.TrimSpace(target.URL) == "" {
+		return Target{}, fmt.Errorf("%s has no address — run `palbase link <ref>` again", projectPath())
+	}
+	return target, nil
 }
 
 func readLinkedProject() (Target, error) {
@@ -208,25 +219,6 @@ func credentialsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".palbase", "credentials.json"), nil
-}
-
-// ResolveTarget is ReadTarget with the selection as a second authority.
-//
-// The file wins. Someone who ran `link` in this checkout named a project on
-// purpose, and a selection quietly overriding it would make that verb a
-// decoration — the same reasoning that puts a hand-written credential ahead of
-// the broker.
-func ResolveTarget(ctx context.Context) (Target, error) {
-	target, err := ReadTarget()
-	if err == nil && target.URL != "" {
-		return target, nil
-	}
-	// AND THERE IS NO SECOND AUTHORITY (FR-013). A `SelectedProject` hook used
-	// to answer here from `.palbase/selection.json`. Nothing writes that file,
-	// so the hook could only fire for a pre-cutover checkout — a second way to
-	// answer "which project am I acting on", which is the whole thing the
-	// requirement retired.
-	return target, err
 }
 
 // stackVersion answers which stack generation this checkout runs, and WRITES the
@@ -282,7 +274,3 @@ func stackVersion(projectDir string) (string, error) {
 	}
 	return major, nil
 }
-
-// ReadProjectTargetForTest reads the COMMITTED project file, bypassing the local
-// stack's preference — the asymmetry that made stackVersion clobber it.
-func ReadProjectTargetForTest() (Target, error) { return readLinkedProject() }

@@ -1,24 +1,16 @@
 //go:build e2e
 
-// Package e2e exercises the Management-API command path end-to-end against a
-// real cloud (api.palbase.studio → Studio /api/v2 → palauth
-// PAT+DPoP verify). It is gated by the `e2e` build tag AND requires live
-// credentials, so it never runs in the unit suite.
+// Package e2e exercises the cloud API with a live account-level machine token.
+// The project test creates a free project and deletes it during cleanup.
 //
-// There is NO organization id here: `POST /api/v2/projects` targets the caller's
-// server-side default Organization (spec §7.3) — Organization is not a CLI
-// context, so the e2e cannot pass one either.
+// Run with an account token that can create and delete projects:
 //
-// Run:
-//
-//	export PALBASE_ACCESS_TOKEN=pat_…          # DPoP-bound PAT (Dashboard-issued)
-//	export PALBASE_PLATFORM_URL=https://api.palbase.studio   # optional
-//	export PALBASE_NO_KEYRING=1                # use file-backed key in CI
+//	export PALBASE_ACCOUNT_TOKEN=pat_…
+//	export PALBASE_DPOP_KEY='<the private P-256 JWK paired with the token>'
+//	export PALBASE_PLATFORM_URL=https://api.palbase.studio # optional
 //	go test -tags e2e -race ./tests/e2e/...
 //
-// The keyring DPoP key MUST be the one the PAT is bound to (the jkt
-// `palbase login` printed). In CI, provision it under $HOME/.palbase or
-// via the keyring before running.
+// PALBASE_ACCESS_TOKEN takes priority over PALBASE_ACCOUNT_TOKEN, as in the CLI.
 package e2e
 
 import (
@@ -26,138 +18,100 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/palgroup/palbase-cli/internal/apikey"
 	"github.com/palgroup/palbase-cli/internal/auth"
+	"github.com/palgroup/palbase-cli/internal/project"
 	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
-func e2eConfig(t *testing.T) (base, pat string, key *auth.DPoPKey) {
+func e2eClient(t *testing.T) *transport.Client {
 	t.Helper()
-	pat = os.Getenv("PALBASE_ACCESS_TOKEN")
-	if pat == "" {
-		t.Skip("set PALBASE_ACCESS_TOKEN to run the mgmt-api e2e")
+	token := os.Getenv("PALBASE_ACCESS_TOKEN")
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv(auth.AccountTokenEnv))
 	}
-	base = os.Getenv("PALBASE_PLATFORM_URL")
+	if token == "" {
+		t.Skip("set PALBASE_ACCOUNT_TOKEN or PALBASE_ACCESS_TOKEN to run the cloud API e2e")
+	}
+	require.True(t, strings.HasPrefix(token, "pat_"), "the cloud API e2e requires an account-level machine token")
+	base := os.Getenv("PALBASE_PLATFORM_URL")
 	if base == "" {
-		// The DEPLOYED cloud. `api.dev.palbase.studio` was the default here and
-		// that address was never deployed — measured 2026-09-04: it does not
-		// connect, while api.palbase.studio answers 200. A default nobody can
-		// reach makes every run of this suite a run against nothing.
 		base = "https://api.palbase.studio"
 	}
-	// No mode argument: `--mode` was retired with the v1 address space, and
-	// LoadDPoPKey now reads the one key this machine holds.
-	k, err := auth.LoadDPoPKey()
-	require.NoError(t, err, "load the keyring DPoP key the PAT is bound to (run `palbase login` first)")
-	return base, pat, k
-}
+	key, err := auth.LoadDPoPKey()
+	require.NoError(t, err, "supply the token's paired private JWK in PALBASE_DPOP_KEY")
 
-// uniqueSeed returns a contract-valid ref SEED ([a-z0-9]{4,13}). It seeds the
-// production Environment's ref; the Project itself has no ref.
-func uniqueSeed() string {
-	return fmt.Sprintf("e2e%d", time.Now().UnixNano()%1_000_000)
-}
-
-// The canonical create → resolve → reveal path on v2. It asserts the whole
-// Project/Environment shape: create takes NO organizationId, the Project has no
-// ref, and the KEY hangs off the ENVIRONMENT.
-func TestE2E_CreateResolveReveal_DPoPBound(t *testing.T) {
-	base, pat, key := e2eConfig(t)
-	// The key is no longer passed to the client: transport signs through a
-	// package-level signer, the way cmd/palbase wires it at startup
-	// (wireDPoPSigner). The test wires the same seam with the key it loaded.
-	transport.DPoPSigner = func(method, url, accessToken string) (string, error) {
+	signer := transport.DPoPSigner
+	t.Cleanup(func() { transport.DPoPSigner = signer })
+	transport.DPoPSigner = func(method, address, accessToken string) (string, error) {
 		return key.NewProof(auth.ProofOptions{
-			HTTPMethod:  method,
-			URL:         url,
-			AccessToken: accessToken,
+			HTTPMethod: method, URL: address, AccessToken: accessToken,
 		})
 	}
-	c := transport.New(base, pat)
+	return transport.New(base, token)
+}
+
+func TestE2E_CreateReadReveal_DPoPBound(t *testing.T) {
+	c := e2eClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	seed := uniqueSeed()
+	name := fmt.Sprintf("cli-e2e-%d", time.Now().UnixNano())
+	var created project.Project
+	require.NoError(t, c.Do(ctx, http.MethodPost, "/v1/cloud/projects",
+		map[string]string{"name": name, "tier": "free"}, &created))
+	require.NotEmpty(t, created.Ref, "create must return the new project's ref")
+	path := "/v1/cloud/projects/" + url.PathEscape(created.Ref)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cleanupCancel()
+		require.NoError(t, c.Do(cleanupCtx, http.MethodDelete, path, nil, nil),
+			"delete the project created by this test: %s", created.Ref)
+	})
+	require.NotNil(t, created.Name)
+	require.Equal(t, name, *created.Name)
+	require.Equal(t, "Running", created.Phase, "provisioning must complete before create returns")
 
-	// 1. create — async, in the caller's DEFAULT Organization. No organizationId.
-	var handle struct {
-		WorkflowID string `json:"workflowId"`
-		RunID      string `json:"runId"`
-	}
-	require.NoError(t, c.Do(ctx, http.MethodPost, "/api/v2/projects",
-		map[string]any{"ref": seed, "name": "e2e"}, &handle))
-	require.NotEmpty(t, handle.WorkflowID, "create must return a workflow handle")
+	var status project.Project
+	require.NoError(t, c.Do(ctx, http.MethodGet, path, nil, &status))
+	require.Equal(t, created, status)
 
-	// 2. resolve — the saga's production Environment is the one whose ref starts
-	// with the seed. That is what identifies the Project it hangs under.
-	projectID, envRef := "", ""
-	deadline := time.Now().Add(8 * time.Minute)
-	for time.Now().Before(deadline) && envRef == "" {
-		var projects []struct {
-			ID string `json:"id"`
-		}
-		if err := c.Do(ctx, http.MethodGet, "/api/v2/projects", nil, &projects); err != nil {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		for _, p := range projects {
-			var envs []struct {
-				Ref          string `json:"ref"`
-				Status       string `json:"status"`
-				IsProduction bool   `json:"is_production"`
-			}
-			if err := c.Do(ctx, http.MethodGet, "/api/v2/projects/"+p.ID+"/environments", nil, &envs); err != nil {
-				continue
-			}
-			for _, e := range envs {
-				if strings.HasPrefix(e.Ref, seed) && e.IsProduction && e.Status == "active" {
-					projectID, envRef = p.ID, e.Ref
-				}
-			}
-		}
-		if envRef == "" {
-			time.Sleep(5 * time.Second)
-		}
-	}
-	require.NotEmpty(t, envRef, "the project's production environment never became active (seed %q)", seed)
+	var projects []project.Project
+	require.NoError(t, c.Do(ctx, http.MethodGet, "/v1/cloud/projects", nil, &projects))
+	require.Contains(t, projects, created, "the created project must appear in the caller's list")
 
-	// 3. reveal — the key hangs off the ENVIRONMENT, under its Project.
-	var revealed struct {
-		EnvironmentRef string  `json:"environment_ref"`
-		PublishableKey *string `json:"publishable_key"`
-	}
-	require.NoError(t, c.Do(ctx, http.MethodGet,
-		"/api/v2/projects/"+projectID+"/environments/"+envRef+"/api-keys?reveal=true", nil, &revealed))
-	require.Equal(t, envRef, revealed.EnvironmentRef, "reveal must identify the selected environment")
-	require.NotNil(t, revealed.PublishableKey, "reveal must surface the publishable key plaintext")
-	require.True(t, strings.HasPrefix(*revealed.PublishableKey, "pb_"), "publishable key has pb_ prefix")
-	require.Contains(t, *revealed.PublishableKey, envRef, "the environment ref is embedded in the key")
+	var keys apikey.Keys
+	require.NoError(t, c.Do(ctx, http.MethodGet, path+"/keys", nil, &keys))
+	// Assert key shape without exposing either key in test output.
+	require.True(t, strings.HasPrefix(keys.AnonKey, "pb_project_c"), "missing publishable key")
+	require.True(t, strings.HasPrefix(keys.ServiceRoleKey, "pb_project_s"), "missing service-role key")
 }
 
-// TestE2E_BearerPresentedPAT_Rejected pins the no-downgrade rule: the
-// same valid PAT presented as `Authorization: Bearer <pat>` (no DPoP
-// proof) MUST be rejected. This is the security invariant from spec §3/§8.
 func TestE2E_BearerPresentedPAT_Rejected(t *testing.T) {
-	base, pat, _ := e2eConfig(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	c := e2eClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v2/projects", nil)
-	require.NoError(t, err)
-	// Deliberately Bearer (not DPoP) and no DPoP proof header.
-	req.Header.Set("Authorization", "Bearer "+pat)
+	// Establish that this token and route work with the required DPoP proof.
+	// A missing route or invalid token must not make the rejection test pass.
+	require.NoError(t, c.Do(ctx, http.MethodGet, "/v1/cloud/projects", nil, nil))
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/cloud/projects", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+
+	resp, err := c.HTTPClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	require.GreaterOrEqual(t, resp.StatusCode, 400,
-		"a Bearer-presented DPoP-bound PAT must be rejected (no downgrade)")
-	require.NotEqual(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, resp.StatusCode,
+		"a valid machine token presented without its DPoP proof must be rejected")
 }

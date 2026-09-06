@@ -58,10 +58,6 @@ type statusJSON struct {
 	// BUILT with — a different fact, and the reason both are named rather than
 	// merged. Empty when the project would not say.
 	SDK string `json:"sdk,omitempty"`
-	// LastAttempt is the newest row in the PLANE's push ledger, which is a
-	// different fact from Deployed: a push that never reached the project is not
-	// in the project's history, and that is exactly the failure worth seeing.
-	LastAttempt *deployRow `json:"last_attempt,omitempty"`
 }
 
 type statusCredential struct {
@@ -71,23 +67,18 @@ type statusCredential struct {
 
 // statusOfProject reports on the project this verb acts on: the one this
 // checkout is linked to, or the one the caller selected.
-//
-// The bool it returns used to mean "I handled it" — false sent the caller to a
-// second arm that asked the Studio the same question over tRPC and rendered a
-// different shape. There is one arm now; the bool is kept only so the call site
-// reads the same as the other target-relative verbs.
-func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error) {
+func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	ctx := cmd.Context()
-	target, err := ResolveTargetFor(cmd)
+	target, err := ReadTarget()
 	if err != nil {
-		return true, err
+		return err
 	}
 	cred, source, err := Credential(target.URL)
 	if err != nil {
-		return true, err
+		return err
 	}
 	if jsonOut {
-		return true, statusAsJSON(ctx, cmd, r, target, cred, string(source))
+		return statusAsJSON(ctx, cmd, target, cred, string(source))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
 
@@ -105,7 +96,7 @@ func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error
 		"/v1/management/deployments/current", nil, "")
 	switch {
 	case err != nil:
-		return true, err
+		return err
 	case status == http.StatusNotFound && target.Local:
 		// A stack started HERE serves this directory and never follows the deploy
 		// pointer, so "no artifact" is the permanent, correct answer rather than a
@@ -116,11 +107,11 @@ func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error
 	case status == http.StatusNotFound:
 		fmt.Fprintln(out, "deployed:     nothing yet — `palbase push`")
 	case status != http.StatusOK:
-		return true, fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
+		return fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(body))
 	default:
 		var deployed deploymentState
 		if err := json.Unmarshal(body, &deployed); err != nil {
-			return true, fmt.Errorf("read the deployment: %w", err)
+			return fmt.Errorf("read the deployment: %w", err)
 		}
 		digest := deployed.Digest
 		if len(digest) > 12 {
@@ -177,7 +168,7 @@ func statusOfProject(cmd *cobra.Command, r Resolvers, jsonOut bool) (bool, error
 			reportInfoPlistRequirement(root, envs, out)
 		}
 	}
-	return true, nil
+	return nil
 }
 
 // reportCommittedDrift says which endpoints the environments this app holds do
@@ -254,7 +245,7 @@ func reportKeyDrift(ctx context.Context, target Target, cred Credentials, out io
 // statusAsJSON answers the same questions the text output does, without the
 // advice: a script cannot follow "run palbase push", and prose inside a JSON
 // document would make it unparseable.
-func statusAsJSON(ctx context.Context, cmd *cobra.Command, r Resolvers, target Target, cred Credentials, source string) error {
+func statusAsJSON(ctx context.Context, cmd *cobra.Command, target Target, cred Credentials, source string) error {
 	doc := statusJSON{
 		Project:    target.Describe(),
 		Address:    target.URL,

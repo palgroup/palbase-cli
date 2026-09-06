@@ -298,7 +298,7 @@ func providersCmd(r Resolvers) *cobra.Command {
 			Use: use + " NAME", Short: short, Args: cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				b, _ := json.Marshal(map[string]bool{"enabled": on})
-				return call(r, cmd, http.MethodPost, base+"/providers/"+args[0], b)
+				return call(r, cmd, http.MethodPost, base+"/providers/"+url.PathEscape(args[0]), b)
 			},
 		}
 	}
@@ -315,14 +315,14 @@ func providersCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return call(r, cmd, http.MethodPut, base+"/providers/"+args[0]+"/config", b)
+			return call(r, cmd, http.MethodPut, base+"/providers/"+url.PathEscape(args[0])+"/config", b)
 		},
 	}
 	setCfg.Flags().StringVar(&body, "json", "", "the credentials, as JSON")
 	cfg.AddCommand(setCfg, &cobra.Command{
 		Use: "clear NAME", Short: "Forget a provider's credentials", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodDelete, base+"/providers/"+args[0]+"/config", nil)
+			return call(r, cmd, http.MethodDelete, base+"/providers/"+url.PathEscape(args[0])+"/config", nil)
 		},
 	})
 	c.AddCommand(cfg)
@@ -342,12 +342,12 @@ func sessionsCmd(r Resolvers) *cobra.Command {
 		// cost more than it should.
 		Use: "revoke SESSION_ID", Short: "End one session", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodDelete, base+"/sessions/"+args[0], nil)
+			return call(r, cmd, http.MethodDelete, base+"/sessions/"+url.PathEscape(args[0]), nil)
 		},
 	}, &cobra.Command{
 		Use: "revoke-all USER_ID", Short: "End every session one person holds", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodPost, base+"/users/"+args[0]+"/sessions/revoke-all", nil)
+			return call(r, cmd, http.MethodPost, base+"/users/"+url.PathEscape(args[0])+"/sessions/revoke-all", nil)
 		},
 	})
 	return c
@@ -397,7 +397,7 @@ func templatesCmd(r Resolvers) *cobra.Command {
 	}, &cobra.Command{
 		Use: "get KEY", Short: "Show one template", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodGet, base+"/templates/"+args[0], nil)
+			return call(r, cmd, http.MethodGet, base+"/templates/"+url.PathEscape(args[0]), nil)
 		},
 	})
 	var body string
@@ -408,7 +408,7 @@ func templatesCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return call(r, cmd, http.MethodPut, base+"/templates/"+args[0], b)
+			return call(r, cmd, http.MethodPut, base+"/templates/"+url.PathEscape(args[0]), b)
 		},
 	}
 	set.Flags().StringVar(&body, "json", "", "the template, as JSON")
@@ -423,7 +423,7 @@ func templatesCmd(r Resolvers) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return call(r, cmd, http.MethodPost, base+"/templates/"+args[0]+"/send-test", b)
+			return call(r, cmd, http.MethodPost, base+"/templates/"+url.PathEscape(args[0])+"/send-test", b)
 		},
 	}
 	send.Flags().StringVar(&testBody, "json", "", `where to send it, e.g. {"to":"you@example.com"}`)
@@ -436,14 +436,14 @@ func mfaCmd(r Resolvers) *cobra.Command {
 	c.AddCommand(&cobra.Command{
 		Use: "get USER_ID", Short: "Show what they have enrolled", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodGet, base+"/users/"+args[0]+"/mfa", nil)
+			return call(r, cmd, http.MethodGet, base+"/users/"+url.PathEscape(args[0])+"/mfa", nil)
 		},
 	}, &cobra.Command{
 		// The three-in-the-morning verb: somebody lost the phone that holds their
 		// authenticator. Reversible in the sense that matters — they enrol again.
 		Use: "reset USER_ID", Short: "Reset their second factor", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodDelete, base+"/users/"+args[0]+"/mfa", nil)
+			return call(r, cmd, http.MethodDelete, base+"/users/"+url.PathEscape(args[0])+"/mfa", nil)
 		},
 	})
 	return c

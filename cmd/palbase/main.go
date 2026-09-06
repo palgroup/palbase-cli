@@ -37,23 +37,17 @@ import (
 
 var Version = "dev"
 
-// sel is the shared selection resolver every context-bound command reads. Built
-// once per invocation in PersistentPreRunE so a command that needs both the
-// Project and the Environment pays for ONE environments listing.
-
 // resolved is populated in PersistentPreRunE and consumed by subcommands.
 var resolved config.Resolved
 
 // authClient is built per invocation from the resolved mode/endpoints.
 var authClient *auth.Client
 
-// managementREST lazily builds the Management-API REST client used by
-// `palbase project`/`apikey`. It loads the keyring DPoP key + resolves
-// the management credential (PALBASE_ACCESS_TOKEN PAT or, for
-// interactive use, the DPoP-bound login access token — refreshed in
-// place if expired). Missing material surfaces a clear error from
-// transport.Client.Do rather than at wiring time, so `palbase login` /
-// `config` still run without a credential present.
+// managementREST lazily resolves the account credential and builds a cloud
+// client. Browser sessions use Bearer auth and refresh in place; machine
+// identities use DPoP with the private JWK supplied in PALBASE_DPOP_KEY.
+// Missing credentials surface when a request is made, so login and config
+// commands can run without an account credential.
 //
 // The Resolvers callbacks below are `func() REST` — they don't carry the cobra
 // command context. Wiring that through every command package would be a wide
@@ -69,24 +63,8 @@ func managementREST() *transport.Client {
 	return transport.New(resolved.Endpoints.PlatformAPI, token)
 }
 
-// wireCloudKeyFetcher lets the backend package ask the control plane for a
-// project's own key.
-//
-// It closes the chain a signed-in person expects: `login` proves who they are,
-// `link` names a project, and `push` needs that project's service-role key —
-// which lives in the control plane's ledger and nowhere else reachable. Before
-// this, that middle step had no bridge and every target-relative verb answered
-// "no credential" to somebody who had done everything right.
-//
-// Wired here rather than imported there so the backend package stays off the
-// auth and transport packages.
-// wireDPoPSigner, taşıyıcı katmana proof üretecini bağlar.
-//
-// `internal/transport` `internal/auth`'a bağımlı OLMAMALI (aynı sebeple
-// `backend.CloudKeyFetcher` de buradan bağlanıyor), o yüzden bağ burada
-// kuruluyor. Anahtar `LoadDPoPKey` ile geliyor ve o fonksiyon
-// `PALBASE_DPOP_KEY`'i keyring'in önünde okuyor — palcore'un bileti kendi
-// anahtarına bağlı ve CLI onu aynı anahtarla sunmak zorunda.
+// wireDPoPSigner connects auth to transport without a package dependency.
+// A machine token must be presented with its paired PALBASE_DPOP_KEY.
 func wireDPoPSigner() {
 	transport.DPoPSigner = func(method, url, accessToken string) (string, error) {
 		key, err := auth.LoadDPoPKey()
@@ -101,6 +79,8 @@ func wireDPoPSigner() {
 	}
 }
 
+// wireCloudKeyFetcher lets the backend fetch a cloud project's service-role
+// key using the caller's account credential.
 func wireCloudKeyFetcher() {
 	backend.CloudKeyFetcher = func(tenantURL string) (string, error) {
 		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
@@ -311,20 +291,10 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	// --project / --environment ARE GONE (T010). They were global overrides that
-	// resolved through `GET /api/v2/projects`, a route the v2 cloud does not
-	// serve — so the flags were documented, accepted, and quietly selected
-	// nothing in 15+ commands. What a checkout talks to is .palbase/project.json,
-	// written by `link`.
-
-	// One Resolvers value for every backend-package entry point: the top-level
-	// lifecycle commands below, and `project create`'s Materialize hop, which
-	// reuses the SAME bundle download as clone/pull.
+	// Cloud lookup is lazy so help needs no account credential.
 	backendResolvers := backend.Resolvers{
-		Auth:      func() *auth.Client { return authClient },
 		Endpoints: func() config.Endpoints { return resolved.Endpoints },
-		// Reuse the single mgmt-client builder (same DPoP/PAT auth path as
-		// project/apikey) for the provider-aware push/pull/clone verbs.
+		// Project names use the same management credential as `project list`.
 		REST: func() backend.REST { return managementREST() },
 	}
 
@@ -332,7 +302,6 @@ func newRootCmd() *cobra.Command {
 		loginCmd(),
 		logoutCmd(),
 		whoamiCmd(),
-		endpointsCmd(),
 		doctorCmd(),
 		openCmd(),
 		project.Cmd(project.Resolvers{
@@ -395,20 +364,25 @@ func newRootCmd() *cobra.Command {
 		}),
 	)
 
-	// CLI-1 flat redesign: the backend lifecycle commands (build/push/pull/
-	// clone/deploys/rollback/status/spec/web/ios/macos/android) live at the
-	// TOP LEVEL — palbase IS the backend CLI, there is no `backend` parent.
-	// Resolvers close over the package-level globals so PersistentPreRunE has
-	// populated them by the time a subcommand's RunE fires.
 	rootCmd.AddCommand(backend.Commands(backendResolvers)...)
 
+	validateCommandTree(rootCmd)
 	return rootCmd
 }
 
-// dbCmd is the local stack's schema surface. There is no `db types` here any
-// more: palbase-env.d.ts is derived output, and `palbase build` produces
-// everything derived — a second command for one of them was a second thing to
-// remember and a second thing to forget.
+// Commands accept positional arguments only when they declare them. Runnable
+// groups let Cobra validate unknown subcommands before displaying group help.
+func validateCommandTree(cmd *cobra.Command) {
+	if cmd.Args == nil {
+		cmd.Args = cobra.NoArgs
+	}
+	if !cmd.Runnable() && cmd.HasSubCommands() {
+		cmd.RunE = func(cmd *cobra.Command, _ []string) error { return cmd.Help() }
+	}
+	for _, child := range cmd.Commands() {
+		validateCommandTree(child)
+	}
+}
 
 func loginCmd() *cobra.Command {
 	var create bool
@@ -473,35 +447,12 @@ keeps opening a project its owner believes they signed out of.`,
 func whoamiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
-		Short: "Show current logged-in user and mode",
+		Short: "Show the signed-in account",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Whoami owns the whole block (user + mode + auth). The banner
 			// here used to ALSO print Mode:, so `whoami` showed two Mode
 			// lines — dropped.
 			return authClient.Whoami(cmd.Context())
-		},
-	}
-}
-
-// endpointsCmd shows where this CLI acts.
-//
-// It was `palbase mode [prod|dev]`, and it SET a mode. There is nothing to set:
-// one cloud, one address set (config.Resolve). Keeping a verb that offers a
-// choice which no longer exists would let somebody switch to a deployment that
-// is not there — which is exactly what happened, and what `--mode prod` cost a
-// person today.
-func endpointsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "endpoints",
-		Args:  cobra.NoArgs,
-		Short: "Show the addresses this CLI acts on",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Studio:      %s\n", resolved.Endpoints.Studio)
-			fmt.Fprintf(out, "Auth:        %s\n", resolved.Endpoints.Auth)
-			fmt.Fprintf(out, "Platform:    %s\n", resolved.Endpoints.PlatformAPI)
-			fmt.Fprintf(out, "Projects:    <ref>.%s\n", resolved.Endpoints.PublicHost)
-			return nil
 		},
 	}
 }

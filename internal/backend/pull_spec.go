@@ -4,8 +4,6 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-
-	"github.com/palgroup/palbase-cli/internal/selection"
 )
 
 // nativeArtifactsDir is the committed directory the NATIVE SDK generators read:
@@ -50,7 +48,7 @@ func linkedPlatforms() (web bool, apple bool, android bool) {
 //
 // spec NEVER probes a local server on :4003 — it fetches the REMOTE
 // spec via the wake-aware fetch.
-func newSpecCmd(r Resolvers) *cobra.Command {
+func newSpecCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "spec",
 		Args:  cobra.NoArgs,
@@ -73,34 +71,16 @@ wrote (` + webArtifactsDir + `/palbase-config.json, ` + nativeArtifactsDir + `/<
 so a fresh clone behaves the same as the machine that linked it.
 
 spec does NOT write the per-environment runtime config (palbase-config.json —
-base URL + key). That comes from ` + "`palbase <platform> link`" + ` and is re-written by
-` + "`palbase link <ref>`" + `.
+base URL + key). Run ` + "`palbase link <ref>`" + ` to refresh that configuration.
 
 This acts on the project this checkout is bound to. There is one addressing
 mechanism — run ` + "`palbase link <ref>`" + ` to point the checkout at another
 project.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			out := cmd.OutOrStdout()
-
-			// TARGET-RELATIVE, like login and push: a checkout linked to a stack
-			// refreshes from THAT stack. One verb either way — a person should
-			// not have to remember which kind of project they are standing in.
-			if target, err := ReadTarget(); err == nil {
-				if err := refuseCloudSelectionFlags(cmd, target); err != nil {
-					return err
-				}
-				if _, err := PrintTargetFor(cmd); err != nil {
-					return err
-				}
-				return RefreshSpec(cmd.Context(), out)
+			if _, err := PrintTargetFor(cmd); err != nil {
+				return err
 			}
-
-			// NO SECOND WAY IN (FR-013). The address path above serves every
-			// checkout this CLI can produce. What stood here resolved a project
-			// through `.palbase/selection.json` and fetched its contracts from
-			// the control plane — a second route to the same cloud, enterable
-			// only by a pre-cutover checkout, because nothing writes that file.
-			return selection.ErrNotSelected{}
+			return RefreshSpec(cmd.Context(), cmd.OutOrStdout())
 		},
 	}
 	return cmd

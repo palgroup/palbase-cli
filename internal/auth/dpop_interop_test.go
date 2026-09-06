@@ -1,6 +1,16 @@
 package auth
 
-import "testing"
+import (
+	"crypto"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/stretchr/testify/require"
+)
 
 // SDK İLE CLI AYNI ANAHTARI OKUMALI — yoksa bilet sessizce 401 alır.
 //
@@ -27,26 +37,50 @@ func TestSDKKeyMaterialLoadsAndAgreesOnThumbprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SDK'nın ürettiği anahtar CLI'da OKUNAMADI: %v", err)
 	}
-	if got := key.Thumbprint(); got != sdkComputedThumbprint {
+	proof, err := key.NewProof(ProofOptions{
+		HTTPMethod: "POST", URL: "https://api.palbase.studio/v1/cloud/projects", AccessToken: "pat_test",
+	})
+	require.NoError(t, err)
+	signed, err := jose.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
+	require.NoError(t, err)
+	require.Len(t, signed.Signatures, 1)
+	public := signed.Signatures[0].Protected.JSONWebKey
+	require.NotNil(t, public)
+	require.True(t, public.IsPublic(), "a proof must not carry private key material")
+	thumbprint, err := public.Thumbprint(crypto.SHA256)
+	require.NoError(t, err)
+	if got := base64.RawURLEncoding.EncodeToString(thumbprint); got != sdkComputedThumbprint {
 		t.Fatalf("parmak izi AYRIŞTI — bilet CLI'da sessizce 401 alır\n  SDK: %s\n  CLI: %s",
 			sdkComputedThumbprint, got)
 	}
+	payload, err := signed.Verify(public.Key)
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	require.Equal(t, "POST", claims["htm"])
+	require.Equal(t, accessTokenHash("pat_test"), claims["ath"])
 }
 
-// Ortamdaki anahtar KEYRING'İN ÖNÜNDE okunur; aksi hâlde CLI, çağıranın
-// VERDİĞİ anahtarı yok sayıp kendi keyring'indeki başkasıyla imzalardı.
-func TestEnvKeyWinsOverKeyring(t *testing.T) {
-	t.Setenv(DPoPKeyEnv, sdkGeneratedJWK)
-	key, err := LoadDPoPKey()
-	if err != nil {
-		t.Fatalf("ortam anahtarı okunamadı: %v", err)
-	}
-	if key.Thumbprint() != sdkComputedThumbprint {
-		t.Fatal("keyring ortam anahtarını EZDİ")
+func TestMachineKeyNeverFallsBackToAnOldFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	keyFile := filepath.Join(dir, ".palbase", "dpop-key.jwk")
+	require.NoError(t, os.MkdirAll(filepath.Dir(keyFile), 0o700))
+	require.NoError(t, os.WriteFile(keyFile, []byte(sdkGeneratedJWK), 0o600))
+	for _, supplied := range []string{"", "  ", "{broken"} {
+		t.Run(supplied, func(t *testing.T) {
+			t.Setenv(DPoPKeyEnv, supplied)
+			key, err := LoadDPoPKey()
+			require.Nil(t, key)
+			require.ErrorContains(t, err, DPoPKeyEnv)
+			if supplied != "{broken" {
+				require.ErrorIs(t, err, ErrDPoPKeyMissing)
+			}
+		})
 	}
 }
 
-// Bozuk bir ortam anahtarı SESLİ düşer, keyring'e sessizce KAYMAZ.
+// A malformed supplied key must fail before a request is sent.
 func TestBrokenEnvKeyFailsLoudly(t *testing.T) {
 	t.Setenv(DPoPKeyEnv, "{bu jwk degil")
 	if _, err := LoadDPoPKey(); err == nil {

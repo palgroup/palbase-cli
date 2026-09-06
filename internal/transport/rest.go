@@ -1,45 +1,11 @@
-// Package transport is the CLI's REST client for the Palbase Management
-// API (`/api/v2/*` on api.palbase.studio). It is now the ONLY transport this
-// CLI has to the control plane.
-//
-// It used to be one of two. `backend *`, `logs`, `flags`, `test-user`,
-// `notifications` and `debug` each carried a second arm that spoke tRPC to the
-// Studio for procedures with no v2 route — two protocols answering the same
-// questions through two gates, returning two shapes. Every one of those
-// procedures has a REST route now: the PROJECT's own management surface for what
-// a project knows, this one for what the plane knows. `internal/studio` is
-// deleted.
-//
-// THERE IS NO `palbase admin` ANY MORE (2026-09-01). This sentence used to
-// read "`/api/v1` survives ONLY for `palbase admin *`", and it was wrong twice
-// over: the fleet-operator tree was removed once the operator console gained
-// the rollout (proved live, job ed667120-…), and the `/v1/*` paths this client
-// still calls were never that tree's — they are the PLANE's own surface
-// (`/v1/management/flags`, `/v1/cloud/projects/.../push`, `/v1/cloud/me`, …),
-// reached by commands that have nothing to do with the fleet.
-//
-// Auth model (D-32 / RFC 9449): every request carries
-//
-//	Authorization: Bearer <session token>
-//
-// The PAT is a DPoP-bound Personal Access Token; the proof's htm/htu match
-// the actual request and its `ath` binds to the PAT. palauth (reached by
-// Studio's introspection hop) re-derives htm/htu and checks the binding.
-// Bearer presentation is rejected server-side — we never downgrade.
-//
-// IDEMPOTENCY. Every mutating v2 route honours an `Idempotency-Key` header:
-// the first 2xx is stored and replayed byte-for-byte for 24h, and an in-flight
-// duplicate is a 409. The CLI sends one on the deploy upload (the only mutation
-// whose side effect is not already collapsed by a stable Temporal workflow id),
-// so a push whose response is lost to a timeout can be retried on the SAME key
-// without deploying twice.
+// Package transport provides the CLI's REST client for the Palbase control
+// plane. Browser sessions use Bearer auth. Machine tokens use DPoP with a fresh
+// proof bound to the request method, URL, and token.
 package transport
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,42 +14,19 @@ import (
 	"time"
 )
 
-// NewOperationID mints a RFC 4122 v4 UUID for one logical durable mutation.
-//
-// Distinct from an idempotency key (32 hex chars) because the admin key-rotation
-// endpoint validates its operationId as a UUID: the server derives the durable
-// mutation id from it, so a retry carrying the SAME value joins the same
-// rotation instead of minting a second key. crypto/rand for the same reason the
-// idempotency key uses it.
-func NewOperationID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// Empty rather than a guessable value: the server rejects it as
-		// invalid_request, which is a visible failure instead of a silent one.
-		return ""
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
-	h := hex.EncodeToString(b[:])
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
-}
-
 // Client issues authenticated requests to the control plane.
 type Client struct {
 	// BaseURL is the control plane origin (e.g. https://api.palbase.studio).
 	BaseURL string
-	// Token is the session bearer token `palbase login` stored. Empty = not
-	// signed in; every request fails closed rather than going out anonymous.
+	// Token is a browser session or machine token. An empty token prevents
+	// requests from being sent.
 	Token string
-	// HTTPClient is the transport. Nil uses a default with a sane timeout.
+	// HTTPClient is initialized by New with a bounded request timeout.
 	HTTPClient *http.Client
 }
 
-// New builds a Client. baseURL is the Management API origin; key is the
-// keyring DPoP key; pat is the DPoP-bound management PAT (may be empty,
-// in which case Do fails closed).
-// New builds a client for the control plane at baseURL, authenticating with the
-// session bearer token.
+// New builds a client for the control plane at baseURL with an account
+// credential. Machine tokens require DPoPSigner to be wired before use.
 func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:    strings.TrimRight(baseURL, "/"),
@@ -150,7 +93,6 @@ func (e *APIError) Error() string {
 }
 
 // errorEnvelope is the failure shape.
-// errorEnvelope is the failure shape.
 //
 // `fields` ARRIVES IN TWO PLACES, and both are real. A tenant's own surface puts
 // it at the top level; the control plane's SDK wraps a data-first error, so it
@@ -176,30 +118,11 @@ func (e errorEnvelope) fields() []APIErrorField {
 	return e.Data.Fields
 }
 
-// Do performs one Management-API request. method is the HTTP verb; path
-// is appended to BaseURL (e.g. "/api/v2/projects"). body is JSON-encoded
-// when non-nil (a nil body sends no request body). On a 2xx the success
-// envelope's `data` is decoded into out (out may be nil to discard). On a
-// non-2xx the error envelope is parsed into an *APIError.
+// Do performs one control-plane request. The path is appended to BaseURL
+// (e.g. "/v1/cloud/projects"). A non-nil body is JSON-encoded. On success the
+// response is decoded directly into out; nil discards it. Non-2xx responses
+// are parsed into an *APIError.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
-	return c.doWithIdempotency(ctx, method, path, body, out, "")
-}
-
-// DoIdempotent is Do with an `Idempotency-Key` header. The v2 API REQUIRES one
-// on some mutations — API-key creation and rotation answer
-// `400 Idempotency-Key is required` without it — so those routes must call this
-// rather than Do.
-//
-// DERIVE the key from what is being mutated, do not mint a random one. A random
-// key is stable only inside one process, and the retry that actually happens is
-// a person running the command again — see backend.pushIdempotencyKey, which was
-// written after a per-invocation key made the second run of `palbase push` a
-// second logical deploy.
-func (c *Client) DoIdempotent(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
-	return c.doWithIdempotency(ctx, method, path, body, out, idempotencyKey)
-}
-
-func (c *Client) doWithIdempotency(ctx context.Context, method, path string, body, out any, idempotencyKey string) error {
 	var reqBody io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -215,9 +138,6 @@ func (c *Client) doWithIdempotency(ctx context.Context, method, path string, bod
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
-	}
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 
 	resp, err := c.HTTPClient.Do(req)

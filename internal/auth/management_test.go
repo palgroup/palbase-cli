@@ -23,23 +23,6 @@ func newLoopbackListener() (net.Listener, error) {
 	return net.Listen("tcp", "127.0.0.1:0")
 }
 
-func TestEnsureDPoPKey_CreatesThenReuses(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-
-	// First call provisions a fresh key.
-	k1, err := EnsureDPoPKey()
-	require.NoError(t, err)
-	require.NotEmpty(t, k1.Thumbprint())
-
-	// Second call must reuse the stored key (stable jkt across runs) so a
-	// PAT bound to the jkt stays valid between CLI invocations.
-	k2, err := EnsureDPoPKey()
-	require.NoError(t, err)
-	require.Equal(t, k1.Thumbprint(), k2.Thumbprint(),
-		"EnsureDPoPKey must reuse the stored key, not mint a new jkt each call")
-}
-
 func newManagementTestClient(t *testing.T, authURL string) *Client {
 	t.Helper()
 	return &Client{
@@ -66,7 +49,7 @@ func TestManagementToken_LoginFallback(t *testing.T) {
 	t.Setenv("PALBASE_ACCESS_TOKEN", "")
 
 	// A logged-in user without a PAT must still authenticate to the
-	// management API — their DPoP-bound login access token is the
+	// management API — their browser login access token is the
 	// credential.
 	creds := &Credentials{
 		AccessToken: "login_at_xyz",
@@ -145,9 +128,6 @@ func TestManagementToken_ExpiredLogin_RefreshFailureIsActionable(t *testing.T) {
 	// login problem.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PALBASE_ACCESS_TOKEN", "")
-	t.Setenv("PALBASE_NO_KEYRING", "1")
-	_, err := EnsureDPoPKey()
-	require.NoError(t, err)
 
 	require.NoError(t, SaveCredentials(&Credentials{
 		AccessToken:  "stale",

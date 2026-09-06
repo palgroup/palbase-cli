@@ -73,30 +73,15 @@ const composeFile = "docker-compose.dev.yml"
 // `repo` alanı sabittir, SÜRÜM değil — ve ayrım önemli: bir imajın ADI neredeyse
 // hiç değişmez, sürümü her yayında değişir. Değişeni dışarı, sabiti içeri.
 var stackImages = []stackImage{
-	{env: "PBC_PALSVC_IMAGE", repo: "ghcr.io/palgroup/palbase/palsvc",
-		build: "cd v2 && DOCKER_BUILDKIT=1 docker build -t palbase-palsvc -f Dockerfile ."},
-	// RUNTIME'IN `-dev` HEDEFİ: bundler'ı ve TypeScript derleyici API'sini o
-	// taşıyor; onsuz hiçbir proje derlenmez (v2/runtime/Dockerfile:83-140).
-	// Son ek imajın ADININ parçası, sürümün değil.
-	{env: "PBC_RUNTIME_IMAGE", repo: "ghcr.io/palgroup/palbase/runtime-dev",
-		build: "cd v2/runtime && DOCKER_BUILDKIT=1 docker build --target dev -t palbase-runtime-dev -f Dockerfile ."},
-	// The EDGE, and it belongs here for the same reason the other two do: it is
-	// the one container that publishes, so a stack without it has no address at
-	// all. Absent from this list, a missing edge image surfaced as docker's raw
-	// pull error at `compose up` instead of this command's own refusal with the
-	// line that builds it.
-	{env: "PBC_EDGE_IMAGE", repo: "ghcr.io/palgroup/palbase/edge",
-		build: "cd v2/deploy/envoy && DOCKER_BUILDKIT=1 docker build -t palbase-edge ."},
-	// THE DATABASE: upstream, bizim sürüm hattımızda DEĞİL. `pinned` alanı tam
-	// bunun için — core sürümü ona uygulanmaz.
-	{env: "PBC_POSTGRES_IMAGE", repo: "pgvector/pgvector", pinned: "pg16",
-		build: "docker pull pgvector/pgvector:pg16", upstream: true},
+	{env: "PBC_PALSVC_IMAGE", repo: "ghcr.io/palgroup/palbase/palsvc"},
+	{env: "PBC_RUNTIME_IMAGE", repo: "ghcr.io/palgroup/palbase/runtime-dev"},
+	{env: "PBC_EDGE_IMAGE", repo: "ghcr.io/palgroup/palbase/edge"},
+	{env: "PBC_POSTGRES_IMAGE", repo: "pgvector/pgvector", pinned: "pg16", upstream: true},
 }
 
-// stackImage is one container: the variable that carries it to compose, the
-// repository it lives in, and the line that tells somebody how to build it.
+// stackImage identifies a container image and its compose variable.
 type stackImage struct {
-	env, repo, build string
+	env, repo string
 	// pinned, upstream imajların KENDİ etiketi — core sürümü onlara uygulanmaz.
 	pinned string
 	// upstream marks an image somebody else publishes, so the core-version rule
@@ -498,66 +483,24 @@ func stackDirectory(group string) (string, error) {
 	return writeVendoredStack(group)
 }
 
-// imagesPresent refuses BEFORE compose does, because compose's own failure for a
-// missing image is a pull error from a registry that was never going to have it.
+// imagesPresent checks the exact image references compose will use and preserves
+// registry failures, so a missing release and a denied request remain distinct.
 func imagesPresent(ctx context.Context, images []stackImage, version string) error {
 	for _, want := range images {
-		// EZME YOK. Burada bir `os.Getenv(want.env)` kaçamağı vardı: aynı
-		// değişken adı, ama bu sefer sürüm kuralını sessizce delen bir ikinci
-		// kaynak olarak. Kullanıcının kararı ve bu koşunun tezi aynı — imajı
-		// belirleyen tek şey kurulu SDK'nın sürümü. Aynı adı CLI'ın KENDİSİ
-		// yığının .env'ine yazıyor (recordStackImages); okunacak bir ezme değil,
-		// yazılacak bir kayıt.
 		image := want.ref(version)
-		// A REGISTRY reference is compose's job — it pulls, and a pull is the
-		// whole reason `palbase start` works on a machine that has never seen
-		// this repository. Already on the machine, nothing to check.
-		if isRegistryImage(image) {
-			if exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil {
-				continue
-			}
-			// Ask the registry BEFORE compose does, because compose's own answer
-			// for an image it may not read is `manifest unknown` — which reads
-			// like the tag is wrong when the tag is fine and the door is shut.
-			if err := exec.CommandContext(ctx, "docker", "manifest", "inspect", image).Run(); err != nil {
-				return fmt.Errorf(
-					"%s cannot be pulled on this machine.\n"+
-						"  If it is private, `docker login ghcr.io` first — or ask for the package to be made public.\n"+
-						"  Building it yourself instead: %s\n"+
-						"  and then tag it as %s — the version comes from the installed %s and nothing overrides it",
-					image, want.build, image, backendPkg)
-			}
+		if exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf(
-				"the %s image is not on this machine.\n  %s",
-				image, want.build)
+		output, err := exec.CommandContext(ctx, "docker", "manifest", "inspect", image).CombinedOutput()
+		if err != nil {
+			reason := strings.TrimSpace(string(output))
+			if reason == "" {
+				reason = err.Error()
+			}
+			return fmt.Errorf("cannot fetch %s: %s", image, reason)
 		}
 	}
 	return nil
-}
-
-// isRegistryImage says whether docker would go and FETCH this reference.
-//
-// A SLASH is the whole rule: `ghcr.io/palgroup/palbase/palsvc:0.43.0` and
-// `pgvector/pgvector:pg16` are both fetched, the first from ghcr and the second
-// from Docker Hub, while `palbase-palsvc` is a tag somebody built here.
-//
-// It used to demand a dot or a colon in the first segment, which excluded Docker
-// Hub's `org/image` short form. The comment justified that with "nothing in this
-// stack defaults to one" — true when it was written, and FALSE from the moment
-// `postgres` joined stackImages with `pgvector/pgvector:pg16` as its default.
-// Left alone, ensureImages would have called the database image local, found it
-// absent on a fresh machine and refused to start a stack docker could have
-// pulled in seconds.
-//
-// The lesson is the premise, not the predicate: a rule whose reason names what
-// the codebase "does not do today" expires the day the codebase does it.
-func isRegistryImage(image string) bool {
-	_, _, hasSlash := strings.Cut(image, "/")
-	return hasSlash
 }
 
 // groupName is what this stack is called on this machine: the linked project's
@@ -1145,7 +1088,7 @@ func migrateSealingChainWithMint(ctx context.Context, envFile, sdkVersion string
 	if found != 3 {
 		return false, fmt.Errorf(
 			"the stack image minted %d of 3 sealing variables — it is too old to seal.\n"+
-				"  Upgrade it: `palbase upgrade`", found)
+				"  Update @palbase/backend in this checkout, then run `palbase start` again", found)
 	}
 
 	// A NEWLINE FIRST, when the file does not end in one.

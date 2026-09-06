@@ -66,9 +66,9 @@ func TestStatusDoesNotAdviseACommandThatRefusesThisTarget(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetContext(context.Background())
 
-	handled, err := statusOfProject(cmd, Resolvers{}, false)
-	if !handled || err != nil {
-		t.Fatalf("handled=%v err=%v", handled, err)
+	err := statusOfProject(cmd, false)
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 
 	if strings.Contains(out.String(), "palbase push") {
@@ -81,8 +81,8 @@ func TestStatusDoesNotAdviseACommandThatRefusesThisTarget(t *testing.T) {
 	dcmd.SetOut(&deployOut)
 	dcmd.SetErr(&deployErr)
 	dcmd.SetContext(context.Background())
-	if handled, err := deploysOfProject(dcmd); !handled || err != nil {
-		t.Fatalf("deploys handled=%v err=%v", handled, err)
+	if err := deploysOfProject(dcmd); err != nil {
+		t.Fatalf("deploys: %v", err)
 	}
 	if strings.Contains(deployOut.String(), "palbase push") {
 		t.Errorf("deploys recommends a command that refuses this target:\n%s", deployOut.String())
