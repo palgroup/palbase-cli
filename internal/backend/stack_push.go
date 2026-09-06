@@ -39,6 +39,22 @@ type pushResult struct {
 	} `json:"schema"`
 }
 
+// Cloud deploys must visit the plane that owns the runtime image before the
+// artifact reaches the tenant. Self-hosted uploads keep their direct path.
+type CloudPushRequest struct {
+	Artifact       []byte `json:"artifact"`
+	SDKVersion     string `json:"sdkVersion"`
+	AcceptDataLoss bool   `json:"acceptDataLoss,omitempty"`
+	AcceptBreaking bool   `json:"acceptBreaking,omitempty"`
+}
+
+type CloudPushResult struct {
+	Digest        string `json:"digest"`
+	EndpointCount int    `json:"endpointCount"`
+}
+
+var CloudArtifactPusher func(context.Context, string, CloudPushRequest) (CloudPushResult, error)
+
 // pushRefusal mirrors the contract's PushRefusal.
 type pushRefusal struct {
 	Error            string `json:"error"`
@@ -274,6 +290,19 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		return err
 	}
 	fmt.Fprintf(w, "sending %s (%d KB)\n", dir, len(tarball)/1024)
+	if isCloudProjectAddress(target.URL) {
+		if CloudArtifactPusher == nil {
+			return fmt.Errorf("cloud deployment transport is not configured")
+		}
+		out, err := CloudArtifactPusher(ctx, target.URL, CloudPushRequest{
+			Artifact: tarball, SDKVersion: installedBackendVersion(dir),
+			AcceptDataLoss: approve, AcceptBreaking: acceptBreaking,
+		})
+		if err != nil {
+			return err
+		}
+		return finishStackPush(ctx, w, pushResult{Digest: out.Digest, EndpointCount: out.EndpointCount}, RefreshSpec)
+	}
 
 	status, body, err := sendWaitingForReady(ctx, stackClient(target), func() (*http.Request, error) {
 		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))

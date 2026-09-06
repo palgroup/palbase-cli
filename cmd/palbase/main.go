@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +63,24 @@ func managementREST() *transport.Client {
 	// "run palbase login" error rather than a bare 401.
 	token, _ := authClient.ManagementToken(ctx)
 	return transport.New(resolved.Endpoints.PlatformAPI, token)
+}
+
+func pushCloudArtifact(ctx context.Context, target string, request backend.CloudPushRequest) (backend.CloudPushResult, error) {
+	var out backend.CloudPushResult
+	ref, ok := tenantRefOf(target, resolved.Endpoints.PublicHost)
+	if !ok {
+		return out, fmt.Errorf("%s is not a project of this cloud", target)
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return out, err
+	}
+	digest := sha256.Sum256(append([]byte(ref+":"), payload...))
+	client := managementREST()
+	client.HTTPClient.Timeout = 12 * time.Minute
+	err = client.DoWithHeaders(ctx, http.MethodPost, "/v1/cloud/projects/"+url.PathEscape(ref)+"/push", request, &out,
+		http.Header{"Idempotency-Key": {fmt.Sprintf("%x", digest)}})
+	return out, err
 }
 
 // wireDPoPSigner connects auth to transport without a package dependency.
@@ -287,6 +307,7 @@ func newRootCmd() *cobra.Command {
 				_, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
 				return ok
 			}
+			backend.CloudArtifactPusher = pushCloudArtifact
 			return nil
 		},
 	}

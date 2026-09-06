@@ -123,6 +123,12 @@ func (e errorEnvelope) fields() []APIErrorField {
 // response is decoded directly into out; nil discards it. Non-2xx responses
 // are parsed into an *APIError.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	return c.DoWithHeaders(ctx, method, path, body, out, nil)
+}
+
+// DoWithHeaders keeps signing and decoding on the ordinary transport while
+// allowing a deployment to carry its durable idempotency key.
+func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body, out any, headers http.Header) error {
 	var reqBody io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -138,6 +144,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 
 	resp, err := c.HTTPClient.Do(req)

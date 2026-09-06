@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,6 +59,15 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 	start := exec.Command(bin, "start")
 	start.Dir = dir
 	if out, err := start.CombinedOutput(); err != nil {
+		// Capture only this test's containers before cleanup removes the cause.
+		list := exec.Command("docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=palbase-"+sanitiseGroup(filepath.Base(dir)))
+		if ids, listErr := list.Output(); listErr == nil {
+			for _, id := range strings.Fields(string(ids)) {
+				if logs, logErr := exec.Command("docker", "logs", "--tail", "60", id).CombinedOutput(); logErr == nil {
+					t.Logf("container %s: %s", id, logs)
+				}
+			}
+		}
 		t.Fatalf("palbase start: %v\n%s", err, out)
 	}
 
