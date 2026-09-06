@@ -163,6 +163,12 @@ const SKIP = new Set([
   '.palbase',
   '.palbase-staged-controllers',
   '.palbase-build-controllers',
+  // An iOS app's build output beside the backend (stage.js SKIP, same list):
+  // not source, large, and Xcode writes symlinks into it.
+  'DerivedData',
+  '.build',
+  'Pods',
+  'xcuserdata',
 ]);
 
 function sources(dir, root, out) {
@@ -173,12 +179,14 @@ function sources(dir, root, out) {
     return out;
   }
   for (const entry of entries) {
-    if (entry.name.startsWith('.') && entry.name !== '.') {
-      if (SKIP.has(entry.name)) continue;
-    }
+    if (SKIP.has(entry.name)) continue;
+    // Symlinks are skipped here for the same reason stage.js skips them: this
+    // walk runs BEFORE staging, on the whole project root, and a dangling link
+    // whose name ends in `.ts` used to refuse the entire push with ENOENT one
+    // function before the stager's own guard could (W4 r2 C-2).
+    if (entry.isSymbolicLink()) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (SKIP.has(entry.name)) continue;
       sources(full, root, out);
     } else if (/\.(c?ts|tsx)$/i.test(entry.name) && !/\.d\.ts$/i.test(entry.name)) {
       out.push(full);
