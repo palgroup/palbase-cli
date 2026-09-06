@@ -95,17 +95,20 @@ func seedInstalledBackend(t *testing.T, dir, version string) {
 // A major that is not the newest must NOT fail the local build.
 //
 // This test asserted the opposite until 2026-08-04, on the premise that "deploys
-// run the latest major and will reject this tree". The runtime now vendors every
-// major inside a 12-month window and builds each tenant against the one their
-// lockfile resolved — verified live: a ^12.0.0 project deployed against a runtime
-// whose newest major is 13, serving traffic, its artifact manifest recording
-// sdkVersion 12.0.1.
+// run the latest major and will reject this tree". Until 2026-09-06 this comment
+// explained the reversal with a runtime that held several SDK majors at once and
+// chose between them per tenant lockfile — that behaviour never existed;
+// `v2/runtime/Dockerfile` unpacks ONE tarball into ONE
+// `node_modules/@palbase/backend`. What actually holds is one level up: the image
+// TAG is the SDK version, so a ^12.0.0 project keeps deploying because it keeps
+// running the 12.x image — verified live, serving traffic, its artifact manifest
+// recording sdkVersion 12.0.1.
 //
 // Keeping the old assertion would keep a real regression: `palbase push` installs
 // runBuild as a pre-push hook, so this check blocked the push before the platform
-// ever saw it — a PASSING deploy turned into a FAILING local build. The
-// authoritative decision belongs to deploy.CheckSDKMajor, which knows the actual
-// vendored set; this process does not.
+// ever saw it — a PASSING deploy turned into a FAILING local build. Which SDK a
+// deploy lands on is decided by the image the tenant runs; this process cannot
+// know it and must not guess.
 func TestRunBuild_OlderMajorDoesNotFailTheLocalBuild(t *testing.T) {
 	dir := t.TempDir()
 	// A MODULE, because a project with none is now refused on its own terms —

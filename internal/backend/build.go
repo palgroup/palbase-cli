@@ -18,12 +18,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// backendPkg is the SDK a controller imports. Its major must be one the deploy
-// runtime VENDORS — not necessarily the newest: the runtime keeps every major
-// inside a 12-month window and builds each tenant against the one their lockfile
-// resolved. Which majors those are is server-side knowledge, so the
-// authoritative check is deploy.CheckSDKMajor; this command validates the code,
-// not the version.
+// backendPkg is the SDK a controller imports. A runtime image carries exactly
+// ONE SDK: `v2/runtime/Dockerfile` unpacks a single tarball into a single
+// `node_modules/@palbase/backend`. A tenant stays on an older SDK by running an
+// older IMAGE — the image tag IS the SDK version — not by a runtime that keeps
+// several majors side by side and picks one per lockfile. So "which SDK will
+// this deploy build against" is not a question this tree can answer; it is the
+// tag of the image the tenant runs. This command validates the code, not the
+// version.
 const backendPkg = "@palbase/backend"
 
 // buildTempPrefix is the os.MkdirTemp prefix for the extracted build-check
@@ -155,11 +157,16 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	//
 	// This used to fail the build when the installed major differed from npm's
 	// `latest`, on the premise that "deploys run the latest major and will reject
-	// this tree". That premise stopped being true on 2026-08-04: the runtime now
-	// vendors every SDK major inside a 12-month window and builds each tenant
-	// against the one their lockfile resolved. A ^12 project deploys perfectly
-	// well against a runtime whose newest major is 13 — verified live, serving
-	// traffic, with the artifact manifest recording sdkVersion 12.0.1.
+	// this tree". That premise stopped being true on 2026-08-04 — but not for the
+	// reason recorded here until 2026-09-06, which described a runtime holding
+	// several SDK majors at once and choosing between them per tenant lockfile.
+	// That behaviour never existed. Measured instead:
+	// `v2/runtime/Dockerfile` unpacks ONE tarball into ONE
+	// `node_modules/@palbase/backend`, so an image has room for exactly one SDK.
+	// What is true sits one level up — the image TAG is the SDK version, so a ^12
+	// project keeps deploying because it keeps running the 12.x image: verified
+	// live, serving traffic, with the artifact manifest recording sdkVersion
+	// 12.0.1.
 	//
 	// Keeping the check would have been worse than removing it: it turned a
 	// PASSING deploy into a FAILING local build, and because `palbase push`
@@ -167,11 +174,10 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// ever saw it. A gate that answers a question the server no longer asks is not
 	// a safety net; it is a wrong answer delivered with confidence.
 	//
-	// The authoritative check remains server-side (deploy.CheckSDKMajor), which
-	// knows the actual vendored set — something this process cannot know without
-	// asking the platform. Surfacing that set locally is worth doing and is
-	// tracked separately; printing the installed version is the honest subset of
-	// it available here.
+	// Which SDK a deploy lands on is decided by the image the tenant runs, not by
+	// anything this process can compute — and the server-side checker this
+	// comment used to name as the authority does not exist in this repo either.
+	// Printing the installed version is the honest subset available here.
 	if installed != "" {
 		fmt.Fprintf(out, "✓ %s %s\n", backendPkg, installed)
 	}
