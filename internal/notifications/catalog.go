@@ -2,30 +2,22 @@ package notifications
 
 import "strings"
 
-// catalog.go — the CLI's provider catalog. This is the third mirror of
-// @palbase/backend's PROVIDER_CATALOG (the SDK is the source; the br-pod apply
-// step + this CLI mirror it). It drives `palbase notifications providers`,
-// validates `add` flags, and derives each provider's reserved secret env key.
-//
-// Keeping the three catalogs in lockstep is the contract: a provider the CLI
-// accepts is one the SDK's defineNotifications types accept and the br-pod knows
-// how to apply. Adding a provider is a small change in each of the three.
+// The provider catalog defines CLI inputs and their management API field names.
+// It also derives the reserved vault keys used by the provider setup flow.
 
 // reservedSecretPrefix is the env-var namespace that backs provider secrets.
-// MUST match @palbase/backend's RESERVED_SECRET_PREFIX and the br-pod's
-// reservedSecretPrefix. A `palbase secret set` of a key under this prefix is
-// refused (see secret-guard).
+// A `palbase secret set` of a key under this prefix is refused (see secret-guard).
 const reservedSecretPrefix = "PB_NOTIFICATIONS"
 
 // field is one non-secret config field an author supplies for a provider.
 type field struct {
-	// name is the camelCase key written into config/notifications.ts.
+	// name is the credential field accepted by this provider's backend API.
 	name string
 	// flag is the CLI flag (kebab-case) that sets it, e.g. "team-id".
 	flag string
 	// required marks a field that must be supplied for an enabled provider.
 	required bool
-	// isInt marks a numeric field (port) — rendered unquoted in the config.
+	// isInt marks a numeric CLI input (port).
 	isInt bool
 	// isBool marks a boolean field (isProduction, useStarttls).
 	isBool bool
@@ -34,9 +26,9 @@ type field struct {
 }
 
 // secretField is one secret an author supplies via a file/prompt; it is uploaded
-// to the reserved env key, never written to config/notifications.ts.
+// to the reserved vault key and sent in the encrypted provider configuration.
 type secretField struct {
-	// name is the camelCase secret name (used to derive the reserved env key).
+	// name is the credential field, also used to derive the reserved vault key.
 	name string
 	// flag is the `--<flag>-file` flag that points at the secret's file.
 	flag string
@@ -50,14 +42,27 @@ type secretField struct {
 // providerSpec is one provider's catalog entry.
 type providerSpec struct {
 	name    string // provider key (apns, fcm, sendgrid, …)
-	channel string // push | email | sms
+	channel string // push | email | sms | whatsapp
 	fields  []field
 	secrets []secretField
 }
 
-// catalog is the ordered provider list (push, then email, then sms) so
+// catalog groups providers by channel so
 // `notifications providers` prints a stable, channel-grouped view.
 var catalog = []providerSpec{
+	{
+		name:    "meta",
+		channel: "whatsapp",
+		fields: []field{
+			{name: "phone_number_id", flag: "phone-number-id", required: true, help: "Meta WhatsApp phone number ID"},
+			{name: "api_version", flag: "api-version", help: "Meta Graph API version (default v26.0)"},
+		},
+		secrets: []secretField{
+			{name: "access_token", flag: "access-token", prompt: true, help: "Meta system user access token"},
+			{name: "app_secret", flag: "app-secret", prompt: true, help: "Meta app secret for webhook signature verification"},
+			{name: "verify_token", flag: "verify-token", prompt: true, help: "webhook verification token chosen by you"},
+		},
+	},
 	{
 		name:    "apns",
 		channel: "push",
@@ -151,9 +156,7 @@ func specByName(name string) *providerSpec {
 }
 
 // reservedSecretKey derives the env-var key backing a provider's secret field,
-// e.g. ("apns","p8") → "PB_NOTIFICATIONS_APNS_P8". MUST match the SDK's
-// reservedSecretKey + the br-pod's ReservedSecretKey so the upload key and the
-// resolve key are identical without a hand-typed string.
+// e.g. ("apns","p8") → "PB_NOTIFICATIONS_APNS_P8".
 func reservedSecretKey(provider, secretField string) string {
 	return reservedSecretPrefix + "_" + camelToUpperSnake(provider) + "_" + camelToUpperSnake(secretField)
 }

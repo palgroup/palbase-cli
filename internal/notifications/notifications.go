@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,22 +73,20 @@ func Cmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "notifications",
 		Short: "Manage this project's notification senders",
-		Long: `The push/email/SMS senders this project delivers through.
+		Long: `The push/email/SMS/WhatsApp senders this project delivers through.
 
   palbase notifications providers                 Show the catalog and what is configured.
   palbase notifications add <provider> [flags]    Configure a sender.
+  palbase notifications status --channel whatsapp Check the sender configuration.
   palbase notifications remove <provider>         Stop delivering through one.
   palbase notifications templates list            Show the templates this stack holds.
-  palbase notifications templates set --file F    Replace the whole template set.
+  palbase notifications templates set --file F    Apply a template document.
 
-They live ON THE STACK and take effect immediately. They used to be declared in
-config/notifications.ts, created on every deploy and never deleted when dropped
-from the file — so "removed" and "still sending" were both true.
-
-Provider SECRETS go to the vault, encrypted, and are never read back: the listing
-says WHICH senders are configured, not with what.`,
+Configuration is stored on the linked backend and used by subsequent sends.
+Provider credentials are encrypted; listing shows configuration status without
+returning secrets. Message content is managed separately through templates.`,
 	}
-	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r), templatesCmd(r))
+	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r), templatesCmd(r), statusCmd(r))
 	return cmd
 }
 
@@ -146,8 +145,9 @@ func providersCmd(r Resolvers) *cobra.Command {
 // the v2 cutover (see the Resolvers comment above).
 func addCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "add <provider> [flags]",
-		Short: "Configure a provider: upload its secret + write its config entry",
+		Use:     "add <provider> [flags]",
+		Aliases: []string{"configure"},
+		Short:   "Configure or rotate a provider on the linked backend",
 		Long: `Configure a notification provider. The provider's NON-SECRET fields are passed
 as flags and sent straight to the Environment — live, with no deploy in between;
 its SECRET (cert/key/api-key) is read from a file (or prompted, hidden) and
@@ -159,6 +159,15 @@ Examples:
   palbase notifications add fcm --service-account-file service-account.json
   palbase notifications add sendgrid --from-domain mail.acme.com            (prompts for API key)
   palbase notifications add twilio --account-sid AC.. --messaging-sid MG..  (prompts for auth token)
+  palbase notifications configure meta --phone-number-id 123456
+
+Meta prompts for the access token, app secret and webhook verify token, or reads
+them from --access-token-file, --app-secret-file and --verify-token-file.
+This configures the linked backend's connection. When that backend is the cloud
+control plane, its relay uses this sender for customer projects. Re-run with the
+complete connection configuration to rotate it. Content is managed separately
+with notifications templates --channel whatsapp; the message's locale selects
+a translation. Palnotify ships its standard verification definitions.
 
 Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 		Args: cobra.ExactArgs(1),
@@ -197,10 +206,17 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			if verr := validateProvider(spec, entry); verr != nil {
 				return verr
 			}
+			// Pin the linked backend and credential for this whole operation.
+			// Re-reading the target between secret writes could split a setup
+			// across backends if another process changes the link concurrently.
+			rest, err := r.REST(cmd)
+			if err != nil {
+				return err
+			}
+			r := Resolvers{REST: func(*cobra.Command) (REST, error) { return rest, nil }}
 
-			// 2. Resolve + upload each secret to its reserved env key FIRST. If the
-			// upload fails we never write the config (so config never references a
-			// secret that isn't set). Order: secrets, then config.
+			// Collect every secret before the first write. A missing final file
+			// must not leave half of a credential rotation uploaded.
 			out := cmd.OutOrStdout()
 			secretValues := map[string]string{}
 			for _, s := range spec.secrets {
@@ -208,7 +224,18 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				if serr != nil {
 					return serr
 				}
+				if name == "meta" {
+					value = strings.TrimSpace(value)
+					if value == "" || strings.ContainsAny(value, "\r\n\t ") {
+						return fmt.Errorf("--%s must be a single non-empty token", s.flag)
+					}
+				}
 				secretValues[s.name] = value
+			}
+			// 2. Upload credentials, then configure the sender. The existing
+			// encrypted provider row stays active until the final upsert succeeds.
+			for _, s := range spec.secrets {
+				value := secretValues[s.name]
 				reserved := reservedSecretKey(name, s.name)
 				// THE PROJECT'S OWN VAULT, through the door `palbase secret set`
 				// uses. It used to be an `env.set` mutation on the Studio, which
@@ -221,7 +248,7 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				}
 				if _, uerr := call(r, cmd, http.MethodPut,
 					secretPath(reserved), secretBody); uerr != nil {
-					return fmt.Errorf("upload secret %s: %w", reserved, uerr)
+					return fmt.Errorf("upload secret %s: %w", reserved, redactProviderError(uerr, secretValues))
 				}
 				fmt.Fprintf(out, "✓ uploaded secret %s (encrypted)\n", reserved)
 			}
@@ -257,9 +284,14 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				return err
 			}
 			if _, err := call(r, cmd, http.MethodPost, providersPath, body); err != nil {
-				return err
+				return redactProviderError(err, secretValues)
 			}
-			fmt.Fprintf(out, "✓ provider %q configured — delivering now\n", name)
+			fmt.Fprintf(out, "✓ provider %q configured on the linked backend\n", name)
+			if name == "meta" {
+				fmt.Fprintln(out, "Meta callback: <this backend's public URL>/v1/notifications/webhooks/whatsapp/meta")
+				fmt.Fprintln(out, "Use the same verify token in Meta and subscribe the app to the WABA's messages events.")
+				fmt.Fprintln(out, "Configuration saved; template approval and live delivery are not verified by this command.")
+			}
 			return nil
 		},
 	}
@@ -273,12 +305,42 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 // validateProvider enforces cross-field rules the flat required-check can't:
 // twilio needs one of fromNumber / messagingServiceSid.
 func validateProvider(spec *providerSpec, entry providerEntry) error {
+	if spec.name == "meta" {
+		checks := []struct{ field, flag, pattern string }{
+			{"phone_number_id", "phone-number-id", `^[0-9]+$`},
+			{"api_version", "api-version", `^v[0-9]+\.0$`},
+		}
+		for _, check := range checks {
+			if value := entry.fields[check.field]; value != "" && !regexp.MustCompile(check.pattern).MatchString(value) {
+				return fmt.Errorf("--%s is not a valid Meta value", check.flag)
+			}
+		}
+	}
 	if spec.name == "twilio" {
 		if entry.fields["fromNumber"] == "" && entry.fields["messagingServiceSid"] == "" {
 			return fmt.Errorf("provider \"twilio\" requires one of --from-number or --messaging-sid")
 		}
 	}
 	return nil
+}
+
+// A rejected write can echo its JSON body. Neither that response nor a
+// transport error may put a credential into a terminal or CI log.
+func redactProviderError(err error, secrets map[string]string) error {
+	message := err.Error()
+	values := make([]string, 0, len(secrets)*2)
+	for _, value := range secrets {
+		if value != "" {
+			values = append(values, value)
+			encoded, _ := json.Marshal(value)
+			values = append(values, string(encoded[1:len(encoded)-1]))
+		}
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	for _, value := range values {
+		message = strings.ReplaceAll(message, value, "[redacted]")
+	}
+	return fmt.Errorf("%s", message)
 }
 
 // registerProviderFlags declares every field flag + every secret `--<flag>-file`
@@ -390,23 +452,29 @@ func templatesCmd(r Resolvers) *cobra.Command {
 		Use:   "templates",
 		Short: "The message bodies this project sends",
 	}
+	var channel string
+	c.PersistentFlags().StringVar(&channel, "channel", "email", "template channel: email or whatsapp")
 
 	var file string
 	set := &cobra.Command{
 		Use:   "set --file <path>",
 		Short: "Add this project's templates from a JSON document",
-		Long: `Add templates from a JSON document.
+		Long: `Manage message content from a JSON document.
 
-IT DOES NOT REPLACE. This said "replace the WHOLE set" until a live stack
-answered "template with this slug already exists" on the second run
-(2026-08-29): the route underneath composes per-template creates and has no
-bulk-replace, so re-sending a set is an error rather than an update. Changing
-one template means changing it where it lives, not re-sending the file.
+Email: creates the supplied templates; existing slugs are not replaced.
+WhatsApp: atomically upserts the supplied slug/locale definitions and preserves
+other definitions. It changes no provider credentials and does not submit
+templates to Meta or certify their approval.
 
-The document is parsed here before anything leaves the machine, so a typo is
-your editor's problem rather than the stack's error message.`,
+  palbase notifications templates set --channel whatsapp --file templates.json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if channel == "whatsapp" {
+				return setWhatsAppTemplates(r, cmd, file)
+			}
+			if channel != "email" {
+				return fmt.Errorf("--channel must be email or whatsapp")
+			}
 			raw, err := os.ReadFile(file)
 			if err != nil {
 				return fmt.Errorf("read %s: %w", file, err)
@@ -449,6 +517,12 @@ your editor's problem rather than the stack's error message.`,
 		Short: "Show the templates this stack holds",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if channel == "whatsapp" {
+				return listWhatsAppTemplates(r, cmd)
+			}
+			if channel != "email" {
+				return fmt.Errorf("--channel must be email or whatsapp")
+			}
 			raw, err := call(r, cmd, http.MethodGet, templatesPath, nil)
 			if err != nil {
 				return err

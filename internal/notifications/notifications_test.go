@@ -436,3 +436,18 @@ func TestProvidersRefusesAnAnswerItCannotRead(t *testing.T) {
 	require.Error(t, err, "an unreadable answer must not be printed as a stack with nothing configured")
 	assert.NotContains(t, out, "●", "nothing may be reported as configured from an answer nobody could read")
 }
+
+func TestAddMetaUsesNativeWhatsAppWireContract(t *testing.T) {
+	dir := t.TempDir()
+	rest := &fakeStack{}
+	output, err := runWith(t, rest, "add", "meta", "--phone-number-id", "123456", "--api-version", "v26.0",
+		"--access-token-file", writeSecretIn(t, dir, "token", "META_ACCESS_FIXTURE"),
+		"--app-secret-file", writeSecretIn(t, dir, "app", "META_APP_FIXTURE"),
+		"--verify-token-file", writeSecretIn(t, dir, "verify", "META_VERIFY_FIXTURE"))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"channel":"whatsapp","provider":"meta","credentials":{"phone_number_id":"123456","api_version":"v26.0","access_token":"META_ACCESS_FIXTURE","app_secret":"META_APP_FIXTURE","verify_token":"META_VERIFY_FIXTURE"}}`, rest.last().Body)
+	require.Len(t, rest.secrets(), 3)
+	require.NotContains(t, output, "META_ACCESS_FIXTURE")
+	require.NotContains(t, output, "META_APP_FIXTURE")
+	require.NotContains(t, output, "META_VERIFY_FIXTURE")
+}

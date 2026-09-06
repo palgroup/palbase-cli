@@ -49,7 +49,7 @@ func TestCatalog_EveryProviderHasAtLeastOneSecret(t *testing.T) {
 }
 
 func TestCatalog_ChannelsValid(t *testing.T) {
-	valid := map[string]bool{"push": true, "email": true, "sms": true}
+	valid := map[string]bool{"push": true, "email": true, "sms": true, "whatsapp": true}
 	for _, spec := range catalog {
 		assert.True(t, valid[spec.channel], "%s has invalid channel %q", spec.name, spec.channel)
 	}
