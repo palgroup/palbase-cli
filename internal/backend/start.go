@@ -652,7 +652,12 @@ func composeEnv(projectDir, bind string, httpPort int) []string {
 		// Compose dosyasının kendi varsayılanı: loopback.
 		host = "127.0.0.1"
 	}
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid < 0 || gid < 0 {
+		uid, gid = 1000, 1000
+	}
 	env := []string{
+		"PALBASE_RUNTIME_USER=" + strconv.Itoa(uid) + ":" + strconv.Itoa(gid),
 		"PALBASE_PROJECT_DIR=" + projectDir,
 		"PALBASE_HTTP_PORT=" + strconv.Itoa(httpPort),
 		"PALBASE_PUBLIC_ORIGIN=http://" + net.JoinHostPort(host, strconv.Itoa(httpPort)),

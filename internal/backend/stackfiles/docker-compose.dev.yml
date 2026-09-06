@@ -297,6 +297,8 @@ services:
     # The DEV target, pulled: it carries the bundler and TypeScript the stager
     # needs. The production image comes up healthy and then refuses every save.
     image: ${PBC_RUNTIME_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
+    # The dev compiler writes into the host checkout as the invoking developer.
+    user: ${PALBASE_RUNTIME_USER:-1000:1000}
     # READINESS IS THE RUNTIME'S OWN ANSWER, not the edge's.
     #
     # `/readyz` on the edge routes to palsvc, so the banner could say "ready"
@@ -314,6 +316,7 @@ services:
       # The switch. With it set, the artifact path is not taken at all — there
       # is no ARTIFACT_BLOB_URL here and nothing looks for one.
       PALBASE_DEV_CONTROLLERS: /app/project
+      ARTIFACT_CACHE_DIR: /app/project/.palbase/cache
       PALBASE_STACK_REF: ${PALBASE_STACK_REF:-project}
       DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
       DB_ROLE: ${RUNTIME_DB_ROLE:-backend_authenticated}
@@ -340,8 +343,6 @@ services:
       # The project, read-WRITE: the bundler writes .palbase/ into it, exactly
       # as it does when a deploy runs it on your machine.
       - ${PALBASE_PROJECT_DIR:?set PALBASE_PROJECT_DIR — the project this stack serves}:/app/project
-      # Built bundles. A build per save, pruned to the last few by src/dev.ts.
-      - artifactcache:/var/cache/palbase/artifacts
     # NOT `node_modules` — the project's own dependencies are its own, and the
     # bundle a deploy produces inlines whatever the project resolved. Masking
     # them would build something different here from what ships. The image
@@ -358,7 +359,6 @@ services:
 volumes:
   pgdata:
   # Barman'ın yedek deposu ve WAL arşivi.
-  artifactcache:
   # palsvc still serves /_artifacts and can still be pushed to. Nothing in this
   # stack READS what lands there — the runtime is serving your directory — so a
   # push here builds an artifact and activates a pointer nobody follows. Said
