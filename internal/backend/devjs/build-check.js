@@ -196,6 +196,9 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
   rmBundledTree(stageDir);
   fs.mkdirSync(stageDir, { recursive: true });
   recordStagedSources(srcDir);
+  const inferencePath = path.join(RUNTIME_MODULES, '@palbase/backend/stager/inferred_returns.js');
+  const inferReturn = fs.existsSync(inferencePath)
+    ? require(inferencePath).createReturnInference(PROJECT_ROOT) : undefined;
   for (const file of walk(srcDir)) {
     const rel = path.relative(srcDir, file);
     const dest = path.join(stageDir, rel);
@@ -205,7 +208,7 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
     // imports still resolve from the staging tree.
     if (/\.controller\.(c?ts|tsx)$/i.test(path.basename(file))) {
       const src = fs.readFileSync(file, 'utf8');
-      let out = returnTypes.injectReturnBindings(src, rel);
+      let out = returnTypes.injectReturnBindings(src, file, inferReturn);
       // Throw inference runs AFTER return bindings, against the controller's
       // REAL path so `../services` / `../models` imports resolve in the real
       // project tree (mirrors the deploy stager). Only the defineError

@@ -995,6 +995,9 @@ const returnTypes = require('./return_types.js');
 const throwAnalysis = require('./throw_analysis.js');
 
 const [srcDir, stageDir, projectRoot] = process.argv.slice(2);
+const inferencePath = path.join(projectRoot, 'node_modules/@palbase/backend/stager/inferred_returns.js');
+const inferReturn = fs.existsSync(inferencePath)
+  ? require(inferencePath).createReturnInference(projectRoot) : undefined;
 
 const SKIP = new Set(["node_modules", "dist", "build", ".git"]);
 function walk(dir) {
@@ -1017,7 +1020,7 @@ for (const file of walk(srcDir)) {
   const dest = path.join(stageDir, rel);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   if (/\.controller\.(c?ts|tsx)$/i.test(path.basename(file))) {
-    let out = returnTypes.injectReturnBindings(fs.readFileSync(file, 'utf8'), rel);
+    let out = returnTypes.injectReturnBindings(fs.readFileSync(file, 'utf8'), file, inferReturn);
     out = throwAnalysis.injectThrowBindings(out, file, {
       readFile: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
       fileExists: (p) => fs.existsSync(p),
