@@ -16,11 +16,89 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
 )
+
+func TestMintCleanupDeletesOnlyReturnedUsersOnTheOriginalProject(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		firstDeleteStatus int
+		wantFailure       bool
+	}{
+		{"success", http.StatusNoContent, false},
+		{"already deleted", http.StatusNotFound, false},
+		{"partial cleanup failure", http.StatusForbidden, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls = append(calls, r.Method+" "+r.URL.Path)
+				switch r.Method + " " + r.URL.Path {
+				case "POST /v1/management/test-users":
+					_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_new1","email":"one@test.invalid"},{"user_id":"usr_new2","email":"two@test.invalid"},{"user_id":"usr_new1"},{}]}`))
+				case "DELETE /v1/management/test-users/usr_new1":
+					w.WriteHeader(tc.firstDeleteStatus)
+				case "DELETE /v1/management/test-users/usr_new2":
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request (preexisting users must be untouched): %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer srv.Close()
+			linkedTo(t, srv.URL)
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			_, cleanup, err := MintIdentities(cmd, 2)
+			require.NoError(t, err)
+			require.NotNil(t, cleanup)
+			// A user's test script may relink its checkout. Cleanup must retain
+			// the authority and address used to mint, without resolving again.
+			require.NoError(t, backend.WriteLocalTarget(backend.Target{URL: "http://127.0.0.1:1", Local: true}))
+			err = cleanup(context.Background())
+			if tc.wantFailure {
+				require.ErrorContains(t, err, "delete test user usr_new1")
+				require.ErrorContains(t, err, "403")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, []string{
+				"POST /v1/management/test-users",
+				"DELETE /v1/management/test-users/usr_new1",
+				"DELETE /v1/management/test-users/usr_new2",
+			}, calls)
+		})
+	}
+}
+
+func TestMintCleanupHonorsItsDeadlineAndReportsEveryRemainingID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_new1"},{"user_id":"usr_new2"}]}`))
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	linkedTo(t, srv.URL)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	_, cleanup, err := MintIdentities(cmd, 2)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = cleanup(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "usr_new1")
+	require.ErrorContains(t, err, "usr_new2")
+	require.Less(t, time.Since(start), 2*time.Second)
+}
 
 // linkedTo points a scratch checkout at srv and gives it a credential, the way
 // `palbase start` leaves one.

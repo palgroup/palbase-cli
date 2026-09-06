@@ -12,11 +12,13 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -26,8 +28,9 @@ import (
 type Resolvers struct {
 	// Target answers the stack this checkout acts on, and its api key.
 	Target func(*cobra.Command) (Target, error)
-	// Mint creates test identities and returns the `--json` payload verbatim.
-	Mint func(cmd *cobra.Command, count int) ([]byte, error)
+	// Mint creates test identities and returns their payload and a cleanup
+	// function bound to exactly those users on the stack that minted them.
+	Mint func(cmd *cobra.Command, count int) ([]byte, func(context.Context) error, error)
 }
 
 // Target is the address a live test run points at.
@@ -68,10 +71,11 @@ this command mints the identities, exports PALBASE_TEST_* and runs the same
 ` + "`npm test`" + ` with them in the environment, so a test that wants a real request
 has one and a test that does not is unaffected.
 
-Identities are minted per run. They expire with the deploy that made them, which
-is why a saved file of them stops working and this command does not use one.`,
+Identities are minted per run. After the live tests finish, this command deletes
+those identities and their data, including when tests fail. Cleanup failures
+are reported; an interrupted process may leave users for test-user delete.`,
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			out := cmd.OutOrStdout()
 			if unitOnly && liveOnly {
 				return fmt.Errorf("--unit and --live are the two halves; pass neither to run both")
@@ -92,10 +96,24 @@ is why a saved file of them stops working and this command does not use one.`,
 			if err != nil {
 				return err
 			}
-			raw, err := r.Mint(cmd, count)
+			raw, cleanup, err := r.Mint(cmd, count)
 			if err != nil {
 				return fmt.Errorf("mint test identities: %w", err)
 			}
+			if cleanup == nil {
+				return fmt.Errorf("the mint did not provide cleanup for this run's test identities")
+			}
+			defer func() {
+				// A cancelled test must still get a bounded chance to remove its
+				// own users. Preserve its original failure if cleanup fails too.
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 30*time.Second)
+				defer cancel()
+				if err := cleanup(ctx); err != nil {
+					runErr = errors.Join(runErr, fmt.Errorf("clean up this run's test identities: %w", err))
+					return
+				}
+				fmt.Fprintln(out, "  removed this run's test identities and their data")
+			}()
 			var minted mintedIdentities
 			if jErr := json.Unmarshal(raw, &minted); jErr != nil {
 				return fmt.Errorf("the mint did not answer in the identities shape: %w", jErr)
@@ -149,7 +167,7 @@ func firstBytes(raw []byte, n int) string {
 // environment. The project's script is the contract — this command supplies the
 // environment, it does not decide how tests are invoked.
 func runNpmTest(cmd *cobra.Command, extra []string, out io.Writer) error {
-	c := exec.CommandContext(context.Background(), "npm", "test")
+	c := exec.CommandContext(cmd.Context(), "npm", "test")
 	c.Env = append(os.Environ(), extra...)
 	c.Stdout = out
 	c.Stderr = out

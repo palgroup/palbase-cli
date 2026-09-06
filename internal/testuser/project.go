@@ -24,9 +24,11 @@ package testuser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -180,18 +182,43 @@ func trimBody(raw []byte) string {
 
 // MintIdentities creates `count` test identities and returns the SAME payload
 // `create --json` prints. Exported so `palbase test` mints through this path
-// rather than shelling out to itself — one mint, one shape, one place to fix.
-func MintIdentities(cmd *cobra.Command, count int) ([]byte, error) {
+// rather than shelling out to itself. Cleanup is bound to the minted IDs and
+// original target, so tests cannot redirect it by relinking their checkout.
+func MintIdentities(cmd *cobra.Command, count int) ([]byte, func(context.Context) error, error) {
 	target, cred, err := resolveProject(cmd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var res stackMinted
 	body := map[string]any{"count": count, "with_tokens": true}
 	if err := callProject(cmd.Context(), target, cred, http.MethodPost, adminTestUsers, body, &res); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return json.Marshal(asIdentities(res))
+	userIDs := make([]string, 0, len(res.Users))
+	seen := make(map[string]bool, len(res.Users))
+	for _, user := range res.Users {
+		if user.UserID != "" && !seen[user.UserID] {
+			userIDs = append(userIDs, user.UserID)
+			seen[user.UserID] = true
+		}
+	}
+	cleanup := func(ctx context.Context) error {
+		var failures []error
+		for _, id := range userIDs {
+			status, raw, err := backend.CallProject(ctx, target, cred, http.MethodDelete,
+				adminTestUsers+"/"+url.PathEscape(id), nil, "")
+			if err == nil && (status >= 200 && status < 300 || status == http.StatusNotFound) {
+				continue // A test may already have deleted one of its own users.
+			}
+			if err == nil {
+				err = fmt.Errorf("%s answered %d: %s", target.Describe(), status, trimBody(raw))
+			}
+			failures = append(failures, fmt.Errorf("delete test user %s: %w", id, err))
+		}
+		return errors.Join(failures...)
+	}
+	raw, err := json.Marshal(asIdentities(res))
+	return raw, cleanup, err
 }
 
 func createOnProject(ctx context.Context, target backend.Target, cred backend.Credentials,
