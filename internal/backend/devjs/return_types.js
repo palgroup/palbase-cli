@@ -80,7 +80,7 @@ const RETURN_BUFFER_SYMBOL_KEY = 'palbase.backend.returnBuffer';
  *   - imports: local-binding-name → module-specifier (for the injector's import)
  *   Throws ReturnTypeError on an un-resolvable/disallowed return type.
  */
-function readReturnTypes(sourceText, fileLabel, inferReturn) {
+function readReturnTypes(sourceText, fileLabel) {
   const tsapi = loadTS();
   const sf = tsapi.createSourceFile(
     fileLabel || 'controller.ts',
@@ -249,11 +249,6 @@ function readReturnTypes(sourceText, fileLabel, inferReturn) {
       // silent gap @Returns had (codegen would emit an untyped struct), so it's a
       // HARD error: the author must say what the route returns.
       if (!m.type) {
-        if (inferReturn) {
-          const expression = inferReturn(fileLabel, className, fnName);
-          if (expression !== null) methods.push({ fnName, expression });
-          continue;
-        }
         throw err(
           fnName,
           'route method has no return type — annotate it (e.g. `: Promise<TodoSchema>`, ' +
@@ -331,7 +326,7 @@ function buildInjection(parsed) {
   lines.push('    __ctor[__RBUF][fn] = schema;');
   lines.push('  };');
   for (const m of parsed.methods) {
-    const expr = m.expression ?? (m.isArray ? `z.array(${m.typeName})` : m.typeName);
+    const expr = m.isArray ? `z.array(${m.typeName})` : m.typeName;
     lines.push(`  __bind(${JSON.stringify(m.fnName)}, ${expr});`);
   }
   lines.push('})();');
@@ -345,8 +340,8 @@ function buildInjection(parsed) {
  * add the import). Pure string transform — the caller writes the result to the
  * file esbuild will bundle.
  */
-function injectReturnBindings(sourceText, fileLabel, inferReturn) {
-  const parsed = readReturnTypes(sourceText, fileLabel, inferReturn);
+function injectReturnBindings(sourceText, fileLabel) {
+  const parsed = readReturnTypes(sourceText, fileLabel);
   const snippet = buildInjection(parsed);
   if (!snippet) return sourceText;
   let out = sourceText;
