@@ -146,16 +146,12 @@ func TestGenerateForEnvironments_StaleOutputIsDeletedAndReported(t *testing.T) {
 	require.Contains(t, err.Error(), "no longer matches the spec")
 }
 
-func TestGenerateForEnvironments_FirstLinkWithoutSDKIsNotAnError(t *testing.T) {
+func TestGenerateForEnvironments_FirstLinkRequiresSDK(t *testing.T) {
 	linkedProject(t, "ios")
 	useStub(t, "", errNoCheckout)
 
 	var out bytes.Buffer
-	// The very first `palbase ios link` runs BEFORE the SDK package is added, so
-	// there is no checkout yet and nothing generated to go stale. The spec fetch
-	// must still succeed.
-	require.NoError(t, generateForEnvironments(context.Background(), oneEnvironment(), &out))
-	require.Contains(t, out.String(), "no Swift client generated yet")
+	require.ErrorContains(t, generateForEnvironments(context.Background(), oneEnvironment(), &out), "cannot generate the Swift client")
 }
 
 func TestFindSwiftgenSources(t *testing.T) {

@@ -18,8 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/palgroup/palbase-cli/internal/authcontract"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,6 +33,7 @@ import (
 // without a stack.
 type REST interface {
 	Do(ctx context.Context, method, path string, body []byte) (int, []byte, error)
+	DoWithHeaders(ctx context.Context, method, path string, body []byte, headers http.Header) (int, []byte, http.Header, error)
 }
 
 // Resolvers carries the lazily-built dependency.
@@ -39,7 +43,8 @@ type REST interface {
 // typed — not to the moment the tree was built, when nothing has been asked for
 // yet.
 type Resolvers struct {
-	REST func(*cobra.Command) (REST, error)
+	REST                func(*cobra.Command) (REST, error)
+	RefreshClientConfig func(*cobra.Command) error
 }
 
 const base = "/v1/management/auth"
@@ -99,10 +104,26 @@ func readBody(cmd *cobra.Command, inline string) ([]byte, error) {
 	if strings.TrimSpace(inline) == "" {
 		return nil, fmt.Errorf("nothing to send: pass the JSON body with --json")
 	}
-	if !json.Valid([]byte(inline)) {
+	var raw []byte
+	var err error
+	switch {
+	case inline == "-":
+		raw, err = io.ReadAll(io.LimitReader(cmd.InOrStdin(), 256*1024+1))
+	case strings.HasPrefix(inline, "@"):
+		raw, err = os.ReadFile(strings.TrimPrefix(inline, "@"))
+	default:
+		raw = []byte(inline)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read --json input: %w", err)
+	}
+	if len(raw) > 256*1024 {
+		return nil, fmt.Errorf("--json input exceeds 256 KiB")
+	}
+	if !json.Valid(raw) {
 		return nil, fmt.Errorf("--json is not valid JSON")
 	}
-	return []byte(inline), nil
+	return raw, nil
 }
 
 // Cmd builds `palbase auth`.
@@ -115,7 +136,8 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase auth settings get|set --password-min 10 [--json '{...}']
   palbase auth providers list
   palbase auth providers enable|disable NAME
-  palbase auth providers config set NAME --json '{...}'   (server-side merge)
+  palbase auth providers config set NAME --json @clients.json
+  palbase auth providers config set NAME --credential KEY --json @secret.json
   palbase auth providers config clear NAME
   palbase auth sessions list
   palbase auth sessions revoke SESSION_ID
@@ -290,7 +312,7 @@ func providersCmd(r Resolvers) *cobra.Command {
 	c.AddCommand(&cobra.Command{
 		Use: "list", Short: "List the providers and whether each is configured", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return call(r, cmd, http.MethodGet, base+"/providers", nil)
+			return listProviders(r, cmd)
 		},
 	})
 	toggle := func(use, short string, on bool) *cobra.Command {
@@ -298,6 +320,9 @@ func providersCmd(r Resolvers) *cobra.Command {
 			Use: use + " NAME", Short: short, Args: cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				b, _ := json.Marshal(map[string]bool{"enabled": on})
+				if socialProvider(args[0]) {
+					return changeSocialConfig(r, cmd, http.MethodPatch, "/providers/"+url.PathEscape(args[0]), b, true)
+				}
 				return call(r, cmd, http.MethodPost, base+"/providers/"+url.PathEscape(args[0]), b)
 			},
 		}
@@ -305,26 +330,56 @@ func providersCmd(r Resolvers) *cobra.Command {
 	c.AddCommand(toggle("enable", "Turn a provider on", true))
 	c.AddCommand(toggle("disable", "Turn a provider off", false))
 
-	cfg := &cobra.Command{Use: "config", Short: "A provider's OAuth credentials"}
-	var body string
+	cfg := &cobra.Command{Use: "config", Short: "Social sign-in clients and server credentials"}
+	var body, setCredential, clearCredential string
 	setCfg := &cobra.Command{
 		Use: "set NAME", Args: cobra.ExactArgs(1),
-		Short: "Store a provider's credentials (server-side merge: a blank field keeps the stored value)",
+		Short: "Update browser/native clients; supplied client lists replace the stored lists",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !socialProvider(args[0]) {
+				return fmt.Errorf("%q is not a social provider: use google, apple, microsoft or github", args[0])
+			}
+			if setCredential != "" && body != "-" && !strings.HasPrefix(body, "@") {
+				return fmt.Errorf("read credentials from --json @file or --json - so secrets do not enter shell history")
+			}
 			b, err := readBody(cmd, body)
 			if err != nil {
 				return err
 			}
-			return call(r, cmd, http.MethodPut, base+"/providers/"+url.PathEscape(args[0])+"/config", b)
+			if setCredential != "" {
+				if err := authcontract.Validate("SocialCredentialInput", b); err != nil {
+					return err
+				}
+				var credential struct {
+					Provider string `json:"provider"`
+				}
+				if err := json.Unmarshal(b, &credential); err != nil || credential.Provider != args[0] {
+					return fmt.Errorf("credential provider must equal %q", args[0])
+				}
+				return changeSocialConfig(r, cmd, http.MethodPut, "/credentials/"+url.PathEscape(setCredential), b, false)
+			}
+			if err := authcontract.Validate("SocialProviderPatch", b); err != nil {
+				return err
+			}
+			return changeSocialConfig(r, cmd, http.MethodPatch, "/providers/"+url.PathEscape(args[0]), b, true)
 		},
 	}
-	setCfg.Flags().StringVar(&body, "json", "", "the credentials, as JSON")
-	cfg.AddCommand(setCfg, &cobra.Command{
-		Use: "clear NAME", Short: "Forget a provider's credentials", Args: cobra.ExactArgs(1),
+	setCfg.Flags().StringVar(&body, "json", "", "JSON object, @file, or - for stdin; client lists replace, omitted fields stay")
+	setCfg.Flags().StringVar(&setCredential, "credential", "", "store or replace this server credential instead of client configuration")
+	clearCfg := &cobra.Command{
+		Use: "clear NAME", Short: "Disable a social provider and remove its client records", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return call(r, cmd, http.MethodDelete, base+"/providers/"+url.PathEscape(args[0])+"/config", nil)
+			if !socialProvider(args[0]) {
+				return fmt.Errorf("%q is not a social provider: use google, apple, microsoft or github", args[0])
+			}
+			if clearCredential != "" {
+				return deleteSocialCredential(r, cmd, args[0], clearCredential)
+			}
+			return changeSocialConfig(r, cmd, http.MethodPatch, "/providers/"+url.PathEscape(args[0]), []byte(`{"enabled":false,"browser_clients":[],"native_clients":[]}`), true)
 		},
-	})
+	}
+	clearCfg.Flags().StringVar(&clearCredential, "credential", "", "delete this unreferenced server credential instead of client records")
+	cfg.AddCommand(setCfg, clearCfg)
 	c.AddCommand(cfg)
 	return c
 }

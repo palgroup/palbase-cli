@@ -146,25 +146,37 @@ type stackManagementREST struct {
 }
 
 func (s stackManagementREST) Do(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	status, raw, _, err := s.DoWithHeaders(ctx, method, path, body, nil)
+	return status, raw, err
+}
+
+func (s stackManagementREST) DoWithHeaders(ctx context.Context, method, path string, body []byte, headers http.Header) (int, []byte, http.Header, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(s.target.URL, "/")+path, reader)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	s.cred.Apply(req)
+	for _, name := range []string{"Palbase-Auth-Contract", "If-Match"} {
+		for _, value := range headers.Values(name) {
+			req.Header.Add(name, value)
+		}
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res, err := s.client.Do(req)
+	client := *s.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	res, err := client.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("reach %s: %w", s.target.URL, err)
+		return 0, nil, nil, fmt.Errorf("reach %s: %w", s.target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	return res.StatusCode, raw, err
+	return res.StatusCode, raw, res.Header.Clone(), err
 }
 
 // openStackEgress is the same client under the egress package's own seam. Two
@@ -339,7 +351,7 @@ func newRootCmd() *cobra.Command {
 			// open their service-role gate.
 			REST: func(cmd *cobra.Command) (flags.REST, error) { return openStackManagement(cmd) },
 		}),
-		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement}),
+		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement, RefreshClientConfig: func(cmd *cobra.Command) error { return backend.RefreshLinkedClients(cmd.Context(), cmd.ErrOrStderr()) }}),
 		egress.Cmd(egress.Resolvers{REST: openStackEgress}),
 		notifications.Cmd(notifications.Resolvers{
 			REST: func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },

@@ -1,0 +1,1759 @@
+{
+  "components": {
+    "schemas": {
+      "SocialAdminConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_revision": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          },
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/SocialCredentialDescriptor"
+            },
+            "type": "array"
+          },
+          "providers": {
+            "additionalProperties": false,
+            "properties": {
+              "apple": {
+                "$ref": "#/components/schemas/SocialAppleProvider"
+              },
+              "github": {
+                "$ref": "#/components/schemas/SocialGithubProvider"
+              },
+              "google": {
+                "$ref": "#/components/schemas/SocialGoogleProvider"
+              },
+              "microsoft": {
+                "$ref": "#/components/schemas/SocialMicrosoftProvider"
+              }
+            },
+            "required": [
+              "apple",
+              "github",
+              "google",
+              "microsoft"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "contract_revision",
+          "credentials",
+          "providers"
+        ],
+        "type": "object"
+      },
+      "SocialAppleBrowserClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "credential_ref": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "web",
+              "ios",
+              "macos",
+              "android"
+            ],
+            "type": "string"
+          },
+          "return_uris": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "services_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$",
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_key",
+          "credential_ref",
+          "enabled",
+          "key",
+          "platform",
+          "return_uris",
+          "services_id",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialAppleNativeClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "bundle_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "ios",
+              "macos"
+            ],
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_key",
+          "bundle_id",
+          "enabled",
+          "key",
+          "platform",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialAppleNativeClientPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "enum": [
+              "apple_native"
+            ],
+            "type": "string"
+          },
+          "bundle_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$",
+            "type": "string"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "native"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "apple"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter",
+          "bundle_id",
+          "key",
+          "mode",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "SocialAppleProvider": {
+        "additionalProperties": false,
+        "properties": {
+          "browser_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialAppleBrowserClient"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "native_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialAppleNativeClient"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "browser_clients",
+          "enabled",
+          "native_clients"
+        ],
+        "type": "object"
+      },
+      "SocialAppleSigningKey": {
+        "additionalProperties": false,
+        "properties": {
+          "key_id": {
+            "pattern": "^[A-Z0-9]{10}$",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "apple_signing_key"
+            ],
+            "type": "string"
+          },
+          "private_key": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "provider": {
+            "enum": [
+              "apple"
+            ],
+            "type": "string"
+          },
+          "team_id": {
+            "pattern": "^[A-Z0-9]{10}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key_id",
+          "kind",
+          "private_key",
+          "provider",
+          "team_id"
+        ],
+        "type": "object"
+      },
+      "SocialBeginRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "client_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "completion_challenge": {
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "type": "string"
+          },
+          "completion_challenge_method": {
+            "enum": [
+              "S256"
+            ],
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "sign_in",
+              "link"
+            ],
+            "type": "string"
+          },
+          "return_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_key",
+          "completion_challenge",
+          "completion_challenge_method",
+          "purpose"
+        ],
+        "type": "object"
+      },
+      "SocialBeginResult": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "type": "string"
+          },
+          "authorization_url": {
+            "type": "string"
+          },
+          "client_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "native",
+              "browser"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "apple",
+              "github",
+              "google",
+              "microsoft"
+            ],
+            "type": "string"
+          },
+          "provider_nonce": {
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "sign_in",
+              "link"
+            ],
+            "type": "string"
+          },
+          "transaction_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_key",
+          "expires_at",
+          "mode",
+          "provider",
+          "purpose",
+          "transaction_id"
+        ],
+        "type": "object"
+      },
+      "SocialBrowserClientPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "browser"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "apple",
+              "github",
+              "google",
+              "microsoft"
+            ],
+            "type": "string"
+          },
+          "return_uris": {
+            "items": {
+              "format": "uri",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "mode",
+          "provider",
+          "return_uris"
+        ],
+        "type": "object"
+      },
+      "SocialBrowserCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "completion_verifier": {
+            "pattern": "^[A-Za-z0-9._~-]{43,128}$",
+            "type": "string"
+          },
+          "result_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "completion_verifier",
+          "result_code"
+        ],
+        "type": "object"
+      },
+      "SocialCancelRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "completion_verifier": {
+            "pattern": "^[A-Za-z0-9._~-]{43,128}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "completion_verifier"
+        ],
+        "type": "object"
+      },
+      "SocialCompleteRequest": {
+        "description": "Body is selected by the transaction. profile is accepted only for Apple native completion.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SocialNativeCompletion"
+          },
+          {
+            "$ref": "#/components/schemas/SocialBrowserCompletion"
+          }
+        ],
+        "type": "object"
+      },
+      "SocialCompleteResult": {
+        "discriminator": {
+          "propertyName": "status"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SocialSignedIn"
+          },
+          {
+            "$ref": "#/components/schemas/SocialMFARequired"
+          },
+          {
+            "$ref": "#/components/schemas/SocialLinked"
+          }
+        ],
+        "type": "object"
+      },
+      "SocialCredentialDescriptor": {
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "oauth_client_secret",
+              "apple_signing_key"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "apple",
+              "github",
+              "google",
+              "microsoft"
+            ],
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "configured",
+          "key",
+          "kind",
+          "provider",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "SocialCredentialInput": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SocialOAuthSecret"
+          },
+          {
+            "$ref": "#/components/schemas/SocialAppleSigningKey"
+          }
+        ],
+        "type": "object"
+      },
+      "SocialGitHubBrowserClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "credential_ref": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "oauth_client_id": {
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "web",
+              "ios",
+              "macos",
+              "android"
+            ],
+            "type": "string"
+          },
+          "return_uris": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_key",
+          "credential_ref",
+          "enabled",
+          "key",
+          "oauth_client_id",
+          "platform",
+          "return_uris",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialGithubProvider": {
+        "additionalProperties": false,
+        "properties": {
+          "browser_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialGitHubBrowserClient"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "native_clients": {
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 0,
+            "type": "array"
+          }
+        },
+        "required": [
+          "browser_clients",
+          "enabled",
+          "native_clients"
+        ],
+        "type": "object"
+      },
+      "SocialGoogleAndroidClient": {
+        "additionalProperties": false,
+        "properties": {
+          "android_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          },
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "package_name": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "android"
+            ],
+            "type": "string"
+          },
+          "server_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          },
+          "signing_certificate_sha1": {
+            "pattern": "^(?:[0-9A-Fa-f]{40}|(?:[0-9A-Fa-f]{2}:){19}[0-9A-Fa-f]{2})$",
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "android_client_id",
+          "application_key",
+          "enabled",
+          "key",
+          "package_name",
+          "platform",
+          "server_client_id",
+          "signing_certificate_sha1",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialGoogleAndroidClientPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "enum": [
+              "google_android_credential_manager"
+            ],
+            "type": "string"
+          },
+          "android_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "native"
+            ],
+            "type": "string"
+          },
+          "package_name": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "google"
+            ],
+            "type": "string"
+          },
+          "server_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          },
+          "signing_certificate_sha1": {
+            "pattern": "^(?:[0-9A-Fa-f]{40}|(?:[0-9A-Fa-f]{2}:){19}[0-9A-Fa-f]{2})$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter",
+          "android_client_id",
+          "key",
+          "mode",
+          "package_name",
+          "provider",
+          "server_client_id",
+          "signing_certificate_sha1"
+        ],
+        "type": "object"
+      },
+      "SocialGoogleAppleClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "bundle_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "ios_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "ios",
+              "macos"
+            ],
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_key",
+          "bundle_id",
+          "enabled",
+          "ios_client_id",
+          "key",
+          "platform",
+          "redirect_uri",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialGoogleAppleClientPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "enum": [
+              "google_ios_pkce"
+            ],
+            "type": "string"
+          },
+          "bundle_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$",
+            "type": "string"
+          },
+          "ios_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "native"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "google"
+            ],
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter",
+          "bundle_id",
+          "ios_client_id",
+          "key",
+          "mode",
+          "provider",
+          "redirect_uri"
+        ],
+        "type": "object"
+      },
+      "SocialGoogleBrowserClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "credential_ref": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "web",
+              "ios",
+              "macos",
+              "android"
+            ],
+            "type": "string"
+          },
+          "return_uris": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "web_client_id": {
+            "pattern": "^[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_key",
+          "credential_ref",
+          "enabled",
+          "key",
+          "platform",
+          "return_uris",
+          "variant",
+          "web_client_id"
+        ],
+        "type": "object"
+      },
+      "SocialGoogleProvider": {
+        "additionalProperties": false,
+        "properties": {
+          "browser_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialGoogleBrowserClient"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "native_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialGoogleAppleClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialGoogleAndroidClient"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "browser_clients",
+          "enabled",
+          "native_clients"
+        ],
+        "type": "object"
+      },
+      "SocialLinked": {
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "additionalProperties": false,
+            "properties": {
+              "created_at": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "provider_user_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "created_at",
+              "id",
+              "provider",
+              "provider_user_id"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "linked"
+            ],
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "status",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "SocialMFARequired": {
+        "additionalProperties": false,
+        "properties": {
+          "factors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mfa_token": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "mfa_required"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "factors",
+          "mfa_token",
+          "status"
+        ],
+        "type": "object"
+      },
+      "SocialMicrosoftAndroidClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "type": "string"
+          },
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "directory": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "tenant"
+                    ],
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "tenant_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "organizations",
+                      "consumers",
+                      "common"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "package_name": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "android"
+            ],
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "application_key",
+          "directory",
+          "enabled",
+          "key",
+          "package_name",
+          "platform",
+          "redirect_uri",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialMicrosoftAndroidClientPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "enum": [
+              "microsoft_native_pkce"
+            ],
+            "type": "string"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "directory": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "tenant"
+                    ],
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "tenant_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "organizations",
+                      "consumers",
+                      "common"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "native"
+            ],
+            "type": "string"
+          },
+          "package_name": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "microsoft"
+            ],
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter",
+          "application_id",
+          "directory",
+          "key",
+          "mode",
+          "package_name",
+          "provider",
+          "redirect_uri"
+        ],
+        "type": "object"
+      },
+      "SocialMicrosoftAppleClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "type": "string"
+          },
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "bundle_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$",
+            "type": "string"
+          },
+          "directory": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "tenant"
+                    ],
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "tenant_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "organizations",
+                      "consumers",
+                      "common"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "ios",
+              "macos"
+            ],
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "application_key",
+          "bundle_id",
+          "directory",
+          "enabled",
+          "key",
+          "platform",
+          "redirect_uri",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialMicrosoftAppleClientPublic": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "enum": [
+              "microsoft_native_pkce"
+            ],
+            "type": "string"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "bundle_id": {
+            "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$",
+            "type": "string"
+          },
+          "directory": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "tenant"
+                    ],
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "tenant_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "organizations",
+                      "consumers",
+                      "common"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "native"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "microsoft"
+            ],
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter",
+          "application_id",
+          "bundle_id",
+          "directory",
+          "key",
+          "mode",
+          "provider",
+          "redirect_uri"
+        ],
+        "type": "object"
+      },
+      "SocialMicrosoftBrowserClient": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "type": "string"
+          },
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "credential_ref": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "directory": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "tenant"
+                    ],
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "tenant_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "organizations",
+                      "consumers",
+                      "common"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "web",
+              "ios",
+              "macos",
+              "android"
+            ],
+            "type": "string"
+          },
+          "return_uris": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "application_key",
+          "credential_ref",
+          "directory",
+          "enabled",
+          "key",
+          "platform",
+          "return_uris",
+          "variant"
+        ],
+        "type": "object"
+      },
+      "SocialMicrosoftProvider": {
+        "additionalProperties": false,
+        "properties": {
+          "browser_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftBrowserClient"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "native_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftAppleClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftAndroidClient"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "browser_clients",
+          "enabled",
+          "native_clients"
+        ],
+        "type": "object"
+      },
+      "SocialNativeCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "completion_verifier": {
+            "pattern": "^[A-Za-z0-9._~-]{43,128}$",
+            "type": "string"
+          },
+          "id_token": {
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "profile": {
+            "additionalProperties": false,
+            "properties": {
+              "family_name": {
+                "maxLength": 256,
+                "type": "string"
+              },
+              "given_name": {
+                "maxLength": 256,
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        },
+        "required": [
+          "completion_verifier",
+          "id_token"
+        ],
+        "type": "object"
+      },
+      "SocialOAuthSecret": {
+        "additionalProperties": false,
+        "properties": {
+          "client_secret": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "kind": {
+            "enum": [
+              "oauth_client_secret"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "google",
+              "microsoft",
+              "github"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_secret",
+          "kind",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "SocialProvider": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/SocialAppleProvider"
+          },
+          {
+            "$ref": "#/components/schemas/SocialGithubProvider"
+          },
+          {
+            "$ref": "#/components/schemas/SocialGoogleProvider"
+          },
+          {
+            "$ref": "#/components/schemas/SocialMicrosoftProvider"
+          }
+        ],
+        "type": "object"
+      },
+      "SocialProviderPatch": {
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "browser_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialGoogleBrowserClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialAppleBrowserClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftBrowserClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialGitHubBrowserClient"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "native_clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialGoogleAppleClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialGoogleAndroidClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialAppleNativeClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftAppleClient"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftAndroidClient"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "SocialSignedIn": {
+        "additionalProperties": false,
+        "properties": {
+          "is_new_user": {
+            "type": "boolean"
+          },
+          "session": {
+            "additionalProperties": false,
+            "properties": {
+              "access_token": {
+                "type": "string"
+              },
+              "expires_in": {
+                "type": "integer"
+              },
+              "refresh_token": {
+                "type": "string"
+              },
+              "token_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "access_token",
+              "expires_in",
+              "refresh_token",
+              "token_type"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "signed_in"
+            ],
+            "type": "string"
+          },
+          "user": {
+            "additionalProperties": false,
+            "properties": {
+              "created_at": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "email_verified": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "roles": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "created_at",
+              "email_verified",
+              "id",
+              "roles"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "is_new_user",
+          "session",
+          "status",
+          "user"
+        ],
+        "type": "object"
+      },
+      "SocialSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "application_key": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "clients": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SocialGoogleAppleClientPublic"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialGoogleAndroidClientPublic"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialAppleNativeClientPublic"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftAppleClientPublic"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialMicrosoftAndroidClientPublic"
+                },
+                {
+                  "$ref": "#/components/schemas/SocialBrowserClientPublic"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "config_revision": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "contract_revision": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          },
+          "environment_ref": {
+            "type": "string"
+          },
+          "platform": {
+            "enum": [
+              "web",
+              "ios",
+              "macos",
+              "android"
+            ],
+            "type": "string"
+          },
+          "variant": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_key",
+          "clients",
+          "config_revision",
+          "contract_revision",
+          "environment_ref",
+          "platform",
+          "variant"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Palbase Social Auth",
+    "version": "1"
+  },
+  "openapi": "3.0.3",
+  "paths": {}
+}

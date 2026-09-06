@@ -32,6 +32,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/palgroup/palbase-cli/internal/authcontract"
 )
 
 // appEnvironment is one environment as an app needs it.
@@ -47,8 +49,10 @@ type appEnvironment struct {
 	//
 	// omitempty: a stack with no chain leaves it out, and the SDK then keeps its
 	// compiled-in roots. Writing "" would look like a configured root.
-	SealedRoot string          `json:"sealed_root,omitempty"`
-	OAuth      json.RawMessage `json:"oauth,omitempty"`
+	SealedRoot    string                       `json:"sealed_root,omitempty"`
+	OAuth         *authcontract.SocialSnapshot `json:"oauth,omitempty"`
+	Notifications json.RawMessage              `json:"notifications,omitempty"`
+	Integrity     json.RawMessage              `json:"integrity,omitempty"`
 }
 
 // appEnvironments is what the CLI writes and the generator reads.
@@ -76,22 +80,9 @@ func (a appEnvironments) names() []string {
 	return out
 }
 
-// writeAppEnvironments records every environment for one platform.
-//
-// BİLMEDİĞİNİ SİLMEZ. Bu dosyayı iki yol yazıyor: bulut yolu (uygulamayı ve
-// ortamlarını düzlemden çözer) ve yığın-URL yolu (`palbase link <url>`).
-// İkincisi uygulamanın OAuth yapılandırmasını GÖREMEZ — o bilgi düzlemde
-// yaşıyor — ve dosyayı olduğu gibi yazınca onu siliyordu.
-//
-// Ölçüldü 25.08.2026, centauri: bir `link <url>` koşumu `app_id`'yi yığın
-// ref'iyle değiştirdi, `api_key`'i düşürdü ve Apple+Google bloğunu TAMAMEN
-// sildi. Uygulama derlenmeye devam ederdi; kaybolan tek şey giriş olurdu, ve
-// bunu hiçbir hata söylemezdi.
-//
-// Bu dosyanın kendi kuralı zaten yazılıydı — kaybolan bir Local girdisi için:
-// *"an app whose Local configuration disappears ... stops compiling for a
-// reason nobody connects to the container"*. Aynı gerekçe ALANLAR için de
-// geçerli; bu, o kuralın alan seviyesindeki hâli.
+// writeAppEnvironments writes the freshly selected OAuth snapshot. Existing
+// application metadata and independent feature configuration belong to the
+// same backend only; they cannot supply an OAuth fallback.
 func writeAppEnvironments(platform string, envs appEnvironments) (string, error) {
 	dir := filepath.Join(nativeArtifactsDir, platform)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -109,14 +100,7 @@ func writeAppEnvironments(platform string, envs appEnvironments) (string, error)
 	return path, nil
 }
 
-// mergeWithExisting, yazacağı şeyin ÜRETEMEDİĞİ alanları diskteki dosyadan
-// korur.
-//
-// Yalnız BOŞ alanlar doldurulur: yeni koşum bir değer ürettiyse o kazanır —
-// aksi hâlde bu birleştirme, güncellenmesi gereken bir anahtarı sonsuza kadar
-// eski tutardı. Dosya okunamıyorsa (ilk link, bozuk JSON) yeni hâl olduğu gibi
-// yazılır: birleştirilecek bir şey yoktur.
-// isUnsetAppID, değerin gerçek bir uygulama kaydı OLMADIĞINI söyler.
+// isUnsetAppID identifies the placeholder used by a direct stack link.
 func isUnsetAppID(v string) bool {
 	v = strings.TrimSpace(v)
 	return v == "" || v == projectAppID
@@ -133,13 +117,8 @@ func mergeWithExisting(dir string, next appEnvironments) appEnvironments {
 	}
 	for name, env := range next.Environments {
 		old, ok := prev.Environments[name]
-		if !ok {
+		if !ok || strings.TrimRight(old.BaseURL, "/") != strings.TrimRight(env.BaseURL, "/") {
 			continue
-		}
-		// OAUTH BULUT YOLUNUN BİLDİĞİ BİR ŞEY. Yığın-URL yolu onu hiç kurmuyor
-		// ve sildiğinde uygulamanın Apple/Google girişi sessizce ölürdü.
-		if len(env.OAuth) == 0 {
-			env.OAuth = old.OAuth
 		}
 		// ANAHTAR VE UYGULAMA KİMLİĞİ de aynı kural: üretilemeyen bir değer,
 		// var olanı silmek için gerekçe değildir.
@@ -154,14 +133,13 @@ func mergeWithExisting(dir string, next appEnvironments) appEnvironments {
 		if isUnsetAppID(env.AppID) && !isUnsetAppID(old.AppID) {
 			env.AppID = old.AppID
 		}
-		next.Environments[name] = env
-	}
-	// DİSKTEKİ FAZLA ORTAMLAR DA KALIR: bir koşumun göremediği ortam (kapalı
-	// bir yerel yığın, erişilemeyen bir düzlem) kaybolmamalı.
-	for name, old := range prev.Environments {
-		if _, ok := next.Environments[name]; !ok {
-			next.Environments[name] = old
+		if len(env.Notifications) == 0 {
+			env.Notifications = old.Notifications
 		}
+		if len(env.Integrity) == 0 {
+			env.Integrity = old.Integrity
+		}
+		next.Environments[name] = env
 	}
 	return next
 }
@@ -200,8 +178,14 @@ func writeWebArtifacts(envs appEnvironments, specs map[string][]byte, w io.Write
 	if env.SealedRoot != "" {
 		cfg["sealed_root"] = env.SealedRoot
 	}
-	if len(env.OAuth) > 0 {
+	if env.OAuth != nil {
 		cfg["oauth"] = env.OAuth
+	}
+	if len(env.Notifications) > 0 {
+		cfg["notifications"] = env.Notifications
+	}
+	if len(env.Integrity) > 0 {
+		cfg["integrity"] = env.Integrity
 	}
 	raw, err := json.MarshalIndent(mergeWebConfigWithExisting(cfg), "", "  ")
 	if err != nil {
@@ -225,12 +209,8 @@ func writeWebArtifacts(envs appEnvironments, specs map[string][]byte, w io.Write
 	return path, nil
 }
 
-// mergeWebConfigWithExisting is mergeWithExisting's rule for the flat document:
-// A WRITER MUST NOT DELETE WHAT IT CANNOT PRODUCE.
-//
-// The cloud path knows things this one does not — `kind`, the OAuth block — and
-// they live in the same file. A run that overwrote it wholesale would take the
-// app's Apple/Google sign-in with it, and the app would go on building.
+// mergeWebConfigWithExisting preserves independent app metadata only for the
+// same backend. OAuth is always supplied by the current link operation.
 func mergeWebConfigWithExisting(next map[string]any) map[string]any {
 	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
 	if err != nil {
@@ -245,6 +225,9 @@ func mergeWebConfigWithExisting(next map[string]any) map[string]any {
 	if _, isNativeShape := prev["environments"]; isNativeShape {
 		return next
 	}
+	if previous, _ := prev["base_url"].(string); strings.TrimRight(previous, "/") != strings.TrimRight(fmt.Sprint(next["base_url"]), "/") {
+		return next
+	}
 	out := map[string]any{}
 	for k, v := range prev {
 		// PRESERVING WHAT A WRITER CANNOT PRODUCE IS NOT PRESERVING WHAT THE
@@ -256,7 +239,7 @@ func mergeWebConfigWithExisting(next map[string]any) map[string]any {
 		// left the file naming the OLD environment (measured 2026-08-25,
 		// palai-cloud: `"environment_ref": "palaicloudm"` survived a re-link to
 		// a project called something else entirely).
-		if k == removedEnvironmentRefField || k == "sealed_root" {
+		if k == removedEnvironmentRefField || k == "sealed_root" || k == "oauth" || k == "auth" || k == "socialAuth" {
 			continue
 		}
 		out[k] = v
@@ -719,6 +702,9 @@ func groupOf(target Target) string {
 	if target.Project != "" {
 		return target.Project
 	}
+	if target.checkoutRoot != "" {
+		return filepath.Base(target.checkoutRoot)
+	}
 	root, err := os.Getwd()
 	if err != nil {
 		return ""
@@ -737,6 +723,10 @@ func writeSpec(env string, spec []byte) error {
 // generateForEnvironments emits one client per environment, and one plist for
 // all of them.
 func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Writer) error {
+	return generateForEnvironmentsAt(ctx, envs, w, "")
+}
+
+func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.Writer, toolRoot string) error {
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -760,13 +750,12 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 		return err
 	}
 
-	tool, err := ensureSwiftgenTool(root, w)
+	if toolRoot == "" {
+		toolRoot = root
+	}
+	tool, err := ensureSwiftgenTool(toolRoot, w)
 	if err != nil {
-		// SPEC REFRESHED, GENERATOR UNAVAILABLE. On a genuine first link there is
-		// nothing generated and this is a note; on a RE-link the clients on disk
-		// were emitted from the previous contract and they still COMPILE, so the
-		// drift stays invisible until a call 404s on a device. Every one of them
-		// goes, and the command fails loudly.
+		// The staged link cannot publish a spec without its matching client.
 		stale := []string{filepath.Join(root, generatedDir, "Palbase-Info.plist")}
 		for _, env := range envs.names() {
 			stale = append(stale, filepath.Join(root, generatedDir, env, "PalbaseGenerated.swift"))

@@ -59,9 +59,8 @@ func addDepArgv() []string {
 }
 
 // ensurePalbeWeb installs @palbase/web when the project doesn't have it yet, so
-// `web link` is ONE command instead of link → install → link. Best-effort: a
-// failed install only means the caller falls back to the manual follow-up, so
-// it warns and returns rather than failing the link.
+// `link` can install and generate in one invocation. The caller requires the
+// generator to be available after this attempt before publishing any artifacts.
 //
 // `latest` is deliberate, matching how the backend template pins @palbase/backend:
 // a version baked into this binary goes stale the next time the SDK majors.
@@ -86,25 +85,19 @@ var ensurePalbeWeb = func(ctx context.Context, w io.Writer) {
 // webPkg is the client SDK `palbase link` generates against.
 const webPkg = "@palbase/web"
 
-// runPalbeGen runs the SDK's generator for palbe.gen.ts when @palbase/web is
-// installed; when it isn't, it prints the follow-up instead of failing the
-// caller. The returned bool reports whether outFile now exists — callers MUST
-// NOT wire an import to it when it doesn't, or the command "succeeds" while
-// leaving a dangling import the project can't resolve.
-//
-// Installing the SDK is NOT done here: `web link` (the setup command) does it
-// on its own path. `web use` only flips the target environment, and silently
-// adding a dependency during that is a side effect nobody asked for.
+// runPalbeGen requires the SDK generator and its output before wiring imports.
 func runPalbeGen(ctx context.Context, outFile string, w io.Writer) (bool, error) {
 	if _, err := os.Stat(palbeGenBin); err != nil {
-		fmt.Fprintf(w, "  %s not installed — install it, then run `npx palbe-gen`\n", webPkg)
-		return false, nil
+		return false, fmt.Errorf("%s generator is unavailable; install %s and re-run `palbase link`: %w", webPkg, webPkg, err)
 	}
 	c := exec.CommandContext(ctx, palbeGenBin, "--out", outFile)
 	c.Stdout = w
 	c.Stderr = w
 	if err := c.Run(); err != nil {
 		return false, fmt.Errorf("palbe-gen: %w", err)
+	}
+	if !isRegularFile(outFile) {
+		return false, fmt.Errorf("palbe-gen did not produce %s", outFile)
 	}
 	return true, nil
 }
@@ -942,20 +935,12 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 		return err
 	}
 
-	// ALWAYS, even when generation could not run: predev/prebuild pick the
-	// generation up on the next build, which is what makes the contract follow
-	// a deploy without anybody re-running a command.
 	if err := patchPackageJSONScriptsWithCommand("package.json", webTypesCmdFor(outFile), w); err != nil {
 		return fmt.Errorf("patch package.json: %w", err)
 	}
 
 	if !generated {
-		// An import of a file that does not exist is a project that does not
-		// build. Defer it rather than report a link that broke the app.
-		fmt.Fprintf(w, "\nnote: skipping the entry-file import until %s exists — "+
-			"after installing @palbase/web, re-run `palbase link` to wire it in\n", outFile)
-		checkGitignoreGuard(outFile, w)
-		return nil
+		return fmt.Errorf("palbe-gen did not produce %s", outFile)
 	}
 
 	if err := wireEntryImport(entryFlag, outFile, w); err != nil {

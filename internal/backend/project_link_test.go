@@ -53,6 +53,10 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/management/auth/social-auth":
+			w.Header().Set("Palbase-Auth-Contract", "1")
+			_, _ = w.Write([]byte(`{"contract_revision":1,"credentials":[],"providers":{"google":{"enabled":false,"browser_clients":[],"native_clients":[]},"apple":{"enabled":false,"browser_clients":[],"native_clients":[]},"microsoft":{"enabled":false,"browser_clients":[],"native_clients":[]},"github":{"enabled":false,"browser_clients":[],"native_clients":[]}}}`))
+			return
 		case wellKnownPath:
 			w.Header().Set("content-type", "application/json")
 			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"18.0.0"}`))
@@ -150,6 +154,7 @@ func TestAProjectWithNoPublishableKeyIsRefused(t *testing.T) {
 
 func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
 	linkedAs(t, srv.URL, "a-credential")
 
@@ -287,6 +292,7 @@ func TestNothingDeployedYetIsAStateNotAFailure(t *testing.T) {
 // depends on when it was built.
 func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
 	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	t.Setenv("HOME", t.TempDir())
 
 	// A stack running on this machine, registered the way `palbase start` does.
@@ -354,6 +360,7 @@ func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
 // nobody connects to the container.
 func TestAStoppedLocalStackStillGetsAnEntry(t *testing.T) {
 	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	t.Setenv("HOME", t.TempDir())
 
 	dir, _ := os.Getwd()
@@ -467,6 +474,7 @@ func TestAnExplicitInfoPlistIsToldWhatItNeeds(t *testing.T) {
 // again the moment the old file was deleted by hand.
 func TestTheOldFlatClientIsRemoved(t *testing.T) {
 	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	t.Setenv("HOME", t.TempDir())
 	dir, _ := os.Getwd()
 
@@ -659,12 +667,12 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 	if _, still := cfg["environment_ref"]; still {
 		t.Errorf("the removed field survived the re-link, naming an environment nothing points at:\n%s", raw)
 	}
-	// …while what this writer genuinely cannot produce is still preserved.
-	if got, _ := cfg["kind"].(string); got != "production" {
-		t.Errorf("kind is %q — the writer deleted what it cannot produce", got)
+	// Metadata from another backend must not be carried into this one.
+	if _, exists := cfg["kind"]; exists {
+		t.Error("kind from the previous backend survived")
 	}
-	if got, _ := cfg["app_id"].(string); got != "app_real" {
-		t.Errorf("app_id is %q, want the real registration preserved", got)
+	if got, _ := cfg["app_id"].(string); got != projectAppID {
+		t.Errorf("app_id is %q, want this link's app identity", got)
 	}
 	if got, _ := cfg["api_key"].(string); got != anon {
 		t.Errorf("api_key is %q — the run produced a value and it must win", got)
@@ -682,6 +690,7 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 // — ne sebebi ne cozumu soyleyen bir mesaj. Bu test o regresyonu sabitler.
 func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
 	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	const root = "MSpMCEuCo76fF82x5Sa9d+9h8RRzNLC3/JiTe0WOvhI="
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/management/keys" {
@@ -694,6 +703,9 @@ func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
+		case "/v1/management/auth/social-auth":
+			w.Header().Set("Palbase-Auth-Contract", "1")
+			_, _ = w.Write([]byte(`{"contract_revision":1,"credentials":[],"providers":{"google":{"enabled":false,"browser_clients":[],"native_clients":[]},"apple":{"enabled":false,"browser_clients":[],"native_clients":[]},"microsoft":{"enabled":false,"browser_clients":[],"native_clients":[]},"github":{"enabled":false,"browser_clients":[],"native_clients":[]}}}`))
 		case wellKnownPath:
 			w.Header().Set("content-type", "application/json")
 			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"18.0.0"}`))
@@ -735,6 +747,7 @@ func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
 // sifir muhurleme degiskeni tasiyor — yani bu dal kurgusal degil, sahadaki durum.
 func TestAStackWithNoSealingRootStillLinks(t *testing.T) {
 	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	// stackServing'in kendi cevabi zaten sealed_root ICERMIYOR — kok bildirmeyen
 	// yiginin ta kendisi.
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
@@ -876,7 +889,7 @@ func TestUnlinkRemovesTheProjectFile(t *testing.T) {
 // the package.json scripts that regenerate the client on the next build.
 func TestLinkWiresAWebCheckoutEndToEnd(t *testing.T) {
 	inScratchCheckout(t)
-	stubInstall(t)
+	installStubCodegen(t, "// generated client")
 
 	const anon = "pb_project_cI1Gf8cAvKPylFE4E4jWVF5FKCT2KmaU0"
 	srv := stackServing(t, anon, nil)

@@ -28,10 +28,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/palgroup/palbase-cli/internal/authcontract"
 )
 
 // Target is where a verb acts.
 type Target struct {
+	checkoutRoot string
+	// OAuth selects provider clients for this checkout once. Platform records and
+	// native identifiers remain in the server's typed configuration.
+	OAuth map[string]OAuthSelection `json:"oauth,omitempty"`
 	// URL is an address this CLI talks to directly. Set for a project running on
 	// this machine, and resolved from Project/Env for a cloud one.
 	URL string `json:"url,omitempty"`
@@ -106,6 +112,18 @@ func (t Target) Describe() string {
 func projectPath() string { return filepath.Join(nativeArtifactsDir, "project.json") }
 func localPath() string   { return filepath.Join(nativeArtifactsDir, "local.json") }
 
+func decodeTarget(raw []byte, target *Target) error {
+	if err := authcontract.DecodeStrict(raw, target); err != nil {
+		return err
+	}
+	for platform := range target.OAuth {
+		if err := validatePlatforms([]string{platform}); err != nil {
+			return fmt.Errorf("oauth: %w", err)
+		}
+	}
+	return nil
+}
+
 // WriteTarget records the project this checkout belongs to.
 func WriteTarget(t Target) error {
 	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
@@ -149,7 +167,7 @@ func ReadTarget() (Target, error) {
 	raw, err := os.ReadFile(localPath())
 	if err == nil {
 		var local Target
-		if err := json.Unmarshal(raw, &local); err != nil {
+		if err := decodeTarget(raw, &local); err != nil {
 			return Target{}, fmt.Errorf("read %s: %w", localPath(), err)
 		}
 		if strings.TrimSpace(local.URL) == "" {
@@ -194,7 +212,7 @@ func readLinkedProject() (Target, error) {
 		return Target{}, err
 	}
 	var t Target
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeTarget(raw, &t); err != nil {
 		return Target{}, fmt.Errorf("read %s: %w", projectPath(), err)
 	}
 	// A target names EITHER a cloud project or a direct address. Demanding an

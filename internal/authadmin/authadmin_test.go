@@ -21,7 +21,19 @@ type fakeREST struct {
 	status       int
 	answer       string
 	calls        int
+	headers      http.Header
 }
+
+func (f *fakeREST) DoWithHeaders(ctx context.Context, method, path string, body []byte, headers http.Header) (int, []byte, http.Header, error) {
+	f.headers = headers.Clone()
+	status, raw, err := f.Do(ctx, method, path, body)
+	if method == http.MethodGet && path == socialBase && status == 200 {
+		raw = []byte(emptySocialConfig)
+	}
+	return status, raw, http.Header{contractHeader: {"1"}, "Etag": {`"revision-1"`}}, err
+}
+
+const emptySocialConfig = `{"contract_revision":1,"credentials":[],"providers":{"google":{"enabled":false,"browser_clients":[],"native_clients":[]},"apple":{"enabled":false,"browser_clients":[],"native_clients":[]},"microsoft":{"enabled":false,"browser_clients":[],"native_clients":[]},"github":{"enabled":false,"browser_clients":[],"native_clients":[]}}}`
 
 func (f *fakeREST) Do(_ context.Context, method, path string, body []byte) (int, []byte, error) {
 	f.calls++
@@ -61,10 +73,10 @@ func TestVerbsReachTheEndpointsTheContractPublishes(t *testing.T) {
 		wantBodyPart string
 	}{
 		{[]string{"settings", "get"}, http.MethodGet, "/v1/management/auth/settings", ""},
-		{[]string{"providers", "list"}, http.MethodGet, "/v1/management/auth/providers", ""},
-		{[]string{"providers", "enable", "google"}, http.MethodPost, "/v1/management/auth/providers/google", `"enabled":true`},
-		{[]string{"providers", "disable", "google"}, http.MethodPost, "/v1/management/auth/providers/google", `"enabled":false`},
-		{[]string{"providers", "config", "clear", "google"}, http.MethodDelete, "/v1/management/auth/providers/google/config", ""},
+		{[]string{"providers", "list"}, http.MethodGet, socialBase, ""},
+		{[]string{"providers", "enable", "google"}, http.MethodPatch, socialBase + "/providers/google", `"enabled":true`},
+		{[]string{"providers", "disable", "google"}, http.MethodPatch, socialBase + "/providers/google", `"enabled":false`},
+		{[]string{"providers", "config", "clear", "google"}, http.MethodPatch, socialBase + "/providers/google", `"native_clients":[]`},
 		{[]string{"sessions", "list"}, http.MethodGet, "/v1/management/auth/sessions", ""},
 		{[]string{"sessions", "revoke", "s-1"}, http.MethodDelete, "/v1/management/auth/sessions/s-1", ""},
 		{[]string{"sessions", "revoke-all", "u-1"}, http.MethodPost, "/v1/management/auth/users/u-1/sessions/revoke-all", ""},
@@ -95,7 +107,6 @@ func TestResourceArgumentsStayInOnePathSegment(t *testing.T) {
 		prefix, suffix string
 	}{
 		{[]string{"providers", "enable", id}, "/providers/", ""},
-		{[]string{"providers", "config", "clear", id}, "/providers/", "/config"},
 		{[]string{"sessions", "revoke", id}, "/sessions/", ""},
 		{[]string{"sessions", "revoke-all", id}, "/users/", "/sessions/revoke-all"},
 		{[]string{"templates", "get", id}, "/templates/", ""},

@@ -51,8 +51,7 @@ var ensureSwiftgenTool = compileSwiftgen
 // discardStaleGenerated handles "spec refreshed, generator unavailable". Leaving
 // yesterday's generated code beside today's spec is the one outcome worse than
 // having none: it still compiles, so the drift stays invisible until a call
-// 404s at runtime. Delete it and fail loudly. With nothing generated yet (the
-// first link, before the SDK package is added) there is no drift to report.
+// 404s at runtime. Delete it and fail loudly, including on the first link.
 func discardStaleGenerated(cause error, w io.Writer, paths ...string) error {
 	var removed []string
 	for _, p := range paths {
@@ -61,8 +60,7 @@ func discardStaleGenerated(cause error, w io.Writer, paths ...string) error {
 		}
 	}
 	if len(removed) == 0 {
-		fmt.Fprintf(w, "note: no Swift client generated yet — %v\n", cause)
-		return nil
+		return fmt.Errorf("cannot generate the Swift client and app configuration: %w", cause)
 	}
 	return fmt.Errorf("removed %s: it no longer matches the spec just fetched, and could not be regenerated: %w",
 		strings.Join(removed, ", "), cause)
