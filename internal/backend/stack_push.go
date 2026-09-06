@@ -30,6 +30,7 @@ import (
 // carries code and schema. Mirroring one anyway is how a client keeps reporting
 // a section the server stopped sending.
 type pushResult struct {
+	Unchanged     bool   `json:"unchanged"`
 	Digest        string `json:"digest"`
 	EndpointCount int    `json:"endpoint_count"`
 	Schema        struct {
@@ -293,29 +294,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		if err := json.Unmarshal(body, &out); err != nil {
 			return fmt.Errorf("the stack answered 200 with something unexpected: %s", trimBody(body))
 		}
-		if out.Schema.Changed {
-			fmt.Fprintln(w, "schema:")
-			for _, line := range out.Schema.Summary {
-				fmt.Fprintf(w, "  %s\n", line)
-			}
-		}
-		// short(), not [:12]: this line runs AFTER the code has shipped, so a
-		// stack that answers 200 with a short or empty digest would turn a
-		// successful push into a Go stack trace.
-		// There is no config line, because a push carries no configuration. It
-		// used to, and the line reported which KINDS had travelled — which read
-		// as though they had landed, and until 2026-08-17 none of them had.
-		// Settings are written directly now, by whoever changes them.
-		fmt.Fprintf(w, "live: %d endpoint(s), %s\n", out.EndpointCount, short(out.Digest))
-
-		// The contract just changed — this is the moment, and the only moment,
-		// when a committed client can be brought level with the stack without
-		// anybody remembering to. A client one deploy behind is a compile error
-		// at best and a 404 at worst.
-		if err := RefreshSpec(ctx, w); err != nil {
-			return fmt.Errorf("the push landed, but the client could not be regenerated: %w", err)
-		}
-		return nil
+		return finishStackPush(ctx, w, out, RefreshSpec)
 
 	case http.StatusConflict:
 		// The one refusal that is a DECISION rather than a mistake, so it prints
