@@ -18,7 +18,7 @@
  *       foo(): Promise<TodoSchema>           → schema = TodoSchema
  *       foo(): Promise<TodoSchema[]>         → schema = z.array(TodoSchema)
  *       foo(): TodoSchema / TodoSchema[]     → (Promise optional)
- *   - `void` / `Promise<void>` / no annotation → no 200 body (allowed)
+ *   - `void` / `Promise<void>` → explicit z.void() binding, bodyless 204
  *   - anything else (inline object, union, intersection, a type with no
  *     same-named exported zod) → HARD error naming <Controller>.<method>.
  *
@@ -76,7 +76,7 @@ const RETURN_BUFFER_SYMBOL_KEY = 'palbase.backend.returnBuffer';
  * @param {string} sourceText  the controller's .ts source
  * @param {string} fileLabel   path/name for error messages
  * @returns {{ className: string, methods: Array<{ fnName, typeName, isArray }>, imports: Record<string,string> }}
- *   - methods: only routes that HAVE a resolvable named return type (void/none omitted)
+ *   - methods: named schemas or expressions, including explicit no-body schemas
  *   - imports: local-binding-name → module-specifier (for the injector's import)
  *   Throws ReturnTypeError on an un-resolvable/disallowed return type.
  */
@@ -251,7 +251,7 @@ function readReturnTypes(sourceText, fileLabel, inferReturn) {
       if (!m.type) {
         if (inferReturn) {
           const expression = inferReturn(fileLabel, className, fnName);
-          if (expression !== null) methods.push({ fnName, expression });
+          methods.push({ fnName, expression: expression ?? 'z.void()' });
           continue;
         }
         throw err(
@@ -261,7 +261,12 @@ function readReturnTypes(sourceText, fileLabel, inferReturn) {
         );
       }
       const resolved = resolveType(m.type, fnName);
-      if (!resolved) continue; // explicit void/Promise<void> — no 200 body, allowed
+      if (!resolved) {
+        // Absence of a binding means unknown, not no content. Keep the written
+        // contract so OpenAPI can emit 204 and the runtime can reject a body.
+        methods.push({ fnName, expression: 'z.void()' });
+        continue;
+      }
 
       const { typeName, isArray } = resolved;
       // The schema name must be an imported (or locally-defined) value. If it's
