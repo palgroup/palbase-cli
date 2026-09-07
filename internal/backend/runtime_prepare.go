@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -55,10 +54,14 @@ func requirePlan(ctx context.Context, dir string, target Target, cred Credential
 	current := saved
 	current.SDK.Target = installedBackendVersion(dir)
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	if running, perr := projectSDKVersion(probeCtx, target, cred); perr == nil && running != "" {
+	running, perr := projectSDKVersion(probeCtx, target, cred)
+	cancel()
+	if perr != nil {
+		running = ""
+	}
+	if running != "" {
 		current.SDK.Running = running
 	}
-	cancel()
 
 	bundle, err := BundleDigest(dir)
 	if err != nil {
@@ -66,29 +69,15 @@ func requirePlan(ctx context.Context, dir string, target Target, cred Credential
 	}
 	current.BundleDigest = bundle
 
-	schemaBody := []byte("{}")
-	sources, serr := ReadSchemaSources(dir)
-	switch {
-	case errors.Is(serr, ErrNoSchema):
-	case serr != nil:
-		return PlanFile{}, serr
-	default:
-		payload, perr := SchemaSourcesBody(sources)
-		if perr != nil {
-			return PlanFile{}, perr
-		}
-		status, body, cerr := managementCall(ctx, target, cred, http.MethodPost,
-			"/v1/management/schema/plan", payload, "application/json")
-		if cerr != nil {
-			return PlanFile{}, cerr
-		}
-		if status != http.StatusOK {
-			return PlanFile{}, fmt.Errorf(
-				"schema preflight returned HTTP %d; no image or code was changed: %s", status, trimBody(body))
-		}
-		schemaBody = body
+	// AYNI GEVŞETME, AYNI ÖLÇÜTLE (FR-063). Bu satır olmadan kapı 1/3/5'in
+	// hepsi kullanıcının klavyesinden erişilemez kalıyordu: elle yazılmış doğru
+	// bir plan dosyasıyla bile `push`, `prepareCloudRuntime`'a hiç varmadan tam
+	// burada ölürdü. Karar ölçebilen tarafa devredilir.
+	schema, serr := schemaPlanFromProject(ctx, dir, target, cred, running != "")
+	if serr != nil {
+		return PlanFile{}, fmt.Errorf("%w; no image or code was changed", serr)
 	}
-	sum := sha256.Sum256(schemaBody)
+	sum := sha256.Sum256(schema.Body)
 	current.SchemaPlanDigest = hex.EncodeToString(sum[:])
 
 	if reasons := StaleReasons(saved, current); len(reasons) > 0 {
@@ -147,7 +136,11 @@ func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Cr
 			"the platform decides from the migration stamp\n")
 	}
 	// A schema refusal must not replace a healthy image as a side effect.
-	if err := checkRuntimeSchemaPlan(ctx, dir, target, cred, approve, out); err != nil {
+	//
+	// VE ÖLÇÜLEMEYEN BİR ŞEMA PLANI BİR RED DEĞİLDİR (FR-063): bu çağrı da
+	// kiracının kendi adresine gidiyordu ve hemen yukarıdaki gevşetmeden SONRA,
+	// aynı ölü pod'a sorarak push'u düşürüyordu.
+	if err := checkRuntimeSchemaPlan(ctx, dir, target, cred, approve, out, running != ""); err != nil {
 		return err
 	}
 	if CloudRuntimePreparer == nil {
@@ -181,25 +174,19 @@ func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Cr
 	return nil
 }
 
-func checkRuntimeSchemaPlan(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer) error {
-	sources, err := ReadSchemaSources(dir)
-	if errors.Is(err, ErrNoSchema) {
+func checkRuntimeSchemaPlan(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer, answering bool) error {
+	schema, err := schemaPlanFromProject(ctx, dir, target, cred, answering)
+	if err != nil {
+		return fmt.Errorf("%w; no image or code was changed", err)
+	}
+	if !schema.Declared || !schema.Measured {
+		// SORULAMAYAN ŞEMA ENGEL DEĞİLDİR. Yıkıcı bir değişiklik varsa onu
+		// projenin KENDİ kapısı kod yüklenirken yakalar — ki o an proje geri
+		// gelmiş olur. Burada engellemek, yalnız ölü kiracıyı diriltmeyi
+		// engellerdi.
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	payload, err := SchemaSourcesBody(sources)
-	if err != nil {
-		return err
-	}
-	status, body, err := managementCall(ctx, target, cred, http.MethodPost, "/v1/management/schema/plan", payload, "application/json")
-	if err != nil {
-		return err
-	}
-	if status != http.StatusOK {
-		return fmt.Errorf("schema preflight returned HTTP %d; no image or code was changed: %s", status, trimBody(body))
-	}
+	body := schema.Body
 	var plan schemaPlanWire
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields["in_sync"] == nil {

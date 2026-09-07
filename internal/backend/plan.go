@@ -112,6 +112,11 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	var (
 		running, installed string
 		runtimeSection     json.RawMessage
+		// TOLERANS POZİTİF KANIT İSTER. Varsayılan KATI: yalnız probe gerçekten
+		// koşup bir sürüm getiremediğinde gevşer. Yerel checkout'un bozuk olması
+		// (`installedSDKVersion` düşerse) sağlıklı bir kiracıyı "cevap vermiyor"
+		// saymaz — o yol hiç ölçüm yapmadı.
+		answering = true
 	)
 	if v, err := installedSDKVersion(dir); err == nil {
 		installed = v
@@ -121,6 +126,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 		if sdkErr == nil {
 			running = probed
 		}
+		answering = running != ""
 	}
 	// RUNTIME BÖLÜMÜ: yükseltme NE YAPACAK (FR-045).
 	//
@@ -159,30 +165,21 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// taşıyor, ve sunucu push anında aynı özeti bekliyor. Ekrana basılan metni
 	// değil, cevabın kendisini hash'lemek zorunda — biçimlendirme değişirse
 	// parmak izi kaymasın.
-	schemaBody := []byte("{}")
-	sources, err := ReadSchemaSources(dir)
-	switch {
-	case errors.Is(err, ErrNoSchema):
-		fmt.Fprintf(out, "  no %s — this project declares no tables\n", PublicSchemaFile)
-	case err != nil:
+	schema, err := schemaPlanFromProject(ctx, dir, target, cred, answering)
+	if err != nil {
 		return err
-	default:
-		payload, err := SchemaSourcesBody(sources)
-		if err != nil {
-			return err
-		}
-		status, body, err := managementCall(ctx, target, cred, http.MethodPost,
-			"/v1/management/schema/plan", payload, "application/json")
-		if err != nil {
-			return err
-		}
-		if status != http.StatusOK {
-			return fmt.Errorf("%s answered %d when asked to plan the schema: %s",
-				target.Describe(), status, trimBody(body))
-		}
-		schemaBody = body
-		renderSchemaPlan(out, body)
 	}
+	var unmeasured []string
+	switch {
+	case !schema.Declared:
+		fmt.Fprintf(out, "  no %s — this project declares no tables\n", PublicSchemaFile)
+	case !schema.Measured:
+		fmt.Fprintf(out, "  %s\n", unmeasuredNote)
+		unmeasured = append(unmeasured, unmeasuredNote)
+	default:
+		renderSchemaPlan(out, schema.Body)
+	}
+	schemaBody := schema.Body
 
 	// NO CONFIG SECTION, and its absence is the point.
 	//
@@ -214,6 +211,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 		Runtime:          runtimeSection,
 		Destructive:      destructiveOf(schemaBody),
 		Breaking:         []string{},
+		Unmeasured:       unmeasured,
 	}
 	p.Fingerprint = Fingerprint(p.BundleDigest, p.SDK.Running, p.SDK.Target, p.SchemaPlanDigest)
 	if err := WritePlanFile(dir, p); err != nil {
@@ -345,3 +343,82 @@ func renderSchemaPlan(out io.Writer, body []byte) {
 // on this machine, and stack_push.go uses it.
 
 func indent(w io.Writer) io.Writer { return &prefixed{w: w, prefix: "  "} }
+
+// ─────────────────────────────────────────────────────────────────────────
+// ŞEMA PLANI, VE ONU SORAMAMANIN BİR CEVAP OLMASI (FR-063)
+//
+// Şema planını yalnız kiracının KENDİSİ hesaplayabilir: sorgu onun kendi
+// veritabanına karşı koşar. Bunun bir sonucu var ve o sonuç bu koşunun hedefi
+// olan kiracıyı tam olarak kurtarılamaz yapıyordu — servis etmeyen bir kiracı
+// şemasını da planlayamaz, ve bu adrese giden DÖRT çağrının her biri
+// `palbase plan` ile `palbase push`u ölü kiracıda düşürüyordu:
+//
+//	plan.go        · plan dosyası HİÇ yazılmıyordu (imaj bölümü başarıyla
+//	                 koşup hemen ardından çöpe gidiyordu)
+//	requirePlan    · elle yazılmış bir plan dosyasıyla bile push burada ölürdü
+//	checkRuntimeSchemaPlan · ölçülemeyen sürüm gevşetmesinden HEMEN SONRA
+//	                 aynı ölü pod'a soruyordu
+//
+// ÖLÇÜT DAR VE BEDAVA: yalnız kiracının KOŞAN SÜRÜMÜ de ölçülemediğinde. İki
+// soru aynı pod'a gidiyor; biri cevapsızsa diğerinin sessizliği ikinci bir
+// arıza değil, aynı arızanın ikinci yüzüdür. Cevap verebilen bir kiracının
+// reddi ise gerçek bir reddir ve tolere EDİLMEZ.
+//
+// ÖLÇÜLDÜ 2026-09-07, penny (`na1m7lt2m`): kapı gövdesiz bir **HTTP 503**
+// döndürüyor — `upstream connect error ... Connection refused` — TAŞIMA HATASI
+// DEĞİL. Yalnız `err != nil`'i tolere eden bir gevşetme bu kiracıda atıl
+// kalırdı; bu yüzden gevşetme `status != 200` dalını da kapsıyor.
+// ─────────────────────────────────────────────────────────────────────────
+
+// SchemaUnmeasured, "bu projeye şemasını soramadım" cevabının BAYTIDIR.
+//
+// `{}` DEĞİL, ve fark taşıyıcıdır: `{}` "bu proje hiç tablo bildirmiyor"
+// demek — ölçülmüş bir SIFIR. İkisini aynı özete katlamak, plan dosyasının
+// parmak izini iki AYRI dünya için aynı yapardı, ve push plan yazıldığında
+// verilmemiş bir onayı taşırdı.
+var SchemaUnmeasured = []byte(`{"unmeasured":true}`)
+
+// schemaPlanResult, şema planı sorusunun üç ayrı cevabını AYRI TUTAR.
+type schemaPlanResult struct {
+	Body     []byte // parmak izine giren baytlar
+	Declared bool   // proje tablo bildiriyor mu
+	Measured bool   // cevap gerçekten projeden mi geldi
+}
+
+// schemaPlanFromProject, projeye kendi veritabanına karşı şema planını
+// hesaplatır. `answering`, kiracının koşan sürümünün ÖLÇÜLEBİLDİĞİ anlamına
+// gelir ve toleransın tek anahtarıdır.
+func schemaPlanFromProject(ctx context.Context, dir string, target Target, cred Credentials, answering bool) (schemaPlanResult, error) {
+	sources, err := ReadSchemaSources(dir)
+	switch {
+	case errors.Is(err, ErrNoSchema):
+		return schemaPlanResult{Body: []byte("{}")}, nil
+	case err != nil:
+		return schemaPlanResult{}, err
+	}
+	payload, err := SchemaSourcesBody(sources)
+	if err != nil {
+		return schemaPlanResult{}, err
+	}
+	status, body, err := managementCall(ctx, target, cred, http.MethodPost,
+		"/v1/management/schema/plan", payload, "application/json")
+	switch {
+	case err == nil && status == http.StatusOK:
+		return schemaPlanResult{Body: body, Declared: true, Measured: true}, nil
+	case !answering:
+		return schemaPlanResult{Body: SchemaUnmeasured, Declared: true}, nil
+	case err != nil:
+		return schemaPlanResult{}, err
+	default:
+		return schemaPlanResult{}, fmt.Errorf("%s answered %d when asked to plan the schema: %s",
+			target.Describe(), status, trimBody(body))
+	}
+}
+
+// unmeasuredNote, plan dosyasına ve ekrana giden TEK cümledir.
+//
+// Kullanıcı "şema kontrol edilmedi" sanmasın diye ne YAPILACAĞINI da söyler:
+// şemanın kendisi kod yüklenirken, proje geri geldikten sonra, yine projenin
+// kendi kapısından geçer — burada kaybolan yalnız ÖNİZLEME.
+const unmeasuredNote = "schema: this project is not answering, so its schema plan could not be previewed; " +
+	"the schema is still checked by the project itself when the code is uploaded"

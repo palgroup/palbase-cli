@@ -25,7 +25,12 @@ type PlanFile struct {
 	Runtime          json.RawMessage `json:"runtime,omitempty"`
 	Destructive      []string        `json:"destructive"`
 	Breaking         []string        `json:"breaking"`
-	Fingerprint      string          `json:"fingerprint"`
+	// Unmeasured, planın SORAMADIĞI şeyleri kullanıcının okuyabileceği cümlelerle
+	// taşır (FR-063). Parmak izinin DIŞINDA, çünkü ölçülemeyen dünya zaten
+	// `schemaPlanDigest`'in içinde ayrı bir sentinel olarak duruyor — bu alan o
+	// olgunun insan için yazılmış hâli, tıpkı `destructive` gibi.
+	Unmeasured  []string `json:"unmeasured,omitempty"`
+	Fingerprint string   `json:"fingerprint"`
 }
 
 type PlanTarget struct {
