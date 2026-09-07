@@ -42,7 +42,7 @@ func writeProjectSDK(t *testing.T, dir, declared, installed string) {
 // TAKİP EDER. O yüzden söylenecek şey artık bir uyarı değil bir SONUÇ — "bu
 // proje eski sürümü koşuyor, düzlem imajı buraya getirecek" — ve haberin
 // taşıması gereken iki sayı da bu: derlenen sürüm ve koşan sürüm.
-func TestSDKSkewSaysTheImageWillFollowTheCheckout(t *testing.T) {
+func TestSDKSkewRequiresAnImageMigrationWithoutPromisingIt(t *testing.T) {
 	got := sdkSkewNotice("34.0.0", "33.0.2")
 	require.NotEmpty(t, got, "majörler ayrıyken haber susamaz")
 
@@ -52,6 +52,8 @@ func TestSDKSkewSaysTheImageWillFollowTheCheckout(t *testing.T) {
 		"haber imajdan hiç söz etmiyor — okuyan ne olacağını bilemez:\n%s", got)
 	require.Regexpf(t, regexp.MustCompile(`(?i)forward`), got,
 		"takasın İLERİ-YALNIZ olduğu söylenmiyor:\n%s", got)
+	require.Contains(t, got, "does not confirm")
+	require.NotContains(t, got, "none fail")
 
 	// VE ESKİ CÜMLE GERİ GELMEMELİ. "installing the project's" bir davranışı
 	// tarif ediyordu; o davranış silindi, cümlesi kalırsa yalan olur.
@@ -64,8 +66,8 @@ func TestSDKSkewSaysTheImageWillFollowTheCheckout(t *testing.T) {
 // NEGATİF KONTROL: söylenecek bir şey yoksa sus. Bu olmadan "her push'ta yaz"
 // yukarıdaki testi de geçerdi ve haber gürültüye dönerdi.
 func TestSDKSkewIsSilentWhenThereIsNoNews(t *testing.T) {
-	require.Empty(t, sdkSkewNotice("24.1.0", "24.0.0"),
-		"aynı majör: imaj zaten bu sürümün imajı, haber yok")
+	require.Empty(t, sdkSkewNotice("24.0.0", "24.0.0"))
+	require.NotEmpty(t, sdkSkewNotice("24.0.1", "24.0.0"), "patch releases have distinct runtime images too")
 	require.Empty(t, sdkSkewNotice("", "24.0.0"),
 		"kurulu sürüm okunamıyorsa bir İDDİA kurulamaz")
 	require.Empty(t, sdkSkewNotice("24.0.0", ""),

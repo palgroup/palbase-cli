@@ -82,6 +82,25 @@ func wireDPoPSigner() {
 // wireCloudKeyFetcher lets the backend fetch a cloud project's service-role
 // key using the caller's account credential.
 func wireCloudKeyFetcher() {
+	backend.CloudRuntimePreparer = func(ctx context.Context, tenantURL, sdkVersion string) error {
+		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
+		if !ok {
+			return fmt.Errorf("%s is not a project on this cloud", tenantURL)
+		}
+		var result struct {
+			SDKVersion string `json:"sdkVersion"`
+		}
+		cloud := managementREST()
+		cloud.HTTPClient.Timeout = 5 * time.Minute
+		if err := cloud.Do(ctx, http.MethodPost,
+			"/v1/cloud/projects/"+url.PathEscape(ref)+"/runtime", map[string]string{"sdkVersion": sdkVersion}, &result); err != nil {
+			return err
+		}
+		if result.SDKVersion != sdkVersion {
+			return fmt.Errorf("platform did not verify SDK %s", sdkVersion)
+		}
+		return nil
+	}
 	backend.CloudKeyFetcher = func(tenantURL string) (string, error) {
 		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
 		if !ok {

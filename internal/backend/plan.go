@@ -156,34 +156,14 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	return nil
 }
 
-// writeImagePlan says what the push will do to the pod — and only when it will
-// do something (FR-017/018).
-//
-// THE IMAGE TAG IS THE SDK VERSION. Nothing else moves it: not a release of the
-// platform, not an operator, not a schedule. So the one moment a tenant's pod is
-// replaced is the moment they change the version in their own package.json, and
-// this is the line that says so before it happens.
-//
-// A WARNING, NOT AN ALARM. The swap goes through the holder route: requests wait
-// and none of them fail. Saying "the pod will restart" without saying that would
-// read as an outage nobody is having.
-//
-// AND NOT NECESSARILY DURING THIS PUSH. The push carries the bundle to the
-// project's own management surface; the image is the plane's to change, and it
-// does so on its reconciliation round (within five minutes). Measured live
-// 2026-09-05 against the control plane itself: `plan` printed this line, the
-// push landed hot, and the pod was replaced afterwards. Saying "the pod is
-// replaced" full stop would promise a synchronous swap the push does not make.
-//
-// SILENT ON AN UNKNOWN CURRENT. The plane does not always answer with a running
-// version, and comparing "" against a real one is not a change — it is a missing
-// fact. Printing "→ 33.0.2" out of that would invent a migration that may not be
-// happening.
+// A plan can compare the observed runtime with the checkout's requirement; it
+// cannot promise a migration. Schema compatibility can stop the push, and the
+// platform can independently refuse an unknown or unpullable image.
 func writeImagePlan(w io.Writer, current, target string) {
 	if current == "" || current == target {
 		return
 	}
-	fmt.Fprintf(w, "image\n  %s → %s   (the pod is replaced when the plane picks this up; requests wait in the holder, none fail)\n",
+	fmt.Fprintf(w, "image\n  running %s; required by this checkout: %s\n  this plan changes nothing; the platform must complete and verify the image migration\n",
 		current, target)
 }
 

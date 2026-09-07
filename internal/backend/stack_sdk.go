@@ -1,49 +1,28 @@
 package backend
 
-// stack_sdk.go — the SDK a project's code is built against comes from the
-// CHECKOUT, and the running image follows it.
-//
-// YÖN 06.09.2026'DA TERSİNE ÇEVRİLDİ ve bu dosyanın yarısı o yüzden gitti.
-//
-// Eskiden: bir backend `@palbase/backend`'e karşı derlenir ve KENDİ kopyasını
-// taşıyan bir runtime tarafından koşulurdu. Majörler ayrıysa build, runtime'ın
-// koşamayacağı bir şey üretiyordu — ve hata, sebebinden üç katman uzakta,
-// eksik bir fonksiyon cümlesi olarak geliyordu (16.08.2026 ölçümü:
-// "getRegisteredControllers is not a function"). Çare, runtime'ın sürümünü
-// indirip buraya kurmaktı: `ensureProjectSDK`. Runtime sabitti, build ona
-// uyuyordu.
-//
-// Şimdi: imaj SDK'yı TAKİP EDİYOR (D-015). Müşteri sürümünü değiştirir, düzlem
-// imajı ona getirir. Eski çare bu yüzden yalnız gereksiz değil ENGELLEYİCİYDİ —
-// her push bundle'ı zaten koşan sürüme sabitliyor, yani müşterinin seçimi
-// üretime hiç ulaşmıyordu. Sürüm bulunduğu yerde donuyordu.
-//
-// Endişe hâlâ gerçek ve hâlâ karşılanıyor, ters yönden: artefakt hangi sürüme
-// derlendiyse onu BİLDİRİYOR, düzlem imajı o sürüme getiriyor (ileri-yalnız),
-// ve arada kalan pencerede runtime bundle'ı TEMİZ reddediyor. `sdkSkewNotice`
-// artık bir uyarı DEĞİL bir haber: "bu push imajı taşıyacak".
+// The checkout selects the SDK used for builds. Its artifact declares that
+// requirement to the platform, which reconciles the runtime image separately.
+// A successful code upload does not prove that image reconciliation succeeded:
+// schema compatibility, legacy image tags and image availability have their
+// own checks. Read the runtime version instead of promising a future swap.
 import (
 	"context"
 	"fmt"
 	"strings"
 )
 
-// sdkSkewNotice says the image is about to move — it is NEWS, not a warning.
-//
-// It used to warn: "this push builds against something other than what you
-// typechecked", because the push silently swapped in the running SDK. Nothing
-// swaps now. The checkout's SDK is what ships, so the only thing worth saying
-// is the CONSEQUENCE: the project runs an older version and the platform will
-// bring the image up to this one.
+// A build/runtime mismatch is observed here; an image migration is not.
+// A refused push carries no new target, and the plane can refuse a migration
+// independently (for example, a legacy SHA image with no comparable version).
 func sdkSkewNotice(installed, running string) string {
-	if installed == "" || running == "" || majorOf(installed) == majorOf(running) {
+	if installed == "" || running == "" || installed == running {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "  this checkout builds against %s %s and the project runs %s.\n",
 		backendPkg, installed, running)
-	fmt.Fprintf(&b, "    The image follows the SDK: the platform moves this project onto %s's image,\n", installed)
-	fmt.Fprintf(&b, "    forward only, under the holder route — requests wait, none fail.\n")
+	fmt.Fprintf(&b, "    Push checks forward migration compatibility for %s and verifies the runtime before uploading code.\n", installed)
+	fmt.Fprint(&b, "    Sending code does not confirm that the runtime image has changed.\n")
 	return b.String()
 }
 
@@ -86,6 +65,6 @@ func sdkPruneRefusal(before, after string) string {
 		"the installed %s changed from %s to %s while preparing the build.\n"+
 			"  A tool install re-aligned node_modules against package.json and took the\n"+
 			"  stack's SDK with it, so the bundle would compile against %s — not the\n"+
-			"  version this stack RUNS. Nothing was pushed.",
+			"  version selected by this checkout. Nothing was pushed.",
 		backendPkg, before, after, after)
 }

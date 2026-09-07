@@ -153,7 +153,7 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	// artifact's SDK, so a reader is not left believing something false.
 	sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
 	if running, err := projectSDKVersion(sdkCtx, target, cred); err == nil && running != "" {
-		fmt.Fprintf(out, "sdk:          %s %s — what this project RUNS, and what `palbase push` builds against\n",
+		fmt.Fprintf(out, "sdk:          %s %s — what this project RUNS\n",
 			backendPkg, running)
 	}
 	cancelSDK()

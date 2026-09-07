@@ -23,3 +23,18 @@ func finishStackPush(ctx context.Context, w io.Writer, out pushResult, refresh f
 	}
 	return nil
 }
+
+func writePushRuntime(w io.Writer, builtWith, running string, readErr error) {
+	if builtWith == "" {
+		return
+	}
+	if readErr != nil || running == "" {
+		fmt.Fprintln(w, "runtime: could not verify the running SDK after the code upload; image migration is unconfirmed")
+		return
+	}
+	if running != builtWith {
+		fmt.Fprintf(w, "runtime: still @palbase/backend %s; code was built with %s — image migration is NOT complete\n", running, builtWith)
+		return
+	}
+	fmt.Fprintf(w, "runtime: verified @palbase/backend %s\n", running)
+}

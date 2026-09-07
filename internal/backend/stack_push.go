@@ -201,6 +201,10 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		return err
 	}
 
+	if err := prepareStackRuntime(ctx, dir, target, cred, approve, w); err != nil {
+		return err
+	}
+
 	// THE CEILING, BEFORE THE ARTIFACT IS ACTIVATED (FR-048).
 	//
 	// The refusal already existed at BOOT (`abi.ts` aboveCeilingRefusal) and it
@@ -294,7 +298,15 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		if err := json.Unmarshal(body, &out); err != nil {
 			return fmt.Errorf("the stack answered 200 with something unexpected: %s", trimBody(body))
 		}
-		return finishStackPush(ctx, w, out, RefreshSpec)
+		finishErr := finishStackPush(ctx, w, out, RefreshSpec)
+		// Activation and image migration are separate operations. Report the
+		// running version after a successful upload, including unchanged code.
+		// Never turn an accepted release into "nothing was deployed" here.
+		sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
+		running, sdkErr := projectSDKVersion(sdkCtx, target, cred)
+		cancelSDK()
+		writePushRuntime(w, installedBackendVersion(dir), running, sdkErr)
+		return finishErr
 
 	case http.StatusConflict:
 		// The one refusal that is a DECISION rather than a mistake, so it prints
