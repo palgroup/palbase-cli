@@ -83,7 +83,7 @@ func wireDPoPSigner() {
 // wireCloudKeyFetcher lets the backend fetch a cloud project's service-role
 // key using the caller's account credential.
 func wireCloudKeyFetcher() {
-	backend.CloudRuntimePreparer = func(ctx context.Context, tenantURL, sdkVersion string) error {
+	backend.CloudRuntimePreparer = func(ctx context.Context, tenantURL, sdkVersion string, plan backend.PlanRef) error {
 		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
 		if !ok {
 			return fmt.Errorf("%s is not a project on this cloud", tenantURL)
@@ -93,8 +93,12 @@ func wireCloudKeyFetcher() {
 		}
 		cloud := managementREST()
 		cloud.HTTPClient.Timeout = 5 * time.Minute
+		// PLAN GÖVDEDE GİDER (C-6, FR-040). Sunucu ona GÜVENMEZ: parmak izini
+		// kendisi yeniden hesaplar ve `running`i canlı runtime'a sorar. Plan bir
+		// İDDİA, kapı bir ÖLÇÜMDÜR.
 		if err := cloud.Do(ctx, http.MethodPost,
-			"/v1/cloud/projects/"+url.PathEscape(ref)+"/runtime", map[string]string{"sdkVersion": sdkVersion}, &result); err != nil {
+			"/v1/cloud/projects/"+url.PathEscape(ref)+"/runtime",
+			map[string]any{"sdkVersion": sdkVersion, "plan": plan}, &result); err != nil {
 			return err
 		}
 		if result.SDKVersion != sdkVersion {

@@ -157,6 +157,23 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		return err
 	}
 
+	// VE PLAN, HER ŞEYDEN ÖNCE (FR-046, D-014).
+	//
+	// SIFIR DOKUNUŞ: plansız bir push kiracıya TEK BİR İSTEK bile atmamalı.
+	// Aşağıdaki ilk satır bile sürümü sormak için ağa çıkıyor, ve "plan yok"
+	// cevabı o istekten SONRA gelirse red artık bir yan etkinin ardından
+	// geliyordur — bu fonksiyonun kendi RequireBackendPlane yorumunun söylediği
+	// şeyin aynısı: "a refusal that arrives after a side effect is not a refusal".
+	//
+	// Burada yalnız VARLIK sorulur. Planın hâlâ DOĞRU olup olmadığı, ölçmek için
+	// sunucuya sormayı gerektiriyor ve o soru `prepareStackRuntime`'da, artefakt
+	// yerelde derlendikten sonra sorulur.
+	if isCloudProjectAddress(target.URL) {
+		if _, err := ReadPlanFile(dir); err != nil {
+			return err
+		}
+	}
+
 	// BUNDLE, BU CHECKOUT'UN KENDİ SDK'SIYLA DERLENİR — VE BU YÖN 06.09.2026'DA
 	// TERSİNE ÇEVRİLDİ.
 	//

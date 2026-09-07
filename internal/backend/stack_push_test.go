@@ -6,10 +6,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -298,5 +302,134 @@ func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
 		if gotBreak != tc.wantBreak {
 			t.Errorf("%v → accept-breaking=%v, beklenen %v", tc.args, gotBreak, tc.wantBreak)
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PLANSIZ PUSH YOK (FR-046, FR-047, D-014)
+//
+// Kullanıcının cümlesi: "plansız push yapılamaması lazım, ben her push
+// denediğimde direkt gidiyo o zaman planın ne işi var". Kapı iki şey ölçer:
+// planın VAR olması ve HÂLÂ DOĞRU olması. İkincisi olmadan plan bir tören
+// olurdu — kullanıcı bir dünya için onay verir, push başka bir dünyaya gider.
+// ─────────────────────────────────────────────────────────────────────────
+
+// asCloudProject, bu adresi bulut projesi sayan kapıyı test süresince bağlar.
+func asCloudProject(t *testing.T, url string) {
+	t.Helper()
+	prev := CloudProjectAddress
+	CloudProjectAddress = func(u string) bool { return u == url }
+	t.Cleanup(func() { CloudProjectAddress = prev })
+}
+
+// pushableCheckout: `buildableBackend` bir modül yazar ama şema yazmaz, ve push
+// İKİSİNİ birden ister (`PlaneOf`: modül + şema). Plan yolu şemasız da koşuyor,
+// push yolu koşmuyor — kapı testinin gerçek push yolunda durması gerekiyor.
+func pushableCheckout(t *testing.T, dir string) {
+	t.Helper()
+	buildableBackend(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realSchema("public")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPushRefusesWithoutAPlanAndTouchesNothing(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	pushableCheckout(t, dir)
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	asCloudProject(t, srv.URL)
+
+	var out bytes.Buffer
+	err := runStackPush(context.Background(), Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, false, false, &out)
+	if err == nil || !errors.Is(err, ErrNoPlan) {
+		t.Fatalf("plansız push reddedilmeli (ErrNoPlan): %v", err)
+	}
+	// SIFIR DOKUNUŞ: red, kiracıya tek bir istek bile atmadan verilmeli.
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("plansız push sunucuya %d istek attı (FR-046: sıfır dokunuş)", n)
+	}
+}
+
+func TestPushNamesWhatMadeThePlanStale(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	pushableCheckout(t, dir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case wellKnownPath:
+			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"37.0.2"}`))
+		default:
+			_, _ = w.Write([]byte(`{"in_sync":true,"changes":[],"destructive":[]}`))
+		}
+	}))
+	defer srv.Close()
+	asCloudProject(t, srv.URL)
+
+	// Plan 36.0.2'yi görmüştü; kiracı o zamandan beri 37.0.2'ye taşındı ve
+	// bundle da bu plandakinden farklı.
+	p := PlanFile{
+		Version:          1,
+		Target:           PlanTarget{URL: srv.URL, Ref: "abc12345m"},
+		BundleDigest:     strings.Repeat("a", 64),
+		SDK:              PlanSDK{Running: "36.0.2", Target: installedBackendVersion(dir)},
+		SchemaPlanDigest: strings.Repeat("b", 64),
+	}
+	p.Fingerprint = Fingerprint(p.BundleDigest, p.SDK.Running, p.SDK.Target, p.SchemaPlanDigest)
+	if err := WritePlanFile(dir, p); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runStackPush(context.Background(), Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, false, false, &out)
+	if err == nil {
+		t.Fatal("bayat plan kabul edildi")
+	}
+	for _, want := range []string{"plan is stale", "runtime moved 36.0.2 → 37.0.2", "palbase plan"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("bayatlık sebebi %q adlandırılmadı: %v", want, err)
+		}
+	}
+}
+
+// PLATFORMUN REDDİ KIRPILMADAN BASILIR (FR-049, FR-051).
+//
+// Ölçülmüş ders: aletin hata çıktısını gövde kırpıcısından geçirmek teşhisi
+// imkânsız kılıyor — çerçeve başta, ASIL CÜMLE sonda kalıyor. Ve çare cümlesi
+// PLATFORM yanıdır: müşteriden eylem istenmez.
+func TestPushPrintsAPlatformRefusalInFull(t *testing.T) {
+	long := strings.Repeat("syntax error near jsonb_object_agg ", 20)
+	report := `{"target":"37.0.2","mode":"expand","outcome":"failed","items":[{"module":"auth",` +
+		`"migration":"000014_social_auth.up.sql","severity":"critical","count":1,"message":"` + long + `"}],` +
+		`"ledger":{"auth":{"version":13,"dirty":true,"repaired":false}},"skippedContract":[],` +
+		`"durationMs":812,"reportId":"ab12cd34ef56"}`
+	var out bytes.Buffer
+	renderUpgradeReport(&out, []byte("abc12345m cannot move to SDK 37.0.2: expand failed (report ab12cd34ef56)\n"+report))
+	s := out.String()
+	if !strings.Contains(s, "critical · auth/000014_social_auth.up.sql · 1 · ") {
+		t.Fatalf("rapor kalemi basılmadı:\n%s", s)
+	}
+	if n := strings.Count(s, "syntax error near jsonb_object_agg"); n != 20 {
+		t.Fatalf("asıl cümle kırpıldı: %d/20 kez göründü:\n%s", n, s)
+	}
+	if !strings.Contains(s, "ledger auth: version 13 dirty=true") {
+		t.Fatalf("defter durumu basılmadı:\n%s", s)
+	}
+	if !strings.Contains(s, "report ab12cd34ef56") || !strings.Contains(s, "no customer action") {
+		t.Fatalf("çare cümlesi eksik ya da müşteriye iş yüklüyor:\n%s", s)
 	}
 }

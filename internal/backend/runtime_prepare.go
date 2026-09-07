@@ -2,26 +2,120 @@ package backend
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// Wired by the CLI's cloud composition root; a project key cannot act as an
-// account credential against the control plane.
-var CloudRuntimePreparer func(context.Context, string, string) error
-
-func prepareStackRuntime(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer) error {
-	if target.OnThisMachine() || !isCloudProjectAddress(target.URL) {
-		return nil
-	}
-	return prepareCloudRuntime(ctx, dir, target, cred, approve, out)
+// PlanRef, plan dosyasının TELDEKİ hâli (C-6). Sunucu ona güvenmez: parmak izini
+// kendisi yeniden hesaplar ve `running`i canlı runtime'a sorar.
+type PlanRef struct {
+	Running          string `json:"running"`
+	Target           string `json:"target"`
+	SchemaPlanDigest string `json:"schemaPlanDigest"`
+	BundleDigest     string `json:"bundleDigest"`
+	Fingerprint      string `json:"fingerprint"`
 }
 
-func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer) error {
+// Ref, plan dosyasının sunucuya giden alt kümesi.
+func (p PlanFile) Ref() PlanRef {
+	return PlanRef{
+		Running:          p.SDK.Running,
+		Target:           p.SDK.Target,
+		SchemaPlanDigest: p.SchemaPlanDigest,
+		BundleDigest:     p.BundleDigest,
+		Fingerprint:      p.Fingerprint,
+	}
+}
+
+// Wired by the CLI's cloud composition root; a project key cannot act as an
+// account credential against the control plane.
+var CloudRuntimePreparer func(ctx context.Context, tenantURL, sdkVersion string, plan PlanRef) error
+
+// requirePlan, plan kapısı (FR-046, FR-047).
+//
+// İKİ AYRI SORU, VE İKİSİ DE GEREKLİ. Plan VAR MI — yoksa `ErrNoPlan`, ve red
+// kiracıya tek bir istek atmadan verilir. Plan HÂLÂ DOĞRU MU — şimdiki durumla
+// yeniden hesaplanır ve ayrışan her şey ADIYLA söylenir. İkincisi olmadan plan
+// bir tören olurdu: kullanıcı bir dünya için onay verir, push başkasına gider.
+//
+// YENİDEN HESAPLANAN ŞEY, PLANIN HESAPLADIĞININ AYNISI OLMAK ZORUNDA — aynı
+// bundle özeti, aynı şema-planı BAYTININ özeti (ekrana basılan metnin değil).
+func requirePlan(ctx context.Context, dir string, target Target, cred Credentials) (PlanFile, error) {
+	saved, err := ReadPlanFile(dir)
+	if err != nil {
+		return PlanFile{}, err
+	}
+	current := saved
+	current.SDK.Target = installedBackendVersion(dir)
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	if running, perr := projectSDKVersion(probeCtx, target, cred); perr == nil && running != "" {
+		current.SDK.Running = running
+	}
+	cancel()
+
+	bundle, err := BundleDigest(dir)
+	if err != nil {
+		return PlanFile{}, err
+	}
+	current.BundleDigest = bundle
+
+	schemaBody := []byte("{}")
+	sources, serr := ReadSchemaSources(dir)
+	switch {
+	case errors.Is(serr, ErrNoSchema):
+	case serr != nil:
+		return PlanFile{}, serr
+	default:
+		payload, perr := SchemaSourcesBody(sources)
+		if perr != nil {
+			return PlanFile{}, perr
+		}
+		status, body, cerr := managementCall(ctx, target, cred, http.MethodPost,
+			"/v1/management/schema/plan", payload, "application/json")
+		if cerr != nil {
+			return PlanFile{}, cerr
+		}
+		if status != http.StatusOK {
+			return PlanFile{}, fmt.Errorf(
+				"schema preflight returned HTTP %d; no image or code was changed: %s", status, trimBody(body))
+		}
+		schemaBody = body
+	}
+	sum := sha256.Sum256(schemaBody)
+	current.SchemaPlanDigest = hex.EncodeToString(sum[:])
+
+	if reasons := StaleReasons(saved, current); len(reasons) > 0 {
+		return PlanFile{}, fmt.Errorf("plan is stale: %s; run `palbase plan`", strings.Join(reasons, "; "))
+	}
+	return saved, nil
+}
+
+func prepareStackRuntime(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer) error {
+	// TEK SORU: bu adres BU BULUTUN bir projesi mi? `OnThisMachine()` de
+	// sorulurdu ve gereksizdi — `CloudProjectAddress` `<ref>.<PublicHost>`
+	// eşleştiriyor, yani bir localhost adresi zaten hiçbir zaman eşleşmez. İki
+	// soru sormak, ikincisinin cevabını birincisinin gölgelemesi demekti: bir
+	// kiracıya makinesinden port-forward ile bakan biri, plan kapısını sessizce
+	// atlardı.
+	if !isCloudProjectAddress(target.URL) {
+		return nil
+	}
+	plan, err := requirePlan(ctx, dir, target, cred)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "applying plan %s\n", plan.Fingerprint[:12])
+	return prepareCloudRuntime(ctx, dir, target, cred, approve, out, plan)
+}
+
+func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer, plan PlanFile) error {
 	want := installedBackendVersion(dir)
 	if want == "" {
 		return errors.New("cannot determine the SDK required by this checkout")
@@ -44,9 +138,17 @@ func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Cr
 	}
 	fmt.Fprintf(out, "runtime: preparing @palbase/backend %s (currently %s)\n", want, running)
 	swapCtx, cancelSwap := context.WithTimeout(ctx, 5*time.Minute)
-	err = CloudRuntimePreparer(swapCtx, target.URL, want)
+	err = CloudRuntimePreparer(swapCtx, target.URL, want, plan.Ref())
 	cancelSwap()
 	if err != nil {
+		// PLATFORMUN REDDİ KIRPILMADAN BASILIR (FR-049, FR-051). Ölçülmüş ders:
+		// çerçeve başta, ASIL CÜMLE sonda — ve bir gövde kırpıcısından geçen
+		// teşhis teşhis değildir. Rapor ekrana tam olarak gider; dönen hata
+		// kısadır çünkü okunacak şey yukarıda.
+		if strings.Contains(err.Error(), `{"target"`) {
+			renderUpgradeReport(out, []byte(err.Error()))
+			return errors.New("runtime preparation failed before code upload (see the report above)")
+		}
 		return fmt.Errorf("runtime preparation failed before code upload: %w", err)
 	}
 	probeCtx, cancel = context.WithTimeout(ctx, 10*time.Second)

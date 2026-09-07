@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,9 +55,20 @@ func TestRuntimePreparationAutomaticallyMigratesAndVerifies(t *testing.T) {
 			originalPrepare := CloudRuntimePreparer
 			t.Cleanup(func() { CloudRuntimePreparer = originalPrepare })
 			prepares := 0
-			CloudRuntimePreparer = func(context.Context, string, string) error { prepares++; running = tc.final; return nil }
+			// PLAN, HAZIRLAYICIYA KADAR TAŞINIR: sunucu parmak izini yeniden
+			// hesaplayacak, o yüzden bu testin planı da gerçek üreticiden gelir.
+			var carried PlanRef
+			CloudRuntimePreparer = func(_ context.Context, _, _ string, plan PlanRef) error {
+				prepares++
+				carried = plan
+				running = tc.final
+				return nil
+			}
+			plan := PlanFile{SDK: PlanSDK{Running: "35.0.0", Target: "36.0.2"},
+				BundleDigest: strings.Repeat("a", 64), SchemaPlanDigest: strings.Repeat("b", 64)}
+			plan.Fingerprint = Fingerprint(plan.BundleDigest, plan.SDK.Running, plan.SDK.Target, plan.SchemaPlanDigest)
 			var out bytes.Buffer
-			err := prepareCloudRuntime(context.Background(), dir, target, Credentials{}, tc.approve, &out)
+			err := prepareCloudRuntime(context.Background(), dir, target, Credentials{}, tc.approve, &out, plan)
 			if tc.wantError == "" {
 				require.NoError(t, err)
 			} else {
@@ -65,6 +77,8 @@ func TestRuntimePreparationAutomaticallyMigratesAndVerifies(t *testing.T) {
 			require.Equal(t, tc.prepares, prepares)
 			if tc.prepares == 1 && tc.wantError == "" {
 				require.Contains(t, out.String(), "verified @palbase/backend 36.0.2 before code upload")
+				require.Equal(t, plan.Fingerprint, carried.Fingerprint,
+					"planın parmak izi platforma DEĞİŞMEDEN gitmeli; sunucu onu yeniden hesaplayıp karşılaştırıyor")
 			}
 		})
 	}
