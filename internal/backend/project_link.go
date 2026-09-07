@@ -292,10 +292,18 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := storeVerifiedToken(ctx, Target{URL: base, Insecure: o.insecure}, token); err != nil {
+		// DOĞRULANAMAMAK ÖLÜMCÜL DEĞİL, SÖYLENİR (FR-063). Servis etmeyen bir
+		// kiracıda anahtar saklanır ve sebebi basılır — aksi hâlde `link`,
+		// kurtarmanın önündeki son kilit olurdu.
+		var unverified errUnverifiedToken
+		switch err := storeVerifiedToken(ctx, Target{URL: base, Insecure: o.insecure}, token); {
+		case errors.As(err, &unverified):
+			fmt.Fprintf(w, "remembered this stack's key for %s — %s\n", base, unverified.reason)
+		case err != nil:
 			return err
+		default:
+			fmt.Fprintf(w, "remembered this stack's key for %s\n", base)
 		}
-		fmt.Fprintf(w, "remembered this stack's key for %s\n", base)
 	}
 
 	// The publishable key comes from the project, over an authenticated route.

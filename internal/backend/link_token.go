@@ -39,18 +39,55 @@ func storeVerifiedToken(ctx context.Context, target Target, token string) error 
 	}
 	cred.Apply(req)
 
+	// REDDİ, CEVAP VEREMEMEKTEN AYIR (FR-063).
+	//
+	// Bu doğrulama, tuğlalaşmış bir kiracıyı kurtarmayı İMKÂNSIZ kılıyordu ve
+	// kusurun en kötü yanı mesajıydı: servis etmeyen bir kiracıda kapı 503
+	// döndürüyor, kod onu "yığın bu anahtarı kabul etmedi" diye okuyordu —
+	// oysa yığın anahtarı HİÇ GÖRMEDİ. Kullanıcı doğru anahtarı yanlış sanıp
+	// aramaya gidiyordu.
+	//
+	// Ve döngü kapanıyordu: `push`un çaresi bir kimlik, kimliğin çaresi `link`,
+	// `link`in şartı da CANLI bir proje. Ölü kiracının kurtulmasının önünde
+	// duran son halka buydu (ölçüldü 07.09.2026, penny `na1m7lt2m` — anahtarı
+	// elle yazmak zorunda kaldım).
+	//
+	// AYRIM DAR VE ANLAMLI: 401/403 yığının KENDİ cevabıdır ve gerçek bir
+	// reddir — hiçbir şey saklanmaz. Taşıma hatası ya da 502/503/504 ise
+	// "soramadım"dır: anahtar saklanır ve doğrulanamadığı AÇIKÇA söylenir.
+	// Sessizce saklamak da, reddetmek de yanlış olurdu.
 	res, err := stackClient(target).Do(req)
 	if err != nil {
-		return fmt.Errorf("reach %s: %w", target.URL, err)
+		if serr := StoreCredential(target.URL, cred); serr != nil {
+			return serr
+		}
+		return errUnverifiedToken{target: target.Describe(), reason: err.Error()}
 	}
 	defer func() { _ = res.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<20))
 
-	if res.StatusCode != http.StatusOK {
+	switch {
+	case res.StatusCode == http.StatusOK:
+		return StoreCredential(target.URL, cred)
+	case res.StatusCode >= 500:
+		if serr := StoreCredential(target.URL, cred); serr != nil {
+			return serr
+		}
+		return errUnverifiedToken{target: target.Describe(), reason: fmt.Sprintf("it answered %d", res.StatusCode)}
+	default:
 		return fmt.Errorf("%s did not accept this token (%d) — nothing was stored",
 			target.Describe(), res.StatusCode)
 	}
-	return StoreCredential(target.URL, cred)
+}
+
+// errUnverifiedToken: anahtar SAKLANDI ama doğrulanamadı. Hata olarak taşınır
+// çünkü kullanıcı bunu bilmeli; `link` onu ölümcül saymaz.
+type errUnverifiedToken struct{ target, reason string }
+
+func (e errUnverifiedToken) Error() string {
+	return fmt.Sprintf("%s is not answering (%s), so this key could not be checked against it — "+
+		"it was remembered anyway so `palbase plan` and `palbase push` can reach the platform; "+
+		"if the key is wrong those will say so", e.target, e.reason)
 }
 
 // readTokenFrom takes the token off a reader so it never has to be typed on a
