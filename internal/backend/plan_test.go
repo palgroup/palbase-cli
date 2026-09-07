@@ -476,3 +476,124 @@ func TestPlanImageLine(t *testing.T) {
 		})
 	}
 }
+
+// PLAN, YÜKSELTMENİN NE YAPACAĞINI SÖYLER VE BİR PLAN DOSYASI BIRAKIR (FR-045).
+//
+// Kullanıcının cümlesi: "plansız push yapılamaması lazım, ben her push
+// denediğimde direkt gidiyo o zaman planın ne işi var". Planın işi bu: takastan
+// önce hangi göçlerin koşacağını ve ön kontrollerin ne dediğini GÖSTERMEK, sonra
+// push'un taşıyacağı parmak izini yazmak.
+func TestPlanWritesAPlanFileWithARuntimeSection(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+
+	target := newRuntimePlanServer(t, "36.0.2")
+	orig := CloudRuntimePlanner
+	var askedSDK string
+	CloudRuntimePlanner = func(_ context.Context, _, sdk string) (json.RawMessage, error) {
+		askedSDK = sdk
+		return json.RawMessage(`{"running":"36.0.2","target":"` + sdk + `","changed":true,` +
+			`"modules":[{"module":"auth","expandFrom":13,"expandTo":14,"contractFrom":0,"contractTo":1}],` +
+			`"prechecks":{"outcome":"ok","items":[{"module":"auth","migration":"000014_social_auth.precheck.sql",` +
+			`"severity":"info","count":2,"message":"imported rows carried"}]}}`), nil
+	}
+	t.Cleanup(func() { CloudRuntimePlanner = orig })
+
+	var out strings.Builder
+	if err := runPlan(context.Background(), dir, Target{URL: target.URL},
+		Credentials{Value: "k", Kind: KindKey}, &out); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out.String())
+	}
+
+	for _, want := range []string{
+		"runtime",
+		"36.0.2 → ",
+		"auth: expand 13→14, contract 0→1",
+		"info · auth/000014_social_auth.precheck.sql · 2 · imported rows carried",
+		"plan written: .palbase/plan.json",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("plan çıktısında %q yok:\n%s", want, out.String())
+		}
+	}
+	if askedSDK == "" {
+		t.Fatal("planlayıcıya hedef SDK sürümü sorulmadı")
+	}
+
+	p, err := ReadPlanFile(dir)
+	if err != nil {
+		t.Fatalf("plan dosyası okunamadı: %v", err)
+	}
+	if p.SDK.Running != "36.0.2" || p.SDK.Target != askedSDK {
+		t.Fatalf("plan dosyası sürümleri: %+v", p.SDK)
+	}
+	if len(p.BundleDigest) != 64 || len(p.SchemaPlanDigest) != 64 {
+		t.Fatalf("özetler sha256 olmalı: bundle=%d schema=%d", len(p.BundleDigest), len(p.SchemaPlanDigest))
+	}
+	// PARMAK İZİ ÜRETİCİSİNDEN DOĞRULANIR, literalden değil: sunucu tarafı aynı
+	// fonksiyonun TypeScript ikizini koşuyor ve iki tarafın aynı baytları
+	// hash'lemesi sözleşmenin kendisi (C-6).
+	if p.Fingerprint != Fingerprint(p.BundleDigest, p.SDK.Running, p.SDK.Target, p.SchemaPlanDigest) {
+		t.Fatalf("parmak izi kendi içeriğiyle tutmuyor: %s", p.Fingerprint)
+	}
+	if len(p.Runtime) == 0 {
+		t.Fatal("plan dosyası runtime bölümünü taşımıyor; push onu sunucuya götürecek")
+	}
+}
+
+// NEGATİF KONTROL: yerel bir yığında runtime bölümü YOKTUR ve plan dosyası yine
+// yazılır. Bulut planlayıcısını her hedefe sormak, `palbase start` ile koşan bir
+// geliştiriciye var olmayan bir yükseltme anlatırdı.
+func TestPlanOfALocalStackHasNoRuntimeSectionButStillWritesAPlan(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+
+	target := newRuntimePlanServer(t, "36.0.2")
+	orig := CloudRuntimePlanner
+	CloudRuntimePlanner = func(context.Context, string, string) (json.RawMessage, error) {
+		return nil, ErrNotACloudProject
+	}
+	t.Cleanup(func() { CloudRuntimePlanner = orig })
+
+	var out strings.Builder
+	if err := runPlan(context.Background(), dir, Target{URL: target.URL},
+		Credentials{Value: "k", Kind: KindKey}, &out); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "migrations run inside the running pod") {
+		t.Fatalf("yerel yığın için runtime bölümü basıldı:\n%s", out.String())
+	}
+	// VE ESKİ SATIR HÂLÂ BASILIR: bulut olmayan bir hedefte söylenecek şey
+	// değişmedi — sürümler ayrışıyor, ama bu süreç göçü vaat edemez.
+	if !strings.Contains(out.String(), "36.0.2") {
+		t.Fatalf("yerel hedefte imaj satırı kayboldu:\n%s", out.String())
+	}
+	if _, err := ReadPlanFile(dir); err != nil {
+		t.Fatalf("plansız push yasak; yerel hedefte de plan dosyası yazılmalı: %v", err)
+	}
+}
+
+// newRuntimePlanServer, `runPlan`'ın konuştuğu iki ucu taşıyan en küçük sunucu:
+// projenin ÇALIŞAN sürümünü söyleyen well-known belgesi ve şema planı.
+func newRuntimePlanServer(t *testing.T, runningSDK string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case wellKnownPath:
+			// `hosting` ZORUNLU: `describeStack` onsuz "ne olduğunu söylemedi"
+			// diyerek düşer, ve sürüm okunamayınca plan runtime bölümüne hiç
+			// varmaz. Gerçek yığının bastığı değer bu (`v2/deploy/verify.sh`).
+			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"` + runningSDK + `"}`))
+		case "/v1/management/schema/plan":
+			_, _ = w.Write([]byte(`{"in_sync":true,"changes":[],"destructive":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}

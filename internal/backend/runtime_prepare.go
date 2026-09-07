@@ -100,3 +100,77 @@ func checkRuntimeSchemaPlan(ctx context.Context, dir string, target Target, cred
 	}
 	return nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// PLANIN RUNTIME BÖLÜMÜ (FR-045)
+//
+// `palbase plan`, kiracının SDK sürümü değişecekse yükseltmenin NE YAPACAĞINI
+// sorar: hangi modül hangi göçe çıkacak, ve ön kontroller ne diyor. Soru
+// PLATFORMA gider çünkü cevabı yalnız o verebilir — göçler hedef imajın kendi
+// binary'siyle, servis eden pod'un içinde koşuyor.
+//
+// BİR DEĞİŞKEN, ÇÜNKÜ BAĞ TERS YÖNDE: `internal/backend` bulut kontrol
+// düzlemini tanımaz ve tanımamalı (aynı kod kendi kendine barındırılan bir
+// yığına da push atıyor). Bağlamayı `cmd/palbase` yapar; bağlamazsa plan eski
+// satırını basar ve hiçbir şey kırılmaz.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ErrNotACloudProject: hedef bu bulutun bir projesi değil (kendi kendine
+// barındırılan bir yığın, ya da `palbase start` ile koşan yerel bir kopya).
+//
+// HATA, SESSİZ BİR NİL DEĞİL: "sormadım" ile "sordum, değişen bir şey yok"
+// ayrı cevaplardır ve ikincisi planın gövdesine girer.
+var ErrNotACloudProject = errors.New("not a project on this cloud")
+
+// CloudRuntimePlanner, hedef sürüme geçişin planını platformdan alır.
+var CloudRuntimePlanner func(ctx context.Context, tenantURL, sdkVersion string) (json.RawMessage, error)
+
+// writeRuntimePlan, planın runtime bölümünü basar.
+//
+// SAF BİÇİMLEYİCİ: ağ yok, karar yok. `changed` false ise hiçbir şey basmaz —
+// zaten hedefte olan bir kiracıya yükseltme anlatmak, planı gürültüye çevirirdi.
+func writeRuntimePlan(w io.Writer, section json.RawMessage) {
+	var rp struct {
+		Running string `json:"running"`
+		Target  string `json:"target"`
+		Changed bool   `json:"changed"`
+		Modules []struct {
+			Module       string `json:"module"`
+			ExpandFrom   int    `json:"expandFrom"`
+			ExpandTo     int    `json:"expandTo"`
+			ContractFrom int    `json:"contractFrom"`
+			ContractTo   int    `json:"contractTo"`
+		} `json:"modules"`
+		Prechecks *struct {
+			Outcome string `json:"outcome"`
+			Items   []struct {
+				Module    string `json:"module"`
+				Migration string `json:"migration"`
+				Severity  string `json:"severity"`
+				Message   string `json:"message"`
+				Count     int64  `json:"count"`
+			} `json:"items"`
+		} `json:"prechecks"`
+	}
+	if err := json.Unmarshal(section, &rp); err != nil || !rp.Changed {
+		return
+	}
+	fmt.Fprintln(w, "runtime")
+	fmt.Fprintf(w, "  %s → %s (migrations run inside the running pod before the swap; the swap is a process restart)\n",
+		rp.Running, rp.Target)
+	for _, m := range rp.Modules {
+		fmt.Fprintf(w, "  %s: expand %d→%d, contract %d→%d\n", m.Module, m.ExpandFrom, m.ExpandTo, m.ContractFrom, m.ContractTo)
+	}
+	if rp.Prechecks == nil {
+		return
+	}
+	for _, it := range rp.Prechecks.Items {
+		fmt.Fprintf(w, "  %s · %s/%s · %d · %s\n", it.Severity, it.Module, it.Migration, it.Count, it.Message)
+	}
+	// ENGEL BİR PLATFORM KUSURUDUR VE ÖYLE SÖYLENİR. Müşteriden eylem
+	// istenmez: çare bizim tarafımızdadır ve bu satır onu yazan tek yerdir.
+	if rp.Prechecks.Outcome == "blocked" {
+		fmt.Fprintln(w, "  BLOCKED: a platform-side check refused this upgrade; nothing was changed and "+
+			"the platform team has been notified — there is no customer action")
+	}
+}

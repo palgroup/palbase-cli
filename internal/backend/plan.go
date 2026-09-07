@@ -15,12 +15,16 @@ package backend
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -105,12 +109,38 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// against is what the push carries. The current is what the project SAYS it
 	// runs; silent when it will not say, and the writer treats that silence as
 	// "unknown", not as "changing".
-	if installed, err := installedSDKVersion(dir); err == nil {
+	var (
+		running, installed string
+		runtimeSection     json.RawMessage
+	)
+	if v, err := installedSDKVersion(dir); err == nil {
+		installed = v
 		sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
-		running, sdkErr := projectSDKVersion(sdkCtx, target, cred)
+		probed, sdkErr := projectSDKVersion(sdkCtx, target, cred)
 		cancelSDK()
 		if sdkErr == nil {
+			running = probed
+		}
+	}
+	// RUNTIME BÖLÜMÜ: yükseltme NE YAPACAK (FR-045).
+	//
+	// Yalnız sürüm gerçekten değişecekse ve hedef bu bulutun bir projesiyse
+	// sorulur. Diğer her durumda eski satır basılır — kendi kendine barındırılan
+	// bir yığın için göç planı isteyecek bir kontrol düzlemi YOKTUR, ve olmayan
+	// bir şeyi sormak planı hatayla düşürmek olurdu.
+	switch {
+	case running == "" || running == installed || CloudRuntimePlanner == nil:
+		writeImagePlan(out, running, installed)
+	default:
+		section, err := CloudRuntimePlanner(ctx, target.URL, installed)
+		switch {
+		case errors.Is(err, ErrNotACloudProject):
 			writeImagePlan(out, running, installed)
+		case err != nil:
+			return fmt.Errorf("runtime plan: %w", err)
+		default:
+			runtimeSection = section
+			writeRuntimePlan(out, section)
 		}
 	}
 
@@ -120,6 +150,11 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// note naming the siblings — but a plan narrower than the project is a plan
 	// somebody reads as complete, and the note was the admission that it was not.
 	fmt.Fprintln(out, "schema")
+	// ŞEMA CEVABININ BAYTI TUTULUR: plan dosyasının parmak izi onun ÖZETİNİ
+	// taşıyor, ve sunucu push anında aynı özeti bekliyor. Ekrana basılan metni
+	// değil, cevabın kendisini hash'lemek zorunda — biçimlendirme değişirse
+	// parmak izi kaymasın.
+	schemaBody := []byte("{}")
 	sources, err := ReadSchemaSources(dir)
 	switch {
 	case errors.Is(err, ErrNoSchema):
@@ -140,6 +175,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 			return fmt.Errorf("%s answered %d when asked to plan the schema: %s",
 				target.Describe(), status, trimBody(body))
 		}
+		schemaBody = body
 		renderSchemaPlan(out, body)
 	}
 
@@ -153,7 +189,61 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// Settings are written directly now, by whoever changes them, so a plan has
 	// nothing to say about them: they are already in effect. What a push carries
 	// is code and schema, and that is what this shows.
+
+	// VE PLAN DOSYASI YAZILIR (FR-045, D-014). Bu satır olmadan `palbase push`
+	// koşamaz — sunucu da koşturmaz. Kullanıcının cümlesi buydu: "plansız push
+	// yapılamaması lazım, ben her push denediğimde direkt gidiyo o zaman planın
+	// ne işi var".
+	bundle, err := BundleDigest(dir)
+	if err != nil {
+		return err
+	}
+	schemaSum := sha256.Sum256(schemaBody)
+	p := PlanFile{
+		Version:          1,
+		CreatedAt:        time.Now().UTC(),
+		Target:           PlanTarget{URL: target.URL, Ref: refOfURL(target.URL)},
+		BundleDigest:     bundle,
+		SDK:              PlanSDK{Running: running, Target: installed},
+		SchemaPlanDigest: hex.EncodeToString(schemaSum[:]),
+		Runtime:          runtimeSection,
+		Destructive:      destructiveOf(schemaBody),
+		Breaking:         []string{},
+	}
+	p.Fingerprint = Fingerprint(p.BundleDigest, p.SDK.Running, p.SDK.Target, p.SchemaPlanDigest)
+	if err := WritePlanFile(dir, p); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "plan written: .palbase/plan.json (%s)\n", p.Fingerprint[:12])
 	return nil
+}
+
+// refOfURL, hedef adresinin ilk host etiketi — bulut projelerinde ref budur.
+// Plan dosyasında yalnız İNSAN için: kapı ref'i değil parmak izini ölçer.
+func refOfURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if i := strings.Index(host, "."); i > 0 {
+		return host[:i]
+	}
+	return host
+}
+
+// destructiveOf, şema planının veri kaybettiren kalemlerini plan dosyasına
+// okunur satırlar olarak taşır.
+func destructiveOf(body []byte) []string {
+	var plan schemaPlanWire
+	if err := json.Unmarshal(body, &plan); err != nil {
+		return []string{}
+	}
+	out := make([]string, 0, len(plan.Destructive))
+	for _, d := range plan.Destructive {
+		out = append(out, fmt.Sprintf("%s %s.%s (%d rows)", d.Kind, d.Table, d.Column, d.Rows))
+	}
+	return out
 }
 
 // A plan can compare the observed runtime with the checkout's requirement; it

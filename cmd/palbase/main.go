@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -100,6 +101,30 @@ func wireCloudKeyFetcher() {
 			return fmt.Errorf("platform did not verify SDK %s", sdkVersion)
 		}
 		return nil
+	}
+	// PLANIN RUNTIME BÖLÜMÜ (FR-045): yükseltmenin NE YAPACAĞINI platformdan
+	// sorar ve hiçbir şeye dokunmaz.
+	//
+	// `ErrNotACloudProject` BİR CEVAPTIR, hata değil: kendi kendine barındırılan
+	// bir yığında ya da `palbase start` ile koşan yerel bir kopyada soracak bir
+	// kontrol düzlemi yoktur, ve plan o zaman eski satırını basar. Bunu genel bir
+	// hata yapmak, bulutu olmayan her kullanıcının planını düşürürdü.
+	backend.CloudRuntimePlanner = func(ctx context.Context, tenantURL, sdkVersion string) (json.RawMessage, error) {
+		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
+		if !ok {
+			return nil, backend.ErrNotACloudProject
+		}
+		var raw json.RawMessage
+		cloud := managementREST()
+		// Ön kontroller SERVİS EDEN pod'un içinde koşuyor ve büyük bir tabloda
+		// saniyeler sürebilir; varsayılan istemci bütçesi bunu kesecek kadar dar.
+		cloud.HTTPClient.Timeout = 3 * time.Minute
+		if err := cloud.Do(ctx, http.MethodGet,
+			"/v1/cloud/projects/"+url.PathEscape(ref)+"/runtime/plan?sdk="+url.QueryEscape(sdkVersion),
+			nil, &raw); err != nil {
+			return nil, err
+		}
+		return raw, nil
 	}
 	backend.CloudKeyFetcher = func(tenantURL string) (string, error) {
 		ref, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
