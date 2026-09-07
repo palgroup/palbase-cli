@@ -162,7 +162,7 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 		return nil, fmt.Errorf("reach %s: %w", target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
+	body, err := readCapped(res.Body, 64<<20, req.URL.String())
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +240,10 @@ func GetManagementJSON(ctx context.Context, target Target, path string, out any)
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	body, err := readCapped(res.Body, 1<<20, req.URL.String())
+	if err != nil {
+		return err
+	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		var env struct {
 			Error       string `json:"error"`

@@ -412,7 +412,7 @@ func sendWaitingForReady(
 		if err != nil {
 			return 0, nil, err
 		}
-		body, rerr := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+		body, rerr := readCapped(res.Body, 8<<20, req.URL.String())
 		_ = res.Body.Close()
 		if rerr != nil {
 			return 0, nil, rerr

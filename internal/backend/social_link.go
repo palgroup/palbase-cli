@@ -17,6 +17,15 @@ import (
 	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
+// socialSnapshotLimit bounds the auth snapshot this reads.
+//
+// The number is the one this call site already used; only the checking is new.
+// It is the realistic overflow of the set — a project with several providers,
+// each with several clients and their redirect URIs — and the site was already
+// reading `limit+1` with nothing looking at the extra byte, which is the shape
+// of a check somebody meant to write.
+const socialSnapshotLimit = 256 * 1024
+
 type OAuthSelection struct {
 	ApplicationKey string   `json:"application_key"`
 	Variant        string   `json:"variant"`
@@ -77,7 +86,7 @@ func socialRequest(ctx context.Context, target Target, path string, cred Credent
 		return nil, fmt.Errorf("read social auth config from %s: %w", target.URL, err)
 	}
 	defer res.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(res.Body, 256*1024+1))
+	raw, err := readCapped(res.Body, socialSnapshotLimit, req.URL.String())
 	if err != nil {
 		return nil, err
 	}

@@ -168,14 +168,11 @@ func drainBody(req *http.Request) ([]byte, error) {
 	if req.Body == nil {
 		return nil, nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))
+	raw, err := readCapped(req.Body, maxBody, "sealed: the request body")
 	_ = req.Body.Close()
 	req.Body = nil
 	if err != nil {
 		return nil, err
-	}
-	if len(raw) > maxBody {
-		return nil, fmt.Errorf("sealed: request body exceeds %d bytes", maxBody)
 	}
 	return raw, nil
 }
@@ -259,7 +256,7 @@ func (c *Client) sealOnce(req *http.Request, plaintext []byte, kid string, pub [
 // plaintext SUCCESS means neither, which is the one thing this must not accept.
 func (c *Client) openResponse(res *http.Response, exporter []byte) (*http.Response, error) {
 	if isSealedResponse(res) {
-		raw, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
+		raw, err := readCapped(res.Body, maxBody, c.baseURL+"'s sealed answer")
 		_ = res.Body.Close()
 		if err != nil {
 			return nil, err
@@ -281,7 +278,7 @@ func (c *Client) openResponse(res *http.Response, exporter []byte) (*http.Respon
 		return res, nil
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
+	raw, err := readCapped(res.Body, maxBody, c.baseURL+"'s answer")
 	_ = res.Body.Close()
 	if err != nil {
 		return nil, err
@@ -409,7 +406,7 @@ func (c *Client) fetchLocked(ctx context.Context) (*Keyset, error) {
 		return nil, fmt.Errorf("read the sealing keyset from %s: %w", c.baseURL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
+	raw, err := readCapped(res.Body, maxBody, c.baseURL+KeysetPath)
 	if err != nil {
 		return nil, err
 	}
@@ -463,4 +460,27 @@ func withPlaintextPermitted(req *http.Request, plaintext []byte) *http.Request {
 func StackPublishesNoKeyset(ctx context.Context) bool {
 	v, ok := ctx.Value(plaintextPermittedKey{}).(plaintextPermitted)
 	return ok && v.measuredNoKeyset
+}
+
+// readCapped reads at most `limit` bytes and refuses a longer body rather than
+// returning a truncated one.
+//
+// `io.ReadAll(io.LimitReader(r, N))` ends in a CLEAN EOF, so io.ReadAll reports
+// success and the caller cannot tell a body cut at N from a complete one. Three
+// reads in this file had that shape, and on the plaintext-refusal path a
+// truncated error body was handed straight back to the caller.
+//
+// It is a second copy of internal/backend's helper of the same name, and that
+// is the import direction rather than an oversight: `backend` imports this
+// package, so this package cannot import `backend`. Eight lines stated twice
+// beats an inverted dependency between a sealing client and a CLI package.
+func readCapped(r io.Reader, limit int64, what string) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes; a truncated body cannot be told from a complete one", what, limit)
+	}
+	return raw, nil
 }

@@ -17,7 +17,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -64,7 +63,10 @@ func projectKeys(ctx context.Context, target Target) (publishable, sealedRoot st
 		return "", "", fmt.Errorf("reach %s: %w", target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	body, err := readCapped(res.Body, 1<<20, req.URL.String())
+	if err != nil {
+		return "", "", err
+	}
 
 	switch res.StatusCode {
 	case http.StatusOK:

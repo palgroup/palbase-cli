@@ -204,19 +204,13 @@ func managementCall(ctx context.Context, target Target, cred Credentials, method
 		return 0, nil, err
 	}
 	defer func() { _ = res.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(res.Body, managementBodyLimit+1))
+	// A LIMIT THAT IS HIT MUST SAY SO — readCapped is where that lives now, so
+	// this door and the nine others in this package cannot drift apart on it.
+	raw, err := readCapped(res.Body, managementBodyLimit, path)
 	if err != nil {
-		return res.StatusCode, nil, err
-	}
-	if len(raw) > managementBodyLimit {
-		// A LIMIT THAT IS HIT MUST SAY SO. io.LimitReader ends in a clean EOF
-		// and io.ReadAll then returns a nil error, so a body cut at the cap
-		// used to be handed back as a COMPLETE one. `palbase pull` inherited
-		// this door on 24.08 and every project over a megabyte failed at the
-		// far end with "read tar entry: unexpected EOF" — the truncation was
-		// silent, and only the symptom was loud.
 		return res.StatusCode, nil, fmt.Errorf(
-			"%s answered with more than %d bytes; this door reads configuration, not payloads", path, managementBodyLimit)
+			"%w; this door reads configuration, not payloads, and anything that can "+
+				"legitimately be bigger is a download that belongs on managementGet", err)
 	}
 	return res.StatusCode, raw, nil
 }

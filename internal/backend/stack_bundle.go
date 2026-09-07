@@ -876,7 +876,7 @@ func stackBuckets(ctx context.Context, target Target) ([]StackBucket, error) {
 		return nil, fmt.Errorf("%w: reach %s: %v", errStackSilent, target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	body, err := readCapped(res.Body, 1<<20, req.URL.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1141,7 +1141,7 @@ func stackServesGeneration(ctx context.Context, target Target) (*int, error) {
 		return nil, fmt.Errorf("%w: reach %s: %v", errStackSilent, target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	body, err := readCapped(res.Body, 1<<20, req.URL.String())
 	if err != nil {
 		return nil, err
 	}

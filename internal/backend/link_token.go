@@ -64,6 +64,10 @@ func storeVerifiedToken(ctx context.Context, target Target, token string) error 
 		return errUnverifiedToken{target: target.Describe(), reason: err.Error()}
 	}
 	defer func() { _ = res.Body.Close() }()
+	// NOT readCapped, and the reason is that nothing reads this body: only the
+	// status below decides anything. This is a DRAIN, so the connection can be
+	// reused, and a drain that stops early cannot mislead anybody — there is no
+	// value derived from these bytes that could come back short.
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<20))
 
 	switch {
@@ -103,6 +107,9 @@ func (e errUnverifiedToken) Error() string {
 // which points at the stack instead of at the pipe.
 const maxTokenBytes = 1 << 16
 
+// It keeps its own wording rather than calling readCapped: the subject is a
+// PIPE, not an endpoint, and "nothing was stored" is the fact the person at the
+// terminal needs. Same discipline, different noun.
 func readTokenFrom(r io.Reader) (string, error) {
 	raw, err := io.ReadAll(io.LimitReader(r, maxTokenBytes+1))
 	if err != nil {

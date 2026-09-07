@@ -66,6 +66,12 @@ func fetchDeployedSource(ctx context.Context, target Target, cred Credentials, n
 }
 
 // errorBody reads a non-2xx body, which is a diagnostic and therefore small.
+//
+// NOT readCapped, deliberately: this is the LAST thing shown before a command
+// fails, and refusing to print a diagnosis because it ran long would replace a
+// partial explanation with none at all. A truncated error message is still an
+// error message; a truncated payload is a lie. That is the whole line between
+// this and every other capped read in the package.
 func errorBody(res *http.Response) []byte {
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, managementBodyLimit))
 	return raw

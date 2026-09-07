@@ -338,7 +338,7 @@ func fetchStackRoles(ctx context.Context, target Target, cred Credentials) (stac
 		return stackRoles{}, fmt.Errorf("reach %s: %w", target.URL, err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	body, err := readCapped(res.Body, 4<<20, req.URL.String())
 	if err != nil {
 		return stackRoles{}, err
 	}
