@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -81,5 +82,43 @@ func TestRuntimePreparationAutomaticallyMigratesAndVerifies(t *testing.T) {
 					"planın parmak izi platforma DEĞİŞMEDEN gitmeli; sunucu onu yeniden hesaplayıp karşılaştırıyor")
 			}
 		})
+	}
+}
+
+// KAPI 5 · SUNUCUNUN DÜZELTMELERİ KULLANICININ KLAVYESİNDEN ERİŞİLEBİLİR OLMALI.
+//
+// `projectSDKVersion` kiracının KENDİ well-known belgesine gidiyor ve
+// CrashLoop'taki bir kiracıda o adres kapalı. Bu satır hata dönünce push
+// platforma TEK BİR İSTEK atmadan düşüyordu — yani operatör ve düzlem tarafında
+// servis etmeyen kiracının yükseltilebilmesi için yapılan her şey burada,
+// çağrılmadan önce ölüyordu. Canlıda ölçüldü: penny `na1m7lt2m`, 98 restart.
+func TestCloudRuntimeIsPreparedWhenTheProjectCannotReportItsVersion(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+
+	// Kiracı CEVAP VERMİYOR — CrashLoop'un tanımı.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	orig := CloudRuntimePreparer
+	t.Cleanup(func() { CloudRuntimePreparer = orig })
+	var asked int
+	CloudRuntimePreparer = func(context.Context, string, string, PlanRef) error {
+		asked++
+		return errors.New("platform reached")
+	}
+
+	var out bytes.Buffer
+	err := prepareCloudRuntime(context.Background(), dir, Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, false, &out, PlanFile{})
+	if asked != 1 {
+		t.Fatalf("platform ÇAĞRILMALI — karar ölçebilen tarafa devredilir; asked=%d err=%v\n%s", asked, err, out.String())
+	}
+	if !strings.Contains(out.String(), "could not be measured") {
+		t.Fatalf("kullanıcı neden platforma devredildiğini görmeli:\n%s", out.String())
 	}
 }

@@ -120,14 +120,31 @@ func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Cr
 	if want == "" {
 		return errors.New("cannot determine the SDK required by this checkout")
 	}
+	// ÖLÇÜLEMEYEN SÜRÜM BİR CEVAPTIR, HATA DEĞİL (FR-063) — VE BU SATIR
+	// SUNUCUDAKİ ÜÇ DÜZELTMEYİ KULLANICININ KLAVYESİNDEN ERİŞİLEMEZ KILIYORDU.
+	//
+	// `projectSDKVersion` kiracının KENDİ `/.well-known/palbase.json`'ına gidiyor.
+	// CrashLoop'taki bir kiracıda o adres kapalı, yani push platforma TEK BİR
+	// İSTEK atmadan düşüyordu. Operatör ve düzlem tarafında servis etmeyen
+	// kiracının yükseltilebilmesi için yapılan her şey, tam burada, çağrılmadan
+	// önce ölüyordu.
+	//
+	// KARAR ÖLÇEBİLEN TARAFA DEVREDİLİR. Düzlem kiracının damgasını ve imaj
+	// başlarını okuyabiliyor — koşan bir runtime istemeden. "Bilinmiyor" hâlinde
+	// onu çağırmak güvenli: `ensureTenantImage` hedefteki kiracıya, ön kontrol
+	// ve expand göçü geçene kadar DOKUNMUYOR.
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	running, err := projectSDKVersion(probeCtx, target, cred)
 	cancel()
-	if err != nil || running == "" {
-		return errors.New("could not verify the running SDK; no image or code was changed")
+	if err != nil {
+		running = ""
 	}
-	if running == want {
+	if running != "" && running == want {
 		return nil
+	}
+	if running == "" {
+		fmt.Fprintf(out, "runtime: this project is not answering, so its running SDK could not be measured; "+
+			"the platform decides from the migration stamp\n")
 	}
 	// A schema refusal must not replace a healthy image as a side effect.
 	if err := checkRuntimeSchemaPlan(ctx, dir, target, cred, approve, out); err != nil {
@@ -151,6 +168,9 @@ func prepareCloudRuntime(ctx context.Context, dir string, target Target, cred Cr
 		}
 		return fmt.Errorf("runtime preparation failed before code upload: %w", err)
 	}
+	// DOĞRULAMA YİNE ŞART: yükseltme BİTTİĞİNDE kiracı cevap veriyor olmalı.
+	// Yukarıdaki gevşetme yalnız BAŞLAMADAN önceki ölçüme ait — sonrasında
+	// "ölçemedim", yükseltmenin işe yaramadığı demektir.
 	probeCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
 	running, err = projectSDKVersion(probeCtx, target, cred)
 	cancel()

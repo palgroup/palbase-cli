@@ -128,8 +128,13 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// sorulur. Diğer her durumda eski satır basılır — kendi kendine barındırılan
 	// bir yığın için göç planı isteyecek bir kontrol düzlemi YOKTUR, ve olmayan
 	// bir şeyi sormak planı hatayla düşürmek olurdu.
+	// ÖLÇÜLEMEYEN SÜRÜM PLANLAYICIYA GİDER (FR-063). `running == ""` "değişen bir
+	// şey yok" demek DEĞİL, "kiracı cevap veremiyor" demek — ve tam da o kiracı
+	// yükseltilmeye muhtaç. Eskiden bu dal sessizce `writeImagePlan`'e düşüyor,
+	// o da `current == ""` görüp hiçbir şey basmıyordu: plan dosyası yazılıyor
+	// ama İÇİ BOŞ, ve push bir şey anlatmayan bir planı taşıyordu.
 	switch {
-	case running == "" || running == installed || CloudRuntimePlanner == nil:
+	case running == installed || CloudRuntimePlanner == nil:
 		writeImagePlan(out, running, installed)
 	default:
 		section, err := CloudRuntimePlanner(ctx, target.URL, installed)
