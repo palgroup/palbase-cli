@@ -345,6 +345,18 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out, "up", "-d", "--wait", "postgres"); err != nil {
 		return err
 	}
+	// THE PRECHECKS FIRST, AND A FAILURE HERE DOES NOT START THE STACK.
+	//
+	// The local stack upgrades the same way the cloud does: read-only prechecks
+	// run against the database BEFORE anything writes to it, so a schema this
+	// release cannot migrate is refused while the old one is still intact rather
+	// than half-migrated. The exit code carries the verdict (70 = blocked) and
+	// compose hands it back as an error, so the refusal below is the report.
+	fmt.Fprintln(out, "▸ checking every module's migration prechecks")
+	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out,
+		"run", "--rm", "--no-deps", "palsvc", "--migrate-prechecks"); err != nil {
+		return fmt.Errorf("migration prechecks refused the local upgrade (a platform-side migration issue; the stack was not started): %w", err)
+	}
 	fmt.Fprintln(out, "▸ applying every module's schema")
 	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out,
 		"run", "--rm", "--no-deps", "palsvc", "--migrate-only"); err != nil {
