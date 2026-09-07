@@ -39,6 +39,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
 // StackDirEnv points at the stack this machine boots from: the directory holding
@@ -745,7 +747,10 @@ func (p *prefixed) Write(b []byte) (int, error) {
 // 503 on their first real request. /readyz routes to the palsvc cluster, so a
 // 200 there is palsvc saying so.
 func waitForStack(ctx context.Context, url, stackDir, project, envFile string, limit time.Duration) error {
-	client := &http.Client{Timeout: 2 * time.Second}
+	// Two seconds per attempt, and the same guard as every other stack client:
+	// a short timeout is a reason to build a client, never a reason to opt out
+	// of what may leave in the clear.
+	client := &http.Client{Timeout: 2 * time.Second, Transport: sealedclient.Guard(nil)}
 	deadline := time.Now().Add(limit)
 	var last string
 	for time.Now().Before(deadline) {

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/palgroup/palbase-cli/internal/authcontract"
+	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
 type OAuthSelection struct {
@@ -22,7 +23,47 @@ type OAuthSelection struct {
 	ClientKeys     []string `json:"client_keys,omitempty"`
 }
 
-func socialRequest(ctx context.Context, target Target, path string, cred Credentials) ([]byte, error) {
+// sealing is what a request needs BEYOND itself in order to be sealed: which
+// stack the address is (from the publishable key), and which root vouches for
+// that stack's sealing key when it is one an operator hosts themselves.
+//
+// It is carried rather than derived here because both facts already travel with
+// the environment an app is being linked against — the key it ships and the
+// `sealed_root` the stack handed over at link time
+// (internal/backend/app_environments.go:52).
+type sealing struct {
+	apiKey     string
+	sealedRoot string
+}
+
+// do sends one request to a stack, sealed when the server refuses plaintext on
+// that path and plain when it does not.
+//
+// ONE RULE, ASKED TWICE, NEVER WRITTEN TWICE. `sealedclient.Required` is the
+// CLI's only copy of the server's `sealedRequired`
+// (v2/internal/server/sealed.go:365) and `Client.Do` asks it too. It is asked
+// here as well only because building a sealing client requires knowing WHICH
+// stack this is, and the operator-facing read this function also serves
+// (`/v1/management/auth/social-auth`) carries a session token rather than a
+// publishable key — there is no ref in it to identify a stack with, and none is
+// needed, because that path is not under a sealed prefix.
+func (s sealing) do(target Target, client *http.Client, req *http.Request) (*http.Response, error) {
+	if !sealedclient.Required(req.URL.Path) {
+		return client.Do(req)
+	}
+	sealed, err := sealedclient.New(sealedclient.Config{
+		BaseURL:      target.URL,
+		APIKey:       s.apiKey,
+		SelfHostRoot: s.sealedRoot,
+		HTTPClient:   client,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sealed.Do(req)
+}
+
+func socialRequest(ctx context.Context, target Target, path string, cred Credentials, seal sealing) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(target.URL, "/")+path, nil)
 	if err != nil {
 		return nil, err
@@ -31,7 +72,7 @@ func socialRequest(ctx context.Context, target Target, path string, cred Credent
 	req.Header.Set("Palbase-Auth-Contract", "1")
 	client := *stackClient(target)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	res, err := client.Do(req)
+	res, err := seal.do(target, &client, req)
 	if err != nil {
 		return nil, fmt.Errorf("read social auth config from %s: %w", target.URL, err)
 	}
@@ -56,12 +97,16 @@ func socialRequest(ctx context.Context, target Target, path string, cred Credent
 
 // Resolve only an explicit binding or an unambiguous native identifier match.
 // A sole web client in another application is not evidence that it is ours.
-func linkedOAuth(ctx context.Context, target Target, platform, publishableKey string, selection OAuthSelection) (*authcontract.SocialSnapshot, OAuthSelection, error) {
+func linkedOAuth(ctx context.Context, target Target, platform, publishableKey, sealedRoot string, selection OAuthSelection) (*authcontract.SocialSnapshot, OAuthSelection, error) {
 	cred, _, err := Credential(target.URL)
 	if err != nil {
 		return nil, selection, err
 	}
-	admin, err := socialRequest(ctx, target, "/v1/management/auth/social-auth", cred)
+	// The snapshot read below is under `/auth/`, which refuses a plaintext
+	// request; the admin read is under `/v1/management/`, which does not. Both
+	// go through the same function and the same rule decides.
+	seal := sealing{apiKey: publishableKey, sealedRoot: sealedRoot}
+	admin, err := socialRequest(ctx, target, "/v1/management/auth/social-auth", cred, seal)
 	if err != nil {
 		return nil, selection, err
 	}
@@ -128,7 +173,7 @@ func linkedOAuth(ctx context.Context, target Target, platform, publishableKey st
 	for _, key := range selection.ClientKeys {
 		query.Add("client_key", key)
 	}
-	raw, err := socialRequest(ctx, target, "/auth/oauth/config?"+query.Encode(), Credentials{Kind: KindKey, Value: publishableKey})
+	raw, err := socialRequest(ctx, target, "/auth/oauth/config?"+query.Encode(), Credentials{Kind: KindKey, Value: publishableKey}, seal)
 	if err != nil {
 		return nil, selection, err
 	}
@@ -207,7 +252,7 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 			return result, fmt.Errorf("%s: cannot refresh complete platform config while the environment is unavailable", name)
 		}
 		remote := Target{URL: env.BaseURL, Insecure: target.Insecure}
-		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, target.OAuth[platform])
+		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, env.SealedRoot, target.OAuth[platform])
 		if err != nil {
 			return result, fmt.Errorf("%s/%s: %w", name, platform, err)
 		}

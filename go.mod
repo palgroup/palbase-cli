@@ -3,6 +3,7 @@ module github.com/palgroup/palbase-cli
 go 1.26.6
 
 require (
+	github.com/cloudflare/circl v1.6.3
 	github.com/coder/websocket v1.8.14
 	github.com/getkin/kin-openapi v0.144.0
 	github.com/go-jose/go-jose/v4 v4.1.4
@@ -10,8 +11,9 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.46.0
 	golang.org/x/sys v0.39.0
-	golang.org/x/term v0.26.0
+	golang.org/x/term v0.38.0
 )
 
 require (

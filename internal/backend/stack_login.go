@@ -17,6 +17,8 @@ import (
 	"crypto/tls"
 	"net/http"
 	"time"
+
+	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
 // stackClient talks to one project, trusting a self-signed certificate only
@@ -27,8 +29,10 @@ func HTTPClient(t Target) *http.Client { return stackClient(t) }
 
 func stackClient(t Target) *http.Client {
 	c := &http.Client{Timeout: 5 * time.Minute}
+	base := http.DefaultTransport
 	if t.Insecure {
-		c.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in at link time
+		base = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in at link time
 	}
+	c.Transport = sealedclient.Guard(base)
 	return c
 }

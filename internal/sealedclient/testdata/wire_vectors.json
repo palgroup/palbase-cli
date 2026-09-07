@@ -1,0 +1,273 @@
+{
+  "suite": "DHKEM-X25519-HKDF-SHA256/HKDF-SHA256/ChaCha20Poly1305",
+  "version": 2,
+  "vectors": [
+    {
+      "name": "login",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "POST",
+      "path": "/auth/login",
+      "recipientPrivate": "Xmu/Y9V80uvqf4ozMbIWXHGmA2cmdgXPboRz6rhLNCA=",
+      "recipientPublic": "nPFYh+SSP7kZ8fLTlWMVMHgbnf3UwzmBiPRg3bVLGDc=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "bLLX5QQU/dj0TrfCbCUpeHMnNwilNqRPmQ9LAyDosDQ=",
+        "ct": "O1Jw6XB6CIsgOZhFiw4FNuNWgx80U/jn2TDhAkgd+31h0XNf6kw0HQuanI9dckjNZjZ1UxlJwQMs3ShmdA0q",
+        "ict": "application/json",
+        "ts": 1786000000
+      },
+      "expectedPlaintext": "eyJlbWFpbCI6ImFAZXhhbXBsZS50ZXN0IiwicGFzc3dvcmQiOiJodW50ZXIyIn0=",
+      "expectedExporter": "1grbvGWNJFctzqUvjT0zE3vZYfo8IgEoYT4r2qierbM="
+    },
+    {
+      "name": "mutating with idempotency key",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "POST",
+      "path": "/todos",
+      "idempotencyKey": "idem-01H",
+      "recipientPrivate": "NrEkHhamFf+75JDKydDoJBDIOJtxKXlqFzgcX6zYEbY=",
+      "recipientPublic": "nuybV+FfsK3+sbia9XWQelbO00LQGyHQ/LvPy7UauyU=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "BdFHgP/kT4GMdXwvheD4814sDFLof+IRFG8lKvNxuGE=",
+        "ct": "DCVVUWJ12p9+p1LrFmV1ELnLgtIe8UIgGJGLonWESSoAPSoO",
+        "ict": "application/json",
+        "ts": 1786000000
+      },
+      "expectedPlaintext": "eyJ0aXRsZSI6ImJ1eSBtaWxrIn0=",
+      "expectedExporter": "cs7NXEuKzQch8PFpsLIZLamnSGCLeh4F3K6AyL4t64k="
+    },
+    {
+      "name": "http QUERY verb",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "QUERY",
+      "path": "/todos/search",
+      "recipientPrivate": "YOsdX143rj0xBWXtIvVduVKEX5WTUUMFPtAGy3oB29k=",
+      "recipientPublic": "vGFdSrDe5NZVcGWYSlG6WHRY/Nk+0s9qhWBsI3mBfDM=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "8tfvnzGd3/q64OsP7s+nzztlIOQI74TcgKpOEqMx3DQ=",
+        "ct": "NaoV4pdgn/x0ecqGX5nJfqemY8JDhorQXm2Xhg==",
+        "ict": "application/json",
+        "ts": 1786000000
+      },
+      "expectedPlaintext": "eyJxIjoibWlsayJ9",
+      "expectedExporter": "XCtMcKuRMLoOy+CLvwO7lo6tK4EexUnoLMRTexswq5s="
+    },
+    {
+      "name": "form encoded inner type",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "POST",
+      "path": "/oauth/token",
+      "recipientPrivate": "23wVxDEMpQ1DF6287kt4XeHlDDJ12QM7gHQjRDbGqSY=",
+      "recipientPublic": "Wb6luqKZeKvobrwDKzM6cmMQFj5KszHH5G6Z/rflvxo=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "5PWvJ6N5TH4SbYbcxc39QQArwU/+/iYnrTANZjJ/62g=",
+        "ct": "Mg0bkieZNkrfXFuzbbKpT2jmh82oHW6lNAG3Kw/4Bhw22z27CDh8ybxuIyTmMcfEAyKXxynzam0gLw==",
+        "ict": "application/x-www-form-urlencoded",
+        "ts": 1786000000
+      },
+      "expectedPlaintext": "Z3JhbnRfdHlwZT1yZWZyZXNoX3Rva2VuJnJlZnJlc2hfdG9rZW49YWJj",
+      "expectedExporter": "5s0zZMJGxFD4fUbBlREV2l/16eL6Saff+ICHbzQQICY="
+    },
+    {
+      "name": "empty body",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "POST",
+      "path": "/auth/logout",
+      "recipientPrivate": "8cYrlrMPw2F3e1TVJCeA206pq5hBeSsWw/zkn/DSuZ0=",
+      "recipientPublic": "MbEGyFXKPsdTyX/Ecz2XghyYorHok3lOQyVYoQtITlA=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "qRRytkQjNUNHRIyQ/oA+3Z0lN/pbsECkHBMilxpC1E4=",
+        "ct": "ll9SlOgN770N8x1VGbd9mg==",
+        "ict": "application/json",
+        "ts": 1786000000
+      },
+      "expectedPlaintext": "",
+      "expectedExporter": "AJNETa5T4IJSarv/7dVEcJd1MvGuGymU9km8mlEplZE="
+    },
+    {
+      "name": "bodyless read (user-flags snapshot)",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "GET",
+      "path": "/v1/user-flags/snapshot",
+      "recipientPrivate": "q9sERH9keweMjGYogkzXIYrqJ27ynYBbvYj0BX/dG+4=",
+      "recipientPublic": "hclbVqpLojSCXEm/D1qiqYriOPJG7P+YyBauxVMLvio=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "+E9cQlOB9/MXXwUD4OYJy2JgZDDxVjU+vXIAw4LTUXk=",
+        "ct": "/co298cliJVJ5Ss4dbpKlw==",
+        "ict": "application/json",
+        "ts": 1786000000
+      },
+      "envelopeHeader": "eyJ2IjoyLCJraWQiOiJ2ZWN0b3Ita2V5IiwiZW5jIjoiK0U5Y1FsT0I5L01YWHdVRDRPWUp5MkpnWkREeFZqVSt2WElBdzRMVFVYaz0iLCJjdCI6Ii9jbzI5OGNsaUpWSjVTczRkYnBLbHc9PSIsImljdCI6ImFwcGxpY2F0aW9uL2pzb24iLCJ0cyI6MTc4NjAwMDAwMH0",
+      "expectedPlaintext": "",
+      "expectedExporter": "dwQiun/8rbX0fL0pJCQEKh5C3u64SPX/zdIe2EAiXpA="
+    },
+    {
+      "name": "bodyless read (auth user)",
+      "host": "todoappm8p6zm.dev.palbase.studio",
+      "method": "GET",
+      "path": "/auth/user",
+      "recipientPrivate": "koi0l94yf6+gEEePiPxmb+2UagmCttAZOsFLCY9CC08=",
+      "recipientPublic": "OCGLkR/DkSf3smXeNMp4RORYt4hAgzN2GEKOI2+PSjk=",
+      "envelope": {
+        "v": 2,
+        "kid": "vector-key",
+        "enc": "yFSijpaPObLnpWz0r4nOQ1+0DX6AT9pGyqaQQmwtFQs=",
+        "ct": "8jBcnsolUCF6sv+R8kODLQ==",
+        "ict": "application/json",
+        "ts": 1786000000
+      },
+      "envelopeHeader": "eyJ2IjoyLCJraWQiOiJ2ZWN0b3Ita2V5IiwiZW5jIjoieUZTaWpwYVBPYkxucFd6MHI0bk9RMSswRFg2QVQ5cEd5cWFRUW13dEZRcz0iLCJjdCI6IjhqQmNuc29sVUNGNnN2K1I4a09ETFE9PSIsImljdCI6ImFwcGxpY2F0aW9uL2pzb24iLCJ0cyI6MTc4NjAwMDAwMH0",
+      "expectedPlaintext": "",
+      "expectedExporter": "fIEI4iBBDuQ8o6zFcipvHrpx9m1lZPirUBkxOlEwAZ0="
+    }
+  ],
+  "keysets": [
+    {
+      "name": "valid",
+      "rootPublic": "OvpMcY3nwCQ4gm/hgUvAirV0aUFnaTdZZEgmTaYxFQo=",
+      "signedB64": "eyJrZXlzZXQiOnsidiI6MSwidmVyc2lvbiI6MTAsImV4cGlyZXMiOjE3ODYwODY0MDAsImtleXMiOlt7ImtpZCI6InZlY3Rvci1rZXkiLCJhbGciOiJESEtFTS1YMjU1MTktSEtERi1TSEEyNTYvSEtERi1TSEEyNTYvQ2hhQ2hhMjBQb2x5MTMwNSIsInB1YiI6IkFSODVncU5WOUs4eFNqeXFoRGdnZHV4T21oSm1zY2RNZmtlbXFvdFpYMGc9In1dfSwic2lnIjoiUEN4SGhpbVJHMWh4WjNocStCcDh4d2RjNjdMblVqM08rMkFHMFhYYkFqSUlSV1ltRXp0UmQweXhlRWlmSkhvcUtQMmp4ODdaZWI2bzh6UXRGNVBkRFE9PSIsInJvb3RLaWQiOiJyb290LXZlY3RvciIsImFsZyI6ImVkMjU1MTkifQ==",
+      "shouldVerify": true,
+      "lastSeenVersion": 0,
+      "nowUnix": 1786000000
+    },
+    {
+      "name": "substituted key",
+      "rootPublic": "OvpMcY3nwCQ4gm/hgUvAirV0aUFnaTdZZEgmTaYxFQo=",
+      "signedB64": "eyJrZXlzZXQiOnsidiI6MSwidmVyc2lvbiI6MTAsImV4cGlyZXMiOjE3ODYwODY0MDAsImtleXMiOlt7ImtpZCI6InZlY3Rvci1rZXkiLCJhbGciOiJESEtFTS1YMjU1MTktSEtERi1TSEEyNTYvSEtERi1TSEEyNTYvQ2hhQ2hhMjBQb2x5MTMwNSIsInB1YiI6Im9TcE4vN3BsdlhwY1cxbk1VSDBuanpMZ2Fqc3IzOHpucWxZeVBGTS9QRU09In1dfSwic2lnIjoiUEN4SGhpbVJHMWh4WjNocStCcDh4d2RjNjdMblVqM08rMkFHMFhYYkFqSUlSV1ltRXp0UmQweXhlRWlmSkhvcUtQMmp4ODdaZWI2bzh6UXRGNVBkRFE9PSIsInJvb3RLaWQiOiJyb290LXZlY3RvciIsImFsZyI6ImVkMjU1MTkifQ==",
+      "shouldVerify": false,
+      "reason": "signature does not cover the swapped key",
+      "lastSeenVersion": 0,
+      "nowUnix": 1786000000
+    },
+    {
+      "name": "expired",
+      "rootPublic": "OvpMcY3nwCQ4gm/hgUvAirV0aUFnaTdZZEgmTaYxFQo=",
+      "signedB64": "eyJrZXlzZXQiOnsidiI6MSwidmVyc2lvbiI6MTEsImV4cGlyZXMiOjE3ODU5OTY0MDAsImtleXMiOlt7ImtpZCI6InZlY3Rvci1rZXkiLCJhbGciOiJESEtFTS1YMjU1MTktSEtERi1TSEEyNTYvSEtERi1TSEEyNTYvQ2hhQ2hhMjBQb2x5MTMwNSIsInB1YiI6IkFSODVncU5WOUs4eFNqeXFoRGdnZHV4T21oSm1zY2RNZmtlbXFvdFpYMGc9In1dfSwic2lnIjoiRWZEbVhGR0gxa1FYcXBoTzVsMXpuOU1hdTZ2N2s2Ny9NZFQ1NFRESUhmczNqUXRnS0tEcC8zU2h3QUp2Y3YwRHM5Z24rVE5vc0tTRW9jSmxGVjZUQVE9PSIsInJvb3RLaWQiOiJyb290LXZlY3RvciIsImFsZyI6ImVkMjU1MTkifQ==",
+      "shouldVerify": false,
+      "reason": "freeze protection: past its expiry",
+      "lastSeenVersion": 0,
+      "nowUnix": 1786000000
+    },
+    {
+      "name": "rollback",
+      "rootPublic": "OvpMcY3nwCQ4gm/hgUvAirV0aUFnaTdZZEgmTaYxFQo=",
+      "signedB64": "eyJrZXlzZXQiOnsidiI6MSwidmVyc2lvbiI6NSwiZXhwaXJlcyI6MTc4NjA4NjQwMCwia2V5cyI6W3sia2lkIjoidmVjdG9yLWtleSIsImFsZyI6IkRIS0VNLVgyNTUxOS1IS0RGLVNIQTI1Ni9IS0RGLVNIQTI1Ni9DaGFDaGEyMFBvbHkxMzA1IiwicHViIjoiQVI4NWdxTlY5Szh4U2p5cWhEZ2dkdXhPbWhKbXNjZE1ma2VtcW90WlgwZz0ifV19LCJzaWciOiJacngzWTFMMzliQlI4N0lOMk5LUWgzekkrODNUSkF3dlNORE5kRUhsM3NDYmFtekxEclR5RmtKK1FNQXFrUUQ1WUhXUkFuaFJYandySDNvSU95aldBdz09Iiwicm9vdEtpZCI6InJvb3QtdmVjdG9yIiwiYWxnIjoiZWQyNTUxOSJ9",
+      "shouldVerify": false,
+      "reason": "rollback protection: version 5 is not newer than the 10 already seen",
+      "lastSeenVersion": 10,
+      "nowUnix": 1786000000
+    }
+  ],
+  "derivations": [
+    {
+      "name": "generation zero",
+      "rootHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "stackRef": "todoappm8p6zm",
+      "generation": 0,
+      "expectedKid": "todoappm8p6zm.0",
+      "expectedPublic": "tX+i4GvZZXRLUOmNgam6rmUx2DNZAQVXkTGGILvMEiM="
+    },
+    {
+      "name": "a rotated generation",
+      "rootHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "stackRef": "todoappm8p6zm",
+      "generation": 7,
+      "expectedKid": "todoappm8p6zm.7",
+      "expectedPublic": "zq8VMp7ZLKiyJe6fuYhvp7GN6gQ/Tla42et8SE9W2R4="
+    },
+    {
+      "name": "a different environment, same generation",
+      "rootHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "stackRef": "otherenv9x2k",
+      "generation": 7,
+      "expectedKid": "otherenv9x2k.7",
+      "expectedPublic": "55K6d4h7X2RuShjQH9jQBTE6E8t3axk1OxJROhHgSQs="
+    },
+    {
+      "name": "a ref carrying the legal punctuation",
+      "rootHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "stackRef": "env-with_both-9",
+      "generation": 1,
+      "expectedKid": "env-with_both-9.1",
+      "expectedPublic": "i4ynFWKx5qElfqYXFRMbFZaxbAf64E6qL/RTC5mPonk="
+    }
+  ],
+  "responses": [
+    {
+      "name": "ok json",
+      "exporterB64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "envelope": {
+        "v": 2,
+        "n": "9hwewLU0AcTnjvLX",
+        "ct": "L10QyZJzUoqOPNXS0YlWpexd0DEJIfOsy5J/dJlbv10/HsnwhFlk0hP6SzpHJmUgPmw=",
+        "ict": "application/json",
+        "st": 200
+      },
+      "expectedPlaintext": "eyJpZCI6InRvZG9fMSIsInRpdGxlIjoiYnV5IG1pbGsifQ==",
+      "expectedStatus": 200
+    },
+    {
+      "name": "created",
+      "exporterB64": "HyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4=",
+      "envelope": {
+        "v": 2,
+        "n": "7Ax4wGo+j8RC3BUI",
+        "ct": "dy/nVdMOir2nXJMWEwiTioDVjuRwzufTDMQjnSo6LQ==",
+        "ict": "application/json",
+        "st": 201
+      },
+      "expectedPlaintext": "eyJpZCI6InRvZG9fMiJ9",
+      "expectedStatus": 201
+    },
+    {
+      "name": "forbidden",
+      "exporterB64": "Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF0=",
+      "envelope": {
+        "v": 2,
+        "n": "ZK9wTe7Uptf4uyYZ",
+        "ct": "/NBt3Dq1ZR6550miZmi5SIlWMxyuv1qyNLyLxgR7oTeeOVa+5g==",
+        "ict": "application/json",
+        "st": 403
+      },
+      "expectedPlaintext": "eyJlcnJvciI6ImZvcmJpZGRlbiJ9",
+      "expectedStatus": 403
+    },
+    {
+      "name": "empty body",
+      "exporterB64": "XV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3w=",
+      "envelope": {
+        "v": 2,
+        "n": "2EbXu/Fn7TuPGoQN",
+        "ct": "1acqxDFBvjpS556NRXG4JA==",
+        "ict": "application/json",
+        "st": 204
+      },
+      "expectedPlaintext": "",
+      "expectedStatus": 204
+    },
+    {
+      "name": "a different inner type",
+      "exporterB64": "fH1+f4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmps=",
+      "envelope": {
+        "v": 2,
+        "n": "0Ew92OCc8SIQHdHb",
+        "ct": "bIU0Z8DPvw4aDqGq1Uc8E4hrF2LSezGkyTMbJaw=",
+        "ict": "text/html",
+        "st": 200
+      },
+      "expectedPlaintext": "PGh0bWw+PC9odG1sPg==",
+      "expectedStatus": 200
+    }
+  ]
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
 // attachToProject streams a device's console from the project this verb acts on
@@ -79,9 +80,12 @@ func resolveSessionOnProject(cmd *cobra.Command, target backend.Target, cred bac
 	cred.Apply(req)
 
 	client := &http.Client{Timeout: 30 * time.Second}
+	base := http.DefaultTransport
 	if target.Insecure {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in at link time
+		base = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in at link time
 	}
+	// A stack address, so the same guard as every other stack client.
+	client.Transport = sealedclient.Guard(base)
 	res, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("reach %s: %w", target.URL, err)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/palgroup/palbase-cli/internal/sealedclient"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,6 +24,16 @@ func oauthLinkServer(t *testing.T, snapshot string) *httptest.Server {
 	admin, err := json.Marshal(map[string]any{"contract_revision": 1, "credentials": []any{}, "providers": providers})
 	require.NoError(t, err)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A stack with no fleet binding publishes no sealing keyset and says so
+		// (v2/internal/server/sealed.go:264). This fixture is that stack, which
+		// is why `/auth/oauth/config` below may be read in the clear: the
+		// server's own condition for requiring a seal is a published document.
+		// The keyset read is not part of the auth contract and carries no
+		// contract header, so it is answered before that assertion.
+		if r.URL.Path == sealedclient.KeysetPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		require.Equal(t, "1", r.Header.Get("Palbase-Auth-Contract"))
 		w.Header().Set("Palbase-Auth-Contract", "1")
 		switch r.URL.Path {
@@ -104,7 +115,7 @@ func TestLinkSelectsOnlyExactNativeTargetAndValidatesSnapshot(t *testing.T) {
 	require.NoError(t, os.Mkdir("Consumer.xcodeproj", 0755))
 	require.NoError(t, os.WriteFile("Consumer.xcodeproj/project.pbxproj", []byte(`PRODUCT_BUNDLE_IDENTIFIER = com.example.app;`), 0644))
 	srv := oauthLinkServer(t, iosSnapshot)
-	snapshot, selection, err := linkedOAuth(context.Background(), Target{URL: srv.URL}, "ios", "pb_env_cPUBLIC", OAuthSelection{})
+	snapshot, selection, err := linkedOAuth(context.Background(), Target{URL: srv.URL}, "ios", "pb_env_cPUBLIC", "", OAuthSelection{})
 	require.NoError(t, err)
 	require.Equal(t, "consumer", selection.ApplicationKey)
 	require.Equal(t, "release", selection.Variant)
@@ -118,7 +129,7 @@ func TestLinkSelectsOnlyExactNativeTargetAndValidatesSnapshot(t *testing.T) {
 func TestLinkRefusesUnidentifiedNativeApplication(t *testing.T) {
 	inScratchCheckout(t)
 	srv := oauthLinkServer(t, iosSnapshot)
-	_, _, err := linkedOAuth(context.Background(), Target{URL: srv.URL}, "ios", "pb_env_cPUBLIC", OAuthSelection{})
+	_, _, err := linkedOAuth(context.Background(), Target{URL: srv.URL}, "ios", "pb_env_cPUBLIC", "", OAuthSelection{})
 	require.ErrorContains(t, err, "oauth.ios")
 }
 

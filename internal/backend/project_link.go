@@ -33,6 +33,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
 // projectAppID names the app slot a linked checkout writes.
@@ -545,9 +547,13 @@ func isApplePlatform(platform string) bool {
 // promised this distinction; only the code was missing it.
 func describeStack(ctx context.Context, base string, insecure bool) (stackDescription, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
+	transport := http.DefaultTransport
 	if insecure {
-		client.Transport = insecureTransport()
+		transport = insecureTransport()
 	}
+	// Its own timeout, but never its own rule about what may leave in the
+	// clear: every client that addresses a stack carries the guard.
+	client.Transport = sealedclient.Guard(transport)
 	status, body, err := sendWaitingForReady(ctx, client, func() (*http.Request, error) {
 		return http.NewRequestWithContext(ctx, http.MethodGet, base+wellKnownPath, nil)
 	}, os.Stderr, stackReadyWait, stackReadyRetryEvery)
