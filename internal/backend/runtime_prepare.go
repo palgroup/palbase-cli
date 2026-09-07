@@ -258,8 +258,14 @@ func writeRuntimePlan(w io.Writer, section json.RawMessage) {
 		return
 	}
 	fmt.Fprintln(w, "runtime")
-	fmt.Fprintf(w, "  %s → %s (migrations run inside the running pod before the swap; the swap is a process restart)\n",
-		rp.Running, rp.Target)
+	// CÜMLE MAKİNEYİ ADLANDIRMAZ. İlk hâli "inside the running pod" diyordu ve
+	// docs kapısı onu yakaladı (`cloud-boundary.test.ts`): "pod" bulutun
+	// dağıtım birimi, ve kullanıcı yüzeyi bulutun nasıl çalıştığını anlatmaz.
+	// Kullanıcının bilmesi gereken şey makine değil GÜVENCE: göç, proje HÂLÂ
+	// SERVİS EDERKEN ve yeni sürüm devralmadan ÖNCE koşar; devir saniyelik bir
+	// yeniden başlatmadır ve istekler düşmez, bekler.
+	fmt.Fprintf(w, "  %s → %s (migrations run against the live project before the new version takes over; "+
+		"the switch is a restart of seconds and requests wait)\n", rp.Running, rp.Target)
 	for _, m := range rp.Modules {
 		fmt.Fprintf(w, "  %s: expand %d→%d, contract %d→%d\n", m.Module, m.ExpandFrom, m.ExpandTo, m.ContractFrom, m.ContractTo)
 	}

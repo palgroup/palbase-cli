@@ -564,7 +564,7 @@ func TestPlanOfALocalStackHasNoRuntimeSectionButStillWritesAPlan(t *testing.T) {
 		Credentials{Value: "k", Kind: KindKey}, &out); err != nil {
 		t.Fatalf("plan: %v\n%s", err, out.String())
 	}
-	if strings.Contains(out.String(), "migrations run inside the running pod") {
+	if strings.Contains(out.String(), "before the new version takes over") {
 		t.Fatalf("yerel yığın için runtime bölümü basıldı:\n%s", out.String())
 	}
 	// VE ESKİ SATIR HÂLÂ BASILIR: bulut olmayan bir hedefte söylenecek şey
