@@ -96,6 +96,13 @@ type stackImage struct {
 	upstream bool
 }
 
+// prechecksMinSDK: `--migrate-prechecks` bayrağını taşıyan İLK çekirdek sürümü.
+//
+// Yerel yığının imaj etiketi PROJENİN SDK sürümüdür (D-1), yani bu CLI'ın kendi
+// yayınından ESKİ bir projede koşması normaldir — ve o imaj bayrağı tanımaz.
+// Değeri, ön kontrolleri yayımlayan çekirdek sürümüyle aynı olmak ZORUNDA.
+const prechecksMinSDK = "38.0.0"
+
 // installedSDKVersion, kurulu paketin TAM sürümünü verir — imajın etiketi budur.
 //
 // Eskiden bir TABLO okunuyordu (`stack-images.json`, SDK major'ı → dört imaj).
@@ -352,10 +359,22 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	// release cannot migrate is refused while the old one is still intact rather
 	// than half-migrated. The exit code carries the verdict (70 = blocked) and
 	// compose hands it back as an error, so the refusal below is the report.
-	fmt.Fprintln(out, "▸ checking every module's migration prechecks")
-	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out,
-		"run", "--rm", "--no-deps", "palsvc", "--migrate-prechecks"); err != nil {
-		return fmt.Errorf("migration prechecks refused the local upgrade (a platform-side migration issue; the stack was not started): %w", err)
+	//
+	// THE FLOOR IS NOT A FALLBACK. The local stack's image tag IS the project's
+	// SDK version, so this CLI legitimately runs against projects older than
+	// itself — and an image published before the prechecks existed answers
+	// `flag provided but not defined: -migrate-prechecks` and exits 1 (measured
+	// against palsvc:37.0.0). Without the floor, installing this CLI would break
+	// `palbase start` for every project that has not upgraded yet. The floor is
+	// the same single version axis the product already has, not a second one.
+	if compareSemver(sdkVersion, prechecksMinSDK) < 0 {
+		fmt.Fprintf(out, "▸ migration prechecks need SDK %s or newer; this project pins %s — skipping\n", prechecksMinSDK, sdkVersion)
+	} else {
+		fmt.Fprintln(out, "▸ checking every module's migration prechecks")
+		if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out,
+			"run", "--rm", "--no-deps", "palsvc", "--migrate-prechecks"); err != nil {
+			return fmt.Errorf("migration prechecks refused the local upgrade (a platform-side migration issue; the stack was not started): %w", err)
+		}
 	}
 	fmt.Fprintln(out, "▸ applying every module's schema")
 	if err := compose(ctx, stackDir, project, envFile, dir, bind, settled, out,
