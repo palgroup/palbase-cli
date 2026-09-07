@@ -167,27 +167,18 @@ func TestAMissingFileIsNotAFollowKiller(t *testing.T) {
 	}
 }
 
-func TestFirstBootedUDID(t *testing.T) {
+// A runtime can hold both states at once; only the booted ones are searchable.
+func TestBootedDevicesSkipsShutdownOnes(t *testing.T) {
 	payload := []byte(`{"devices":{
 		"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[
 			{"udid":"AAA","state":"Shutdown","name":"iPhone 15"},
 			{"udid":"BBB","state":"Booted","name":"iPhone 17 Pro"}]}}`)
-	udid, err := firstBootedUDID(payload)
+	devices, err := bootedDevices(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if udid != "BBB" {
-		t.Errorf("picked %q, want the BOOTED device", udid)
-	}
-}
-
-func TestNoBootedSimulatorSaysWhatToDo(t *testing.T) {
-	_, err := firstBootedUDID([]byte(`{"devices":{"rt":[{"udid":"AAA","state":"Shutdown"}]}}`))
-	if err == nil {
-		t.Fatal("expected an error when nothing is booted")
-	}
-	if !strings.Contains(err.Error(), "--device") {
-		t.Errorf("the error must tell the user the way out, got: %v", err)
+	if len(devices) != 1 || devices[0].UDID != "BBB" {
+		t.Errorf("picked %+v, want only the BOOTED device", devices)
 	}
 }
 

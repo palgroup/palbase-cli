@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -118,7 +117,10 @@ func tailCmd() *cobra.Command {
 		Short: "Tail the in-app console of a simulator app",
 		Long: "Reads the console records the SDK writes inside the app's simulator\n" +
 			"container. No network and no credentials are involved — the container is\n" +
-			"a directory on this machine.",
+			"a directory on this machine.\n\n" +
+			"Every booted simulator is searched and the newest session wins, because\n" +
+			"\"the booted one\" is not a thing once two are up. Pass --device to look in\n" +
+			"exactly one.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			session, err := locateSession(device, bundleID)
@@ -158,7 +160,7 @@ func tailCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "keep watching for new records")
 	cmd.Flags().StringVar(&bundleID, "app", "", "bundle identifier, when several apps use the SDK")
-	cmd.Flags().StringVar(&device, "device", "", "simulator UDID (default: the booted one)")
+	cmd.Flags().StringVar(&device, "device", "", "simulator UDID (default: search every booted simulator)")
 	cmd.Flags().BoolVar(&errorsOnly, "errors", false, "only failed requests and error logs")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit raw records, one JSON object per line")
 	cmd.Flags().IntVar(&limit, "limit", 50, "how many existing records to print before following")
@@ -170,25 +172,37 @@ func tailCmd() *cobra.Command {
 type sessionFile struct {
 	path      string
 	container string
+	device    simulator
 	modified  time.Time
 }
 
+// describe names the device as well as the session, because with more than one
+// simulator booted "session 8F3A" does not say where it was found — and where
+// it was found is the question that sent somebody looking in the first place.
 func (s sessionFile) describe() string {
-	return fmt.Sprintf("%s · session %s",
-		filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(s.container)))),
-		strings.TrimSuffix(filepath.Base(s.path), ".jsonl"))
+	app := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(s.container))))
+	session := strings.TrimSuffix(filepath.Base(s.path), ".jsonl")
+	if s.device.UDID == "" {
+		return fmt.Sprintf("%s · session %s", app, session)
+	}
+	return fmt.Sprintf("%s · %s · session %s", s.device, app, session)
 }
 
-// locateSession finds the newest console session written by an app on a booted
-// simulator.
+// locateSession finds the newest console session written by an app on any
+// simulator the flags point at.
+//
+// ACROSS EVERY BOOTED DEVICE, not one of them. The loop below was always a loop
+// over roots; the defect was that the set of roots came from a single device
+// chosen by map iteration order. Widening the set is what makes the "nothing
+// here" answer true when it is given.
 func locateSession(device, bundleID string) (sessionFile, error) {
-	roots, err := consoleRoots(device, bundleID)
+	roots, searched, err := consoleRoots(device, bundleID)
 	if err != nil {
 		return sessionFile{}, err
 	}
 	var newest sessionFile
 	for _, root := range roots {
-		entries, err := os.ReadDir(filepath.Join(root, "sessions"))
+		entries, err := os.ReadDir(filepath.Join(root.path, "sessions"))
 		if err != nil {
 			continue
 		}
@@ -202,116 +216,109 @@ func locateSession(device, bundleID string) (sessionFile, error) {
 			}
 			if info.ModTime().After(newest.modified) {
 				newest = sessionFile{
-					path:      filepath.Join(root, "sessions", entry.Name()),
-					container: root,
+					path:      filepath.Join(root.path, "sessions", entry.Name()),
+					container: root.path,
+					device:    root.device,
 					modified:  info.ModTime(),
 				}
 			}
 		}
 	}
 	if newest.path == "" {
+		// NAME WHAT WAS SEARCHED. The old message sent the reader off to "run
+		// the app once", which they had just done — on the other simulator.
 		return sessionFile{}, fmt.Errorf(
-			"no Palbe console data found on the simulator.\n" +
-				"Run the app once so the SDK creates a session, and make sure it links a\n" +
-				"Palbe version with pb.debug (the console records from launch; nothing to\n" +
-				"switch on)")
+			"no Palbe console data found on %s.\n"+
+				"Run the app once so the SDK creates a session, and make sure it links a\n"+
+				"Palbe version with pb.debug (the console records from launch; nothing to\n"+
+				"switch on). If the app is running on a simulator that is not listed above,\n"+
+				"boot it or name it with --device <udid>",
+			describeDevices(searched))
 	}
 	return newest, nil
 }
 
-// consoleRoots returns every `PalbeConsole` directory under the simulator's app
-// containers.
-func consoleRoots(device, bundleID string) ([]string, error) {
+// consoleRoot pairs a PalbeConsole directory with the device it was found on.
+type consoleRoot struct {
+	path   string
+	device simulator
+}
+
+// consoleRoots returns every `PalbeConsole` directory across the target
+// devices, and the devices it looked at — the second return value exists so a
+// refusal can say where it looked instead of saying "the simulator".
+func consoleRoots(device, bundleID string) ([]consoleRoot, []simulator, error) {
+	devices, err := targetDevices(device)
+	if err != nil {
+		return nil, nil, err
+	}
 	if bundleID != "" {
-		container, err := appContainer(device, bundleID)
-		if err != nil {
-			return nil, err
-		}
-		return []string{filepath.Join(container, consoleDir)}, nil
+		roots, err := containersFor(devices, bundleID)
+		return roots, devices, err
 	}
 
-	base, err := simulatorDataRoot(device)
-	if err != nil {
-		return nil, err
-	}
-	apps, err := os.ReadDir(base)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read the simulator's app containers: %w", err)
-	}
-	var roots []string
-	for _, app := range apps {
-		candidate := filepath.Join(base, app.Name(), consoleDir)
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			roots = append(roots, candidate)
+	var roots []consoleRoot
+	for _, sim := range devices {
+		base, err := deviceDataRoot(sim.UDID)
+		if err != nil {
+			return nil, devices, err
+		}
+		apps, err := os.ReadDir(base)
+		if err != nil {
+			// A device with no app containers at all is the ORDINARY case once
+			// more than one simulator is booted — the app was simply never
+			// installed there. Refusing on it would make a second booted
+			// device break a command that used to work.
+			continue
+		}
+		for _, app := range apps {
+			candidate := filepath.Join(base, app.Name(), consoleDir)
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				roots = append(roots, consoleRoot{path: candidate, device: sim})
+			}
 		}
 	}
-	sort.Strings(roots)
-	return roots, nil
+	sort.Slice(roots, func(i, j int) bool { return roots[i].path < roots[j].path })
+	return roots, devices, nil
 }
 
-func appContainer(device, bundleID string) (string, error) {
-	args := []string{"simctl", "get_app_container"}
-	if device != "" {
-		args = append(args, device)
-	} else {
-		args = append(args, "booted")
+// containersFor asks each device where the bundle's container is, and refuses
+// only when NO device has one.
+//
+// The refusal carries every device's answer verbatim, because the answers
+// differ and the useful one is whichever device the developer thought they were
+// looking at.
+func containersFor(devices []simulator, bundleID string) ([]consoleRoot, error) {
+	var roots []consoleRoot
+	refusals := make([]string, 0, len(devices))
+	for _, sim := range devices {
+		container, err := appContainer(sim.UDID, bundleID)
+		if err != nil {
+			refusals = append(refusals, fmt.Sprintf("  %s: %s", sim, err))
+			continue
+		}
+		roots = append(roots, consoleRoot{path: filepath.Join(container, consoleDir), device: sim})
 	}
-	args = append(args, bundleID, "data")
-	out, err := exec.Command("xcrun", args...).Output()
-	if err != nil {
-		return "", fmt.Errorf("no container for %q on the simulator: %w", bundleID, err)
+	if len(roots) > 0 {
+		return roots, nil
 	}
-	return strings.TrimSpace(string(out)), nil
+	if len(devices) == 1 {
+		return nil, fmt.Errorf("no container for %q on the simulator %s: %s",
+			bundleID, devices[0], strings.TrimSpace(strings.TrimPrefix(refusals[0], "  "+devices[0].String()+":")))
+	}
+	return nil, fmt.Errorf("no container for %q on any booted simulator:\n%s",
+		bundleID, strings.Join(refusals, "\n"))
 }
 
-// simulatorDataRoot resolves the Containers/Data/Application directory of the
-// target simulator. It asks `simctl` for any app's container rather than
-// guessing the path, then walks up — the layout is Apple's, not ours.
-func simulatorDataRoot(device string) (string, error) {
-	udid := device
-	if udid == "" {
-		out, err := exec.Command("xcrun", "simctl", "list", "devices", "booted", "-j").Output()
-		if err != nil {
-			return "", fmt.Errorf("cannot list booted simulators: %w", err)
-		}
-		udid, err = firstBootedUDID(out)
-		if err != nil {
-			return "", err
-		}
-	}
+// deviceDataRoot is where one simulator keeps its app data containers. The
+// layout is Apple's, not ours.
+func deviceDataRoot(udid string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, "Library/Developer/CoreSimulator/Devices", udid,
 		"data/Containers/Data/Application"), nil
-}
-
-// firstBootedUDID pulls a UDID out of `simctl list devices booted -j`.
-func firstBootedUDID(payload []byte) (string, error) {
-	var parsed struct {
-		Devices map[string][]struct {
-			UDID  string `json:"udid"`
-			State string `json:"state"`
-			Name  string `json:"name"`
-		} `json:"devices"`
-	}
-	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return "", fmt.Errorf("cannot parse the simulator list: %w", err)
-	}
-	names := make([]string, 0, len(parsed.Devices))
-	for runtime := range parsed.Devices {
-		names = append(names, runtime)
-	}
-	sort.Strings(names)
-	for _, runtime := range names {
-		for _, device := range parsed.Devices[runtime] {
-			if strings.EqualFold(device.State, "Booted") {
-				return device.UDID, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("no booted simulator. Start one, or pass --device <udid>")
 }
 
 // MARK: - Rendering
