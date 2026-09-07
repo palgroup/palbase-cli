@@ -1,7 +1,7 @@
 package backend
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -20,31 +20,68 @@ func SourcePath(digest string) string {
 }
 
 // fetchDeployedSource downloads and extracts the source the target serves.
+//
+// STREAMED, not buffered. A deployed source tree is megabytes — centauri's is
+// 3.4 MB over 225 entries — and the buffering door caps what it reads, so this
+// verb used to unpack the first megabyte and fail on the seam.
 func fetchDeployedSource(ctx context.Context, target Target, cred Credentials, name, dst string, w io.Writer) error {
-	status, body, err := managementCall(ctx, target, cred, http.MethodGet, SourcePath("latest"), nil, "")
+	res, err := managementGet(ctx, target, cred, SourcePath("latest"))
 	if err != nil {
 		return err
 	}
-	switch status {
+	defer func() { _ = res.Body.Close() }()
+
+	switch res.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
 		// The project answered and has nothing — either it has never deployed, or
 		// its live version predates source retention. Both are states, and saying
 		// which is the difference between waiting and acting.
-		return fmt.Errorf("%s has no source to pull: %s", name, describeError(body))
+		return fmt.Errorf("%s has no source to pull: %s", name, describeError(errorBody(res)))
 	default:
-		return fmt.Errorf("%s answered %d: %s", name, status, trimBody(body))
+		return fmt.Errorf("%s answered %d: %s", name, res.StatusCode, trimBody(errorBody(res)))
 	}
-	if len(body) == 0 {
-		// An empty archive extracts into an empty directory and reports success —
-		// a pull that silently replaced a project with nothing.
+
+	counted := &countingReader{r: res.Body}
+	// Peek before extracting: an empty archive extracts into an empty directory
+	// and reports success — a pull that silently replaced a project with
+	// nothing — and gzip's own error for it ("EOF") names none of that.
+	buffered := bufio.NewReader(counted)
+	if _, err := buffered.Peek(1); err != nil {
 		return fmt.Errorf("%s returned an empty archive", name)
 	}
-	if err := extractSourceTree(dst, bytes.NewReader(body)); err != nil {
+
+	if err := extractSourceTree(dst, buffered); err != nil {
+		// A STREAM CUT SHORT IS NOT A BROKEN ARCHIVE. Tar reports both as
+		// "unexpected EOF", and telling them apart is the difference between
+		// retrying and filing a bug, so compare what arrived against what the
+		// project said it was sending.
+		if res.ContentLength >= 0 && counted.n < res.ContentLength {
+			return fmt.Errorf("extract bundle: the connection delivered %d of %d bytes: %w", counted.n, res.ContentLength, err)
+		}
 		return fmt.Errorf("extract bundle: %w", err)
 	}
-	fmt.Fprintf(w, "✓ pulled environment %s (%d bytes)\n", name, len(body))
+	fmt.Fprintf(w, "✓ pulled environment %s (%d bytes)\n", name, counted.n)
 	return nil
+}
+
+// errorBody reads a non-2xx body, which is a diagnostic and therefore small.
+func errorBody(res *http.Response) []byte {
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, managementBodyLimit))
+	return raw
+}
+
+// countingReader counts what actually came through, so the success line reports
+// the bundle's real size and a short read can be named as one.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // stackPush is the seam the flag→consent binding is asserted through.

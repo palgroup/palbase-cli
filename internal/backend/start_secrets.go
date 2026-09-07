@@ -204,8 +204,50 @@ func managementCall(ctx context.Context, target Target, cred Credentials, method
 		return 0, nil, err
 	}
 	defer func() { _ = res.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	return res.StatusCode, raw, err
+	raw, err := io.ReadAll(io.LimitReader(res.Body, managementBodyLimit+1))
+	if err != nil {
+		return res.StatusCode, nil, err
+	}
+	if len(raw) > managementBodyLimit {
+		// A LIMIT THAT IS HIT MUST SAY SO. io.LimitReader ends in a clean EOF
+		// and io.ReadAll then returns a nil error, so a body cut at the cap
+		// used to be handed back as a COMPLETE one. `palbase pull` inherited
+		// this door on 24.08 and every project over a megabyte failed at the
+		// far end with "read tar entry: unexpected EOF" — the truncation was
+		// silent, and only the symptom was loud.
+		return res.StatusCode, nil, fmt.Errorf(
+			"%s answered with more than %d bytes; this door reads configuration, not payloads", path, managementBodyLimit)
+	}
+	return res.StatusCode, raw, nil
+}
+
+// managementBodyLimit bounds what managementCall will buffer.
+//
+// It is sized for the JSON this door was built for — secrets, flags, a deploy
+// list, a status. Anything that can legitimately be bigger is a DOWNLOAD and
+// belongs on managementGet, which streams.
+const managementBodyLimit = 1 << 20
+
+// managementGet performs an authenticated management GET and hands back the
+// live response, body unread.
+//
+// managementCall buffers, which is right for configuration and wrong for a
+// source tree: a bundle is megabytes, and the caller extracts it through a
+// reader anyway. Returning the response rather than a []byte also keeps
+// Content-Length reachable, which is how a stream cut short is told apart from
+// an archive that was always malformed.
+//
+// The caller closes the body.
+func managementGet(ctx context.Context, target Target, cred Credentials, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(target.URL, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	cred.Apply(req)
+	// No 30s narrowing here: stackClient's own five minutes is the budget a
+	// multi-megabyte download needs on a slow link, and the context still
+	// governs cancellation.
+	return stackClient(target).Do(req)
 }
 
 func hashOf(value string) string {
