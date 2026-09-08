@@ -41,6 +41,16 @@ var generatedProjectPaths = []struct {
 }{
 	{"node_modules/", "dependencies", false},
 	{".palbase/local.json", "the stack running on THIS machine; project.json is committed on purpose", true},
+	// `palbase plan`'in ürünü ve `palbase push`'un ön koşulu. Bu makinede, ŞU AN,
+	// SEÇİLİ ortama karşı yapılmış bir ölçüm: içinde `createdAt`, o an seçili
+	// hedefin URL'i ve bir bundle digest'i var, ve onu okuyan tek şey hemen
+	// ardından koşan `push` — parmak izini yeniden hesaplayarak. `local.json` ile
+	// aynı sınıf, ve commit'lenirse iki geliştiricinin planı birbirini ezer.
+	//
+	// Ölçülen (08.09.2026): `plan` sonrası `git status` onu `.palbase/` altında
+	// takipsiz gösteriyordu ve hiçbir kural kapsamıyordu — `link`'in bastığı
+	// "commit .palbase/" cümlesi onu içeri alırdı.
+	{".palbase/plan.json", "`palbase plan`'s measurement of THIS machine against the selected environment; `push` reads it and recomputes the fingerprint", true},
 	{envTypesFile, "generated from this project's secrets on every build, like next-env.d.ts", true},
 	{"*.log", "logs", false},
 }

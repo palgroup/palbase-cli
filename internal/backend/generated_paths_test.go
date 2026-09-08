@@ -375,3 +375,35 @@ func TestInitDoesNotAnswerTheIgnoreQuestionOnItsOwn(t *testing.T) {
 		t.Errorf("kullanıcının kendi kuralı silindi:\n%s", got)
 	}
 }
+
+// BİLDİRİM, YAZANLARIN KULLANDIĞI YOL ÜRETİCİLERİNİ KAPSAMALI.
+//
+// Elde tutulan bir liste, kendi kümesinin büyümesini göremez: `.palbase/plan.json`
+// aylarca yazıldı ve hiçbir kural onu kapsamadı — `link`'in bastığı
+// "commit .palbase/" cümlesi onu içeri alırdı. Kapı bu yüzden listeyi değil,
+// dosyayı YAZAN fonksiyonların ürettiği yolları okuyor: bir yeniden adlandırma
+// iddiayı kodla birlikte taşır.
+func TestEveryPerMachinePathHelperIsIgnored(t *testing.T) {
+	body := gitignoreScaffold()
+	for _, tc := range []struct {
+		name, path string
+	}{
+		{"localPath (palbase start)", localPath()},
+		{"planFilePath (palbase plan)", planFilePath(".")},
+	} {
+		rel := filepath.ToSlash(filepath.Clean(tc.path))
+		rel = strings.TrimPrefix(rel, "./")
+		if !strings.Contains(body, rel) {
+			t.Errorf("%s → %s hiçbir kural tarafından kapsanmıyor:\n%s", tc.name, rel, body)
+		}
+	}
+
+	// VE SÖZLEŞME KAPSANMAMALI: `.palbase/project.json` ile `openapi/` bilerek
+	// commit'leniyor — onları ignore eden bir dosya, klonu derleyemez hâle
+	// getirir.
+	for _, committed := range []string{".palbase/project.json", ".palbase/openapi"} {
+		if strings.Contains(body, committed) {
+			t.Errorf("%s commit'lenmek İÇİN var ve ignore ediliyor:\n%s", committed, body)
+		}
+	}
+}
