@@ -269,10 +269,17 @@ func writeRuntimePlan(w io.Writer, section json.RawMessage) {
 	// docs kapısı onu yakaladı (`cloud-boundary.test.ts`): "pod" bulutun
 	// dağıtım birimi, ve kullanıcı yüzeyi bulutun nasıl çalıştığını anlatmaz.
 	// Kullanıcının bilmesi gereken şey makine değil GÜVENCE: göç, proje HÂLÂ
-	// SERVİS EDERKEN ve yeni sürüm devralmadan ÖNCE koşar; devir saniyelik bir
-	// yeniden başlatmadır ve istekler düşmez, bekler.
+	// SERVİS EDERKEN ve yeni sürüm devralmadan ÖNCE koşar; devir sırasında
+	// istekler düşmez, BEKLER.
+	//
+	// SÜRE ÖLÇÜLDÜ, TAHMİN EDİLMEDİ. Cümle "a restart of seconds" diyordu;
+	// canlıda iki kiracıda ölçülen devir 73 ve 82 saniye, dışarıdan bekleyen
+	// en uzun istek 101,8 saniye (07.09.2026, 1 istek/sn). "Saniyeler" demek,
+	// müşteriye bir dakikayı saniye diye satmaktı — ve o cümleye bakıp bakım
+	// penceresi planlayan biri yanılırdı. Sayı MİMARİDEN geliyor: kiracının
+	// veritabanı da aynı birimde yaşıyor, yani devir onu da yeniden başlatır.
 	fmt.Fprintf(w, "  %s → %s (migrations run against the live project before the new version takes over; "+
-		"the switch is a restart of seconds and requests wait)\n", rp.Running, rp.Target)
+		"the switch restarts it — measured about a minute and a half — and requests wait rather than fail)\n", rp.Running, rp.Target)
 	for _, m := range rp.Modules {
 		fmt.Fprintf(w, "  %s: expand %d→%d, contract %d→%d\n", m.Module, m.ExpandFrom, m.ExpandTo, m.ContractFrom, m.ContractTo)
 	}
