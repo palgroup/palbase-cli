@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 type artifactFile struct {
@@ -24,31 +25,109 @@ type artifactFile struct {
 // app sees the new config, spec and generated code only after the set is ready.
 // Dependencies are read from the checkout; generated artifacts are never linked
 // back to it. Failure before publication leaves the original files untouched.
+// moveTree, bir ağacı taşır — VE DOSYA SİSTEMİ SINIRINI GEÇEBİLİR.
+//
+// `os.Rename` yalnız aynı dosya sisteminde çalışır; sınırı geçince `EXDEV` ile
+// düşer. Hazırlık alanı artık işletim sisteminin temp'inde (müşterinin projesine
+// hiçbir şey yazılmaması için) ve temp, projeyle aynı FS'te olmak zorunda
+// değil — Linux'ta `/tmp` çoğu zaman tmpfs'tir. O yüzden taşıma, ucuz yolu
+// DENER ve gerekirse kopyaya düşer.
+//
+// Kopya bir "fallback flag" değil, bir errno'nun karşılanması: alternatif,
+// müşterinin projesine dizin açmak ya da CI'da çalışmayan bir link.
+// renameForMove, `moveTree`'nin ucuz yolu — ve testin ERİŞEBİLDİĞİ tek yer.
+//
+// EXDEV dalı, temp ile projenin aynı dosya sisteminde olduğu bir makinede HİÇ
+// koşmaz; ölçüldü: dalı tamamen silen bir mutasyon hiçbir testi kırmadı. Bir
+// errno dalını test edilebilir kılmanın yolu, onu üreten çağrıyı
+// değiştirilebilir yapmaktır — aksi hâlde kopya yolu üretimde İLK KEZ koşar.
+var renameForMove = os.Rename
+
+func moveTree(from, to string) error {
+	if err := renameForMove(from, to); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := copyTree(from, to); err != nil {
+		return err
+	}
+	return os.RemoveAll(from)
+}
+
+// copyTree, ağacı İZİNLERİYLE kopyalar.
+//
+// İzinler korunmak zorunda: 0600'lük bir dosya kopyada 0644 olursa, sır taşıyan
+// bir dosya kopyada okunabilir hâle gelir. Symlink'ler İZLENMEZ — bir bağımlılık
+// ağacında checkout dışına işaret eden bir link, kopyayı projenin dışına
+// taşırdı.
+func copyTree(from, to string) error {
+	return filepath.Walk(from, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(from, path)
+		if relErr != nil {
+			return relErr
+		}
+		target := filepath.Join(to, rel)
+		switch {
+		case info.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case info.Mode()&os.ModeSymlink != 0:
+			dest, readErr := os.Readlink(path)
+			if readErr != nil {
+				return readErr
+			}
+			return os.Symlink(dest, target)
+		case !info.Mode().IsRegular():
+			// Soket, cihaz, FIFO: bir bağımlılık ağacında işi yok ve kopyalanamaz.
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = src.Close() }()
+		dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(dst, src); err != nil {
+			_ = dst.Close()
+			return err
+		}
+		return dst.Close()
+	})
+}
+
 // linkStagePrefix, hazırlık alanının adı. Süpürme de yaratma da bunu kullanır:
 // iki yerde yazılan bir önek, bir gün ayrışır ve süpürücü kendi ürettiğini
 // tanımaz hâle gelir.
 const linkStagePrefix = ".palbase-link-"
 
-// newLinkStage, hazırlık alanını CHECKOUT'UN İÇİNDE açar ve önce eskiyi süpürür.
+// newLinkStage, hazırlık alanını İŞLETİM SİSTEMİNİN TEMP'İNDE açar.
 //
-// NEDEN İÇERİDE: eskiden `filepath.Dir(root)` kullanılıyordu, yani projenin BİR
-// ÜSTÜ. Müşteride proje `smartex/palbase`, üstü git deposunun kökü; kalıntı
-// orada `?? .palbase-link-1344746409/` olarak duruyordu — bir gün öncesinden,
-// içinde `.env.local` kopyası (bir API anahtarı) ve canlı checkout'a
-// symlink'ler. Bu dosyanın kendi kuralı bunu zaten yasaklıyor: kullanıcıdan
-// gelen yollar için "link output and entry must belong to this checkout" diyor
-// ve aracın kendisi o kurala uymuyordu.
+// MÜŞTERİNİN PROJESİNE HİÇBİR ŞEY YAZILMAZ. Önce projenin BİR ÜSTÜNE
+// yazılıyordu (müşteride git deposunun kökü; bir gün yaşayan, içinde bir API
+// anahtarı taşıyan ve `.gitignore`'un kapsamadığı bir kalıntı orada bulundu),
+// sonra checkout'un içine aldım ve her koşuda eskiyi süpürdüm. Kullanıcı bunu da
+// reddetti ve haklıydı: "süpürülüyor değil, hiç oluşmasın". Bir link sürerken
+// projede `.palbase-link-XXXX/` görünmesi, kalıntı bırakmasa bile onun görmek
+// istemediği şey.
 //
-// NEDEN OS TEMP DEĞİL: yayımlama `os.Rename(staged, live)` ile yapılıyor
-// (`publishLinkArtifacts`) ve farklı dosya sistemleri arasında rename EXDEV ile
-// düşer. Checkout'un içi aynı dosya sistemini garantiler; `/tmp` garantilemez —
-// CI'da tmpfs olması olağandır.
+// Buna engel `os.Rename` sanılıyordu — yayımlama stage'den checkout'a taşıma
+// yapıyor ve farklı dosya sistemleri arasında rename EXDEV ile düşer. Engel
+// gerçek ama çaresi stage'i projeye sokmak değil, taşımanın EXDEV'i
+// karşılaması (`moveTree`).
 //
-// NEDEN SÜPÜRME: temizlik yalnız `defer os.RemoveAll(stage)` ile yapılıyor ve o
-// defer SIGINT'te, SIGKILL'de, panikte ya da elektrik kesintisinde KOŞMAZ.
-// Sinyal yakalamak da yetmez — SIGKILL yakalanamaz. Sağlam olan her koşunun
-// BAŞINDA eskiyi toplamasıdır: hazırlık alanı koşu başına tekildir ve bu depoda
-// bir checkout'un tek yazarı vardır, dolayısıyla önceden duran her şey ölüdür.
+// CHECKOUT YİNE DE SÜPÜRÜLÜR: bu CLI'ın bir ara sürümü stage'i checkout'un
+// içine açıyordu, ve o sürümle yarıda kesilmiş bir koşunun kalıntısı hâlâ
+// duruyor olabilir. Üst dizine DOKUNULMAZ — orası bu aracın alanı değil ve
+// silmek de bir yazma fiilidir.
 func newLinkStage(root string) (string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -56,13 +135,12 @@ func newLinkStage(root string) (string, error) {
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), linkStagePrefix) {
-			// Süpürme BEST-EFFORT: bir kalıntı silinemiyorsa (izin, açık dosya)
-			// bu koşuyu düşürmek, düzeltilebilir bir çöp yüzünden yapılabilir bir
-			// işi reddetmek olurdu.
+			// BEST-EFFORT: silinemeyen bir kalıntı yüzünden yapılabilir bir işi
+			// reddetmek, düzeltilebilir bir çöpe koşuyu feda etmek olurdu.
 			_ = os.RemoveAll(filepath.Join(root, e.Name()))
 		}
 	}
-	return os.MkdirTemp(root, linkStagePrefix+"*")
+	return os.MkdirTemp("", "palbase-link-*")
 }
 
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
@@ -107,15 +185,8 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 	before := map[string]artifactFile{}
-	stageName := filepath.Base(stage)
 	for _, entry := range entries {
 		name := entry.Name()
-		// HAZIRLIK ALANI KENDİNİ AYNALAYAMAZ. Stage artık checkout'un İÇİNDE
-		// açılıyor, yani bu taramada görünür; atlanmazsa kendi içine symlink
-		// kurar ve ağaç kendi kendini içerir.
-		if name == stageName {
-			continue
-		}
 		if name == "node_modules" && installWebSDK {
 			// An installer must not follow a symlink into the live checkout.
 			// Install the declared dependency set in the stage and publish it
@@ -181,7 +252,10 @@ func publishLinkArtifacts(root, stage string, before, after map[string]artifactF
 	live := filepath.Join(root, "node_modules")
 	// Yedek de checkout'un İÇİNDE: `os.Rename(live, backup)` ile taşındığı için
 	// aynı dosya sisteminde olmak zorunda, ve dışarıya yazmak burada da yanlış.
-	backupDir, err := os.MkdirTemp(root, linkStagePrefix+"dependencies-")
+	// Yedek de temp'te: müşterinin projesine hiçbir şey yazılmıyor. Aynı FS'te
+	// ise taşıma anlıktır; değilse `moveTree` kopyaya düşer — bu dal yalnız web
+	// SDK'sının İLK kurulumunda koşar.
+	backupDir, err := os.MkdirTemp("", "palbase-link-dependencies-")
 	if err != nil {
 		return err
 	}
@@ -195,17 +269,17 @@ func publishLinkArtifacts(root, stage string, before, after map[string]artifactF
 		return err
 	}
 	if hadDependencies {
-		if err := os.Rename(live, backup); err != nil {
+		if err := moveTree(live, backup); err != nil {
 			return fmt.Errorf("preserve previous dependencies: %w", err)
 		}
 	}
 	restore := func() error {
 		if hadDependencies {
-			return os.Rename(backup, live)
+			return moveTree(backup, live)
 		}
 		return nil
 	}
-	if err := os.Rename(staged, live); err != nil {
+	if err := moveTree(staged, live); err != nil {
 		if restoreErr := restore(); restoreErr != nil {
 			return fmt.Errorf("publish dependencies: %w; restore failed: %v; previous dependencies remain at %s", err, restoreErr, backup)
 		}
@@ -214,7 +288,7 @@ func publishLinkArtifacts(root, stage string, before, after map[string]artifactF
 	if err := publishArtifacts(root, before, after); err != nil {
 		// Move only the directory this invocation installed back into its
 		// stage before restoring the original directory (or workspace link).
-		if moveErr := os.Rename(live, staged); moveErr != nil {
+		if moveErr := moveTree(live, staged); moveErr != nil {
 			return fmt.Errorf("%w; dependency rollback failed: %v; previous dependencies remain at %s", err, moveErr, backup)
 		}
 		if restoreErr := restore(); restoreErr != nil {

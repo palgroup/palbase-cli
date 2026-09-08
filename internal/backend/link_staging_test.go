@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -49,14 +50,18 @@ func stagingLeftovers(t *testing.T, dir string) []string {
 	return out
 }
 
-func TestTheStageBelongsToTheCheckout(t *testing.T) {
-	// YERLEŞİMİ DOĞRUDAN ÖLÇÜYORUZ, ARTIĞINI DEĞİL.
+func TestTheStageNeverTouchesTheCheckout(t *testing.T) {
+	// SÜPÜRMEK YETMEZ, HİÇ DOĞMASIN.
 	//
-	// İlk hâli "başarılı bir link'ten sonra üst dizin temiz mi" diye soruyordu ve
-	// GEÇİYORDU — çünkü başarılı koşuda `defer os.RemoveAll(stage)` zaten
-	// temizliyor. Kusur yalnız koşu yarıda kesildiğinde görünür hâle geliyordu,
-	// yani o test kusuru ölçmüyordu. Ölçülmesi gereken şey artık değil, stage'in
-	// NEREYE açıldığı.
+	// İlk düzeltmede hazırlık alanını checkout'un İÇİNE almıştım (üstünden
+	// alarak) ve her koşuda eskiyi süpürüyordum. Kullanıcı haklı olarak reddetti:
+	// "süpürülüyor değil, hiç oluşmasın". Bir link sürerken müşterinin projesinde
+	// `.palbase-link-XXXX/` görünmesi, kalıntı olmasa bile onun görmek istemediği
+	// şey.
+	//
+	// Engel `os.Rename`'di: yayımlama stage'den checkout'a taşıma yapıyor ve
+	// farklı dosya sistemleri arasında rename EXDEV ile düşer. Çare stage'i
+	// checkout'a sokmak değil, taşımanın EXDEV'i karşılaması.
 	root := t.TempDir()
 	stage, err := newLinkStage(root)
 	if err != nil {
@@ -64,22 +69,79 @@ func TestTheStageBelongsToTheCheckout(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(stage) })
 
-	rel, err := filepath.Rel(root, stage)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		t.Fatalf("hazırlık alanı checkout'un DIŞINDA: %s (kök %s) — aracın kendisi, "+
-			"kullanıcıya dayattığı \"must belong to this checkout\" kuralına uymuyor", stage, root)
+	rel, relErr := filepath.Rel(root, stage)
+	if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("hazırlık alanı checkout'un İÇİNDE doğdu: %s (kök %s)", stage, root)
 	}
-	if info, err := os.Stat(stage); err != nil || !info.IsDir() {
-		t.Fatalf("hazırlık alanı yaratılmadı: %v", err)
+	if info, statErr := os.Stat(stage); statErr != nil || !info.IsDir() {
+		t.Fatalf("hazırlık alanı yaratılmadı: %v", statErr)
 	}
-	// AYNI DOSYA SİSTEMİ ZORUNLU: yayımlama `os.Rename(staged, live)` ile yapılıyor
-	// ve farklı dosya sistemleri arasında rename EXDEV ile düşer. Checkout'un içi
-	// bunu garantiler; OS temp'i garantilemez.
-	if err := os.WriteFile(filepath.Join(stage, "probe"), []byte("x"), 0o600); err != nil {
+}
+
+// (Burada bir `TestTheToolRunningInsideTheStageSeesNoSelfReference` vardı: stage
+// checkout'un İÇİNDEYKEN kök taraması onu görüyordu ve atlanmazsa ayna kendi
+// içine symlink kurup stage'i gezen her aracı döngüye sokuyordu. Stage temp'e
+// taşınınca o dal YAPISAL olarak imkânsız hâle geldi — atlama ölü koda dönüştü
+// ve silindi, testi de kırılamaz hâle geldiği için kaldırıldı. Bilgisi burada
+// duruyor: stage checkout'a geri sokulursa o tuzak geri gelir, ve yukarıdaki
+// iddia tam olarak onu tutuyor.)
+
+func TestMovingATreeIntoTheCheckoutWorks(t *testing.T) {
+	// `os.Rename` aynı dosya sisteminde çalışır; test makinesinde temp ile
+	// checkout aynı FS'te olabilir ve rename hiç düşmeyebilir. Bu yüzden taşıyıcı
+	// rename'i DENEYİP EXDEV'de kopyaya düşen bir fiil, ve kopya dalı ayrıca
+	// ölçülüyor (aşağıda) — nadir dallar test edilmezse üretimde ilk kez koşar.
+	from := filepath.Join(t.TempDir(), "tree")
+	if err := os.MkdirAll(filepath.Join(from, "pkg", "nested"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(filepath.Join(stage, "probe"), filepath.Join(root, "probe")); err != nil {
-		t.Fatalf("stage'den checkout'a rename düştü — yayımlama yolu bozulur: %v", err)
+	want := "module.exports=1"
+	if err := os.WriteFile(filepath.Join(from, "pkg", "nested", "index.js"), []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(t.TempDir(), "node_modules")
+
+	if err := moveTree(from, to); err != nil {
+		t.Fatalf("taşıma düştü: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(to, "pkg", "nested", "index.js"))
+	if err != nil || string(body) != want {
+		t.Fatalf("taşınan ağaç eksik: %v %q", err, body)
+	}
+	if _, err := os.Stat(from); !os.IsNotExist(err) {
+		t.Errorf("kaynak ağaç geride kaldı: %s", from)
+	}
+}
+
+func TestCopyFallbackReproducesTheTreeExactly(t *testing.T) {
+	from := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(filepath.Join(from, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(from, "a", "b", "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(from, "top.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(t.TempDir(), "dst")
+	if err := copyTree(from, to); err != nil {
+		t.Fatalf("kopya: %v", err)
+	}
+	for rel, want := range map[string]string{"a/b/f.txt": "x", "top.txt": "y"} {
+		got, err := os.ReadFile(filepath.Join(to, filepath.FromSlash(rel)))
+		if err != nil || string(got) != want {
+			t.Errorf("%s: %v %q", rel, err, got)
+		}
+	}
+	// İZİNLER KORUNMALI: 0600'lük bir dosya kopyada 0644 olursa, sır taşıyan bir
+	// dosya kopyada okunabilir hâle gelir.
+	fi, err := os.Stat(filepath.Join(to, "a", "b", "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("izin korunmadı: %v", fi.Mode().Perm())
 	}
 }
 
@@ -132,52 +194,40 @@ func TestLinkSweepsAStaleStageBeforeRunning(t *testing.T) {
 	}
 }
 
-// STAGE KENDİNİ İÇEREMEZ — VE BUNU STAGE'İN İÇİNDE KOŞAN ARAÇ SÖYLER.
+// EXDEV DALI GERÇEKTEN KOPYAYA DÜŞÜYOR MU.
 //
-// Hazırlık alanı artık checkout'un İÇİNDE açılıyor, yani `os.ReadDir(root)`
-// taramasında görünüyor. Atlanmazsa ayna kendi içine bir symlink kurar
-// (`stage/.palbase-link-X -> root/.palbase-link-X`, yani stage'in kendisi) ve
-// stage'i symlink takip ederek gezen HER araç — npm, kod üreteçleri — sonsuz
-// döngüye girer.
-//
-// İLK HÂLİ ÖLÇMÜYORDU: atlamayı söküp testleri koştum ve HEPSİ GEÇTİ, çünkü
-// `collectArtifacts` symlink'i toplamıyor ve kalıntı testine yansımıyor. Bir
-// satırı "korumalı" diye bırakıp gate'i varmış gibi saymak, tam olarak bu
-// depoda üç kez ödenen hata. Bu yüzden gözlem, stage'in İÇİNDE koşan aracın
-// gördüğü dizin listesinden alınıyor.
-func TestTheToolRunningInsideTheStageSeesNoSelfReference(t *testing.T) {
-	root, _ := linkedProjectForStaging(t)
-	listing := filepath.Join(t.TempDir(), "cwd-listing")
-	stub := filepath.Join(t.TempDir(), "stub-swiftgen")
-	script := "#!/bin/sh\nls -a . >> \"" + listing + "\"\n" + `while [ $# -gt 0 ]; do
-  case "$1" in
-    --out-swift|--out-plist) printf 'generated\n' > "$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-`
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+// `copyTree` ayrıca test ediliyor, ama BAĞLANTISI edilmiyordu: dalı silen bir
+// mutasyon, temp ile hedefin aynı FS'te olduğu bu makinede hiçbir testi kırmadı.
+// Rename'i EXDEV döndürmeye zorlayarak dalı ölçülebilir kılıyoruz.
+func TestMoveFallsBackToCopyAcrossFilesystems(t *testing.T) {
+	original := renameForMove
+	t.Cleanup(func() { renameForMove = original })
+	calls := 0
+	renameForMove = func(string, string) error {
+		calls++
+		return &os.LinkError{Op: "rename", Err: syscall.EXDEV}
+	}
+
+	from := filepath.Join(t.TempDir(), "tree")
+	if err := os.MkdirAll(from, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	useStub(t, stub, nil)
-	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
-	linkedAs(t, srv.URL, "a-credential")
+	if err := os.WriteFile(filepath.Join(from, "f"), []byte("payload"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(t.TempDir(), "dst")
 
-	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
-		t.Fatalf("link: %v", err)
+	if err := moveTree(from, to); err != nil {
+		t.Fatalf("EXDEV'de taşıma düştü — kopya dalı bağlı değil: %v", err)
 	}
-
-	seen, err := os.ReadFile(listing)
-	if err != nil {
-		t.Fatalf("stage içinde koşan araç dizini listeleyemedi: %v", err)
+	if calls == 0 {
+		t.Fatal("negatif kontrol: rename hiç denenmedi, ucuz yol atlanıyor")
 	}
-	// NEGATİF KONTROL: araç gerçekten stage'de koştu mu. Boş bir listeleme,
-	// hiçbir şey iddia etmemiş olurdu.
-	if !strings.Contains(string(seen), ".palbase") {
-		t.Fatalf("araç beklenen dizinde koşmamış görünüyor:\n%s", seen)
+	got, err := os.ReadFile(filepath.Join(to, "f"))
+	if err != nil || string(got) != "payload" {
+		t.Fatalf("kopya eksik: %v %q", err, got)
 	}
-	if strings.Contains(string(seen), linkStagePrefix) {
-		t.Errorf("stage kendini içeriyor — symlink döngüsü:\n%s", seen)
+	if _, err := os.Stat(from); !os.IsNotExist(err) {
+		t.Error("kopya sonrası kaynak silinmedi")
 	}
-	_ = root
 }
