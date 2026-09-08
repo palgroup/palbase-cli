@@ -71,3 +71,47 @@ func TestOrphanCleanupHasAProductionCaller(t *testing.T) {
 		t.Fatal("removeOrphanedEnvironments'ın üretim çağıranı YOK — yetim ortam klasörü build'i kırmaya devam eder")
 	}
 }
+
+// APPLE CHECKOUT'UNUN KANITI YAPILANDIRMA DOSYASI DEĞİL, XCODE PROJESİDİR.
+//
+// `apple` bir zamanlar yalnız "ios yuva dosyası var mı" diye soruyordu ve bir
+// BACKEND deposu o dosyayı meşru biçimde taşıyabilir: biri orada bir kez
+// `palbase link --platform ios` koşmuş ve commit'lemiştir. Gerçek müşteri
+// deposunda ölçüldü (08.09.2026, centauri): her `palbase push`
+//
+//	the push landed, but the client could not be regenerated: … the
+//	palbackend-ios checkout is not resolved for this project yet
+//
+// ile bitiyordu — çünkü uygulama AYRI bir depoda ve burada çözülecek bir Xcode
+// projesi hiç yok. Üretici, asla koşamayacağı yerde koşmaya zorlanıyordu.
+func TestApplePlatformNeedsAnXcodeProjectNotJustAConfig(t *testing.T) {
+	root := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Yuva dosyası VAR, Xcode projesi YOK — bir backend deposunun hâli.
+	if err := os.MkdirAll(filepath.Join(nativeArtifactsDir, "ios"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, apple, _ := linkedPlatforms(); apple {
+		t.Fatal("Xcode projesi olmayan bir checkout Apple sayıldı — her push kusur satırıyla biter")
+	}
+
+	// Aynı checkout'a bir Xcode projesi koy: ARTIK Apple checkout'udur ve
+	// çözülmemiş bir proje GERÇEK bir hatadır ("build once in Xcode").
+	if err := os.MkdirAll("white-label.xcodeproj", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, apple, _ := linkedPlatforms(); !apple {
+		t.Fatal("Xcode projesi olan bir checkout Apple SAYILMADI — istemci hiç üretilmez")
+	}
+}

@@ -28,10 +28,38 @@ const webArtifactsDir = "Palbase"
 // wrote and the repo carries.
 func linkedPlatforms() (web bool, apple bool, android bool) {
 	web = isRegularFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
-	apple = isRegularFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")) ||
-		isRegularFile(filepath.Join(nativeArtifactsDir, "macos", "palbase-config.json"))
+	apple = (isRegularFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")) ||
+		isRegularFile(filepath.Join(nativeArtifactsDir, "macos", "palbase-config.json"))) &&
+		hasAppleProject(".")
 	android = isRegularFile(filepath.Join(nativeArtifactsDir, "android", "palbase-config.json"))
 	return web, apple, android
+}
+
+// hasAppleProject reports whether THIS checkout is one an Apple client can be
+// generated in — that is, whether it holds an Xcode project at all.
+//
+// A CONFIG FILE IS NOT THE PROOF. `apple` used to be "the ios slot file exists",
+// and a backend repository can hold that file legitimately: somebody ran
+// `palbase link --platform ios` there once and committed it. Measured on a real
+// customer repo (08.09.2026, centauri): every `palbase push` ended with
+//
+//	the push landed, but the client could not be regenerated: … the
+//	palbackend-ios checkout is not resolved for this project yet
+//
+// on every push, forever — because the app lives in a SEPARATE repository and
+// this one has no Xcode project to resolve. The generator was being asked to run
+// where it can never run.
+//
+// The distinction this restores: no Xcode project means the client is generated
+// SOMEWHERE ELSE and nothing is wrong here; an Xcode project that is not yet
+// resolved is a real error and still says "build once in Xcode".
+func hasAppleProject(root string) bool {
+	for _, ext := range []string{"*.xcodeproj", "*.xcworkspace"} {
+		if m, _ := filepath.Glob(filepath.Join(root, ext)); len(m) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // newSpecCmd (`palbase spec`) fetches ONLY the artifact the SDK code generators

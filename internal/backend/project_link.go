@@ -388,6 +388,24 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 			path string
 			err  error
 		)
+		// APPLE YUVASINI, APPLE PROJESİ OLMAYAN BİR CHECKOUT'A YAZMA.
+		//
+		// Yuva dosyası commit'lenir ve `spec`/`push` onu "burada bir Apple
+		// istemcisi üretilir" diye okur. Bir backend deposuna yazıldığında o
+		// okuma sonsuza kadar yanlış olur: üretici orada asla koşamaz ve her
+		// push bir kusur satırıyla biter. Gerçek bir müşteri deposunda ölçüldü
+		// (08.09.2026, centauri): `.palbase/ios/palbase-config.json` commit'liydi,
+		// Xcode projesi yoktu, ve her `palbase push`
+		//
+		//   the push landed, but the client could not be regenerated: … the
+		//   palbackend-ios checkout is not resolved for this project yet
+		//
+		// ile bitiyordu. Kaynağını yazmayı reddetmek, o satırın bir daha hiç
+		// doğmaması demek.
+		if isApplePlatform(platform) && !hasAppleProject(".") {
+			return fmt.Errorf("this checkout has no Xcode project, so an Apple client cannot be generated here — "+
+				"run `palbase link --platform %s` in the app's own checkout (the one holding the .xcodeproj)", platform)
+		}
 		if platform == webPlatform {
 			path, err = writeWebArtifacts(selectedEnvs, specs, w)
 		} else {

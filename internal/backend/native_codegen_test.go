@@ -66,12 +66,28 @@ func oneEnvironment() appEnvironments {
 // errNoCheckout stands for the real "SDK package not resolved yet" failure.
 var errNoCheckout = errors.New("the palbackend-ios checkout is not resolved for this project yet")
 
-// useStub points the generator seam at a stub for one test.
+// useStub points the generator seam at a stub for one test — AND makes the
+// working directory look like a checkout an Apple client can be generated in.
+//
+// The Xcode project is part of the fixture because it is part of the fact: a
+// checkout is an Apple one when it HOLDS an Xcode project, not when it merely
+// carries the slot file. Without it these tests were describing a shape that
+// cannot exist in production — a backend repository generating a Swift client —
+// and that shape is exactly the defect measured on a real customer repo
+// (08.09.2026, centauri): every push ended with "the client could not be
+// regenerated … not resolved for this project yet", forever, because the app
+// lived in a separate repository.
 func useStub(t *testing.T, tool string, err error) {
 	t.Helper()
 	prev := ensureSwiftgenTool
 	ensureSwiftgenTool = func(string, io.Writer) (string, error) { return tool, err }
 	t.Cleanup(func() { ensureSwiftgenTool = prev })
+
+	if m, _ := filepath.Glob("*.xcodeproj"); len(m) == 0 {
+		if err := os.MkdirAll("fixture.xcodeproj", 0o755); err != nil {
+			t.Fatalf("fikstür Xcode projesi kurulamadı: %v", err)
+		}
+	}
 }
 
 func TestGenerateForEnvironments_NoAppleSlotWritesNoPlist(t *testing.T) {
