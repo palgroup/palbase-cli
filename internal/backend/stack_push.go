@@ -209,9 +209,10 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	// previous build left on disk is how somebody edits a controller, pushes, and
 	// deploys yesterday's code under today's commit message.
 	// ÜRÜNLER GEÇİCİ BİR KÖKE YAZILIR, MÜŞTERİNİN PROJESİNE DEĞİL. Tar bunları
-	// oradan alır (self-host push'u için); bulut push'u onları zaten
-	// göndermiyor. Proje, kişinin yazdığı hâliyle kalır — commit'lenecek,
-	// ignore'lanacak ya da kaynak sanılacak hiçbir derleme çıktısı olmadan.
+	// oradan alır — bu yol bulut ve self-host için AYNI, ikisi de aşağıda
+	// `BuildStackTarball`'dan geçiyor. Proje, kişinin yazdığı hâliyle kalır:
+	// commit'lenecek, ignore'lanacak ya da kaynak sanılacak hiçbir derleme
+	// çıktısı olmadan.
 	bundleRoot, err := os.MkdirTemp("", "palbase-bundle-*")
 	if err != nil {
 		return err

@@ -97,12 +97,10 @@ func TestBuildSweepsBeforeItRefuses(t *testing.T) {
 // hâlâ müşterinin projesinde duruyordu. Kullanıcının istediği bu değil: "defer
 // değil, zaten hiç olmaması lazım".
 //
-// VE HAKLI, ÇÜNKÜ BULUT PUSH'U ONLARI GÖNDERMİYOR BİLE. `archive.go`'nun kendi
-// yorumu: "The cloud builds those server-side from source, so the cloud tarball
-// leaves them out". Yani bulut kullanıcısının projesinde üretilen `esm/jobs/hooks`
-// hiçbir yere gitmiyor, kimse okumuyor — yalnız yerel doğrulama çıktısı.
-// Self-host push'u (`BuildStackTarball`) onları paketliyor, o yüzden üretilmeye
-// devam ediyorlar; ama üretildikleri YER checkout olmak zorunda değil.
+// VE ÜRETİLDİKLERİ YERİN CHECKOUT OLMASI GEREKMİYOR. `push` onları tarball'a
+// koyuyor (bulut ve self-host ayrımsız, ikisi de `BuildStackTarball`), ama tar
+// onları geçici kökten de alabilir — müşterinin projesinde doğmalarının hiçbir
+// sebebi yok.
 func TestASuccessfulBuildWritesNoProductsIntoTheProject(t *testing.T) {
 	requiresRealToolchain(t)
 	dir := t.TempDir()
