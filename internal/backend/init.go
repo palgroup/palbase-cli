@@ -328,7 +328,7 @@ var generatedProjectPaths = []struct {
 	// `.env.local` kopyası ve bir API anahtarı vardı. `link` artık her koşunun
 	// başında eskiyi süpürüyor, ama süpürülmeden önce bir `git add -A` yakalarsa
 	// sır depoya girer — o yüzden ignore da şart.
-	{linkStagePrefix + "*/", "`palbase link`'in hazırlık alanı; koşu başına tekil, bir sonraki koşu süpürür", true},
+	{linkStagePrefix + "*/", "`palbase link`'s staging tree; one per run, swept by the next run", true},
 	{deployStagingDir + "/", "staged sources left by older CLIs; new deploy builds use a temp directory", true},
 	{envTypesFile, "generated from this project's secrets on every build, like next-env.d.ts", true},
 	{"*.log", "logs", false},
