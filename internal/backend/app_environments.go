@@ -750,6 +750,20 @@ func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.W
 		return err
 	}
 
+	// THE SAME BREAK, THE OTHER SHAPE: a folder for an environment that no
+	// longer exists.
+	//
+	// Renaming an environment leaves its generated folder behind, and Xcode 16's
+	// synchronized groups compile every file under Palbase/Generated — so the app
+	// stops building with exactly the error above. Measured on a real customer
+	// app (07.09.2026, centauri): `Palbase/Generated/centauri` had outlived a
+	// rename to `main`, the build failed with "Multiple commands produce …
+	// PalbaseGenerated.stringsdata", and it succeeded the moment that folder was
+	// moved aside.
+	if err := removeOrphanedEnvironments(root, envs.names(), w); err != nil {
+		return err
+	}
+
 	if toolRoot == "" {
 		toolRoot = root
 	}
@@ -892,4 +906,54 @@ func appInfoPlists(root string) []string {
 		return nil
 	})
 	return found
+}
+
+// removeOrphanedEnvironments deletes generated folders whose environment the
+// project no longer declares.
+//
+// Deleted on the same grounds as the single-file legacy above: it is OUR
+// generated content, it belongs to no environment this project declares, and
+// its only remaining effect is to break the build. A folder holding anything we
+// did not write is LEFT ALONE and named instead — a writer must not delete what
+// it cannot reproduce.
+func removeOrphanedEnvironments(root string, live []string, w io.Writer) error {
+	declared := map[string]bool{}
+	for _, env := range live {
+		declared[env] = true
+	}
+	entries, err := os.ReadDir(filepath.Join(root, generatedDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() || declared[e.Name()] {
+			continue
+		}
+		dir := filepath.Join(root, generatedDir, e.Name())
+		inside, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		ours := true
+		for _, f := range inside {
+			if f.Name() != "PalbaseGenerated.swift" {
+				ours = false
+				break
+			}
+		}
+		if !ours {
+			fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase did not write — "+
+				"Xcode compiles everything under %s, so move it aside if the build reports "+
+				"\"Multiple commands produce\"\n", dir, generatedDir)
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "removed %s (no environment by that name any more)\n", dir)
+	}
+	return nil
 }
