@@ -85,15 +85,9 @@ func TestOrphanCleanupHasAProductionCaller(t *testing.T) {
 // ile bitiyordu — çünkü uygulama AYRI bir depoda ve burada çözülecek bir Xcode
 // projesi hiç yok. Üretici, asla koşamayacağı yerde koşmaya zorlanıyordu.
 func TestApplePlatformNeedsAnXcodeProjectNotJustAConfig(t *testing.T) {
-	root := t.TempDir()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(wd)
-	if err := os.Chdir(root); err != nil {
-		t.Fatal(err)
-	}
+	// `t.Chdir` dizini değiştirir VE testin sonunda geri alır — elle bir
+	// `defer os.Chdir(wd)` yazmak, dönüşü kontrol edilmeyen bir çağrı bırakır.
+	t.Chdir(t.TempDir())
 
 	// Yuva dosyası VAR, Xcode projesi YOK — bir backend deposunun hâli.
 	if err := os.MkdirAll(filepath.Join(nativeArtifactsDir, "ios"), 0o755); err != nil {
