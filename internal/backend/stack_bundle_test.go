@@ -104,7 +104,7 @@ func TestABackendWithNoControllersIsRefusedBeforeAnythingShips(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "controllers"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := buildStackArtifact(context.Background(), dir, &strings.Builder{})
+	_, _, err := buildStackArtifact(context.Background(), dir, t.TempDir(), &strings.Builder{})
 	if err == nil {
 		t.Fatal("a project with no controllers built successfully")
 	}
@@ -121,7 +121,7 @@ func TestAProjectThatIsNotABackendSaysSo(t *testing.T) {
 	// `controllers/`, which sent an author looking for a folder the runtime does
 	// not use — and made the layout the module system exists to allow
 	// unpushable.
-	_, _, err := buildStackArtifact(context.Background(), t.TempDir(), &strings.Builder{})
+	_, _, err := buildStackArtifact(context.Background(), t.TempDir(), t.TempDir(), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "*.module.ts") {
 		t.Fatalf("a directory with no module got %v", err)
 	}
@@ -861,7 +861,7 @@ export default defineSchema("public", { tables: [airports, trips] });
 	}
 
 	var out strings.Builder
-	_, _, err := buildStackArtifact(context.Background(), dir, &out)
+	_, _, err := buildStackArtifact(context.Background(), dir, t.TempDir(), &out)
 	if err == nil {
 		t.Fatal("a schema that cannot form its relation graph was BUNDLED — it would refuse at boot, " +
 			"and the pod that refuses cannot accept the push that fixes it")
@@ -911,7 +911,7 @@ export default defineSchema("public", { tables: [airports, trips] });
 	}
 
 	var out strings.Builder
-	if _, _, err := buildStackArtifact(context.Background(), dir, &out); err != nil {
+	if _, _, err := buildStackArtifact(context.Background(), dir, t.TempDir(), &out); err != nil {
 		t.Fatalf("a LEGITIMATE pair of named foreign keys was refused: %v", err)
 	}
 }

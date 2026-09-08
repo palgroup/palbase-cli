@@ -58,7 +58,7 @@ var defaultIgnoreFiles = []string{
 // BuildTarball walks dir and returns a gzip-compressed tar with paths relative
 // to dir (no wrapper directory), matching what /internal/push expects. It skips
 // defaultIgnoreDirs and any glob in an optional .palignore file at the root.
-func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, false) }
+func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, "", false) }
 
 // BuildStackTarball is the archive a SELF-HOSTED stack is pushed.
 //
@@ -71,7 +71,26 @@ func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, false) 
 // What still does not travel: the rest of `.palbase` — which stack this checkout
 // is linked to, the slots an app reads, the fetched spec. None of that is the
 // backend, and the target file in particular describes the machine that pushed.
-func BuildStackTarball(dir string) ([]byte, error) { return buildTarball(dir, true) }
+// bundleRoot, derleme ürünlerinin bulunduğu geçici kök. Ürünler artık müşterinin
+// checkout'una yazılmıyor (`buildStackArtifact`), o yüzden tar onları BURADAN
+// alır. Boş bırakılırsa hiçbir ürün eklenmez — ve bir stack push'u kodsuz gider,
+// o yüzden çağıran onu vermek zorunda.
+func BuildStackTarball(dir, bundleRoot string) ([]byte, error) {
+	// FAIL-CLOSED. Boş bir kök, kodsuz bir artefakt demek: stack derlemez,
+	// TOPLAR — `.palbase/esm` olmadan giden bir push, işi koşabilen ama hiçbir
+	// şey sunmayan bir kiracı bırakır ve hiçbir yerde hata vermez.
+	//
+	// Bunu bir testle değil BURADA tutuyorum, çünkü ölçüldü: üretim çağrısını
+	// `BuildStackTarball(dir, "")` yapan bir mutasyon, tarball testlerinin
+	// hiçbirini kırmadı — testler fikstürü doğrudan çağırıyor, üretim yolundan
+	// geçmiyor. Sessizce boş giden bir artefaktın kapısı, çağıranın testinde
+	// değil fiilin kendisinde olmalı.
+	if bundleRoot == "" {
+		return nil, fmt.Errorf("a stack push needs the build products, and no bundle root was given — " +
+			"the artifact would carry no code at all")
+	}
+	return buildTarball(dir, bundleRoot, true)
+}
 
 // stackOnlyPalbaseEntries are the `.palbase` paths a stack push carries.
 //
@@ -88,7 +107,7 @@ func BuildStackTarball(dir string) ([]byte, error) { return buildTarball(dir, tr
 // with a `jobs/` directory until 2026-08-26.
 var stackOnlyPalbaseEntries = []string{".palbase/esm", ".palbase/jobs", ".palbase/hooks"}
 
-func buildTarball(dir string, forStack bool) ([]byte, error) {
+func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 	patterns, err := loadPalignore(filepath.Join(dir, ".palignore"))
 	if err != nil {
 		return nil, err
@@ -146,6 +165,35 @@ func buildTarball(dir string, forStack bool) ([]byte, error) {
 	})
 	if walkErr != nil {
 		return nil, walkErr
+	}
+	// ÜRÜNLER AYRI BİR KÖKTEN GELİR. Checkout'ta artık yoklar — orada üretilmeleri
+	// için hiçbir sebep yoktu ve müşterinin projesini kirletiyorlardı. Stack
+	// derlemez, TOPLAR; o yüzden bu üç girdi olmadan giden bir artefakt, işi
+	// koşabilen ama hiç haber almayan bir kiracı demektir.
+	if forStack && bundleRoot != "" {
+		bundleErr := filepath.Walk(filepath.Join(bundleRoot, ".palbase"), func(path string, info os.FileInfo, err error) error {
+			if os.IsNotExist(err) {
+				// `hooks` her projede üretilmiyor; yokluğu bir hata değil.
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, relErr := filepath.Rel(bundleRoot, path)
+			if relErr != nil {
+				return relErr
+			}
+			if !stackWantsPalbase(rel) {
+				return nil
+			}
+			return writeTarFile(tw, bundleRoot, rel)
+		})
+		if bundleErr != nil {
+			return nil, bundleErr
+		}
 	}
 	if err := tw.Close(); err != nil {
 		return nil, err

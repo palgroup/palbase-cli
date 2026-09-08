@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,7 +76,7 @@ func TestBuildSweepsBeforeItRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := buildStackArtifact(context.Background(), dir, &strings.Builder{})
+	_, _, err := buildStackArtifact(context.Background(), dir, t.TempDir(), &strings.Builder{})
 	if err == nil {
 		t.Fatal("modülsüz bir proje derlendi")
 	}
@@ -87,5 +88,61 @@ func TestBuildSweepsBeforeItRefuses(t *testing.T) {
 	if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
 		t.Errorf("öldürülmüş bir koşunun bundle'ı duruyor: %s — bir sonraki push "+
 			"onu gönderebilir", stale)
+	}
+}
+
+// BAŞARILI BİR BUILD DE PROJEYE HİÇBİR ŞEY YAZMAMALI.
+//
+// Süpürme, öldürülmüş bir koşunun artığını topluyor — ama koşu SÜRERKEN ürünler
+// hâlâ müşterinin projesinde duruyordu. Kullanıcının istediği bu değil: "defer
+// değil, zaten hiç olmaması lazım".
+//
+// VE HAKLI, ÇÜNKÜ BULUT PUSH'U ONLARI GÖNDERMİYOR BİLE. `archive.go`'nun kendi
+// yorumu: "The cloud builds those server-side from source, so the cloud tarball
+// leaves them out". Yani bulut kullanıcısının projesinde üretilen `esm/jobs/hooks`
+// hiçbir yere gitmiyor, kimse okumuyor — yalnız yerel doğrulama çıktısı.
+// Self-host push'u (`BuildStackTarball`) onları paketliyor, o yüzden üretilmeye
+// devam ediyorlar; ama üretildikleri YER checkout olmak zorunda değil.
+func TestASuccessfulBuildWritesNoProductsIntoTheProject(t *testing.T) {
+	requiresRealToolchain(t)
+	dir := t.TempDir()
+	buildableBackend(t, dir)
+
+	// BUNDLE KÖKÜNÜ ÇAĞIRAN YARATIR VE ÖMRÜNE SAHİP OLUR: derleyicinin
+	// müşterinin projesine yazmak için hiçbir sebebi yok, ve temizliğin sahibi
+	// onu açan taraf olmalı.
+	bundleRoot := t.TempDir()
+	_, _, err := buildStackArtifact(context.Background(), dir, bundleRoot, io.Discard)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	// NEGATİF KONTROL: bundle GERÇEKTEN üretilmiş olmalı, yoksa bu test
+	// "hiçbir şey yazılmadı" derken aslında hiç build olmadığını ölçer.
+	produced := filepath.Join(bundleRoot, ".palbase", "esm", "controllers", "controllers.js")
+	if _, err := os.Stat(produced); err != nil {
+		t.Fatalf("bundle üretilmemiş: %v", err)
+	}
+
+	for _, sub := range bundleOutputDirs {
+		p := filepath.Join(dir, ".palbase", sub)
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("başarılı bir build müşterinin projesine ürün yazdı: %s", p)
+		}
+	}
+}
+
+// KODSUZ BİR STACK PUSH'U SESSİZCE GİDEMEZ.
+func TestAStackTarballRefusesAnEmptyBundleRoot(t *testing.T) {
+	_, err := BuildStackTarball(t.TempDir(), "")
+	if err == nil {
+		t.Fatal("bundle kökü olmadan bir stack artefaktı üretildi — kodsuz giderdi")
+	}
+	if !strings.Contains(err.Error(), "no code") {
+		t.Errorf("red, sonucu adlandırmıyor: %v", err)
+	}
+	// NEGATİF KONTROL: kök verilince kabul etmeli, yoksa kapı her şeyi reddeder.
+	if _, err := BuildStackTarball(t.TempDir(), t.TempDir()); err != nil {
+		t.Errorf("geçerli bir kök reddedildi: %v", err)
 	}
 }

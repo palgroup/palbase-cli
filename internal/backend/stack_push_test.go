@@ -45,17 +45,32 @@ func entriesOf(t *testing.T, blob []byte) map[string]bool {
 	return out
 }
 
-func projectForPush(t *testing.T) string {
+// projectForPush, KAYNAĞI projeye ve ÜRÜNLERİ ayrı bir bundle köküne koyar.
+//
+// Derleme ürünleri artık müşterinin checkout'una yazılmıyor; tar onları geçici
+// kökten alıyor. Fikstür de o ayrımı taşımak zorunda, yoksa "tar ürünleri
+// buluyor mu" sorusu, ürünlerin ARTIK BULUNMADIĞI bir yerden sorulur ve test
+// sessizce boş bir artefaktı onaylar.
+func projectForPush(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
-	write := func(rel, body string) {
-		p := filepath.Join(dir, rel)
+	bundleRoot := t.TempDir()
+	writeTo := func(root, rel, body string) {
+		p := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	write := func(rel, body string) {
+		// Ürünler bundle köküne, geri kalan her şey projeye.
+		if strings.HasPrefix(rel, ".palbase/esm/") || strings.HasPrefix(rel, ".palbase/jobs/") || strings.HasPrefix(rel, ".palbase/hooks/") {
+			writeTo(bundleRoot, rel, body)
+			return
+		}
+		writeTo(dir, rel, body)
 	}
 	write("controllers/todo.controller.ts", "// source")
 	write("db/public.ts", "export default {}")
@@ -70,7 +85,7 @@ func projectForPush(t *testing.T) string {
 	write(".palbase/ios/palbase-config.json", `{"api_key":"pb_selfhost_c…"}`)
 	write(".palbase/openapi.json", `{"openapi":"3.2.0"}`)
 	write("node_modules/left-pad/index.js", "// huge")
-	return dir
+	return dir, bundleRoot
 }
 
 func TestAStackPushCarriesTheBuiltCode(t *testing.T) {
@@ -125,7 +140,8 @@ func TestTheCloudTarballIsUnchanged(t *testing.T) {
 	// The cloud builds server-side from source, so its archive must not start
 	// carrying build products: that would ship a bundle the cloud then rebuilds,
 	// and the two could disagree.
-	blob, err := BuildTarball(projectForPush(t))
+	pushDir, _ := projectForPush(t)
+	blob, err := BuildTarball(pushDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,9 +197,10 @@ func quote(s string) string {
 // finding none in the artifact, PRUNES every definition. The tenant would have
 // gone from "never scheduled" to "unscheduled on every deploy".
 func TestAStackPushCarriesTheJobAndHookManifests(t *testing.T) {
-	dir := projectForPush(t)
+	dir, bundleRoot := projectForPush(t)
+	// Manifestolar birer ÜRÜN: bundle köküne yazılırlar, projeye değil.
 	write := func(rel, body string) {
-		p := filepath.Join(dir, rel)
+		p := filepath.Join(bundleRoot, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +213,7 @@ func TestAStackPushCarriesTheJobAndHookManifests(t *testing.T) {
 	write(".palbase/hooks/hooks.manifest.json",
 		`{"hooks":[{"event":"auth.before_signup","blocking":true,"file":"hooks/signup.ts"}]}`)
 
-	blob, err := BuildStackTarball(dir)
+	blob, err := BuildStackTarball(dir, bundleRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +274,7 @@ func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir := projectForPush(t)
+	dir, _ := projectForPush(t)
 	if err := os.WriteFile(filepath.Join(dir, ".palbase", "local.json"),
 		[]byte(`{"url":"https://127.0.0.1"}`), 0o644); err != nil {
 		t.Fatal(err)

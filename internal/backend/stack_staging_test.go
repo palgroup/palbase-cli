@@ -108,12 +108,16 @@ func TestStackBundleDoesNotDependOnTemporaryDirectory(t *testing.T) {
 	requiresRealToolchain(t)
 	dir := t.TempDir()
 	buildableBackend(t, dir)
-	t.Cleanup(func() { removeBundleOutput(dir) })
 	var previous []byte
 	for i := 0; i < 2; i++ {
-		_, _, err := buildStackArtifact(context.Background(), dir, io.Discard)
+		// HER TURDA FARKLI BİR BUNDLE KÖKÜ — testin adı bunu istiyor zaten.
+		// Ürünler artık checkout'a değil geçici bir köke yazıldığı için, o kökün
+		// adı da artefakta sızabilecek bir girdi hâline geldi; iki farklı kökle
+		// koşup baytları karşılaştırmak o sızıntıyı ölçer.
+		bundleRoot := t.TempDir()
+		_, _, err := buildStackArtifact(context.Background(), dir, bundleRoot, io.Discard)
 		require.NoError(t, err)
-		bundle, err := os.ReadFile(filepath.Join(dir, ".palbase", "esm", "controllers", "controllers.js"))
+		bundle, err := os.ReadFile(filepath.Join(bundleRoot, ".palbase", "esm", "controllers", "controllers.js"))
 		require.NoError(t, err)
 		if i > 0 {
 			require.True(t, string(previous) == string(bundle), "temporary directory names must not change the deployment artifact")

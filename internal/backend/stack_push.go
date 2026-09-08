@@ -208,12 +208,16 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	// this project's own node_modules, which live here. Shipping whatever a
 	// previous build left on disk is how somebody edits a controller, pushes, and
 	// deploys yesterday's code under today's commit message.
-	uses, reaches, err := buildStackArtifact(ctx, dir, w)
-	// The tarball is assembled and sent below, inside this function, so the
-	// deferred cleanup runs after the artifact has left — and the project is
-	// left exactly as the person typed it, with no build output to commit,
-	// ignore, or mistake for source.
-	defer removeBundleOutput(dir)
+	// ÜRÜNLER GEÇİCİ BİR KÖKE YAZILIR, MÜŞTERİNİN PROJESİNE DEĞİL. Tar bunları
+	// oradan alır (self-host push'u için); bulut push'u onları zaten
+	// göndermiyor. Proje, kişinin yazdığı hâliyle kalır — commit'lenecek,
+	// ignore'lanacak ya da kaynak sanılacak hiçbir derleme çıktısı olmadan.
+	bundleRoot, err := os.MkdirTemp("", "palbase-bundle-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(bundleRoot) }()
+	uses, reaches, err := buildStackArtifact(ctx, dir, bundleRoot, w)
 	if err != nil {
 		return err
 	}
@@ -290,7 +294,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	// stack, so code reading a secret nobody set does not compile. That is a
 	// keystroke, not a push.
 
-	tarball, err := BuildStackTarball(dir)
+	tarball, err := BuildStackTarball(dir, bundleRoot)
 	if err != nil {
 		return err
 	}

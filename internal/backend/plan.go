@@ -77,11 +77,15 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// A plan that goes green on code the push then refuses is worse than no plan:
 	// it is a check whose passing means nothing.
 	fmt.Fprintln(out, "code")
-	uses, _, err := buildStackArtifact(ctx, dir, indent(out))
-	// `plan` answers a question and ships nothing, so the bundle it just built
-	// has no reader at all — leaving it would put a stale artifact where the
-	// next push would find one and have to distrust it.
-	defer removeBundleOutput(dir)
+	// ÜRÜNLER PROJEYE DEĞİL, GEÇİCİ BİR KÖKE YAZILIR. `plan` bir soruya cevap
+	// verir ve hiçbir şey göndermez; ürettiği bundle'ın okuyucusu yalnız kendi
+	// parmak izidir. Müşterinin checkout'una yazmak için bir sebep yok.
+	bundleRoot, err := os.MkdirTemp("", "palbase-bundle-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(bundleRoot) }()
+	uses, _, err := buildStackArtifact(ctx, dir, bundleRoot, indent(out))
 	if err != nil {
 		return err
 	}
@@ -196,7 +200,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// koşamaz — sunucu da koşturmaz. Kullanıcının cümlesi buydu: "plansız push
 	// yapılamaması lazım, ben her push denediğimde direkt gidiyo o zaman planın
 	// ne işi var".
-	bundle, err := BundleDigest(dir)
+	bundle, err := BundleDigest(bundleRoot)
 	if err != nil {
 		return err
 	}
