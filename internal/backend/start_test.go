@@ -745,7 +745,7 @@ func TestStartBannerSaysHowToApplyTheSchema(t *testing.T) {
 
 // SÜRÜM TEK KAYNAKTAN GELİR — VE BU LİSTEDE İKİNCİ BİR KAYNAK OLAMAZ.
 //
-// Bu test eskiden `v2-cloud/bootstrap/images/version.env`'i okur ve her pinin
+// Bu test eskiden `cloud/bootstrap/images/version.env`'i okur ve her pinin
 // çekirdek sürümünü taşıdığını ölçerdi. O dosya 2026-09-05'te SİLİNDİ: aynı
 // şeyin sürümü beş ayrı yerde beş ayrı sayıydı (SDK 33.0.2 · version.env 0.42.1
 // · stack-images.json 0.42.0 · control-plane.yaml 0.33.1 · compose 0.43.0) ve

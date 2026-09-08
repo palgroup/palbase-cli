@@ -102,7 +102,7 @@ değil, ADRES/DAĞITIM kavramı.
 
 ## Yayınlanmış docs zaten AÇIĞI YAZIYOR (yeni bir keşif değil, kabul edilmiş borç)
 
-`v2-cloud/platform/studio/src/content/docs/cli/overview.md:80`:
+`cloud/platform/studio/src/content/docs/cli/overview.md:80`:
 
 > "The first three lines can be overridden for a self-hosted deployment with
 > `PALBASE_STUDIO_URL`, `PALBASE_AUTH_URL` and `PALBASE_PLATFORM_URL`. **The
@@ -227,7 +227,7 @@ kilit adım istiyor (`bootstrap_handler.go:43-45` ↔ `internal/auth/auth.go:389
 **Kırılan yer: 4 ayaktan BİRİNCİSİ.** `PALBASE_AUTH_URL` akışı gerçekten
 yönlendiriyor, ama ilk çağrı `plane.Bootstrap(ctx)` (`browser_login.go:48`) →
 `GET <base>/v1/cloud/config` (`v2login.go:79`) ve bu bir **kontrol düzlemi**
-rotası — `v2-cloud/platform` sunuyor, çekirdek sunmuyor. Alınan tek şey her
+rotası — `cloud/platform` sunuyor, çekirdek sunmuyor. Alınan tek şey her
 sonraki ayağın `apikey` başlığında gönderdiği anon key (`v2login.go:145,190`).
 
 ### B-3 — Çekirdeğin yönetim yüzeyi self-host için İKİ kimliği zaten kabul ediyor

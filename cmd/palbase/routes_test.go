@@ -35,7 +35,7 @@ func TestEveryCloudRouteLiteralIsServed(t *testing.T) {
 	}
 	// cmd/palbase → sdk/cli → sdk → palbase
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
-	controllers := filepath.Join(repoRoot, "..", "..", "v2-cloud", "platform", "server", "controllers")
+	controllers := filepath.Join(repoRoot, "..", "..", "cloud", "platform", "server", "controllers")
 
 	served, err := servedCloudRoutes(controllers)
 	if err != nil {

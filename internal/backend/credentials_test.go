@@ -182,7 +182,7 @@ func TestEachCredentialGoesInTheHeaderItsProjectAccepts(t *testing.T) {
 
 // BİR PALBASE ANAHTARI, ORTAM DEĞİŞKENİNDEN GELSE BİLE BİR ANAHTARDIR.
 //
-// Çözümleyicinin yorumu "there is no headless key" diyordu ve v2-cloud'da bu
+// Çözümleyicinin yorumu "there is no headless key" diyordu ve cloud'da bu
 // artık DOĞRU DEĞİL: bulut projesinin yönetim yüzeyini açan şey o projenin
 // KENDİ `service_role` anahtarıdır ve hedefe-göreli her komut onunla konuşur.
 //

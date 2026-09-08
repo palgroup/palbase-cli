@@ -98,7 +98,7 @@ PB-N kayıtları; (d) tsconfig include'unu şablonla hizala.
 | PB-12 yan: yayınlanmış README yanlış API | **DOĞRULANDI** | npm'den çekilen `@palbase/backend@24.3.0` README'si 24 satır, `defineEndpoint` + `Database.insert` gösteriyor; `grep -c defineEndpoint dist/index.d.ts` → **0**. Aynı pakette `docs/llms.txt` doğrusunu yazıyor |
 | PB-13 | **ŞU AN ANLAŞIYORLAR** — ama sessiz düşme gerçek | `palbase deploys` → `▸ c881cc02d661 is serving 80 endpoint(s)`, push → `live: 80 endpoint(s), c881cc02d661`. Kusur: `deployments.go:92-99` o satırı `err==nil && 200 && EndpointCount!=nil` koşuluna bağlıyor ve koşul tutmazsa **hiçbir şey basmıyor** — listenin okunmak için var olduğu tek satır sessizce kaybolabilir |
 | PB-6 | **KAPANDI** | `template/AGENTS.md:84-86` artık doğru kuralı yazıyor: *"Class and method names are your public API. `NotesController.list` generates `pb.notes.list()`"* |
-| PB-10 | **AÇIK, analiz doğru** | `v2-cloud/tenant-stack/envoy/routes.yaml:59` — *"An explicit list, and NEVER a wildcard"*: iki localhost bir varsayılan değil, KASITLI politika. CLI'da köken yazan verb yok (`auth settings` yalnız `site_url`) |
+| PB-10 | **AÇIK, analiz doğru** | `cloud/tenant-stack/envoy/routes.yaml:59` — *"An explicit list, and NEVER a wildcard"*: iki localhost bir varsayılan değil, KASITLI politika. CLI'da köken yazan verb yok (`auth settings` yalnız `site_url`) |
 
 ### D-008 — Emekli `config/` adını taşıyan DÖRT yayınlanmış metin var
 `internal/testuser/testuser.go:52-54` · `internal/backend/deploy.go:735-744` (öksüz yorum) ·

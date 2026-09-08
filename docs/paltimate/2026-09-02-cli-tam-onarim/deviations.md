@@ -15,7 +15,7 @@ _(henüz kayıt yok)_
 ## D-02 · ÇEKİRDEK SÜRÜM SÜRÜKLENMESİ — mevcut, üst akışta, ve CI'da GÖRÜNMÜYOR
 **Bulundu (2026-09-04, T003 sırasında):** `go test ./internal/backend/` yerelde kırmızı:
 `TestStackImagesTrackTheCoreVersion` → CLI üç imajı **0.40.1**'e pinliyor, otorite
-`v2-cloud/bootstrap/images/version.env` ise **V2_VERSION=0.41.0** diyor.
+`cloud/bootstrap/images/version.env` ise **V2_VERSION=0.41.0** diyor.
 
 **Benim değişikliklerimden DEĞİL:** değişikliklerim stash'liyken HEAD'de de aynı test düşüyor (ölçüldü).
 
@@ -145,7 +145,7 @@ ayırt edemedi" idi; T010'da ben aynı şeyi elle yaptım — kutuyu ölçüm ye
 ### O-1 · AÇIK KALEM (sunucu tarafı, bu deponun DIŞINDA) — push'un idempotency'sini kimse okumuyor
 
 `reviewer2` ölçtü, ben doğruladım: `Idempotency-Key` kontrol düzleminde HİÇ okunmuyor.
-`v2-cloud/platform/server` altında tek eşleşme yok; `v2/internal/sealed/replay.go:20` bunu zaten
+`cloud/platform/server` altında tek eşleşme yok; `v2/internal/sealed/replay.go:20` bunu zaten
 yazıyor — *"`Idempotency-Key` appears nowhere in this repository outside this package."*
 
 Sonuç: CLI'ın gönderdiği başlık bugün hiçbir şeyi değiştirmiyor. Ve **retry eklemek zararı

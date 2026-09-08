@@ -152,7 +152,7 @@ Hiçbiri sessizce düşemez; tasarım kapanışında traceability kontrolünde h
 ### D-013a · DÜZELTME + BÜYÜK SADELEŞTİRME · Manifesto ZATEN VAR: `version.env`
 **D-013 "iki ayrı imaj ailesi, farklı depolar/pipeline'lar" YAYIMLAMA adımı için doğru, ama İLİŞKİ için yanıltıcıydı.** Karşı-hipotez kontrolü (team-lead, bizzat) şunu ölçtü:
 
-**1. Aynı artefaktlar, iki türlü monte ediliyor.** `v2-cloud/tenant-stack/Dockerfile:31-33,64-65`:
+**1. Aynı artefaktlar, iki türlü monte ediliyor.** `cloud/tenant-stack/Dockerfile:31-33,64-65`:
 ```
 FROM --platform=linux/amd64 ${BASE_REGISTRY}/palsvc@${PALSVC_DIGEST}  AS palsvc
 FROM --platform=linux/amd64 ${BASE_REGISTRY}/runtime@${RUNTIME_DIGEST} AS runtime
@@ -162,7 +162,7 @@ COPY --from=runtime /app /app
 Yani kiracı imajı, yerel yığının kullandığı **aynı palsvc ve runtime'ı digest'le tüketip** envoy + pgvector ile tek konteynere monte ediyor. Ve `/app` kopyalandığı için **kiracı imajının SDK sürümü = runtime imajının SDK sürümü**. İkisi ayrı dünya değil; biri diğerinin bileşimi.
 **Bonus:** yerel compose'un `:162`'de değişkensiz sabitlediği `pgvector/pgvector:pg16`, kiracı imajının TABAN imajının ta kendisi — "yönetilmeyen dördüncü pin" aslında zaten paylaşılan bir pin.
 
-**2. DIGEST DİSİPLİNİ, TEK-KAYNAK MANİFESTO VE TAG→DIGEST DOĞRULAMASI ZATEN VAR.** `v2-cloud/bootstrap/images/version.env` kendini "ORTAMIN ÇEKİRDEK SÜRÜMÜ VE PİNLERİ — TEK KAYNAK" diye tanımlıyor ve şunları taşıyor: `V2_VERSION=0.40.0`, `V2_PALSVC_DIGEST=sha256:1a85…`, `V2_RUNTIME_DIGEST=sha256:b7dd…`, `V2CLOUD_IMAGE_TAG=sha-<commit>`. `seed.sh` **her koşumda içeri aldığı etiketin bu digest'e çözüldüğünü DOĞRULUYOR — çözmezse duruyor** (`seed.sh:80`).
+**2. DIGEST DİSİPLİNİ, TEK-KAYNAK MANİFESTO VE TAG→DIGEST DOĞRULAMASI ZATEN VAR.** `cloud/bootstrap/images/version.env` kendini "ORTAMIN ÇEKİRDEK SÜRÜMÜ VE PİNLERİ — TEK KAYNAK" diye tanımlıyor ve şunları taşıyor: `V2_VERSION=0.40.0`, `V2_PALSVC_DIGEST=sha256:1a85…`, `V2_RUNTIME_DIGEST=sha256:b7dd…`, `CLOUD_IMAGE_TAG=sha-<commit>`. `seed.sh` **her koşumda içeri aldığı etiketin bu digest'e çözüldüğünü DOĞRULUYOR — çözmezse duruyor** (`seed.sh:80`).
 
 **3. Ve dosyanın kendi yorumları, risk araştırmamın bağımsız olarak bulduğu iki dersi ZATEN kaydetmiş:**
 - *"ETİKET DEĞİŞEBİLİR, DIGEST DEĞİŞMEZ — ve bu ölçüldü: tenant yığını `palsvc@sha256:7b21…` pinliydi; yukarı akış `0.33.1` etiketini yeniden itince o digest yeni defterde HİÇ YOKTU ve derleme 'not found' ile düştü. Pin'in bütün amacı buydu: baytlar değişince SESSİZ kalmamak."* → D-007'nin (telde yalnız digest) kanıtı bu depoda, kendi acımızla.
@@ -197,7 +197,7 @@ Yani kiracı imajı, yerel yığının kullandığı **aynı palsvc ve runtime'�
 ### D-030 · W1 (imaj/pin ağdan çözme) KAPSAM DIŞI — kullanıcı kararı
 **Karar:** *"kanka sen bu image işine girme bence."* → İmaj/pin/SDK sürümünün ağdan çözülmesi bu programdan ÇIKARILDI.
 **Sonuç:** ⑬/⑭/⑮ (sürüm+imaj network'ten, hep en güncel, CLI güncellemesi gerekmesin) kapsamdan düşer. D-006…D-029 arası pin/güven kararları **arşivlenir** — silinmez, çünkü iş ileride açılırsa kanıt hazır (özellikle D-013a: `version.env` zaten manifesto; D-027: güven iki katmanlı).
-**Gerekçe (çıkarım):** İş `v2-cloud` + filo yayım hattına giriyor; orası başka oturumun kulvarı ([[feedback_infra_not_my_lane_just_wait]]) ve `cli-self-host-denkligi` koşusu şu anda tam o dosyalarda çalışıyor.
+**Gerekçe (çıkarım):** İş `cloud` + filo yayım hattına giriyor; orası başka oturumun kulvarı ([[feedback_infra_not_my_lane_just_wait]]) ve `cli-self-host-denkligi` koşusu şu anda tam o dosyalarda çalışıyor.
 **Kalan etki:** W5'in (start↔deploy denkliği) **pin'e bağlı olmayan** kısımları kapsamda kalır: runtime'ı yokla (palsvc değil), seçilen imajı yazdır, `upgrade` ölü-ucunu düzelt, `stop`'un compose'u ezmesini durdur.
 
 ### D-031 · Güvenlik/imzalama sorusu KONUSUZ kaldı
@@ -220,7 +220,7 @@ Yani kiracı imajı, yerel yığının kullandığı **aynı palsvc ve runtime'�
 
 ### D-035 · `palbase start` DOĞRU projeyi kaldırmalı — mekanizma: CONFIG'te sürüm, ağ DEĞİL
 **Kullanıcı:** *"palbase start ilgili projeyi start etmesi lazım. configlere versiyon koyabilirsin bence — supabase nasıl yapıyor bu işi?"*
-**Okuma:** ⑩ (doğru stack) gereksinim olarak GERİ GELDİ, ama mekanizma D-030 ile uyumlu: **proje-yerel, commit'lenen config'te sürüm beyanı** — ağ manifestosu, sunucu ucu, filo yayım hattı YOK. Bu yüzden `v2-cloud` kulvarına hiç girmiyor ve "image işine girme" talimatıyla çelişmiyor.
+**Okuma:** ⑩ (doğru stack) gereksinim olarak GERİ GELDİ, ama mekanizma D-030 ile uyumlu: **proje-yerel, commit'lenen config'te sürüm beyanı** — ağ manifestosu, sunucu ucu, filo yayım hattı YOK. Bu yüzden `cloud` kulvarına hiç girmiyor ve "image işine girme" talimatıyla çelişmiyor.
 **Araştırma açıldı:** Supabase'in yerel yığın sürümleme/`config.toml` modeli (kullanıcı doğrudan sordu) + "proje kendi çekirdek sürümünü beyan eder" deseninin diğer örnekleri.
 **Ön bilgi (rs-pin-priorart):** Supabase CLI bugün imajları `//go:embed` ile binary'ye gömülü bir Dockerfile'da taşıyor, değişken tag, digest yok — yani bizim bugünkü hâlimizin aynısı. Ama `config.toml` tarafında sürüm alanları olup olmadığı AYRI bir soru ve ölçülecek.
 
@@ -293,7 +293,7 @@ Kullanıcı kod senkronu bekliyordu. Checkout hiçbir şey yazmazsa "ortam deği
 
 ### K-02 · RED-TEAM · Sürüm→imaj tablosu CLI binary'sindeyse ⑮'i geri ihlal ediyoruz
 Proje config'te `0.41` beyan etsin; tabloyu taşıyan CLI eskiyse "bilinmeyen sürüm" der → **yine CLI güncellemesi gerekir**, ki kullanıcı bunu istemiyordu (⑮) ve Supabase'in "binary'ye kaynaklı" tuzağının aynısı.
-**Düzeltme (Expo'nun hamlesi, D-023):** Tabloyu **`@palbase/backend` paketinin İÇİNDE** dağıt — proje zaten ona bağımlı, npm zaten dağıtıyor. `npm i @palbase/backend@…` tabloyu da tazeler: **CLI sürümü gerekmez, ağ ucu gerekmez, `v2-cloud` işi gerekmez.** D-030 ile çelişmez.
+**Düzeltme (Expo'nun hamlesi, D-023):** Tabloyu **`@palbase/backend` paketinin İÇİNDE** dağıt — proje zaten ona bağımlı, npm zaten dağıtıyor. `npm i @palbase/backend@…` tabloyu da tazeler: **CLI sürümü gerekmez, ağ ucu gerekmez, `cloud` işi gerekmez.** D-030 ile çelişmez.
 
 ### K-03 · RED-TEAM (EN CİDDİ) · "En son görülen deploy" kaydı COMMIT'LENMEMELİ
 Kayıp-güncelleme koruması bir "en son gördüğüm sürüm" kaydı ister. Bunu commit'lemek Amplify'ın 1 numaralı acısını birebir kopyalamak olur: `team-provider-info.json` commit'liydi ve *"crippling merge conflicts"*in kaynağıydı.

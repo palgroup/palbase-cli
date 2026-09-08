@@ -9,7 +9,7 @@
 
 **İçeride (6 kol):** sevkiyat kapıları · ortam modeli · `start` doğruluğu · tek `link` · seçim katmanının emekliliği · modül sözleşmesi + güvenlik hijyeni. Artı **beş P0'ın tamamı**.
 
-**Dışarıda (kullanıcı kararı, D-030):** imaj/pin/SDK sürümünün **ağdan** çözülmesi. `v2-cloud` + filo yayım hattına giriyor, orası başka oturumun kulvarı. D-006…D-029 arası kanıt arşivde duruyor; iş açılırsa hazır.
+**Dışarıda (kullanıcı kararı, D-030):** imaj/pin/SDK sürümünün **ağdan** çözülmesi. `cloud` + filo yayım hattına giriyor, orası başka oturumun kulvarı. D-006…D-029 arası kanıt arşivde duruyor; iş açılırsa hazır.
 
 **Bağlayıcı kısıtlar:** self-host denkliği dokunulmaz (D-002) · geriye uyum yok, shim yok (D-003) · release kesmek bu programın içinde (D-004) · gereksiz flag/fallback yok.
 
@@ -53,7 +53,7 @@
 **Gereksinim (D-035):** *"start ilgili projeyi start etmeli; configlere versiyon koyabilirsin."*
 
 > **Karar:** Proje config'inde **tek anlamsal sürüm alanı**; servis başına tag **YOK**. Beyan yoksa kurulu `@palbase/backend`'den türetilir, **sonra yazılır ve commit'lenir**. Sürüm→imaj tablosu **`@palbase/backend` paketinin içinde** dağıtılır.
-> **Gerekçe:** Supabase'in 14 imaj alanı `toml:"-"` ile kullanıcıdan **yapısal olarak gizli** — bu bir kaza değil, düşünülmüş ret: servis başına tag vermek kullanıcıya uyumluluk matrisi vermektir (D-036). Supabase'in iki tuzağından da kaçıyoruz: binary'ye kaynaklı değil (proje beyan edebiliyor) ve `.temp` gibi gitignore'lu değil (commit'leniyor, taze klon ve CI da alıyor). Tablonun SDK paketinde olması Expo'nun hamlesi (D-023) ve **K-02'yi** çözer: tabloyu tazelemek için CLI sürümü gerekmez, `npm i` yeter — ağ ucu yok, `v2-cloud` işi yok, D-030 ile çelişmez.
+> **Gerekçe:** Supabase'in 14 imaj alanı `toml:"-"` ile kullanıcıdan **yapısal olarak gizli** — bu bir kaza değil, düşünülmüş ret: servis başına tag vermek kullanıcıya uyumluluk matrisi vermektir (D-036). Supabase'in iki tuzağından da kaçıyoruz: binary'ye kaynaklı değil (proje beyan edebiliyor) ve `.temp` gibi gitignore'lu değil (commit'leniyor, taze klon ve CI da alıyor). Tablonun SDK paketinde olması Expo'nun hamlesi (D-023) ve **K-02'yi** çözer: tabloyu tazelemek için CLI sürümü gerekmez, `npm i` yeter — ağ ucu yok, `cloud` işi yok, D-030 ile çelişmez.
 > **Alternatifler:** Nhost tarzı servis-başına pin — reddedildi (uyumluluk matrisi). Yalnız SDK'dan türetme — reddedildi: emsaller **tersini** yapıyor ve yine bir sürüm→imaj tablosu gerekiyor (D-038).
 
 **Ayrıca — `start` dürüst olacak:**

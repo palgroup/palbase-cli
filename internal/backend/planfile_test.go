@@ -73,7 +73,7 @@ func TestPlanFileRoundTripsAndNamesWhatChanged(t *testing.T) {
 // PARMAK İZİ DENKLİĞİ — SÖZLEŞMENİN KENDİSİ (C-6, FR-040).
 //
 // Bu hash'i `palbase plan` burada hesaplar, sunucu `planFingerprint`
-// (`v2-cloud/platform/server/models/projects/migrate.ts`) ile YENİDEN hesaplar,
+// (`cloud/platform/server/models/projects/migrate.ts`) ile YENİDEN hesaplar,
 // ve ikisi eşleşmezse push reddedilir. İki taraf ayrışırsa kapı koruduğu şeyi
 // İMKÂNSIZ kılar: her plan "bayat" görünür, hiçbir push geçmez, ve sebep hiçbir
 // yerde yazmaz — ortada hata yoktur, yalnız iki farklı sayı vardır.
@@ -87,6 +87,6 @@ func TestFingerprintMatchesTheServersVector(t *testing.T) {
 	const want = "ce63ea747add147dd4551f102005c58391c88e2e5112922802d2a1285e8a94a5"
 	if got := Fingerprint("b1", "36.0.2", "38.0.0", "s1"); got != want {
 		t.Fatalf("CLI ve sunucu ayrıştı — her plan bayat görünür ve hiçbir push geçmez.\n"+
-			"  got  %s\n  want %s (v2-cloud/platform/server/models/projects/migrate.test.ts)", got, want)
+			"  got  %s\n  want %s (cloud/platform/server/models/projects/migrate.test.ts)", got, want)
 	}
 }
