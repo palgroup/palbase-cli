@@ -24,6 +24,47 @@ type artifactFile struct {
 // app sees the new config, spec and generated code only after the set is ready.
 // Dependencies are read from the checkout; generated artifacts are never linked
 // back to it. Failure before publication leaves the original files untouched.
+// linkStagePrefix, hazırlık alanının adı. Süpürme de yaratma da bunu kullanır:
+// iki yerde yazılan bir önek, bir gün ayrışır ve süpürücü kendi ürettiğini
+// tanımaz hâle gelir.
+const linkStagePrefix = ".palbase-link-"
+
+// newLinkStage, hazırlık alanını CHECKOUT'UN İÇİNDE açar ve önce eskiyi süpürür.
+//
+// NEDEN İÇERİDE: eskiden `filepath.Dir(root)` kullanılıyordu, yani projenin BİR
+// ÜSTÜ. Müşteride proje `smartex/palbase`, üstü git deposunun kökü; kalıntı
+// orada `?? .palbase-link-1344746409/` olarak duruyordu — bir gün öncesinden,
+// içinde `.env.local` kopyası (bir API anahtarı) ve canlı checkout'a
+// symlink'ler. Bu dosyanın kendi kuralı bunu zaten yasaklıyor: kullanıcıdan
+// gelen yollar için "link output and entry must belong to this checkout" diyor
+// ve aracın kendisi o kurala uymuyordu.
+//
+// NEDEN OS TEMP DEĞİL: yayımlama `os.Rename(staged, live)` ile yapılıyor
+// (`publishLinkArtifacts`) ve farklı dosya sistemleri arasında rename EXDEV ile
+// düşer. Checkout'un içi aynı dosya sistemini garantiler; `/tmp` garantilemez —
+// CI'da tmpfs olması olağandır.
+//
+// NEDEN SÜPÜRME: temizlik yalnız `defer os.RemoveAll(stage)` ile yapılıyor ve o
+// defer SIGINT'te, SIGKILL'de, panikte ya da elektrik kesintisinde KOŞMAZ.
+// Sinyal yakalamak da yetmez — SIGKILL yakalanamaz. Sağlam olan her koşunun
+// BAŞINDA eskiyi toplamasıdır: hazırlık alanı koşu başına tekildir ve bu depoda
+// bir checkout'un tek yazarı vardır, dolayısıyla önceden duran her şey ölüdür.
+func newLinkStage(root string) (string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), linkStagePrefix) {
+			// Süpürme BEST-EFFORT: bir kalıntı silinemiyorsa (izin, açık dosya)
+			// bu koşuyu düşürmek, düzeltilebilir bir çöp yüzünden yapılabilir bir
+			// işi reddetmek olurdu.
+			_ = os.RemoveAll(filepath.Join(root, e.Name()))
+		}
+	}
+	return os.MkdirTemp(root, linkStagePrefix+"*")
+}
+
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	root, err := os.Getwd()
 	if err != nil {
@@ -40,7 +81,7 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		platforms = detectPlatforms(root)
 	}
 	installWebSDK := slices.Contains(platforms, webPlatform) && !isRegularFile(filepath.Join(root, palbeGenBin))
-	stage, err := os.MkdirTemp(filepath.Dir(root), ".palbase-link-*")
+	stage, err := newLinkStage(root)
 	if err != nil {
 		return err
 	}
@@ -66,8 +107,15 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 	before := map[string]artifactFile{}
+	stageName := filepath.Base(stage)
 	for _, entry := range entries {
 		name := entry.Name()
+		// HAZIRLIK ALANI KENDİNİ AYNALAYAMAZ. Stage artık checkout'un İÇİNDE
+		// açılıyor, yani bu taramada görünür; atlanmazsa kendi içine symlink
+		// kurar ve ağaç kendi kendini içerir.
+		if name == stageName {
+			continue
+		}
 		if name == "node_modules" && installWebSDK {
 			// An installer must not follow a symlink into the live checkout.
 			// Install the declared dependency set in the stage and publish it
@@ -131,7 +179,9 @@ func publishLinkArtifacts(root, stage string, before, after map[string]artifactF
 		return fmt.Errorf("the dependency installer did not produce a node_modules directory")
 	}
 	live := filepath.Join(root, "node_modules")
-	backupDir, err := os.MkdirTemp(filepath.Dir(root), ".palbase-link-dependencies-")
+	// Yedek de checkout'un İÇİNDE: `os.Rename(live, backup)` ile taşındığı için
+	// aynı dosya sisteminde olmak zorunda, ve dışarıya yazmak burada da yanlış.
+	backupDir, err := os.MkdirTemp(root, linkStagePrefix+"dependencies-")
 	if err != nil {
 		return err
 	}

@@ -322,6 +322,13 @@ var generatedProjectPaths = []struct {
 	{".palbase/jobs/", "the job manifest — same", true},
 	{".palbase/hooks/", "the hook manifest — same", true},
 	{stagedControllersDir + "/", "`palbase build`'s staging tree; removed on exit, left behind by a SIGKILL", true},
+	// `link`'in hazırlık alanı. Bir gün ötesine kadar yaşayan bir kalıntı canlıda
+	// görüldü (07.09.2026, müşteri deposu) ve `git check-ignore` ona HİÇBİR kural
+	// bulamadı: `?? .palbase-link-1344746409/` olarak duruyordu, içinde bir
+	// `.env.local` kopyası ve bir API anahtarı vardı. `link` artık her koşunun
+	// başında eskiyi süpürüyor, ama süpürülmeden önce bir `git add -A` yakalarsa
+	// sır depoya girer — o yüzden ignore da şart.
+	{linkStagePrefix + "*/", "`palbase link`'in hazırlık alanı; koşu başına tekil, bir sonraki koşu süpürür", true},
 	{deployStagingDir + "/", "staged sources left by older CLIs; new deploy builds use a temp directory", true},
 	{envTypesFile, "generated from this project's secrets on every build, like next-env.d.ts", true},
 	{"*.log", "logs", false},
