@@ -656,6 +656,15 @@ func ensurePalbaseGitignored(path string) error {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
+	// NO FILE AT ALL IS NOT A CURATED FILE. Everything below is written to be
+	// careful with somebody else's rules — narrow one, add only ours, take back
+	// only what we retired. None of that applies when there is nothing there,
+	// and treating the two the same produced a `.gitignore` this CLI created for
+	// a JavaScript project without `node_modules/` in it.
+	if strings.TrimSpace(string(content)) == "" {
+		return os.WriteFile(path, []byte(gitignoreScaffold()), 0o644)
+	}
+
 	// STEP 1 — NARROW. A `.gitignore` carrying `.palbase` or `.palbase/` takes
 	// the contract, the platform slots and the link itself with it, and the next
 	// clone resolves no project and generates no client. The directory-wide rule

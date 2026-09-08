@@ -288,22 +288,18 @@ func copyTemplate(from, to string) ([]string, error) {
 	return written, err
 }
 
-// writeGitignore scaffolds the ignore file from that one list.
+// writeGitignore puts this project's ignore file in the state the CLI needs,
+// through the ONE function that knows what that state is.
+//
+// It used to have its own answer for an existing file: "if it mentions
+// node_modules, do nothing". So `palbase init` into a directory that already
+// carried an ignore file left `.palbase/local.json` and the generated types
+// unignored — and a `.palbase` blanket rule, which takes the contract with it
+// and leaves the next clone unable to build, went unnarrowed. Two mechanisms
+// maintaining one file is two answers to one question, and the quieter one was
+// wrong.
 func writeGitignore(dir string) error {
-	var b strings.Builder
-	for _, e := range generatedProjectPaths {
-		b.WriteString(e.path)
-		b.WriteString("\n")
-	}
-	body := b.String()
-	path := filepath.Join(dir, ".gitignore")
-	if existing, err := os.ReadFile(path); err == nil {
-		if strings.Contains(string(existing), "node_modules") {
-			return nil
-		}
-		return os.WriteFile(path, append(existing, []byte("\n"+body)...), 0o644)
-	}
-	return os.WriteFile(path, []byte(body), 0o644)
+	return ensurePalbaseGitignored(filepath.Join(dir, ".gitignore"))
 }
 
 // seedPackageJSON makes this directory a project root for npm's benefit.

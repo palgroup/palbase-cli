@@ -68,6 +68,25 @@ var retiredProjectPaths = []struct {
 	{linkStagePrefix + "*", "`palbase link`'s staging tree; it opens in the temp directory"},
 }
 
+// gitignoreScaffold is the whole ignore file for a project that has none.
+//
+// EVERY entry, not just `ours`. The `ours` flag decides what may be APPENDED to
+// a file somebody curated — `node_modules/` there would be noise, because a
+// project with a curated ignore file already handles it. A checkout with NO
+// ignore file has curated nothing, and the two were treated as the same case:
+// `link` created a `.gitignore` for a JavaScript project that did not ignore
+// `node_modules`, so the next `git add -A` staged every installed dependency.
+// Measured on a fresh web checkout, 08.09.2026: 500+ files under
+// `node_modules/@bufbuild` staged by a repository the CLI had just set up.
+func gitignoreScaffold() string {
+	var b strings.Builder
+	for _, e := range generatedProjectPaths {
+		b.WriteString(e.path)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // reapRetiredArtifacts deletes what an older CLI left in this checkout.
 //
 // Best effort by design: refusing a job somebody asked for because a dead

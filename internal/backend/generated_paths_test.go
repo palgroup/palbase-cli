@@ -288,3 +288,90 @@ func TestBuildRefusesWhenTheSDKCannotBeInstalled(t *testing.T) {
 		t.Errorf("kaynağı olmayan bir dizin reddedildi: %v", err)
 	}
 }
+
+// CLI'IN SIFIRDAN YARATTIĞI .gitignore, node_modules'ü DE KAPSAR.
+//
+// `link` bir checkout'ta ignore dosyası bulamayınca birini yaratıyor, ve
+// yalnızca `ours` kuralları yazıyordu: bir JavaScript projesi için `node_modules/`
+// içermeyen bir `.gitignore`. Canlı ölçüm (taze web checkout'u, 08.09.2026): bir
+// `git add -A`, kurulu her bağımlılığı sahneye aldı — 500'den fazla dosya,
+// CLI'ın az önce kurduğu depoda.
+//
+// `ours` bayrağı BAŞKASININ dosyasına ne EKLENECEĞİNİ söyler; hiç dosyası
+// olmayan bir checkout ise hiçbir şey kürate etmemiştir.
+func TestACreatedGitignoreCoversTheWholeScaffold(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".gitignore")
+	if err := ensurePalbaseGitignored(path); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range generatedProjectPaths {
+		if !strings.Contains(string(body), e.path) {
+			t.Errorf("yaratılan dosya %s'i kapsamıyor (%s):\n%s", e.path, e.why, body)
+		}
+	}
+
+	// VE KÜRATE EDİLMİŞ BİR DOSYAYA `node_modules/` EKLENMEZ — ayrımın öbür
+	// yarısı: birinin kendi dosyasına bizim gürültümüz girmez.
+	curated := filepath.Join(t.TempDir(), ".gitignore")
+	if err := os.WriteFile(curated, []byte("dist/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePalbaseGitignored(curated); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(curated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after), "node_modules") {
+		t.Errorf("kürate edilmiş bir dosyaya ekosistemin kuralı eklendi:\n%s", after)
+	}
+	if !strings.Contains(string(after), ".palbase/local.json") {
+		t.Errorf("kürate edilmiş dosyaya bizim kuralımız eklenmedi:\n%s", after)
+	}
+}
+
+// `init`, KENDİ ignore CEVABINI VERMEZ.
+//
+// Bir dosyayı iki mekanizma bakımlıyorsa, bir soruya iki cevap var demektir ve
+// sessiz olanı yanlıştır: `writeGitignore`'un kendi dalı "içinde node_modules
+// geçiyorsa hiç dokunma" diyordu, yani zaten bir ignore dosyası taşıyan bir
+// dizine `palbase init` çalıştırınca `.palbase/local.json` ve üretilen tipler
+// ignore EDİLMİYORDU — ve `.palbase` toptan kuralı daraltılmadan kalıyordu ki o
+// kural sözleşmeyi de götürür, bir sonraki klon derleyemez.
+func TestInitDoesNotAnswerTheIgnoreQuestionOnItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	// Kürate edilmiş, node_modules'ü zaten olan VE `.palbase`'i toptan alan bir
+	// dosya — eski dal buna hiç dokunmuyordu.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"),
+		[]byte("node_modules/\ndist/\n.palbase/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGitignore(dir); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, line := range strings.Split(got, "\n") {
+		if strings.TrimSpace(line) == ".palbase" || strings.TrimSpace(line) == ".palbase/" {
+			t.Errorf("toptan `.palbase` kuralı duruyor — sözleşme ignore ediliyor, klon derleyemez:\n%s", got)
+		}
+	}
+	if !strings.Contains(got, ".palbase/local.json") {
+		t.Errorf("daraltılmış kural yazılmadı:\n%s", got)
+	}
+	if !strings.Contains(got, envTypesFile) {
+		t.Errorf("üretilen tipler ignore edilmedi:\n%s", got)
+	}
+	if !strings.Contains(got, "dist/") {
+		t.Errorf("kullanıcının kendi kuralı silindi:\n%s", got)
+	}
+}
