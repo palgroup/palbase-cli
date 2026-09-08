@@ -23,7 +23,7 @@ import (
 // kalmış bir kalıntı, içinde bir API anahtarıyla birlikte müşterinin deposunda
 // duruyordu. Çare orada da buydu — sinyal yakalamak yetmez (SIGKILL
 // yakalanamaz), her koşu BAŞTA eskiyi süpürmeli.
-func TestSweepBuildLitterRemovesWhatAKilledRunLeaves(t *testing.T) {
+func TestReapRetiredArtifactsRemovesWhatAnOlderCLILeft(t *testing.T) {
 	dir := t.TempDir()
 	litter := []string{
 		filepath.Join(dir, ".palbase", "esm", "controllers", "controllers.js"),
@@ -31,6 +31,7 @@ func TestSweepBuildLitterRemovesWhatAKilledRunLeaves(t *testing.T) {
 		filepath.Join(dir, ".palbase", "hooks", "manifest.json"),
 		filepath.Join(dir, stagedControllersDir, "a.ts"),
 		filepath.Join(dir, deployStagingDir, "b.ts"),
+		filepath.Join(dir, linkStagePrefix+"1344746409", ".env.local"),
 	}
 	for _, p := range litter {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -48,7 +49,7 @@ func TestSweepBuildLitterRemovesWhatAKilledRunLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sweepBuildLitter(dir)
+	reapRetiredArtifacts(dir)
 
 	for _, p := range litter {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {

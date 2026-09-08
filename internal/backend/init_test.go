@@ -344,7 +344,7 @@ func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
 // source, is read by nothing, and goes stale the moment a controller changes.
 // Measured 2026-08-24 on a real project: 17 files, 88 KB, all 17 different from
 // the controllers beside them.
-// THE SCAFFOLD IGNORES WHAT THE CLI ACTUALLY WRITES.
+// THE SCAFFOLD IGNORES WHAT THE CLI ACTUALLY WRITES — AND NOTHING ELSE.
 //
 // This test used to demand two staging names — the deploy stager's and
 // `.palbase-serve-controllers/`, which nothing has written for two renames —
@@ -353,9 +353,12 @@ func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
 // gate was green, the remembered name was ignored forever, and the live one was
 // committed. A rule that pins names from memory measures the memory.
 //
-// It now reads the constants the writers use, so a rename moves the assertion
-// with the code, and `init`'s scaffold — which runs on a BRAND NEW project that
-// never met an older CLI — carries no name nothing writes.
+// The list it then pinned went stale the other way. `link`, `build` and `push`
+// moved their working trees into the temp directory, and the assertion kept
+// DEMANDING rules for directories that can no longer be created — a gate
+// holding the lie in place instead of catching it. So the subject is now the
+// declaration itself: every path the CLI says it generates must be ignored, and
+// nothing it has retired may appear. Both halves move with the code.
 func TestTheScaffoldIgnoresEveryPathTheCLIGenerates(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeGitignore(dir); err != nil {
@@ -365,18 +368,14 @@ func TestTheScaffoldIgnoresEveryPathTheCLIGenerates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	// The constants the code writes with, named here so a rename breaks THIS
-	// instead of a user's repository.
-	for _, name := range []string{
-		stagedControllersDir + "/",                           // build-check.js stages here
-		deployStagingDir + "/",                               // the deploy stager stages here
-		envTypesFile,                                         // generated from the project's secrets
-		".palbase/esm/", ".palbase/jobs/", ".palbase/hooks/", // the bundle
-		".palbase/local.json",
-	} {
-		if !strings.Contains(string(body), name) {
-			t.Errorf("%s is written by the CLI and not ignored:\n%s", name, body)
+	for _, e := range generatedProjectPaths {
+		if !strings.Contains(string(body), e.path) {
+			t.Errorf("%s is written by the CLI (%s) and not ignored:\n%s", e.path, e.why, body)
 		}
+	}
+	// NEGATİF KONTROL: dosya boş olsaydı yukarıdaki döngü de sessiz kalırdı.
+	if len(generatedProjectPaths) == 0 {
+		t.Fatal("üretilen yol listesi boş — bu test hiçbir şey ölçmüyor")
 	}
 	// And the committed half stays committed: a scaffold that ignored these
 	// would produce a repository the next clone cannot build.

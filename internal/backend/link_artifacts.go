@@ -124,22 +124,14 @@ const linkStagePrefix = ".palbase-link-"
 // gerçek ama çaresi stage'i projeye sokmak değil, taşımanın EXDEV'i
 // karşılaması (`moveTree`).
 //
-// CHECKOUT YİNE DE SÜPÜRÜLÜR: bu CLI'ın bir ara sürümü stage'i checkout'un
+// CHECKOUT YİNE DE TOPLANIR: bu CLI'ın bir ara sürümü stage'i checkout'un
 // içine açıyordu, ve o sürümle yarıda kesilmiş bir koşunun kalıntısı hâlâ
-// duruyor olabilir. Üst dizine DOKUNULMAZ — orası bu aracın alanı değil ve
-// silmek de bir yazma fiilidir.
+// duruyor olabilir. Toplama emekli yolların TEK listesinden geçer
+// (`reapRetiredArtifacts`) — burada ikinci bir süpürücü yazmak, listeyle bir
+// gün ayrışacak ikinci bir gerçek yazmak olurdu. Üst dizine DOKUNULMAZ: orası
+// bu aracın alanı değil ve silmek de bir yazma fiilidir.
 func newLinkStage(root string) (string, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return "", err
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), linkStagePrefix) {
-			// BEST-EFFORT: silinemeyen bir kalıntı yüzünden yapılabilir bir işi
-			// reddetmek, düzeltilebilir bir çöpe koşuyu feda etmek olurdu.
-			_ = os.RemoveAll(filepath.Join(root, e.Name()))
-		}
-	}
+	reapRetiredArtifacts(root)
 	return os.MkdirTemp("", "palbase-link-*")
 }
 

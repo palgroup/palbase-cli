@@ -124,12 +124,23 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 
 	// Controllers import @palbase/backend; the bundler keeps it external and the
 	// extractor require()s it from node_modules. Install once when absent so a
-	// fresh clone can be validated in one step. Install failure = environment
-	// problem, not a user-code error → warn + continue (server gate backstops).
+	// fresh clone can be validated in one step.
+	//
+	// AND A FAILED INSTALL REFUSES. It used to print a warning and RETURN NIL —
+	// exit 0, the word "build" on the screen, and not one controller read. The
+	// warning even said so ("cannot validate locally"), which is the whole
+	// problem: the sentence a person remembers from a command that exits 0 is
+	// that it passed. `palbase push` installs this as a pre-push hook, so the
+	// green it printed was the green a deploy went out on.
+	//
+	// "The deploy will still gate it" was the justification, and it is the same
+	// advisory shape as the staging fallback below: a local gate whose answer is
+	// known not to measure anything is worse than no local gate, because it
+	// spends the person's trust. A build that cannot run says it cannot run.
 	if backendDepMissing(cwd) {
 		if err := installNodeDeps(cwd); err != nil {
-			fmt.Fprintf(out, "warning: %s is not installed and `npm install` failed (%v) — cannot validate locally; the deploy will still gate it\n", backendPkg, err)
-			return nil
+			return fmt.Errorf("%s is not installed and `npm install` failed (%w) — nothing here can be "+
+				"validated without the SDK the controllers import", backendPkg, err)
 		}
 	}
 	// Read the installed major BEFORE ensureBuildCheckTools: its `npm install
@@ -197,15 +208,31 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// the working directory resolved bare third-party imports (`import { z } from
 	// "zod"`) that the deploy then failed on with `Could not resolve "zod"`, after
 	// this command had already printed "build OK". Staging closes that gap at the
-	// source: same bytes in, same bundler behaviour out. Staging failure is an
-	// environment problem, not user code → warn + fall back to the live tree.
-	buildRoot := cwd
-	if staged, serr := stageDeployTree(cwd); serr != nil {
-		fmt.Fprintf(out, "warning: could not stage the deploy tree (%v) — validating the working directory instead; a bare third-party import may still pass here and fail the deploy\n", serr)
-	} else {
-		defer removeTemp(staged)
-		buildRoot = staged
+	// source: same bytes in, same bundler behaviour out.
+	//
+	// A STAGING FAILURE REFUSES. It used to warn and validate the working
+	// directory instead, on the premise that an environment fault is not the
+	// user's fault — but the fallback's own warning admitted what it was doing:
+	// "a bare third-party import may still pass here and fail the deploy". That
+	// is the exact false green this staging exists to kill, handed back under
+	// the word `warning`, and `palbase push` installs this command as a pre-push
+	// hook, so the answer it prints is the one a deploy is launched on.
+	//
+	// It also wrote into the checkout. build-check.js stages its
+	// return-binding-injected controllers at `PROJECT_ROOT/.palbase-build-controllers`,
+	// and PROJECT_ROOT is whatever is passed here — so the fallback was the one
+	// path that put that directory in somebody's repository, cleaned by an exit
+	// handler a SIGKILL never runs.
+	//
+	// Both halves have the same cure: when the tree cannot be staged, say so and
+	// stop. A refusal a person can act on beats an answer nobody can trust.
+	buildRoot, serr := stageDeployTreeFn(cwd)
+	if serr != nil {
+		return fmt.Errorf("the deploy tree could not be staged, and validating the working "+
+			"directory instead would answer a different question than the deploy asks "+
+			"(a bare third-party import resolves here through node_modules and fails there): %w", serr)
 	}
+	defer removeTemp(buildRoot)
 
 	node := exec.CommandContext(ctx, "node", filepath.Join(tmpDir, "build-check.js"))
 	node.Dir = buildRoot
@@ -329,6 +356,15 @@ func landEnvTypes(buildRoot, cwd string, out io.Writer) error {
 	fmt.Fprintf(out, "✓ %s\n", envTypesFile)
 	return nil
 }
+
+// stageDeployTreeFn is the seam the refusal above is measured through.
+//
+// Staging fails on a full disk, an unwritable temp directory or a broken
+// symlink — none of which a test can arrange on a machine where they are all
+// fine. Without a seam the refusal branch would be code nobody has ever run,
+// and "it obviously works" is the sentence that precedes every branch that
+// did not.
+var stageDeployTreeFn = stageDeployTree
 
 // stageDeployTree materialises, in a temp dir, EXACTLY the source tree a deploy
 // receives: the `palbase push` tarball, unpacked. It reuses BuildTarball rather

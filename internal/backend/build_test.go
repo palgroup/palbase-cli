@@ -967,12 +967,33 @@ func TestBuildRefusesARetiredConfigDeclaration(t *testing.T) {
 func TestBuildAcceptsAPlainModuleUnderConfig(t *testing.T) {
 	requiresRealToolchain(t)
 	dir := t.TempDir()
+	// THE SDK IS INSTALLED BECAUSE THE BUILD HAS TO ACTUALLY RUN.
+	//
+	// This assertion was green on a tree with no `@palbase/backend`: the build
+	// warned that it could not validate anything and returned nil, so "a plain
+	// module under config/ is accepted" was measured by a command that never
+	// opened config/. The warn-and-pass branch is gone (build.go), and with it
+	// the green this test was riding.
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	requireCutoverSDK(t, dir)
+	useTestParserCache(t)
+	// AND THE REST OF THE TREE IS A REAL PROJECT. The fixture used to be
+	// `config/pricing.ts` alone, which is not a backend at all — it has no
+	// module, so a build that actually runs refuses it for a reason that has
+	// nothing to do with config/. The question here is whether an ordinary file
+	// under config/ is mistaken for a retired declaration, and asking it needs a
+	// tree the build otherwise accepts.
+	writeFixture(t, dir, goodControllerTS)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config", "pricing.ts"),
 		[]byte("export const RATE = 3;\n"), 0o644))
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	var out bytes.Buffer
-	require.NoError(t, runBuild(context.Background(), dir, &out))
+	require.NoError(t, runBuild(ctx, dir, &out), "build:\n%s", out.String())
 	require.NotContains(t, out.String(), "pricing.ts")
 }
 
@@ -1007,13 +1028,26 @@ func TestBuildRefusesATsconfigThatSkipsACompiledDirectory(t *testing.T) {
 func TestBuildAcceptsATsconfigWithNoIncludeList(t *testing.T) {
 	requiresRealToolchain(t)
 	dir := t.TempDir()
+	// Same reason as the config/ acceptance above: without the SDK installed the
+	// build used to return nil having read nothing, and an acceptance measured
+	// by a command that did not run is not an acceptance.
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	requireCutoverSDK(t, dir)
+	useTestParserCache(t)
+	// Same as above: the gate under test is the tsconfig coverage rule, and it
+	// can only be exercised on a tree the build otherwise accepts.
+	writeFixture(t, dir, goodControllerTS)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "jobs", "sweep.ts"), []byte("export default class {}\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
 		[]byte(`{"compilerOptions":{"strict":true}}`), 0o644))
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	var out bytes.Buffer
-	require.NoError(t, runBuild(context.Background(), dir, &out))
+	require.NoError(t, runBuild(ctx, dir, &out), "build:\n%s", out.String())
 }
 
 // TestASharedModuleIsNotDuplicatedPerBundle locks the parity that `palbase

@@ -643,6 +643,13 @@ func insecureTransport() http.RoundTripper {
 // `.palbase/selection.json`; that file no longer decides anything (FR-013), so
 // narrowing to it would have ignored a file nothing writes while leaving the
 // per-machine address committed for everyone else to trip over.
+//
+// IT ALSO TAKES RULES BACK. This function could only ever add, so a rule
+// outlived the producer that justified it: after `link`, `build` and `push`
+// moved their working trees into the temp directory, every run still appended
+// five lines telling the reader that this CLI writes directories it can no
+// longer write. Retiring a producer is two acts — stop writing the file, and
+// un-write what its existence already put in the repository.
 func ensurePalbaseGitignored(path string) error {
 	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -667,6 +674,13 @@ func ensurePalbaseGitignored(path string) error {
 				narrowed = true
 			}
 		default:
+			// A rule this CLI wrote for a producer it has retired. Dropping the
+			// line is the honest half of the retirement; `reapRetiredArtifacts`
+			// is the other half, and it has already run by the time link
+			// reaches here.
+			if isRetiredIgnoreRule(line) {
+				continue
+			}
 			if t != "" {
 				present[t] = true
 			}
