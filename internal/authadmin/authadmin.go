@@ -185,31 +185,37 @@ func settingsCmd(r Resolvers) *cobra.Command {
 				return fmt.Errorf("nothing to send: name a setting (--password-min, --password-max, " +
 					"--confirm-email, --site-url) or pass the fields to change with --json")
 			}
-			// READ FIRST, ALWAYS. The module's PUT replaces the WHOLE document,
-			// so a partial body erases what it does not mention — measured live:
-			// `--password-min 13` alone was refused with "password_max_length
-			// must be between password_min_length and 64", because the absent
-			// maximum arrived as zero. A person saying "make the minimum 13" is
-			// not saying "and forget everything else".
-			//
-			// This used to be gated on the caller having named a flag, on the
-			// theory that --json carries the whole document. It does not: its own
-			// help offers it for "anything the named flags do not cover", which is
-			// an invitation to send one field — and that one field then WAS the
-			// document, erasing the rest under a success line. --json is a
-			// fragment like any other, and takes the same merge.
-			current, err := readSettings(r, cmd)
+			// Send only the requested fields. The API preserves omitted settings;
+			// If-Match prevents a concurrent change after our read from being lost.
+			rest, err := r.REST(cmd)
 			if err != nil {
 				return err
 			}
-			b, err := mergeSettings(fragment, named, current)
+			etag, err := readSettingsRevision(rest, cmd)
 			if err != nil {
 				return err
 			}
-			return call(r, cmd, http.MethodPut, base+"/settings", b)
+			b, err := mergeSettings(fragment, named)
+			if err != nil {
+				return err
+			}
+			status, raw, headers, err := rest.DoWithHeaders(cmd.Context(), http.MethodPut, base+"/settings", b, http.Header{"If-Match": {etag}})
+			if err != nil {
+				return err
+			}
+			if status == http.StatusPreconditionFailed {
+				return fmt.Errorf("auth settings changed while saving; no retry was sent. Read the current settings and review your change before running this command again")
+			}
+			if status != http.StatusOK {
+				return fmt.Errorf("the settings API answered %d: %s", status, strings.TrimSpace(string(raw)))
+			}
+			if !validSettingsRevision(headers) {
+				return fmt.Errorf("the save response has no valid auth settings revision; verify the current settings before retrying")
+			}
+			return emit(cmd, raw)
 		},
 	}
-	set.Flags().StringVar(&body, "json", "", "fields the named flags do not cover, as a JSON object — merged into the current settings, not a replacement")
+	set.Flags().StringVar(&body, "json", "", "fields to change as a JSON object; omitted settings are preserved")
 	set.Flags().IntVar(&pwMin, "password-min", 0, "shortest password this project accepts")
 	set.Flags().IntVar(&pwMax, "password-max", 0, "longest password this project accepts")
 	set.Flags().BoolVar(&confirm, "confirm-email", false, "require a confirmed address before sign-in")
@@ -224,8 +230,7 @@ func settingsCmd(r Resolvers) *cobra.Command {
 // is the thing a CLI exists to hide — and getting one wrong is a settings write
 // that silently does nothing, because the module ignores fields it does not read.
 //
-// Only flags the caller CHANGED are sent: this is a PUT over the whole document,
-// so a zero for a flag nobody typed would set the password floor to zero.
+// Only flags the caller CHANGED are sent; an omitted flag preserves its value.
 func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL string) map[string]any {
 	out := map[string]any{}
 	if cmd.Flags().Changed("password-min") {
@@ -241,31 +246,6 @@ func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL s
 		out["site_url"] = siteURL
 	}
 	return out
-}
-
-// readSettings fetches the document a `set` is about to change.
-//
-// A failure here refuses the write rather than falling back to an empty
-// document: merging into nothing is exactly the erasure this read exists to
-// prevent, and it would be indistinguishable from a successful change.
-func readSettings(r Resolvers, cmd *cobra.Command) (map[string]any, error) {
-	rest, err := r.REST(cmd)
-	if err != nil {
-		return nil, err
-	}
-	status, raw, err := rest.Do(cmd.Context(), http.MethodGet, base+"/settings", nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("could not read the current settings to change one of them (%d): %s",
-			status, strings.TrimSpace(string(raw)))
-	}
-	current := map[string]any{}
-	if err := json.Unmarshal(raw, &current); err != nil {
-		return nil, fmt.Errorf("the current settings did not parse: %w", err)
-	}
-	return current, nil
 }
 
 // parseFragment reads --json as what it is: some of the fields, not all of them.
@@ -286,18 +266,10 @@ func parseFragment(inline string) (map[string]any, error) {
 	return fragment, nil
 }
 
-// mergeSettings puts the named flags over the --json fragment, over the document
-// as it stands.
-//
-// Both flavours of caller are accepted rather than one winning silently: a person
-// setting the password floor and a site URL in the same breath should not have to
-// choose which half to write by hand.
-func mergeSettings(fragment, named, current map[string]any) ([]byte, error) {
+// Named flags take precedence over the explicit JSON fragment. Server values
+// never enter this body, so changing a password bound cannot rewrite app policy.
+func mergeSettings(fragment, named map[string]any) ([]byte, error) {
 	merged := map[string]any{}
-	// The document as it stands, under everything the caller said.
-	for k, v := range current {
-		merged[k] = v
-	}
 	for k, v := range fragment {
 		merged[k] = v
 	}

@@ -30,6 +30,9 @@ func (f *fakeREST) DoWithHeaders(ctx context.Context, method, path string, body 
 	if method == http.MethodGet && path == socialBase && status == 200 {
 		raw = []byte(emptySocialConfig)
 	}
+	if path == base+"/settings" {
+		return status, raw, http.Header{"Etag": {`"auth-settings-` + strings.Repeat("a", 64) + `"`}}, err
+	}
 	return status, raw, http.Header{contractHeader: {"1"}, "Etag": {`"revision-1"`}}, err
 }
 
@@ -214,14 +217,7 @@ func TestSettingsSetWithNothingToSaySaysSo(t *testing.T) {
 	}
 }
 
-// A named change is READ-MODIFY-WRITE, because the module's PUT replaces the
-// whole document.
-//
-// Measured against a live stack: `auth settings set --password-min 13` sent
-// {"password_min_length":13} and was refused —
-// "password_max_length must be between password_min_length and 64" — because the
-// absent maximum arrived as zero. A person saying "make the minimum 13" is not
-// saying "and forget everything else".
+// Read the revision, then send only the requested partial update.
 func TestSettingsSetReadsBeforeItWrites(t *testing.T) {
 	rest := &fakeREST{answer: `{"password_min_length":8,"password_max_length":64,"confirm_email_required":false,"site_url":"https://kept.example"}`}
 	run(t, rest, "settings", "set", "--password-min", "13")
@@ -236,22 +232,15 @@ func TestSettingsSetReadsBeforeItWrites(t *testing.T) {
 	if sent["password_min_length"] != float64(13) {
 		t.Errorf("the change did not travel: %s", rest.body)
 	}
-	if sent["password_max_length"] != float64(64) {
-		t.Errorf("the untouched maximum was dropped — the module reads that as zero: %s", rest.body)
+	if len(sent) != 1 {
+		t.Errorf("unrequested settings must not be rewritten: %s", rest.body)
 	}
-	if sent["site_url"] != "https://kept.example" {
-		t.Errorf("a field nobody mentioned was erased: %s", rest.body)
+	if rest.headers.Get("If-Match") == "" {
+		t.Fatal("missing revision")
 	}
 }
 
-// A --json FRAGMENT is a change, not a replacement.
-//
-// The read-first merge above was gated on the caller having named a flag, so
-// `--json '{"password_min_length":13}'` alone merged into an empty document and
-// the module's replacing PUT erased every field the fragment omitted — with a
-// success line, because the write itself succeeds. The help calls --json
-// "anything the named flags do not cover", which is an invitation to send
-// exactly one field.
+// JSON fragments have the same partial-update contract as named flags.
 func TestSettingsSetJSONAloneDoesNotEraseTheRestOfTheDocument(t *testing.T) {
 	rest := &fakeREST{answer: `{"password_min_length":8,"password_max_length":64,"confirm_email_required":true,"site_url":"https://kept.example"}`}
 	run(t, rest, "settings", "set", "--json", `{"password_min_length":13}`)
@@ -266,14 +255,11 @@ func TestSettingsSetJSONAloneDoesNotEraseTheRestOfTheDocument(t *testing.T) {
 	if sent["password_min_length"] != float64(13) {
 		t.Errorf("the change did not travel: %s", rest.body)
 	}
-	if sent["password_max_length"] != float64(64) {
-		t.Errorf("the untouched maximum was erased — the module reads that as zero: %s", rest.body)
+	if len(sent) != 1 {
+		t.Errorf("unrequested settings must not be rewritten: %s", rest.body)
 	}
-	if sent["confirm_email_required"] != true {
-		t.Errorf("e-mail confirmation was turned off by a write that never mentioned it: %s", rest.body)
-	}
-	if sent["site_url"] != "https://kept.example" {
-		t.Errorf("a field nobody mentioned was erased: %s", rest.body)
+	if rest.headers.Get("If-Match") == "" {
+		t.Fatal("missing revision")
 	}
 }
 
