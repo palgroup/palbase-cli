@@ -85,13 +85,10 @@ the running Environment.
   palbase flags remove <key>               Remove a flag definition.
   palbase flags user ...                   Set/inspect/clear ONE user's overrides.
 
-A flag definition is a typed project-wide DEFAULT (its type + default value, and
-for string flags an optional list of allowed variants). THEY LIVE ON THE STACK and
-take effect on the next deploy. They used to be declared in config/flags.ts and
-upserted by every deploy, which never deleted one dropped from the file — so
-` + "`remove`" + ` edited the file and left the live flag serving, and "removed" and
-"still there" were both true. There is no file left to fall back to, so a removal
-here is the whole operation.
+A flag definition is a typed default for the selected Environment: boolean,
+number, string, or JSON, with optional allowed variants for strings. Add, update,
+and remove operations write directly to the running stack. Clients receive the
+change on their next sync; no application deploy is needed.
 
 A per-user VALUE is the other kind of thing: runtime state for one user in one
 Environment, live the moment it is written, never in git. That is
