@@ -223,7 +223,9 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		return err
 	}
 
-	if err := prepareStackRuntime(ctx, dir, target, cred, approve, w); err != nil {
+	// KAPI, BU PUSH'UN DERLEDİĞİNİ ÖLÇER. `bundleRoot` buraya geçmeseydi kapı
+	// checkout'u ölçerdi ve orada — 0.61.1'den beri — hiçbir ürün yok.
+	if err := prepareStackRuntime(ctx, dir, bundleRoot, target, cred, approve, w); err != nil {
 		return err
 	}
 

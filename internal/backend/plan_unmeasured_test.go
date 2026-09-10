@@ -157,6 +157,26 @@ func TestPlanStillFailsWhenAnAnsweringProjectRefusesTheSchema(t *testing.T) {
 	}
 }
 
+// bundleRootWithOutput, BU TESTLERİN ÖLÇEBİLECEĞİ bir bundle kökü kurar.
+//
+// Eskiden bu testler `BundleDigest(dir)` çağırıyordu ve `dir` bir checkout'tu —
+// içinde hiçbir ürün olmayan. Yani plan da kapı da BOŞ KÜMEYİ ölçüyor, ikisi de
+// aynı `sha256("")` sabitini buluyor ve test yeşil kalıyordu. Ölçmediği için
+// eşleşen bir kapı, yalanı yakalamaz; SABİTLER. Kök artık ürün taşıyor, yani
+// iki taraf gerçekten bir bundle üzerinde anlaşıyor.
+func bundleRootWithOutput(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	out := filepath.Join(root, ".palbase", "esm", "controllers", "controllers.js")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("export const controllers = [];\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // requirePlan AYNI GEVŞETMEYİ TAŞIMALI: elle yazılmış doğru bir plan dosyasıyla
 // bile push, `prepareCloudRuntime`a hiç varmadan burada ölüyordu.
 func TestRequirePlanAcceptsAPlanWhoseProjectIsNotAnswering(t *testing.T) {
@@ -171,7 +191,8 @@ func TestRequirePlanAcceptsAPlanWhoseProjectIsNotAnswering(t *testing.T) {
 	}
 	target := newDeadTenantServer(t)
 
-	bundle, err := BundleDigest(dir)
+	bundleRoot := bundleRootWithOutput(t)
+	bundle, err := BundleDigest(bundleRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +211,7 @@ func TestRequirePlanAcceptsAPlanWhoseProjectIsNotAnswering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := requirePlan(context.Background(), dir, Target{URL: target.URL}, Credentials{Value: "k", Kind: KindKey})
+	got, err := requirePlan(context.Background(), dir, bundleRoot, Target{URL: target.URL}, Credentials{Value: "k", Kind: KindKey})
 	if err != nil {
 		t.Fatalf("ölü kiracının planı reddedildi — push'un önündeki son kilit buydu: %v", err)
 	}
@@ -212,7 +233,8 @@ func TestRequirePlanStillRefusesWhenAnAnsweringProjectRefusesTheSchema(t *testin
 	}
 	target := newHalfDeadTenantServer(t, "36.0.2")
 
-	bundle, _ := BundleDigest(dir)
+	bundleRoot := bundleRootWithOutput(t)
+	bundle, _ := BundleDigest(bundleRoot)
 	sum := sha256.Sum256(SchemaUnmeasured)
 	saved := PlanFile{
 		Version:          1,
@@ -225,7 +247,7 @@ func TestRequirePlanStillRefusesWhenAnAnsweringProjectRefusesTheSchema(t *testin
 	if err := WritePlanFile(dir, saved); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := requirePlan(context.Background(), dir, Target{URL: target.URL},
+	if _, err := requirePlan(context.Background(), dir, bundleRoot, Target{URL: target.URL},
 		Credentials{Value: "k", Kind: KindKey}); err == nil {
 		t.Fatal("cevap veren bir kiracının şema reddi push kapısında yutuldu")
 	}

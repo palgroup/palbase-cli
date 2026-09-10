@@ -216,6 +216,21 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 	if workErr != nil {
+		// THE ADDRESS IS NOT A CLIENT ARTIFACT, AND IT MUST SURVIVE THIS.
+		//
+		// A project that has never been pushed to answers its contract route
+		// with 404 `spec_unavailable`, so the link refuses — correctly: there is
+		// no specification, so there is no client to generate. But everything
+		// this run learned lived in the stage, INCLUDING the project's identity,
+		// and the stage is thrown away. The person was then holding a checkout
+		// bound to nothing, and `palbase push` — the ONE act that ends the state
+		// the refusal is complaining about — reads exactly that binding.
+		//
+		// So a refusal whose cure is a push cannot also delete the address the
+		// push needs. Everything else stays behind; the contract is published.
+		if err := publishProjectContract(root, stage); err != nil {
+			return fmt.Errorf("link failed (%v); and the project's address could not be kept: %w", workErr, err)
+		}
 		return fmt.Errorf("link failed; previous client artifacts were preserved: %w", workErr)
 	}
 	after := map[string]artifactFile{}
@@ -227,6 +242,39 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	_, err = io.WriteString(w, strings.ReplaceAll(output.String(), stage, root))
 	return err
+}
+
+// publishProjectContract copies the linked project's identity out of a stage a
+// failed link is about to discard.
+//
+// ONLY that file. The stage also holds half-written client artifacts, and those
+// are what "previous client artifacts were preserved" promises to leave alone.
+// The contract is a different thing: it is not generated FROM the project, it
+// says WHICH project — and it was already verified by the time it was written
+// (the address resolved, the credential answered, the publishable key came
+// back). Nothing is overwritten if the run never got that far.
+func publishProjectContract(root, stage string) error {
+	// `projectPath()` is the ONE declaration of where the contract lives. Naming
+	// the directory again here would be a second truth about it, and the two
+	// would drift the first time the layout moved.
+	rel := projectPath()
+	staged, err := os.ReadFile(filepath.Join(stage, rel))
+	if os.IsNotExist(err) {
+		// The link refused before it knew which project this is. There is
+		// nothing true to keep.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	live := filepath.Join(root, rel)
+	if existing, err := os.ReadFile(live); err == nil && bytes.Equal(existing, staged) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(live, staged, 0o644)
 }
 
 func publishLinkArtifacts(root, stage string, before, after map[string]artifactFile) error {

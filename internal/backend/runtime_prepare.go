@@ -46,7 +46,10 @@ var CloudRuntimePreparer func(ctx context.Context, tenantURL, sdkVersion string,
 //
 // YENİDEN HESAPLANAN ŞEY, PLANIN HESAPLADIĞININ AYNISI OLMAK ZORUNDA — aynı
 // bundle özeti, aynı şema-planı BAYTININ özeti (ekrana basılan metnin değil).
-func requirePlan(ctx context.Context, dir string, target Target, cred Credentials) (PlanFile, error) {
+// bundleRoot, BU PUSH'UN AZ ÖNCE DERLEDİĞİ ürünlerin kökü. Kapı checkout'u
+// ölçemez: 0.61.1'den beri orada ölçülecek hiçbir ürün yok (BundleDigest'in
+// kendi yorumu), yani checkout'u ölçen bir kapı planla ASLA eşleşmez.
+func requirePlan(ctx context.Context, dir, bundleRoot string, target Target, cred Credentials) (PlanFile, error) {
 	saved, err := ReadPlanFile(dir)
 	if err != nil {
 		return PlanFile{}, err
@@ -63,7 +66,7 @@ func requirePlan(ctx context.Context, dir string, target Target, cred Credential
 		current.SDK.Running = running
 	}
 
-	bundle, err := BundleDigest(dir)
+	bundle, err := BundleDigest(bundleRoot)
 	if err != nil {
 		return PlanFile{}, err
 	}
@@ -86,7 +89,7 @@ func requirePlan(ctx context.Context, dir string, target Target, cred Credential
 	return saved, nil
 }
 
-func prepareStackRuntime(ctx context.Context, dir string, target Target, cred Credentials, approve bool, out io.Writer) error {
+func prepareStackRuntime(ctx context.Context, dir, bundleRoot string, target Target, cred Credentials, approve bool, out io.Writer) error {
 	// TEK SORU: bu adres BU BULUTUN bir projesi mi? `OnThisMachine()` de
 	// sorulurdu ve gereksizdi — `CloudProjectAddress` `<ref>.<PublicHost>`
 	// eşleştiriyor, yani bir localhost adresi zaten hiçbir zaman eşleşmez. İki
@@ -96,7 +99,7 @@ func prepareStackRuntime(ctx context.Context, dir string, target Target, cred Cr
 	if !isCloudProjectAddress(target.URL) {
 		return nil
 	}
-	plan, err := requirePlan(ctx, dir, target, cred)
+	plan, err := requirePlan(ctx, dir, bundleRoot, target, cred)
 	if err != nil {
 		return err
 	}

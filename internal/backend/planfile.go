@@ -82,11 +82,23 @@ func ReadPlanFile(dir string) (PlanFile, error) {
 
 // BundleDigest: .palbase/{esm,jobs,hooks} altındaki dosyaların sıralı yol +
 // içerik sha256'sı. Tarball başlıkları değil İÇERİK hash'lenir (NFR-007).
-func BundleDigest(dir string) (string, error) {
+//
+// ARGÜMAN BUNDLE KÖKÜDÜR, MÜŞTERİNİN CHECKOUT'U DEĞİL — ve bu ayrım 0.61.1'den
+// beri bulut push'unu imkânsız kılmıştı. O sürümde ürünler geçici bir köke
+// taşındı (`retiredProjectPaths`: ".palbase/esm — built into a temp bundle root
+// since 0.61.1"); `plan` yeni kökü ölçmeye geçti, `push`un kapısı checkout'u
+// ölçmeye devam etti. Checkout'ta ise artık HİÇBİR ürün yok — üstelik her
+// derleme `reapRetiredArtifacts` ile eskisini de siliyor — yani kapı her
+// seferinde BOŞ KÜMENİN özetini hesaplıyor, planınkiyle karşılaştırıyor ve
+// "bundle changed" diyordu. Yeni bir plan da aynı yere düşüyordu: kullanıcının
+// gördüğü, çıkışı olmayan bir plan→push döngüsüydü.
+//
+// Parametrenin ADI `dir`di ve çağıranı checkout vermeye davet ediyordu.
+func BundleDigest(bundleRoot string) (string, error) {
 	h := sha256.New()
 	var paths []string
 	for _, sub := range bundleOutputDirs {
-		root := filepath.Join(dir, ".palbase", sub)
+		root := filepath.Join(bundleRoot, ".palbase", sub)
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
@@ -94,7 +106,7 @@ func BundleDigest(dir string) (string, error) {
 			if err != nil || d.IsDir() {
 				return err
 			}
-			rel, _ := filepath.Rel(filepath.Join(dir, ".palbase"), path)
+			rel, _ := filepath.Rel(filepath.Join(bundleRoot, ".palbase"), path)
 			paths = append(paths, filepath.ToSlash(rel))
 			return nil
 		})
@@ -103,8 +115,19 @@ func BundleDigest(dir string) (string, error) {
 		}
 	}
 	sort.Strings(paths)
+	// FAIL-CLOSED: BOŞ KÜMENİN ÖZETİ BİR ÖLÇÜM DEĞİLDİR.
+	//
+	// Boş bir kök `sha256("")` döndürüyordu — 64 haneli, geçerli GÖRÜNEN, her
+	// çağrıda aynı çıkan bir değer. Sessizliğin sebebi buydu: yanlış kökü ölçen
+	// kapı hata vermedi, yalnızca hiçbir zaman eşleşmeyen bir sabit üretti. Bir
+	// artefaktın kodsuz gidemeyeceğini söyleyen `BuildStackTarball` ile aynı
+	// gerekçe, aynı yerde: kapı, çağıranın testinde değil fiilin kendisinde.
+	if len(paths) == 0 {
+		return "", fmt.Errorf("no build output under %s/.palbase/%v — the digest of nothing "+
+			"is not a measurement of a bundle", bundleRoot, bundleOutputDirs)
+	}
 	for _, rel := range paths {
-		f, err := os.Open(filepath.Join(dir, ".palbase", rel))
+		f, err := os.Open(filepath.Join(bundleRoot, ".palbase", rel))
 		if err != nil {
 			return "", err
 		}

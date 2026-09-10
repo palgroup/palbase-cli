@@ -192,7 +192,16 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 		}
 		if json.Unmarshal(body, &envelope) == nil &&
 			strings.TrimSpace(envelope.Description) != "" {
-			return nil, fmt.Errorf("%s cannot describe itself: %s",
+			// THE PROJECT'S SENTENCE, AND THEN WHAT TO DO ABOUT IT.
+			//
+			// The branch below — the one with LESS information — names the cure;
+			// this one, which knows more, used to name none, so the better
+			// diagnosis produced the worse message. Every reason a runtime
+			// cannot build a spec ends the same way: the code is fixed and
+			// pushed. Saying so does not displace the project's own sentence,
+			// which is still what a person reads first.
+			return nil, fmt.Errorf("%s cannot describe itself: %s — a backend is what "+
+				"makes a contract, so this ends with `palbase push`",
 				target.URL, strings.TrimSpace(envelope.Description))
 		}
 		return nil, fmt.Errorf(
