@@ -279,11 +279,15 @@ func TestTheProjectsTestsAreBundledSoTheyCanTravel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := bundleTests(context.Background(), dir, &strings.Builder{}); err != nil {
+	bundleRoot := t.TempDir()
+	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
 		t.Fatalf("the suite did not bundle: %v", err)
 	}
 
-	built := filepath.Join(dir, ".palbase", "esm", "tests", "todos.test.js")
+	// BUNDLE KOKUNDE, checkout'ta DEGIL. Bu satir eskiden `dir`i okuyordu ve
+	// boylece urunun musterinin projesine yazilmasini SABITLIYORDU — 0.61.1'in
+	// gocunun kacirdigi tek uretici tam da buydu.
+	built := filepath.Join(bundleRoot, ".palbase", "esm", "tests", "todos.test.js")
 	body, err := os.ReadFile(built)
 	if err != nil {
 		t.Fatalf("the bundled suite is not where the artifact collects it: %v", err)
@@ -298,17 +302,21 @@ func TestTheProjectsTestsAreBundledSoTheyCanTravel(t *testing.T) {
 	}
 	// helper.ts is not a suite and must not become one — `bun test` would run it
 	// and report zero tests, which reads as a suite that silently does nothing.
-	if _, err := os.Stat(filepath.Join(dir, ".palbase", "esm", "tests", "helper.js")); err == nil {
+	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests", "helper.js")); err == nil {
 		t.Error("a non-test file was emitted as a suite")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".palbase")); err == nil {
+		t.Error("the bundler wrote into the customer's checkout")
 	}
 }
 
 func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
 	dir := t.TempDir()
-	if err := bundleTests(context.Background(), dir, &strings.Builder{}); err != nil {
+	bundleRoot := t.TempDir()
+	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
 		t.Fatalf("a project that declares no tests was refused: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".palbase", "esm", "tests")); err == nil {
+	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests")); err == nil {
 		t.Error("an empty tests directory was created for a project with none")
 	}
 }
@@ -913,5 +921,52 @@ export default defineSchema("public", { tables: [airports, trips] });
 	var out strings.Builder
 	if _, _, err := buildStackArtifact(context.Background(), dir, t.TempDir(), &out); err != nil {
 		t.Fatalf("a LEGITIMATE pair of named foreign keys was refused: %v", err)
+	}
+}
+
+// ÜRÜN MÜŞTERİNİN CHECKOUT'UNA YAZILMAZ — TEST PAKETLERİ DE DAHİL.
+//
+// 0.61.1'de her derleme ürünü geçici bir bundle köküne taşındı ve 0.61.4 bunu
+// "CLI artık müşterinin projesine yazmıyor" diye duyurdu. BİR üretici geride
+// kaldı: `bundleTests` çıktısını `dir` (checkout) altına yazıyordu, oysa aynı
+// fonksiyonun içindeki diğer her çıktı `bundleRoot`a gidiyor.
+//
+// ÖLÇÜLDÜ 11.09.2026, centauri-backdoor: `.palbase/` silinip commit'lendi
+// (22:01), `palbase link` ondan sonra GEÇTİ, ve `palbase plan` 22:34'te
+// `.palbase/esm/tests` altına 13 MB geri yazdı.
+//
+// Bedeli iki katlı. Müşteri istemediği bir derleme ağacını geri alıyor — ve
+// daha kötüsü, `palbase link` `.palbase` taşıyan bir checkout'u REDDEDİYOR
+// ("this checkout still carries the retired layout"). Yani `push`, `link`'in
+// engel saydığı şeyi ÜRETİYOR: alet kendi kendisiyle kavga ediyor.
+func TestTheTestBundlerWritesToTheBundleRootNotTheCheckout(t *testing.T) {
+	requiresRealToolchain(t)
+
+	dir := t.TempDir()
+	bundleRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	suite := "export function noop() { return 1 }\n"
+	if err := os.WriteFile(filepath.Join(dir, "tests", "a.test.ts"), []byte(suite), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
+		t.Fatalf("bundleTests: %v", err)
+	}
+
+	// (1) Ürün BUNDLE KÖKÜNDE — yoksa süit artifact'la seyahat etmez ve
+	// deploy'un koştuğu testler sessizce hiç olmaz.
+	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests", "a.test.js")); err != nil {
+		t.Errorf("suite did not land in the bundle root: %v", err)
+	}
+
+	// (2) Ve checkout'ta HİÇBİR ŞEY yok. `link`in engel saydığı dizin burada
+	// oluşmamalı.
+	if _, err := os.Stat(filepath.Join(dir, ".palbase")); err == nil {
+		t.Error("the bundler wrote .palbase into the customer's checkout — " +
+			"`palbase link` refuses a checkout that carries it, so push would " +
+			"create the blocker link rejects")
 	}
 }

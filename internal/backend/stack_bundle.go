@@ -280,7 +280,7 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 	// The project's own tests, bundled so they can travel. A deploy runs them
 	// against the release it just built, in a container that has no node_modules
 	// — so the resolution happens here, where they are.
-	if err := bundleTests(ctx, dir, w); err != nil {
+	if err := bundleTests(ctx, dir, bundleRoot, w); err != nil {
 		return nil, nil, err
 	}
 
@@ -305,7 +305,19 @@ const (
 // Only *.test.* files become suites. A helper beside them is pulled IN by the
 // suite that imports it; emitted as its own file it would be run, report zero
 // tests, and read as a suite that silently does nothing.
-func bundleTests(ctx context.Context, dir string, w io.Writer) error {
+// KAYNAK `dir`DEN OKUNUR, URUN `bundleRoot`A YAZILIR — ve bu iki kok ayri
+// olmak ZORUNDA.
+//
+// Cikti eskiden `dir` altina gidiyordu ve bu, 0.61.1'in "her urun gecici bir
+// bundle kokune" gocunun KACIRDIGI tek ureticiydi: ayni fonksiyondaki diger
+// her cikti (`controllers.js`, `package.json`, jobs, hooks) `bundleRoot`
+// kullaniyor. Olculdu 11.09.2026: `.palbase/` silinip commit'lendikten ve
+// `palbase link` gectikten SONRA, `palbase plan` musterinin checkout'una
+// 13 MB geri yazdi.
+//
+// Ve bu yalniz cop degil: `palbase link` `.palbase` tasiyan bir checkout'u
+// REDDEDIYOR. Yani `push` kendi `link`inin engel saydigi dizini URETIYOR.
+func bundleTests(ctx context.Context, dir, bundleRoot string, w io.Writer) error {
 	root := filepath.Join(dir, testsDir)
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -325,7 +337,7 @@ func bundleTests(ctx context.Context, dir string, w io.Writer) error {
 	}
 	sort.Strings(suites)
 
-	outDir := filepath.Join(dir, filepath.FromSlash(bundledTestsDir))
+	outDir := filepath.Join(bundleRoot, filepath.FromSlash(bundledTestsDir))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
