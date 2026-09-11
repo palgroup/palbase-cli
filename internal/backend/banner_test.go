@@ -15,7 +15,11 @@ func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "todoapp", Env: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(localPath(), []byte(`{"url":"http://localhost:54321"}`), 0o644); err != nil {
+	localRecord, pathErr := localPath()
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if err := os.WriteFile(localRecord, []byte(`{"url":"http://localhost:54321"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

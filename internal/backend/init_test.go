@@ -195,10 +195,13 @@ func TestTheScaffoldComesFromTheInstalledPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no .gitignore: %v", err)
 	}
-	for _, want := range []string{"node_modules/", ".palbase/local.json"} {
-		if !strings.Contains(string(ignore), want) {
-			t.Errorf(".gitignore does not carry %q:\n%s", want, ignore)
-		}
+	// The ecosystem's rules, and ONLY those: everything this CLI writes into a
+	// checkout is committed now.
+	if !strings.Contains(string(ignore), "node_modules/") {
+		t.Errorf(".gitignore does not carry %q:\n%s", "node_modules/", ignore)
+	}
+	if strings.Contains(strings.ToLower(string(ignore)), "palbase") {
+		t.Errorf(".gitignore still ignores a palbase path:\n%s", ignore)
 	}
 	// …and NOT the whole .palbase directory: project.json is committed on
 	// purpose, so a colleague who clones this reaches the same project.

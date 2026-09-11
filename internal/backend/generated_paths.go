@@ -40,18 +40,6 @@ var generatedProjectPaths = []struct {
 	ours      bool
 }{
 	{"node_modules/", "dependencies", false},
-	{".palbase/local.json", "the stack running on THIS machine; project.json is committed on purpose", true},
-	// `palbase plan`'in ürünü ve `palbase push`'un ön koşulu. Bu makinede, ŞU AN,
-	// SEÇİLİ ortama karşı yapılmış bir ölçüm: içinde `createdAt`, o an seçili
-	// hedefin URL'i ve bir bundle digest'i var, ve onu okuyan tek şey hemen
-	// ardından koşan `push` — parmak izini yeniden hesaplayarak. `local.json` ile
-	// aynı sınıf, ve commit'lenirse iki geliştiricinin planı birbirini ezer.
-	//
-	// Ölçülen (08.09.2026): `plan` sonrası `git status` onu `.palbase/` altında
-	// takipsiz gösteriyordu ve hiçbir kural kapsamıyordu — `link`'in bastığı
-	// "commit .palbase/" cümlesi onu içeri alırdı.
-	{".palbase/plan.json", "`palbase plan`'s measurement of THIS machine against the selected environment; `push` reads it and recomputes the fingerprint", true},
-	{envTypesFile, "generated from this project's secrets on every build, like next-env.d.ts", true},
 	{"*.log", "logs", false},
 }
 
@@ -76,7 +64,17 @@ var retiredProjectPaths = []struct {
 	{stagedControllersDir, "`palbase build`'s staging tree; it stages inside the temp deploy tree, never the checkout"},
 	{deployStagingDir, "the deploy stager's tree; it stages into a temp directory"},
 	{linkStagePrefix + "*", "`palbase link`'s staging tree; it opens in the temp directory"},
+	{".palbase/local.json", "the stack in front of you — machine state, moved to ~/.palbase/checkouts/<hash>/"},
+	{".palbase/plan.json", "`palbase plan`'s measurement of THIS machine — same move"},
+	{envTypesFile, "the generated declaration file; it is written under " + rootDir + "/ and committed"},
 }
+
+// NOT IN THIS LIST, AND THE ABSENCE IS THE POINT (D-008): the visible root.
+// `reapRetiredArtifacts` DELETES what it names, and on macOS and Windows
+// `palbase` and `Palbase` are ONE directory — sweeping the retired spelling
+// would delete the directory this CLI just filled. A checkout still carrying
+// the old layout is REFUSED by `link` (measured with `CarriesLegacyLayout`),
+// never silently swept.
 
 // gitignoreScaffold is the whole ignore file for a project that has none.
 //

@@ -331,8 +331,12 @@ func TestACreatedGitignoreCoversTheWholeScaffold(t *testing.T) {
 	if strings.Contains(string(after), "node_modules") {
 		t.Errorf("kürate edilmiş bir dosyaya ekosistemin kuralı eklendi:\n%s", after)
 	}
-	if !strings.Contains(string(after), ".palbase/local.json") {
-		t.Errorf("kürate edilmiş dosyaya bizim kuralımız eklenmedi:\n%s", after)
+	// VE BİZİM HİÇBİR KURALIMIZ EKLENMEZ. Bu CLI'ın checkout'a yazdığı her şey
+	// commit'leniyor: makine-yerel iki dosya `~/.palbase/checkouts/<hash>/`e
+	// taşındı, üretilen tip bildirimi `palbase/` altına girdi. Kürate edilmiş
+	// bir dosyaya eklenecek tek satır kalmadı.
+	if strings.Contains(strings.ToLower(string(after)), "palbase") {
+		t.Errorf("kürate edilmiş dosyaya artık yazılmaması gereken bir kural eklendi:\n%s", after)
 	}
 }
 
@@ -365,11 +369,8 @@ func TestInitDoesNotAnswerTheIgnoreQuestionOnItsOwn(t *testing.T) {
 			t.Errorf("toptan `.palbase` kuralı duruyor — sözleşme ignore ediliyor, klon derleyemez:\n%s", got)
 		}
 	}
-	if !strings.Contains(got, ".palbase/local.json") {
-		t.Errorf("daraltılmış kural yazılmadı:\n%s", got)
-	}
-	if !strings.Contains(got, envTypesFile) {
-		t.Errorf("üretilen tipler ignore edilmedi:\n%s", got)
+	if strings.Contains(strings.ToLower(got), "palbase") {
+		t.Errorf("`init` hâlâ bir palbase yolunu ignore ediyor:\n%s", got)
 	}
 	if !strings.Contains(got, "dist/") {
 		t.Errorf("kullanıcının kendi kuralı silindi:\n%s", got)
@@ -378,32 +379,42 @@ func TestInitDoesNotAnswerTheIgnoreQuestionOnItsOwn(t *testing.T) {
 
 // BİLDİRİM, YAZANLARIN KULLANDIĞI YOL ÜRETİCİLERİNİ KAPSAMALI.
 //
+// `localPath` ARTIK BURADA DEĞİL, ve bu bir kapsam daralması değil genişlemesi:
+// checkout'ta ignore edilmesi gereken bir yol olmaktan çıktı, `~/.palbase`e
+// taşındı. Onu ölçen kapı `machine_state_test.go`'da ve orada iddia daha güçlü —
+// "ignore ediliyor" değil, "depoda HİÇ YOK".
+//
 // Elde tutulan bir liste, kendi kümesinin büyümesini göremez: `.palbase/plan.json`
 // aylarca yazıldı ve hiçbir kural onu kapsamadı — `link`'in bastığı
 // "commit .palbase/" cümlesi onu içeri alırdı. Kapı bu yüzden listeyi değil,
 // dosyayı YAZAN fonksiyonların ürettiği yolları okuyor: bir yeniden adlandırma
 // iddiayı kodla birlikte taşır.
-func TestEveryPerMachinePathHelperIsIgnored(t *testing.T) {
-	body := gitignoreScaffold()
-	for _, tc := range []struct {
-		name, path string
-	}{
-		{"localPath (palbase start)", localPath()},
-		{"planFilePath (palbase plan)", planFilePath(".")},
+func TestEveryPerMachinePathHelperLivesOutsideTheCheckout(t *testing.T) {
+	root := t.TempDir()
+	plan, err := planFilePath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := LocalStatePath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, path string }{
+		{"planFilePath (palbase plan)", plan},
+		{"LocalStatePath (palbase start)", local},
 	} {
-		rel := filepath.ToSlash(filepath.Clean(tc.path))
-		rel = strings.TrimPrefix(rel, "./")
-		if !strings.Contains(body, rel) {
-			t.Errorf("%s → %s hiçbir kural tarafından kapsanmıyor:\n%s", tc.name, rel, body)
+		rel, relErr := filepath.Rel(root, tc.path)
+		if relErr == nil && !strings.HasPrefix(rel, "..") {
+			t.Errorf("%s → %s hâlâ checkout'un İÇİNDE; bu makinenin durumu müşterinin "+
+				"deposunda duramaz", tc.name, rel)
 		}
 	}
 
-	// VE SÖZLEŞME KAPSANMAMALI: `.palbase/project.json` ile `openapi/` bilerek
-	// commit'leniyor — onları ignore eden bir dosya, klonu derleyemez hâle
-	// getirir.
-	for _, committed := range []string{".palbase/project.json", ".palbase/openapi"} {
-		if strings.Contains(body, committed) {
-			t.Errorf("%s commit'lenmek İÇİN var ve ignore ediliyor:\n%s", committed, body)
-		}
+	// VE ARTIK IGNORE EDİLECEK BİR ŞEY YOK. Checkout'a yazılan her şey
+	// commit'leniyor, yani bu CLI'ın `.gitignore`a koyacağı tek bir satırı bile
+	// kalmadı — ekosistemin kendi kuralları dışında (NFR-001).
+	body := gitignoreScaffold()
+	if strings.Contains(strings.ToLower(body), "palbase") {
+		t.Errorf("iskelet hâlâ bir palbase yolunu ignore ediyor:\n%s", body)
 	}
 }

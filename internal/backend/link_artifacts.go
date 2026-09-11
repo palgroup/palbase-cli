@@ -156,7 +156,11 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
-	mutable := map[string]bool{".palbase": true, "Palbase": true, "src": true, "app": true, "pages": true, "public": true}
+	// `palbase` is the ONE directory this CLI owns in a checkout. It replaced
+	// the pair `.palbase` (hidden) and `Palbase` (visible); neither is written
+	// any more, and `link` refuses a checkout that still carries one — so
+	// neither belongs in the set of directories a link may create.
+	mutable := map[string]bool{RootDir(): true, "src": true, "app": true, "pages": true, "public": true}
 	for _, path := range []string{o.entry, o.out} {
 		if path == "" {
 			continue

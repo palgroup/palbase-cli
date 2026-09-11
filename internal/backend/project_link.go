@@ -352,14 +352,8 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 
-	// Before a single artifact is written: a repository that ignores the whole
-	// .palbase directory is a repository the next clone cannot build, and every
-	// platform's slot goes with it — not just web's.
-	if err := ensurePalbaseGitignored(".gitignore"); err != nil {
-		return fmt.Errorf("update .gitignore: %w", err)
-	}
-	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", nativeArtifactsDir, err)
+	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", RootDir(), err)
 	}
 	// EACH PLATFORM GETS WHAT ITS OWN GENERATOR READS.
 	//
@@ -384,10 +378,6 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		if configErr != nil {
 			return configErr
 		}
-		var (
-			path string
-			err  error
-		)
 		// APPLE YUVASINI, APPLE PROJESİ OLMAYAN BİR CHECKOUT'A YAZMA.
 		//
 		// Yuva dosyası commit'lenir ve `spec`/`push` onu "burada bir Apple
@@ -406,11 +396,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 			return fmt.Errorf("this checkout has no Xcode project, so an Apple client cannot be generated here — "+
 				"run `palbase link --platform %s` in the app's own checkout (the one holding the .xcodeproj)", platform)
 		}
-		if platform == webPlatform {
-			path, err = writeWebArtifacts(selectedEnvs, specs, w)
-		} else {
-			path, err = writeAppEnvironments(platform, selectedEnvs)
-		}
+		paths, err := writeEnvironmentConfigs([]string{platform}, selectedEnvs)
 		if err != nil {
 			return err
 		}
@@ -420,24 +406,26 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		if platform == webPlatform {
 			web = true
 		}
-		written := strings.Join(envs.names(), ", ")
-		if platform == webPlatform {
-			// The flat document carries ONE environment, so naming the others
-			// here would describe a file that does not contain them.
-			written = envs.Default
+		for _, p := range paths {
+			fmt.Fprintf(w, "wrote %s\n", p)
 		}
-		fmt.Fprintf(w, "wrote %s (%s)\n", path, written)
 	}
 
 	if apple {
-		root, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		if err := writeXcconfigs(root, envs, w); err != nil {
-			return err
-		}
-		reportInfoPlistRequirement(root, envs, w)
+		// NOTHING IS WRITTEN INTO THE APP'S BUILD SYSTEM.
+		//
+		// This used to write one xcconfig per environment into
+		// `Palbase/Config/` and then print an instruction to add a key to the
+		// app's own Info.plist. The CLI could complete neither half — assigning
+		// an xcconfig to a build configuration is a pbxproj edit it never makes
+		// — so it shipped half a mechanism, and unwired the failure was the
+		// worst shape there is: measured on a real simulator, a build in the
+		// `Local` configuration signed up against the MAIN environment's
+		// address while every build setting still read `local`.
+		//
+		// The customer owns their configuration system. What they need from us
+		// is printed once, below, and it is theirs to place.
+		printEnvironmentSelectionSnippet(w)
 	}
 
 	// THE SAME STEP APPLE GETS, FOR WEB. An Apple checkout leaves here with
@@ -469,16 +457,12 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
 
-	switch {
-	case apple:
-		fmt.Fprintln(w, "commit .palbase/ and Palbase/Generated/")
-	case len(platforms) == 0:
-		// There is no Palbase/ in a backend-only checkout, and naming a
-		// directory that does not exist sends the reader looking for it.
-		fmt.Fprintln(w, "commit .palbase/")
-	default:
-		fmt.Fprintln(w, "commit .palbase/ and Palbase/")
-	}
+	// ONE DIRECTORY, SO ONE SENTENCE. The closing line used to name a pair
+	// (`.palbase/` hidden, `Palbase/` visible) and branch three ways to say
+	// which halves existed. Everything this CLI writes now lives under
+	// `RootDir()`, so the line names it and cannot drift from the layout: a
+	// spelled-out directory here would be a second truth about where things go.
+	fmt.Fprintf(w, "commit %s/\n", RootDir())
 	return nil
 }
 
@@ -525,9 +509,9 @@ func runUnlink(w io.Writer) error {
 	default:
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
-	// Remove .palbase/ when nothing else lives there.
-	if entries, err := os.ReadDir(nativeArtifactsDir); err == nil && len(entries) == 0 {
-		_ = os.Remove(nativeArtifactsDir)
+	// Remove palbase/ when nothing else lives there.
+	if entries, err := os.ReadDir(RootDir()); err == nil && len(entries) == 0 {
+		_ = os.Remove(RootDir())
 	}
 	fmt.Fprintln(w, "  generated clients and their imports are left in place")
 	fmt.Fprintln(w, "  re-link with `palbase link <url>`")
@@ -665,36 +649,27 @@ func ensurePalbaseGitignored(path string) error {
 		return os.WriteFile(path, []byte(gitignoreScaffold()), 0o644)
 	}
 
-	// STEP 1 — NARROW. A `.gitignore` carrying `.palbase` or `.palbase/` takes
-	// the contract, the platform slots and the link itself with it, and the next
-	// clone resolves no project and generates no client. The directory-wide rule
-	// becomes the one file inside it that is genuinely per-machine.
-	const local = ".palbase/local.json"
+	// STEP 1 — TAKE BACK WHAT WE RETIRED. The directory-wide `.palbase` rule
+	// used to be NARROWED to `.palbase/local.json`, because one file inside it
+	// really was per-machine. Nothing in the checkout is any more: `local.json`
+	// and `plan.json` moved to `~/.palbase/checkouts/<hash>/` and the generated
+	// declaration moved under the committed root. So the rule is not narrowed —
+	// it is dropped, like every other rule whose producer this CLI retired.
+	//
+	// Dropping the line is the honest half of a retirement; `reapRetiredArtifacts`
+	// is the other half, and it has already run by the time link reaches here.
 	lines := strings.Split(string(content), "\n")
 	kept := make([]string, 0, len(lines)+len(generatedProjectPaths))
 	present := map[string]bool{}
-	narrowed := false
 	for _, line := range lines {
-		switch t := strings.TrimSpace(line); t {
-		case ".palbase", ".palbase/":
-			if !narrowed {
-				kept = append(kept, local)
-				present[local] = true
-				narrowed = true
-			}
-		default:
-			// A rule this CLI wrote for a producer it has retired. Dropping the
-			// line is the honest half of the retirement; `reapRetiredArtifacts`
-			// is the other half, and it has already run by the time link
-			// reaches here.
-			if isRetiredIgnoreRule(line) {
-				continue
-			}
-			if t != "" {
-				present[t] = true
-			}
-			kept = append(kept, line)
+		t := strings.TrimSpace(line)
+		if t == ".palbase" || t == ".palbase/" || isRetiredIgnoreRule(line) {
+			continue
 		}
+		if t != "" {
+			present[t] = true
+		}
+		kept = append(kept, line)
 	}
 
 	// STEP 2 — COVER WHAT WE WRITE. Everything this CLI generates into the
@@ -744,4 +719,33 @@ func refuseUnsupportedPlatforms(platforms []string) error {
 		}
 	}
 	return nil
+}
+
+// printEnvironmentSelectionSnippet tells an Apple developer the ONE key they
+// own, and the two static lines that make it select.
+//
+// The pattern is environment-AGNOSTIC: it names `$(PALBASE_ENV)` rather than any
+// environment, so it is written once and never regenerated as environments come
+// and go. That is why the CLI can print it instead of maintaining a file — the
+// per-environment xcconfigs it used to write existed only because each one
+// listed the OTHERS by name.
+//
+// The two-level glob is not a typo. Measured on a real Xcode 26.6 build: `*`
+// does NOT cross a directory boundary in these settings, so
+// `*/palbase/environments/*` excludes nothing at all, while the form below
+// excludes correctly — verified in both directions, with the unselected
+// environment's plist never entering the app bundle.
+func printEnvironmentSelectionSnippet(w io.Writer) {
+	fmt.Fprint(w, `
+Add these to your own build configuration (xcconfig, build settings, Tuist —
+whichever you already use). PALBASE_ENV is the only line you change; the other
+two never do:
+
+    PALBASE_ENV = main
+    EXCLUDED_SOURCE_FILE_NAMES = */palbase/environments/*/*
+    INCLUDED_SOURCE_FILE_NAMES = */palbase/environments/$(PALBASE_ENV)/*
+
+Then add palbase/environments to your app target. Leave PALBASE_ENV unset and
+the build takes `+"`local`"+`, the stack this machine runs.
+`)
 }

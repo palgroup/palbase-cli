@@ -338,22 +338,30 @@ func landEnvTypes(buildRoot, cwd string, out io.Writer) error {
 	if buildRoot == cwd {
 		return nil
 	}
-	body, err := os.ReadFile(filepath.Join(buildRoot, envTypesFile))
+	// BOTH ENDS COME FROM THE DECLARATION. The file lives under the CLI's own
+	// directory now — committed, like everything else there — so a path spelled
+	// here would land it at the checkout root, where nothing reads it and a
+	// retired ignore rule no longer covers it.
+	rel := filepath.FromSlash(EnvTypesPath())
+	body, err := os.ReadFile(filepath.Join(buildRoot, rel))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	dest := filepath.Join(cwd, envTypesFile)
+	dest := filepath.Join(cwd, rel)
 	if prev, rerr := os.ReadFile(dest); rerr == nil && bytes.Equal(prev, body) {
-		fmt.Fprintf(out, "✓ %s (unchanged)\n", envTypesFile)
+		fmt.Fprintf(out, "✓ %s (unchanged)\n", rel)
 		return nil
 	}
-	if err := os.WriteFile(dest, body, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", envTypesFile, err)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
 	}
-	fmt.Fprintf(out, "✓ %s\n", envTypesFile)
+	if err := os.WriteFile(dest, body, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", rel, err)
+	}
+	fmt.Fprintf(out, "✓ %s\n", rel)
 	return nil
 }
 

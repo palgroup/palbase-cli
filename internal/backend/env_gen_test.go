@@ -221,7 +221,7 @@ export default defineSchema("billing", { tables: [invoices] });
 		t.Fatalf("generateEnvTypes: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(root, "palbase-env.d.ts"))
+	got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(EnvTypesPath())))
 	if err != nil {
 		t.Fatalf("read palbase-env.d.ts: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestGenerateEnvTypesNoSchema(t *testing.T) {
 	if err := generateEnvTypes(context.Background(), root, filepath.Join(root, "node_modules")); err != nil {
 		t.Fatalf("generateEnvTypes (no schema) must be a clean no-op, got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "palbase-env.d.ts")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(EnvTypesPath()))); !os.IsNotExist(err) {
 		t.Fatalf("palbase-env.d.ts must NOT exist when there is no db/ (stat err: %v)", err)
 	}
 }

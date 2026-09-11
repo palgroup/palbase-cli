@@ -66,7 +66,7 @@ func TestTheScaffoldTypechecksAgainstItsOwnSDK(t *testing.T) {
 	if err := runBuild(ctx, dir, &buildOut); err != nil {
 		t.Fatalf("the scaffold does not even build: %v\n%s", err, buildOut.String())
 	}
-	if _, err := os.Stat(filepath.Join(dir, "palbase-env.d.ts")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(EnvTypesPath()))); err != nil {
 		t.Fatalf("the build wrote no palbase-env.d.ts, so the typecheck below would "+
 			"measure the wrong thing: %v\n%s", err, buildOut.String())
 	}

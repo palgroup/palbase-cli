@@ -379,7 +379,11 @@ func validateSchemaDeclaration(ctx context.Context, projectDir, nodeModules stri
 
 // generateEnvTypes writes the project's palbase-env.d.ts. See runEnvGen.
 func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
-	return runEnvGen(ctx, projectDir, nodeModules, filepath.Join(projectDir, envTypesFile))
+	dest := filepath.Join(projectDir, filepath.FromSlash(EnvTypesPath()))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	return runEnvGen(ctx, projectDir, nodeModules, dest)
 }
 
 func runEnvGen(ctx context.Context, projectDir, nodeModules, outPath string) error {

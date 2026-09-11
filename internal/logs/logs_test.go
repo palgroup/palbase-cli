@@ -21,6 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/palgroup/palbase-cli/internal/transport"
+
+	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
 // runLogs drives `palbase logs` against a fake project and returns what the
@@ -44,10 +46,12 @@ func runLogs(t *testing.T, entries []map[string]any, args ...string) (url.Values
 	// `showCloud` through the selection resolver; FR-013 retired that, and the
 	// route it exercised is still live — a linked checkout whose address IS a
 	// cloud ref takes it. So the rig binds the checkout instead of selecting it.
-	if err := os.MkdirAll(".palbase", 0o755); err != nil {
+	// `backend.RootDir()`, never the string: this rig binds a checkout the way
+	// `link` does, and a spelled-out directory would keep building the old one.
+	if err := os.MkdirAll(backend.RootDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(".palbase", "project.json"),
+	if err := os.WriteFile(filepath.Join(backend.RootDir(), "project.json"),
 		[]byte(`{"url":"https://app1prod.palbase.studio"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

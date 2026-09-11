@@ -509,7 +509,7 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 		}
 	})
 
-	t.Run("narrows an existing directory rule", func(t *testing.T) {
+	t.Run("drops a retired directory rule", func(t *testing.T) {
 		t.Chdir(t.TempDir())
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
@@ -519,9 +519,14 @@ func TestWebLink_EnsuresPalbaseGitignored(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.NotContains(t, string(body), "\n.palbase/\n",
-			"the directory-wide rule survived — the contract and the platform slots stay uncommittable")
-		require.Contains(t, string(body), ".palbase/local.json")
+		// DROPPED, NOT NARROWED. It used to become `.palbase/local.json`,
+		// because one file in there really was per-machine. Nothing is any
+		// more — this CLI's directory is committed whole — so the rule leaves
+		// and nothing takes its place.
+		require.NotContains(t, strings.ToLower(string(body)), "palbase",
+			"a retired rule survived; a rule for a producer that is gone hides the next one")
+		require.Contains(t, string(body), "node_modules/",
+			"the curator's own rule was taken with it")
 	})
 }
 func TestWebLink_GitignoreWarning(t *testing.T) {
@@ -544,13 +549,15 @@ func TestWebLink_GitignoreWarning(t *testing.T) {
 			require.Contains(t, outStr, "WARNING", "should print a loud warning about .gitignore")
 			require.Contains(t, outStr, "palbe.gen.ts", "warning should mention the gen file")
 
-			// The offending rule must NOT be rewritten/removed; the only
-			// change is the appended .palbase/local.json entry.
+			// The offending rule must NOT be rewritten or removed — and NOTHING
+			// is appended either: this CLI has no rule left to add, because
+			// everything it writes into a checkout is committed now.
 			body, err := os.ReadFile(".gitignore")
 			require.NoError(t, err)
 			require.True(t, strings.HasPrefix(string(body), tc.content),
 				"existing rules must stay byte-identical, got: %q", string(body))
-			require.Contains(t, string(body), ".palbase/local.json")
+			require.NotContains(t, strings.ToLower(string(body)), "palbase/local.json",
+				"a rule was appended for a file that is no longer in the checkout")
 		})
 	}
 }
@@ -577,7 +584,7 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 func TestWebUnlink_RemovesConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
 	require.NoError(t, os.WriteFile("palbe.gen.ts", []byte("// gen"), 0o644))
-	require.NoError(t, os.MkdirAll(nativeArtifactsDir, 0o755))
+	require.NoError(t, os.MkdirAll("palbase", 0o755))
 	require.NoError(t, os.WriteFile(projectPath(), []byte(`{"url":"https://app1prod.palbase.studio"}`), 0o644))
 	writePkgJSON(t, `{
   "name": "myapp",
@@ -667,9 +674,11 @@ func TestWebLink_ArtifactsWritten(t *testing.T) {
 
 	runWebLinkWithGitignore(t)
 
-	for _, f := range []string{"openapi.json", "palbase-config.json"} {
-		_, err := os.Stat(filepath.Join(webArtifactsDir, f))
-		require.NoError(t, err, "web link must write Palbase/%s", f)
+	// The environment's own directory carries both — one contract, one config,
+	// no second copy anywhere.
+	for _, p := range []string{SpecPath("main"), ConfigPath("main", webPlatform)} {
+		_, err := os.Stat(p)
+		require.NoError(t, err, "web link must write %s", p)
 	}
 }
 
@@ -1163,10 +1172,10 @@ func runWebLink(t *testing.T, args ...string) string {
 // wiring does.
 func writeStubArtifacts(t *testing.T) {
 	t.Helper()
-	require.NoError(t, os.MkdirAll(webArtifactsDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"),
+	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
+	require.NoError(t, os.WriteFile(SpecPath("main"),
 		[]byte(`{"openapi":"3.1.0","paths":{}}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"),
+	require.NoError(t, os.WriteFile(ConfigPath("main", webPlatform),
 		[]byte(`{"environment_ref":"main","base_url":"https://stub","api_key":"pb_stub"}`+"\n"), 0o600))
 }
 

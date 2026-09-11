@@ -818,7 +818,12 @@ func wireNextProxy(entryFlag string, w io.Writer) error {
 		}
 	}
 
-	cfgPath := filepath.Join(webArtifactsDir, "palbase-config.json")
+	// The selected environment's web config, in that environment's own directory.
+	cfgEnv, err := selectedWebEnvironment()
+	if err != nil {
+		return err
+	}
+	cfgPath := ConfigPath(cfgEnv, webPlatform)
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", cfgPath, err)
@@ -975,4 +980,21 @@ func webTypesCmdFor(outFile string) string {
 	}
 	quoted := "'" + strings.ReplaceAll(outFile, "'", "'\"'\"'") + "'"
 	return "palbe-gen --out " + quoted + " --soft || exit 0"
+}
+
+// selectedWebEnvironment names the environment a web checkout is wired to.
+//
+// `local` when the machine's stack is what this checkout points at, otherwise
+// the first cloud environment carrying a web config — the same rule
+// `readAppEnvironments` uses, so the wiring and the status view can never
+// disagree about which environment they are talking about.
+func selectedWebEnvironment() (string, error) {
+	envs, err := readAppEnvironments(webPlatform)
+	if err != nil {
+		return "", err
+	}
+	if envs.Default != "" {
+		return envs.Default, nil
+	}
+	return "", fmt.Errorf("no environment in this checkout carries a web config — run `palbase link`")
 }

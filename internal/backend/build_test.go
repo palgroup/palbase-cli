@@ -576,7 +576,7 @@ func TestRunBuild_LandsTheTypesInTheCheckout(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, runBuild(ctx, dir, &out), "build:\n%s", out.String())
 
-	body, err := os.ReadFile(filepath.Join(dir, envTypesFile))
+	body, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(EnvTypesPath())))
 	require.NoError(t, err, "the derived types never reached the checkout:\n%s", out.String())
 	require.Contains(t, string(body), "todos:", "the landed file does not describe db/public.ts:\n%s", body)
 	require.Contains(t, string(body), `declare module "@palbase/backend/env"`)
@@ -585,11 +585,11 @@ func TestRunBuild_LandsTheTypesInTheCheckout(t *testing.T) {
 	// Run twice: a build that changes nothing must not rewrite the file, because
 	// a checkout that goes dirty on every build is a checkout nobody can read a
 	// `git status` in.
-	before, err := os.Stat(filepath.Join(dir, envTypesFile))
+	before, err := os.Stat(filepath.Join(dir, filepath.FromSlash(EnvTypesPath())))
 	require.NoError(t, err)
 	out.Reset()
 	require.NoError(t, runBuild(ctx, dir, &out))
-	after, err := os.Stat(filepath.Join(dir, envTypesFile))
+	after, err := os.Stat(filepath.Join(dir, filepath.FromSlash(EnvTypesPath())))
 	require.NoError(t, err)
 	require.Equal(t, before.ModTime(), after.ModTime(), "the second build rewrote an identical file")
 	require.Contains(t, out.String(), "unchanged")
@@ -868,7 +868,7 @@ func TestRunBuild_AMultiSchemaProjectBuilds(t *testing.T) {
 	require.NoError(t, runBuild(ctx, dir, &out),
 		"a legitimate multi-schema project was refused:\n%s", out.String())
 
-	body, err := os.ReadFile(filepath.Join(dir, envTypesFile))
+	body, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(EnvTypesPath())))
 	require.NoError(t, err, "the derived types never reached the checkout:\n%s", out.String())
 	require.Contains(t, string(body), "todos:", "the public schema is missing from the types:\n%s", body)
 	require.Contains(t, string(body), "billing", "the SECOND schema never reached the types:\n%s", body)
