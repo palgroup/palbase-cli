@@ -241,8 +241,8 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			// sahibinin kararı olmalı. Ama sessiz bırakmak da bir karardır ve
 			// kasada okunmayan bir özel anahtar bırakır.
 			for _, stale := range supersededSecretKeys(name) {
-				fmt.Fprintf(out, "! %s artık okunmuyor (alan adı %s olarak hizalandı).\n"+
-					"  İçinde eski bir gizli anahtar kalmış olabilir; kontrol edip kaldırmak istersen:\n"+
+				fmt.Fprintf(out, "! %s is no longer read (the field was aligned to %s).\n"+
+					"  It may still hold an old private key. To check and remove it:\n"+
 					"    palbase secret remove %s\n", stale, "p8_private_key", stale)
 			}
 

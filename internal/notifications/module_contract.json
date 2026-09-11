@@ -1,0 +1,60 @@
+{
+  "_README": [
+    "MODULUN KIMLIK SOZLESMESININ VENDOR'LANMIS ANLIK GORUNTUSU.",
+    "Elle duzenlenmez: v2'nin provider config struct'larindan uretilir.",
+    "Iki test onu durust tutar (catalog_test.go):",
+    "  TestTheCatalogMatchesTheModuleContract  — katalog bu dosyaya uyar (CI'da KOSAR)",
+    "  TestTheModuleContractSnapshotIsCurrent  — bu dosya v2'nin HEAD'ine uyar (tam agacta)",
+    "Ikincisi olmadan bu dosya bir YALANI SABITLEYEBILIRDI; birincisi olmadan sozlesme",
+    "CI'da hic olculmezdi (sdk/cli CI'i v2'yi checkout etmez, olculdu 11.09.2026)."
+  ],
+  "providers": {
+    "acs": {
+      "access_key": "string",
+      "connection_string": "string",
+      "endpoint": "string",
+      "from_email": "string",
+      "from_name": "string"
+    },
+    "apns": {
+      "bundle_id": "string",
+      "is_production": "bool",
+      "key_id": "string",
+      "p8_private_key": "string",
+      "team_id": "string"
+    },
+    "meta": {
+      "access_token": "string",
+      "api_version": "string",
+      "app_secret": "string",
+      "phone_number_id": "string",
+      "verify_token": "string"
+    },
+    "sendgrid": {
+      "api_key": "string",
+      "from_domain": "string"
+    },
+    "ses": {
+      "access_key_id": "string",
+      "from_domain": "string",
+      "region": "string",
+      "secret_access_key": "string"
+    },
+    "smtp": {
+      "from_email": "string",
+      "host": "string",
+      "password": "string",
+      "port": "int",
+      "use_starttls": "bool",
+      "username": "string"
+    },
+    "twilio": {
+      "account_sid": "string",
+      "api_key_secret": "string",
+      "api_key_sid": "string",
+      "auth_token": "string",
+      "from_number": "string",
+      "messaging_service_sid": "string"
+    }
+  }
+}

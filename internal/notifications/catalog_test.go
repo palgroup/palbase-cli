@@ -131,11 +131,8 @@ var notProducedByCLI = map[string]map[string]string{
 //  1. CLI'ın yazdığı her ad modülde OKUNUYOR mu,
 //  2. modülün okuduğu her ad CLI'da üretiliyor mu (ya da gerekçesi yazılı mı),
 //  3. CLI'ın alan TÜRÜ modülün Go tipiyle uyuşuyor mu.
-func TestTheCatalogMatchesTheModulesStructs(t *testing.T) {
-	repo := filepath.Join("..", "..", "..", "..", "v2")
-	if _, err := os.Stat(repo); os.IsNotExist(err) {
-		t.Skipf("v2 kaynağı yok (%s) — bu kapı yalnız tam ağaçta koşar", repo)
-	}
+func TestTheCatalogMatchesTheModuleContract(t *testing.T) {
+	contract := loadModuleContract(t)
 
 	for _, spec := range catalog {
 		// `fcm` BİLEREK DIŞARIDA — ve bu bir istisna değil, AYRI BİR KUSUR.
@@ -148,18 +145,13 @@ func TestTheCatalogMatchesTheModulesStructs(t *testing.T) {
 		if spec.name == "fcm" {
 			continue
 		}
-		where, known := moduleConfigStruct[spec.name]
+		moduleTypes, known := contract[spec.name]
 		if !known {
-			t.Errorf("%s: modül struct adresi yazılı değil — yeni sağlayıcı eklendiyse moduleConfigStruct da güncellenmeli", spec.name)
+			t.Errorf("%s: sözleşme anlık görüntüsünde yok — yeni sağlayıcı eklendiyse module_contract.json da yenilenmeli", spec.name)
 			continue
 		}
-		moduleTypes, err := readStructJSONFields(repo, where.path, where.typ)
-		if err != nil {
-			t.Skipf("%s: v2'nin commit'li hâli okunamadı (%s): %v", spec.name, where.path, err)
-		}
 		if len(moduleTypes) == 0 {
-			t.Fatalf("%s: %s içinde %s struct'ında tek bir `json:` etiketi bulunamadı — kapı ÖLÇEMEDİĞİ için geçemez",
-				spec.name, where.path, where.typ)
+			t.Fatalf("%s: sözleşmede tek bir alan yok — kapı ÖLÇEMEDİĞİ için geçemez", spec.name)
 		}
 
 		// CLI'ın ürettiği her alan: adı + TELE KOYDUĞU JSON türü.
@@ -176,15 +168,15 @@ func TestTheCatalogMatchesTheModulesStructs(t *testing.T) {
 
 		// 1 + 3: CLI → modül, ad ve tip.
 		for name, kind := range cliKind {
-			goType, reads := moduleTypes[name]
+			want, reads := moduleTypes[name]
 			if !reads {
 				t.Errorf("%s: CLI %q yazıyor, modül bu adı OKUMUYOR — kabul edilen gövde worker'da reddedilir (modülün okuduğu adlar: %v)",
 					spec.name, name, sortedKeys(moduleTypes))
 				continue
 			}
-			if want := jsonKindOf(goType); want != kind {
-				t.Errorf("%s: %q alanı TİPÇE ayrışmış — CLI %s gönderiyor, modül %s (%s) bekliyor; json.Unmarshal bu gövdeyi REDDEDER",
-					spec.name, name, kind, want, goType)
+			if want != kind {
+				t.Errorf("%s: %q alanı TİPÇE ayrışmış — CLI %s gönderiyor, modül %s bekliyor; json.Unmarshal bu gövdeyi REDDEDER",
+					spec.name, name, kind, want)
 			}
 		}
 
@@ -250,6 +242,102 @@ func producedJSONKinds(t *testing.T, spec providerSpec) map[string]string {
 		}
 	}
 	return kinds
+}
+
+// moduleContractPath, vendor'lanmış sözleşme anlık görüntüsü.
+const moduleContractPath = "module_contract.json"
+
+// loadModuleContract, anlık görüntüyü okur. Okuyamazsa REDDEDER — atlamaz.
+func loadModuleContract(t *testing.T) map[string]map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(moduleContractPath)
+	if err != nil {
+		t.Fatalf("%s okunamadı: %v — kapı ÖLÇEMEDİĞİ için geçemez", moduleContractPath, err)
+	}
+	var doc struct {
+		Providers map[string]map[string]string `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%s ayrıştırılamadı: %v", moduleContractPath, err)
+	}
+	if len(doc.Providers) == 0 {
+		t.Fatalf("%s tek bir sağlayıcı taşımıyor — kapı ÖLÇEMEDİĞİ için geçemez", moduleContractPath)
+	}
+	return doc.Providers
+}
+
+// TestTheModuleContractSnapshotIsCurrent, VENDOR'LANMIŞ ANLIK GÖRÜNTÜNÜN hâlâ
+// v2'nin söylediği şey olduğunu ölçer.
+//
+// NEDEN İKİ KAPI VAR. Bir önceki hâlim modül tablosunu doğrudan v2'den okuyup,
+// okuyamazsa `t.Skipf` ediyordu. İki deliği vardı ve ikincisi ağırdı:
+//
+//  1. `sdk/cli`'ın CI'ı TEK bir checkout yapıyor ve v2'yi hiç almıyor — yani
+//     `os.Stat` orada HER ZAMAN düşüyor ve kapı CI'da HİÇ KOŞMUYORDU. FR-019'un
+//     kabul ölçütü yalnız benim makinemde ölçülüyordu.
+//  2. v2 bir dosyayı taşıdığı gün `Skipf` testin TAMAMINI durduruyordu — yani
+//     diğer altı sağlayıcı da ölçülmeden yeşil geçiyordu. Bu, aynı dalganın
+//     `versionRose`'da bilerek kapattığı fail-open'ın ta kendisiydi.
+//
+// Çare bölünme: sözleşme depoya VENDOR'LANDI, katalog kapısı ona bakıyor (CI'da
+// koşar), ve BU test anlık görüntünün v2'den sapmadığını ölçüyor. Vendor'lanmış
+// bir kopya tek başına bir YALANI SABİTLEYEBİLİRDİ; bu test tam da onu
+// engelliyor. Aynı desen `cloud/tenant-stack/vendored_test.go`'da da var.
+//
+// v2 YOKSA atlanır — `sdk/cli` kendi başına klonlanabilen bir depo ve orada
+// komşunun kaynağı gerçekten yoktur. Ama v2 VARSA ve bir yol okunamıyorsa bu
+// bir KUSURDUR, atlama sebebi değil: taşınan dosya sözleşmeyi sessizce
+// dondurur.
+func TestTheModuleContractSnapshotIsCurrent(t *testing.T) {
+	repo := filepath.Join("..", "..", "..", "..", "v2")
+	if _, err := os.Stat(repo); os.IsNotExist(err) {
+		t.Skipf("v2 kaynağı yok (%s) — anlık görüntünün tazeliği yalnız tam ağaçta ölçülür", repo)
+	}
+	snapshot := loadModuleContract(t)
+
+	for name, where := range moduleConfigStruct {
+		live, err := readStructJSONFields(repo, where.path, where.typ)
+		if err != nil {
+			t.Fatalf("%s: v2'nin commit'li hâli okunamadı (%s): %v — dosya taşındıysa "+
+				"moduleConfigStruct ve %s birlikte yenilenmeli; atlamak sözleşmeyi DONDURUR",
+				name, where.path, err, moduleContractPath)
+		}
+		if len(live) == 0 {
+			t.Fatalf("%s: %s içinde %s struct'ı bulunamadı ya da boş — struct yeniden adlandırıldıysa "+
+				"moduleConfigStruct yenilenmeli", name, where.path, where.typ)
+		}
+		want, known := snapshot[name]
+		if !known {
+			t.Errorf("%s: v2 bu sağlayıcıyı tanıyor ama anlık görüntüde yok — %s yenilenmeli",
+				name, moduleContractPath)
+			continue
+		}
+		for field, goType := range live {
+			kind := jsonKindOf(goType)
+			got, present := want[field]
+			if !present {
+				t.Errorf("%s: v2 %q alanını okuyor, anlık görüntüde yok — %s BAYAT",
+					name, field, moduleContractPath)
+				continue
+			}
+			if got != kind {
+				t.Errorf("%s: %q alanının türü v2'de %s (%s), anlık görüntüde %s — %s BAYAT",
+					name, field, kind, goType, got, moduleContractPath)
+			}
+		}
+		for field := range want {
+			if _, present := live[field]; !present {
+				t.Errorf("%s: anlık görüntü %q alanını taşıyor ama v2 artık okumuyor — %s BAYAT",
+					name, field, moduleContractPath)
+			}
+		}
+	}
+	// Anlık görüntüde v2'nin hiç tanımadığı bir sağlayıcı kalmasın.
+	for name := range snapshot {
+		if _, known := moduleConfigStruct[name]; !known {
+			t.Errorf("%s: anlık görüntüde var ama adresi yazılı değil — ölü giriş", name)
+		}
+	}
 }
 
 // structFieldRE, bir struct gövdesindeki tek bir alanı yakalar: Go adı, Go tipi
