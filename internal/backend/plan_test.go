@@ -512,11 +512,21 @@ func TestPlanWritesAPlanFileWithARuntimeSection(t *testing.T) {
 		"36.0.2 → ",
 		"auth: expand 13→14, contract 0→1",
 		"info · auth/000014_social_auth.precheck.sql · 2 · imported rows carried",
-		"plan written: .palbase/plan.json",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("plan çıktısında %q yok:\n%s", want, out.String())
 		}
+	}
+	// VE SATIR PLANIN GERÇEKTEN YAZILDIĞI YERİ SÖYLER. Burada `.palbase/plan.json`
+	// yazıyordu ve plan bu makinenin kendi dizinine taşındıktan sonra da öyle
+	// kaldı — yani kişiye planının nereye gittiğini söyleyen TEK cümle, ürünün
+	// artık yazmadığı bir dosyayı adlandırıyordu.
+	wrote, pathErr := planFilePath(dir)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if !strings.Contains(out.String(), "plan written: "+wrote) {
+		t.Fatalf("plan çıktısı yazdığı yeri adlandırmıyor (%s):\n%s", wrote, out.String())
 	}
 	if askedSDK == "" {
 		t.Fatal("planlayıcıya hedef SDK sürümü sorulmadı")

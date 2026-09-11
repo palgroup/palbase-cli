@@ -221,7 +221,15 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	if err := WritePlanFile(dir, p); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "plan written: .palbase/plan.json (%s)\n", p.Fingerprint[:12])
+	// THE PATH IS ASKED FOR, NOT SPELLED. This line said `.palbase/plan.json`
+	// after the plan had moved to this machine's own directory — so the one
+	// sentence telling somebody where their plan went named a file the product
+	// no longer writes, and `ls` there would have found nothing.
+	planPath, err := planFilePath(dir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "plan written: %s (%s)\n", planPath, p.Fingerprint[:12])
 	return nil
 }
 
