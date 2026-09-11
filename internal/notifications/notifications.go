@@ -24,8 +24,11 @@ type Resolvers struct {
 }
 
 // providerEntry holds a sender's non-secret fields for validation.
+//
+// Değerler `any` — çünkü modülün kimlik yapıları `int` ve `bool` alanlar da
+// okuyor ve bu harita doğrudan gövdeye kopyalanıyor. Bkz. collectProviderFields.
 type providerEntry struct {
-	fields map[string]string
+	fields map[string]any
 }
 
 // REST reaches the linked stack's management surface.
@@ -179,29 +182,9 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			}
 
 			// 1. Collect non-secret fields from flags; validate required ones.
-			entry := providerEntry{fields: map[string]string{}}
-			for _, f := range spec.fields {
-				raw, _ := cmd.Flags().GetString(f.flag)
-				if f.isBool {
-					// Bool flags are tri-state here: present → value, absent → unset.
-					if cmd.Flags().Changed(f.flag) {
-						bv, _ := cmd.Flags().GetBool(f.flag)
-						entry.fields[f.name] = strconv.FormatBool(bv)
-					}
-					continue
-				}
-				if raw == "" {
-					if f.required {
-						return fmt.Errorf("provider %q requires --%s (%s)", name, f.flag, f.help)
-					}
-					continue
-				}
-				if f.isInt {
-					if _, perr := strconv.Atoi(raw); perr != nil {
-						return fmt.Errorf("--%s must be a number (got %q)", f.flag, raw)
-					}
-				}
-				entry.fields[f.name] = raw
+			entry, cerr := collectProviderFields(spec, cmd)
+			if cerr != nil {
+				return cerr
 			}
 			if verr := validateProvider(spec, entry); verr != nil {
 				return verr
@@ -253,6 +236,16 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				fmt.Fprintf(out, "✓ uploaded secret %s (encrypted)\n", reserved)
 			}
 
+			// Hizalama bir ANAHTAR bıraktıysa, onu adıyla söyle.
+			// Silmiyoruz: canlı bir sırrı komutun yan etkisi olarak yok etmek
+			// sahibinin kararı olmalı. Ama sessiz bırakmak da bir karardır ve
+			// kasada okunmayan bir özel anahtar bırakır.
+			for _, stale := range supersededSecretKeys(name) {
+				fmt.Fprintf(out, "! %s artık okunmuyor (alan adı %s olarak hizalandı).\n"+
+					"  İçinde eski bir gizli anahtar kalmış olabilir; kontrol edip kaldırmak istersen:\n"+
+					"    palbase secret remove %s\n", stale, "p8_private_key", stale)
+			}
+
 			// 3. Tell the stack. No file, no deploy to wait for.
 			//
 			// GÖVDE MODÜLÜN SÖZLEŞMESİDİR: {channel, provider, credentials}.
@@ -302,6 +295,68 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 	return cmd
 }
 
+// collectProviderFields, bayraklardan sağlayıcının GİZLİ OLMAYAN alanlarını
+// toplar — ve her alanı MODÜLÜN BEKLEDİĞİ TÜRDE saklar.
+//
+// TÜR BURADA BİR SÖZLEŞMEDİR, biçim tercihi değil. Modülün kimlik yapıları
+// `port`u `int`, `use_starttls` ve `is_production`'ı `bool` olarak okuyor
+// (provider/email/smtp.go, provider/push/apns.go). Bu fonksiyon 11.09.2026'ya
+// kadar HEPSİNİ dizge olarak yazıyordu: `strconv.Atoi` çağrılıyor ama sonucu
+// ATILIYOR, `strconv.FormatBool` ise bool'u dizgeye çeviriyordu. Sonuç iki
+// kanalda iki ayrı arıza oldu:
+//
+//   - `smtp`: gövde `{"port":"587"}` gidiyor, modülün doğrulayıcısı
+//     `cannot unmarshal string into Go struct field SMTPConfig.port of type int`
+//     ile REDDEDİYOR — ve komut bu noktaya SIRRI KASAYA YÜKLEDİKTEN sonra
+//     varıyor, yani kullanıcıda parola kasada ama sağlayıcı yok.
+//   - `apns`: `{"is_production":"true"}` push kanalında kabul kapısından
+//     GEÇİYOR (o kanal `Create`'te doğrulanmıyor), kayıt yazılıyor, API
+//     `configured: true` diyor ve worker her push'u düşürüyor — 26.08–11.09
+//     arası e-postada yaşanan sessiz ölümün birebir aynısı.
+//
+// Fonksiyon olarak AYRILMASININ sebebi de bu: kapı artık kataloğun BEYANINI
+// değil bu fonksiyonun ÜRETTİĞİ GÖVDEYİ ölçüyor. Beyanı ölçen bir kapı
+// yeşil kalıyordu — `isInt: true` yazıyordu ve tele dizge koyuyordu.
+func collectProviderFields(spec *providerSpec, cmd *cobra.Command) (providerEntry, error) {
+	entry := providerEntry{fields: map[string]any{}}
+	for _, f := range spec.fields {
+		raw, _ := cmd.Flags().GetString(f.flag)
+		if f.isBool {
+			// Bool flags are tri-state here: present → value, absent → unset.
+			if cmd.Flags().Changed(f.flag) {
+				bv, _ := cmd.Flags().GetBool(f.flag)
+				entry.fields[f.name] = bv
+			}
+			continue
+		}
+		if raw == "" {
+			if f.required {
+				return entry, fmt.Errorf("provider %q requires --%s (%s)", spec.name, f.flag, f.help)
+			}
+			continue
+		}
+		if f.isInt {
+			n, perr := strconv.Atoi(raw)
+			if perr != nil {
+				return entry, fmt.Errorf("--%s must be a number (got %q)", f.flag, raw)
+			}
+			entry.fields[f.name] = n
+			continue
+		}
+		entry.fields[f.name] = raw
+	}
+	return entry, nil
+}
+
+// stringField, bir alanın dizge değerini verir; alan yoksa ya da dizge değilse
+// boş dizge döner. Çapraz alan kuralları yalnız dizge alanlara bakıyor.
+func stringField(entry providerEntry, name string) string {
+	if v, ok := entry.fields[name].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // validateProvider enforces cross-field rules the flat required-check can't:
 // twilio needs one of from_number / messaging_service_sid.
 // (Adlar 11.09.2026'da modülün `json:` etiketleriyle hizalandı; bu kontrol
@@ -314,13 +369,13 @@ func validateProvider(spec *providerSpec, entry providerEntry) error {
 			{"api_version", "api-version", `^v[0-9]+\.0$`},
 		}
 		for _, check := range checks {
-			if value := entry.fields[check.field]; value != "" && !regexp.MustCompile(check.pattern).MatchString(value) {
+			if value := stringField(entry, check.field); value != "" && !regexp.MustCompile(check.pattern).MatchString(value) {
 				return fmt.Errorf("--%s is not a valid Meta value", check.flag)
 			}
 		}
 	}
 	if spec.name == "twilio" {
-		if entry.fields["from_number"] == "" && entry.fields["messaging_service_sid"] == "" {
+		if stringField(entry, "from_number") == "" && stringField(entry, "messaging_service_sid") == "" {
 			return fmt.Errorf("provider \"twilio\" requires one of --from-number or --messaging-sid")
 		}
 	}

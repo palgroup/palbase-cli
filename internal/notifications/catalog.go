@@ -162,8 +162,38 @@ func specByName(name string) *providerSpec {
 	return nil
 }
 
+// supersededSecretKeys, bir sağlayıcının ARTIK OKUNMAYAN kasa anahtarlarıdır.
+//
+// Bir alan adını hizalamak, o adın DAHA ÖNCE ÜRETTİĞİ kaydı kaldırmaz. `p8` →
+// `p8_private_key` hizalaması (11.09.2026) kasa anahtarını da kaydırdı, çünkü
+// anahtar alan adından türetiliyor. Daha önce `palbase notifications add apns`
+// koşmuş bir projenin kasasında `PB_NOTIFICATIONS_APNS_P8` altında bir APNs
+// ÖZEL ANAHTARI duruyor ve artık hiçbir şey onu okumuyor.
+//
+// Bu liste onu SİLMEZ — canlı bir sırrı bir CLI komutunun yan etkisi olarak
+// yok etmek, sahibinin haberi olmadan alınmış bir karardır. Yaptığı şey onu
+// ADLANDIRMAK: sessiz bırakmak da bir karar olurdu ve sır hijyeni açısından
+// daha kötüsü.
+func supersededSecretKeys(provider string) []string {
+	switch provider {
+	case "apns":
+		return []string{reservedSecretPrefix + "_APNS_P8"}
+	default:
+		return nil
+	}
+}
+
 // reservedSecretKey derives the env-var key backing a provider's secret field,
-// e.g. ("apns","p8") → "PB_NOTIFICATIONS_APNS_P8".
+// e.g. ("apns","p8_private_key") → "PB_NOTIFICATIONS_APNS_P8_PRIVATE_KEY".
+//
+// ÖRNEK 11.09.2026'da DÜZELTİLDİ ve bu bir üslup düzeltmesi değil: eski örnek
+// ("apns","p8") artık katalogda BULUNMAYAN bir alanı adlandırıyordu ve
+// ürettiği anahtar da yanlıştı. Alan adı `p8` → `p8_private_key` olarak
+// hizalandığında (modül `p8_private_key` okuyor) kasa anahtarı da KAYDI —
+// diğer sekiz hizalamada kaymamıştı, çünkü camelToUpperSnake `teamId` ile
+// `team_id`'yi aynı çıktıya veriyor. Bu tekil istisna yukarıda `p8_private_key`
+// girdisinin yanında ayrıca uyarılıyor; okuyucunun İKİ yerde aynı şeyi
+// görmesi bilerek.
 func reservedSecretKey(provider, secretField string) string {
 	return reservedSecretPrefix + "_" + camelToUpperSnake(provider) + "_" + camelToUpperSnake(secretField)
 }

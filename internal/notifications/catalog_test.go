@@ -1,9 +1,16 @@
 package notifications
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,54 +80,235 @@ func TestSpecByName(t *testing.T) {
 //
 // Beklenen adlar EZBERDEN değil, modülün struct etiketlerinden alındı:
 // v2/internal/modules/notify/internal/provider/email/{acs,smtp,sendgrid,ses}.go
-func TestCatalogFieldNamesMatchTheModule(t *testing.T) {
-	// Modülün `json:` etiketleri — EZBERDEN DEĞİL, struct'lardan okundu (2026-09-11):
-	//   e-posta : provider/email/{acs,smtp,sendgrid,ses}.go
-	//   push    : provider/push/apns.go
-	//   sms     : provider/sms/twilio.go
-	//   whatsapp: provider/whatsapp/
-	moduleFields := map[string]map[string]bool{
-		"acs":      {"connection_string": true, "endpoint": true, "access_key": true, "from_email": true, "from_name": true},
-		"smtp":     {"host": true, "port": true, "username": true, "password": true, "from_email": true, "use_starttls": true},
-		"sendgrid": {"api_key": true, "from_domain": true},
-		"ses":      {"region": true, "access_key_id": true, "secret_access_key": true, "from_domain": true},
-		"apns":     {"team_id": true, "key_id": true, "p8_private_key": true, "bundle_id": true, "is_production": true},
-		"twilio":   {"account_sid": true, "auth_token": true, "api_key_sid": true, "api_key_secret": true, "from_number": true, "messaging_service_sid": true, "verify_service_sid": true},
-		"meta":     {"phone_number_id": true, "api_version": true, "access_token": true, "app_secret": true, "verify_token": true},
+// moduleConfigStruct, bir sağlayıcının kimlik yapısının v2'deki ADRESİDİR.
+//
+// Bu tablo alan ADI taşımaz — yalnız DOSYA ve STRUCT adı. Adların ve TİPLERİN
+// kendisi v2'nin commit'li kaynağından OKUNUR. Fark önemli: elle yazılan bir
+// alan tablosu, yakalamak için var olduğu YALANI SABİTLER. Ölçüldü 11.09.2026 —
+// önceki hâli `twilio` için `verify_service_sid` diye bir ad taşıyordu; o ad
+// HİÇBİR modül struct'ında yok (Verify sağlayıcısı `service_sid` okur) ve CLI
+// da onu hiç yazmıyor. Tablo kendi uydurduğu adı "doğru" sayıyordu.
+var moduleConfigStruct = map[string]struct{ path, typ string }{
+	"acs":      {"internal/modules/notify/internal/provider/email/acs.go", "ACSEmailConfig"},
+	"smtp":     {"internal/modules/notify/internal/provider/email/smtp.go", "SMTPConfig"},
+	"sendgrid": {"internal/modules/notify/internal/provider/email/sendgrid.go", "SendGridConfig"},
+	"ses":      {"internal/modules/notify/internal/provider/email/ses.go", "SESConfig"},
+	"apns":     {"internal/modules/notify/internal/provider/push/apns.go", "APNsConfig"},
+	"twilio":   {"internal/modules/notify/internal/provider/sms/twilio.go", "TwilioConfig"},
+	"meta":     {"internal/modules/notify/internal/provider/whatsapp/meta.go", "Config"},
+}
+
+// notProducedByCLI, modülün OKUDUĞU ama CLI'ın YAZMADIĞI alanlar — her biri
+// gerekçesiyle. Bu liste bir muafiyet değil bir BEYANDIR: kapı çift yönlü
+// olduğu için, modülde yeni bir alan belirdiğinde ya CLI onu üretmeli ya da
+// buraya bir gerekçe düşülmeli. Sessizce eksik kalamaz.
+var notProducedByCLI = map[string]map[string]string{
+	"acs": {
+		"endpoint":   "connection_string ile birlikte gelir; ACS bağlantı dizgesi ikisini de taşır",
+		"access_key": "connection_string ile birlikte gelir",
+	},
+	"twilio": {
+		"api_key_sid":    "API Key kimliği CLI yüzeyinde henüz yok; auth_token yolu destekleniyor",
+		"api_key_secret": "aynı — API Key yolu CLI'da açılmadı",
+	},
+}
+
+// TestTheCatalogMatchesTheModulesStructs, CLI'ın ürettiği gövdenin modülün
+// kimlik yapısına HEM ADCA HEM TİPÇE oturduğunu ölçer.
+//
+// NEDEN ÜÇ SORU BİRDEN: 26.08–11.09.2026 arasında bir kiracının her e-postası
+// öldü, çünkü CLI camelCase yazıyordu ve modül snake_case okuyordu. O kusurun
+// düzeltmesi (T016/T017) adları hizaladı — ama TİPLERİ hizalamadı, ve ad kapısı
+// tipi göremiyordu. Ölçüldü 11.09.2026: CLI `port`u `"587"` (dizge) gönderiyordu,
+// modül `int` bekliyor; `ValidateSMTPConfig` gövdeyi
+// `cannot unmarshal string into Go struct field SMTPConfig.port of type int`
+// ile reddediyordu — yani `palbase notifications add smtp` SIR KASAYA
+// YÜKLENDİKTEN SONRA 400 alıyordu. Aynı sınıf `is_production` için sessizdi:
+// push kanalı kabul kapısından geçtiği için kayıt YAZILIYOR, API
+// `configured: true` diyor ve worker her push'u düşürüyordu.
+//
+// Kapı bu yüzden ÜÇ yönü birden ölçer:
+//  1. CLI'ın yazdığı her ad modülde OKUNUYOR mu,
+//  2. modülün okuduğu her ad CLI'da üretiliyor mu (ya da gerekçesi yazılı mı),
+//  3. CLI'ın alan TÜRÜ modülün Go tipiyle uyuşuyor mu.
+func TestTheCatalogMatchesTheModulesStructs(t *testing.T) {
+	repo := filepath.Join("..", "..", "..", "..", "v2")
+	if _, err := os.Stat(repo); os.IsNotExist(err) {
+		t.Skipf("v2 kaynağı yok (%s) — bu kapı yalnız tam ağaçta koşar", repo)
 	}
 
 	for _, spec := range catalog {
 		// `fcm` BİLEREK DIŞARIDA — ve bu bir istisna değil, AYRI BİR KUSUR.
-		//
-		// Diğerlerinde sorun adlandırma: CLI camelCase yazıyor, modül snake_case
-		// okuyor. `fcm`'de sorun SARMALAMA: CLI service-account JSON'unu
-		// `{"serviceAccount": "<dosya>"}` diye bir alanın İÇİNE koyuyor, modül ise
-		// credentials'ı service_account.json'un KENDİSİ sayıp kök seviyede
-		// `client_email` / `private_key` arıyor (provider/push/fcm.go:118-129).
-		// Adı snake_case yapmak onu düzeltmez, yalnız kusuru gizler. Ölçüldü
-		// 2026-09-11, ayrı bir iş olarak deftere yazıldı.
+		// Diğerlerinde sorun adlandırmaydı. `fcm`'de sorun SARMALAMA: CLI
+		// service-account JSON'unu `{"serviceAccount": "<dosya>"}` diye bir alanın
+		// İÇİNE koyuyor, modül ise credentials'ı service_account.json'un KENDİSİ
+		// sayıp kök seviyede `client_email` / `private_key` arıyor
+		// (provider/push/fcm.go:118-129). Adı ya da tipi düzeltmek onu çözmez,
+		// yalnız kusuru gizler. Deftere ayrı bir iş olarak yazıldı.
 		if spec.name == "fcm" {
 			continue
 		}
-		if _, known := moduleFields[spec.name]; !known {
-			t.Errorf("%s: bu testin tablosunda yok — yeni bir sağlayıcı eklendiyse tablo da güncellenmeli", spec.name)
+		where, known := moduleConfigStruct[spec.name]
+		if !known {
+			t.Errorf("%s: modül struct adresi yazılı değil — yeni sağlayıcı eklendiyse moduleConfigStruct da güncellenmeli", spec.name)
 			continue
 		}
-		want := moduleFields[spec.name]
-		names := make([]string, 0, len(spec.fields)+len(spec.secrets))
-		for _, f := range spec.fields {
-			names = append(names, f.name)
+		moduleTypes, err := readStructJSONFields(repo, where.path, where.typ)
+		if err != nil {
+			t.Skipf("%s: v2'nin commit'li hâli okunamadı (%s): %v", spec.name, where.path, err)
 		}
+		if len(moduleTypes) == 0 {
+			t.Fatalf("%s: %s içinde %s struct'ında tek bir `json:` etiketi bulunamadı — kapı ÖLÇEMEDİĞİ için geçemez",
+				spec.name, where.path, where.typ)
+		}
+
+		// CLI'ın ürettiği her alan: adı + TELE KOYDUĞU JSON türü.
+		//
+		// KATALOĞUN BEYANI SORULMAZ, ÜRETİLEN GÖVDE ÖLÇÜLÜR. İlk hâlim beyanı
+		// ölçüyordu (`f.isInt` → "int") ve YEŞİL geçiyordu: katalog `port`u
+		// `isInt: true` diye bildiriyor ama üretici onu dizge olarak yazıyordu.
+		// Bir kapı, ölçtüğünü söylediği şeyi gerçekten üretmelidir — bu yüzden
+		// üretim fonksiyonu çağrılır ve çıktısı JSON'a çevrilip TÜRÜNE bakılır.
+		cliKind := producedJSONKinds(t, spec)
 		for _, sf := range spec.secrets {
-			names = append(names, sf.name)
+			cliKind[sf.name] = "string" // sırlar kasadan dizge olarak eklenir
 		}
-		for _, n := range names {
-			if !want[n] {
-				t.Errorf("%s: CLI %q yazıyor, modül bu adı OKUMUYOR — kabul edilen gövde worker'da reddedilir (beklenen adlar: %v)",
-					spec.name, n, keysOf(want))
+
+		// 1 + 3: CLI → modül, ad ve tip.
+		for name, kind := range cliKind {
+			goType, reads := moduleTypes[name]
+			if !reads {
+				t.Errorf("%s: CLI %q yazıyor, modül bu adı OKUMUYOR — kabul edilen gövde worker'da reddedilir (modülün okuduğu adlar: %v)",
+					spec.name, name, sortedKeys(moduleTypes))
+				continue
+			}
+			if want := jsonKindOf(goType); want != kind {
+				t.Errorf("%s: %q alanı TİPÇE ayrışmış — CLI %s gönderiyor, modül %s (%s) bekliyor; json.Unmarshal bu gövdeyi REDDEDER",
+					spec.name, name, kind, want, goType)
+			}
+		}
+
+		// 2: modül → CLI. Eksik kalan her alan gerekçesini BEYAN etmeli.
+		for name := range moduleTypes {
+			if _, produced := cliKind[name]; produced {
+				continue
+			}
+			if _, declared := notProducedByCLI[spec.name][name]; declared {
+				continue
+			}
+			t.Errorf("%s: modül %q okuyor, CLI onu ÜRETMİYOR ve gerekçesi de yazılı değil — ya katalog alanı eklensin ya notProducedByCLI'a gerekçe düşülsün",
+				spec.name, name)
+		}
+
+		// Ölü beyan birikmesin: artık var olmayan bir alan için gerekçe tutulamaz.
+		for name := range notProducedByCLI[spec.name] {
+			if _, exists := moduleTypes[name]; !exists {
+				t.Errorf("%s: notProducedByCLI %q için gerekçe taşıyor ama modül artık böyle bir alan okumuyor — ölü beyan", spec.name, name)
 			}
 		}
 	}
+}
+
+// producedJSONKinds, `palbase notifications add <spec>` KOŞSAYDI gövdeye hangi
+// adların hangi JSON TÜRÜYLE gireceğini, ÜRETİM fonksiyonunu çağırarak ölçer.
+//
+// Bayraklara akla yatkın değerler verilir (sayısal alana bir sayı, bool alana
+// `true`), sonra `collectProviderFields` — komutun kendi kullandığı fiil —
+// çağrılır ve çıktısı `json.Marshal`/`Unmarshal` turundan geçirilir. O tur
+// önemlidir: teldeki temsil budur, Go'daki değer değil.
+func producedJSONKinds(t *testing.T, spec providerSpec) map[string]string {
+	t.Helper()
+	cmd := &cobra.Command{Use: "add"}
+	registerProviderFlags(cmd)
+	for _, f := range spec.fields {
+		value := "x"
+		switch {
+		case f.isInt:
+			value = "587"
+		case f.isBool:
+			value = "true"
+		}
+		require.NoError(t, cmd.Flags().Set(f.flag, value), "%s: --%s ayarlanamadı", spec.name, f.flag)
+	}
+	entry, err := collectProviderFields(&spec, cmd)
+	require.NoError(t, err, "%s: üretim yolu bu girdilerle hata verdi", spec.name)
+
+	body, err := json.Marshal(entry.fields)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(body, &wire))
+
+	kinds := map[string]string{}
+	for name, v := range wire {
+		switch v.(type) {
+		case float64:
+			kinds[name] = "int"
+		case bool:
+			kinds[name] = "bool"
+		default:
+			kinds[name] = "string"
+		}
+	}
+	return kinds
+}
+
+// structFieldRE, bir struct gövdesindeki tek bir alanı yakalar: Go adı, Go tipi
+// ve `json:` etiketinin ilk parçası (`,omitempty` atılır).
+var structFieldRE = regexp.MustCompile("^\\s*[A-Z]\\w*\\s+([\\w.\\[\\]*]+)\\s+`[^`]*json:\"([^\",]+)")
+
+// readStructJSONFields, komşu deponun COMMIT'Lİ hâlinden tek bir struct'ın
+// `json:` etiketlerini ve Go tiplerini okur.
+//
+// Çalışma ağacından değil `git show HEAD:` ile okunur — komşu depoda başka bir
+// oturumun yarım bıraktığı bir düzenleme bu kapıyı yanıltmasın diye. Aynı desen
+// cloud/tenant-stack/vendored_test.go'da da kullanılıyor.
+//
+// Yalnız ADI VERİLEN struct'ın gövdesi okunur: bu dosyalar aynı zamanda tel
+// payload'larını da tanımlıyor (acsEmailAddress, sendGridEmail …) ve hepsini
+// toplamak kapıyı anlamsız kılardı.
+func readStructJSONFields(repo, path, typeName string) (map[string]string, error) {
+	out, err := exec.Command("git", "-C", repo, "show", "HEAD:"+path).Output()
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]string{}
+	inStruct := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if !inStruct {
+			if strings.HasPrefix(line, "type "+typeName+" struct {") {
+				inStruct = true
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "}") {
+			break
+		}
+		if m := structFieldRE.FindStringSubmatch(line); m != nil {
+			fields[m[2]] = m[1]
+		}
+	}
+	return fields, nil
+}
+
+// jsonKindOf, bir Go tipini CLI'ın gönderebileceği JSON türüne indirger.
+func jsonKindOf(goType string) string {
+	switch goType {
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float32", "float64":
+		return "int"
+	case "bool":
+		return "bool"
+	default:
+		return "string"
+	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func keysOf(m map[string]bool) []string {
