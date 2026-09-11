@@ -243,7 +243,7 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			for _, stale := range supersededSecretKeys(name) {
 				fmt.Fprintf(out, "! %s is no longer read (the field was aligned to %s).\n"+
 					"  It may still hold an old private key. To check and remove it:\n"+
-					"    palbase secret remove %s\n", stale, "p8_private_key", stale)
+					"    palbase secret remove %s\n", stale.key, stale.replacedBy, stale.key)
 			}
 
 			// 3. Tell the stack. No file, no deploy to wait for.

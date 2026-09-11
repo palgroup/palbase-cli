@@ -291,7 +291,15 @@ func loadModuleContract(t *testing.T) map[string]map[string]string {
 func TestTheModuleContractSnapshotIsCurrent(t *testing.T) {
 	repo := filepath.Join("..", "..", "..", "..", "v2")
 	if _, err := os.Stat(repo); os.IsNotExist(err) {
-		t.Skipf("v2 kaynağı yok (%s) — anlık görüntünün tazeliği yalnız tam ağaçta ölçülür", repo)
+		// BU CÜMLEDEKİ "not beside this checkout" BELİRTECİ YÜKLÜDÜR, süs değil.
+		// Ana deponun `cli cross-repo gates` iş akışı, koşacağı kapı kümesini
+		// ADLA değil KAYNAKTAN türetiyor: `grep -rl "not beside this checkout"`
+		// ile bu cümleyi ATLAMA MESAJINDA taşıyan testleri buluyor, üç depoyu
+		// yerel ağaçla aynı düzende checkout ediyor, ve ATLAMAYI KIRMIZI
+		// sayıyor. Belirteç olmadan bu kapı hiçbir hatta koşmaz — ölçüldü
+		// 11.09.2026: türetme beş kapı buluyordu ve bu onlardan biri DEĞİLDİ.
+		// Belirteci kaldıran, kapıyı sessizce emekli eder.
+		t.Skipf("v2 is not beside this checkout (%s) — the snapshot's freshness is measured only in the full tree", repo)
 	}
 	snapshot := loadModuleContract(t)
 

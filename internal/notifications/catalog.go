@@ -174,10 +174,23 @@ func specByName(name string) *providerSpec {
 // yok etmek, sahibinin haberi olmadan alınmış bir karardır. Yaptığı şey onu
 // ADLANDIRMAK: sessiz bırakmak da bir karar olurdu ve sır hijyeni açısından
 // daha kötüsü.
-func supersededSecretKeys(provider string) []string {
+// supersededSecret, emekli bir kasa anahtarı ve onun YERİNİ ALAN alan adı.
+//
+// İkisi BİRLİKTE döner, çünkü uyarı ikisini de yazıyor ve ayrı tutulduklarında
+// ayrışırlar: ilk hâlim anahtarları listeden, yerine geçen adı ise ÇAĞRI
+// YERİNDEKİ sabit bir dizgeden alıyordu (`"p8_private_key"`). Bugün doğruydu
+// — liste tek girdiliydi — ama ikinci bir sağlayıcı eklendiği gün kullanıcı,
+// kendi kasasında duran bir özel anahtarın yerine bakmak için BAŞKA bir
+// sağlayıcının alan adını okuyacaktı.
+type supersededSecret struct {
+	key        string // artık okunmayan kasa anahtarı
+	replacedBy string // yerini alan credential alanı
+}
+
+func supersededSecretKeys(provider string) []supersededSecret {
 	switch provider {
 	case "apns":
-		return []string{reservedSecretPrefix + "_APNS_P8"}
+		return []supersededSecret{{key: reservedSecretPrefix + "_APNS_P8", replacedBy: "p8_private_key"}}
 	default:
 		return nil
 	}
