@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,4 +59,59 @@ func TestCatalog_ChannelsValid(t *testing.T) {
 func TestSpecByName(t *testing.T) {
 	assert.NotNil(t, specByName("apns"))
 	assert.Nil(t, specByName("nope"))
+}
+
+// CLI'IN YAZDIĞI ALAN ADLARI, MODÜLÜN OKUDUKLARIYLA AYNI OLMALI.
+//
+// 16 günlük bir arızanın gerçek kök nedeni buydu ve teşhis bir katman erken
+// durmuştu. Canlıda 26.08.2026'da `palbase notifications add acs` ile yazılan
+// kayıt, worker tarafından "missing required field: endpoint" ile reddedildi;
+// sebep eksik bir kimlik bilgisi DEĞİL, CLI'ın `connectionString` yazarken
+// modülün `connection_string` okumasıydı. Yolun hiçbir yerinde anahtar dönüşümü
+// yok: CLI gövdeyi olduğu gibi POST ediyor, yönetim yüzeyi ham delege ediyor,
+// modül `json.Decode` ediyor.
+//
+// Beklenen adlar EZBERDEN değil, modülün struct etiketlerinden alındı:
+// v2/internal/modules/notify/internal/provider/email/{acs,smtp,sendgrid,ses}.go
+func TestCatalogFieldNamesMatchTheModule(t *testing.T) {
+	// Modülün `json:` etiketleri (yukarıdaki dosyalar, 2026-09-11'de okundu).
+	moduleFields := map[string]map[string]bool{
+		"acs":      {"connection_string": true, "endpoint": true, "access_key": true, "from_email": true, "from_name": true},
+		"smtp":     {"host": true, "port": true, "username": true, "password": true, "from_email": true, "use_starttls": true},
+		"sendgrid": {"api_key": true, "from_domain": true},
+		"ses":      {"region": true, "access_key_id": true, "secret_access_key": true, "from_domain": true},
+	}
+
+	for _, spec := range catalog {
+		if spec.channel != "email" {
+			continue
+		}
+		want, known := moduleFields[spec.name]
+		if !known {
+			t.Errorf("%s: modülde karşılığı olmayan bir e-posta sağlayıcısı — testin tablosu eskimiş olabilir", spec.name)
+			continue
+		}
+		names := make([]string, 0, len(spec.fields)+len(spec.secrets))
+		for _, f := range spec.fields {
+			names = append(names, f.name)
+		}
+		for _, sf := range spec.secrets {
+			names = append(names, sf.name)
+		}
+		for _, n := range names {
+			if !want[n] {
+				t.Errorf("%s: CLI %q yazıyor, modül bu adı OKUMUYOR — kabul edilen gövde worker'da reddedilir (beklenen adlar: %v)",
+					spec.name, n, keysOf(want))
+			}
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

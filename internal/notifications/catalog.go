@@ -88,10 +88,10 @@ var catalog = []providerSpec{
 		name:    "sendgrid",
 		channel: "email",
 		fields: []field{
-			{name: "fromDomain", flag: "from-domain", required: true, help: "verified sender domain"},
+			{name: "from_domain", flag: "from-domain", required: true, help: "verified sender domain"},
 		},
 		secrets: []secretField{
-			{name: "apiKey", flag: "api-key", prompt: true, help: "SendGrid API key"},
+			{name: "api_key", flag: "api-key", prompt: true, help: "SendGrid API key"},
 		},
 	},
 	{
@@ -99,11 +99,11 @@ var catalog = []providerSpec{
 		channel: "email",
 		fields: []field{
 			{name: "region", flag: "region", required: true, help: "AWS region (e.g. us-east-1)"},
-			{name: "accessKeyId", flag: "access-key-id", required: true, help: "AWS access key ID"},
-			{name: "fromDomain", flag: "from-domain", required: true, help: "verified sender domain"},
+			{name: "access_key_id", flag: "access-key-id", required: true, help: "AWS access key ID"},
+			{name: "from_domain", flag: "from-domain", required: true, help: "verified sender domain"},
 		},
 		secrets: []secretField{
-			{name: "secretAccessKey", flag: "secret-access-key", prompt: true, help: "AWS secret access key"},
+			{name: "secret_access_key", flag: "secret-access-key", prompt: true, help: "AWS secret access key"},
 		},
 	},
 	{
@@ -112,9 +112,9 @@ var catalog = []providerSpec{
 		fields: []field{
 			{name: "host", flag: "host", required: true, help: "SMTP server host"},
 			{name: "port", flag: "port", required: true, isInt: true, help: "SMTP server port"},
-			{name: "fromEmail", flag: "from-email", required: true, help: "sender email address"},
+			{name: "from_email", flag: "from-email", required: true, help: "sender email address"},
 			{name: "username", flag: "username", help: "SMTP username (optional)"},
-			{name: "useStarttls", flag: "starttls", isBool: true, help: "use STARTTLS (optional)"},
+			{name: "use_starttls", flag: "starttls", isBool: true, help: "use STARTTLS (optional)"},
 		},
 		secrets: []secretField{
 			{name: "password", flag: "password", prompt: true, help: "SMTP password"},
@@ -124,11 +124,11 @@ var catalog = []providerSpec{
 		name:    "acs",
 		channel: "email",
 		fields: []field{
-			{name: "fromEmail", flag: "from-email", required: true, help: "sender email address"},
-			{name: "fromName", flag: "from-name", help: "sender display name (optional)"},
+			{name: "from_email", flag: "from-email", required: true, help: "sender email address"},
+			{name: "from_name", flag: "from-name", help: "sender display name (optional)"},
 		},
 		secrets: []secretField{
-			{name: "connectionString", flag: "connection-string", prompt: true, help: "Azure Communication Services connection string"},
+			{name: "connection_string", flag: "connection-string", prompt: true, help: "Azure Communication Services connection string"},
 		},
 	},
 	{
