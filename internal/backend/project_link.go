@@ -527,10 +527,11 @@ func runUnlink(w io.Writer) error {
 	default:
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
-	// Remove palbase/ when nothing else lives there.
-	if entries, err := os.ReadDir(RootDir()); err == nil && len(entries) == 0 {
-		_ = os.Remove(RootDir())
-	}
+	// NO "remove the directory if it is empty" BRANCH. It could never fire:
+	// every `link` writes `palbase/.gitattributes`, so something always lives
+	// there — and `unlink` deliberately leaves the generated clients in place,
+	// which is the sentence below. A branch that cannot run is one more thing a
+	// reader has to prove does nothing.
 	fmt.Fprintln(w, "  generated clients and their imports are left in place")
 	fmt.Fprintln(w, "  re-link with `palbase link <url>`")
 	return nil

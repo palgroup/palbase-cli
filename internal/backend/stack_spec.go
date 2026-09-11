@@ -79,8 +79,7 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 		return err
 	}
 
-	// The web SDK reads its contract from its own directory, and has no notion
-	// of bu	// NO SECOND COPY FOR WEB. `palbe-gen` used to read its own
+	// NO SECOND COPY FOR WEB. `palbe-gen` used to read its own
 	// `Palbase/openapi.json` and `Palbase/roles.json` — the same bytes as the
 	// per-environment contract, committed twice (measured: 167 KB each, identical
 	// sha256). It now reads the environment directory directly, so `spec` writes

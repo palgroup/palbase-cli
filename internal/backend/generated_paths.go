@@ -100,9 +100,12 @@ func gitignoreScaffold() string {
 // Best effort by design: refusing a job somebody asked for because a dead
 // directory would not delete trades a doable command for a tidier disk.
 //
-// `.palbase` ITSELF IS NEVER TOUCHED. `project.json` and `openapi/` are not
-// products — they are the contract that lets a colleague clone the repository
-// and build without logging in. Only the named subdirectories go.
+// `.palbase` ITSELF IS NEVER TOUCHED, and the reason has changed: it used to be
+// that `project.json` and `openapi/` lived in there and had to survive. They do
+// not exist any more — `link` REFUSES a checkout carrying that directory at all
+// (`CarriesLegacyLayout`). Sweeping it here would delete a person's old layout
+// silently, behind a progress line, instead of letting them delete it in a
+// commit they can review. Only the named entries go.
 func reapRetiredArtifacts(dir string) {
 	for _, e := range retiredProjectPaths {
 		if !strings.ContainsAny(e.path, "*?[") {

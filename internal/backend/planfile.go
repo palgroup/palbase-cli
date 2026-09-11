@@ -64,14 +64,16 @@ func WritePlanFile(dir string, p PlanFile) error {
 	// A WRITE KNOWS IT IS A WRITE. Asking where the plan goes creates nothing;
 	// putting one there creates the directory, and records which checkout it
 	// belongs to so a deleted project's state can be recognised and swept.
+	// SWEEP BEFORE CREATING, for the same reason `start` does (see target.go):
+	// a concurrent run must not find our directory empty between the mkdir and
+	// the write. And it runs HERE as well as on `start`, because a machine that
+	// plans and pushes without ever starting a local stack collected nothing —
+	// `plan` is the verb people run most.
+	reapDeadCheckoutState()
 	if err := ensureMachineStateDir(path); err != nil {
 		return err
 	}
 	rememberOrigin(filepath.Dir(path), dir)
-	// AND DEAD RECORDS GO HERE TOO. The sweep used to run only on the `start`
-	// path, so a machine that plans and pushes without ever starting a local
-	// stack never collected anything — and `plan` is the verb people run most.
-	reapDeadCheckoutState()
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err

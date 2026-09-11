@@ -48,7 +48,10 @@ fi
 mkdir -p "$dir/$env"
 echo '// generated' > "$dir/$env/$out"
 mkdir -p "$(dirname "$dir")"
-echo "export * from './environments/$env/$out'" > "$(dirname "$dir")/client.ts"
+# The real generator strips the extension (generate.ts: rel.replace(/\.ts$/, '')).
+# A stub that keeps it writes an import TypeScript rejects without
+# allowImportingTsExtensions — an imitation that produces what the tool cannot.
+echo "export * from './environments/$env/${out%.ts}'" > "$(dirname "$dir")/client.ts"
 `
 	require.NoError(t, os.WriteFile(palbeGenBin, []byte(script), 0o755))
 }

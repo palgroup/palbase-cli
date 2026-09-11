@@ -201,7 +201,11 @@ func TestARealBuildWritesNothingUnexpectedIntoTheProject(t *testing.T) {
 	for _, p := range before {
 		had[p] = true
 	}
-	allowed := map[string]bool{envTypesFile: true}
+	// FROM THE DECLARATION. This named `envTypesFile` — the bare file name — while
+	// the build writes it under `palbase/`, so the entry could never match and the
+	// allowance was inert. A list that cannot fire is not an allowance; it is a
+	// trap for the first fixture that makes the file appear.
+	allowed := map[string]bool{filepath.ToSlash(EnvTypesPath()): true}
 	for _, p := range after {
 		if had[p] || allowed[p] {
 			continue

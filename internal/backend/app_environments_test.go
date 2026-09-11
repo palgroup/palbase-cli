@@ -143,3 +143,30 @@ func TestAnAppleSweepKeepsTheLocalEnvironmentsWebClient(t *testing.T) {
 	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
 	require.NoDirExists(t, gone, "an environment the project no longer has survived")
 }
+
+// A CUSTOM `--out` NAME MUST NOT MAKE A STALE ENVIRONMENT UNDELETABLE.
+//
+// `isGeneratedEnvironmentFile` derived its list from the layout's fixed names, so
+// a client written under a name the person chose (`--out api.gen.ts`) read as
+// "not ours" and protected the whole directory. Two environments' clients then
+// sat under `palbase/environments` — the "Multiple commands produce" failure the
+// sweep exists to prevent.
+func TestASweepRemovesAnEnvironmentWithACustomClientName(t *testing.T) {
+	root := t.TempDir()
+	stale := filepath.Join(root, filepath.FromSlash(EnvDir("gone")))
+	require.NoError(t, os.MkdirAll(stale, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stale, "openapi.json"), []byte("{}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stale, "api.gen.ts"), []byte("export {}"), 0o644))
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.NoDirExists(t, stale, "a stale environment survived because its client had a custom name")
+
+	// NEGATIVE CONTROL: something that is NOT ours still protects the directory —
+	// a writer must not delete what it cannot reproduce.
+	theirs := filepath.Join(root, filepath.FromSlash(EnvDir("mine")))
+	require.NoError(t, os.MkdirAll(theirs, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(theirs, "NOTES.md"), []byte("mine"), 0o644))
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.DirExists(t, theirs, "a directory holding somebody's own file was deleted")
+}

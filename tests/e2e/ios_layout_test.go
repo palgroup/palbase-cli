@@ -57,12 +57,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: studio.palbase.e2e.app
 `
 
-// e2eCheckout makes a checkout whose directory NAME is the local stack's group.
-//
-// `groupOf` falls back to the base name when a target carries no project field
-// and `LookupLocalStack` reads the machine-wide registry by that group (D-009),
-// so an app checkout carries a `local` environment only when it shares the name
-// of the checkout that started one.
 // generateApp writes the xcodegen spec and generates the project.
 //
 // TWICE, AND THAT MIRRORS REALITY: a person has an Xcode project first, runs
@@ -81,6 +75,12 @@ func specWithoutPalbase(spec string) string {
 	return strings.ReplaceAll(spec, "      - path: palbase/environments\n", "")
 }
 
+// e2eCheckout makes a checkout whose directory NAME is the local stack's group.
+//
+// `groupOf` falls back to the base name when a target carries no project field
+// and `LookupLocalStack` reads the machine-wide registry by that group (D-009),
+// so an app checkout carries a `local` environment only when it shares the name
+// of the checkout that started one.
 func e2eCheckout(t *testing.T) string {
 	t.Helper()
 	group := strings.TrimSpace(os.Getenv("PALBASE_E2E_LOCAL_GROUP"))

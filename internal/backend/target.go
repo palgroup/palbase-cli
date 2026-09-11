@@ -165,15 +165,21 @@ func WriteLocalTarget(t Target) error {
 	if err != nil {
 		return err
 	}
+	// SWEEP FIRST, THEN CREATE. The other order left a window: this process
+	// created its directory, and a concurrent `palbase start` in another
+	// checkout could see it still EMPTY — an empty record is litter by
+	// definition — and remove it between the mkdir and the write. The write
+	// then failed with ENOENT and `start` reported "no such file or directory"
+	// about a path the person never chose. Sweeping before anything of ours
+	// exists closes it.
+	reapDeadCheckoutState()
+
 	// THE WRITER CREATES THE DIRECTORY. Asking for the path does not — a read
 	// that writes left one directory per question in the user's home.
 	if err := ensureMachineStateDir(dest); err != nil {
 		return err
 	}
 	rememberOrigin(filepath.Dir(dest), ".")
-	// AND DEAD RECORDS GO. `start` is where a checkout's state is created, so it
-	// is where the records of checkouts that no longer exist are collected.
-	reapDeadCheckoutState()
 	return os.WriteFile(dest, append(blob, '\n'), 0o600)
 }
 

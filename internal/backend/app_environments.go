@@ -57,9 +57,15 @@ type appEnvironment struct {
 
 // appEnvironments is what the CLI writes and the generator reads.
 type appEnvironments struct {
-	// Default is the environment a build with no PALBASE_ENV setting gets. It
-	// is the safe one — production — because a build that forgot to say which
-	// environment it wanted must not silently talk to a developer's laptop.
+	// Default is DERIVED, never read from a file, and it is not "production".
+	//
+	// Nothing writes `default_environment` any longer: each environment's config
+	// holds that environment's own fields, so the name is the DIRECTORY and a
+	// key inside the file would be a second copy of it. `readAppEnvironments`
+	// fills this in by taking the first non-`local` environment IN NAME ORDER —
+	// `local` is excluded so a build that forgot to say which environment it
+	// wanted cannot silently talk to somebody's laptop, and the rest is
+	// alphabetical, not a judgement about which one is production.
 	Default      string                    `json:"default_environment"`
 	Environments map[string]appEnvironment `json:"environments"`
 }
@@ -231,7 +237,18 @@ func isGeneratedEnvironmentFile(name string) bool {
 			return true
 		}
 	}
-	return false
+	// A CUSTOM `--out` NAME IS STILL OURS. `palbase link --platform web --out
+	// api.gen.ts` puts a generated client here under a name this list cannot
+	// know, and the sweep then leaves the whole directory behind as "holds files
+	// Palbase did not write" — so two environments' clients sit under
+	// `palbase/environments`, which is exactly the "Multiple commands produce"
+	// build failure the sweep exists to prevent. It is the same loose definition
+	// as C-2, pulling the other way.
+	//
+	// The generator only ever writes TypeScript here, so a `.ts` file inside an
+	// environment directory is ours. Anything else — a note, an asset somebody
+	// dropped in — still protects the directory.
+	return strings.HasSuffix(name, ".ts")
 }
 
 // specPath is where one environment's contract is committed — C-1 owns the

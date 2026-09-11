@@ -54,11 +54,17 @@ func TestGitignoreCarriesNoPalbasePath(t *testing.T) {
 // in either spelling — deletes the directory this migration just created in the
 // customer's repository.
 func TestRetiredPathsNeverNameTheVisibleRoot(t *testing.T) {
+	// THE FIRST SEGMENT IS WHAT MATTERS, at any depth. The earlier form also
+	// required the entry to contain no "/", which made the two conditions one:
+	// it only ever caught a bare `palbase`. An entry like `Palbase/environments`
+	// would have walked straight through — and `reapRetiredArtifacts` DELETES
+	// what it lists, so on macOS that is every environment the customer has.
+	// A gate must have the shape of its authority.
 	for _, e := range retiredProjectPaths {
 		first, _, _ := strings.Cut(e.path, "/")
-		if strings.EqualFold(first, RootDir()) && !strings.Contains(e.path, "/") {
-			t.Errorf("%q is swept and differs from %q only by case — on a "+
-				"case-insensitive filesystem this deletes the customer's new directory",
+		if strings.EqualFold(first, RootDir()) {
+			t.Errorf("%q is swept and its first segment differs from %q only by case — on a "+
+				"case-insensitive filesystem this deletes inside the customer's new directory",
 				e.path, RootDir())
 		}
 	}

@@ -121,9 +121,18 @@ func runPalbeGen(ctx context.Context, env, outFlag string, w io.Writer) (bool, e
 	}
 	// BOTH PRODUCTS, because either one alone is a project that does not
 	// compile: the environment's client, and the one line that re-exports it.
+	// WHERE THE GENERATOR ACTUALLY PUT IT — its rule, not a second guess at it.
+	// `--out` is resolved INSIDE the environment's directory unless it is
+	// absolute, in which case it is used as given. Looking in the wrong place
+	// made the CLI refuse a run that had just succeeded:
+	// `--out /tmp/x.ts` had it checking `palbase/environments/<env>/tmp/x.ts`.
 	client := filepath.FromSlash(GeneratedPath(env, webPlatform))
 	if outFlag != "" {
-		client = filepath.Join(filepath.FromSlash(EnvDir(env)), outFlag)
+		if filepath.IsAbs(outFlag) {
+			client = outFlag
+		} else {
+			client = filepath.Join(filepath.FromSlash(EnvDir(env)), outFlag)
+		}
 	}
 	if !isRegularFile(client) {
 		return false, fmt.Errorf("palbe-gen did not produce %s", client)
