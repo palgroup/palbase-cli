@@ -219,10 +219,6 @@ func isGeneratedEnvironmentFile(name string) bool {
 	return false
 }
 
-// removedEnvironmentRefField is a field this contract no longer has. It is named
-// here so a writer can refuse to carry it forward rather than merely not emit it.
-const removedEnvironmentRefField = "environment_ref"
-
 // specPath is where one environment's contract is committed — C-1 owns the
 // shape; this name stays so the call sites read as they always did.
 func specPath(env string) string { return SpecPath(env) }

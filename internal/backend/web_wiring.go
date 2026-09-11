@@ -946,10 +946,6 @@ type webConfigArtifact struct {
 // overwritten, and the `.gitignore` rule that would hide the generated file is
 // reported and never edited.
 func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer) error {
-	outFile := outFlag
-	if outFile == "" {
-		outFile = "palbe.gen.ts"
-	}
 	// A PRECONDITION, not a decision. `runLink` refuses `--platform web` in a
 	// directory with no package.json BEFORE it writes anything (see
 	// refuseUnsupportedPlatforms), so this branch is the guard for a caller that
@@ -981,7 +977,7 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 	// EVERYTHING DOWNSTREAM IMPORTS THE BARREL, not the generated file. Its
 	// path carries no environment name, so switching environments never edits
 	// the application's own source.
-	outFile = filepath.FromSlash(ClientBarrelPath())
+	outFile := filepath.FromSlash(ClientBarrelPath())
 
 	// THE HOOK CARRIES THE PERSON'S OWN `--out`, not the barrel: it re-runs the
 	// generator, and the generator's flag is the file NAME. Passing the barrel

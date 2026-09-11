@@ -140,6 +140,24 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// THE RETIRED LAYOUT IS REFUSED FIRST, BEFORE ANY SIDE EFFECT.
+	//
+	// There is no migration and there will not be one: a half-old, half-new tree
+	// carries two contracts and two clients, and nothing can say which one the
+	// build read. Deleting the old files is a commit somebody makes and reviews,
+	// not something a tool does to their repository behind a progress line.
+	//
+	// Measured by CONTENT, never by directory name (D-008): `palbase` and
+	// `Palbase` are ONE directory on macOS and Windows, so a name-based check
+	// would refuse every checkout that already carries the new layout.
+	if found := CarriesLegacyLayout(root); len(found) > 0 {
+		return fmt.Errorf("this checkout still carries the retired layout: %s.\n"+
+			"  Delete it and commit that deletion, then run `palbase link` again — "+
+			"everything here is regenerated from the project.\n"+
+			"  There is no migration: a tree holding both layouts has two contracts "+
+			"and two clients, and no way to tell which one a build read",
+			strings.Join(found, ", "))
+	}
 	if err := validatePlatforms(o.platforms); err != nil {
 		return err
 	}
