@@ -793,6 +793,21 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 
 // ── Next.js proxy.ts wiring ──────────────────────────────────────────────────
 
+// configImportFor is the specifier a proxy at `proxyPath` uses to reach the
+// generated config barrel.
+//
+// `palbase/` sits at the project ROOT in both layouts Next recognizes, so a
+// proxy inside `src/` has to climb out of it. One function, because the file is
+// WRITTEN in one place and DESCRIBED in another (the note printed when an
+// existing proxy is left alone) — two copies would drift and the note would
+// teach a path that does not resolve.
+func configImportFor(proxyPath string) string {
+	if filepath.Dir(proxyPath) == "src" {
+		return "../palbase/config"
+	}
+	return "./palbase/config"
+}
+
 func proxyPathFor(entryPath string) (path string, typescript bool) {
 	name, typescript := "proxy.ts", true
 	if strings.HasSuffix(entryPath, ".jsx") {
@@ -849,7 +864,12 @@ func wireNextProxy(entryFlag string, w io.Writer) error {
 			fmt.Fprintf(w, "      Without this, RSC session refresh cannot persist (Server Components\n")
 			fmt.Fprintf(w, "      can't write cookies) and users get force-logged-out everywhere. Wire it\n")
 			fmt.Fprintf(w, "      in by hand — see the @palbase/web/next/proxy package doc for the\n")
-			fmt.Fprintf(w, "      exact call (palbeProxy(request, { url, apiKey })).\n")
+			fmt.Fprintf(w, "      exact call:\n")
+			fmt.Fprintf(w, "        import { palbeProxy } from '@palbase/web/next/proxy';\n")
+			fmt.Fprintf(w, "        import { environmentConfig } from '%s';\n", configImportFor(existing))
+			fmt.Fprintf(w, "        return palbeProxy(request, environmentConfig);\n")
+			fmt.Fprintf(w, "      Import palbase/config, never palbase/client: the client barrel\n")
+			fmt.Fprintf(w, "      reaches the runtime and this bundle must not carry it.\n")
 			if strings.HasPrefix(filepath.Base(existing), "middleware.") {
 				fmt.Fprintf(w, "      Next 16 also deprecated that filename: rename it to proxy%s and its\n", filepath.Ext(existing))
 				fmt.Fprintf(w, "      export to `proxy` (`npx @next/codemod middleware-to-proxy .`).\n")
@@ -859,34 +879,44 @@ func wireNextProxy(entryFlag string, w io.Writer) error {
 		}
 	}
 
-	// The selected environment's web config, in that environment's own directory.
-	cfgEnv, err := selectedWebEnvironment()
-	if err != nil {
-		return err
-	}
-	cfgPath := ConfigPath(cfgEnv, webPlatform)
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", cfgPath, err)
-	}
-	var art webConfigArtifact
-	if err := json.Unmarshal(raw, &art); err != nil {
-		return fmt.Errorf("parse %s: %w", cfgPath, err)
-	}
-
 	proxyPath, typescript := proxyPathFor(entryPath)
 	requestParam, importType := "request", ""
 	if typescript {
 		requestParam = "request: NextRequest"
 		importType = "import type { NextRequest } from 'next/server';\n"
 	}
+
+	// THE CONFIG IS IMPORTED, NOT EMBEDDED.
+	//
+	// This file used to carry the url and the publishable key as literals read
+	// out of the selected environment's web config, and nothing ever refreshed
+	// them. The generated client does NOT work that way: `predev`/`prebuild`
+	// re-run `palbe-gen` and it follows PALBASE_ENV, so `npm run dev` could
+	// leave the data client on localhost while the session proxy still pointed
+	// at the cloud — RSC refresh went to the wrong stack and the developer could
+	// not stay signed in, with nothing on screen to connect it to (ledger D-013).
+	//
+	// `palbase/config.ts` is a barrel over an IMPORT-FREE leaf that the
+	// generator rewrites for every PALBASE_ENV, so the proxy now follows the
+	// same switch as the client. It is deliberately NOT `palbase/client.ts`:
+	// that barrel re-exports palbe.gen.ts, which calls __configure at import
+	// time and reaches the runtime (livekit + the MLS WASM loader) — weight this
+	// bundle must never carry. @palbase/web's own bundle lock measures that
+	// chain, so pointing this import at the client barrel turns it red.
+	//
+	// Reading the web config here is therefore no longer needed at all: the
+	// environment is resolved at GENERATION time, not at link time.
+	configImport := configImportFor(proxyPath)
+
 	content := fmt.Sprintf(
-		"import { palbeProxy } from '@palbase/web/next/proxy';\n%s\nexport function proxy(%s) {\n  return palbeProxy(request, {\n    url: %s,\n    apiKey: %s,\n  });\n}\n\n"+
+		"import { palbeProxy } from '@palbase/web/next/proxy';\n"+
+			"import { environmentConfig } from '%s';\n%s\n"+
+			"export function proxy(%s) {\n  return palbeProxy(request, environmentConfig);\n}\n\n"+
 			"// `config` MUST be declared here, in this file: Next reads it off THIS\n"+
 			"// file's AST (export const + literal initializer). A re-exported or\n"+
 			"// imported config is invisible and silently degrades to a catch-all.\n"+
 			"export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'] };\n",
-		importType, requestParam, encodeJSONString(art.BaseURL), encodeJSONString(art.APIKey),
+		configImport, importType, requestParam,
 	)
 	// MkdirAll(".", …) is a no-op when the project has no src/ layout.
 	if err := os.MkdirAll(filepath.Dir(proxyPath), 0o755); err != nil {
@@ -896,19 +926,10 @@ func wireNextProxy(entryFlag string, w io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(w, "✓ wrote %s — required for RSC session refresh to persist\n", proxyPath)
-	// IT CARRIES ONE ENVIRONMENT, AND SAYS SO.
-	//
-	// `palbeProxy` takes a url and a key, so this file holds `%[1]s`'s literally.
-	// The generated client does NOT: `predev`/`prebuild` re-run the generator and
-	// it follows `PALBASE_ENV`, defaulting to `local`. So `npm run dev` can leave
-	// the data client on localhost while the session proxy still points at the
-	// cloud — RSC refresh goes to the wrong stack and the developer cannot stay
-	// signed in, with nothing on screen to connect it to.
-	//
-	// The real cure is a resolved-config surface in @palbase/web; until then the
-	// divergence is at least NAMED rather than silent (ledger D-013).
-	fmt.Fprintf(w, "  it is pinned to %q — run `palbase link` again after you change which"+
-		" environment this app talks to, or the session proxy and the client will disagree\n", cfgEnv)
+	// NO "pinned to <env>" WARNING ANY MORE, because the defect it described is
+	// gone: the file carries no environment value, so it cannot disagree with
+	// the generated client. Telling people to re-run `palbase link` after an
+	// environment switch would send them to fix something that cannot break.
 	return nil
 }
 
@@ -939,17 +960,6 @@ func announceModified(w io.Writer, path string) {
 // isn't installed yet (command-not-found exits 127, which --soft alone
 // cannot swallow).
 const webTypesCmd = "palbe-gen --soft || exit 0"
-
-// webConfigArtifact is the subset of Palbase/palbase-config.json (already
-// committed by webLinkArtifacts, step 4, before this runs) that
-// wireNextProxy needs. base_url and api_key are the SAME two published
-// values palbe.gen.ts itself is configured with — api_key is always the
-// publishable (anon) key, never service_role (see @palbase/web/next/proxy's
-// own doc comment: a service_role key has no business in a request-path bundle).
-type webConfigArtifact struct {
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
-}
 
 // wireWebProject does for a web checkout what the xcconfig + Swift generator
 // steps do for an Apple one: it turns written artifacts into a project that

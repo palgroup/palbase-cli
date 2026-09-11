@@ -1006,13 +1006,22 @@ func TestWebLink_ProxyCreatedForAppRouter(t *testing.T) {
 	require.Contains(t, s, "import { palbeProxy } from '@palbase/web/next/proxy';")
 	require.Contains(t, s, "import type { NextRequest } from 'next/server';")
 	require.Contains(t, s, "export function proxy(request: NextRequest)")
-	require.Contains(t, s, "palbeProxy(request, {")
+	require.Contains(t, s, "palbeProxy(request, environmentConfig)")
+	require.Contains(t, s, "import { environmentConfig } from './palbase/config';")
 	require.NotContains(t, s, "middleware",
 		"the generated file must not use the deprecated Next middleware convention")
-	// stubArtifactsFunc commits base_url:"https://stub" / api_key:"pb_stub" —
-	// the SAME artifact palbe.gen.ts itself was configured from.
-	require.Contains(t, s, `url: "https://stub"`, "must carry the artifact's own url")
-	require.Contains(t, s, `apiKey: "pb_stub"`, "must carry the artifact's own (publishable) api key")
+
+	// IT CARRIES NO ENVIRONMENT VALUE AT ALL — the whole point of this change.
+	//
+	// stubArtifactsFunc commits base_url:"https://stub" / api_key:"pb_stub".
+	// This file used to embed both as literals and nothing ever refreshed them,
+	// so `PALBASE_ENV=local npm run dev` left the proxy on the cloud while the
+	// generated client moved to localhost. The generator rewrites
+	// palbase/config.ts on every run, so the proxy now follows the same switch.
+	require.NotContains(t, s, "https://stub", "the proxy must carry no address literal")
+	require.NotContains(t, s, "pb_stub", "the proxy must carry no key literal")
+	require.NotContains(t, s, "palbase/client",
+		"the CLIENT barrel reaches palbe.gen.ts and from there the runtime — the proxy's own bundle must never carry it")
 	require.Contains(t, s, "export const config = {",
 		"config MUST be declared in this file — Next reads it off this file's own AST, a re-export is invisible")
 	require.Contains(t, s, "matcher:")
@@ -1042,6 +1051,10 @@ func TestWebLink_ProxyNeverOverwritesExisting(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, existing, string(body), "an existing proxy.ts must survive byte-identical")
 	require.Contains(t, out, "already exists", "the CLI must tell the user it skipped the file")
+	// AND IT MUST NAME THE CALL THE USER HAS TO ADD — in the shape that exists
+	// today, not the retired literal one.
+	require.Contains(t, out, "palbeProxy(request, environmentConfig)",
+		"the note must name the current call, or the user wires in the shape we just removed")
 }
 
 // TestWebLink_ProxyPathDerivedFromSrcLayout: proxy.ts must land at
@@ -1072,6 +1085,18 @@ func TestWebLink_ProxyPathDerivedFromSrcLayout(t *testing.T) {
 
 			_, err := os.Stat(tc.wantPath)
 			require.NoError(t, err, "the proxy must land at %s", tc.wantPath)
+
+			// AND ITS IMPORT MUST REACH THE BARREL FROM WHERE IT LANDED.
+			// `palbase/` sits at the project root in both layouts, so a proxy
+			// inside src/ has to climb out of it.
+			body, readErr := os.ReadFile(tc.wantPath)
+			require.NoError(t, readErr)
+			wantImport := "'./palbase/config'"
+			if tc.wantPath != "proxy.ts" {
+				wantImport = "'../palbase/config'"
+			}
+			require.Contains(t, string(body), wantImport,
+				"the config import must be relative to the proxy's own location")
 
 			// It must NOT also land at the OTHER convention level.
 			other := "proxy.ts"
@@ -1242,4 +1267,26 @@ func runWebLinkWithGitignore(t *testing.T, args ...string) string {
 	t.Helper()
 	require.NoError(t, takeBackRetiredIgnoreRules(".gitignore"))
 	return runWebLink(t, args...)
+}
+
+// TestWebLink_ProxyNoLongerWarnsAboutPinning — the warning is gone because the
+// DEFECT is gone.
+//
+// `link` used to close with "it is pinned to <env> — run `palbase link` again
+// after you change which environment this app talks to". That sentence existed
+// because the proxy carried literals the generator would never refresh, so the
+// two halves of one app could point at different stacks. The proxy now reads
+// the same generated config the client does; a warning telling people to re-run
+// link would send them to fix something that cannot break.
+func TestWebLink_ProxyNoLongerWarnsAboutPinning(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installStubCodegen(t, "// gen")
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	out := runWebLinkWithGitignore(t)
+
+	require.NotContains(t, out, "pinned to",
+		"the pinning warning describes a defect that no longer exists")
 }
