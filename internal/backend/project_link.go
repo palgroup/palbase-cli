@@ -355,6 +355,12 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", RootDir(), err)
 	}
+	// GENERATED CODE IS MARKED AS SUCH, every link. A spec fetch can move
+	// thousands of lines nobody wrote; unmarked, they arrive in a pull request
+	// as a change somebody has to read.
+	if err := writeGitattributes("."); err != nil {
+		return fmt.Errorf("write %s/.gitattributes: %w", RootDir(), err)
+	}
 	// EACH PLATFORM GETS WHAT ITS OWN GENERATOR READS.
 	//
 	// This loop used to write one document for all of them and then run the
