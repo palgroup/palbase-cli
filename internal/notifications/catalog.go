@@ -19,7 +19,7 @@ type field struct {
 	required bool
 	// isInt marks a numeric CLI input (port).
 	isInt bool
-	// isBool marks a boolean field (isProduction, useStarttls).
+	// isBool marks a boolean field (is_production, use_starttls).
 	isBool bool
 	// help is the flag's one-line usage string.
 	help string
@@ -67,13 +67,20 @@ var catalog = []providerSpec{
 		name:    "apns",
 		channel: "push",
 		fields: []field{
-			{name: "teamId", flag: "team-id", required: true, help: "Apple Developer Team ID"},
-			{name: "keyId", flag: "key-id", required: true, help: "APNs auth key ID"},
-			{name: "bundleId", flag: "bundle-id", required: true, help: "app bundle identifier (e.g. com.acme.app)"},
-			{name: "isProduction", flag: "production", isBool: true, help: "use the APNs production gateway (default true)"},
+			{name: "team_id", flag: "team-id", required: true, help: "Apple Developer Team ID"},
+			{name: "key_id", flag: "key-id", required: true, help: "APNs auth key ID"},
+			{name: "bundle_id", flag: "bundle-id", required: true, help: "app bundle identifier (e.g. com.acme.app)"},
+			{name: "is_production", flag: "production", isBool: true, help: "use the APNs production gateway (default true)"},
 		},
 		secrets: []secretField{
-			{name: "p8", flag: "p8", help: "APNs .p8 auth key file"},
+			// ‼️ BU AD KASA ANAHTARINI KAYDIRIR — diğer sekiz hizalama kaydırmaz.
+			// `reservedSecretKey` adı `camelToUpperSnake`'ten geçiriyor ve o, camelCase
+			// ile snake_case'i AYNI çıktıya veriyor (`teamId` ve `team_id` → `TEAM_ID`).
+			// `p8` ise farklı: eski anahtar `..._APNS_P8`, yenisi `..._APNS_P8_PRIVATE_KEY`.
+			// Modül `p8_private_key` okuduğu için ad değişmek ZORUNDA; daha önce
+			// `palbase notifications add apns` koşmuş bir kurulum sırrı yeni anahtarla
+			// yeniden yüklemelidir. Ölçüldü ve deftere yazıldı 2026-09-11.
+			{name: "p8_private_key", flag: "p8", help: "APNs .p8 auth key file"},
 		},
 	},
 	{
@@ -135,12 +142,12 @@ var catalog = []providerSpec{
 		name:    "twilio",
 		channel: "sms",
 		fields: []field{
-			{name: "accountSid", flag: "account-sid", required: true, help: "Twilio Account SID"},
-			{name: "fromNumber", flag: "from-number", help: "sender phone number (one of from-number / messaging-sid)"},
-			{name: "messagingServiceSid", flag: "messaging-sid", help: "Twilio Messaging Service SID (one of from-number / messaging-sid)"},
+			{name: "account_sid", flag: "account-sid", required: true, help: "Twilio Account SID"},
+			{name: "from_number", flag: "from-number", help: "sender phone number (one of from-number / messaging-sid)"},
+			{name: "messaging_service_sid", flag: "messaging-sid", help: "Twilio Messaging Service SID (one of from-number / messaging-sid)"},
 		},
 		secrets: []secretField{
-			{name: "authToken", flag: "auth-token", prompt: true, help: "Twilio auth token"},
+			{name: "auth_token", flag: "auth-token", prompt: true, help: "Twilio auth token"},
 		},
 	},
 }

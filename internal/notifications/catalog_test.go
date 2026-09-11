@@ -74,23 +74,39 @@ func TestSpecByName(t *testing.T) {
 // Beklenen adlar EZBERDEN değil, modülün struct etiketlerinden alındı:
 // v2/internal/modules/notify/internal/provider/email/{acs,smtp,sendgrid,ses}.go
 func TestCatalogFieldNamesMatchTheModule(t *testing.T) {
-	// Modülün `json:` etiketleri (yukarıdaki dosyalar, 2026-09-11'de okundu).
+	// Modülün `json:` etiketleri — EZBERDEN DEĞİL, struct'lardan okundu (2026-09-11):
+	//   e-posta : provider/email/{acs,smtp,sendgrid,ses}.go
+	//   push    : provider/push/apns.go
+	//   sms     : provider/sms/twilio.go
+	//   whatsapp: provider/whatsapp/
 	moduleFields := map[string]map[string]bool{
 		"acs":      {"connection_string": true, "endpoint": true, "access_key": true, "from_email": true, "from_name": true},
 		"smtp":     {"host": true, "port": true, "username": true, "password": true, "from_email": true, "use_starttls": true},
 		"sendgrid": {"api_key": true, "from_domain": true},
 		"ses":      {"region": true, "access_key_id": true, "secret_access_key": true, "from_domain": true},
+		"apns":     {"team_id": true, "key_id": true, "p8_private_key": true, "bundle_id": true, "is_production": true},
+		"twilio":   {"account_sid": true, "auth_token": true, "api_key_sid": true, "api_key_secret": true, "from_number": true, "messaging_service_sid": true, "verify_service_sid": true},
+		"meta":     {"phone_number_id": true, "api_version": true, "access_token": true, "app_secret": true, "verify_token": true},
 	}
 
 	for _, spec := range catalog {
-		if spec.channel != "email" {
+		// `fcm` BİLEREK DIŞARIDA — ve bu bir istisna değil, AYRI BİR KUSUR.
+		//
+		// Diğerlerinde sorun adlandırma: CLI camelCase yazıyor, modül snake_case
+		// okuyor. `fcm`'de sorun SARMALAMA: CLI service-account JSON'unu
+		// `{"serviceAccount": "<dosya>"}` diye bir alanın İÇİNE koyuyor, modül ise
+		// credentials'ı service_account.json'un KENDİSİ sayıp kök seviyede
+		// `client_email` / `private_key` arıyor (provider/push/fcm.go:118-129).
+		// Adı snake_case yapmak onu düzeltmez, yalnız kusuru gizler. Ölçüldü
+		// 2026-09-11, ayrı bir iş olarak deftere yazıldı.
+		if spec.name == "fcm" {
 			continue
 		}
-		want, known := moduleFields[spec.name]
-		if !known {
-			t.Errorf("%s: modülde karşılığı olmayan bir e-posta sağlayıcısı — testin tablosu eskimiş olabilir", spec.name)
+		if _, known := moduleFields[spec.name]; !known {
+			t.Errorf("%s: bu testin tablosunda yok — yeni bir sağlayıcı eklendiyse tablo da güncellenmeli", spec.name)
 			continue
 		}
+		want := moduleFields[spec.name]
 		names := make([]string, 0, len(spec.fields)+len(spec.secrets))
 		for _, f := range spec.fields {
 			names = append(names, f.name)

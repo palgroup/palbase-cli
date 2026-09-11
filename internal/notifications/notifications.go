@@ -303,7 +303,10 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 }
 
 // validateProvider enforces cross-field rules the flat required-check can't:
-// twilio needs one of fromNumber / messagingServiceSid.
+// twilio needs one of from_number / messaging_service_sid.
+// (Adlar 11.09.2026'da modülün `json:` etiketleriyle hizalandı; bu kontrol
+// alan adının ÜÇÜNCÜ okuyucusuydu ve hizalama onu sessizce kırıyordu —
+// mevcut kapı `TestTheProviderEntryMatchesTheModuleContract` yakaladı.)
 func validateProvider(spec *providerSpec, entry providerEntry) error {
 	if spec.name == "meta" {
 		checks := []struct{ field, flag, pattern string }{
@@ -317,7 +320,7 @@ func validateProvider(spec *providerSpec, entry providerEntry) error {
 		}
 	}
 	if spec.name == "twilio" {
-		if entry.fields["fromNumber"] == "" && entry.fields["messagingServiceSid"] == "" {
+		if entry.fields["from_number"] == "" && entry.fields["messaging_service_sid"] == "" {
 			return fmt.Errorf("provider \"twilio\" requires one of --from-number or --messaging-sid")
 		}
 	}
