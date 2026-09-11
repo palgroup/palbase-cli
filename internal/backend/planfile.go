@@ -61,6 +61,13 @@ func WritePlanFile(dir string, p PlanFile) error {
 	if err != nil {
 		return err
 	}
+	// A WRITE KNOWS IT IS A WRITE. Asking where the plan goes creates nothing;
+	// putting one there creates the directory, and records which checkout it
+	// belongs to so a deleted project's state can be recognised and swept.
+	if err := ensureMachineStateDir(path); err != nil {
+		return err
+	}
+	rememberOrigin(filepath.Dir(path), dir)
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err

@@ -14,13 +14,15 @@ func TestBrokenLocalTargetNeverFallsBackToCloud(t *testing.T) {
 	for _, raw := range []string{`{"url":`, `{}`, `{"url":" "}`, "directory"} {
 		t.Run(raw, func(t *testing.T) {
 			seedProject(t, Target{URL: "https://project.palbase.studio"})
+			p, err := localPath()
+			require.NoError(t, err)
+			// The rig creates the directory it is about to write into: asking
+			// for the path creates nothing, for the product and for the test
+			// alike.
+			require.NoError(t, ensureMachineStateDir(p))
 			if raw == "directory" {
-				p, err := localPath()
-				require.NoError(t, err)
 				require.NoError(t, os.Mkdir(p, 0o755))
 			} else {
-				p, err := localPath()
-				require.NoError(t, err)
 				require.NoError(t, os.WriteFile(p, []byte(raw), 0o644))
 			}
 			target, err := ReadTarget()

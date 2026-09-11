@@ -281,6 +281,11 @@ func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The rig writes, so the rig creates the directory — asking for the path
+	// does not, exactly as it does not for the product's own writers.
+	if err := ensureMachineStateDir(local); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(local, []byte(`{"url":"https://127.0.0.1"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}

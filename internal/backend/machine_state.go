@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // machineStateHome is the seam the tests point somewhere else.
@@ -52,6 +53,16 @@ var machineStateHome = os.UserHomeDir
 //
 // 0o700, like the credentials beside it: the file it will hold names a stack
 // this machine can reach.
+// ASKING WHERE A FILE GOES MUST NOT CREATE ANYTHING. This used to end in
+// `os.MkdirAll`, so every caller that merely wanted the PATH left a directory
+// behind — measured live on 11.09.2026: 823 of them under
+// `~/.palbase/checkouts/`, one per checkout anything had ever asked about,
+// including every temp directory the test suite used and every project since
+// deleted. The key is a hash of an absolute path, so a dead one can never be
+// named again: it is not garbage that gets reused, it is garbage forever.
+//
+// The writers create it (`ensureMachineStateDir`), because a write knows it is
+// a write.
 func machineStateDir(checkoutRoot string) (string, error) {
 	home, err := machineStateHome()
 	if err != nil {
@@ -69,11 +80,85 @@ func machineStateDir(checkoutRoot string) (string, error) {
 		abs = resolved
 	}
 	sum := sha256.Sum256([]byte(abs))
-	dir := filepath.Join(home, ".palbase", "checkouts", hex.EncodeToString(sum[:8]))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	return filepath.Join(home, ".palbase", "checkouts", hex.EncodeToString(sum[:8])), nil
+}
+
+// ensureMachineStateDir creates the directory for a path a writer is about to
+// use. 0o700, like the credentials beside it: what it will hold names a stack
+// this machine can reach.
+func ensureMachineStateDir(path string) error {
+	return os.MkdirAll(filepath.Dir(path), 0o700)
+}
+
+// checkoutsRoot is where every checkout's private directory lives.
+func checkoutsRoot() (string, error) {
+	home, err := machineStateHome()
+	if err != nil {
 		return "", err
 	}
-	return dir, nil
+	return filepath.Join(home, ".palbase", "checkouts"), nil
+}
+
+// reapDeadCheckoutState removes the records of checkouts that no longer exist.
+//
+// Best effort, and deliberately: it runs beside work somebody is waiting for,
+// and a directory it could not remove is not worth displacing their result. The
+// record it deletes belongs to a path that is gone, so there is nothing to lose
+// — and nothing to find, since the key is a one-way hash of that path.
+//
+// Each directory carries its own `origin` file naming the checkout it belongs
+// to. Without it the hash could never be reversed and a dead record could never
+// be recognised — which is how 823 of them accumulated unnoticed.
+func reapDeadCheckoutState() {
+	root, err := checkoutsRoot()
+	if err != nil {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+
+		// AN EMPTY STATE DIRECTORY IS LITTER, whatever wrote it. A write always
+		// leaves a file, so an empty one can only have come from a call that
+		// merely ASKED for the path — the defect above. This is the other half
+		// of that fix: correcting the code that produced them does not remove
+		// the ones already on disk. Measured 11.09.2026: 726 of 879.
+		if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) == 0 {
+			_ = os.Remove(dir)
+			continue
+		}
+
+		origin, readErr := os.ReadFile(filepath.Join(dir, originFile))
+		if readErr != nil {
+			continue // written by a CLI that did not record its origin; leave it
+		}
+		if _, statErr := os.Stat(strings.TrimSpace(string(origin))); statErr == nil {
+			continue // the checkout is still there
+		}
+		_ = os.RemoveAll(dir)
+	}
+}
+
+// originFile records WHICH checkout a state directory belongs to, so a dead one
+// can be recognised. The directory name is a hash and answers nothing.
+const originFile = "origin"
+
+// rememberOrigin writes that record beside the state a writer is creating.
+func rememberOrigin(dir, checkoutRoot string) {
+	abs, err := filepath.Abs(checkoutRoot)
+	if err != nil {
+		return
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = resolved
+	}
+	_ = os.WriteFile(filepath.Join(dir, originFile), []byte(abs+"\n"), 0o600)
 }
 
 // LocalStatePath is where `palbase start` records the stack in front of you.

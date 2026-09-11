@@ -161,11 +161,19 @@ func WriteLocalTarget(t Target) error {
 	if err != nil {
 		return err
 	}
-	// The directory is created by LocalStatePath — this writes only the file.
 	dest, err := localPath()
 	if err != nil {
 		return err
 	}
+	// THE WRITER CREATES THE DIRECTORY. Asking for the path does not — a read
+	// that writes left one directory per question in the user's home.
+	if err := ensureMachineStateDir(dest); err != nil {
+		return err
+	}
+	rememberOrigin(filepath.Dir(dest), ".")
+	// AND DEAD RECORDS GO. `start` is where a checkout's state is created, so it
+	// is where the records of checkouts that no longer exist are collected.
+	reapDeadCheckoutState()
 	return os.WriteFile(dest, append(blob, '\n'), 0o600)
 }
 

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // useTempMachineHome points the machine-state home at a throwaway directory for
@@ -12,12 +14,13 @@ import (
 //
 // NOT `t.Setenv("HOME", …)`: that changes a machine-global for every test that
 // runs after it in the same binary, and it did — the suite stopped finishing.
-func useTempMachineHome(t *testing.T) {
+func useTempMachineHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	prev := machineStateHome
 	machineStateHome = func() (string, error) { return home, nil }
 	t.Cleanup(func() { machineStateHome = prev })
+	return home
 }
 
 // MAKİNE-YEREL DURUM MÜŞTERİNİN DEPOSUNDA DURMAZ.
@@ -56,10 +59,13 @@ func TestMachineStateLivesOutsideTheCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// DİZİN HENÜZ YOK, ÇÜNKÜ SORMAK ONU YARATMIYOR (D-010). `EvalSymlinks` var
+	// olmayan bir yolda düşer, yani karşılaştırma yolun KENDİSİ üzerinden
+	// yapılıyor; ev dizini zaten yukarıda çözülmüş hâliyle geliyor.
 	for _, p := range []string{local, plan} {
-		resolved, evalErr := filepath.EvalSymlinks(filepath.Dir(p))
-		if evalErr != nil {
-			t.Fatal(evalErr)
+		resolved := filepath.Dir(p)
+		if r, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil {
+			resolved = r
 		}
 		rel, relErr := filepath.Rel(resolvedCheckout, resolved)
 		if relErr == nil && !strings.HasPrefix(rel, "..") {
@@ -72,10 +78,22 @@ func TestMachineStateLivesOutsideTheCheckout(t *testing.T) {
 		t.Errorf("local ve plan aynı yolu paylaşıyor: %s", local)
 	}
 
-	// (c) Üst dizin YARATILMIŞ olmalı: çağıran yazmaya hazır bulmalı.
+	// (c) ÜST DİZİN YARATILMAMIŞ olmalı — ve bu, iddianın TERSİNE ÇEVRİLMESİ
+	// (D-010). Burada "çağıran yazmaya hazır bulmalı" yazıyordu ve yol soran her
+	// çağrı bir dizin bırakıyordu: canlıda 823 tane sayıldı, her biri artık
+	// adlandırılamayan bir hash. Dizini açmak YAZANIN işi.
 	for _, p := range []string{local, plan} {
+		if _, statErr := os.Stat(filepath.Dir(p)); statErr == nil {
+			t.Errorf("%s: yalnızca yolu SORMAK dizini yarattı", p)
+		}
+	}
+	// …ve yazan taraf onu açar.
+	for _, p := range []string{local, plan} {
+		if err := ensureMachineStateDir(p); err != nil {
+			t.Fatal(err)
+		}
 		if _, statErr := os.Stat(filepath.Dir(p)); statErr != nil {
-			t.Errorf("%s'in üst dizini yok: %v", p, statErr)
+			t.Errorf("yazan taraf dizini açamadı: %v", statErr)
 		}
 	}
 }
@@ -182,4 +200,85 @@ func TestWriteTargetLeavesNothingInTheCheckout(t *testing.T) {
 	if got.URL != "http://127.0.0.1:54321" || !got.Local {
 		t.Errorf("hedef çözülmedi: %+v", got)
 	}
+}
+
+// TestMachineStateDirIsNotCreatedByAsking — ASKING WHERE A FILE GOES MUST NOT
+// CREATE ANYTHING.
+//
+// Measured live on 11.09.2026: `~/.palbase/checkouts/` held 823 directories.
+// `machineStateDir` hashed the path and called `os.MkdirAll` on every call, so
+// every question left a directory behind — one per temp checkout the test suite
+// ever asked about, and one per checkout a person has since deleted. A read that
+// writes is a read nobody can use to look.
+func TestMachineStateDirIsNotCreatedByAsking(t *testing.T) {
+	useTempMachineHome(t)
+
+	checkout := t.TempDir()
+	path, err := LocalStatePath(checkout)
+	require.NoError(t, err)
+	require.NoDirExists(t, filepath.Dir(path), "asking for the path created the directory")
+
+	planPath, err := PlanStatePath(checkout)
+	require.NoError(t, err)
+	require.NoDirExists(t, filepath.Dir(planPath), "asking for the plan path created the directory")
+
+	// …but WRITING one does create it. Otherwise the split would just move the
+	// failure to the writer.
+	require.NoError(t, WritePlanFile(checkout, PlanFile{
+		Version: 1, Target: PlanTarget{URL: "https://x"}, Fingerprint: "f",
+	}))
+	require.FileExists(t, planPath)
+}
+
+// AND THE RECORDS OF CHECKOUTS THAT NO LONGER EXIST ARE SWEPT.
+//
+// The key is a hash of an absolute path, so a deleted checkout leaves a
+// directory nothing can ever name again — it is not garbage that will be reused,
+// it is garbage that accumulates forever in somebody's home.
+func TestDeadCheckoutStateIsReaped(t *testing.T) {
+	home := useTempMachineHome(t)
+
+	alive := t.TempDir()
+	dead := t.TempDir()
+	for _, c := range []string{alive, dead} {
+		require.NoError(t, WritePlanFile(c, PlanFile{
+			Version: 1, Target: PlanTarget{URL: "https://x"}, Fingerprint: "f",
+		}))
+	}
+	require.NoError(t, os.RemoveAll(dead))
+
+	reapDeadCheckoutState()
+
+	livePath, err := PlanStatePath(alive)
+	require.NoError(t, err)
+	require.FileExists(t, livePath, "a living checkout's state was swept")
+
+	entries, err := os.ReadDir(filepath.Join(home, ".palbase", "checkouts"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "the deleted checkout's record survived: %d entries", len(entries))
+}
+
+// AND AN EMPTY RECORD GOES WHATEVER WROTE IT — the migration half of D-010.
+//
+// Fixing the code that produced a file does not remove the files it already
+// produced. The empty directories are unattributable (no origin was recorded
+// when they were made) but they are also unambiguous: a write always leaves a
+// file behind, so an empty one can only have come from a call that asked.
+func TestEmptyStateRecordsAreSwept(t *testing.T) {
+	home := useTempMachineHome(t)
+	root := filepath.Join(home, ".palbase", "checkouts")
+
+	empty := filepath.Join(root, "deadbeefdeadbeef")
+	require.NoError(t, os.MkdirAll(empty, 0o700))
+
+	// One that carries state but no origin: it cannot be attributed, so it is
+	// LEFT ALONE — deleting it could forget a living checkout's stack.
+	kept := filepath.Join(root, "cafebabecafebabe")
+	require.NoError(t, os.MkdirAll(kept, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(kept, "local.json"), []byte(`{"url":"x"}`), 0o600))
+
+	reapDeadCheckoutState()
+
+	require.NoDirExists(t, empty, "an empty record survived")
+	require.DirExists(t, kept, "a record carrying state was swept without knowing whose it is")
 }

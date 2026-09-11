@@ -47,6 +47,9 @@ func runningStackAt(t *testing.T, url string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(local, blob, 0o644); err != nil {
 		t.Fatal(err)
 	}

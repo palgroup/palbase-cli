@@ -19,6 +19,9 @@ func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	if pathErr != nil {
 		t.Fatal(pathErr)
 	}
+	if err := ensureMachineStateDir(localRecord); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(localRecord, []byte(`{"url":"http://localhost:54321"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
