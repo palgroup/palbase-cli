@@ -45,25 +45,39 @@ type PlanSDK struct {
 
 var ErrNoPlan = errors.New("no plan for this checkout; run `palbase plan`")
 
-func planFilePath(dir string) string { return filepath.Join(dir, ".palbase", "plan.json") }
+// planFilePath is where THIS MACHINE's plan for this checkout lives — and it is
+// not in the checkout.
+//
+// The file records a measurement made on this machine, right now, against the
+// environment selected here: a `createdAt`, the target's URL, a bundle digest.
+// The only thing that reads it is the `push` that follows, and it recomputes the
+// fingerprint. Committed, two developers' plans overwrite each other; ignored,
+// it is one more file the repository must carry a rule for forever. It moved
+// beside the credentials, where this machine's own state already lived.
+func planFilePath(dir string) (string, error) { return PlanStatePath(dir) }
 
 func WritePlanFile(dir string, p PlanFile) error {
-	if err := os.MkdirAll(filepath.Join(dir, ".palbase"), 0o755); err != nil {
+	path, err := planFilePath(dir)
+	if err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := planFilePath(dir) + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, planFilePath(dir))
+	return os.Rename(tmp, path)
 }
 
 func ReadPlanFile(dir string) (PlanFile, error) {
-	b, err := os.ReadFile(planFilePath(dir))
+	path, err := planFilePath(dir)
+	if err != nil {
+		return PlanFile{}, err
+	}
+	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return PlanFile{}, ErrNoPlan
 	}

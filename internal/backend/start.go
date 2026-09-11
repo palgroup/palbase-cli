@@ -7,12 +7,16 @@ package backend
 // mounts your source and reloads it, so the loop between typing a line and
 // seeing the answer is seconds and involves nobody's registry.
 //
-// What it leaves behind is three files in three different places, and each one
-// is where it is for a reason:
+// What it leaves behind is three files, and NONE of them is in the checkout —
+// each one is where it is for the same reason:
 //
-//	.palbase/local.json          IN the checkout, gitignored — "right now, work
-//	                             here". Every verb reads it, so switching back is
-//	                             `palbase stop` rather than a flag on each command.
+//	~/.palbase/checkouts/<h>/    "right now, work here", keyed by this checkout.
+//	  local.json                 Every verb reads it, so switching back is
+//	                             `palbase stop` rather than a flag on each
+//	                             command. It used to live in the repository and
+//	                             the reason recorded for that was "every verb
+//	                             reads it" — which is not a reason: every verb
+//	                             already knows the checkout root.
 //	~/.palbase/credentials.json  MACHINE-WIDE — the app checkout in another
 //	                             directory needs the same credential, and copying
 //	                             a secret between repositories is how it ends up
@@ -474,11 +478,15 @@ func runStop(ctx context.Context, dir string, out io.Writer) error {
 		return err
 	}
 
-	// The files come off FIRST. A stop that failed halfway used to leave
-	// local.json behind pointing at a dead address, which every later verb then
-	// tried to reach — and the error it gave was a connection refusal rather
-	// than "there is no local stack".
-	if err := os.Remove(localPath()); err != nil && !os.IsNotExist(err) {
+	// The record comes off FIRST. A stop that failed halfway used to leave the
+	// local record behind pointing at a dead address, which every later verb
+	// then tried to reach — and the error it gave was a connection refusal
+	// rather than "there is no local stack".
+	local, err := localPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(local); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := deregisterStack(group); err != nil {

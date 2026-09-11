@@ -163,7 +163,11 @@ func TestALocalStackWinsOverTheLinkedProject(t *testing.T) {
 		t.Errorf("during start: %s (local=%v)", during.Describe(), during.Local)
 	}
 
-	if err := os.Remove(localPath()); err != nil {
+	localRecord, pathErr := localPath()
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if err := os.Remove(localRecord); err != nil {
 		t.Fatal(err)
 	}
 	after, err := ReadTarget()

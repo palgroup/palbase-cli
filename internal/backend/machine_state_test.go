@@ -142,3 +142,44 @@ func TestRelativeAndAbsoluteRootsAgree(t *testing.T) {
 		t.Errorf("aynı dizin iki yol verdi:\n%s\n%s", byAbs, byDot)
 	}
 }
+
+// `palbase start` KAYDI CHECKOUT'A YAZMAZ — ve `stop` onu bulup siler.
+//
+// Bu, T016'nın uçtan uca iddiası: hedef çözümü artık makine evinden geçiyor.
+// Checkout'ta `local.json` görünürse depoda ignore edilecek bir dosya doğar ve
+// düzenin "her şey commit'lenir" kuralı düşer.
+func TestWriteTargetLeavesNothingInTheCheckout(t *testing.T) {
+	useTempMachineHome(t)
+	checkout := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	if err := os.Chdir(checkout); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteLocalTarget(Target{URL: "http://127.0.0.1:54321"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// (a) checkout'ta HİÇBİR ŞEY yok.
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("checkout'ta dosya doğdu: %s — makine-yerel durum depoya yazılmamalı", e.Name())
+	}
+
+	// (b) ve hedef GERÇEKTEN çözülüyor — (a) tek başına "hiçbir şey yazılmadı"
+	// diyen bozuk bir uygulamayla da geçerdi.
+	got, err := ReadTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "http://127.0.0.1:54321" || !got.Local {
+		t.Errorf("hedef çözülmedi: %+v", got)
+	}
+}

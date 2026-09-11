@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,17 +26,17 @@ func TestAStaleAppKeyIsReported(t *testing.T) {
 	linkedAs(t, srv.URL, "a-credential")
 
 	// The app was linked when the project handed out a different key.
-	if err := os.MkdirAll(filepath.Join(nativeArtifactsDir, "ios"), 0o755); err != nil {
+	if err := os.MkdirAll(EnvDir("main"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	slot := appEnvironments{
-		Default: "main",
-		Environments: map[string]appEnvironment{
-			"main": {AppID: projectAppID, BaseURL: srv.URL, APIKey: "pb_project_cOLDKEY"},
-		},
-	}
-	blob, _ := json.MarshalIndent(slot, "", "  ")
-	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"), blob, 0o644); err != nil {
+	// ONE ENVIRONMENT, ONE FILE, ITS OWN FIELDS. The map keyed by environment
+	// name is gone from disk: the directory IS the name, so a key inside the
+	// file would be a second copy of it. A fixture that still built the map
+	// wrote a document nothing reads, and the drift report saw no key at all.
+	blob, _ := json.MarshalIndent(appEnvironment{
+		AppID: projectAppID, BaseURL: srv.URL, APIKey: "pb_project_cOLDKEY",
+	}, "", "  ")
+	if err := os.WriteFile(ConfigPath("main", "ios"), blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,17 +64,11 @@ func TestACurrentAppKeySaysSo(t *testing.T) {
 	srv := stackServing(t, "pb_project_cCURRENT", nil)
 	linkedAs(t, srv.URL, "a-credential")
 
-	if err := os.MkdirAll(filepath.Join(nativeArtifactsDir, "ios"), 0o755); err != nil {
+	if err := os.MkdirAll(EnvDir("main"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	slot := appEnvironments{
-		Default: "main",
-		Environments: map[string]appEnvironment{
-			"main": {AppID: projectAppID, BaseURL: srv.URL, APIKey: "pb_project_cCURRENT"},
-		},
-	}
-	blob, _ := json.MarshalIndent(slot, "", "  ")
-	_ = os.WriteFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"), blob, 0o644)
+	blob, _ := json.MarshalIndent(appEnvironment{AppID: projectAppID, BaseURL: srv.URL, APIKey: "pb_project_cCURRENT"}, "", "  ")
+	_ = os.WriteFile(ConfigPath("main", "ios"), blob, 0o644)
 
 	var out bytes.Buffer
 	reportKeyDrift(context.Background(), Target{URL: srv.URL},
@@ -95,13 +88,9 @@ func TestAKeyThatCannotBeCheckedSaysThat(t *testing.T) {
 	defer unreachable.Close()
 	linkedAs(t, unreachable.URL, "a-credential")
 
-	_ = os.MkdirAll(filepath.Join(nativeArtifactsDir, "ios"), 0o755)
-	slot := appEnvironments{
-		Default:      "main",
-		Environments: map[string]appEnvironment{"main": {APIKey: "pb_project_cOLD"}},
-	}
-	blob, _ := json.MarshalIndent(slot, "", "  ")
-	_ = os.WriteFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"), blob, 0o644)
+	_ = os.MkdirAll(EnvDir("main"), 0o755)
+	blob, _ := json.MarshalIndent(appEnvironment{APIKey: "pb_project_cOLD"}, "", "  ")
+	_ = os.WriteFile(ConfigPath("main", "ios"), blob, 0o644)
 
 	var out bytes.Buffer
 	reportKeyDrift(context.Background(), Target{URL: unreachable.URL},

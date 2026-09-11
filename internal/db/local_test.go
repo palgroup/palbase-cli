@@ -34,14 +34,20 @@ func scratchCheckout(t *testing.T) string {
 // and a credential for it.
 func runningStackAt(t *testing.T, url string) {
 	t.Helper()
-	if err := os.MkdirAll(".palbase", 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// THE LOCAL TARGET IS NOT IN THE CHECKOUT ANY MORE. `palbase start` writes
+	// it under the user's own `~/.palbase/checkouts/<hash>/`, because it is this
+	// machine's state and a repository is not where a machine keeps its state.
+	// The rig asks `LocalStatePath` where that is rather than rebuilding the
+	// path it replaced.
 	blob, err := json.Marshal(backend.Target{URL: url})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(".palbase", "local.json"), blob, 0o644); err != nil {
+	local, err := backend.LocalStatePath(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.StoreCredential(url, backend.Credentials{Value: "a-credential", Kind: backend.KindPerson}); err != nil {

@@ -1,21 +1,11 @@
 package backend
 
 import (
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
-
-// nativeArtifactsDir is the committed directory the NATIVE SDK generators read:
-// the per-environment contracts under openapi/ plus one per-platform slot (.palbase/ios, /macos,
-// /android). The web SDK reads its own directory instead — webArtifactsDir.
-const nativeArtifactsDir = ".palbase"
-
-// webArtifactsDir is the committed directory the WEB SDK generator reads —
-// openapi.json + palbase-config.json under ./Palbase. It lived in web_link.go
-// until the `palbase web` command group was retired (FR-009); the directory
-// outlived the command because `link`, `spec` and `pull` all write into it.
-const webArtifactsDir = "Palbase"
 
 // linkedPlatforms reports which platforms this checkout is linked for, read from
 // the COMMITTED slot files rather than from `.palbase/config.json` (which is
@@ -27,12 +17,30 @@ const webArtifactsDir = "Palbase"
 // --out-dir that may have moved. It reads the same files the link commands
 // wrote and the repo carries.
 func linkedPlatforms() (web bool, apple bool, android bool) {
-	web = isRegularFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
-	apple = (isRegularFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")) ||
-		isRegularFile(filepath.Join(nativeArtifactsDir, "macos", "palbase-config.json"))) &&
-		hasAppleProject(".")
-	android = isRegularFile(filepath.Join(nativeArtifactsDir, "android", "palbase-config.json"))
+	web = anyEnvironmentHas(webPlatform)
+	apple = (anyEnvironmentHas("ios") || anyEnvironmentHas("macos")) && hasAppleProject(".")
+	android = anyEnvironmentHas("android")
 	return web, apple, android
+}
+
+// anyEnvironmentHas reports whether ANY environment in this checkout carries a
+// config for that platform.
+//
+// Any, not all: the local stack is often linked before a cloud environment
+// exists, and a checkout with one environment configured for iOS is an iOS
+// checkout. The question this answers is "what is this repository", and one
+// answer is enough to settle it.
+func anyEnvironmentHas(platform string) bool {
+	entries, err := os.ReadDir(filepath.Dir(filepath.FromSlash(EnvDir("any"))))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() && isRegularFile(ConfigPath(e.Name(), platform)) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasAppleProject reports whether THIS checkout is one an Apple client can be
@@ -81,25 +89,25 @@ func newSpecCmd() *cobra.Command {
 		Use:   "spec",
 		Args:  cobra.NoArgs,
 		Short: "Refresh openapi.json for the selected environment (and regenerate the committed Swift client)",
-		Long: `Fetch the SELECTED environment's openapi.json into every directory this
-checkout's linked platforms read it from. Run it after every deploy so the
-committed API contract stays current.
+		Long: `Fetch every linked environment's openapi.json into that environment's own
+directory. Run it after every deploy so the committed API contract stays current.
 
-  web      → ` + webArtifactsDir + `/openapi.json   (` + "`palbe-gen`" + ` regenerates palbe.gen.ts from it,
-                                    via the predev/prebuild hook or by hand)
-  ios/macos→ ` + nativeArtifactsDir + `/openapi/<env>.json  ONE PER ENVIRONMENT, then regenerates
-                                    Palbase/Generated/ — PalbaseGenerated.swift +
-                                    Palbase-Info.plist — using the generator from the
-                                    palbackend-ios checkout SwiftPM resolved for this
-                                    project. Commit the result.
-  android  → ` + nativeArtifactsDir + `/openapi/<env>.json  (the Gradle plugin regenerates on the next build)
+  palbase/environments/<env>/openapi.json   the contract
+  palbase/environments/<env>/roles.json     the role definitions
 
-Which of those run is read from the COMMITTED slot files the link commands
-wrote (` + webArtifactsDir + `/palbase-config.json, ` + nativeArtifactsDir + `/<platform>/palbase-config.json),
-so a fresh clone behaves the same as the machine that linked it.
+  ios/macos→ regenerates PalbaseGenerated.swift and Palbase-Info.plist beside them,
+             using the generator from the palbackend-ios checkout SwiftPM resolved
+             for this project. Commit the result.
+  web      → ` + "`palbe-gen`" + ` regenerates palbe.gen.ts from the same directory, via the
+             predev/prebuild hook or by hand.
+  android  → the Gradle plugin regenerates on the next build.
 
-spec does NOT write the per-environment runtime config (palbase-config.json —
-base URL + key). Run ` + "`palbase link <ref>`" + ` to refresh that configuration.
+Which of those run is read from the COMMITTED config files the link commands
+wrote (palbase/environments/<env>/<platform>-config.json), so a fresh clone
+behaves the same as the machine that linked it.
+
+spec does NOT write the runtime config (base URL + key). Run ` + "`palbase link <ref>`" + `
+to refresh that.
 
 This acts on the project this checkout is bound to. There is one addressing
 mechanism — run ` + "`palbase link <ref>`" + ` to point the checkout at another

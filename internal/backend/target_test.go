@@ -15,12 +15,23 @@ func TestBrokenLocalTargetNeverFallsBackToCloud(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			seedProject(t, Target{URL: "https://project.palbase.studio"})
 			if raw == "directory" {
-				require.NoError(t, os.Mkdir(localPath(), 0o755))
+				p, err := localPath()
+				require.NoError(t, err)
+				require.NoError(t, os.Mkdir(p, 0o755))
 			} else {
-				require.NoError(t, os.WriteFile(localPath(), []byte(raw), 0o644))
+				p, err := localPath()
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(p, []byte(raw), 0o644))
 			}
 			target, err := ReadTarget()
-			require.ErrorContains(t, err, ".palbase/local.json")
+			// THE REFUSAL NAMES THE FILE IT COULD NOT READ, and the file is the
+			// one `localPath()` declares — this machine's own state under
+			// `~/.palbase/checkouts/<hash>/`, not a path spelled again here. A
+			// literal would keep passing after the state moved, which is the
+			// move this test exists to guard.
+			p, pathErr := localPath()
+			require.NoError(t, pathErr)
+			require.ErrorContains(t, err, p)
 			require.Empty(t, target.URL, "a broken local target must not send an operation to the cloud")
 		})
 	}
@@ -72,14 +83,14 @@ func TestATargetKnowsWhetherItIsOnThisMachine(t *testing.T) {
 func seedProject(t *testing.T, target Target) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, nativeArtifactsDir), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "palbase"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	blob, err := json.MarshalIndent(target, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, nativeArtifactsDir, "project.json"), append(blob, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "palbase", "project.json"), append(blob, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
@@ -186,7 +197,7 @@ func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
 	// AND IT WRITES NOTHING: `start` creates the project file itself once the
 	// stack is up, and a half-formed target on disk names an address that does
 	// not exist yet.
-	if _, err := os.Stat(filepath.Join(dir, nativeArtifactsDir, "project.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "palbase", "project.json")); !os.IsNotExist(err) {
 		t.Error("a project file was written before there was a project to name")
 	}
 }
@@ -206,15 +217,17 @@ func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
 func TestStackVersionDoesNotClobberTheProjectWithALocalStack(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
+	if err := os.MkdirAll("palbase", 0o755); err != nil {
 		t.Fatal(err)
 	}
 	const committed = `{"project":"myproj","env":"prod"}`
-	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "project.json"), []byte(committed), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join("palbase", "project.json"), []byte(committed), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "local.json"),
-		[]byte(`{"url":"http://127.0.0.1:54321"}`), 0o644); err != nil {
+	// The local record lives OUTSIDE the checkout now, so it is written through
+	// the same path the product uses rather than by hand at a repository path.
+	useTempMachineHome(t)
+	if err := WriteLocalTarget(Target{URL: "http://127.0.0.1:54321"}); err != nil {
 		t.Fatal(err)
 	}
 	seedInstalledSDK(t, dir, "33.0.0")

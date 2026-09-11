@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -81,21 +80,11 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	}
 
 	// The web SDK reads its contract from its own directory, and has no notion
-	// of build configurations to select one with — so it gets the environment
-	// that was just refreshed.
-	if web, _, _ := linkedPlatforms(); web {
-		if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
-			return fmt.Errorf("create %s: %w", webArtifactsDir, err)
-		}
-		path := filepath.Join(webArtifactsDir, "openapi.json")
-		if err := os.WriteFile(path, spec, 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", path, err)
-		}
-		fmt.Fprintf(w, "✓ wrote %s\n", path)
-		if err := copyRolesToWeb(env, w); err != nil {
-			return fmt.Errorf("write %s: %w", webRolesPath(), err)
-		}
-	}
+	// of bu	// NO SECOND COPY FOR WEB. `palbe-gen` used to read its own
+	// `Palbase/openapi.json` and `Palbase/roles.json` — the same bytes as the
+	// per-environment contract, committed twice (measured: 167 KB each, identical
+	// sha256). It now reads the environment directory directly, so `spec` writes
+	// the contract once and there is nothing to mirror.
 
 	// Apple is the only platform with no build-time generator of its own. Every
 	// environment is regenerated, not just the refreshed one: a client missing

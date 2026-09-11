@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -161,13 +160,9 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	reportKeyDrift(ctx, target, cred, out)
 	reportCommittedDrift(out)
 
-	// The same warning `link` prints, repeated where somebody looks when the app
-	// is behaving oddly. It is idempotent and silent once the key is there.
-	if envs, err := readAppEnvironments("ios"); err == nil && len(envs.Environments) > 0 {
-		if root, err := os.Getwd(); err == nil {
-			reportInfoPlistRequirement(root, envs, out)
-		}
-	}
+	// The Info.plist warning that used to be repeated here is GONE with the
+	// mechanism it belonged to: nothing in the app's build system is ours to
+	// require any more, so there is nothing to remind anybody of.
 	return nil
 }
 
@@ -180,22 +175,21 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 // freshness — this reports the difference between what was FETCHED, which is
 // also what the app was built against.
 func reportCommittedDrift(out io.Writer) {
-	dir := filepath.Join(nativeArtifactsDir, "openapi")
-	entries, err := os.ReadDir(dir)
+	// One contract per environment directory — the shape the layout writes.
+	entries, err := os.ReadDir(filepath.Dir(filepath.FromSlash(EnvDir("any"))))
 	if err != nil {
 		return
 	}
 	specs := map[string][]byte{}
 	for _, e := range entries {
-		name := strings.TrimSuffix(e.Name(), ".json")
-		if e.IsDir() || name == e.Name() {
+		if !e.IsDir() {
 			continue
 		}
-		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		body, err := os.ReadFile(SpecPath(e.Name()))
 		if err != nil {
 			continue
 		}
-		specs[name] = body
+		specs[e.Name()] = body
 	}
 	reportContractDrift(specs, out)
 }

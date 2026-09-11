@@ -275,8 +275,13 @@ func TestPushCmd_FlagsReachTheRightConsents(t *testing.T) {
 	}
 
 	dir, _ := projectForPush(t)
-	if err := os.WriteFile(filepath.Join(dir, ".palbase", "local.json"),
-		[]byte(`{"url":"https://127.0.0.1"}`), 0o644); err != nil {
+	// The local target lives with this MACHINE, not in the checkout; ask for it
+	// rather than rebuilding the path `start` stopped writing.
+	local, err := LocalStatePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(`{"url":"https://127.0.0.1"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	prev, _ := os.Getwd()

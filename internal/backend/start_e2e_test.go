@@ -71,7 +71,14 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 		t.Fatalf("palbase start: %v\n%s", err, out)
 	}
 
-	local := filepath.Join(dir, ".palbase", "local.json")
+	// THIS MACHINE'S STATE IS NOT IN THE CHECKOUT. `start` records the stack in
+	// front of you under the user's own `~/.palbase/checkouts/<hash>/`, so the
+	// test asks `LocalStatePath` where that is instead of rebuilding a path the
+	// product stopped writing.
+	local, err := LocalStatePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw, err := os.ReadFile(local)
 	if err != nil {
 		t.Fatalf("start left no %s: %v", local, err)

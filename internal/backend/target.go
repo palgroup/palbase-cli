@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -109,8 +110,17 @@ func (t Target) Describe() string {
 	return t.URL
 }
 
-func projectPath() string { return filepath.Join(nativeArtifactsDir, "project.json") }
-func localPath() string   { return filepath.Join(nativeArtifactsDir, "local.json") }
+// projectPath is the committed record of which project this checkout belongs
+// to — it lives in the ONE visible directory (C-1), beside the contracts.
+func projectPath() string { return path.Join(RootDir(), "project.json") }
+
+// localPath is where THIS MACHINE records the stack in front of you.
+//
+// It is not in the checkout. `palbase start` writing into the repository is how
+// a repository acquires a file that must be ignored forever, and the layout's
+// rule is that everything under `palbase/` is committed — so the per-machine
+// half moved out entirely, next to the credentials that were already there.
+func localPath() (string, error) { return LocalStatePath(".") }
 
 func decodeTarget(raw []byte, target *Target) error {
 	if err := authcontract.DecodeStrict(raw, target); err != nil {
@@ -126,7 +136,7 @@ func decodeTarget(raw []byte, target *Target) error {
 
 // WriteTarget records the project this checkout belongs to.
 func WriteTarget(t Target) error {
-	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
+	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
 		return err
 	}
 	blob, err := json.MarshalIndent(t, "", "  ")
@@ -147,37 +157,43 @@ func WriteTarget(t Target) error {
 // NOW. Writing one through the other is how a `palbase start` ends up committing
 // a localhost address into a colleague's checkout.
 func WriteLocalTarget(t Target) error {
-	if err := os.MkdirAll(nativeArtifactsDir, 0o755); err != nil {
-		return err
-	}
 	blob, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(localPath(), append(blob, '\n'), 0o644)
+	// The directory is created by LocalStatePath — this writes only the file.
+	dest, err := localPath()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dest, append(blob, '\n'), 0o600)
 }
 
 // ReadTarget answers where a verb should act.
 //
-// A running dev stack WINS. `palbase start` writes `.palbase/local.json` and
-// `palbase stop` removes it, so "am I working locally right now" is a fact on
-// disk rather than a flag on every command — and every verb prints what it
-// resolved, so nobody has to remember.
+// A running dev stack WINS. `palbase start` records it under `~/.palbase` and
+// `palbase stop` removes that record, so "am I working locally right now" is a
+// fact on disk rather than a flag on every command — and every verb prints what
+// it resolved, so nobody has to remember.
 func ReadTarget() (Target, error) {
-	raw, err := os.ReadFile(localPath())
+	local, pathErr := localPath()
+	if pathErr != nil {
+		return Target{}, pathErr
+	}
+	raw, err := os.ReadFile(local)
 	if err == nil {
-		var local Target
-		if err := decodeTarget(raw, &local); err != nil {
-			return Target{}, fmt.Errorf("read %s: %w", localPath(), err)
+		var running Target
+		if err := decodeTarget(raw, &running); err != nil {
+			return Target{}, fmt.Errorf("read %s: %w", local, err)
 		}
-		if strings.TrimSpace(local.URL) == "" {
-			return Target{}, fmt.Errorf("%s has no address — run `palbase start` again", localPath())
+		if strings.TrimSpace(running.URL) == "" {
+			return Target{}, fmt.Errorf("%s has no address — run `palbase start` again", local)
 		}
-		local.Local = true
-		return local, nil
+		running.Local = true
+		return running, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return Target{}, fmt.Errorf("read %s: %w", localPath(), err)
+		return Target{}, fmt.Errorf("read %s: %w", local, err)
 	}
 	target, err := readLinkedProject()
 	if err != nil {
