@@ -1237,7 +1237,24 @@ PALBE_EOF
 # A stub that keeps it writes an import TypeScript rejects without
 # allowImportingTsExtensions — an imitation that produces what the tool cannot.
 echo "export * from './environments/$env/${out%.ts}'" > "$(dirname "$dir")/client.ts"
+` + configBarrelLine
+}
+
+// configBarrelLine is what @palbase/web >= 10.1.0 adds: the import-free leaf
+// beside the client, and the barrel the Next proxy imports. Split out so a test
+// can build a stub WITHOUT it and measure what an older SDK does to a link.
+const configBarrelLine = `
+cat > "$dir/$env/palbe.config.ts" <<'PALBE_CFG_EOF'
+export const environmentConfig = { url: 'https://stub', apiKey: 'pb_stub' } as const;
+PALBE_CFG_EOF
+echo "export * from './environments/$env/palbe.config'" > "$(dirname "$dir")/config.ts"
 `
+
+// palbeGen10Script0 imitates @palbase/web 10.0.x: it writes the client and the
+// client barrel, and NOTHING else — the shape that shipped before this feature.
+func palbeGen10Script0(content string) string {
+	full := palbeGen10Script(content)
+	return full[:len(full)-len(configBarrelLine)]
 }
 
 func installStubCodegen(t *testing.T, content string) {
@@ -1289,4 +1306,74 @@ func TestWebLink_ProxyNoLongerWarnsAboutPinning(t *testing.T) {
 
 	require.NotContains(t, out, "pinned to",
 		"the pinning warning describes a defect that no longer exists")
+}
+
+// TestWebLink_RefusesAnSdkTooOldToWriteTheConfigBarrel — a link that cannot
+// produce what it is about to IMPORT must fail, loudly, with the cure.
+//
+// MEASURED ON THE REAL PRODUCT before this gate existed: a project with
+// @palbase/web 10.0.3 installed (so `node_modules/.bin/palbe-gen` exists and
+// the installer step is skipped) ran `palbase link --platform web`, got exit 0
+// and `✓ wrote proxy.ts` — and then `next build` failed with
+// `Module not found: Can't resolve './palbase/config'`. The CLI had written a
+// file importing something its own generator never produced.
+//
+// `runPalbeGen` already validated TWO products for exactly this reason. The
+// proxy made the config barrel a third.
+func TestWebLink_RefusesAnSdkTooOldToWriteTheConfigBarrel(t *testing.T) {
+	t.Chdir(t.TempDir())
+	stubInstall(t)
+	writeStubArtifacts(t)
+	require.NoError(t, os.MkdirAll(filepath.Dir(palbeGenBin), 0o755))
+	// The 10.0.x generator: client + client barrel, no config barrel.
+	require.NoError(t, os.WriteFile(palbeGenBin, []byte(palbeGen10Script0("// gen")), 0o755))
+	writePkgJSON(t, minimalPkgJSON())
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile("app/layout.tsx", []byte("// entry\n"), 0o644))
+
+	// The production entry point, called directly so the REFUSAL is observable —
+	// the test helper asserts NoError and would hide it.
+	var buf bytes.Buffer
+	err := wireWebProject(context.Background(), "", "", &buf)
+
+	require.Error(t, err, "link succeeded against a generator that cannot write the config barrel")
+	require.Contains(t, err.Error(), ConfigBarrelPath(), "the refusal must name the missing file")
+	require.Contains(t, err.Error(), "10.1.0", "the refusal must name the version that fixes it")
+
+	// AND IT MUST NOT HAVE LEFT A proxy.ts BEHIND — a file importing nothing is
+	// worse than no file: the app stops building and the cause is invisible.
+	_, statErr := os.Stat("proxy.ts")
+	require.True(t, os.IsNotExist(statErr), "a refused link left proxy.ts importing a file that was never written")
+}
+
+// TestPalbeWebVersionGate — the installed tree decides, not the declaration.
+func TestPalbeWebVersionGate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		write  func(t *testing.T)
+		enough bool
+	}{
+		{"10.1.0 writes it", func(t *testing.T) { writeInstalledPalbeWeb(t, "10.1.0") }, true},
+		{"10.0.3 does not", func(t *testing.T) { writeInstalledPalbeWeb(t, "10.0.3") }, false},
+		{"11.0.0 does", func(t *testing.T) { writeInstalledPalbeWeb(t, "11.0.0") }, true},
+		{"10.2.5 does", func(t *testing.T) { writeInstalledPalbeWeb(t, "10.2.5") }, true},
+		// NOT INSTALLED, and UNREADABLE, both count as too old: the choice is
+		// between installing again and writing an import nothing resolves.
+		{"absent", func(t *testing.T) {}, false},
+		{"unparseable", func(t *testing.T) { writeInstalledPalbeWeb(t, "not-a-version") }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			tc.write(t)
+			require.Equal(t, tc.enough, palbeWebWritesConfigBarrel())
+		})
+	}
+}
+
+func writeInstalledPalbeWeb(t *testing.T, version string) {
+	t.Helper()
+	dir := filepath.Join("node_modules", webPkg)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"),
+		[]byte(`{"name":"`+webPkg+`","version":"`+version+`"}`), 0o644))
 }

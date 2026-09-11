@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -57,6 +58,49 @@ func addDepArgv() []string {
 		}
 	}
 	return []string{"npm", "install"}
+}
+
+// palbeWebWritesConfigBarrel reports whether the INSTALLED @palbase/web is new
+// enough to produce the config barrel `proxy.ts` imports (>= 10.1.0).
+//
+// Read from node_modules, never from package.json: a declared range is what
+// somebody asked for, and the installed tree is what will actually run. A
+// version that cannot be read at all is treated as too old — on a security-
+// adjacent choice between "install again" and "write a broken import", the
+// cheap wrong answer is installing again.
+func palbeWebWritesConfigBarrel() bool {
+	raw, err := os.ReadFile(filepath.Join("node_modules", webPkg, "package.json"))
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &pkg); err != nil {
+		return false
+	}
+	major, minor, ok := majorMinor(pkg.Version)
+	if !ok {
+		return false
+	}
+	return major > 10 || (major == 10 && minor >= 1)
+}
+
+// majorMinor parses the leading `<major>.<minor>` of a semver string.
+func majorMinor(version string) (int, int, bool) {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err := strconv.Atoi(strings.TrimSuffix(parts[1], "-"))
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // ensurePalbeWeb installs @palbase/web when the project doesn't have it yet, so
@@ -139,6 +183,20 @@ func runPalbeGen(ctx context.Context, env, outFlag string, w io.Writer) (bool, e
 	}
 	if !isRegularFile(filepath.FromSlash(ClientBarrelPath())) {
 		return false, fmt.Errorf("palbe-gen did not produce %s", ClientBarrelPath())
+	}
+	// THE THIRD PRODUCT, and it is checked here for the same reason as the other
+	// two: without it the project does not compile. `proxy.ts` imports this
+	// barrel, so a generator that does not write it leaves a file importing
+	// nothing — and MEASURED, that is exactly what an older SDK does: with
+	// @palbase/web 10.0.x installed, `link` exited 0, printed `✓ wrote proxy.ts`,
+	// and the app then failed with `Module not found: Can't resolve
+	// './palbase/config'`. The error names the version so the reader does not
+	// have to guess which half is behind.
+	if !isRegularFile(filepath.FromSlash(ConfigBarrelPath())) {
+		return false, fmt.Errorf(
+			"palbe-gen did not produce %s — the installed @palbase/web is older than 10.1.0; "+
+				"upgrade it (`npm install %s@latest`) and run `palbase link` again",
+			ConfigBarrelPath(), webPkg)
 	}
 	return true, nil
 }
@@ -991,7 +1049,19 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 
 	// The generator ships in @palbase/web. Without it there is no client, and
 	// every step after this one would skip — which would mean linking twice.
-	if _, err := os.Stat(palbeGenBin); err != nil {
+	//
+	// PRESENT IS NOT ENOUGH, IT ALSO HAS TO BE NEW ENOUGH. Asking only whether
+	// the binary exists was right while the generator's OUTPUT never changed;
+	// it no longer is. `proxy.ts` imports `palbase/config.ts`, which only
+	// @palbase/web >= 10.1.0 writes — and a project pinned to 10.0.x has a
+	// perfectly good `palbe-gen` on disk, so this check passed, the install was
+	// skipped, and the link produced a file importing something nothing wrote.
+	// Measured on the real product: exit 0, `✓ wrote proxy.ts`, then
+	// `Module not found: Can't resolve './palbase/config'` at `next build`.
+	//
+	// The refusal in `runPalbeGen` is the backstop; this is the cure, so most
+	// people never meet the refusal.
+	if _, err := os.Stat(palbeGenBin); err != nil || !palbeWebWritesConfigBarrel() {
 		ensurePalbeWeb(ctx, w)
 	}
 
@@ -1043,8 +1113,13 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 	// BOTH PRODUCTS. A rule hiding the generated client is as bad as one hiding
 	// the barrel: either way the next clone compiles against a file that is not
 	// in the history. The guard reports; it never edits somebody's rules.
+	// ALL FOUR GENERATED FILES, because NFR-003 is about all four: every file
+	// under `palbase/` is meant to be committed, and an ignore rule that swallows
+	// one of them is invisible until someone else's checkout fails to build.
 	checkGitignoreGuard(filepath.FromSlash(GeneratedPath(env, webPlatform)), w)
 	checkGitignoreGuard(outFile, w)
+	checkGitignoreGuard(filepath.FromSlash(ConfigBarrelPath()), w)
+	checkGitignoreGuard(filepath.Join(filepath.FromSlash(EnvDir(env)), "palbe.config.ts"), w)
 	return nil
 }
 

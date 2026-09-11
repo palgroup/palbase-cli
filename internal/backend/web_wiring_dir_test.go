@@ -52,6 +52,14 @@ mkdir -p "$(dirname "$dir")"
 # A stub that keeps it writes an import TypeScript rejects without
 # allowImportingTsExtensions — an imitation that produces what the tool cannot.
 echo "export * from './environments/$env/${out%.ts}'" > "$(dirname "$dir")/client.ts"
+# AND THE CONFIG BARREL, because @palbase/web >= 10.1.0 writes it and the CLI
+# now REFUSES a generator that does not: proxy.ts imports it. A stub that stops
+# at the client measures a tool that no longer exists, which is the exact
+# mistake the comment above this one records.
+cat > "$dir/$env/palbe.config.ts" <<'CFG_EOF'
+export const environmentConfig = { url: 'https://x.palbase.studio', apiKey: 'pb_project_cKEY' } as const;
+CFG_EOF
+echo "export * from './environments/$env/palbe.config'" > "$(dirname "$dir")/config.ts"
 `
 	require.NoError(t, os.WriteFile(palbeGenBin, []byte(script), 0o755))
 }

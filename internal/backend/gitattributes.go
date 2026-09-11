@@ -49,8 +49,12 @@ func generatedAttributes() []string {
 			add(p)
 		}
 	}
-	// The barrel sits at the root of this directory, not under an environment.
+	// The environment config leaf: generated beside the web client, and just as
+	// much noise in a review diff.
+	add(EnvDir(probe) + "/palbe.config.ts")
+	// The barrels sit at the root of this directory, not under an environment.
 	add(ClientBarrelPath())
+	add(ConfigBarrelPath())
 	return lines
 }
 

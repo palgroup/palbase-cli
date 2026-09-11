@@ -118,6 +118,15 @@ func EnvTypesPath() string { return path.Join(rootDir, envTypesFile) }
 // barrel keeps the import stable; only its single re-export line changes.
 func ClientBarrelPath() string { return path.Join(rootDir, "client.ts") }
 
+// ConfigBarrelPath is the ONE line a Next proxy imports.
+//
+// It sits beside the client barrel and follows the same PALBASE_ENV switch, but
+// it is a SEPARATE file on purpose: the proxy is compiled into its own bundle
+// and the client barrel re-exports the generated client, which configures the
+// SDK runtime at import time. Reaching that from a request path costs megabytes
+// (@palbase/web measures it). This barrel points at an import-free leaf instead.
+func ConfigBarrelPath() string { return path.Join(rootDir, "config.ts") }
+
 // LegacyRoots are the directories older CLIs owned that are still THEIR OWN
 // directory here.
 //
