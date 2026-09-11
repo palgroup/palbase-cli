@@ -12,9 +12,22 @@ import (
 	"strings"
 )
 
+// THE CLI'S OWN DIRECTORY IS NOT SOURCE. `.palbase` was here and `palbase` was
+// not, so the layout migration SILENTLY put two things back into the payload
+// that this list had been excluding all along: every environment's contract
+// (measured at 167 KB each) and `project.json`, which carries the target URL,
+// the OAuth selections and the stack version.
+//
+// The cost is written in this file's own header: a base64 tarball that reaches
+// Temporal's 4 MB gRPC argument ceiling kills the deploy with an opaque
+// RESOURCE_EXHAUSTED. A three-environment project is enough.
+//
+// The bundle the stack DOES need rides separately — see stackOnlyPalbaseEntries,
+// which is added back explicitly for a self-host push.
 var defaultIgnoreDirs = map[string]bool{
 	".git":         true,
 	".palbase":     true,
+	rootDir:        true,
 	"node_modules": true,
 	".next":        true, // Next.js build output — bloat, never part of the backend bundle
 	// Staging trees left by older commands must never ship as source, even when

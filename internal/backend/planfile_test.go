@@ -47,6 +47,13 @@ func TestFingerprintMatchesTheServerFormula(t *testing.T) {
 }
 
 func TestPlanFileRoundTripsAndNamesWhatChanged(t *testing.T) {
+	// THE MACHINE'S HOME IS A TEMP ONE. `WritePlanFile` writes under
+	// `~/.palbase/checkouts/<hash>/`, so a test without this seam writes into the
+	// DEVELOPER's home and leaves a record there forever — the checkout it names
+	// is a `t.TempDir()` that vanishes, so the record is dead the moment the test
+	// ends. That is exactly the litter D-010 measured at 823 directories, being
+	// recreated by the suite that fixed it. A clean CI runner can never see it.
+	useTempMachineHome(t)
 	dir := t.TempDir()
 	p := PlanFile{Version: 1, CreatedAt: time.Now().UTC(), Target: PlanTarget{URL: "https://abc12345m.palbase.studio", Ref: "abc12345m"},
 		BundleDigest: "b", SDK: PlanSDK{Running: "36.0.2", Target: "37.0.2"}, SchemaPlanDigest: "s"}

@@ -31,9 +31,12 @@ package backend
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // machineStateHome is the seam the tests point somewhere else.
@@ -109,7 +112,18 @@ func checkoutsRoot() (string, error) {
 // Each directory carries its own `origin` file naming the checkout it belongs
 // to. Without it the hash could never be reversed and a dead record could never
 // be recognised — which is how 823 of them accumulated unnoticed.
-func reapDeadCheckoutState() {
+// ONCE PER PROCESS, not once per write.
+//
+// A CLI process runs ONE command, so collecting dead records once is exactly the
+// right frequency — and calling it from every `WritePlanFile`/`WriteLocalTarget`
+// made the work quadratic in the number of records: measured in this package's
+// own suite, which writes state hundreds of times, the run went from ~390s to
+// over 600s and tripped the test timeout. The users' directory grows too.
+var reapOnce sync.Once
+
+func reapDeadCheckoutState() { reapOnce.Do(reapDeadCheckoutStateNow) }
+
+func reapDeadCheckoutStateNow() {
 	root, err := checkoutsRoot()
 	if err != nil {
 		return
@@ -138,8 +152,14 @@ func reapDeadCheckoutState() {
 		if readErr != nil {
 			continue // written by a CLI that did not record its origin; leave it
 		}
-		if _, statErr := os.Stat(strings.TrimSpace(string(origin))); statErr == nil {
-			continue // the checkout is still there
+		// ONLY "IT IS NOT THERE" IS A REASON TO DELETE. Anything else — a
+		// permission error, an unmounted external disk, a network share that is
+		// briefly unreachable — says nothing about whether the checkout exists.
+		// Treating every stat error as absence deletes the state of a project
+		// that is merely on a disk nobody plugged in: the next `push` then says
+		// "no plan for this checkout" and `stop` cannot find a running stack.
+		if _, statErr := os.Stat(strings.TrimSpace(string(origin))); !errors.Is(statErr, fs.ErrNotExist) {
+			continue
 		}
 		_ = os.RemoveAll(dir)
 	}

@@ -88,6 +88,9 @@ func TestLocalStateLivesOutsideTheCheckout(t *testing.T) {
 // plan is a measurement made here, now, against the environment selected here;
 // committed, two developers overwrite each other's.
 func TestPlanStateLivesOutsideTheCheckout(t *testing.T) {
+	// Through the package's own seam, never the developer's real home: this test
+	// WRITES a plan, and a record left in `$HOME` outlives the checkout it names.
+	useTempMachineHome(t)
 	checkout := t.TempDir()
 	path, err := planFilePath(checkout)
 	require.NoError(t, err)

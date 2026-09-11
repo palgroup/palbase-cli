@@ -9,6 +9,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestMain points THIS PACKAGE's machine-state home at a throwaway directory.
+//
+// THE DEFAULT HAS TO BE THE SAFE ONE. Eleven test files write machine state —
+// `WritePlanFile`, `WriteLocalTarget`, the push and plan paths — and each was
+// one forgotten `useTempMachineHome` away from leaving a record in the
+// DEVELOPER's `~/.palbase/checkouts/`, naming a `t.TempDir()` that vanishes when
+// the test ends. That is the litter D-010 measured at 823 directories, and the
+// suite that fixed it was recreating it five records per run. A clean CI runner
+// never sees this, so "remember to call the seam" is not a gate — the default is.
+//
+// NOT `os.Setenv("HOME", …)`: this package measured what that does — one such
+// test and the suite stopped finishing, because something downstream resolves a
+// home-derived path once and keeps it. This moves the package's own seam and
+// nothing else.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "palbase-test-home-*")
+	if err != nil {
+		panic(err)
+	}
+	machineStateHome = func() (string, error) { return home, nil }
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
+}
+
 // useTempMachineHome points the machine-state home at a throwaway directory for
 // ONE test, through the package's own seam.
 //
@@ -247,7 +272,7 @@ func TestDeadCheckoutStateIsReaped(t *testing.T) {
 	}
 	require.NoError(t, os.RemoveAll(dead))
 
-	reapDeadCheckoutState()
+	reapDeadCheckoutStateNow()
 
 	livePath, err := PlanStatePath(alive)
 	require.NoError(t, err)
@@ -277,8 +302,36 @@ func TestEmptyStateRecordsAreSwept(t *testing.T) {
 	require.NoError(t, os.MkdirAll(kept, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(kept, "local.json"), []byte(`{"url":"x"}`), 0o600))
 
-	reapDeadCheckoutState()
+	reapDeadCheckoutStateNow()
 
 	require.NoDirExists(t, empty, "an empty record survived")
 	require.DirExists(t, kept, "a record carrying state was swept without knowing whose it is")
+}
+
+// NO TEST IN THIS PACKAGE MAY WRITE INTO THE DEVELOPER'S REAL HOME.
+//
+// `WritePlanFile` and `WriteLocalTarget` write under `~/.palbase/checkouts/`, and
+// a test that skips `useTempMachineHome` leaves a record there naming a
+// `t.TempDir()` that no longer exists — dead the moment the test ends. That is
+// the litter D-010 measured at 823 directories, recreated by the suite that
+// fixed it; a clean CI runner never sees it, so the gate has to be here.
+func TestNoTestWritesIntoTheRealHome(t *testing.T) {
+	real, err := os.UserHomeDir()
+	require.NoError(t, err)
+	used, err := machineStateHome()
+	require.NoError(t, err)
+	require.NotEqual(t, real, used,
+		"this package's machine-state home is the developer's real one — every test that "+
+			"writes state leaves a dead record in it")
+
+	// And a write really does land in the throwaway one, or the seam would be
+	// pointing somewhere nothing uses.
+	checkout := t.TempDir()
+	require.NoError(t, WritePlanFile(checkout, PlanFile{
+		Version: 1, Target: PlanTarget{URL: "https://x"}, Fingerprint: "f",
+	}))
+	path, err := PlanStatePath(checkout)
+	require.NoError(t, err)
+	require.FileExists(t, path)
+	require.True(t, strings.HasPrefix(path, used), "%s is not under %s", path, used)
 }

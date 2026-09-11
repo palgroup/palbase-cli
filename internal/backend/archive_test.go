@@ -463,3 +463,32 @@ func TestStagedControllersDirMatchesBuildCheck(t *testing.T) {
 	require.Contains(t, string(src), "'"+stagedControllersDir+"'",
 		"build-check.js must stage into %s — the tarball walk skips exactly that name", stagedControllersDir)
 }
+
+// THE CLI'S OWN DIRECTORY NEVER SHIPS IN A DEPLOY PAYLOAD.
+//
+// `defaultIgnoreDirs` named `.palbase` and not `palbase`, so the layout
+// migration quietly put two things back into the tarball that had been excluded
+// all along: every environment's contract, and `project.json` with the target
+// URL and OAuth selections in it. A base64 tarball that reaches Temporal's 4 MB
+// gRPC ceiling kills the deploy with an opaque RESOURCE_EXHAUSTED.
+func TestTheTarballCarriesNoPalbaseDirectory(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.FromSlash(EnvDir("main"))), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(SpecPath("main"))),
+		[]byte(`{"openapi":"3.1.0"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, RootDir(), "project.json"),
+		[]byte(`{"url":"https://x.palbase.studio"}`), 0o644))
+	// …and something that IS source, so this is not measuring an empty tarball.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "app.module.ts"), []byte("export {}\n"), 0o644))
+
+	blob, err := BuildTarball(dir)
+	require.NoError(t, err)
+
+	names := tarEntries(t, blob)
+	require.Contains(t, names, "modules/app.module.ts", "the tarball carries no source at all")
+	for _, n := range names {
+		require.False(t, strings.HasPrefix(n, RootDir()+"/"),
+			"the deploy payload carries %s — the CLI's own directory is not source", n)
+	}
+}

@@ -19,6 +19,28 @@ import (
 // test ran docker against it — the parity gate compared two strings that both
 // passed through the same broken function. A stack that answers /.well-known is
 // the answer that gate could not give.
+// useRealMachineHome puts this ONE test back on the developer's real home, and
+// collects what it leaves there.
+//
+// `TestMain` moves the package's seam to a throwaway directory, but this test
+// spawns the real binary — a child process resolves `os.UserHomeDir()` from its
+// own environment and cannot see a package variable. Handing it `HOME` instead
+// breaks Docker, which discovers `compose` through `$HOME/.docker/cli-plugins`
+// (measured: `unknown shorthand flag: 'f' in -f`). So the child writes to the
+// real home, this test reads the same place, and the record goes at the end —
+// litter that outlives its checkout is the defect D-010 was about.
+func useRealMachineHome(t *testing.T, checkout string) {
+	t.Helper()
+	prev := machineStateHome
+	machineStateHome = os.UserHomeDir
+	t.Cleanup(func() {
+		if dir, err := machineStateDir(checkout); err == nil {
+			_ = os.RemoveAll(dir)
+		}
+		machineStateHome = prev
+	})
+}
+
 func TestStartServesAndStopCleansUp(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings a real stack up — excluded from -short")
@@ -75,6 +97,12 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 	// front of you under the user's own `~/.palbase/checkouts/<hash>/`, so the
 	// test asks `LocalStatePath` where that is instead of rebuilding a path the
 	// product stopped writing.
+	// THE SUBPROCESS HAS ITS OWN HOME. `TestMain` moves this package's seam, and
+	// a spawned binary cannot see a package variable — it resolves
+	// `os.UserHomeDir()` from its own environment. So the child was pointed at
+	// the same throwaway home through `HOME` (see the commands above), and the
+	// path is asked for with that same home in effect.
+	useRealMachineHome(t, dir)
 	local, err := LocalStatePath(dir)
 	if err != nil {
 		t.Fatal(err)

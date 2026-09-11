@@ -102,8 +102,15 @@ func TestLinkLayoutPrintsTheSelectionPattern(t *testing.T) {
 	// THE PATTERNS, EXACTLY. `*` does not cross a directory boundary, so the
 	// trailing `/*` is what reaches the files inside an environment — a pattern
 	// written without it silently excludes nothing.
+	// THE ENVIRONMENT COMES FROM THE CHECKOUT, not from a literal. Pinning the
+	// string `main` here is what let the snippet print `main` for a project whose
+	// environment is called something else — a test that names the value cannot
+	// see the value be wrong.
+	envs, err := readAppEnvironments("ios")
+	require.NoError(t, err)
+	require.NotEmpty(t, envs.Default, "the link recorded no default environment")
 	for _, line := range []string{
-		"PALBASE_ENV = main",
+		"PALBASE_ENV = " + envs.Default,
 		"EXCLUDED_SOURCE_FILE_NAMES = */palbase/environments/*/*",
 		"INCLUDED_SOURCE_FILE_NAMES = */palbase/environments/$(PALBASE_ENV)/*",
 	} {

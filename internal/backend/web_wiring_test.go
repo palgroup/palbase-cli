@@ -1228,9 +1228,13 @@ func installStubCodegen(t *testing.T, content string) {
 }
 
 // runWebLinkWithGitignore drives the two steps runLink performs for a web
-// checkout, in runLink's order: narrow the ignore rule, then wire the project.
-// Splitting them across two functions is how the narrowing ended up applying to
-// web only, when a directory-wide `.palbase` rule buries every platform's slot.
+// checkout, in runLink's order: take back the retired ignore rules, then wire
+// the project.
+//
+// The first step is a REMOVAL now, not a narrowing — and for a while `runLink`
+// did not do it at all, which left this helper measuring an order the product
+// had stopped following. A helper that imitates a sequence nobody runs turns
+// every test built on it into a test of its own fixture.
 func runWebLinkWithGitignore(t *testing.T, args ...string) string {
 	t.Helper()
 	require.NoError(t, takeBackRetiredIgnoreRules(".gitignore"))

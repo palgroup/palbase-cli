@@ -887,6 +887,19 @@ func wireNextProxy(entryFlag string, w io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(w, "✓ wrote %s — required for RSC session refresh to persist\n", proxyPath)
+	// IT CARRIES ONE ENVIRONMENT, AND SAYS SO.
+	//
+	// `palbeProxy` takes a url and a key, so this file holds `%[1]s`'s literally.
+	// The generated client does NOT: `predev`/`prebuild` re-run the generator and
+	// it follows `PALBASE_ENV`, defaulting to `local`. So `npm run dev` can leave
+	// the data client on localhost while the session proxy still points at the
+	// cloud — RSC refresh goes to the wrong stack and the developer cannot stay
+	// signed in, with nothing on screen to connect it to.
+	//
+	// The real cure is a resolved-config surface in @palbase/web; until then the
+	// divergence is at least NAMED rather than silent (ledger D-013).
+	fmt.Fprintf(w, "  it is pinned to %q — run `palbase link` again after you change which"+
+		" environment this app talks to, or the session proxy and the client will disagree\n", cfgEnv)
 	return nil
 }
 

@@ -175,7 +175,8 @@ func linkedOAuth(ctx context.Context, target Target, platform, publishableKey, s
 				selection = match
 			}
 		} else {
-			return nil, selection, fmt.Errorf("social sign-in for %s needs application_key and variant in .palbase/project.json oauth.%s; the checkout does not identify one configured target", platform, platform)
+			return nil, selection, fmt.Errorf("social sign-in for %s needs application_key and variant in %s oauth.%s; "+
+				"the checkout does not identify one configured target", platform, projectPath(), platform)
 		}
 	}
 	query := url.Values{"application_key": {selection.ApplicationKey}, "platform": {platform}, "variant": {selection.Variant}}

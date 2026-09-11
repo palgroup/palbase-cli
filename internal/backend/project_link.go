@@ -443,7 +443,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		//
 		// The customer owns their configuration system. What they need from us
 		// is printed once, below, and it is theirs to place.
-		printEnvironmentSelectionSnippet(w)
+		printEnvironmentSelectionSnippet(w, envs.Default)
 	}
 
 	// THE SAME STEP APPLE GETS, FOR WEB. An Apple checkout leaves here with
@@ -737,17 +737,35 @@ func refuseUnsupportedPlatforms(platforms []string) error {
 // `*/palbase/environments/*` excludes nothing at all, while the form below
 // excludes correctly — verified in both directions, with the unselected
 // environment's plist never entering the app bundle.
-func printEnvironmentSelectionSnippet(w io.Writer) {
-	fmt.Fprint(w, `
+// THE SNIPPET NAMES THIS CHECKOUT'S OWN ENVIRONMENT, not a guess.
+//
+// It printed a literal `main`, which was right only because `defaultEnvName`
+// happens to return `main` when the target carries no environment name. A
+// project whose environment is `production` gets `palbase/environments/production/`
+// on disk and `PALBASE_ENV = main` on screen: copied as printed, `INCLUDED`
+// matches nothing while `EXCLUDED` takes everything, so the app ships with NO
+// `Palbase-Info.plist` and the SDK is unconfigured at runtime. Silently.
+//
+// And the old closing sentence — "leave PALBASE_ENV unset and the build takes
+// `local`" — was false HERE. That default belongs to `palbe-gen`, on the web
+// side. Xcode expands an unset variable to nothing, so the pattern becomes
+// `*/palbase/environments//*` and matches NOTHING: not `local`, not anything.
+// It also contradicted the three lines above it, which already set the value.
+func printEnvironmentSelectionSnippet(w io.Writer, env string) {
+	if env == "" {
+		env = localEnvName
+	}
+	fmt.Fprintf(w, `
 Add these to your own build configuration (xcconfig, build settings, Tuist —
 whichever you already use). PALBASE_ENV is the only line you change; the other
 two never do:
 
-    PALBASE_ENV = main
+    PALBASE_ENV = %s
     EXCLUDED_SOURCE_FILE_NAMES = */palbase/environments/*/*
     INCLUDED_SOURCE_FILE_NAMES = */palbase/environments/$(PALBASE_ENV)/*
 
-Then add palbase/environments to your app target. Leave PALBASE_ENV unset and
-the build takes `+"`local`"+`, the stack this machine runs.
-`)
+Then add palbase/environments to your app target. Set PALBASE_ENV to any
+directory under it; an UNSET one expands to nothing in Xcode, so the include
+pattern matches nothing and the app ships unconfigured.
+`, env)
 }
