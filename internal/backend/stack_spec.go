@@ -148,6 +148,20 @@ func reportStaleContracts(refreshed string, envs appEnvironments, w io.Writer) {
 	fmt.Fprintln(w, "  `palbase link <project>` fetches every environment's contract; `palbase link <ref>` then `palbase spec` refreshes one.")
 }
 
+// ErrNoContractYet is the project saying it has no specification to give.
+//
+// A LEGAL STATE, NOT A FAILURE. A project that has never been pushed to answers
+// its contract route with 404 `spec_unavailable`, and so does one whose runtime
+// could not build a document from the artifact it holds. Both end the same way
+// — someone pushes a backend — and `link` is the verb that makes that push
+// possible, because `push` reads the binding `link` writes.
+//
+// Treating it as a failure closed that loop on itself: link refused because
+// nothing was deployed, and nothing could be deployed because the link refused.
+// Callers that NEED a contract still refuse; `link` records the state and says
+// what ends it.
+var ErrNoContractYet = errors.New("no contract yet")
+
 // fetchStackSpec asks the management surface what the stack is serving.
 func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -200,12 +214,13 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 			// cannot build a spec ends the same way: the code is fixed and
 			// pushed. Saying so does not displace the project's own sentence,
 			// which is still what a person reads first.
-			return nil, fmt.Errorf("%s cannot describe itself: %s — a backend is what "+
+			return nil, fmt.Errorf("%w: %s cannot describe itself: %s — a backend is what "+
 				"makes a contract, so this ends with `palbase push`",
-				target.URL, strings.TrimSpace(envelope.Description))
+				ErrNoContractYet, target.URL, strings.TrimSpace(envelope.Description))
 		}
 		return nil, fmt.Errorf(
-			"%s has nothing to describe yet — push a backend to it first (palbase push)", target.URL)
+			"%w: %s has nothing to describe yet — push a backend to it first (palbase push)",
+			ErrNoContractYet, target.URL)
 	default:
 		return nil, fmt.Errorf("the stack's contract came back %d: %s", res.StatusCode, trimBody(body))
 	}

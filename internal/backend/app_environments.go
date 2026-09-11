@@ -631,17 +631,33 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 	if err != nil {
 		return appEnvironments{}, nil, err
 	}
-	spec, err := fetchStackSpec(ctx, target, cred)
-	if err != nil {
+	// A PROJECT WITH NOTHING DEPLOYED IS STILL A PROJECT YOU CAN BIND TO.
+	//
+	// This refusal closed a loop on itself: `link` refused because the project
+	// had no contract, and the project could get no contract because `push`
+	// reads the binding only `link` writes. The person was told to push by a
+	// command that had just made pushing impossible.
+	//
+	// The environment entry is written either way — it carries the address and
+	// the key, which is what `push` needs — and the contract is fetched later by
+	// `palbase spec`, or by the next `link`, once something answers. The same
+	// leniency the local stack has had all along (see below): a stack that
+	// cannot answer is a legal state, not a reason to refuse the link.
+	switch spec, err := fetchStackSpec(ctx, target, cred); {
+	case errors.Is(err, ErrNoContractYet):
+		fmt.Fprintf(w, "%v\n", err)
+		fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
+	case err != nil:
 		return appEnvironments{}, nil, err
+	default:
+		if err := writeSpec(primary, spec); err != nil {
+			return appEnvironments{}, nil, err
+		}
+		if err := refreshRoles(ctx, target, cred, primary, w); err != nil {
+			return appEnvironments{}, nil, err
+		}
+		specs[primary] = spec
 	}
-	if err := writeSpec(primary, spec); err != nil {
-		return appEnvironments{}, nil, err
-	}
-	if err := refreshRoles(ctx, target, cred, primary, w); err != nil {
-		return appEnvironments{}, nil, err
-	}
-	specs[primary] = spec
 
 	// The stack on this machine, when there is one and it is not already the
 	// target.
