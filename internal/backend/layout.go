@@ -43,7 +43,11 @@ package backend
 // Xcode pattern above — `filepath.Join` would write `\` on Windows and the
 // pattern would match nothing there.
 
-import "path"
+import (
+	"os"
+	"path"
+	"path/filepath"
+)
 
 const (
 	rootDir   = "palbase"
@@ -64,18 +68,22 @@ func SpecPath(env string) string { return path.Join(EnvDir(env), "openapi.json")
 // setting somebody has to keep in step.
 func RolesPath(env string) string { return path.Join(EnvDir(env), "roles.json") }
 
-// ConfigPath is the app configuration that environment's platform reads.
+// ConfigPath is what the CLI WRITES for one platform of one environment — the
+// generator's INPUT, and the file `readAppEnvironments` reads back on a relink.
 //
-// Apple's is a plist because the app BUNDLES it and the SDK reads it out of the
-// bundle at first use; the others are JSON read by their generator.
+// One rule for every platform. Apple's generator turns this JSON into the plist
+// the app bundles (PlistPath); android's and web's read it directly.
 func ConfigPath(env, platform string) string {
-	switch platform {
-	case "ios", "macos":
-		return path.Join(EnvDir(env), "Palbase-Info.plist")
-	default:
-		return path.Join(EnvDir(env), platform+"-config.json")
-	}
+	return path.Join(EnvDir(env), platform+"-config.json")
 }
+
+// PlistPath is what swiftgen EMITS for one environment: the file an Apple app
+// bundles and the SDK reads at first use.
+//
+// Separate from ConfigPath because on Apple the generator's input and output are
+// two different files — the CLI writes JSON, swiftgen writes the plist, and the
+// app ships only the second.
+func PlistPath(env string) string { return path.Join(EnvDir(env), "Palbase-Info.plist") }
 
 // GeneratedPath is the committed client generated for that environment, or ""
 // for a platform whose generator writes outside the checkout.
@@ -94,6 +102,14 @@ func GeneratedPath(env, platform string) string {
 	}
 }
 
+// EnvTypesPath is the declaration file generated from this project's secrets.
+//
+// It sits under the CLI's own directory and is COMMITTED, like everything else
+// there. At the checkout root it was a generated file that had to be ignored
+// forever, and an ignored file is one nothing can see drift in — the reason the
+// whole of `palbase/` is trackable now (NFR-001).
+func EnvTypesPath() string { return path.Join(rootDir, envTypesFile) }
+
 // ClientBarrelPath is the ONE line a web application imports.
 //
 // Every environment's generated client is committed side by side. If the app
@@ -102,9 +118,42 @@ func GeneratedPath(env, platform string) string {
 // barrel keeps the import stable; only its single re-export line changes.
 func ClientBarrelPath() string { return path.Join(rootDir, "client.ts") }
 
-// LegacyRoots are the directories older CLIs owned in a checkout.
+// LegacyRoots are the directories older CLIs owned that are still THEIR OWN
+// directory here.
 //
-// They are named so `link` can REFUSE a checkout that still carries one. There
-// is no reader for them and no migration: a half-old, half-new tree is the one
-// outcome that makes "I will clean the old ones up myself" impossible.
-func LegacyRoots() []string { return []string{".palbase", "Palbase"} }
+// `Palbase` is deliberately NOT in this list, and its absence is the whole
+// lesson: on macOS and Windows the filesystem is case-insensitive, so `palbase`
+// and `Palbase` are ONE directory. Measured 11.09.2026 —
+// `mkdir palbase && [ -d "Palbase" ]` is true on APFS. A gate that refused a
+// checkout "carrying `Palbase/`" would therefore refuse every checkout carrying
+// the NEW root, on the platform this product's customers use; and a sweeper
+// that deleted it would delete the customer's new directory. The retirement of
+// the visible root cannot be measured by its NAME.
+func LegacyRoots() []string { return []string{".palbase"} }
+
+// LegacyMarkers are what the OLD visible layout put inside the directory the new
+// one now shares with it — files and directories the new layout never creates.
+//
+// This is how the visible root's retirement is measured: by content, because
+// the name cannot tell the two apart. Everything here sat directly under
+// `Palbase/`; the new layout writes only `environments/` and `client.ts`.
+func LegacyMarkers() []string {
+	return []string{"Generated", "Config", "openapi.json", "roles.json", "palbase-config.json"}
+}
+
+// CarriesLegacyLayout reports whether this checkout still holds the retired
+// layout, by looking for what only that layout produced.
+func CarriesLegacyLayout(root string) []string {
+	var found []string
+	for _, dir := range LegacyRoots() {
+		if _, err := os.Stat(filepath.Join(root, dir)); err == nil {
+			found = append(found, dir)
+		}
+	}
+	for _, marker := range LegacyMarkers() {
+		if _, err := os.Stat(filepath.Join(root, rootDir, marker)); err == nil {
+			found = append(found, path.Join(rootDir, marker))
+		}
+	}
+	return found
+}

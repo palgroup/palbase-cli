@@ -15,8 +15,9 @@ func TestLayoutPaths(t *testing.T) {
 		{EnvDir("main"), "palbase/environments/main"},
 		{SpecPath("main"), "palbase/environments/main/openapi.json"},
 		{RolesPath("local"), "palbase/environments/local/roles.json"},
-		{ConfigPath("main", "ios"), "palbase/environments/main/Palbase-Info.plist"},
-		{ConfigPath("main", "macos"), "palbase/environments/main/Palbase-Info.plist"},
+		{ConfigPath("main", "ios"), "palbase/environments/main/ios-config.json"},
+		{ConfigPath("main", "macos"), "palbase/environments/main/macos-config.json"},
+		{PlistPath("main"), "palbase/environments/main/Palbase-Info.plist"},
 		{ConfigPath("main", "android"), "palbase/environments/main/android-config.json"},
 		{ConfigPath("main", "web"), "palbase/environments/main/web-config.json"},
 		{GeneratedPath("main", "ios"), "palbase/environments/main/PalbaseGenerated.swift"},
@@ -47,6 +48,7 @@ func TestAndroidHasNoGeneratedPathInTheCheckout(t *testing.T) {
 func TestEnvironmentDirectoryIsFlat(t *testing.T) {
 	for _, p := range []string{
 		ConfigPath("main", "ios"), ConfigPath("main", "web"), ConfigPath("main", "android"),
+		PlistPath("main"),
 		GeneratedPath("main", "ios"), GeneratedPath("main", "web"),
 		SpecPath("main"), RolesPath("main"),
 	} {
@@ -56,12 +58,27 @@ func TestEnvironmentDirectoryIsFlat(t *testing.T) {
 	}
 }
 
-// ESKİ KÖKLER ADLANDIRILIR: `link` onları görüp reddedebilsin. Adlandırılmayan
-// bir kök, sessizce yarı-eski-yarı-yeni bir ağaç demektir.
+// ESKİ DÜZEN ADIYLA DEĞİL İÇERİĞİYLE ÖLÇÜLÜR (D-008).
+//
+// `Palbase` bu listede DEĞİL ve yokluğu dersin kendisi: macOS ve Windows'ta
+// dosya sistemi büyük/küçük harf duyarsız, yani `palbase` ile `Palbase` TEK
+// dizin. Adı ölçen bir kapı, yeni kökü taşıyan her checkout'u — yani ilk
+// başarılı `link`ten sonra hepsini — reddederdi; silen bir yol ise müşterinin
+// yeni dizinini silerdi. Gizli kök (`.palbase`) gerçek bir ikinci dizin, o
+// kalıyor; görünür kökün emekliliği `LegacyMarkers` ile ölçülüyor.
 func TestLegacyRootsAreNamed(t *testing.T) {
 	got := LegacyRoots()
-	if len(got) != 2 || got[0] != ".palbase" || got[1] != "Palbase" {
+	if len(got) != 1 || got[0] != ".palbase" {
 		t.Errorf("eski kökler: %v", got)
+	}
+	for _, name := range got {
+		if strings.EqualFold(name, RootDir()) {
+			t.Errorf("%q, bu CLI'ın kendi kökünden yalnız BÜYÜK/KÜÇÜK HARFLE ayrılıyor — "+
+				"duyarsız bir dosya sisteminde aynı dizin", name)
+		}
+	}
+	if len(LegacyMarkers()) == 0 {
+		t.Error("görünür kökün emekliliğini ölçecek hiçbir işaret yok")
 	}
 }
 

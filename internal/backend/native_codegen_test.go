@@ -33,22 +33,25 @@ done
 	return path
 }
 
-// linkedProject lays out a checkout as the fetch path leaves it: .palbase with
-// ONE CONTRACT PER ENVIRONMENT plus the requested platform slots. It also makes
-// that checkout the working directory, because generateForEnvironments emits
-// relative to it — the same way every real invocation runs.
+// linkedProject lays out a checkout as the fetch path leaves it: ONE DIRECTORY
+// PER ENVIRONMENT, holding that environment's contract and the requested
+// platforms' configuration. It also makes that checkout the working directory,
+// because generateForEnvironments emits relative to it — the same way every
+// real invocation runs.
+//
+// Every path comes from `layout.go`. The fixture used to spell `.palbase` and
+// its subdirectories itself, so it went on describing a shape the product had
+// stopped writing — a fixture that builds the old world measures the old world.
 func linkedProject(t *testing.T, platforms ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	t.Chdir(root)
-	palbaseDir := filepath.Join(root, ".palbase")
-	require.NoError(t, os.MkdirAll(palbaseDir, 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(palbaseDir, "openapi"), 0o755))
+	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
 	require.NoError(t, os.WriteFile(specPath("main"), []byte(`{"openapi":"3.1.0"}`), 0o644))
 	for _, p := range platforms {
-		dir := filepath.Join(palbaseDir, p)
-		require.NoError(t, os.MkdirAll(dir, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "palbase-config.json"), []byte(`{}`), 0o644))
+		cfg := ConfigPath("main", p)
+		require.NoError(t, os.MkdirAll(filepath.Dir(cfg), 0o755))
+		require.NoError(t, os.WriteFile(cfg, []byte(`{}`), 0o644))
 	}
 	return root
 }
@@ -99,7 +102,7 @@ func TestGenerateForEnvironments_NoAppleSlotWritesNoPlist(t *testing.T) {
 
 	// Android generates its client from the Gradle plugin and has no plist: the
 	// CLI must not invent an Apple envelope for it.
-	require.NoFileExists(t, filepath.Join(root, "Palbase", "Generated", "Palbase-Info.plist"))
+	require.NoFileExists(t, filepath.Join(root, filepath.FromSlash(PlistPath("main"))))
 }
 
 // THE TWO HALVES ARE REQUESTED SEPARATELY, and that is the contract the
@@ -117,14 +120,14 @@ func TestGenerateForEnvironments_ClientPerEnvironmentAndOnePlist(t *testing.T) {
 	argv, err := os.ReadFile(argvLog)
 	require.NoError(t, err)
 	got := strings.Split(strings.TrimSpace(string(argv)), "\n")
-	outSwift := filepath.Join(root, "Palbase", "Generated", "main", "PalbaseGenerated.swift")
-	outPlist := filepath.Join(root, "Palbase", "Generated", "Palbase-Info.plist")
+	outSwift := filepath.Join(root, filepath.FromSlash(GeneratedPath("main", "ios")))
+	outPlist := filepath.Join(root, filepath.FromSlash(PlistPath("main")))
 	require.Equal(t, []string{
 		"--openapi", specPath("main"),
 		"--out-swift", outSwift,
 		"--out-plist", outPlist,
-		"--ios-config", filepath.Join(".palbase", "ios", "palbase-config.json"),
-		"--macos-config", filepath.Join(".palbase", "macos", "palbase-config.json"),
+		"--ios-config", filepath.FromSlash(ConfigPath("main", "ios")),
+		"--macos-config", filepath.FromSlash(ConfigPath("main", "macos")),
 	}, got)
 
 	// Committed, not DerivedData: the whole point is that this is diffable.
@@ -147,7 +150,7 @@ func TestGenerateForEnvironments_OnlyLinkedSlotIsPassed(t *testing.T) {
 
 func TestGenerateForEnvironments_StaleOutputIsDeletedAndReported(t *testing.T) {
 	root := linkedProject(t, "ios")
-	genDir := filepath.Join(root, "Palbase", "Generated", "main")
+	genDir := filepath.Join(root, filepath.FromSlash(EnvDir("main")))
 	require.NoError(t, os.MkdirAll(genDir, 0o755))
 	stale := filepath.Join(genDir, "PalbaseGenerated.swift")
 	require.NoError(t, os.WriteFile(stale, []byte("// generated from yesterday's spec"), 0o644))
