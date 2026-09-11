@@ -68,6 +68,10 @@ func WritePlanFile(dir string, p PlanFile) error {
 		return err
 	}
 	rememberOrigin(filepath.Dir(path), dir)
+	// AND DEAD RECORDS GO HERE TOO. The sweep used to run only on the `start`
+	// path, so a machine that plans and pushes without ever starting a local
+	// stack never collected anything — and `plan` is the verb people run most.
+	reapDeadCheckoutState()
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err

@@ -619,27 +619,26 @@ func insecureTransport() http.RoundTripper {
 	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in, documented above
 }
 
-// ensurePalbaseGitignored narrows a directory-wide `.palbase` ignore rule to the
-// ONE file inside it that must not be committed.
+// ensurePalbaseGitignored takes BACK the rules this CLI used to write, and adds
+// none.
 //
-// `.palbase/` is meant to be committed: the contract, the platform slots and the
-// link itself live there, and that is what lets a colleague clone the repository
-// and build without logging in or re-linking. A `.gitignore` carrying `.palbase`
-// or `.palbase/` takes all of it, and the next clone resolves no project and
-// generates no client.
+// It has nothing left to add. Everything this tool writes into a checkout is
+// committed — the contract, the platform configuration, the generated clients,
+// the declaration file — and anything that belongs to the MACHINE rather than
+// the project (`palbase start`'s selection, `palbase plan`'s measurement) lives
+// outside the repository entirely, beside the credentials in
+// `~/.palbase/checkouts/<hash>/`.
 //
-// The narrowed entry is `.palbase/local.json` — the stack running on THIS
-// machine, which is per-machine by definition. It used to be
-// `.palbase/selection.json`; that file no longer decides anything (FR-013), so
-// narrowing to it would have ignored a file nothing writes while leaving the
-// per-machine address committed for everyone else to trip over.
+// What it still does is un-write. A rule outlives the producer that justified
+// it: after the working trees moved to the temp directory and the machine-local
+// files moved out of the checkout, every run still appended lines telling the
+// reader that this CLI writes files it can no longer write. Retiring a producer
+// is two acts — stop writing the file, and un-write what its existence already
+// put in somebody's repository.
 //
-// IT ALSO TAKES RULES BACK. This function could only ever add, so a rule
-// outlived the producer that justified it: after `link`, `build` and `push`
-// moved their working trees into the temp directory, every run still appended
-// five lines telling the reader that this CLI writes directories it can no
-// longer write. Retiring a producer is two acts — stop writing the file, and
-// un-write what its existence already put in the repository.
+// The directory-wide `.palbase` rule is DROPPED rather than narrowed. It used to
+// become `.palbase/local.json`, because exactly one file in there really was
+// per-machine; none is now.
 func ensurePalbaseGitignored(path string) error {
 	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -665,36 +664,21 @@ func ensurePalbaseGitignored(path string) error {
 	// Dropping the line is the honest half of a retirement; `reapRetiredArtifacts`
 	// is the other half, and it has already run by the time link reaches here.
 	lines := strings.Split(string(content), "\n")
-	kept := make([]string, 0, len(lines)+len(generatedProjectPaths))
-	present := map[string]bool{}
+	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		t := strings.TrimSpace(line)
 		if t == ".palbase" || t == ".palbase/" || isRetiredIgnoreRule(line) {
 			continue
 		}
-		if t != "" {
-			present[t] = true
-		}
 		kept = append(kept, line)
 	}
 
-	// STEP 2 — COVER WHAT WE WRITE. Everything this CLI generates into the
-	// project and nothing else; `node_modules/` and `*.log` are the ecosystem's
-	// and are left to whoever curated this file.
-	var missing []string
-	for _, e := range generatedProjectPaths {
-		if e.ours && !present[strings.TrimSpace(e.path)] {
-			missing = append(missing, e.path)
-		}
-	}
-
+	// THERE IS NO STEP 2. A loop here appended "everything this CLI generates
+	// into the project", and that set is now EMPTY — `generatedProjectPaths`
+	// carries only the ecosystem's own rules, which belong to whoever curated
+	// this file. The loop could not add a line and still ran on every link; an
+	// inert step is one more thing a reader has to prove does nothing.
 	updated := strings.Join(kept, "\n")
-	if len(missing) > 0 {
-		if updated != "" && !strings.HasSuffix(updated, "\n") {
-			updated += "\n"
-		}
-		updated += strings.Join(missing, "\n") + "\n"
-	}
 	if updated == string(content) {
 		return nil
 	}
