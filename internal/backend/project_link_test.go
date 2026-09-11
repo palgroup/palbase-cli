@@ -152,6 +152,26 @@ func TestAProjectWithNoPublishableKeyIsRefused(t *testing.T) {
 	}
 }
 
+// readEnvConfig reads ONE environment's platform configuration.
+//
+// The file holds that environment's own fields now, not a map of every
+// environment keyed by name: each environment owns a directory, so the name is
+// the directory and a key inside the file would be a second copy of it. Tests
+// that unmarshalled `appEnvironments` here were reading the shape this
+// migration removed, and got an empty map without an error.
+func readEnvConfig(t *testing.T, env, platform string) appEnvironment {
+	t.Helper()
+	raw, err := os.ReadFile(ConfigPath(env, platform))
+	if err != nil {
+		t.Fatalf("no config for %s/%s: %v", env, platform, err)
+	}
+	var cfg appEnvironment
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("%s/%s config did not parse: %v", env, platform, err)
+	}
+	return cfg
+}
+
 func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	inScratchCheckout(t)
 	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
@@ -163,18 +183,7 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 		t.Fatalf("link: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
-	if err != nil {
-		t.Fatalf("no slot file: %v", err)
-	}
-	var slot appEnvironments
-	if err := json.Unmarshal(raw, &slot); err != nil {
-		t.Fatal(err)
-	}
-	entry, ok := slot.Environments[slot.Default]
-	if !ok {
-		t.Fatalf("the slot has no %q environment: %v", slot.Default, slot.names())
-	}
+	entry := readEnvConfig(t, "main", "ios")
 	// THE assertion. This file is committed and ships inside the app, so the key
 	// in it must be the one that is safe to ship.
 	if entry.APIKey != "pb_project_cPUBLISHABLE" {
@@ -191,8 +200,12 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	// in the field, "project" inside the key — so the web generator refused the
 	// config outright and the iOS realtime client joined a channel nobody
 	// published to. The key is the identity; a copy is only a way to be wrong.
-	if strings.Contains(string(raw), "environment_ref") {
-		t.Errorf("the app's config still carries a second copy of the project identity:\n%s", raw)
+	onDisk, err := os.ReadFile(ConfigPath("main", "ios"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(onDisk), "environment_ref") {
+		t.Errorf("the app's config still carries a second copy of the project identity:\n%s", onDisk)
 	}
 }
 
@@ -211,7 +224,7 @@ func TestLinkingWithoutACredentialWritesNOTHING(t *testing.T) {
 	if err == nil {
 		t.Fatal("linking succeeded with no credential")
 	}
-	if _, statErr := os.Stat(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json")); statErr == nil {
+	if _, statErr := os.Stat(ConfigPath("main", "ios")); statErr == nil {
 		t.Error("a half-linked checkout was written")
 	}
 	// And the refusal names both ways to fix it.
@@ -315,49 +328,69 @@ func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
 		t.Fatalf("link: %v\n%s", err, out.String())
 	}
 
-	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
+	// EVERY ENVIRONMENT HAS ITS OWN DIRECTORY AND ITS OWN FLAT CONFIG.
+	//
+	// This used to read ONE file carrying a map of them all, plus a
+	// `default_environment`. The map is gone: the checkout answers "which
+	// environments do I carry" by what is on disk.
+	for _, env := range []string{"main", localEnvName} {
+		raw, err := os.ReadFile(ConfigPath(env, "ios"))
+		if err != nil {
+			all, _ := filepath.Glob("palbase/environments/*")
+			t.Fatalf("no config for %s: %v\nLINK:\n%s\nDISK: %v", env, err, out.String(), all)
+		}
+
+		var cfg appEnvironment
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("%s: %v", env, err)
+		}
+		if strings.Contains(string(raw), "default_environment") ||
+			strings.Contains(string(raw), `"environments"`) {
+			t.Errorf("%s config still carries the retired map:\n%s", env, raw)
+		}
+		want := srv.URL
+		if env == localEnvName {
+			want = local.URL
+		}
+		if cfg.BaseURL != want {
+			t.Errorf("%s points at %q, want %s", env, cfg.BaseURL, want)
+		}
+	}
+
+	// The local stack's key rides along, as the environment every checkout gets
+	// for free.
+	localRaw, err := os.ReadFile(ConfigPath(localEnvName, "ios"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var slot appEnvironments
-	if err := json.Unmarshal(raw, &slot); err != nil {
+	var localCfg appEnvironment
+	if err := json.Unmarshal(localRaw, &localCfg); err != nil {
 		t.Fatal(err)
 	}
-	if slot.Default != "main" {
-		t.Errorf("the default environment is %q", slot.Default)
-	}
-	if got := slot.Environments["main"].BaseURL; got != srv.URL {
-		t.Errorf("main points at %q", got)
-	}
-	if got := slot.Environments[localEnvName].BaseURL; got != local.URL {
-		t.Errorf("the local environment points at %q, want %s", got, local.URL)
-	}
-	if got := slot.Environments[localEnvName].APIKey; got != "pb_local_cLOCALKEY" {
-		t.Errorf("the local environment carries %q", got)
+	if localCfg.APIKey != "pb_local_cLOCALKEY" {
+		t.Errorf("the local environment carries %q", localCfg.APIKey)
 	}
 
-	// One build configuration per environment, each excluding the others' client.
-	for _, name := range []string{"Main.xcconfig", "Local.xcconfig"} {
-		body, err := os.ReadFile(filepath.Join(dir, "Palbase", "Config", name))
-		if err != nil {
-			t.Fatalf("no %s: %v", name, err)
-		}
-		if !strings.Contains(string(body), "PALBASE_ENV = ") {
-			t.Errorf("%s does not name an environment:\n%s", name, body)
-		}
-		if !strings.Contains(string(body), "EXCLUDED_SOURCE_FILE_NAMES") {
-			t.Errorf("%s does not exclude the other environments' client:\n%s", name, body)
+	// AND NOTHING WAS WRITTEN INTO THE APP'S BUILD SYSTEM. The xcconfigs this
+	// test used to demand are the mechanism the CLI could never finish wiring.
+	// The retired root cannot be probed by NAME on macOS: the filesystem is
+	// case-insensitive, so `Palbase` and `palbase` are the same directory and
+	// `os.Stat("Palbase")` succeeds on the new one. Measured at design time and
+	// it caught this assertion. What IS distinguishable is what used to live
+	// inside it.
+	for _, retired := range []string{
+		filepath.Join(dir, "Palbase", "Config"),
+		filepath.Join(dir, "Palbase", "Generated"),
+	} {
+		if _, err := os.Stat(retired); !os.IsNotExist(err) {
+			t.Errorf("the retired layout was created: %s", retired)
 		}
 	}
-	mainCfg, _ := os.ReadFile(filepath.Join(dir, "Palbase", "Config", "Main.xcconfig"))
-	if !strings.Contains(string(mainCfg), "Generated/local/*") {
-		t.Errorf("the main configuration would compile the local client too:\n%s", mainCfg)
+	if !strings.Contains(out.String(), "EXCLUDED_SOURCE_FILE_NAMES") {
+		t.Errorf("link did not print the selection snippet:\n%s", out.String())
 	}
 }
 
-// TestAStoppedLocalStackStillGetsAnEntry is FR-057: a build configuration that
-// disappears because a container was stopped is a configuration whose absence
-// nobody connects to the container.
 func TestAStoppedLocalStackStillGetsAnEntry(t *testing.T) {
 	inScratchCheckout(t)
 	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
@@ -381,124 +414,15 @@ func TestAStoppedLocalStackStillGetsAnEntry(t *testing.T) {
 		t.Fatalf("link: %v\n%s", err, out.String())
 	}
 
-	raw, _ := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
-	var slot appEnvironments
-	if err := json.Unmarshal(raw, &slot); err != nil {
-		t.Fatal(err)
-	}
-	entry, ok := slot.Environments[localEnvName]
-	if !ok {
-		t.Fatal("the local environment was left out because the stack was down")
-	}
+	// THE LOCAL ENVIRONMENT HAS ITS OWN DIRECTORY, and it must exist even when
+	// the stack is down — an app whose Local configuration disappears with a
+	// stopped container stops compiling for a reason nobody connects to it.
+	entry := readEnvConfig(t, localEnvName, "ios")
 	if entry.APIKey != "" {
 		t.Errorf("a key was invented for a stack that did not answer: %q", entry.APIKey)
 	}
 	if !strings.Contains(out.String(), "palbase start") {
 		t.Errorf("the output does not say how to fill it in:\n%s", out.String())
-	}
-}
-
-// TestAnExplicitInfoPlistIsToldWhatItNeeds is the silent failure this reports:
-// Xcode merges INFOPLIST_KEY_* only into a plist it GENERATES, so a target with
-// an explicit Info.plist gets PALBASE_ENV computed and thrown away. Measured on
-// a real simulator — a build in the Local configuration signed up against the
-// MAIN environment's address while every build setting still read `local`.
-func TestAnExplicitInfoPlistIsToldWhatItNeeds(t *testing.T) {
-	inScratchCheckout(t)
-	dir, _ := os.Getwd()
-	envs := appEnvironments{
-		Default:      "main",
-		Environments: map[string]appEnvironment{"main": {}, "local": {}},
-	}
-
-	// A target whose plist Xcode generates: nothing to say.
-	var quiet strings.Builder
-	reportInfoPlistRequirement(dir, envs, &quiet)
-	if quiet.Len() != 0 {
-		t.Errorf("a generated-plist target was told to edit a file it does not have:\n%s", quiet.String())
-	}
-
-	// An explicit one, without the key.
-	if err := os.MkdirAll(filepath.Join(dir, "MyApp"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	plist := filepath.Join(dir, "MyApp", "Info.plist")
-	if err := os.WriteFile(plist, []byte(`<?xml version="1.0"?><plist><dict>
-  <key>CFBundleName</key><string>MyApp</string>
-</dict></plist>`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// …and a dependency's copy, which is not the app's business.
-	if err := os.MkdirAll(filepath.Join(dir, "Pods", "SomeLib"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "Pods", "SomeLib", "Info.plist"), []byte(`<plist/>`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var out strings.Builder
-	reportInfoPlistRequirement(dir, envs, &out)
-	got := out.String()
-	if !strings.Contains(got, "MyApp/Info.plist") {
-		t.Errorf("the app's plist was not named:\n%s", got)
-	}
-	if strings.Contains(got, "Pods") {
-		t.Errorf("a dependency's plist was named:\n%s", got)
-	}
-	if !strings.Contains(got, "<key>PALBASE_ENV</key>") || !strings.Contains(got, "$(PALBASE_ENV)") {
-		t.Errorf("the exact line to add is missing:\n%s", got)
-	}
-	if !strings.Contains(got, `"main"`) {
-		t.Errorf("it does not say which environment every build would reach instead:\n%s", got)
-	}
-
-	// With the key present, silence.
-	if err := os.WriteFile(plist, []byte(`<?xml version="1.0"?><plist><dict>
-  <key>PALBASE_ENV</key><string>$(PALBASE_ENV)</string>
-</dict></plist>`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var after strings.Builder
-	reportInfoPlistRequirement(dir, envs, &after)
-	if after.Len() != 0 {
-		t.Errorf("a plist that already carries the key was told to add it:\n%s", after.String())
-	}
-}
-
-// TestTheOldFlatClientIsRemoved is the defect that stopped the real app from
-// building at all: one environment used to mean one
-// Palbase/Generated/PalbaseGenerated.swift, and writing the per-environment ones
-// beside it left both in the target. Xcode 16 compiles every file under a
-// synchronized folder, so the build died with "Multiple commands produce
-// PalbaseGenerated.stringsdata" — measured on the real todoapp app, which built
-// again the moment the old file was deleted by hand.
-func TestTheOldFlatClientIsRemoved(t *testing.T) {
-	inScratchCheckout(t)
-	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
-	t.Setenv("HOME", t.TempDir())
-	dir, _ := os.Getwd()
-
-	legacy := filepath.Join(dir, generatedDir, "PalbaseGenerated.swift")
-	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacy, []byte("// the one-environment client"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
-	linkedAs(t, srv.URL, "a-credential")
-
-	var out strings.Builder
-	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
-		t.Fatalf("link: %v\n%s", err, out.String())
-	}
-
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Errorf("the one-environment client survived the link (%v) — the app would not compile", err)
-	}
-	if !strings.Contains(out.String(), "one client per environment") {
-		t.Errorf("the removal was silent:\n%s", out.String())
 	}
 }
 
@@ -510,6 +434,20 @@ func TestTheOldFlatClientIsRemoved(t *testing.T) {
 // backend had no way to reach a cloud project by name, which is exactly the step
 // between `login` and `secret set`. The only thing missing was the suffix, and
 // the configured cloud carries it.
+// EMEKLİ: `TestAnExplicitInfoPlistIsToldWhatItNeeds` ve
+// `TestTheOldFlatClientIsRemoved`.
+//
+// Birincisi `reportInfoPlistRequirement`i ölçüyordu — CLI'ın müşterinin
+// Info.plist'ine anahtar eklemesini İSTEDİĞİ satırı. O talimat silindi: CLI
+// artık uygulamanın build sistemine ne yazar ne de ondan bir şey ister, ve
+// bunun YOKLUĞU `TestLinkLayout`ta ölçülüyor.
+//
+// İkincisi `Palbase/Generated/PalbaseGenerated.swift` düz istemcisinin
+// silindiğini ölçüyordu — ortam başına klasöre geçişin artığı. O yol artık
+// hiç yazılmıyor; bugünkü karşılığı bayat ORTAM dizinlerinin toplanması ve
+// onu `TestOrphanedEnvironmentFolderIsRemovedButForeignFilesAreNot` ölçüyor,
+// üstelik "bizim yazmadığımız dosya silinmez" kuralıyla birlikte.
+
 func TestLink_ResolvesABareRefToItsAddress(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -607,7 +545,7 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	requireWebGenerator(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out), out.String())
 	dir, _ := os.Getwd()
 
-	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
 	if err != nil {
 		t.Fatalf("no web config: %v", err)
 	}
@@ -627,13 +565,13 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	if got, _ := cfg["app_id"].(string); got == "" {
 		t.Error("app_id is empty — palbe-gen refuses the file")
 	}
-	if _, err := os.Stat(filepath.Join(webArtifactsDir, "openapi.json")); err != nil {
+	if _, err := os.Stat(SpecPath("main")); err != nil {
 		t.Errorf("palbe-gen's contract input is missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "Palbase", "Config", "Main.xcconfig")); err == nil {
 		t.Error("a web link wrote an Xcode build configuration")
 	}
-	if _, err := os.Stat(filepath.Join(dir, generatedDir)); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "palbase", "environments")); err == nil {
 		t.Error("a web link produced the Swift client directory")
 	}
 }
@@ -666,10 +604,10 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 
 	// A config from the cloud path, carrying both a field this path cannot
 	// produce and the removed one.
-	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
+	if err := os.MkdirAll(EnvDir("main"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(webArtifactsDir, "palbase-config.json"), []byte(
+	if err := os.WriteFile(ConfigPath("main", webPlatform), []byte(
 		`{"app_id":"app_real","base_url":"https://old.example","api_key":"pb_old_c01234567890123456789",`+
 			`"environment_ref":"deadenv","kind":"production"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -678,7 +616,7 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 	var out strings.Builder
 	requireWebGenerator(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out), out.String())
 
-	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,15 +686,7 @@ func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
 	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
 		t.Fatalf("link: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
-	if err != nil {
-		t.Fatalf("no slot file: %v", err)
-	}
-	var slot appEnvironments
-	if err := json.Unmarshal(raw, &slot); err != nil {
-		t.Fatal(err)
-	}
-	entry := slot.Environments[slot.Default]
+	entry := readEnvConfig(t, "main", "ios")
 	if entry.SealedRoot != root {
 		t.Errorf("the app's config carries sealed_root %q; the stack said %q", entry.SealedRoot, root)
 	}
@@ -778,15 +708,7 @@ func TestAStackWithNoSealingRootStillLinks(t *testing.T) {
 	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
 		t.Fatalf("kok bildirmeyen bir yigin link'i basarisiz yapti: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"))
-	if err != nil {
-		t.Fatalf("no slot file: %v", err)
-	}
-	var slot appEnvironments
-	if err := json.Unmarshal(raw, &slot); err != nil {
-		t.Fatal(err)
-	}
-	if got := slot.Environments[slot.Default].SealedRoot; got != "" {
+	if got := readEnvConfig(t, "main", "ios").SealedRoot; got != "" {
 		t.Errorf("kok bildirmeyen yigin icin sealed_root yazildi: %q", got)
 	}
 }
@@ -888,7 +810,7 @@ func TestUnlinkRemovesTheProjectFile(t *testing.T) {
 	if err := runUnlink(&out); err != nil {
 		t.Fatalf("unlink failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, nativeArtifactsDir, "project.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "palbase", "project.json")); !os.IsNotExist(err) {
 		t.Error("project.json survived the unlink — the checkout is still linked")
 	}
 
@@ -944,13 +866,14 @@ func TestLinkWiresAWebCheckoutEndToEnd(t *testing.T) {
 		t.Errorf("the project's own script did not survive the patch:\n%s", pkg)
 	}
 
-	// The ignore rule was narrowed for every platform, not just web.
-	ignore, err := os.ReadFile(".gitignore")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(ignore), ".palbase/local.json") {
-		t.Errorf(".gitignore does not keep the per-machine address out of git:\n%s", ignore)
+	// AND NO IGNORE FILE IS INVENTED. A curated checkout keeps its own rules;
+	// one that has none is left alone, because this CLI has nothing to ignore:
+	// everything it writes here is committed. `link` only writes a `.gitignore`
+	// where it also scaffolds the project.
+	if ignore, err := os.ReadFile(".gitignore"); err == nil {
+		if strings.Contains(strings.ToLower(string(ignore)), "palbase") {
+			t.Errorf(".gitignore still ignores a palbase path:\n%s", ignore)
+		}
 	}
 }
 
@@ -1013,8 +936,8 @@ func TestAnUnsupportedPlatformIsRefusedBeforeAnythingIsWritten(t *testing.T) {
 	// NOTHING ON DISK. These are what the write path produces, in order; any of
 	// them existing means the refusal came too late.
 	for _, left := range []string{
-		filepath.Join(webArtifactsDir, "palbase-config.json"),
-		filepath.Join(webArtifactsDir, "openapi.json"),
+		ConfigPath("main", webPlatform),
+		SpecPath("main"),
 		filepath.Join(dir, ".palbase", "project.json"),
 		filepath.Join(dir, ".gitignore"),
 	} {

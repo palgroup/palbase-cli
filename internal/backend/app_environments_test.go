@@ -17,7 +17,7 @@ import (
 // aşmıştı; klasör kenara alınınca build GEÇTİ.
 func TestOrphanedEnvironmentFolderIsRemovedButForeignFilesAreNot(t *testing.T) {
 	root := t.TempDir()
-	gen := filepath.Join(root, "Palbase", "Generated")
+	gen := filepath.Join(root, "palbase", "environments")
 	for _, env := range []string{"main", "centauri", "handwritten"} {
 		if err := os.MkdirAll(filepath.Join(gen, env), 0o755); err != nil {
 			t.Fatal(err)
@@ -32,8 +32,8 @@ func TestOrphanedEnvironmentFolderIsRemovedButForeignFilesAreNot(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := removeOrphanedEnvironments(root, []string{"main"}, &out); err != nil {
-		t.Fatalf("removeOrphanedEnvironments: %v", err)
+	if err := removeStaleEnvironmentDirs(root, []string{"main"}, &out); err != nil {
+		t.Fatalf("removeStaleEnvironmentDirs: %v", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(gen, "main")); err != nil {
@@ -63,12 +63,12 @@ func TestOrphanCleanupHasAProductionCaller(t *testing.T) {
 	calls := 0
 	for _, line := range strings.Split(string(b), "\n") {
 		code, _, _ := strings.Cut(line, "//")
-		if strings.Contains(code, "removeOrphanedEnvironments(") && !strings.Contains(code, "func removeOrphanedEnvironments") {
+		if strings.Contains(code, "removeStaleEnvironmentDirs(") && !strings.Contains(code, "func removeStaleEnvironmentDirs") {
 			calls++
 		}
 	}
 	if calls == 0 {
-		t.Fatal("removeOrphanedEnvironments'ın üretim çağıranı YOK — yetim ortam klasörü build'i kırmaya devam eder")
+		t.Fatal("removeStaleEnvironmentDirs'ın üretim çağıranı YOK — yetim ortam klasörü build'i kırmaya devam eder")
 	}
 }
 
@@ -90,10 +90,10 @@ func TestApplePlatformNeedsAnXcodeProjectNotJustAConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	// Yuva dosyası VAR, Xcode projesi YOK — bir backend deposunun hâli.
-	if err := os.MkdirAll(filepath.Join(nativeArtifactsDir, "ios"), 0o755); err != nil {
+	if err := os.MkdirAll(EnvDir("main"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(nativeArtifactsDir, "ios", "palbase-config.json"), []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(ConfigPath("main", "ios"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, apple, _ := linkedPlatforms(); apple {

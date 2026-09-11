@@ -20,7 +20,11 @@ func TestLinkedCommandsReportTargetErrors(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Chdir(t.TempDir())
 				if broken {
-					require.NoError(t, os.MkdirAll(".palbase", 0o755))
+					// `RootDir()`, not a second spelling of it: the directory
+					// this CLI owns is declared in one place, and a test that
+					// names it again is a test that keeps passing through the
+					// rename it was supposed to catch.
+					require.NoError(t, os.MkdirAll(RootDir(), 0o755))
 					require.NoError(t, os.WriteFile(projectPath(), []byte(`{"url":`), 0o644))
 				}
 				cmd := &cobra.Command{Use: "palbase", SilenceErrors: true, SilenceUsage: true}
@@ -30,7 +34,7 @@ func TestLinkedCommandsReportTargetErrors(t *testing.T) {
 				cmd.SetArgs(argv)
 				err := cmd.Execute()
 				if broken {
-					require.ErrorContains(t, err, "read .palbase/project.json")
+					require.ErrorContains(t, err, "read "+projectPath())
 					require.NotContains(t, err.Error(), "not linked")
 				} else {
 					require.ErrorContains(t, err, "palbase link <ref>")

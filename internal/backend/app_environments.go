@@ -25,10 +25,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,9 +68,6 @@ type appEnvironments struct {
 // running on this machine.
 const localEnvName = "local"
 
-// generatedDir is where the per-environment clients live, committed.
-const generatedDir = "Palbase/Generated"
-
 func (a appEnvironments) names() []string {
 	out := make([]string, 0, len(a.Environments))
 	for name := range a.Environments {
@@ -80,214 +77,171 @@ func (a appEnvironments) names() []string {
 	return out
 }
 
-// writeAppEnvironments writes the freshly selected OAuth snapshot. Existing
-// application metadata and independent feature configuration belong to the
-// same backend only; they cannot supply an OAuth fallback.
-func writeAppEnvironments(platform string, envs appEnvironments) (string, error) {
-	dir := filepath.Join(nativeArtifactsDir, platform)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+// writeEnvironmentConfigs writes ONE config per environment per platform, flat,
+// into that environment's own directory.
+//
+// There used to be two writers with two shapes: a native slot that was a MAP of
+// every environment (`{default_environment, environments:{…}}`) and a FLAT web
+// config, because "one app binary is built against several environments, a
+// deployed web app is one". The map existed only because the file lived at ONE
+// path — pointing an app at another environment meant OVERWRITING it. Every
+// environment now has its own directory, so the map has nothing left to do and
+// both platforms write the same flat shape.
+func writeEnvironmentConfigs(platforms []string, envs appEnvironments) ([]string, error) {
+	var written []string
+	for _, env := range envs.names() {
+		fields := envs.Environments[env]
+		for _, platform := range platforms {
+			dest := ConfigPath(env, platform)
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				return nil, err
+			}
+			blob, err := json.MarshalIndent(mergeConfigWithExisting(dest, fields), "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			// 0o600: it carries this environment\'s publishable key. Not a
+			// secret, but not something to widen either.
+			if err := os.WriteFile(dest, append(blob, '\n'), 0o600); err != nil {
+				return nil, err
+			}
+			written = append(written, dest)
+		}
 	}
-	envs = mergeWithExisting(dir, envs)
-	blob, err := json.MarshalIndent(envs, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "palbase-config.json")
-	if err := os.WriteFile(path, append(blob, '\n'), 0o644); err != nil {
-		return "", err
-	}
-	return path, nil
+	return written, nil
 }
 
-// isUnsetAppID identifies the placeholder used by a direct stack link.
-func isUnsetAppID(v string) bool {
-	v = strings.TrimSpace(v)
-	return v == "" || v == projectAppID
-}
-
-func mergeWithExisting(dir string, next appEnvironments) appEnvironments {
-	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
+// mergeConfigWithExisting keeps app metadata this link did not supply.
+//
+// Only for the SAME backend: a value carried over from another project would
+// name a channel nobody else uses (measured 2026-08-25). OAuth is ALWAYS
+// supplied by the current link and never merged — a stale snapshot is a client
+// that signs in against the wrong project.
+//
+// `environment_ref` is not preserved and never was after it was removed: the
+// identity comes from the key and nowhere else, and a copy that must equal its
+// original is not a second fact but a second chance to be wrong.
+func mergeConfigWithExisting(dest string, next appEnvironment) appEnvironment {
+	raw, err := os.ReadFile(dest)
 	if err != nil {
 		return next
 	}
-	var prev appEnvironments
+	var prev appEnvironment
 	if err := json.Unmarshal(raw, &prev); err != nil {
 		return next
 	}
-	for name, env := range next.Environments {
-		old, ok := prev.Environments[name]
-		if !ok || strings.TrimRight(old.BaseURL, "/") != strings.TrimRight(env.BaseURL, "/") {
-			continue
-		}
-		// ANAHTAR VE UYGULAMA KİMLİĞİ de aynı kural: üretilemeyen bir değer,
-		// var olanı silmek için gerekçe değildir.
-		if strings.TrimSpace(env.APIKey) == "" {
-			env.APIKey = old.APIKey
-		}
-		// YER TUTUCU DA "ÜRETİLMEMİŞ"TİR. Yığın-URL yolu `projectAppID` yazıyor
-		// ve bu kod tabanının KENDİSİ onu gerçek bir kimlik saymıyor:
-		// `native_link.go` uygulamanın kaydını ararken `e.AppID != projectAppID`
-		// diye açıkça atlıyor. Gerçek bir kaydı onunla ezmek, bir kimliği
-		// anlamsız bir sabitle değiştirmek olurdu.
-		if isUnsetAppID(env.AppID) && !isUnsetAppID(old.AppID) {
-			env.AppID = old.AppID
-		}
-		if len(env.Notifications) == 0 {
-			env.Notifications = old.Notifications
-		}
-		if len(env.Integrity) == 0 {
-			env.Integrity = old.Integrity
-		}
-		next.Environments[name] = env
+	if prev.BaseURL != next.BaseURL {
+		return next
+	}
+	if len(next.Notifications) == 0 {
+		next.Notifications = prev.Notifications
+	}
+	if len(next.Integrity) == 0 {
+		next.Integrity = prev.Integrity
 	}
 	return next
 }
 
-// writeWebArtifacts writes the two committed files @palbase/web's `palbe-gen`
-// reads, in the shape it actually reads them.
+// removeStaleEnvironmentDirs deletes the directory of an environment the project
+// no longer has.
 //
-// THE WEB SHAPE IS NOT THE NATIVE SHAPE, and the difference is not cosmetic.
-// A native slot is a MAP of environments (`{default_environment, environments:
-// {...}}`) because one app binary is built against several; the web config is
-// FLAT (`{app_id, base_url, api_key}`) because a deployed web app is one
-// environment — `readWebConfig` in palbe/src/gen/generate.ts requires those
-// three fields at the top level and reads nothing else.
-//
-// Writing the native document here (which this path did until 2026-08-25)
-// produces a file with none of the three required fields. `palbe-gen` then
-// refuses it, and nothing upstream reports a failure — every step of the link
-// succeeded.
-//
-// The contract goes in beside it: the native path commits one spec per
-// environment under `.palbase/openapi/`, and `palbe-gen` reads exactly one,
-// `Palbase/openapi.json`.
-func writeWebArtifacts(envs appEnvironments, specs map[string][]byte, w io.Writer) (string, error) {
-	env, ok := envs.Environments[envs.Default]
-	if !ok {
-		return "", fmt.Errorf("internal: no %q environment to write the web config from", envs.Default)
+// Xcode 16 compiles EVERY file under a synchronized folder, so a left-behind
+// environment is not clutter — it is a second generated client in the same
+// target and a build that stops with "Multiple commands produce …
+// PalbaseGenerated.stringsdata". Measured on a real customer app (07.09.2026,
+// centauri): `centauri` had outlived a rename to `main` and the build failed
+// until that folder was moved aside.
+func removeStaleEnvironmentDirs(root string, keep []string, w io.Writer) error {
+	wanted := make(map[string]bool, len(keep))
+	for _, env := range keep {
+		wanted[env] = true
 	}
-	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
-		return "", err
-	}
-	cfg := map[string]any{
-		"app_id":   env.AppID,
-		"base_url": env.BaseURL,
-		"api_key":  env.APIKey,
-	}
-	if env.SealedRoot != "" {
-		cfg["sealed_root"] = env.SealedRoot
-	}
-	if env.OAuth != nil {
-		cfg["oauth"] = env.OAuth
-	}
-	if len(env.Notifications) > 0 {
-		cfg["notifications"] = env.Notifications
-	}
-	if len(env.Integrity) > 0 {
-		cfg["integrity"] = env.Integrity
-	}
-	raw, err := json.MarshalIndent(mergeWebConfigWithExisting(cfg), "", "  ")
+	// From the declaration, never spelled again: this must be exactly the
+	// directory `EnvDir` creates its environments in.
+	base := filepath.Join(root, filepath.Dir(filepath.FromSlash(EnvDir("any"))))
+	entries, err := os.ReadDir(base)
 	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(webArtifactsDir, "palbase-config.json")
-	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
-		return "", err
-	}
-	if spec, ok := specs[envs.Default]; ok {
-		if err := os.WriteFile(filepath.Join(webArtifactsDir, "openapi.json"), spec, 0o644); err != nil {
-			return "", err
+		if os.IsNotExist(err) {
+			return nil
 		}
-		// The ROLE DEFINITIONS of the same environment, beside the contract they
-		// belong to. The generator reads one directory and must not have to be
-		// told twice which environment it is looking at.
-		if err := copyRolesToWeb(envs.Default, w); err != nil {
-			return "", err
-		}
+		return err
 	}
-	return path, nil
-}
-
-// mergeWebConfigWithExisting preserves independent app metadata only for the
-// same backend. OAuth is always supplied by the current link operation.
-func mergeWebConfigWithExisting(next map[string]any) map[string]any {
-	raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
-	if err != nil {
-		return next
-	}
-	var prev map[string]any
-	if err := json.Unmarshal(raw, &prev); err != nil {
-		return next
-	}
-	// A native document that an earlier run of THIS path left here is not a web
-	// config; there is nothing in it to preserve.
-	if _, isNativeShape := prev["environments"]; isNativeShape {
-		return next
-	}
-	if previous, _ := prev["base_url"].(string); strings.TrimRight(previous, "/") != strings.TrimRight(fmt.Sprint(next["base_url"]), "/") {
-		return next
-	}
-	out := map[string]any{}
-	for k, v := range prev {
-		// PRESERVING WHAT A WRITER CANNOT PRODUCE IS NOT PRESERVING WHAT THE
-		// CONTRACT DELETED. `environment_ref` was taken out on purpose — the
-		// identity comes from the key and from nowhere else, and a copy that
-		// must equal its original is not a second fact but a second chance to
-		// be wrong. The cloud writer already drops it (it rewrites the document
-		// whole); merging carried it forward, so a re-link onto a NEW project
-		// left the file naming the OLD environment (measured 2026-08-25,
-		// palai-cloud: `"environment_ref": "palaicloudm"` survived a re-link to
-		// a project called something else entirely).
-		if k == removedEnvironmentRefField || k == "sealed_root" || k == "oauth" || k == "auth" || k == "socialAuth" {
+	for _, e := range entries {
+		if !e.IsDir() || wanted[e.Name()] {
 			continue
 		}
-		out[k] = v
-	}
-	for k, v := range next {
-		if str, isStr := v.(string); isStr && strings.TrimSpace(str) == "" {
-			continue
+		dir := filepath.Join(base, e.Name())
+		inside, err := os.ReadDir(dir)
+		if err != nil {
+			return err
 		}
-		// The placeholder is "not produced" too — the same rule the native
-		// merge applies, and for the same reason: overwriting a real
-		// registration with a constant replaces an identity with nothing.
-		if k == "app_id" {
-			if str, _ := v.(string); isUnsetAppID(str) {
-				if old, _ := prev["app_id"].(string); !isUnsetAppID(old) {
-					continue
-				}
+		ours := true
+		for _, f := range inside {
+			if !isGeneratedEnvironmentFile(f.Name()) {
+				ours = false
+				break
 			}
 		}
-		out[k] = v
+		if !ours {
+			// A WRITER MUST NOT DELETE WHAT IT CANNOT REPRODUCE. The developer
+			// gets the path and the reason; the build error they would otherwise
+			// chase is spelled out for them.
+			fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase "+
+				"did not write — Xcode compiles everything under palbase/environments, so move it "+
+				"aside if the build reports \"Multiple commands produce\"\n", dir)
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "removed %s (the project no longer has that environment)\n", dir)
 	}
-	return out
+	return nil
+}
+
+// isGeneratedEnvironmentFile reports whether this CLI wrote a file by that name
+// into an environment directory. Derived from C-1 so a new artifact cannot be
+// forgotten here and turn a cleanup into a refusal.
+func isGeneratedEnvironmentFile(name string) bool {
+	const probe = "probe"
+	known := []string{
+		path.Base(SpecPath(probe)), path.Base(RolesPath(probe)), path.Base(PlistPath(probe)),
+		path.Base(GeneratedPath(probe, "ios")), path.Base(GeneratedPath(probe, webPlatform)),
+	}
+	for _, platform := range []string{"ios", "macos", "android", webPlatform} {
+		known = append(known, path.Base(ConfigPath(probe, platform)))
+	}
+	for _, k := range known {
+		if k != "" && k == name {
+			return true
+		}
+	}
+	return false
 }
 
 // removedEnvironmentRefField is a field this contract no longer has. It is named
 // here so a writer can refuse to carry it forward rather than merely not emit it.
 const removedEnvironmentRefField = "environment_ref"
 
-// specPath is where one environment's contract is committed.
-func specPath(env string) string {
-	return filepath.Join(nativeArtifactsDir, "openapi", env+".json")
-}
+// specPath is where one environment's contract is committed — C-1 owns the
+// shape; this name stays so the call sites read as they always did.
+func specPath(env string) string { return SpecPath(env) }
 
 // rolesPath is where one environment's ROLE DEFINITIONS are committed: beside
-// its contract, in the same directory, differing only in extension.
+// its contract, in the same directory, differing only in name.
 //
 // Beside it rather than in a directory of its own because the two documents
 // describe the same environment at the same moment and are fetched by one act —
 // and because a generator handed the spec can then find the roles BY RULE
 // instead of by a second setting somebody has to keep in step. `palbase-swiftgen`
-// and `palbe-gen` live in other repositories and cannot call this function; the
-// rule is the only thing they can share.
-func rolesPath(env string) string {
-	return filepath.Join(nativeArtifactsDir, "openapi", env+".roles.json")
-}
-
-// webRolesPath is the same document where the web SDK reads it: beside the ONE
-// contract `palbe-gen` takes, for the same reason openapi.json is there.
-func webRolesPath() string { return filepath.Join(webArtifactsDir, "roles.json") }
+// and `palbe-gen` live in other packages and cannot call this function; the rule
+// is the only thing they can share.
+//
+// THERE IS NO SECOND COPY ANY MORE. The web SDK used to read its own
+// `Palbase/roles.json`, mirrored here by `copyRolesToWeb` — two committed files
+// with the same bytes, and a generator that could be handed a stale one. Both
+// generators now read this one.
+func rolesPath(env string) string { return RolesPath(env) }
 
 // stackRole is one role definition as the generators need it.
 //
@@ -427,91 +381,6 @@ func writeRolesArtifact(path string, roles stackRoles) error {
 		return err
 	}
 	return os.WriteFile(path, append(blob, '\n'), 0o644)
-}
-
-// copyRolesToWeb mirrors one environment's role definitions into the web SDK's
-// directory, beside the contract that came from the same environment.
-//
-// A COPY, not a second fetch: the round that wrote the native artifact already
-// asked, and asking twice is two chances for two files to disagree about one
-// stack. Nothing to copy leaves the web file alone — absence means "not
-// fetched", never "none", and the same rule refreshRoles keeps applies here.
-func copyRolesToWeb(env string, w io.Writer) error {
-	raw, err := os.ReadFile(rolesPath(env))
-	if errors.Is(err, os.ErrNotExist) {
-		// YOKLUK SESSİZ OLAMAZ — ve buradaki yokluk normaldir, bu yüzden hata
-		// değil bir CÜMLE.
-		//
-		// `link` yayımlanabilir anahtarla koşuyor, rol ucu ise service_role
-		// kapılı: link rolleri çekemez ve çekmemeli. Ama sessizce geçtiğinde
-		// geliştiricinin gördüğü şey şuydu — link "başarılı" diyor, `palbe-gen`
-		// koşuyor, ve üretilen istemcide `Roles`/`Permissions` sabitleri hiç
-		// olmuyor. Kimse sebebini söylemiyor, ve eksik bir sabit derleme hatası
-		// bile vermiyor: kod düz string yazmaya devam ediyor, yani sunucunun
-		// 403'lediği bir izin adı sessizce yaşıyor.
-		fmt.Fprintf(w, "roles: no %s — role definitions are fetched by `palbase spec`, not by link\n", rolesPath(env))
-		fmt.Fprintf(w, "roles: until you run it, the generated client carries NO Roles/Permissions constants\n")
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(webArtifactsDir, 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(webRolesPath(), raw, 0o644)
-}
-
-// writeXcconfigs writes one build configuration per environment.
-//
-// Two settings each, and both are load-bearing. PALBASE_ENV names the
-// environment and reaches the app through its Info.plist, which is where the SDK
-// reads it — a build setting alone would be invisible at run time. The exclusion
-// list keeps the OTHER environments' generated clients out of the compile, so
-// "which endpoints exist" is decided by the same configuration that decides
-// which address they are called at.
-func writeXcconfigs(root string, envs appEnvironments, w io.Writer) error {
-	dir := filepath.Join(root, "Palbase", "Config")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	names := envs.names()
-	for _, name := range names {
-		var excluded []string
-		for _, other := range names {
-			if other != name {
-				excluded = append(excluded, fmt.Sprintf("*/%s/%s/*", filepath.Base(generatedDir), other))
-			}
-		}
-		body := fmt.Sprintf(`// GENERATED by palbase link — do not edit.
-//
-// Build with this configuration and the app talks to the %q environment: the SDK
-// reads PALBASE_ENV from the Info.plist, and only this environment's generated
-// client is compiled.
-
-PALBASE_ENV = %s
-INFOPLIST_KEY_PALBASE_ENV = $(PALBASE_ENV)
-EXCLUDED_SOURCE_FILE_NAMES = $(inherited) %s
-`, name, name, strings.Join(excluded, " "))
-
-		path := filepath.Join(dir, xcconfigName(name))
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-			return err
-		}
-		fmt.Fprintf(w, "wrote %s\n", path)
-	}
-	return nil
-}
-
-// xcconfigName is the file an Xcode configuration points at. Capitalised because
-// that is how build configurations are named in every Xcode project ever
-// created, and a file called `local.xcconfig` next to a configuration called
-// `Local` reads as a different thing.
-func xcconfigName(env string) string {
-	if env == "" {
-		return "Palbase.xcconfig"
-	}
-	return strings.ToUpper(env[:1]) + env[1:] + ".xcconfig"
 }
 
 // reportContractDrift says which endpoints one environment has and another does
@@ -747,36 +616,8 @@ func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.W
 	if err != nil {
 		return err
 	}
-	// THE OLD FLAT CLIENT GOES FIRST.
-	//
-	// One environment used to mean one Palbase/Generated/PalbaseGenerated.swift.
-	// Writing the per-environment ones beside it leaves BOTH in the target —
-	// Xcode 16's synchronized groups compile every file under the folder — and
-	// the app stops building at all: "Multiple commands produce
-	// PalbaseGenerated.stringsdata". Measured on the real todoapp app, which
-	// failed immediately after a relink and built again the moment the old file
-	// was deleted by hand.
-	//
-	// Deleted rather than left for the person to find: it is OUR file, it is
-	// regenerated content, and its only remaining effect is to break the build.
-	legacy := filepath.Join(root, generatedDir, "PalbaseGenerated.swift")
-	if err := os.Remove(legacy); err == nil {
-		fmt.Fprintf(w, "removed %s (one client per environment now)\n", legacy)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	// THE SAME BREAK, THE OTHER SHAPE: a folder for an environment that no
-	// longer exists.
-	//
-	// Renaming an environment leaves its generated folder behind, and Xcode 16's
-	// synchronized groups compile every file under Palbase/Generated — so the app
-	// stops building with exactly the error above. Measured on a real customer
-	// app (07.09.2026, centauri): `Palbase/Generated/centauri` had outlived a
-	// rename to `main`, the build failed with "Multiple commands produce …
-	// PalbaseGenerated.stringsdata", and it succeeded the moment that folder was
-	// moved aside.
-	if err := removeOrphanedEnvironments(root, envs.names(), w); err != nil {
+	// A LEFT-BEHIND ENVIRONMENT BREAKS THE BUILD, so it goes first.
+	if err := removeStaleEnvironmentDirs(root, envs.names(), w); err != nil {
 		return err
 	}
 
@@ -786,190 +627,104 @@ func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.W
 	tool, err := ensureSwiftgenTool(toolRoot, w)
 	if err != nil {
 		// The staged link cannot publish a spec without its matching client.
-		stale := []string{filepath.Join(root, generatedDir, "Palbase-Info.plist")}
+		var stale []string
 		for _, env := range envs.names() {
-			stale = append(stale, filepath.Join(root, generatedDir, env, "PalbaseGenerated.swift"))
+			stale = append(stale, filepath.Join(root, filepath.FromSlash(GeneratedPath(env, "ios"))))
+			stale = append(stale, filepath.Join(root, filepath.FromSlash(PlistPath(env))))
 		}
 		return discardStaleGenerated(err, w, stale...)
 	}
 
-	// The two halves are requested separately: one client per environment, and
-	// the plist ONCE. The generator accepts either half alone, which is what
-	// makes that possible — asking for the plist alongside every client would
-	// write the same bytes N times and read as though the environment mattered
-	// to it, when the plist is built from the config files and nothing else.
+	// ONE CLIENT AND ONE PLIST PER ENVIRONMENT, both inside that environment's
+	// own directory. The plist used to be written ONCE for all of them, because
+	// it carried a map the app indexed by name at runtime; it is now one file
+	// per environment and the BUILD picks which one enters the bundle.
 	for _, env := range envs.names() {
 		spec := specPath(env)
 		if !isRegularFile(spec) {
 			// An environment whose contract has not been fetched — the local
-			// stack while it is down. Its plist entry exists; its client cannot,
-			// and inventing an empty one would compile and then 404.
+			// stack while it is down. Inventing an empty client would compile
+			// and then 404.
 			continue
 		}
-		outDir := filepath.Join(root, generatedDir, env)
-		if err := os.MkdirAll(outDir, 0o755); err != nil {
+		out := filepath.Join(root, filepath.FromSlash(GeneratedPath(env, "ios")))
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 			return err
 		}
-		out := filepath.Join(outDir, "PalbaseGenerated.swift")
 		cmd := exec.CommandContext(ctx, tool, "--openapi", spec, "--out-swift", out)
 		cmd.Stderr = w
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("palbase-swiftgen (%s): %w", env, err)
 		}
 		fmt.Fprintf(w, "✓ wrote %s\n", out)
-	}
 
-	var configFlags []string
-	for _, platform := range []string{"ios", "macos"} {
-		cfg := filepath.Join(nativeArtifactsDir, platform, "palbase-config.json")
-		if isRegularFile(cfg) {
-			configFlags = append(configFlags, "--"+platform+"-config", cfg)
+		var configFlags []string
+		for _, platform := range []string{"ios", "macos"} {
+			cfg := ConfigPath(env, platform)
+			if isRegularFile(cfg) {
+				configFlags = append(configFlags, "--"+platform+"-config", cfg)
+			}
 		}
+		if len(configFlags) == 0 {
+			continue // no Apple slot in this checkout
+		}
+		plist := filepath.Join(root, filepath.FromSlash(PlistPath(env)))
+		cmd = exec.CommandContext(ctx, tool, append([]string{"--out-plist", plist}, configFlags...)...)
+		cmd.Stderr = w
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("palbase-swiftgen (plist, %s): %w", env, err)
+		}
+		fmt.Fprintf(w, "✓ wrote %s\n", plist)
 	}
-	if len(configFlags) == 0 {
-		return nil // no Apple slot in this checkout
-	}
-	plist := filepath.Join(root, generatedDir, "Palbase-Info.plist")
-	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, tool, append([]string{"--out-plist", plist}, configFlags...)...)
-	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("palbase-swiftgen (plist): %w", err)
-	}
-	fmt.Fprintf(w, "✓ wrote %s (%s)\n", plist, strings.Join(envs.names(), ", "))
 	return nil
 }
 
 // readAppEnvironments reads back what the link wrote for one platform.
+//
+// It walks the environment directories and reassembles the map callers still
+// think in — the map is gone from DISK, not from the CLI's own vocabulary:
+// `status` and the drift report legitimately ask "which environments does this
+// checkout carry", and that question is now answered by what is on disk rather
+// than by a field somebody could have edited.
 func readAppEnvironments(platform string) (appEnvironments, error) {
-	dir := filepath.Join(nativeArtifactsDir, platform)
-	raw, err := os.ReadFile(filepath.Join(dir, "palbase-config.json"))
+	// Same declaration as the writer's: a walk that spells the root itself
+	// would keep reading the old one after a rename.
+	base := filepath.Dir(filepath.FromSlash(EnvDir("any")))
+	entries, err := os.ReadDir(base)
 	if os.IsNotExist(err) {
 		return appEnvironments{}, nil
 	}
 	if err != nil {
 		return appEnvironments{}, err
 	}
-	var envs appEnvironments
-	if err := json.Unmarshal(raw, &envs); err != nil {
-		return appEnvironments{}, fmt.Errorf("read the app's environments: %w", err)
-	}
-	return envs, nil
-}
-
-// reportInfoPlistRequirement says the one thing an xcconfig cannot do by itself.
-//
-// The xcconfig sets PALBASE_ENV and INFOPLIST_KEY_PALBASE_ENV, and the second is
-// how the value was meant to reach the app. Xcode merges INFOPLIST_KEY_* only
-// into a plist it GENERATES (GENERATE_INFOPLIST_FILE = YES); a target with an
-// explicit Info.plist gets the setting computed and thrown away. Measured on a
-// real simulator: a build in the Local configuration signed up against the MAIN
-// environment's address while every build setting still read `local`.
-//
-// That is the worst shape a failure can take here — the app talks to production
-// while everything on screen says otherwise — so it is reported at the moment
-// the configurations are written, with the exact line to add.
-func reportInfoPlistRequirement(root string, envs appEnvironments, w io.Writer) {
-	plists := appInfoPlists(root)
-	if len(plists) == 0 {
-		// A target whose plist Xcode generates: INFOPLIST_KEY_PALBASE_ENV does
-		// reach it, and there is nothing to add.
-		return
-	}
-	var missing []string
-	for _, path := range plists {
-		body, err := os.ReadFile(path)
-		if err != nil || !strings.Contains(string(body), "PALBASE_ENV") {
-			rel, relErr := filepath.Rel(root, path)
-			if relErr != nil {
-				rel = path
-			}
-			missing = append(missing, rel)
-		}
-	}
-	if len(missing) == 0 {
-		return
-	}
-	sort.Strings(missing)
-	fmt.Fprintf(w, "\nADD THIS to %s, or every configuration will build against %q:\n",
-		strings.Join(missing, " and "), envs.Default)
-	fmt.Fprintln(w, "    <key>PALBASE_ENV</key>")
-	fmt.Fprintln(w, "    <string>$(PALBASE_ENV)</string>")
-	fmt.Fprintln(w, "  Xcode expands INFOPLIST_KEY_* only into a plist it generates itself; an")
-	fmt.Fprintln(w, "  explicit one has to name the key, and then the build configuration decides.")
-}
-
-// appInfoPlists finds the Info.plist files that belong to this app, skipping the
-// places a dependency's copy lives.
-func appInfoPlists(root string) []string {
-	var found []string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case "node_modules", "Pods", ".git", "build", "DerivedData", ".build", "Carthage":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == "Info.plist" {
-			found = append(found, path)
-		}
-		return nil
-	})
-	return found
-}
-
-// removeOrphanedEnvironments deletes generated folders whose environment the
-// project no longer declares.
-//
-// Deleted on the same grounds as the single-file legacy above: it is OUR
-// generated content, it belongs to no environment this project declares, and
-// its only remaining effect is to break the build. A folder holding anything we
-// did not write is LEFT ALONE and named instead — a writer must not delete what
-// it cannot reproduce.
-func removeOrphanedEnvironments(root string, live []string, w io.Writer) error {
-	declared := map[string]bool{}
-	for _, env := range live {
-		declared[env] = true
-	}
-	entries, err := os.ReadDir(filepath.Join(root, generatedDir))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
+	out := appEnvironments{Environments: map[string]appEnvironment{}}
 	for _, e := range entries {
-		if !e.IsDir() || declared[e.Name()] {
+		if !e.IsDir() {
 			continue
 		}
-		dir := filepath.Join(root, generatedDir, e.Name())
-		inside, err := os.ReadDir(dir)
-		if err != nil {
-			return err
-		}
-		ours := true
-		for _, f := range inside {
-			if f.Name() != "PalbaseGenerated.swift" {
-				ours = false
-				break
-			}
-		}
-		if !ours {
-			fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase did not write — "+
-				"Xcode compiles everything under %s, so move it aside if the build reports "+
-				"\"Multiple commands produce\"\n", dir, generatedDir)
+		raw, readErr := os.ReadFile(ConfigPath(e.Name(), platform))
+		if os.IsNotExist(readErr) {
 			continue
 		}
-		if err := os.RemoveAll(dir); err != nil {
-			return err
+		if readErr != nil {
+			return appEnvironments{}, readErr
 		}
-		fmt.Fprintf(w, "removed %s (no environment by that name any more)\n", dir)
+		var env appEnvironment
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return appEnvironments{}, fmt.Errorf("read %s: %w", ConfigPath(e.Name(), platform), err)
+		}
+		out.Environments[e.Name()] = env
 	}
-	return nil
+	// `local` is never the default: a build that forgot to say which environment
+	// it wanted must not silently talk to a developer's laptop.
+	for _, name := range out.names() {
+		if name != localEnvName {
+			out.Default = name
+			break
+		}
+	}
+	if out.Default == "" && len(out.Environments) > 0 {
+		out.Default = out.names()[0]
+	}
+	return out, nil
 }

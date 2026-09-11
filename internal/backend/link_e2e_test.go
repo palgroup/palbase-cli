@@ -95,7 +95,7 @@ func TestTheWholeChainFromInitToLink(t *testing.T) {
 	// NO SILENT SKIP. This read used to be wrapped in `if err == nil`, and the
 	// file never existed, so the one assertion this test was written for never
 	// ran once. A missing file is now the failure it always was.
-	projectFile := filepath.Join(dir, ".palbase", "project.json")
+	projectFile := filepath.Join(dir, filepath.FromSlash(projectPath()))
 	body, err := os.ReadFile(projectFile)
 	if err != nil {
 		t.Fatalf("link wrote no %s, so the checkout is not bound and `push` cannot work: %v\n%s",

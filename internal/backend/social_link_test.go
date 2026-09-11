@@ -68,7 +68,7 @@ func TestOAuthBindingRejectsRetiredAndAmbiguousFields(t *testing.T) {
 	} {
 		t.Run(fields, func(t *testing.T) {
 			t.Chdir(t.TempDir())
-			require.NoError(t, os.MkdirAll(".palbase", 0755))
+			require.NoError(t, os.MkdirAll(filepath.Dir(projectPath()), 0755))
 			raw := []byte(`{"url":"https://stack.example",` + fields + `}`)
 			require.NoError(t, os.WriteFile(projectPath(), raw, 0644))
 			_, err := readLinkedProject()
@@ -104,7 +104,7 @@ func TestFirstLinkCannotSucceedWithoutWebGenerator(t *testing.T) {
 	linkedAs(t, srv.URL, "operator")
 	require.ErrorContains(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, io.Discard), "generator is unavailable")
 	require.NoFileExists(t, "palbe.gen.ts")
-	require.NoFileExists(t, filepath.Join(webArtifactsDir, "palbase-config.json"))
+	require.NoFileExists(t, ConfigPath("main", webPlatform))
 	raw, err := os.ReadFile("package.json")
 	require.NoError(t, err)
 	require.Equal(t, minimalPkgJSON(), string(raw))

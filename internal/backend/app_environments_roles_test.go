@@ -21,13 +21,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The two places a generator looks. `.palbase/openapi/<env>.json` is the
-// native contract, so the roles for that environment sit beside it; the web
-// SDK reads one contract out of `Palbase/`, so its roles sit beside that one.
-const (
-	nativeRolesForMain = ".palbase/openapi/main.roles.json"
-	webRoles           = "Palbase/roles.json"
-)
+// THE ONE PLACE A GENERATOR LOOKS. There used to be two, and the pair is what
+// this migration removes: the native contract lived under `.palbase/openapi/`
+// with its roles beside it, and the web SDK read a SECOND copy out of
+// `Palbase/` — the same bytes, committed twice. Every generator now reads one
+// environment's directory, so an environment has exactly one roles document and
+// "which copy is stale" stops being a question anybody can ask.
+var rolesForMain = RolesPath("main")
 
 // specRoundStack stands up a stack that answers the two questions a spec round
 // asks it, and links this checkout to it with a web slot present.
@@ -51,11 +51,12 @@ func specRoundStack(t *testing.T, roles http.HandlerFunc) *httptest.Server {
 	require.NoError(t, WriteTarget(Target{URL: srv.URL}))
 	require.NoError(t, StoreCredential(srv.URL, Credentials{Kind: KindKey, Value: "pb_secret_test"}))
 
-	// The web slot. `palbe-gen` reads its contract from Palbase/, and
-	// linkedPlatforms decides a checkout is a web one by this file existing.
-	require.NoError(t, os.MkdirAll(webArtifactsDir, 0o755))
+	// The web config, in its environment's own directory. `linkedPlatforms`
+	// decides a checkout is a web one by this file existing under ANY
+	// environment.
+	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(webArtifactsDir, "palbase-config.json"),
+		ConfigPath("main", webPlatform),
 		[]byte(`{"app_id":"app_1","base_url":"`+srv.URL+`","api_key":"pb_x"}`), 0o600))
 	return srv
 }
@@ -92,7 +93,7 @@ func TestSpecRoles_LandBesideTheContract(t *testing.T) {
 
 	require.NoError(t, RefreshSpec(t.Context(), os.Stderr))
 
-	for _, path := range []string{nativeRolesForMain, webRoles} {
+	for _, path := range []string{rolesForMain} {
 		doc := readRolesDoc(t, path)
 		require.Len(t, doc.Roles, 2, "%s", path)
 
@@ -123,7 +124,7 @@ func TestSpecRoles_OldStackWritesEmptyAndDoesNotFail(t *testing.T) {
 
 	require.NoError(t, RefreshSpec(t.Context(), os.Stderr))
 
-	for _, path := range []string{nativeRolesForMain, webRoles} {
+	for _, path := range []string{rolesForMain} {
 		doc := readRolesDoc(t, path)
 		require.NotNil(t, doc.Roles, "%s: an empty list, never null — null reads as \"unknown\"", path)
 		require.Empty(t, doc.Roles, "%s", path)
@@ -140,13 +141,12 @@ func TestSpecRoles_ARefusalLeavesTheArtifactAlone(t *testing.T) {
 	})
 
 	known := []byte(`{"roles":[{"name":"admin","isDefault":false,"permissions":["todos.delete_any"]}]}` + "\n")
-	require.NoError(t, os.MkdirAll(filepath.Dir(nativeRolesForMain), 0o755))
-	require.NoError(t, os.WriteFile(nativeRolesForMain, known, 0o644))
-	require.NoError(t, os.WriteFile(webRoles, known, 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Dir(rolesForMain), 0o755))
+	require.NoError(t, os.WriteFile(rolesForMain, known, 0o644))
 
 	require.NoError(t, RefreshSpec(t.Context(), os.Stderr), "the contract was fetched; roles are an addendum")
 
-	for _, path := range []string{nativeRolesForMain, webRoles} {
+	for _, path := range []string{rolesForMain} {
 		require.Equal(t, known, mustRead(t, path), "%s was overwritten with what the stack never said", path)
 	}
 }

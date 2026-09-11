@@ -3,8 +3,6 @@ package backend
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -15,10 +13,10 @@ func TestWebConfigCarriesCurrentSealingRoot(t *testing.T) {
 		envs := appEnvironments{Default: "main", Environments: map[string]appEnvironment{
 			"main": {AppID: "project", BaseURL: "http://127.0.0.1:1234", APIKey: "pb_project_cPUBLISHABLE", SealedRoot: currentRoot},
 		}}
-		if _, err := writeWebArtifacts(envs, nil, &strings.Builder{}); err != nil {
+		if _, err := writeEnvironmentConfigs([]string{webPlatform}, envs); err != nil {
 			t.Fatal(err)
 		}
-		raw, err := os.ReadFile(filepath.Join(webArtifactsDir, "palbase-config.json"))
+		raw, err := os.ReadFile(ConfigPath("main", webPlatform))
 		if err != nil {
 			t.Fatal(err)
 		}
