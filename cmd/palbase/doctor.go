@@ -175,8 +175,9 @@ func doctorCmd() *cobra.Command {
 			}
 
 			// The link this CLI acts on is a TARGET: a stack address in
-			// .palbase/project.json, written by `palbase link` (or by
-			// `palbase start` for a stack on this machine). Reporting the v1
+			// palbase/project.json, written by `palbase link` (or, for a
+			// stack on this machine, tracked outside the checkout by
+			// `palbase start` — see backend.LocalStatePath). Reporting the v1
 			// project/environment selection instead would send a person to
 			// `palbase project use`, a verb that no longer exists — the v2
 			// cloud has one project per tenant and one address per project.

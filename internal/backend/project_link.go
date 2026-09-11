@@ -59,6 +59,43 @@ type linkOpts struct {
 	out   string
 }
 
+// linkHelpWritesBlock renders the "It writes:" table shown by
+// `palbase link --help`, FROM the same functions (layout.go's RootDir/EnvDir/
+// ConfigPath/SpecPath/GeneratedPath, target.go's projectPath) that decide
+// where `link` actually writes — not spelled out here a second time.
+//
+// This text used to be a hand-written copy of the layout, and it drifted: it
+// still named `.palbase/project.json`, `.palbase/<platform>/palbase-config.json`,
+// `.palbase/openapi/<env>.json` and `Palbase/Generated/` after all four moved
+// to the visible, environment-scoped `palbase/` tree (measured 11.09.2026).
+// `template/AGENTS.md` tells a scaffolded project's agent that "`palbase
+// --help` is authoritative; a copy of the command surface inside this
+// repository goes stale silently" — this function is what keeps that promise
+// for `link` itself: there is no second copy left to go stale.
+func linkHelpWritesBlock() string {
+	const env, platform = "<env>", "<platform>"
+	rows := []struct {
+		path string
+		what string
+	}{
+		{projectPath(), "the project this checkout belongs to"},
+		{ConfigPath(env, platform), "the app's URL + publishable key"},
+		{SpecPath(env), "the contract, one per environment"},
+		{GeneratedPath(env, "ios"), "(apple) the committed Swift client"},
+	}
+	width := 0
+	for _, row := range rows {
+		if len(row.path) > width {
+			width = len(row.path)
+		}
+	}
+	var b strings.Builder
+	for _, row := range rows {
+		fmt.Fprintf(&b, "  %-*s   %s\n", width, row.path, row.what)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func newLinkCmd(r Resolvers) *cobra.Command {
 	var o linkOpts
 	cmd := &cobra.Command{
@@ -78,10 +115,7 @@ stack it just brought up), from ` + "`palbase login`" + `, or from PALBASE_ACCES
 
 It writes:
 
-  .palbase/project.json                     the project this checkout belongs to
-  .palbase/<platform>/palbase-config.json   the app's URL + publishable key
-  .palbase/openapi/<env>.json               the contract, one per environment
-  Palbase/Generated/                        (apple) the committed Swift client
+` + linkHelpWritesBlock() + `
 
 Run it again after every ` + "`palbase push`" + ` — or just ` + "`palbase spec`" + `, which
 refreshes the contract alone, because that is the part that changed.
@@ -512,7 +546,9 @@ func validatePlatforms(platforms []string) error {
 //
 // The old `web unlink` deleted the SELECTION — a second addressing mechanism on
 // its way out — and pointed the reader at `palbase web link`, a command on its
-// way out too. What makes a checkout linked is .palbase/project.json.
+// way out too. What makes a checkout linked is projectPath() — today
+// `palbase/project.json`; it used to be `.palbase/project.json`, the retired
+// hidden root, which is why this is asked for rather than spelled out here.
 //
 // AN ALREADY-UNLINKED CHECKOUT IS NOT AN ERROR: the caller asked to end up
 // somewhere, and it is already there.

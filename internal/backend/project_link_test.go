@@ -936,3 +936,42 @@ func TestAnUnsupportedPlatformIsRefusedBeforeAnythingIsWritten(t *testing.T) {
 		}
 	}
 }
+
+// TestLinkHelpNamesTheRealPaths: `palbase link --help` is what a person reads
+// to find out what this command touches, and it is the ONLY place that text
+// lives — `template/AGENTS.md` tells the agent reading a scaffolded project
+// that "`palbase --help` is authoritative; a copy of the command surface
+// inside this repository goes stale silently". So the help text itself must
+// not be that stale copy: it has to be built FROM the same functions
+// (layout.go's RootDir/EnvDir/ConfigPath/SpecPath/GeneratedPath, and target.go's
+// projectPath) that decide where `link` actually writes, not spelled out by
+// hand a second time.
+//
+// Measured 11.09.2026: the `Long` field named `.palbase/project.json`,
+// `.palbase/<platform>/palbase-config.json`, `.palbase/openapi/<env>.json` and
+// `Palbase/Generated/` — a layout this CLI retired. Nobody edited this text
+// when the layout moved to the visible, environment-scoped `palbase/` tree,
+// because nothing measures it against the paths the code actually writes.
+func TestLinkHelpNamesTheRealPaths(t *testing.T) {
+	cmd := newLinkCmd(Resolvers{})
+	long := cmd.Long
+	require.NotEmpty(t, long)
+
+	const env, platform = "<env>", "<platform>"
+	for _, want := range []string{
+		projectPath(),
+		ConfigPath(env, platform),
+		SpecPath(env),
+		GeneratedPath(env, "ios"),
+	} {
+		require.Contains(t, long, want,
+			"help text must name a path this command actually writes, derived from layout.go/target.go")
+	}
+
+	// The retired layout must not survive anywhere in this text — not as the
+	// paths above, and not in some other sentence that still assumes it.
+	require.NotContains(t, long, ".palbase/",
+		"help text must not resurrect the retired hidden root")
+	require.NotContains(t, long, "Palbase/Generated",
+		"help text must not resurrect the retired visible-root layout")
+}

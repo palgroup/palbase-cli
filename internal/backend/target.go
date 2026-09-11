@@ -4,21 +4,25 @@ package backend
 //
 // TWO facts, in two places, because they belong to different people.
 //
-// The TARGET is a fact about the PROJECT: `.palbase/project.json`, committed, so
-// a colleague who clones the repository reaches the same place without being
-// told which one it is. It names either a cloud project and environment, or a
-// URL for something running on this machine — and nothing else. It used to carry
-// the publishable key as well; that key now comes from the project itself, over
-// an authenticated route, so a committed file no longer hands one out.
+// The TARGET is a fact about the PROJECT: `palbase/project.json` (projectPath,
+// below), committed, so a colleague who clones the repository reaches the same
+// place without being told which one it is. It names either a cloud project and
+// environment, or a URL for something running on this machine — and nothing
+// else. It used to carry the publishable key as well; that key now comes from
+// the project itself, over an authenticated route, so a committed file no
+// longer hands one out. (It also used to live at `.palbase/project.json`, the
+// retired hidden root — see layout.go's LegacyRoots.)
 //
 // The CREDENTIAL is a fact about the PERSON: `~/.palbase/credentials.json`,
 // never near the repository (see credentials.go). A token committed by accident
 // is a token in every clone and every CI log.
 //
 // And there is a third, temporary fact: while `palbase start` is running, the
-// stack in front of you is the target. That lives in `.palbase/local.json`,
-// gitignored, and it wins for as long as it exists — which is what makes "work
-// locally, then push" a two-word switch rather than a re-link.
+// stack in front of you is the target. That lives outside the checkout
+// entirely now (LocalStatePath, in machine_state.go — it used to be
+// `.palbase/local.json`, gitignored, inside it) and it wins for as long as it
+// exists — which is what makes "work locally, then push" a two-word switch
+// rather than a re-link.
 
 import (
 	"encoding/json"
@@ -280,10 +284,13 @@ func credentialsPath() (string, error) {
 func stackVersion(projectDir string) (string, error) {
 	// THE COMMITTED FILE, NOT THE RUNNING STACK.
 	//
-	// ReadTarget PREFERS .palbase/local.json while WriteTarget writes
-	// .palbase/project.json, so reading through the first and writing through
-	// the second replaced a colleague's project with a localhost address —
-	// measured: {"project":"myproj","env":"prod"} became
+	// ReadTarget PREFERS the machine-local state (localPath(), today
+	// LocalStatePath — outside the checkout entirely) while WriteTarget writes
+	// projectPath() (the committed `palbase/project.json`), so reading through
+	// the first and writing through the second replaced a colleague's project
+	// with a localhost address — measured, back when that local state still
+	// lived at `.palbase/local.json` inside the checkout:
+	// {"project":"myproj","env":"prod"} became
 	// {"url":"http://127.0.0.1:54321","stackVersion":"33"}. WriteLocalTarget's
 	// comment twelve lines above warns about exactly this, and the warning was
 	// right. The stack version is a property of the PROJECT, so it is read from
