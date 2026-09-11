@@ -153,12 +153,16 @@ func TestLinkPublishesInstalledWebDependencies(t *testing.T) {
 	linkedAs(t, srv.URL, "operator")
 	original := ensurePalbeWeb
 	t.Cleanup(func() { ensurePalbeWeb = original })
+	// The installer drops in a generator that honours the published contract:
+	// it reads an environment directory and writes both products. A stub that
+	// only took `--out` measured a tool that no longer exists.
 	ensurePalbeWeb = func(_ context.Context, _ io.Writer) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(palbeGenBin), 0755))
-		require.NoError(t, os.WriteFile(palbeGenBin, []byte("#!/bin/sh\nprintf '// generated\\n' > \"$2\"\n"), 0755))
+		require.NoError(t, os.WriteFile(palbeGenBin, []byte(palbeGen10Script("// generated")), 0755))
 	}
 	require.NoError(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, io.Discard))
-	require.FileExists(t, "palbe.gen.ts")
+	require.FileExists(t, filepath.FromSlash(GeneratedPath("main", webPlatform)))
+	require.FileExists(t, filepath.FromSlash(ClientBarrelPath()))
 	require.FileExists(t, palbeGenBin, "the installed SDK must survive removal of the staging directory")
 }
 

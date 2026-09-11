@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -85,19 +86,50 @@ var ensurePalbeWeb = func(ctx context.Context, w io.Writer) {
 // webPkg is the client SDK `palbase link` generates against.
 const webPkg = "@palbase/web"
 
+// environmentsRoot is the directory holding every environment's artifacts — the
+// one `palbe-gen` is pointed at. Derived from the declaration so the two sides
+// cannot drift; spelling it here is how the generator ended up reading a
+// directory the CLI had stopped writing.
+func environmentsRoot() string { return path.Dir(EnvDir("any")) }
+
 // runPalbeGen requires the SDK generator and its output before wiring imports.
-func runPalbeGen(ctx context.Context, outFile string, w io.Writer) (bool, error) {
+//
+// IT IS POINTED AT AN ENVIRONMENT, NOT AT A FILE. `@palbase/web` 10 reads
+// `<dir>/<env>/{openapi.json, roles.json, web-config.json}`, writes that
+// environment's client beside them, and writes the barrel the application
+// imports. The environment comes from `PALBASE_ENV` — the single key the person
+// switches — so nothing in their source changes when they point elsewhere.
+//
+// Before this, the CLI called it with `--out palbe.gen.ts` and nothing else, and
+// the generator refused: "palbase/environments/local/web-config.json is required
+// in dir mode". Every `palbase link --platform web` failed that way, with the
+// tool's sentence buried under a bare `exit status 1`.
+func runPalbeGen(ctx context.Context, env, outFlag string, w io.Writer) (bool, error) {
 	if _, err := os.Stat(palbeGenBin); err != nil {
 		return false, fmt.Errorf("%s generator is unavailable; install %s and re-run `palbase link`: %w", webPkg, webPkg, err)
 	}
-	c := exec.CommandContext(ctx, palbeGenBin, "--out", outFile)
+	args := []string{"--dir", filepath.FromSlash(environmentsRoot())}
+	if outFlag != "" {
+		args = append(args, "--out", outFlag)
+	}
+	c := exec.CommandContext(ctx, palbeGenBin, args...)
+	c.Env = append(os.Environ(), "PALBASE_ENV="+env)
 	c.Stdout = w
 	c.Stderr = w
 	if err := c.Run(); err != nil {
 		return false, fmt.Errorf("palbe-gen: %w", err)
 	}
-	if !isRegularFile(outFile) {
-		return false, fmt.Errorf("palbe-gen did not produce %s", outFile)
+	// BOTH PRODUCTS, because either one alone is a project that does not
+	// compile: the environment's client, and the one line that re-exports it.
+	client := filepath.FromSlash(GeneratedPath(env, webPlatform))
+	if outFlag != "" {
+		client = filepath.Join(filepath.FromSlash(EnvDir(env)), outFlag)
+	}
+	if !isRegularFile(client) {
+		return false, fmt.Errorf("palbe-gen did not produce %s", client)
+	}
+	if !isRegularFile(filepath.FromSlash(ClientBarrelPath())) {
+		return false, fmt.Errorf("palbe-gen did not produce %s", ClientBarrelPath())
 	}
 	return true, nil
 }
@@ -935,12 +967,26 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 		ensurePalbeWeb(ctx, w)
 	}
 
-	generated, err := runPalbeGen(ctx, outFile, w)
+	// WHICH ENVIRONMENT. The generator needs one, and it is the same answer
+	// `status` gives — derived from the directories on disk, never a second
+	// setting somebody has to keep in step.
+	env, err := selectedWebEnvironment()
 	if err != nil {
 		return err
 	}
+	generated, err := runPalbeGen(ctx, env, outFlag, w)
+	if err != nil {
+		return err
+	}
+	// EVERYTHING DOWNSTREAM IMPORTS THE BARREL, not the generated file. Its
+	// path carries no environment name, so switching environments never edits
+	// the application's own source.
+	outFile = filepath.FromSlash(ClientBarrelPath())
 
-	if err := patchPackageJSONScriptsWithCommand("package.json", webTypesCmdFor(outFile), w); err != nil {
+	// THE HOOK CARRIES THE PERSON'S OWN `--out`, not the barrel: it re-runs the
+	// generator, and the generator's flag is the file NAME. Passing the barrel
+	// here made every regeneration write the application's import line.
+	if err := patchPackageJSONScriptsWithCommand("package.json", webTypesCmdFor(outFlag), w); err != nil {
 		return fmt.Errorf("patch package.json: %w", err)
 	}
 
@@ -966,6 +1012,10 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 		return fmt.Errorf("wire proxy.ts: %w", err)
 	}
 
+	// BOTH PRODUCTS. A rule hiding the generated client is as bad as one hiding
+	// the barrel: either way the next clone compiles against a file that is not
+	// in the history. The guard reports; it never edits somebody's rules.
+	checkGitignoreGuard(filepath.FromSlash(GeneratedPath(env, webPlatform)), w)
 	checkGitignoreGuard(outFile, w)
 	return nil
 }
@@ -975,7 +1025,7 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 // byte compatible; a custom --out is single-quoted because package scripts run
 // through a shell and the path is user-controlled.
 func webTypesCmdFor(outFile string) string {
-	if filepath.Clean(outFile) == "palbe.gen.ts" {
+	if outFile == "" || filepath.Clean(outFile) == "palbe.gen.ts" {
 		return webTypesCmd
 	}
 	quoted := "'" + strings.ReplaceAll(outFile, "'", "'\"'\"'") + "'"

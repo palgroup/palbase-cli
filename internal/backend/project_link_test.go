@@ -501,32 +501,6 @@ func TestLink_RefusesSomethingThatIsNeitherAddressNorRef(t *testing.T) {
 // HARİTASI şemasıyla ezdi (palbe-gen düz `{app_id, base_url, api_key}` okur) ve
 // `Palbase/openapi.json`'ı hiç yazmadı. palbe.gen.ts üretilemedi ve bunu söyleyen
 // bir hata da yoktu: her adım başarıyla döndü.
-// requireWebGenerator stops a web-link test when the published `palbe-gen`
-// cannot read what THIS CLI writes.
-//
-// KNOWN DEBT, NAMED RATHER THAN HIDDEN. `@palbase/web` 10.0.1 moved the
-// generator onto the per-environment layout `layout.go` already declares —
-// `palbase/environments/<env>/{openapi.json, roles.json, web-config.json}` —
-// and this CLI still writes the pair it is replacing. The reader shipped before
-// the writer, which is the outage this repository has a rule about, and closing
-// it is the `cli-dizin-duzeni` migration's whole job, not a hotfix's.
-//
-// IT RETIRES ITSELF. The moment the CLI writes that layout, `runLink` succeeds
-// here, this function returns, and the assertions below run again unchanged —
-// so nothing has to remember to delete it. Only the generator's own refusal is
-// tolerated: any other failure is still a failure.
-func requireWebGenerator(t *testing.T, err error, out string) {
-	t.Helper()
-	if err == nil {
-		return
-	}
-	if strings.Contains(err.Error(), "palbe-gen") {
-		t.Skipf("the published web generator does not read this CLI's layout yet "+
-			"(cli-dizin-duzeni): %v\n%s", err, out)
-	}
-	t.Fatalf("link: %v\n%s", err, out)
-}
-
 func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	inScratchCheckout(t)
 	// A web link needs a web project — AFTER the chdir, or the files land
@@ -542,7 +516,9 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	linkedAs(t, srv.URL, "a-credential")
 
 	var out strings.Builder
-	requireWebGenerator(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out), out.String())
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
 	dir, _ := os.Getwd()
 
 	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
@@ -568,11 +544,23 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	if _, err := os.Stat(SpecPath("main")); err != nil {
 		t.Errorf("palbe-gen's contract input is missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "Palbase", "Config", "Main.xcconfig")); err == nil {
-		t.Error("a web link wrote an Xcode build configuration")
+	// NOTHING OF THE RETIRED LAYOUT, measured by content — `palbase` and
+	// `Palbase` are one directory on macOS, so a name comparison here would
+	// fail against the new root itself (D-008).
+	require.Empty(t, CarriesLegacyLayout(dir), "a web link wrote the retired layout")
+
+	// AND NO APPLE PRODUCTS. The environment directory is REQUIRED now — it is
+	// where the web client is generated — so the thing to check is that this
+	// link produced no Swift client and no bundled plist for it.
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(GeneratedPath("main", "ios")))); err == nil {
+		t.Error("a web link produced the Swift client")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "palbase", "environments")); err == nil {
-		t.Error("a web link produced the Swift client directory")
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(PlistPath("main")))); err == nil {
+		t.Error("a web link produced the Apple bundle plist")
+	}
+	// …and it DID produce the one line the application imports.
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(ClientBarrelPath()))); err != nil {
+		t.Errorf("a web link left the application nothing to import: %v", err)
 	}
 }
 
@@ -614,7 +602,9 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 	}
 
 	var out strings.Builder
-	requireWebGenerator(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out), out.String())
+	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, &out); err != nil {
+		t.Fatalf("link: %v\n%s", err, out.String())
+	}
 
 	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
 	if err != nil {

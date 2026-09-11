@@ -74,7 +74,7 @@ export default function Layout() {}
 	runWebLinkWithGitignore(t)
 
 	// gen file must exist (stubbed).
-	genContent, err := os.ReadFile("palbe.gen.ts")
+	genContent, err := os.ReadFile(filepath.Join(filepath.FromSlash(EnvDir("main")), "palbe.gen.ts"))
 	require.NoError(t, err)
 	require.Contains(t, string(genContent), "palbe gen sentinel")
 
@@ -87,7 +87,7 @@ export default function Layout() {}
 	// import must be inserted into app/layout.tsx.
 	entryBody, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
-	require.Contains(t, string(entryBody), `import '../palbe.gen'`)
+	require.Contains(t, string(entryBody), `import '../palbase/client'`)
 }
 
 // TestWebLink_EntryVariants: each auto-detected entry file is tried in order.
@@ -116,7 +116,7 @@ func TestWebLink_EntryVariants(t *testing.T) {
 
 			body, err := os.ReadFile(tc.path)
 			require.NoError(t, err)
-			require.Contains(t, string(body), "palbe.gen", "import should reference gen file")
+			require.Contains(t, string(body), "palbase/client", "import should reference the barrel the app imports")
 		})
 	}
 }
@@ -135,7 +135,7 @@ func TestWebLink_EntryFlagOverride(t *testing.T) {
 
 	body, err := os.ReadFile("src/custom-entry.tsx")
 	require.NoError(t, err)
-	require.Contains(t, string(body), "palbe.gen")
+	require.Contains(t, string(body), "palbase/client")
 }
 
 // TestWebLink_UseClientDirective: a 'use client' directive must STAY the first
@@ -158,7 +158,7 @@ export default function Layout() {}
 	require.NoError(t, err)
 	expected := `'use client';
 
-import '../palbe.gen';
+import '../palbase/client';
 export default function Layout() {}
 `
 	require.Equal(t, expected, string(body))
@@ -190,7 +190,7 @@ export default function App() {}
 	expected := `import {
   useState,
 } from 'react';
-import '../palbe.gen';
+import '../palbase/client';
 
 export default function App() {}
 `
@@ -198,15 +198,15 @@ export default function App() {}
 }
 
 // TestWebLink_ImportIdempotencyExactMatch (M1): the skip check is an exact
-// module-specifier match — './palbe.gen.extra' must NOT suppress the insert,
-// while './palbe.gen' / '../palbe.gen' must.
+// module-specifier match — './palbase/client.extra' must NOT suppress the insert,
+// while './palbase/client' / '../palbase/client' must.
 func TestWebLink_ImportIdempotencyExactMatch(t *testing.T) {
 	t.Run("near-miss specifier still gets the import", func(t *testing.T) {
 		t.Chdir(t.TempDir())
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
 		require.NoError(t, os.MkdirAll("src", 0o755))
-		require.NoError(t, os.WriteFile("src/main.tsx", []byte(`import './palbe.gen.extra';
+		require.NoError(t, os.WriteFile("src/main.tsx", []byte(`import './palbase/client.extra';
 
 export const x = 1;
 `), 0o644))
@@ -215,8 +215,8 @@ export const x = 1;
 
 		body, err := os.ReadFile("src/main.tsx")
 		require.NoError(t, err)
-		require.Contains(t, string(body), `import './palbe.gen.extra';`)
-		require.Equal(t, 1, strings.Count(string(body), `'../palbe.gen'`),
+		require.Contains(t, string(body), `import './palbase/client.extra';`)
+		require.Equal(t, 1, strings.Count(string(body), `'../palbase/client'`),
 			"the real gen import must be inserted exactly once")
 	})
 
@@ -225,7 +225,7 @@ export const x = 1;
 		installStubCodegen(t, "// gen")
 		writePkgJSON(t, minimalPkgJSON())
 		require.NoError(t, os.MkdirAll("src", 0o755))
-		input := `import '../palbe.gen';
+		input := `import '../palbase/client';
 
 export const x = 1;
 `
@@ -430,7 +430,7 @@ func TestWebLink_IdempotentRelink(t *testing.T) {
 	// Only ONE import line referencing palbe.gen.
 	entryBody, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
-	count := strings.Count(string(entryBody), "palbe.gen")
+	count := strings.Count(string(entryBody), "palbase/client")
 	require.Equal(t, 1, count, "import must appear exactly once after idempotent re-link")
 
 	// scripts appear exactly once.
@@ -547,7 +547,7 @@ func TestWebLink_GitignoreWarning(t *testing.T) {
 			outStr := runWebLinkWithGitignore(t)
 
 			require.Contains(t, outStr, "WARNING", "should print a loud warning about .gitignore")
-			require.Contains(t, outStr, "palbe.gen.ts", "warning should mention the gen file")
+			require.Contains(t, outStr, filepath.ToSlash(GeneratedPath("main", webPlatform)), "warning should name the file the rule would hide")
 
 			// The offending rule must NOT be rewritten or removed — and NOTHING
 			// is appended either: this CLI has no rule left to add, because
@@ -571,7 +571,7 @@ func TestWebLink_UnknownLayout(t *testing.T) {
 	// No entry file created.
 
 	outStr := runWebLinkWithGitignore(t)
-	require.Contains(t, outStr, "palbe.gen", "manual instruction should mention gen file")
+	require.Contains(t, outStr, "palbase/client", "manual instruction should mention gen file")
 }
 
 // TestWebUnlink_RemovesConfig: `web unlink` removes .palbase/local.json and
@@ -618,7 +618,7 @@ func TestWebUnlink_RemovesConfig(t *testing.T) {
 	// knowledge, so it must not hardcode palbe.gen.ts).
 	outStr := out.String()
 	require.Contains(t, outStr, "generated clients")
-	require.NotContains(t, outStr, "palbe.gen.ts")
+	require.NotContains(t, outStr, "palbase/client.ts")
 }
 
 // TestWebUnlink_Idempotent: running unlink twice is a no-op on the second run.
@@ -643,13 +643,20 @@ func TestWebLink_CustomOut(t *testing.T) {
 
 	runWebLink(t, "--out", "my.custom.gen.ts")
 
-	_, err := os.Stat("my.custom.gen.ts")
-	require.NoError(t, err, "custom out file should exist")
+	// INSIDE THE ENVIRONMENT'S DIRECTORY. `--out` names the FILE; where it lands
+	// is the environment the generator was pointed at — the same rule the
+	// default name follows, so a custom name does not become a second layout.
+	_, err := os.Stat(filepath.Join(filepath.FromSlash(EnvDir("main")), "my.custom.gen.ts"))
+	require.NoError(t, err, "custom out file should exist inside the environment directory")
 
-	// The import in the entry file should reference the custom out name.
+	// AND THE ENTRY STILL IMPORTS THE BARREL. The custom name is the
+	// generator's business; the application's import must not carry it, or the
+	// name would have to be edited in two places to change one thing.
 	entryBody, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
-	require.Contains(t, string(entryBody), "my.custom.gen")
+	require.Contains(t, string(entryBody), "client")
+	require.NotContains(t, string(entryBody), "my.custom.gen",
+		"the application imports the generated file directly")
 
 	pkgBody, err := os.ReadFile("package.json")
 	require.NoError(t, err)
@@ -716,7 +723,7 @@ export default function Layout() {}
 	require.NoError(t, err, "app/providers.tsx must be created")
 	s := string(body)
 	require.Contains(t, s, "'use client'", "providers.tsx must be a client component")
-	require.Contains(t, s, "palbe.gen", "providers.tsx must import the generated client")
+	require.Contains(t, s, "palbase/client", "providers.tsx must import the generated client")
 	require.Contains(t, s, "setupPalbeNext", "providers.tsx must call setupPalbeNext()")
 	require.Contains(t, s, "@palbase/web/next/client", "providers.tsx must import from @palbase/web/next/client")
 	require.Contains(t, s, "Providers", "providers.tsx must export a Providers component")
@@ -739,7 +746,7 @@ export default function Layout() {}
 	require.NoError(t, err, "src/app/providers.tsx must be created")
 	s := string(body)
 	require.Contains(t, s, "'use client'")
-	require.Contains(t, s, "palbe.gen")
+	require.Contains(t, s, "palbase/client")
 	require.Contains(t, s, "setupPalbeNext")
 }
 
@@ -796,7 +803,7 @@ func TestWebLink_ProvidersGenRelPath(t *testing.T) {
 	body, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)
 	// Default gen file is palbe.gen.ts in root; from app/ that's ../palbe.gen.
-	require.Contains(t, string(body), "../palbe.gen",
+	require.Contains(t, string(body), "../palbase/client",
 		"providers.tsx import path must be relative to its own directory")
 }
 
@@ -853,7 +860,7 @@ func TestWebLink_ProvidersSplicedIntoExistingClientComponent(t *testing.T) {
 	body, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)
 	s := string(body)
-	require.Contains(t, s, "import '../palbe.gen'", "the gen import must be spliced in")
+	require.Contains(t, s, "import '../palbase/client'", "the gen import must be spliced in")
 	require.Contains(t, s, "ThemeProvider", "the existing provider content must survive")
 	require.Contains(t, s, "'use client';", "the existing directive must survive")
 
@@ -862,7 +869,7 @@ func TestWebLink_ProvidersSplicedIntoExistingClientComponent(t *testing.T) {
 	runWebLinkWithGitignore(t)
 	second, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)
-	require.Equal(t, 1, strings.Count(string(second), "palbe.gen"), "the spliced import must not be duplicated on re-link")
+	require.Equal(t, 1, strings.Count(string(second), "palbase/client"), "the spliced import must not be duplicated on re-link")
 }
 
 // TestWebLink_ProvidersJSXAppRouter (.jsx silent-skip fix): a plain-JS App
@@ -881,13 +888,13 @@ func TestWebLink_ProvidersJSXAppRouter(t *testing.T) {
 
 	entryBody, err := os.ReadFile("app/layout.jsx")
 	require.NoError(t, err)
-	require.Contains(t, string(entryBody), "palbe.gen", "the .jsx entry must still be auto-detected and wired")
+	require.Contains(t, string(entryBody), "palbase/client", "the .jsx entry must still be auto-detected and wired")
 
 	body, err := os.ReadFile("app/providers.jsx")
 	require.NoError(t, err, "app/providers.jsx must be created for a .jsx App Router layout")
 	s := string(body)
 	require.Contains(t, s, "'use client'")
-	require.Contains(t, s, "palbe.gen")
+	require.Contains(t, s, "palbase/client")
 	require.Contains(t, s, "setupPalbeNext")
 	require.NotContains(t, s, "React.ReactNode", "a .jsx project must not get TypeScript type syntax it can't parse")
 
@@ -1112,10 +1119,10 @@ func TestWebLink_AnnouncesEveryFileItEdited(t *testing.T) {
 	require.Contains(t, string(pkg), `"predev"`)
 	entry, err := os.ReadFile("app/layout.tsx")
 	require.NoError(t, err)
-	require.Contains(t, string(entry), "palbe.gen")
+	require.Contains(t, string(entry), "palbase/client")
 	providers, err := os.ReadFile("app/providers.tsx")
 	require.NoError(t, err)
-	require.Contains(t, string(providers), "palbe.gen")
+	require.Contains(t, string(providers), "palbase/client")
 
 	// NEGATİF KONTROL: ikinci koşuda hiçbir şey düzenlenmiyor (üçü de
 	// idempotent) — o zaman satır HİÇ basılmamalı. Bu olmadan "her zaman bas"
@@ -1179,14 +1186,45 @@ func writeStubArtifacts(t *testing.T) {
 		[]byte(`{"environment_ref":"main","base_url":"https://stub","api_key":"pb_stub"}`+"\n"), 0o600))
 }
 
+// palbeGen10Script is the stub body shared by the web-wiring fixtures: one
+// imitation of the published generator, so the two cannot drift apart.
+func palbeGen10Script(content string) string {
+	return `#!/bin/sh
+dir=palbase/environments
+out=palbe.gen.ts
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir) dir="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+env="${PALBASE_ENV:-local}"
+if [ ! -f "$dir/$env/web-config.json" ]; then
+  echo "error: $dir/$env/web-config.json is required in dir mode" >&2
+  exit 1
+fi
+mkdir -p "$dir/$env"
+cat > "$dir/$env/$out" <<'PALBE_EOF'
+` + content + `
+PALBE_EOF
+echo "export * from './environments/$env/$out'" > "$(dirname "$dir")/client.ts"
+`
+}
+
 func installStubCodegen(t *testing.T, content string) {
 	t.Helper()
 	stubInstall(t)
 	writeStubArtifacts(t)
 
 	require.NoError(t, os.MkdirAll(filepath.Dir(palbeGenBin), 0o755))
-	script := "#!/bin/sh\nout=palbe.gen.ts\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift; fi\n  shift\ndone\ncat > \"$out\" <<'PALBE_EOF'\n" + content + "\nPALBE_EOF\n"
-	require.NoError(t, os.WriteFile(palbeGenBin, []byte(script), 0o755))
+	// THE PUBLISHED GENERATOR'S CONTRACT, not the one it replaced. `@palbase/web`
+	// 10 reads an ENVIRONMENT directory, writes that environment's client inside
+	// it, and writes the barrel the application imports. A stub still taking
+	// only `--out` measured a tool that no longer exists — and passed while the
+	// real one refused, which is how the web link broke for every user without
+	// a single red test.
+	require.NoError(t, os.WriteFile(palbeGenBin, []byte(palbeGen10Script(content)), 0o755))
 }
 
 // runWebLinkWithGitignore drives the two steps runLink performs for a web
