@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -78,9 +79,24 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 		_ = stop.Run()
 	})
 
-	start := exec.Command(bin, "start")
+	// A DEADLINE THIS TEST OWNS, so an unbounded wait becomes a NAMED failure.
+	//
+	// Measured 11.09.2026: this one test took 1086s of a 587s-to-600s package —
+	// its cost is whatever Docker spends pulling four images, which is minutes on
+	// a cold cache and seconds on a warm one. Without a deadline of its own it
+	// drags the whole package into Go's 600s default and the suite dies with
+	// "panic: test timed out" naming whatever test happened to be running — a
+	// diagnosis that points at the wrong place. With one, the sentence says what
+	// actually did not finish.
+	startCtx, cancelStart := context.WithTimeout(t.Context(), 12*time.Minute)
+	defer cancelStart()
+	start := exec.CommandContext(startCtx, bin, "start")
 	start.Dir = dir
 	if out, err := start.CombinedOutput(); err != nil {
+		if startCtx.Err() != nil {
+			t.Fatalf("the stack did not come up within 12m — `palbase start` pulls four "+
+				"images and this runner's cache is cold:\n%s", out)
+		}
 		// Capture only this test's containers before cleanup removes the cause.
 		list := exec.Command("docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=palbase-"+sanitiseGroup(filepath.Base(dir)))
 		if ids, listErr := list.Output(); listErr == nil {

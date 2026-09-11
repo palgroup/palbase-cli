@@ -89,7 +89,10 @@ jobs:
           version: v2.12.2
 
       - name: Run tests
-        run: go test ./... -race -count=1
+        # Same explicit ceiling as ci.yml, for the same measured reason: one test
+        # brings a real stack up with Docker and costs whatever the image pull
+        # costs. A release is the worst moment to discover Go's 600s default.
+        run: go test ./... -race -count=1 -timeout 25m
 
       - name: Generate GitHub App token for palgroup/homebrew-tap
         id: app-token

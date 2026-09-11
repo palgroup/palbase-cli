@@ -85,5 +85,17 @@ jobs:
         with:
           version: v2.12.2
 
+      # THE PACKAGE LIMIT IS A DECISION, NOT GO'S DEFAULT.
+      #
+      # Without `-timeout` each package gets 600s, and `internal/backend` holds one
+      # test that brings a real stack up with Docker: measured 11.09.2026 at 1086s
+      # on a cold image cache against 587s for everything else combined. A cold
+      # runner therefore kills the package with "panic: test timed out", naming
+      # whichever test was in flight — a red build that points at the wrong file.
+      #
+      # The test now carries its own 12m deadline and fails with a sentence that
+      # says the stack did not come up; this raises the package ceiling above it so
+      # that sentence is what a person reads. The job's own timeout-minutes stays
+      # the outer bound.
       - name: Run tests
-        run: go test ./... -race -count=1
+        run: go test ./... -race -count=1 -timeout 25m
