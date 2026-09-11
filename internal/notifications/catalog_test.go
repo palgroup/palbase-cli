@@ -310,12 +310,3 @@ func sortedKeys(m map[string]string) []string {
 	sort.Strings(out)
 	return out
 }
-
-func keysOf(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
