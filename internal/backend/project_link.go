@@ -355,6 +355,18 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", RootDir(), err)
 	}
+	// AND THE RETIRED RULES GO, every link.
+	//
+	// A customer upgrading from 0.61.x carries lines an older `link` appended —
+	// `palbase-env.d.ts` among them, unanchored, which git matches at ANY depth.
+	// The only code that takes those back is this one, and `link` had stopped
+	// calling it: so `link` printed "commit palbase/" while a file inside it
+	// stayed invisible to git. Retiring a producer is two acts, and this is the
+	// second one for everybody who did not start from a fresh `init`.
+	if err := takeBackRetiredIgnoreRules(".gitignore"); err != nil {
+		return fmt.Errorf("update .gitignore: %w", err)
+	}
+
 	// GENERATED CODE IS MARKED AS SUCH, every link. A spec fetch can move
 	// thousands of lines nobody wrote; unmarked, they arrive in a pull request
 	// as a change somebody has to read.
@@ -619,8 +631,8 @@ func insecureTransport() http.RoundTripper {
 	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in, documented above
 }
 
-// ensurePalbaseGitignored takes BACK the rules this CLI used to write, and adds
-// none.
+// takeBackRetiredIgnoreRules takes BACK the rules this CLI used to write, and
+// adds none.
 //
 // It has nothing left to add. Everything this tool writes into a checkout is
 // committed — the contract, the platform configuration, the generated clients,
@@ -639,7 +651,7 @@ func insecureTransport() http.RoundTripper {
 // The directory-wide `.palbase` rule is DROPPED rather than narrowed. It used to
 // become `.palbase/local.json`, because exactly one file in there really was
 // per-machine; none is now.
-func ensurePalbaseGitignored(path string) error {
+func takeBackRetiredIgnoreRules(path string) error {
 	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", path, err)

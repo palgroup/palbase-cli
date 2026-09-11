@@ -1233,6 +1233,6 @@ func installStubCodegen(t *testing.T, content string) {
 // web only, when a directory-wide `.palbase` rule buries every platform's slot.
 func runWebLinkWithGitignore(t *testing.T, args ...string) string {
 	t.Helper()
-	require.NoError(t, ensurePalbaseGitignored(".gitignore"))
+	require.NoError(t, takeBackRetiredIgnoreRules(".gitignore"))
 	return runWebLink(t, args...)
 }

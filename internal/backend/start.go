@@ -424,9 +424,11 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err := WriteLocalTarget(Target{URL: url}); err != nil {
 		return err
 	}
-	if err := ignoreLocalTarget(dir); err != nil {
-		return err
-	}
+	// NO IGNORE RULE. `start` used to write `.palbase/local.json` into the
+	// customer's `.gitignore`; that file moved to this machine's own directory
+	// and the rule became one for a path nothing writes. Worse, it was a rule
+	// `init` takes BACK as retired — so the two verbs argued: one un-wrote it,
+	// the next `start` put it there again.
 	if err := registerStack(group, url, project, dir); err != nil {
 		return err
 	}
@@ -877,33 +879,6 @@ func setEnvValues(path string, values map[string]string) error {
 		body += "\n"
 	}
 	return writeFileAtomic(path, []byte(body), 0o600)
-}
-
-// ignoreLocalTarget keeps the local pointer out of git.
-//
-// It names the file rather than the directory: .palbase/project.json is
-// COMMITTED on purpose, so `.palbase/` in a .gitignore would take the one file a
-// colleague cloning this repository needs.
-func ignoreLocalTarget(dir string) error {
-	const entry = ".palbase/local.json"
-	path := filepath.Join(dir, ".gitignore")
-
-	raw, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.TrimSpace(line) == entry {
-			return nil
-		}
-	}
-
-	body := string(raw)
-	if body != "" && !strings.HasSuffix(body, "\n") {
-		body += "\n"
-	}
-	body += entry + "\n"
-	return os.WriteFile(path, []byte(body), 0o644)
 }
 
 // ── the machine's register of running stacks ────────────────────────────────

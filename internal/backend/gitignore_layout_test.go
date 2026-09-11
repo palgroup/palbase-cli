@@ -13,8 +13,14 @@ package backend
 // their environment's contract, out of the history that is supposed to carry it.
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestGitignoreCarriesNoPalbasePath(t *testing.T) {
@@ -56,4 +62,30 @@ func TestRetiredPathsNeverNameTheVisibleRoot(t *testing.T) {
 				e.path, RootDir())
 		}
 	}
+}
+
+// AN UPGRADING CHECKOUT'S RETIRED RULES ARE TAKEN BACK BY `link`.
+//
+// A customer coming from 0.61.x carries lines an older `link` appended. The most
+// consequential is `palbase-env.d.ts`, written unanchored — git matches it at ANY
+// depth, so it hides the file inside `palbase/` that the closing line tells them
+// to commit. Only this path removes it, and `link` had stopped calling it.
+func TestLinkTakesBackARetiredIgnoreRule(t *testing.T) {
+	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	// Exactly what 0.61.x left behind, plus a rule of the person's own.
+	before := "dist/\n.palbase/local.json\npalbase-env.d.ts\n"
+	require.NoError(t, os.WriteFile(".gitignore", []byte(before), 0o644))
+
+	require.NoError(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, io.Discard))
+
+	body, err := os.ReadFile(".gitignore")
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "palbase-env.d.ts",
+		"the retired rule survived, so the file `link` tells them to commit stays invisible to git")
+	require.NotContains(t, string(body), ".palbase/local.json", "a retired rule survived")
+	require.Contains(t, string(body), "dist/", "the person's own rule was taken")
 }

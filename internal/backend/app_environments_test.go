@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // YETİM ORTAM KLASÖRÜ BUILD'İ KIRAR — ve bu, kaldırılan tek dosyanın öteki
@@ -108,4 +110,36 @@ func TestApplePlatformNeedsAnXcodeProjectNotJustAConfig(t *testing.T) {
 	if _, apple, _ := linkedPlatforms(); !apple {
 		t.Fatal("Xcode projesi olan bir checkout Apple SAYILMADI — istemci hiç üretilmez")
 	}
+}
+
+// AN APPLE LINK MUST NOT DELETE THE WEB CHECKOUT'S COMMITTED CLIENT.
+//
+// `removeStaleEnvironmentDirs` runs on the Apple branch and deletes any
+// environment directory holding only files Palbase generated — and the web
+// client and its config ARE Palbase-generated. `local` leaves the caller's set
+// as soon as the stack is down (`palbase stop` is enough), so a checkout that is
+// both a web and an iOS one would lose `local/palbe.gen.ts` to an `ios` link,
+// with `palbase/client.ts` still re-exporting it.
+func TestAnAppleSweepKeepsTheLocalEnvironmentsWebClient(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, filepath.FromSlash(EnvDir(localEnvName)))
+	require.NoError(t, os.MkdirAll(local, 0o755))
+	for _, name := range []string{"palbe.gen.ts", "web-config.json", "openapi.json"} {
+		require.NoError(t, os.WriteFile(filepath.Join(local, name), []byte("x"), 0o644))
+	}
+
+	// The caller's set after `palbase stop`: the cloud environment only.
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+
+	require.FileExists(t, filepath.Join(local, "palbe.gen.ts"),
+		"an iOS link deleted the web client of an environment it simply could not see")
+
+	// NEGATIVE CONTROL: a cloud environment the project really dropped still goes,
+	// or this guard would just disable the sweep.
+	gone := filepath.Join(root, filepath.FromSlash(EnvDir("retired-env")))
+	require.NoError(t, os.MkdirAll(gone, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(gone, "openapi.json"), []byte("x"), 0o644))
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.NoDirExists(t, gone, "an environment the project no longer has survived")
 }

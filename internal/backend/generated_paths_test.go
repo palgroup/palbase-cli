@@ -53,7 +53,7 @@ func TestGitignoreRepairTakesRetiredRulesBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ensurePalbaseGitignored(path); err != nil {
+	if err := takeBackRetiredIgnoreRules(path); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -97,14 +97,14 @@ func TestGitignoreRepairIsStable(t *testing.T) {
 	if err := os.WriteFile(path, []byte("node_modules/\n.palbase/esm/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePalbaseGitignored(path); err != nil {
+	if err := takeBackRetiredIgnoreRules(path); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePalbaseGitignored(path); err != nil {
+	if err := takeBackRetiredIgnoreRules(path); err != nil {
 		t.Fatal(err)
 	}
 	second, err := os.ReadFile(path)
@@ -302,7 +302,7 @@ func TestBuildRefusesWhenTheSDKCannotBeInstalled(t *testing.T) {
 func TestACreatedGitignoreCoversTheWholeScaffold(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".gitignore")
-	if err := ensurePalbaseGitignored(path); err != nil {
+	if err := takeBackRetiredIgnoreRules(path); err != nil {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(path)
@@ -321,7 +321,7 @@ func TestACreatedGitignoreCoversTheWholeScaffold(t *testing.T) {
 	if err := os.WriteFile(curated, []byte("dist/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePalbaseGitignored(curated); err != nil {
+	if err := takeBackRetiredIgnoreRules(curated); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(curated)

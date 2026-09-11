@@ -103,36 +103,35 @@ func TestTheGroupComesFromTheLinkedProject(t *testing.T) {
 	}
 }
 
-// TestTheLocalPointerIsIgnoredButTheProjectFileIsNOT is the mistake this guards:
-// `.palbase/` in a .gitignore takes project.json with it, and project.json is the
-// one file a colleague cloning the repository needs.
-func TestTheLocalPointerIsIgnoredButTheProjectFileIsNOT(t *testing.T) {
+// TestStartWritesNoIgnoreRule — `start` has nothing to keep out of git.
+//
+// This test asserted the OPPOSITE: that `.gitignore` carried
+// `.palbase/local.json` after a start. That file is this machine's, and it
+// moved out of the checkout — so the rule named a path nothing writes, and
+// `init` was already taking it back as retired. Two verbs, one question, and
+// the quiet one was wrong: `init` un-wrote the line and the next `start` put it
+// back.
+func TestStartWritesNoIgnoreRule(t *testing.T) {
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 
-	if err := ignoreLocalTarget(dir); err != nil {
+	mine := "dist/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(mine), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := WriteLocalTarget(Target{URL: "http://127.0.0.1:1"}); err != nil {
+		t.Fatal(err)
+	}
+
 	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), ".palbase/local.json") {
-		t.Errorf(".gitignore does not carry the local pointer:\n%s", body)
+	if string(body) != mine {
+		t.Errorf("`start` edited the checkout's ignore file:\n%s", body)
 	}
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.TrimSpace(line) == ".palbase" || strings.TrimSpace(line) == ".palbase/" {
-			t.Error("the whole .palbase directory was ignored — project.json is committed on purpose")
-		}
-	}
-
-	// Twice is once: a start that ran yesterday must not add a second line.
-	if err := ignoreLocalTarget(dir); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	if strings.Count(string(after), ".palbase/local.json") != 1 {
-		t.Errorf("the entry was added twice:\n%s", after)
+	if strings.Contains(strings.ToLower(string(body)), "palbase") {
+		t.Errorf(".gitignore carries a palbase rule after a start:\n%s", body)
 	}
 }
 

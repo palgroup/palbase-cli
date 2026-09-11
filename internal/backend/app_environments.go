@@ -170,6 +170,21 @@ func removeStaleEnvironmentDirs(root string, keep []string, w io.Writer) error {
 		if !e.IsDir() || wanted[e.Name()] {
 			continue
 		}
+		// `local` IS NEVER AN ENVIRONMENT THE PROJECT LOST. It belongs to this
+		// MACHINE, and it drops out of the caller's set the moment the stack is
+		// down — `palbase stop` is enough. Sweeping on that would delete a
+		// directory holding committed products: this runs on the Apple branch
+		// only, and `isGeneratedEnvironmentFile` counts the WEB client and its
+		// config as ours, so an `ios` link in a checkout that is also a web one
+		// would take `local/palbe.gen.ts` and `local/web-config.json` with it —
+		// while `palbase/client.ts` went on re-exporting the file that had just
+		// been deleted.
+		//
+		// A lingering `local/` is harmless to the build: the selection pattern
+		// compiles the chosen environment only.
+		if e.Name() == localEnvName {
+			continue
+		}
 		dir := filepath.Join(base, e.Name())
 		inside, err := os.ReadDir(dir)
 		if err != nil {

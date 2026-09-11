@@ -299,7 +299,7 @@ func copyTemplate(from, to string) ([]string, error) {
 // maintaining one file is two answers to one question, and the quieter one was
 // wrong.
 func writeGitignore(dir string) error {
-	return ensurePalbaseGitignored(filepath.Join(dir, ".gitignore"))
+	return takeBackRetiredIgnoreRules(filepath.Join(dir, ".gitignore"))
 }
 
 // seedPackageJSON makes this directory a project root for npm's benefit.
