@@ -213,6 +213,25 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 						return fmt.Errorf("--%s must be a single non-empty token", s.flag)
 					}
 				}
+				// KİMLİĞİ SIRRIN KENDİSİ OLAN SAĞLAYICIDA, DOSYA BURADA
+				// REDDEDİLİR — kasaya yazılmadan ÖNCE.
+				//
+				// Sıra bir ayrıntı değil: 11.09.2026'da `smtp`'de tam tersi
+				// yaşandı. Kabul kapısı kaydı reddetti ama komut oraya sırrı
+				// kasaya YÜKLEDİKTEN sonra varmıştı; kullanıcıda parola kasada,
+				// sağlayıcı yok.
+				//
+				// BU, MODÜLÜN KURALININ İKİNCİ BİR KOPYASI DEĞİL. Modül
+				// "gönderim için gereken alanlar var mı" diye soruyor
+				// (ValidateFCMConfig: project_id, private_key, client_email);
+				// burada sorulan şey "bu dosya bir servis hesabı belgesi mi" —
+				// belgenin KENDİ tür ayracı, ki onu Google tanımlıyor. İki ayrı
+				// soru, iki ayrı yerde; kural çoğaltılmıyor.
+				if spec.credentialsAreTheSecret {
+					if verr := verifySecretDocument(s, value); verr != nil {
+						return verr
+					}
+				}
 				secretValues[s.name] = value
 			}
 			// 2. Upload credentials, then configure the sender. The existing
@@ -290,6 +309,28 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 	// reads the ones in that provider's spec.
 	registerProviderFlags(cmd)
 	return cmd
+}
+
+// verifySecretDocument, kimliği sırrın kendisi olan bir sağlayıcının dosyasını
+// KASAYA YAZILMADAN ÖNCE reddeder.
+//
+// Ölçtüğü tek şey belgenin KENDİ tür ayracı. Alanların gönderim için yeterli
+// olup olmadığı modülün sorusu ve orada soruluyor; burada aynı kuralı ikinci
+// kez yazmak, iki kopyanın sessizce ayrışmasına davetiye olurdu.
+func verifySecretDocument(s secretField, raw string) error {
+	var doc struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return fmt.Errorf("--%s-file is not valid JSON: %w", s.flag, err)
+	}
+	if doc.Type != "service_account" {
+		return fmt.Errorf("--%s-file is not a service-account document: its %q field is %q, "+
+			"expected \"service_account\" — download the JSON key from the Firebase console "+
+			"(Project settings → Service accounts → Generate new private key)",
+			s.flag, "type", doc.Type)
+	}
+	return nil
 }
 
 // buildCredentials, sunucuya gidecek `credentials` gövdesini kurar.

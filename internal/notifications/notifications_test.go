@@ -451,3 +451,37 @@ func TestAddMetaUsesNativeWhatsAppWireContract(t *testing.T) {
 	require.NotContains(t, output, "META_APP_FIXTURE")
 	require.NotContains(t, output, "META_VERIFY_FIXTURE")
 }
+
+// TestAddFCMRefusesABrokenServiceAccountBeforeTheVault, reddin SIRASINI ölçer.
+//
+// `fcm`'in kimliği servis hesabı dosyasının AYRIŞTIRILMIŞ içeriğidir. Dosya
+// geçerli bir servis hesabı değilse komut reddetmeli — ve reddi KASAYA HİÇBİR
+// ŞEY YAZMADAN vermeli.
+//
+// Sıra bir ayrıntı değil: 11.09.2026'da `smtp`'de tam olarak bunun tersi
+// yaşandı. Kabul kapısı kaydı reddetti ama komut oraya SIRRI KASAYA
+// YÜKLEDİKTEN sonra varmıştı; kullanıcıda parola kasada, sağlayıcı yok — yani
+// "yarısı yapılmış hata". Bu test o yarımlığı imkânsız kılıyor.
+func TestAddFCMRefusesABrokenServiceAccountBeforeTheVault(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"geçerli JSON değil", "bu bir servis hesabı değil"},
+		{"JSON ama servis hesabı değil", `{"hello":"world"}`},
+		{"type alanı yanlış", `{"type":"authorized_user","project_id":"p"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			rest := &fakeStack{}
+
+			_, err := runWith(t, rest, "add", "fcm",
+				"--service-account-file", writeSecretIn(t, dir, "sa.json", tc.body))
+
+			require.Error(t, err, "bozuk servis hesabı dosyası KABUL edildi")
+			for _, c := range rest.all() {
+				assert.NotContains(t, c.Path, "/v1/management/secrets/",
+					"kasaya yazıldı — red, yazımdan SONRA gelmiş (%s %s)", c.Method, c.Path)
+			}
+			assert.Empty(t, rest.all(), "reddedilen bir kurulum hiçbir istek göndermemeli")
+		})
+	}
+}
