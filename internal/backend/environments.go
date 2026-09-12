@@ -182,6 +182,49 @@ func Resolve(ctx context.Context) (Resolved, error) {
 		return Resolved{Target: target, URL: target.URL, Source: "url"}, nil
 	}
 
+	// 3. AN OLD CHECKOUT THE MIGRATION COULD NOT MOVE STILL WORKS (FR-061).
+	//
+	// The branch above deliberately lets a cloud address fall through so the
+	// migration can rewrite it. But the migration is best-effort: it returns
+	// without touching anything when the control plane cannot say which product
+	// a ref belongs to (offline, a deleted environment, an older CLI's record),
+	// and `Resolve` is also called on paths that never run it at all. Without
+	// this branch those cases reach `environmentsOf("")` — asking the cloud for
+	// the environments of an empty product id — and every verb fails in a
+	// checkout that used to work. NFR-005 is that no verb errors on an old
+	// record; FR-061 is that a migration may not break a working checkout.
+	//
+	// So the address it already has IS the answer. `--env` is the exception and
+	// it refuses: choosing between environments needs a project, and this
+	// record does not name one.
+	if strings.TrimSpace(target.Project) == "" && strings.TrimSpace(target.URL) != "" {
+		named := envNamed()
+		if named == "" {
+			return Resolved{Target: target, URL: target.URL, Source: "legacy"}, nil
+		}
+		// THE RECORD NAMES NO PROJECT, BUT ITS ADDRESS CARRIES A REF, and that
+		// ref belongs to one. Deriving the product here is what lets `--env`
+		// keep working on a checkout the migration has not moved yet.
+		//
+		// The product id is derived EXPLICITLY rather than left empty: passing
+		// "" to the listing hook is what this branch exists to prevent, and a
+		// test double that ignores its argument makes that mistake invisible —
+		// which is exactly how it survived until the product was run.
+		if ref := refOfURL(target.URL); ref != "" && ProductOfRef != nil {
+			if product, prodErr := ProductOfRef(ctx, ref); prodErr == nil && strings.TrimSpace(product.ID) != "" {
+				derived := target
+				derived.Project = product.ID
+				derived.Name = product.Name
+				return resolveNamed(ctx, derived, named)
+			}
+		}
+		return Resolved{}, fmt.Errorf(
+			"palbase/project.json still records one environment's address (%s) and the cloud "+
+				"did not say which project it belongs to, so %q cannot be resolved.\n"+
+				"  palbase link <project>   bind this checkout to the project again",
+			target.URL, named)
+	}
+
 	// 1-2. WHAT THE CALLER NAMED, this call only. It never writes the persisted
 	// selection: an override is for one call, and a flag that quietly became
 	// the new default would make the NEXT command act on an environment nobody
@@ -336,6 +379,33 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 		return nil
 	}
 
+	// THE ENVIRONMENT THE OLD FILE NAMED IS KEPT, and keeping it is the whole
+	// difference between a migration and a break.
+	//
+	// The old record said "act on this address", and that address is one
+	// environment. Rewriting the file to a project identity and stopping there
+	// changes the answer to "which one?" — so the next verb in a checkout that
+	// worked a minute ago REFUSES. Measured on the product: `palbase plan` in a
+	// migrated checkout of a two-environment project. NFR-005 says no verb
+	// errors on an old record, and this is how that is honoured: the intent
+	// moves to where a choice belongs, MACHINE-LOCAL, uncommitted — the same
+	// place `palbase env use` writes. Nothing new appears in the repository.
+	envName := ""
+	if envs, envErr := environmentsOf(ctx, product.ID); envErr == nil {
+		for _, e := range envs {
+			if e.Ref == ref {
+				envName = e.Name
+				break
+			}
+		}
+	}
+	if envName == "" {
+		// FR-061: a migration that cannot finish leaves the checkout exactly as
+		// it was. Writing the identity without the environment would produce
+		// the refusal this comment exists to prevent.
+		return nil
+	}
+
 	migrated := target
 	migrated.Project = product.ID
 	migrated.Name = product.Name
@@ -343,8 +413,24 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 	if err := WriteTarget(migrated); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address — "+
-		"pick an environment with `palbase env use <name>` or `--env <name>`\n",
-		projectPath(), product.Name)
+	// A DELIBERATE CHOICE IS NOT OVERWRITTEN: somebody who already ran
+	// `palbase env use` on this checkout means it, and the old address is the
+	// staler of the two facts.
+	kept := ""
+	if sel, selErr := ReadSelection("."); selErr != nil || sel.Ref == "" || sel.Project != product.ID {
+		root, wdErr := os.Getwd()
+		if wdErr != nil {
+			return wdErr
+		}
+		if err := WriteSelection(root, Selection{Project: product.ID, Env: envName, Ref: ref}); err != nil {
+			return err
+		}
+		kept = envName
+	} else {
+		kept = sel.Env
+	}
+	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address; "+
+		"this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)\n",
+		projectPath(), product.Name, kept)
 	return nil
 }
