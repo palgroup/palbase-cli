@@ -37,6 +37,31 @@ var ErrNotSignedIn = errors.New(
 // committed slot files the link wrote, so a fresh clone behaves like the machine
 // that linked it.
 func RefreshSpec(ctx context.Context, w io.Writer) error {
+	return refreshSpec(ctx, w, true)
+}
+
+// RefreshSpecAfterPush is the same act as a SIDE EFFECT of `push`, and it stops
+// where `link` stops: a checkout with no client generator gets no
+// per-environment files.
+//
+// THIS IS WHERE THE CHURN ACTUALLY CAME FROM. FR-020/021 closed `link`, and
+// `link` runs once; `push` runs all day. A backend-only checkout was still
+// getting `palbase/environments/main/openapi.json` and `roles.json` rewritten
+// on every deploy — the diff on every branch that this whole change exists to
+// remove, produced by the verb nobody thought to check. Measured on the
+// product: `palbase push` into a fresh `palbase init` checkout, which had just
+// been told by `link` that there is "no client app here".
+//
+// `palbase spec` still writes them unconditionally (FR-023): that verb is
+// somebody asking, and an answer they asked for is not churn.
+func RefreshSpecAfterPush(ctx context.Context, w io.Writer) error {
+	return refreshSpec(ctx, w, false)
+}
+
+func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
+	if !asked && !writesPerEnvironmentArtifacts(detectPlatforms(".")) {
+		return nil
+	}
 	// No banner here: RefreshSpec runs INSIDE `push` and `link`, which have
 	// already said where they are acting. Announcing it a second time mid-run
 	// reads as a second destination.

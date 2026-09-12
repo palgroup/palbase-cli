@@ -104,10 +104,24 @@ func pushURL(base string, acceptDataLoss, acceptBreaking bool) string {
 }
 
 func runStackPush(ctx context.Context, target Target, cred Credentials, approve, acceptBreaking bool, w io.Writer) error {
-	// Where this is going, before anything goes. Both push paths funnel through
-	// here — the linked-project one and the probe in the cloud command — so one
-	// line here covers both without either being able to forget it.
-	fmt.Fprintf(w, "▸ %s\n", target.Describe())
+	// NO BANNER HERE, AND ITS ABSENCE IS THE FIX.
+	//
+	// This printed `▸ target.Describe()` to cover two callers: the linked-project
+	// push and a probe in the cloud command, "so one line here covers both
+	// without either being able to forget it". That second caller no longer
+	// exists — `stackPush` has exactly one call site (deploy.go), and that one
+	// announces through `PrintResolvedFor` before it gets here.
+	//
+	// So the line had become a SECOND announcement, and the less specific of the
+	// two: `Target.Describe()` cannot name the environment (Target has no Env
+	// field any more — that is the resolver's answer), so a push printed
+	//
+	//	▸ uatclone/main     ← where it is actually going
+	//	▸ uatclone          ← this line
+	//
+	// and a reader could take the second, vaguer one as the destination. Two
+	// banners where the later one says less is worse than one.
+	// Measured on the product: `palbase push` into a linked checkout, 0.65.0.
 
 	// A LOCAL STACK IS NOT A PLACE TO PUBLISH TO, and the reason is measured
 	// rather than stylistic: the dev runtime serves the DIRECTORY it has mounted
@@ -322,7 +336,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		if err := json.Unmarshal(body, &out); err != nil {
 			return fmt.Errorf("the stack answered 200 with something unexpected: %s", trimBody(body))
 		}
-		finishErr := finishStackPush(ctx, w, out, RefreshSpec)
+		finishErr := finishStackPush(ctx, w, out, RefreshSpecAfterPush)
 		// Activation and image migration are separate operations. Report the
 		// running version after a successful upload, including unchanged code.
 		// Never turn an accepted release into "nothing was deployed" here.
