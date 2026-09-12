@@ -45,6 +45,16 @@ type providerSpec struct {
 	channel string // push | email | sms | whatsapp
 	fields  []field
 	secrets []secretField
+	// credentialsAreTheSecret, bu sağlayıcının KİMLİĞİNİN tek sırrının
+	// AYRIŞTIRILMIŞ İÇERİĞİ olduğunu söyler — sarmalayıcı bir alan YOKTUR.
+	//
+	// Bugün tek kullanıcısı `fcm`: modül credentials'ı service_account.json'un
+	// KENDİSİ sayıyor ve kök seviyede `type`/`project_id`/`private_key`/
+	// `client_email` arıyor (v2 provider/push/fcm.go ValidateFCMConfig), worker
+	// da baytları doğrudan option.WithCredentialsJSON'a veriyor. CLI bugüne
+	// kadar `{"serviceAccount": "<dosyanın metni>"}` gönderiyordu; kayıt kabul
+	// ediliyor, API "configured: true" diyor ve her push worker'da ölüyordu.
+	credentialsAreTheSecret bool
 }
 
 // catalog groups providers by channel so
@@ -87,6 +97,11 @@ var catalog = []providerSpec{
 		name:    "fcm",
 		channel: "push",
 		fields:  nil,
+		// Sır ADI `serviceAccount` KALIR: kasa anahtarı ondan türüyor
+		// (reservedSecretKey → PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT) ve o anahtar
+		// yayımlanan dokümanda da adlandırılmış. Değişen tek şey, içeriğinin
+		// artık bir alanın İÇİNE değil gövdenin KÖKÜNE konması.
+		credentialsAreTheSecret: true,
 		secrets: []secretField{
 			{name: "serviceAccount", flag: "service-account", help: "Firebase service-account JSON file"},
 		},

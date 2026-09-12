@@ -23,6 +23,12 @@
       "p8_private_key": "string",
       "team_id": "string"
     },
+    "fcm": {
+      "type": "string",
+      "project_id": "string",
+      "private_key": "string",
+      "client_email": "string"
+    },
     "meta": {
       "access_token": "string",
       "api_version": "string",

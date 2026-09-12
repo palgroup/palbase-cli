@@ -261,12 +261,9 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 			// tarif ediyor. Yani sırrı yalnız kasaya koymak, onu HİÇBİR ŞEYİN
 			// okumadığı bir yere koymaktı. Modül `credentials`'ı ŞİFRELİ saklar
 			// ve geri okutmaz; sır git'e yine girmez.
-			creds := map[string]any{}
-			for k, v := range entry.fields {
-				creds[k] = v
-			}
-			for k, v := range secretValues {
-				creds[k] = v
+			creds, cerr := buildCredentials(spec, entry, secretValues)
+			if cerr != nil {
+				return cerr
 			}
 			body, err := json.Marshal(map[string]any{
 				"channel":     spec.channel,
@@ -293,6 +290,48 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 	// reads the ones in that provider's spec.
 	registerProviderFlags(cmd)
 	return cmd
+}
+
+// buildCredentials, sunucuya gidecek `credentials` gövdesini kurar.
+//
+// AYRI BİR FİİL, çünkü kapı onu ÇAĞIRMALI. Gövdenin şekli daha önce cobra
+// closure'ının içinde kuruluyordu ve hiçbir test onu göremiyordu; sonuç, 11.09
+// öncesinde alan adlarının, bugün de `fcm`'in sarmalayıcısının kimseye
+// görünmeden yanlış olmasıydı.
+//
+// İKİ ŞEKİL VAR:
+//
+//   - Olağan: alanlar ve sırlar ADLARIYLA gövdeye girer.
+//   - `credentialsAreTheSecret`: sırrın AYRIŞTIRILMIŞ içeriği gövdenin
+//     KENDİSİDİR. `fcm` böyle — modül credentials'ı service_account.json'un
+//     kendisi sayıyor (v2 provider/push/fcm.go ValidateFCMConfig: kökte `type`
+//     == "service_account", `project_id`, `private_key`, `client_email`).
+//     Sarmalayıcı bir alan koymak, kabul edilen ama her push'u ölen bir kayıt
+//     yazmaktı.
+func buildCredentials(
+	spec *providerSpec, entry providerEntry, secrets map[string]string,
+) (map[string]any, error) {
+	if spec.credentialsAreTheSecret {
+		if len(spec.secrets) != 1 {
+			return nil, fmt.Errorf("provider %q: credentials are the secret, so it must declare "+
+				"exactly one secret (declares %d)", spec.name, len(spec.secrets))
+		}
+		raw := secrets[spec.secrets[0].name]
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+			return nil, fmt.Errorf("--%s-file is not valid JSON: %w", spec.secrets[0].flag, err)
+		}
+		return doc, nil
+	}
+
+	creds := map[string]any{}
+	for k, v := range entry.fields {
+		creds[k] = v
+	}
+	for k, v := range secrets {
+		creds[k] = v
+	}
+	return creds, nil
 }
 
 // collectProviderFields, bayraklardan sağlayıcının GİZLİ OLMAYAN alanlarını

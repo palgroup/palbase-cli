@@ -96,6 +96,7 @@ var moduleConfigStruct = map[string]struct{ path, typ string }{
 	"apns":     {"internal/modules/notify/internal/provider/push/apns.go", "APNsConfig"},
 	"twilio":   {"internal/modules/notify/internal/provider/sms/twilio.go", "TwilioConfig"},
 	"meta":     {"internal/modules/notify/internal/provider/whatsapp/meta.go", "Config"},
+	"fcm":      {"internal/modules/notify/internal/provider/push/fcm.go", "FCMConfig"},
 }
 
 // notProducedByCLI, modülün OKUDUĞU ama CLI'ın YAZMADIĞI alanlar — her biri
@@ -135,16 +136,6 @@ func TestTheCatalogMatchesTheModuleContract(t *testing.T) {
 	contract := loadModuleContract(t)
 
 	for _, spec := range catalog {
-		// `fcm` BİLEREK DIŞARIDA — ve bu bir istisna değil, AYRI BİR KUSUR.
-		// Diğerlerinde sorun adlandırmaydı. `fcm`'de sorun SARMALAMA: CLI
-		// service-account JSON'unu `{"serviceAccount": "<dosya>"}` diye bir alanın
-		// İÇİNE koyuyor, modül ise credentials'ı service_account.json'un KENDİSİ
-		// sayıp kök seviyede `client_email` / `private_key` arıyor
-		// (provider/push/fcm.go:118-129). Adı ya da tipi düzeltmek onu çözmez,
-		// yalnız kusuru gizler. Deftere ayrı bir iş olarak yazıldı.
-		if spec.name == "fcm" {
-			continue
-		}
 		moduleTypes, known := contract[spec.name]
 		if !known {
 			t.Errorf("%s: sözleşme anlık görüntüsünde yok — yeni sağlayıcı eklendiyse module_contract.json da yenilenmeli", spec.name)
@@ -162,9 +153,6 @@ func TestTheCatalogMatchesTheModuleContract(t *testing.T) {
 		// Bir kapı, ölçtüğünü söylediği şeyi gerçekten üretmelidir — bu yüzden
 		// üretim fonksiyonu çağrılır ve çıktısı JSON'a çevrilip TÜRÜNE bakılır.
 		cliKind := producedJSONKinds(t, spec)
-		for _, sf := range spec.secrets {
-			cliKind[sf.name] = "string" // sırlar kasadan dizge olarak eklenir
-		}
 
 		// 1 + 3: CLI → modül, ad ve tip.
 		for name, kind := range cliKind {
@@ -225,7 +213,25 @@ func producedJSONKinds(t *testing.T, spec providerSpec) map[string]string {
 	entry, err := collectProviderFields(&spec, cmd)
 	require.NoError(t, err, "%s: üretim yolu bu girdilerle hata verdi", spec.name)
 
-	body, err := json.Marshal(entry.fields)
+	// SIRLARIN YOLU DA ÜRETİM YOLUDUR ve kapı onu da ölçmeli.
+	//
+	// İki şekil var. Olağan olanı: her sır, ADIYLA gövdeye bir dizge alan
+	// olarak girer. Diğeri `credentialsAreTheSecret`: sırrın AYRIŞTIRILMIŞ
+	// içeriği gövdenin KENDİSİDİR, sarmalayıcı alan yoktur — `fcm` böyle.
+	// İkincisini "sır adını dizge olarak enjekte et" diye ölçmek, tam da
+	// düzeltmekte olduğumuz sarmalamayı DOĞRU sayardı.
+	secrets := map[string]string{}
+	for _, sf := range spec.secrets {
+		if spec.credentialsAreTheSecret {
+			secrets[sf.name] = sampleSecretDocument(spec.name)
+			continue
+		}
+		secrets[sf.name] = "x"
+	}
+	creds, err := buildCredentials(&spec, entry, secrets)
+	require.NoError(t, err, "%s: kimlik gövdesi kurulamadı", spec.name)
+
+	body, err := json.Marshal(creds)
 	require.NoError(t, err)
 	var wire map[string]any
 	require.NoError(t, json.Unmarshal(body, &wire))
@@ -345,6 +351,19 @@ func TestTheModuleContractSnapshotIsCurrent(t *testing.T) {
 		if _, known := moduleConfigStruct[name]; !known {
 			t.Errorf("%s: anlık görüntüde var ama adresi yazılı değil — ölü giriş", name)
 		}
+	}
+}
+
+// sampleSecretDocument, kimliği "sırrın kendisi" olan sağlayıcılar için,
+// kullanıcının vereceği dosyanın TEMSİLİ içeriğidir. Kapı bunu üretim yolundan
+// geçirip gövdeye hangi KÖK alanların girdiğini ölçüyor — yani sarmalayıcı bir
+// alan kalırsa bu ölçüm onu görür.
+func sampleSecretDocument(provider string) string {
+	switch provider {
+	case "fcm":
+		return `{"type":"service_account","project_id":"p","private_key":"k","client_email":"e@f.g"}`
+	default:
+		return `{}`
 	}
 }
 
