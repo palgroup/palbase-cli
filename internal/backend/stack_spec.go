@@ -62,9 +62,16 @@ func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
 	if !asked && !writesPerEnvironmentArtifacts(detectPlatforms(".")) {
 		return nil
 	}
-	// No banner here: RefreshSpec runs INSIDE `push` and `link`, which have
-	// already said where they are acting. Announcing it a second time mid-run
-	// reads as a second destination.
+	// NO BANNER HERE: both callers have already announced where they act —
+	// `palbase spec` through `PrintResolvedFor` and `push` through the same,
+	// before it hands this function to `finishStackPush`. Announcing a second
+	// time mid-run reads as a second destination, which is exactly the defect
+	// `push` carried until this run (see RefreshSpecAfterPush and
+	// push_banner_test.go).
+	//
+	// `link` is NOT a caller, whatever an earlier version of this comment said:
+	// it writes the contract through `gatherEnvironments`, which applies the
+	// same artifact rule for its own reasons.
 	// RESOLVED, NOT READ. Which environment's contract this refreshes is the
 	// resolver's answer — `--env` has to reach here or `palbase spec` would
 	// silently refresh a different environment than the one a person named.
