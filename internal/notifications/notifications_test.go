@@ -467,6 +467,15 @@ func TestAddFCMRefusesABrokenServiceAccountBeforeTheVault(t *testing.T) {
 		{"geçerli JSON değil", "bu bir servis hesabı değil"},
 		{"JSON ama servis hesabı değil", `{"hello":"world"}`},
 		{"type alanı yanlış", `{"type":"authorized_user","project_id":"p"}`},
+		// TÜRÜ DOĞRU AMA EKSİK. Üç vaka da `type` kontrolünde düşüyordu, yani
+		// dosyanın "servis hesabı ama yarım" hâli — elle kırpılmış, eksik
+		// kopyalanmış — HİÇ ölçülmüyordu, ve o hâl kapıdan GEÇİYORDU: sır
+		// kasaya yazılıyor, sağlayıcı POST'u modülden 400 alıyor, kullanıcıda
+		// yetim bir sır kalıyordu. Tam da bu testin var olma sebebi olan dizi.
+		{"private_key yok", `{"type":"service_account","project_id":"p","client_email":"e@f.g"}`},
+		{"client_email yok", `{"type":"service_account","project_id":"p","private_key":"-----BEGIN"}`},
+		{"project_id yok", `{"type":"service_account","private_key":"-----BEGIN","client_email":"e@f.g"}`},
+		{"private_key BOŞ", `{"type":"service_account","project_id":"p","private_key":"","client_email":"e@f.g"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -484,4 +493,29 @@ func TestAddFCMRefusesABrokenServiceAccountBeforeTheVault(t *testing.T) {
 			assert.Empty(t, rest.all(), "reddedilen bir kurulum hiçbir istek göndermemeli")
 		})
 	}
+}
+
+// TestTheFCMVaultKeyIsStillTheOneEverybodyElseNames, sır ADININ türettiği kasa
+// anahtarını ölçer.
+//
+// T001'den sonra `fcm`'in sır ADI tel gövdesine ARTIK GİRMİYOR: belge
+// `credentials`'ın kökü olarak gönderiliyor ve `buildCredentials` adı tamamen
+// yok sayıyor. Ad böylece TEK bir şey üretiyor — kasa anahtarı — ve onu ölçen
+// hiçbir iddia kalmamıştı (bağımsız inceleme bulgusu I-2).
+//
+// Somut senaryo: biri alanı `serviceAccountJSON` diye yeniden adlandırır. Tel
+// gövdesi DEĞİŞMEZ (kök şekil aynı), katalog kapısı YEŞİL kalır, ve kasa
+// anahtarı sessizce `PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT_JSON`'a kayar —
+// kullanıcının o anahtarı okuyan her şeyi (ve yayımlanan dokümanı) geride
+// bırakarak. Bu, `PB_NOTIFICATIONS_APNS_P8` → `..._P8_PRIVATE_KEY` kaymasının
+// bedelini ödettiği ve `supersededSecretKeys`'in var olma sebebi olan sınıfın
+// ta kendisi.
+func TestTheFCMVaultKeyIsStillTheOneEverybodyElseNames(t *testing.T) {
+	spec := specByName("fcm")
+	require.NotNil(t, spec, "katalogda fcm yok")
+	require.Len(t, spec.secrets, 1, "fcm tek bir sır taşımalı")
+
+	assert.Equal(t, "PB_NOTIFICATIONS_FCM_SERVICE_ACCOUNT",
+		reservedSecretKey("fcm", spec.secrets[0].name),
+		"fcm'in kasa anahtarı kaydı — yayımlanan doküman ve kullanıcının kasası bu adı taşıyor")
 }

@@ -4,6 +4,7 @@ package notifications
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -221,14 +222,15 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 				// kasaya YÜKLEDİKTEN sonra varmıştı; kullanıcıda parola kasada,
 				// sağlayıcı yok.
 				//
-				// BU, MODÜLÜN KURALININ İKİNCİ BİR KOPYASI DEĞİL. Modül
-				// "gönderim için gereken alanlar var mı" diye soruyor
-				// (ValidateFCMConfig: project_id, private_key, client_email);
-				// burada sorulan şey "bu dosya bir servis hesabı belgesi mi" —
-				// belgenin KENDİ tür ayracı, ki onu Google tanımlıyor. İki ayrı
-				// soru, iki ayrı yerde; kural çoğaltılmıyor.
+				// BU, MODÜLÜN KURALININ İKİNCİ BİR KOPYASI DEĞİL. Belgenin
+				// tür ayracını Google tanımlıyor; kök alan listesi ise
+				// `module_contract.json`'dan, yani v2'nin kendi struct'ından
+				// türetilmiş ve tazeliği ayrı bir kapıyla ölçülen anlık
+				// görüntüden geliyor. Elle yazılmış bir alan listesi burada
+				// olsaydı, iki kopyanın sessizce ayrışması bu koşunun kapattığı
+				// sınıfın ta kendisi olurdu.
 				if spec.credentialsAreTheSecret {
-					if verr := verifySecretDocument(s, value); verr != nil {
+					if verr := verifySecretDocument(s, spec.name, value); verr != nil {
 						return verr
 					}
 				}
@@ -314,23 +316,90 @@ Run ` + "`palbase notifications providers`" + ` to see every provider's flags.`,
 // verifySecretDocument, kimliği sırrın kendisi olan bir sağlayıcının dosyasını
 // KASAYA YAZILMADAN ÖNCE reddeder.
 //
-// Ölçtüğü tek şey belgenin KENDİ tür ayracı. Alanların gönderim için yeterli
-// olup olmadığı modülün sorusu ve orada soruluyor; burada aynı kuralı ikinci
-// kez yazmak, iki kopyanın sessizce ayrışmasına davetiye olurdu.
-func verifySecretDocument(s secretField, raw string) error {
-	var doc struct {
-		Type string `json:"type"`
-	}
+// İKİ ŞEY ölçüyor ve ikisi de kasa PUT'undan önce:
+//
+//  1. belgenin KENDİ tür ayracı (`type`), ve
+//  2. modülün o sağlayıcı için beyan ettiği KÖK ALANLARIN hepsinin var ve boş
+//     olmadığı.
+//
+// İkincisi 12.09.2026'da eklendi ve sebebi ölçülmüş bir açıktı: yalnız `type`e
+// bakan hâl, elle kırpılmış bir servis hesabı dosyasını
+// (`{"type":"service_account","project_id":"p","client_email":"e"}` — `private_key`
+// YOK) GEÇİRİYORDU. Akış şuydu: kapı geçer → sır KASAYA YAZILIR → sağlayıcı
+// POST'u modülden 400 alır → kullanıcının kasasında YETİM bir sır kalır ve
+// sağlayıcı yoktur. Bu, 11.09'da smtp'de birebir yaşanan dizidir ve bu fiilin
+// var olma sebebidir.
+//
+// KURAL İKİNCİ KEZ YAZILMIYOR. Alan listesi `module_contract.json`'dan geliyor —
+// v2'nin config struct'ından türetilmiş, depoya vendor'lanmış ve tazeliği
+// `TestTheModuleContractSnapshotIsCurrent` tarafından v2'nin HEAD'ine karşı
+// ölçülen anlık görüntü. Burada elle bir alan listesi tutmak, bu koşunun
+// kapattığı sınıfın kendisi olurdu.
+//
+// SIKILIK SINIRI, açıkça: sözleşme config struct'ının TÜM alanlarını kaydediyor,
+// "zorunlu olanları" değil. Bu yüzden kontrol yalnız `credentialsAreTheSecret`
+// sağlayıcılarına uygulanıyor — orada belge KİMLİĞİN KENDİSİ ve bugünkü tek
+// örneği olan `fcm` için modülün doğrulayıcısı dört alanın DÖRDÜNÜ de istiyor
+// (`ValidateFCMConfig`). İleride bu dala isteğe bağlı alanı olan bir sağlayıcı
+// girerse, bu kontrol sunucudan KATI olur ve çalışan bir kimliği reddeder;
+// o gün sözleşmenin zorunluluğu da taşıması gerekir. Bu cümle o günün uyarısıdır.
+func verifySecretDocument(s secretField, provider string, raw string) error {
+	var doc map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return fmt.Errorf("--%s-file is not valid JSON: %w", s.flag, err)
 	}
-	if doc.Type != "service_account" {
+	var typ string
+	if v, ok := doc["type"]; ok {
+		_ = json.Unmarshal(v, &typ)
+	}
+	if typ != "service_account" {
 		return fmt.Errorf("--%s-file is not a service-account document: its %q field is %q, "+
 			"expected \"service_account\" — download the JSON key from the Firebase console "+
 			"(Project settings → Service accounts → Generate new private key)",
-			s.flag, "type", doc.Type)
+			s.flag, "type", typ)
+	}
+	for _, field := range contractFields(provider) {
+		v, ok := doc[field]
+		if !ok {
+			return fmt.Errorf("--%s-file is missing %q — nothing was written to the vault. "+
+				"A service-account file the stack cannot send with is worse than no file at "+
+				"all: the credential would sit in the vault under a provider that does not "+
+				"exist. Download the key again from the Firebase console (Project settings → "+
+				"Service accounts → Generate new private key)", s.flag, field)
+		}
+		var str string
+		if err := json.Unmarshal(v, &str); err == nil && strings.TrimSpace(str) == "" {
+			return fmt.Errorf("--%s-file has an empty %q — nothing was written to the vault",
+				s.flag, field)
+		}
 	}
 	return nil
+}
+
+//go:embed module_contract.json
+var moduleContractJSON []byte
+
+// contractFields, bir sağlayıcının modül sözleşmesinde beyan edilen kök
+// alanlarını verir; sağlayıcı sözleşmede yoksa boş döner.
+//
+// FAIL-CLOSED DEĞİL, ve bilerek: bu fiilin çağrıldığı tek yer zaten `type`
+// kontrolünden geçmiş bir belge, ve sözleşmede olmayan bir sağlayıcı için
+// "hiçbir alan zorunlu" demek kullanıcıyı BUGÜNKÜ davranışta bırakır — daha
+// kötüye değil. Sözleşmenin eksikliğini yakalayan kapı ayrı ve zaten var
+// (`TestTheCatalogMatchesTheModuleContract`, her sağlayıcı için kayıt ister).
+func contractFields(provider string) []string {
+	var doc struct {
+		Providers map[string]map[string]string `json:"providers"`
+	}
+	if err := json.Unmarshal(moduleContractJSON, &doc); err != nil {
+		return nil
+	}
+	fields := make([]string, 0, len(doc.Providers[provider]))
+	for name := range doc.Providers[provider] {
+		fields = append(fields, name)
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 // buildCredentials, sunucuya gidecek `credentials` gövdesini kurar.
