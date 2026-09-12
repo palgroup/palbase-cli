@@ -6,7 +6,20 @@ import "strings"
 // It also derives the reserved vault keys used by the provider setup flow.
 
 // reservedSecretPrefix is the env-var namespace that backs provider secrets.
-// A `palbase secret set` of a key under this prefix is refused (see secret-guard).
+// NOTHING REFUSES A HAND-SET KEY UNDER THIS PREFIX, and this line used to claim
+// otherwise ("see secret-guard"). There is no such guard — grep the repository:
+// `PB_NOTIFICATIONS` appears in this package and nowhere else. The published
+// docs already say the truth (`content/docs/backend/notifications.md`,
+// `content/docs/cli/secrets.md`: "Nothing in the CLI or the stack refuses…"),
+// so the corpus and this comment disagreed, with the comment lying to the next
+// maintainer rather than to a user.
+//
+// The claim was flagged as false in another run's own design doc on 2026-09-02
+// and outlived the fix by ten days. Corrected 2026-09-12.
+//
+// The namespace is therefore RESERVED BY CONVENTION: a hand-set
+// `PB_NOTIFICATIONS_*` silently overwrites what `notifications add` wrote and
+// breaks delivery in a way that looks like a provider outage.
 const reservedSecretPrefix = "PB_NOTIFICATIONS"
 
 // field is one non-secret config field an author supplies for a provider.
