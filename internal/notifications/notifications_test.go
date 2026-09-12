@@ -476,6 +476,10 @@ func TestAddFCMRefusesABrokenServiceAccountBeforeTheVault(t *testing.T) {
 		{"client_email yok", `{"type":"service_account","project_id":"p","private_key":"-----BEGIN"}`},
 		{"project_id yok", `{"type":"service_account","private_key":"-----BEGIN","client_email":"e@f.g"}`},
 		{"private_key BOŞ", `{"type":"service_account","project_id":"p","private_key":"","client_email":"e@f.g"}`},
+		// DIZGE OLMAYAN deger: CLI bunu GECIRIYORDU ve sunucu 400 donuyordu —
+		// yani sir kasada, saglayici yok. Sunucudan KATI degil, sunucuyla AYNI.
+		{"private_key sayi", `{"type":"service_account","project_id":"p","private_key":123,"client_email":"e@f.g"}`},
+		{"private_key sadece BOSLUK", `{"type":"service_account","project_id":"p","private_key":"   ","client_email":"e@f.g"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

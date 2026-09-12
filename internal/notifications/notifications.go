@@ -367,8 +367,20 @@ func verifySecretDocument(s secretField, provider string, raw string) error {
 				"exist. Download the key again from the Firebase console (Project settings → "+
 				"Service accounts → Generate new private key)", s.flag, field)
 		}
+		// DİZGE OLMAYAN DEĞER DE REDDEDİLİR, ve bu sunucudan KATI değil: modül
+		// belgeyi kendi struct'ına ayrıştırıyor ve `"private_key": 123` orada
+		// `invalid service account JSON` ile 400 alıyor. Bu kontrol olmadan CLI
+		// onu GEÇİRİYORDU (`Unmarshal` hata verir, boşluk kontrolü atlanır) —
+		// yani sır kasaya yazılıyor, sağlayıcı POST'u 400 alıyor ve kullanıcıda
+		// yetim bir sır kalıyordu. Tam da bu fiilin engellemek için var olduğu
+		// dizi, bir kenarda hayatta kalmış hâliyle.
 		var str string
-		if err := json.Unmarshal(v, &str); err == nil && strings.TrimSpace(str) == "" {
+		if err := json.Unmarshal(v, &str); err != nil {
+			return fmt.Errorf("--%s-file has a non-string %q — a service-account document "+
+				"carries text in every field, and the stack refuses this one. Nothing was "+
+				"written to the vault", s.flag, field)
+		}
+		if strings.TrimSpace(str) == "" {
 			return fmt.Errorf("--%s-file has an empty %q — nothing was written to the vault",
 				s.flag, field)
 		}
