@@ -235,15 +235,29 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 					dir = product.Name
 				}
 				target := Target{URL: "https://" + ref + "." + host}
+				// CLONE ANNOUNCES WHERE IT IS CLONING FROM, like every other
+				// verb. It resolves an environment — the source it downloads is
+				// one environment's deployed code — and a verb that resolves
+				// without saying so is how "this went somewhere I did not mean"
+				// becomes visible only afterwards.
+				fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s/%s\n", product.Name, envName)
+				// MADE HERE, REMOVED IF NOTHING ARRIVES: a clone that failed
+				// must not leave a directory named after the project, because
+				// the next reader cannot tell an empty clone from a clone that
+				// is still running.
+				existed := dirExists(dir)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					return err
 				}
+				cleanup := func() { reapEmptyClone(dir, existed) }
 				cred, _, credErr := Credential(target.URL)
 				if credErr != nil {
+					cleanup()
 					return credErr
 				}
 				if err := fetchDeployedSource(
 					ctx, target, cred, target.URL, dir, cmd.OutOrStdout()); err != nil {
+					cleanup()
 					return err
 				}
 				// BOUND BY IDENTITY, AND THE SELECTION IS SET.
@@ -300,4 +314,33 @@ func inDir(dir string, fn func() error) error {
 	}
 	defer func() { _ = os.Chdir(prev) }()
 	return fn()
+}
+
+// dirExists answers whether a path is already there, without creating it.
+func dirExists(dir string) bool {
+	_, err := os.Stat(dir)
+	return err == nil
+}
+
+// reapEmptyClone removes a directory `clone` made and could not fill.
+//
+// A WRITER MUST NOT LEAVE WHAT IT COULD NOT PRODUCE. `clone` creates the
+// directory before the download because the download writes into it, so a
+// failure — nothing deployed yet, no credential, a dropped connection — used to
+// leave an empty directory named after the project. The next reader cannot tell
+// that from a clone still in progress, and `ls` says the project is here when
+// none of it is.
+//
+// IT ONLY REMOVES WHAT IT MADE, and only while empty: a directory that was
+// already there belongs to whoever put it there, and one with files in it may
+// hold a partial download somebody wants to look at.
+func reapEmptyClone(dir string, existedBefore bool) {
+	if existedBefore {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(dir)
 }
