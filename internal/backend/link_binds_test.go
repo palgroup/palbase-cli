@@ -121,3 +121,31 @@ func TestNoStaleArtifactNoticeWhenThereIsNothingStale(t *testing.T) {
 	reportStaleArtifacts(&out, root, []string{"ios"})
 	require.Empty(t, out.String(), "an app checkout was told its own artifact directory is stale")
 }
+
+// THE ARTIFACT DIRECTORY'S NAME COMES FROM THE CHOSEN ENVIRONMENT, and this is
+// the step the old defect lived in.
+//
+// `EnvDir("staging")` is measured elsewhere, but that function takes the name
+// as an argument — it cannot tell whether the CALLER handed it a constant, and
+// handing it a constant is precisely what `defaultEnvName` did for every cloud
+// link. So the step between "which ref did we choose" and "what do we call the
+// directory" is measured here, including the case with no `main` in sight.
+func TestTheArtifactDirectoryTakesTheChosenEnvironmentsName(t *testing.T) {
+	require.Equal(t, "staging", envNameOfRef(linkEnvs, "mu0028"))
+	require.Equal(t, "canary", envNameOfRef(linkEnvs, "aa11bb22c"),
+		"an environment that is not `main` lost its name")
+
+	// AND THE WHOLE CHAIN AGREES: a product with no `main` must not land in
+	// `environments/main/`, which is what an empty name becomes downstream.
+	noMain := []Environment{{Ref: "zzz", Name: "staging"}, {Ref: "aaa", Name: "canary"}}
+	ref, err := linkEnvironmentRef(Product{ID: "prd_a", Name: "todoapp"}, noMain, "")
+	require.NoError(t, err)
+	name := envNameOfRef(noMain, ref)
+	require.NotEmpty(t, name, "the chosen environment has no name, so the directory becomes a constant")
+	require.Equal(t, "palbase/environments/canary", EnvDir(name))
+	require.NotContains(t, EnvDir(name), "main")
+
+	// A REF NOBODY HAS HAS NO NAME: the fallback belongs to a stack somebody
+	// runs, and inventing a name here would hide a chooser that went wrong.
+	require.Empty(t, envNameOfRef(linkEnvs, "notaref"))
+}

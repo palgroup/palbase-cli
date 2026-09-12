@@ -176,11 +176,7 @@ boot generated.`,
 				if refErr != nil {
 					return refErr
 				}
-				for _, e := range envs {
-					if e.Ref == ref {
-						o.linkedEnv = e.Name
-					}
-				}
+				o.linkedEnv = envNameOfRef(envs, ref)
 				host := r.Endpoints().PublicHost
 				if host == "" {
 					return fmt.Errorf("this CLI has no tenant host configured, so %q cannot be resolved to an address", ref)
@@ -324,6 +320,25 @@ func linkEnvironmentRef(product Product, envs []Environment, named string) (stri
 		}
 	}
 	return ordered[0].Ref, nil
+}
+
+// envNameOfRef is the NAME the artifact directory takes.
+//
+// IT IS WHY THE DIRECTORY IS NOT A CONSTANT. `defaultEnvName` returned the
+// literal "main" for every cloud checkout, so two environments shared one
+// directory and the second link overwrote the first one's contract in place.
+// The chooser returns a REF; the generators and `palbase/environments/<name>/`
+// want the NAME, and this is the one step between them. An empty answer falls
+// back to `main` downstream — correct for a stack somebody runs, wrong for a
+// cloud environment — so returning "" for a ref that IS in the list would put
+// the old defect back with none of its code.
+func envNameOfRef(envs []Environment, ref string) string {
+	for _, e := range envs {
+		if e.Ref == ref {
+			return e.Name
+		}
+	}
+	return ""
 }
 
 // writeLinkRecord commits WHAT THIS CHECKOUT IS BOUND TO, and the two shapes
