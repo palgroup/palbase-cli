@@ -119,3 +119,78 @@ func TestTheUnlinkedRefusalsOfferNoFlagThatCannotSelect(t *testing.T) {
 		}
 	}
 }
+
+// THE BANNER NAMES THE ENVIRONMENT, and that is the half that was tested but
+// unreachable for months: `Target.Env` had assertions and no production writer,
+// so "the banner prints project/env" was true in the suite and false in the
+// product. It is the resolver's answer now, so the assertion lives where the
+// answer does.
+func TestPrintResolvedNamesProjectAndEnvironment(t *testing.T) {
+	inScratchCheckout(t)
+	if err := WriteTarget(Target{Project: "prd_a", Name: "todoapp"}); err != nil {
+		t.Fatal(err)
+	}
+	resolverRig(t, []Environment{{Ref: "mu0028", Name: "staging", Status: "Running"}})
+
+	var out bytes.Buffer
+	got, err := PrintResolvedTo(&out, cmdFor(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Env != "staging" {
+		t.Errorf("resolved env = %q", got.Env)
+	}
+	if s := out.String(); s != "▸ todoapp/staging\n" {
+		t.Errorf("banner = %q, want the project AND the environment", s)
+	}
+}
+
+// A RUNNING LOCAL STACK STILL SAYS SO — `(local)` is the whole warning that
+// this push is not going to the cloud.
+func TestPrintResolvedStillMarksALocalStack(t *testing.T) {
+	inScratchCheckout(t)
+	if err := WriteTarget(Target{Project: "prd_a", Name: "todoapp"}); err != nil {
+		t.Fatal(err)
+	}
+	resolverRig(t, []Environment{{Ref: "mu0028", Name: "staging"}})
+	local, err := localPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMachineStateDir(local); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(`{"url":"http://127.0.0.1:54321"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if _, err := PrintResolvedTo(&out, cmdFor(t)); err != nil {
+		t.Fatal(err)
+	}
+	if s := out.String(); s != "▸ http://127.0.0.1:54321 (local)\n" {
+		t.Errorf("banner = %q", s)
+	}
+}
+
+// THE REFUSAL REACHES THE READER. A verb that cannot resolve an environment
+// must print WHY — the list of environments — not a bare error somewhere else.
+func TestPrintResolvedSurfacesTheRefusal(t *testing.T) {
+	inScratchCheckout(t)
+	if err := WriteTarget(Target{Project: "prd_a", Name: "todoapp"}); err != nil {
+		t.Fatal(err)
+	}
+	resolverRig(t, []Environment{
+		{Ref: "j06bwtuum", Name: "main"},
+		{Ref: "mu0028", Name: "staging"},
+	})
+
+	var out bytes.Buffer
+	_, err := PrintResolvedTo(&out, cmdFor(t))
+	if err == nil {
+		t.Fatal("two environments and no selection resolved anyway")
+	}
+	if !strings.Contains(err.Error(), "staging") {
+		t.Errorf("the refusal does not list the environments: %v", err)
+	}
+}
