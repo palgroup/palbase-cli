@@ -214,6 +214,17 @@ func TestCreateNamesTheCostAndAsksFirst(t *testing.T) {
 	require.Contains(t, strings.ToLower(out), "billing",
 		"the billing consequence was not printed before the question")
 	require.Contains(t, strings.ToLower(out), "quota")
+	// THE ENVELOPE LINE MUST SAY SOMETHING. Printing the label with an empty
+	// value is worse than not printing it: the line exists so a person sees
+	// what they will be billed for, and a blank reads as "nothing".
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "compute envelope") {
+			value := strings.TrimSpace(strings.SplitN(line, "compute envelope", 2)[1])
+			require.NotEmpty(t, value, "the compute envelope was printed with no value")
+			require.Contains(t, strings.ToLower(value), "plan",
+				"with no --tier, the line does not say the plan chooses the envelope")
+		}
+	}
 	require.Equal(t, http.MethodGet, rest.last().method, "an environment was created before the confirmation")
 }
 
@@ -228,7 +239,26 @@ func TestCreateProceedsWhenTheNameIsTyped(t *testing.T) {
 	require.Equal(t, http.MethodGet, rest.calls[0].method, "create acted without reading the project first")
 	sent, _ := rest.last().body.(map[string]any)
 	require.Equal(t, "staging2", sent["name"])
-	require.Equal(t, "free", sent["tier"], "the default compute envelope is not the plan's smallest")
+	// THE ENVELOPE FIELD IS ABSENT unless somebody names one. The server's own
+	// contract says the plan chooses it, so a constant sent from here would be
+	// a policy duplicated on the side that does not own the catalogue — and it
+	// pins itself: the day the catalogue's smallest changes, this CLI would
+	// keep asking for yesterday's.
+	_, sentTier := sent["tier"]
+	require.False(t, sentTier, "create sent a compute envelope nobody asked for")
+}
+
+// AND WHEN SOMEBODY DOES NAME ONE, it is sent verbatim — the omission above is
+// a default, not a refusal to carry the flag.
+func TestCreateSendsTheEnvelopeWhenItIsNamed(t *testing.T) {
+	linkedCheckout(t)
+	rest := &stubREST{projects: twoEnvironments()}
+
+	out, err := run(t, rest, "", "create", "staging2", "--tier", "pro", "--yes")
+	require.NoError(t, err)
+	sent, _ := rest.last().body.(map[string]any)
+	require.Equal(t, "pro", sent["tier"])
+	require.Contains(t, out, "pro", "the envelope it will ask for is not printed")
 }
 
 func TestCreateWithYesSkipsThePrompt(t *testing.T) {

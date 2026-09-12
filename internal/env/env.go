@@ -205,7 +205,16 @@ this command prints that consequence before it asks.`,
 			// consequence would drop exactly the thing that justified leaving
 			// it out.
 			fmt.Fprintf(out, "This creates a new environment %q under %s.\n", name, p.Name)
-			fmt.Fprintf(out, "  compute envelope   %s\n", tier)
+			// THE ENVELOPE IS NOT THIS COMMAND'S DECISION when nobody names one.
+			// The control plane owns the plan catalogue and picks the smallest
+			// envelope the organisation's plan allows; a constant here would be
+			// a policy this side does not own, and it would silently detach the
+			// day that catalogue's order changes.
+			envelope := "your plan's smallest allowed (chosen by the control plane)"
+			if tier != "" {
+				envelope = tier
+			}
+			fmt.Fprintf(out, "  compute envelope   %s\n", envelope)
 			fmt.Fprintln(out, "  billing            its own microVM and disk; it draws on your")
 			fmt.Fprintln(out, "                     organisation's pooled quota from the moment it runs")
 			if !yes {
@@ -224,7 +233,14 @@ this command prints that consequence before it asks.`,
 				Name  string `json:"name"`
 				Phase string `json:"phase"`
 			}
-			body := map[string]any{"name": name, "tier": tier}
+			// THE FIELD IS OMITTED, NOT DEFAULTED: the server's contract reads
+			// "tier opsiyonel çünkü ortamın zarfını PLAN seçebilir" — sending a
+			// value always would answer a question that was deliberately left
+			// to the plan.
+			body := map[string]any{"name": name}
+			if tier != "" {
+				body["tier"] = tier
+			}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost,
 				"/v1/cloud/projects/"+url.PathEscape(p.ID)+"/environments", body, &created); err != nil {
 				return err
@@ -234,7 +250,8 @@ this command prints that consequence before it asks.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "free", "compute envelope for the new environment")
+	cmd.Flags().StringVar(&tier, "tier", "",
+		"compute envelope for the new environment (default: the smallest your plan allows)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
 }
