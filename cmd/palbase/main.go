@@ -454,7 +454,11 @@ func newRootCmd() *cobra.Command {
 	// gate whose reason still holds — a reader who types the old name should
 	// not be answered by a new mechanism wearing it.
 	rootCmd.PersistentFlags().StringVar(&selectedEnv, "env", "",
-		"environment to act on (name or ref); overrides `palbase env use` for this call only")
+		// THE BACKQUOTED WORD IS THE VALUE'S NAME, not emphasis: cobra reads
+		// the first backquoted section of a usage string as the placeholder it
+		// prints after the flag. Quoting the verb here rendered the help line
+		// as "--env palbase env use", which reads as three arguments.
+		"the `environment` to act on — a name or a ref; overrides the remembered selection for this call only")
 
 	// Cloud lookup is lazy so help needs no account credential.
 	backendResolvers := backend.Resolvers{

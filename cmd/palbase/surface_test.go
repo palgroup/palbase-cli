@@ -241,6 +241,25 @@ func subcommands(t *testing.T, parent string) []string {
 // (TestTheSelectionFlagResolvesThroughALiveRoute), not by trusting this list.
 // The retired NAMES stay retired — a reader who types `--environment` must not
 // be answered by a new mechanism wearing the old name.
+// A FLAG'S VALUE PLACEHOLDER IS ONE WORD, and this measures the rendering
+// rather than the source.
+//
+// Cobra derives the placeholder from the first BACKQUOTED section of the usage
+// string. `--env`'s usage quoted a command name (`palbase env use`) to
+// emphasise it, so the help printed "--env palbase env use" — which reads as a
+// flag taking three arguments. Emphasis and placeholder are the same mechanism
+// in pflag, so backquotes in a usage string are never decoration.
+func TestEveryGlobalFlagPrintsAOneWordPlaceholder(t *testing.T) {
+	root := newRootCmd()
+	root.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		name, _ := pflag.UnquoteUsage(f)
+		if strings.ContainsAny(name, " \t") {
+			t.Errorf("--%s prints the placeholder %q, so its help reads as several arguments; "+
+				"backquote the value's NAME in the usage string, not a phrase", f.Name, name)
+		}
+	})
+}
+
 func TestGolden_GlobalFlags(t *testing.T) {
 	var names []string
 	newRootCmd().PersistentFlags().VisitAll(func(f *pflag.Flag) { names = append(names, f.Name) })
