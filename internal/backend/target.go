@@ -46,10 +46,14 @@ type Target struct {
 	// URL is an address this CLI talks to directly. Set for a project running on
 	// this machine, and resolved from Project/Env for a cloud one.
 	URL string `json:"url,omitempty"`
-	// Project and Env name a cloud project group and one of its environments.
+	// Project is the PRODUCT this checkout belongs to — the identity that does
+	// not change. Which ENVIRONMENT a verb acts on is never stored here: it is
+	// resolved per call (environments.go) and remembered, if at all, on this
+	// machine. A committed environment is how a colleague pulls your branch and
+	// pushes to your staging.
+	//
 	// Empty for a direct URL target.
 	Project string `json:"project,omitempty"`
-	Env     string `json:"env,omitempty"`
 	// Name is what a person calls this project. The ref is the identity and it
 	// never changes; this does — and a banner that printed `prd_9f21c7/staging`
 	// would be correct and useless.
@@ -58,21 +62,6 @@ type Target struct {
 	// boot generated. Remembered rather than retyped, because a flag somebody
 	// has to repeat is a flag they will eventually paste at the wrong project.
 	Insecure bool `json:"insecure,omitempty"`
-	// StackVersion is the MAJOR of the SDK generation this project runs on, and
-	// it decides which images `palbase start` brings up.
-	//
-	// ONE field, not one per service. Handing somebody a tag per container hands
-	// them a compatibility matrix — Supabase hides all 14 of its image fields
-	// behind `toml:"-"` for exactly that reason, and that is a considered refusal
-	// rather than an oversight (D-036).
-	//
-	// The MAJOR rather than the full version: a table keyed by every patch
-	// release is a table nobody maintains.
-	//
-	// It lives in the COMMITTED file on purpose. Supabase writes the equivalent
-	// to `.temp/`, which `supabase init` gitignores — so a fresh clone and every
-	// CI runner silently get a different stack than the machine that linked it.
-	StackVersion string `json:"stackVersion,omitempty"`
 	// Local is true when this target came from a running dev stack rather than
 	// from the committed file. Not serialised — it is a fact about right now.
 	Local bool `json:"-"`
@@ -110,8 +99,10 @@ func (t Target) Describe() string {
 		return t.URL + " (local)"
 	}
 	if t.Project != "" {
-		if t.Env != "" {
-			return t.Project + "/" + t.Env
+		// The ENVIRONMENT is not part of a target any more — `Resolved.Describe`
+		// prints `<project>/<env>` because only the resolver knows which one.
+		if t.Name != "" {
+			return t.Name
 		}
 		return t.Project
 	}
@@ -277,59 +268,26 @@ func credentialsPath() (string, error) {
 	return filepath.Join(home, ".palbase", "credentials.json"), nil
 }
 
-// stackVersion answers which stack generation this checkout runs, and WRITES the
-// answer down when it had to work it out.
+// stackVersion answers which stack generation this checkout runs.
 //
-// Deriving without persisting would leave the next run free to derive something
-// else — the same drift the field exists to end, one layer down. And a project
-// that can neither declare nor derive gets a REFUSAL, not an embedded default:
-// falling back silently is how the stack becomes a property of the binary again,
-// which is the whole defect (D-035/D-039).
+// IT IS DERIVED, AND IT WRITES NOTHING. The committed file used to carry the
+// answer and win over the installed package; measured, that field decided
+// nothing (`start` picks images from `installedSDKVersion`) and could lie about
+// the one thing it was printed for — bumping @palbase/backend 38 → 39 brought
+// the 39 images up under a banner that still said 38.
+//
+// A PROJECT THAT CANNOT ANSWER GETS A REFUSAL, not an embedded default:
+// falling back silently is how the stack becomes a property of the binary
+// again, which is the whole defect.
 func stackVersion(projectDir string) (string, error) {
-	// THE COMMITTED FILE, NOT THE RUNNING STACK.
-	//
-	// ReadTarget PREFERS the machine-local state (localPath(), today
-	// LocalStatePath — outside the checkout entirely) while WriteTarget writes
-	// projectPath() (the committed `palbase/project.json`), so reading through
-	// the first and writing through the second replaced a colleague's project
-	// with a localhost address — measured, back when that local state still
-	// lived at `.palbase/local.json` inside the checkout:
-	// {"project":"myproj","env":"prod"} became
-	// {"url":"http://127.0.0.1:54321","stackVersion":"33"}. WriteLocalTarget's
-	// comment twelve lines above warns about exactly this, and the warning was
-	// right. The stack version is a property of the PROJECT, so it is read from
-	// and written to the project's own file.
-	//
-	// AN UNLINKED CHECKOUT IS THE NORMAL CASE FOR `start`, which brings a stack
-	// up and links to it — a missing project file is the state before the one
-	// that command creates, not an error.
-	target, err := readLinkedProject()
-	linked := err == nil
-	if linked {
-		if v := strings.TrimSpace(target.StackVersion); v != "" {
-			return v, nil
-		}
-	}
-
 	installed := installedBackendVersion(projectDir)
 	if installed == "" {
 		return "", fmt.Errorf(
-			"this project declares no stackVersion and %s is not installed here — run `npm install`, "+
-				"or set stackVersion in %s", backendPkg, projectPath())
+			"%s is not installed here — run `npm install`", backendPkg)
 	}
 	major, _, _ := strings.Cut(installed, ".")
 	if major == "" {
 		return "", fmt.Errorf("cannot read a major out of the installed %s version %q", backendPkg, installed)
-	}
-
-	// Persist only where there is a file to persist into. `start` writes the
-	// project file itself once the stack is up; forcing one here would put a
-	// half-formed target on disk before the address it names exists.
-	if linked {
-		target.StackVersion = major
-		if err := WriteTarget(target); err != nil {
-			return "", fmt.Errorf("write the derived stack version: %w", err)
-		}
 	}
 	return major, nil
 }

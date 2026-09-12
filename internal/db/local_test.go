@@ -110,7 +110,7 @@ func TestEveryVerbRefusesWithoutARunningStack(t *testing.T) {
 func TestALinkedCloudProjectIsNotATarget(t *testing.T) {
 	scratchCheckout(t)
 	writeSchema(t, "export default {}")
-	if err := backend.WriteTarget(backend.Target{Project: "todoapp", Env: "production"}); err != nil {
+	if err := backend.WriteTarget(backend.Target{Project: "prd_a", Name: "todoapp"}); err != nil {
 		t.Fatal(err)
 	}
 

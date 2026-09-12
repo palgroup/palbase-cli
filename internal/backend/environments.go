@@ -22,6 +22,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -250,4 +251,53 @@ func ambiguous(target Target, envs []Environment) error {
 		"  palbase env use <name>        remember one for this checkout\n"+
 		"  palbase <verb> --env <name>   act on one without remembering it",
 		projectLabel(target), len(envs), listing(envs))
+}
+
+// MigrateLegacyTarget rewrites an old committed address as an identity.
+//
+// WHY IT EXISTS. Before the identity format, a cloud link wrote the RESOLVED
+// ADDRESS — `{"url":"https://<ref>.<host>"}`. That file pins one tenant: the
+// project can grow a second environment and the checkout never learns, and
+// `--env` has nothing to resolve against because the file names no project.
+//
+// IT IS BEST EFFORT, AND THAT IS THE POINT. Fixing the producer does not move
+// what the producer already wrote, so this runs on the read path — but a
+// migration that FAILED must leave the checkout exactly as it was. A control
+// plane that cannot be reached, a ref somebody else owns: either way the verb
+// carries on against the address it has. A migration is not allowed to break a
+// checkout that worked a minute ago.
+//
+// IT SAYS WHAT IT DID. A committed file that changed under somebody without a
+// word is worse than one that did not change.
+func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
+	target, err := readLinkedProject()
+	if err != nil {
+		return nil // nothing linked: nothing to migrate
+	}
+	if strings.TrimSpace(target.Project) != "" || strings.TrimSpace(target.URL) == "" {
+		return nil // already an identity, or nothing to work with
+	}
+	if !isCloudProjectAddress(target.URL) {
+		return nil // a stack somebody runs: one installation, one address
+	}
+	ref := refOfURL(target.URL)
+	if ref == "" || ProductOfRef == nil {
+		return nil
+	}
+	product, err := ProductOfRef(ctx, ref)
+	if err != nil || strings.TrimSpace(product.ID) == "" {
+		return nil
+	}
+
+	migrated := target
+	migrated.Project = product.ID
+	migrated.Name = product.Name
+	migrated.URL = ""
+	if err := WriteTarget(migrated); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address — "+
+		"pick an environment with `palbase env use <name>` or `--env <name>`\n",
+		projectPath(), product.Name)
+	return nil
 }

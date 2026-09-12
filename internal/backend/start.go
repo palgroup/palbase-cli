@@ -553,8 +553,17 @@ func imagesPresent(ctx context.Context, images []stackImage, version string) err
 // checkouts of two projects never share a database — and two checkouts of the
 // SAME project deliberately do.
 func groupName(dir string) string {
-	if target, err := readLinkedProject(); err == nil && target.Project != "" {
-		return sanitiseGroup(target.Project)
+	// THE NAME, NOT THE IDENTITY. This becomes the docker compose project name,
+	// so it is what a person sees in `docker ps`. `Target.Project` used to be
+	// what they called their project; it is the product ID now (`prd_9f21c7`)
+	// and using it would rename every local container to an opaque string.
+	if target, err := readLinkedProject(); err == nil {
+		if target.Name != "" {
+			return sanitiseGroup(target.Name)
+		}
+		if target.Project != "" {
+			return sanitiseGroup(target.Project)
+		}
 	}
 	return sanitiseGroup(filepath.Base(dir))
 }

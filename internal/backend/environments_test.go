@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -305,4 +306,74 @@ func TestACorruptSelectionIsNotSilentlyTreatedAsAbsent(t *testing.T) {
 	_, readErr := ReadSelection(root)
 	require.ErrorIs(t, readErr, ErrCorruptSelection,
 		"a corrupt selection reported as 'nothing selected' stays corrupt forever")
+}
+
+// ── GÖÇ (FR-060/FR-061) ────────────────────────────────────────────────────
+
+// AN OLD CHECKOUT MIGRATES ITSELF, ONCE, AND SAYS SO.
+//
+// Before the identity format a cloud link wrote the resolved ADDRESS. That file
+// pins a tenant: the project can grow a second environment and the checkout
+// never learns. The first verb that runs resolves the ref back to its product
+// and rewrites the file — and prints what it did, because a file that changed
+// under somebody without a word is worse than one that did not change.
+func TestALegacyCheckoutIsRewrittenToItsIdentity(t *testing.T) {
+	root := linkedTo(t, Target{URL: "https://mu0028.palbase.studio"})
+	resolverRig(t, twoEnvs)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return true }
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	after, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "prd_a", after.Project, "the committed file still pins an address")
+	require.Equal(t, "todoapp", after.Name)
+	require.Empty(t, after.URL, "the stale address survived the migration")
+	require.Contains(t, out.String(), "todoapp", "the migration happened silently")
+	_ = root
+}
+
+// A MIGRATION THAT CANNOT RESOLVE CHANGES NOTHING.
+//
+// The control plane is unreachable, or the ref belongs to somebody else. Either
+// way the checkout keeps working against the address it has: a migration is not
+// allowed to break a checkout that was fine a minute ago.
+func TestAFailedMigrationLeavesTheCheckoutAlone(t *testing.T) {
+	linkedTo(t, Target{URL: "https://mu0028.palbase.studio"})
+	resolverRig(t, twoEnvs)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return true }
+	ProductOfRef = func(context.Context, string) (Product, error) {
+		return Product{}, errors.New("control plane unreachable")
+	}
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out),
+		"a failed migration must not fail the verb")
+
+	after, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "https://mu0028.palbase.studio", after.URL,
+		"a failed migration rewrote the file anyway")
+}
+
+// A SELF-HOST CHECKOUT IS NOT A MIGRATION CANDIDATE.
+func TestSelfHostIsNotMigrated(t *testing.T) {
+	linkedTo(t, Target{URL: "https://stack.firma.com"})
+	resolverRig(t, nil)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return false }
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	after, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "https://stack.firma.com", after.URL)
+	require.Empty(t, out.String(), "a self-host checkout was told it migrated")
 }

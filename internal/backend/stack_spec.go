@@ -61,7 +61,7 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	// by — so a refresh updates the contract for THAT configuration and leaves
 	// the others alone. Refreshing them all would mean reaching every
 	// environment on every push, including production from a laptop.
-	env := defaultEnvName(target)
+	env := defaultEnvName()
 	if target.Local {
 		env = localEnvName
 	}

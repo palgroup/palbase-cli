@@ -506,12 +506,12 @@ func pathsOf(spec []byte) map[string]bool {
 // container. The entry says what to run instead.
 func gatherEnvironments(ctx context.Context, target Target, key string, w io.Writer) (appEnvironments, map[string][]byte, error) {
 	envs := appEnvironments{
-		Default:      defaultEnvName(target),
+		Default:      defaultEnvName(),
 		Environments: map[string]appEnvironment{},
 	}
 	specs := map[string][]byte{}
 
-	primary := defaultEnvName(target)
+	primary := defaultEnvName()
 	primaryEnv := appEnvironment{
 		AppID:   projectAppID,
 		BaseURL: target.URL,
@@ -602,16 +602,25 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 // defaultEnvName is what the linked target's environment is called. A cloud
 // project names it; a project you run yourself is its own single environment,
 // and `main` is what every other surface calls that one.
-func defaultEnvName(target Target) string {
-	if target.Env != "" {
-		return target.Env
-	}
+func defaultEnvName() string {
+	// GEÇİCİ: ortam adı artık `ResolveFor`dan geliyor ve bu fonksiyon T013'te
+	// tamamen düşüyor. Şimdilik sabit, çünkü `Target.Env` alanı kalktı ve
+	// okunacak bir şey kalmadı.
 	return "main"
 }
 
 // groupOf is the project group a target belongs to, for finding its local stack
 // in the machine register.
 func groupOf(target Target) string {
+	// THE NAME, NOT THE IDENTITY. `Target.Project` used to be what a person
+	// called their project; it is the product ID now (`prd_9f21c7`), and that
+	// value would become the docker compose project name — every local
+	// container renamed to an opaque string nobody typed. When a model's
+	// direction is inverted, the code that read the old meaning stays behind
+	// and keeps compiling; this is that code.
+	if target.Name != "" {
+		return target.Name
+	}
 	if target.Project != "" {
 		return target.Project
 	}

@@ -95,7 +95,7 @@ func TestTheGroupComesFromTheLinkedProject(t *testing.T) {
 		t.Errorf("an unlinked checkout grouped as %q", got)
 	}
 
-	if err := WriteTarget(Target{Project: "TodoApp", Env: "main"}); err != nil {
+	if err := WriteTarget(Target{Project: "prd_a", Name: "TodoApp"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := groupName(dir); got != "todoapp" {
@@ -139,7 +139,7 @@ func TestStartWritesNoIgnoreRule(t *testing.T) {
 // start, every verb acts locally without a flag, and after stop they all go back.
 func TestALocalStackWinsOverTheLinkedProject(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "todoapp", Env: "production"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "prd_a", Name: "todoapp"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,7 +147,11 @@ func TestALocalStackWinsOverTheLinkedProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.Describe() != "todoapp/production" {
+	// The committed file names the PROJECT; which environment a verb acts on is
+	// the resolver's answer, not a field on the target (see
+	// `Resolved.Describe`). What this test is about — a running local stack
+	// winning — is unchanged and measured below.
+	if before.Describe() != "todoapp" {
 		t.Fatalf("before start: %s", before.Describe())
 	}
 
@@ -173,7 +177,7 @@ func TestALocalStackWinsOverTheLinkedProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Describe() != "todoapp/production" {
+	if after.Describe() != "todoapp" {
 		t.Errorf("after stop: %s", after.Describe())
 	}
 	// And the committed file never learned about the local address.

@@ -12,7 +12,7 @@ import (
 // push is not going to the cloud.
 func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "todoapp", Env: "main"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "prd_a", Name: "todoapp"}); err != nil {
 		t.Fatal(err)
 	}
 	localRecord, pathErr := localPath()
@@ -39,12 +39,19 @@ func TestPrintTargetNamesTheLocalStack(t *testing.T) {
 	}
 }
 
-// TestPrintTargetNamesTheCloudEnvironment: no local stack, so the committed
-// project file decides — and the environment is part of the name, because
-// `todoapp` alone does not distinguish staging from production.
-func TestPrintTargetNamesTheCloudEnvironment(t *testing.T) {
+// TestPrintTargetNamesTheCloudProject: no local stack, so the committed project
+// file decides — and it names the PROJECT, because that is all a committed file
+// knows now.
+//
+// THE ENVIRONMENT HALF OF THIS ASSERTION DID NOT DISAPPEAR, IT MOVED. It used
+// to live here and read `todoapp/staging`, taken from a `Target.Env` field that
+// nothing in production ever wrote — so the banner was tested and unreachable
+// at the same time. Which environment a verb acts on is a question only the
+// resolver can answer, so the `<project>/<env>` assertion belongs to
+// `Resolved.Describe` and `PrintResolved` (see the banner tests beside them).
+func TestPrintTargetNamesTheCloudProject(t *testing.T) {
 	inScratchCheckout(t)
-	if err := WriteTarget(Target{URL: "https://staging.palbase.studio", Project: "todoapp", Env: "staging"}); err != nil {
+	if err := WriteTarget(Target{URL: "https://staging.palbase.studio", Project: "prd_a", Name: "todoapp"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,7 +59,7 @@ func TestPrintTargetNamesTheCloudEnvironment(t *testing.T) {
 	if _, err := PrintTarget(&out); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); got != "▸ todoapp/staging\n" {
+	if got := out.String(); got != "▸ todoapp\n" {
 		t.Errorf("banner = %q", got)
 	}
 }

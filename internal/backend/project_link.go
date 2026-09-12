@@ -349,7 +349,6 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	target := Target{URL: base, Insecure: o.insecure, checkoutRoot: o.checkoutRoot}
 	if previous, err := readLinkedProject(); err == nil {
 		target.OAuth = previous.OAuth
-		target.StackVersion = previous.StackVersion
 	} else if _, statErr := os.Stat(projectPath()); !errors.Is(statErr, os.ErrNotExist) {
 		return err
 	}
@@ -363,19 +362,6 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// reaches the same stack without being told which one it is.
 	if err := WriteTarget(target); err != nil {
 		return err
-	}
-	// AND THE VERSION THE PROJECT DECLARES (FR-001). The field is a property of
-	// the committed file, not of the command that happens to need it: it was
-	// written only on the `start` path, so a checkout bound to a CLOUD project
-	// never carried one and "the file says which generation this project runs"
-	// was true for local stacks only.
-	//
-	// BEST EFFORT, DELIBERATELY. Deriving it reads the installed
-	// @palbase/backend, and a checkout that has not run `npm install` yet has
-	// none — turning a working link into an error over a field `start` would
-	// fill in later would be a refusal nobody needs.
-	if root, err := os.Getwd(); err == nil {
-		_, _ = stackVersion(root)
 	}
 
 	// EVERY environment, not the one being linked. An app that holds only the
@@ -501,9 +487,9 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 	}
 	reportContractDrift(specs, w)
-	if prepared, err := readLinkedProject(); err == nil {
-		target.StackVersion = prepared.StackVersion
-	}
+	// THE SECOND WriteTarget USED TO CARRY A DERIVED FIELD FORWARD. It does not
+	// any more: `stackVersion` is derived from the installed package on every
+	// read and written nowhere, so there is nothing to re-read and preserve.
 	if err := WriteTarget(target); err != nil {
 		return err
 	}

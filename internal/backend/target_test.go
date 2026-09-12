@@ -40,7 +40,7 @@ func TestBrokenLocalTargetNeverFallsBackToCloud(t *testing.T) {
 }
 
 func TestTargetWithoutAddressRequiresRelinking(t *testing.T) {
-	seedProject(t, Target{Project: "old-project", Env: "prod"})
+	seedProject(t, Target{Project: "prd_old", Name: "old-project"})
 	_, err := ReadTarget()
 	require.ErrorContains(t, err, "palbase link <ref>")
 }
@@ -114,31 +114,25 @@ func seedInstalledSDK(t *testing.T, dir, version string) {
 
 // WHICH STACK THIS PROJECT RUNS IS THE PROJECT'S FACT, NOT THE BINARY'S.
 //
-// The image tags lived in the CLI, so `palbase start` brought up whatever the
-// installed binary happened to carry — two colleagues on two CLI versions ran
-// two different stacks against the same source, and nothing said so.
+// THE STACK VERSION IS DERIVED, NEVER DECLARED — and that is a correction.
 //
-// Declared once, in the COMMITTED file. Supabase writes the equivalent to a
-// gitignored `.temp/`, so a fresh clone and every CI runner silently disagree
-// with the machine that linked it (D-036).
-func TestStackVersionReadsWhatTheProjectDeclares(t *testing.T) {
-	seedProject(t, Target{URL: "http://127.0.0.1:54321", StackVersion: "33"})
-
-	got, err := stackVersion(".")
-	if err != nil {
-		t.Fatalf("declared version was refused: %v", err)
-	}
-	if got != "33" {
-		t.Errorf("stackVersion = %q, want the declared 33", got)
-	}
-}
-
-// A PROJECT THAT DECLARES NOTHING GETS THE FIELD WRITTEN, not a silent default.
+// The committed file used to carry `stackVersion`, and the field's own comment
+// said it "decides which images `palbase start` brings up". MEASURED, that is
+// no longer true: every decision in `start` reads `installedSDKVersion` —
+// `img.ref(sdkVersion)` (:281), `imagesPresent` (:284), `ensureBootValues`
+// (:293), `recordStackImages` (:297). The declared value survived in exactly
+// ONE place: the banner string.
 //
-// Deriving and forgetting would leave the next run free to derive something
-// else — the same drift, one layer down. The value is persisted so the file
-// answers the question from then on.
-func TestStackVersionDerivesFromTheSDKAndWritesIt(t *testing.T) {
+// And there it could LIE. `stackVersion()` returned the committed value BEFORE
+// falling back to the installed package, so bumping @palbase/backend 38 → 39
+// brought the 39 images up while the banner still printed "stack 38" — and the
+// banner exists precisely to make "the wrong stack came up" visible
+// (`start.go:265`). A field that decides nothing and can lie about the one
+// thing it is printed for is not a field; it is a defect with a schema.
+//
+// So: derived from the installed SDK, every time, and written nowhere.
+
+func TestStackVersionDerivesFromTheInstalledSDK(t *testing.T) {
 	dir := seedProject(t, Target{URL: "http://127.0.0.1:54321"})
 	seedInstalledSDK(t, dir, "33.0.0")
 
@@ -151,15 +145,57 @@ func TestStackVersionDerivesFromTheSDKAndWritesIt(t *testing.T) {
 	if got != "33" {
 		t.Errorf("derived %q from SDK 33.0.0, want the major 33", got)
 	}
+}
 
-	// IT MUST BE ON DISK, or the next run derives again.
-	onDisk, err := ReadTarget()
+// A COMMITTED `stackVersion` NO LONGER WINS — this is the defect, stated as a
+// test. An old checkout carries the field; the installed SDK must still decide.
+func TestAnOldDeclaredStackVersionDoesNotOverrideTheInstalledSDK(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("palbase", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Written by hand: the field no longer exists on Target, and an old file is
+	// exactly what this test is about.
+	const old = `{"url":"http://127.0.0.1:54321","stackVersion":"33"}`
+	if err := os.WriteFile(filepath.Join("palbase", "project.json"), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedInstalledSDK(t, dir, "39.1.6")
+
+	got, err := stackVersion(".")
+	if err != nil {
+		t.Fatalf("an old file made the derivation fail: %v", err)
+	}
+	if got != "39" {
+		t.Errorf("stackVersion = %q, want 39 from the INSTALLED SDK — a committed field "+
+			"that outranks the installed package is how the banner learned to lie", got)
+	}
+}
+
+// NOTHING IS EVER WRITTEN. The old implementation persisted what it derived, so
+// the next run would agree with itself; now there is nothing to disagree about.
+func TestStackVersionWritesNothing(t *testing.T) {
+	dir := seedProject(t, Target{URL: "http://127.0.0.1:54321"})
+	seedInstalledSDK(t, dir, "33.0.0")
+	before, err := os.ReadFile(filepath.Join(dir, "palbase", "project.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onDisk.StackVersion != got {
-		t.Errorf("project.json carries %q, want the derived %q — a derivation nobody wrote down "+
-			"is a derivation the next run can disagree with", onDisk.StackVersion, got)
+
+	if _, err := stackVersion("."); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.ReadFile(filepath.Join(dir, "palbase", "project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("stackVersion rewrote the committed file:\nbefore %s\nafter  %s", before, after)
+	}
+	if strings.Contains(string(after), "stackVersion") {
+		t.Error("the retired field was written back into the customer's repository")
 	}
 }
 
@@ -171,7 +207,7 @@ func TestStackVersionRefusesWhenNothingCanAnswer(t *testing.T) {
 
 	_, err := stackVersion(".")
 	if err == nil {
-		t.Fatal("a project with no declaration and no installed SDK got a version anyway")
+		t.Fatal("a project with no installed SDK got a version anyway")
 	}
 	if !strings.Contains(err.Error(), backendPkg) {
 		t.Errorf("the refusal does not name %s: %v", backendPkg, err)
@@ -182,8 +218,7 @@ func TestStackVersionRefusesWhenNothingCanAnswer(t *testing.T) {
 //
 // Caught by UAT, not by a unit test: reading the target first made `palbase
 // start` refuse a fresh `palbase init` with "this checkout is not linked" —
-// advice for the command the reader had just run. Every unit test passed,
-// because each half agreed with itself.
+// advice for the command the reader had just run.
 func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -196,9 +231,6 @@ func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
 	if got != "33" {
 		t.Errorf("stackVersion = %q, want the derived 33", got)
 	}
-	// AND IT WRITES NOTHING: `start` creates the project file itself once the
-	// stack is up, and a half-formed target on disk names an address that does
-	// not exist yet.
 	if _, err := os.Stat(filepath.Join(dir, "palbase", "project.json")); !os.IsNotExist(err) {
 		t.Error("a project file was written before there was a project to name")
 	}
@@ -206,28 +238,22 @@ func TestStackVersionWorksInAnUnlinkedCheckout(t *testing.T) {
 
 // A RUNNING DEV STACK MUST NOT EAT THE PROJECT BOND.
 //
-// ReadTarget PREFERS .palbase/local.json; WriteTarget writes .palbase/project.json.
-// Reading through the first and writing through the second replaces a colleague's
-// committed project with a localhost address — the exact thing WriteLocalTarget's
-// comment twelve lines above warns about: "Writing one through the other is how a
-// `palbase start` ends up committing a localhost address into a colleague's
-// checkout."
-//
-// Not a rare edge: WriteLocalTarget only ever writes Target{URL}, so the local
-// target NEVER carries a StackVersion — every repeat `palbase start` on a running
-// stack re-derives and re-writes.
+// The original defect: ReadTarget PREFERS the machine-local record while
+// WriteTarget writes the committed one, so reading through the first and
+// writing through the second replaced a colleague's project with a localhost
+// address. `stackVersion` no longer writes at all, which removes the mechanism
+// — and this test keeps measuring the outcome, because a future writer could
+// reintroduce it.
 func TestStackVersionDoesNotClobberTheProjectWithALocalStack(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	if err := os.MkdirAll("palbase", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	const committed = `{"project":"myproj","env":"prod"}`
+	const committed = `{"project":"prd_a","name":"myproj"}`
 	if err := os.WriteFile(filepath.Join("palbase", "project.json"), []byte(committed), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The local record lives OUTSIDE the checkout now, so it is written through
-	// the same path the product uses rather than by hand at a repository path.
 	useTempMachineHome(t)
 	if err := WriteLocalTarget(Target{URL: "http://127.0.0.1:54321"}); err != nil {
 		t.Fatal(err)
@@ -242,11 +268,7 @@ func TestStackVersionDoesNotClobberTheProjectWithALocalStack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the committed project file is unreadable after stackVersion: %v", err)
 	}
-	if after.Project != "myproj" || after.Env != "prod" {
-		t.Errorf("the project bond was overwritten: project=%q env=%q url=%q — a running dev stack "+
-			"just committed a localhost address into this checkout", after.Project, after.Env, after.URL)
-	}
-	if after.URL != "" {
-		t.Errorf("the local stack's address leaked into the committed file: %q", after.URL)
+	if after.Project != "prd_a" || after.Name != "myproj" {
+		t.Errorf("the committed project was replaced: %+v", after)
 	}
 }
