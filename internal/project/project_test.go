@@ -19,9 +19,13 @@ type stubREST struct {
 	body         any
 	reply        any
 	err          error
+	// calls IS AN ASSERTION, not bookkeeping: the listing's whole shape rests
+	// on one request, and nothing measured that until this field existed.
+	calls int
 }
 
 func (s *stubREST) Do(_ context.Context, method, path string, body, out any) error {
+	s.calls++
 	s.method, s.path, s.body = method, path, body
 	if s.err != nil {
 		return s.err
@@ -67,7 +71,7 @@ func run(t *testing.T, r Resolvers, stdin string, args ...string) (string, error
 // the domain, which differs per deployment.
 func TestCreatePrintsALinkableAddress(t *testing.T) {
 	shop := "shop"
-	rest := &stubREST{reply: tenant{Ref: "abc123xyz", Name: &shop, Phase: "Running"}}
+	rest := &stubREST{reply: Tenant{Ref: "abc123xyz", Name: &shop, Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{domain: "palbase.studio"}), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -88,7 +92,7 @@ func TestCreatePrintsALinkableAddress(t *testing.T) {
 // succeeds — the project exists — but says plainly that the host is unknown
 // rather than printing a confident, wrong address.
 func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
-	rest := &stubREST{reply: tenant{Ref: "abc123xyz", Phase: "Running"}}
+	rest := &stubREST{reply: Tenant{Ref: "abc123xyz", Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{err: fmt.Errorf("unreachable")}), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -128,6 +132,9 @@ func TestListShowsEveryProjectWithItsEnvironments(t *testing.T) {
 	if rest.path != "/api/v2/projects" {
 		t.Fatalf("wrong path: %s", rest.path)
 	}
+	if rest.calls != 1 {
+		t.Fatalf("the listing made %d requests, want 1", rest.calls)
+	}
 	// THE PROJECT NAME APPEARS ONCE per project, not once per environment.
 	if n := strings.Count(out, "centauri"); n != 1 {
 		t.Fatalf("the project name appears %d times, want 1 — repeating it reads as two projects:\n%s", n, out)
@@ -143,6 +150,34 @@ func TestListShowsEveryProjectWithItsEnvironments(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("%q missing from:\n%s", want, out)
 		}
+	}
+}
+
+// THE REQUEST COUNT DOES NOT GROW WITH THE NUMBER OF PROJECTS, and this is
+// measured on the CLIENT because the client is what makes the requests.
+//
+// The invariant was written down on the server instead — `CliProjectSchema`'s
+// comment says environments are nested rather than served from their own
+// endpoint because otherwise "`palbase project list` M projeli bir hesapta M+1
+// istek yapardı". That is a statement about THIS code's behaviour living in
+// another component's file, where no test of this package can defend it: a
+// later "just fetch each project's environments" loop would read as an
+// improvement and break the reason the shape exists. Three projects, still one
+// request.
+func TestTheListingMakesOneRequestNoMatterHowManyProjects(t *testing.T) {
+	rest := &stubREST{reply: []Project{
+		{ID: "prd_a", Name: "one", Environments: []Environment{{Ref: "a1", Name: "main", Status: "Running"}}},
+		{ID: "prd_b", Name: "two", Environments: []Environment{{Ref: "b1", Name: "main", Status: "Running"}}},
+		{ID: "prd_c", Name: "three", Environments: []Environment{
+			{Ref: "c1", Name: "main", Status: "Running"},
+			{Ref: "c2", Name: "staging", Status: "Running"},
+		}},
+	}}
+	if _, err := run(t, resolvers(rest, stubCloud{}), "", "list"); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if rest.calls != 1 {
+		t.Fatalf("three projects cost %d requests, want 1 — the nesting exists to keep this at 1", rest.calls)
 	}
 }
 
@@ -215,7 +250,7 @@ func TestDeleteWithYesSkipsThePrompt(t *testing.T) {
 // projesi olan biri sekiz opak ref'e bakıyordu.
 func TestStatusNamesTheProject(t *testing.T) {
 	name := "centauri"
-	rest := &stubREST{reply: tenant{Ref: "abc123xyz", Name: &name, Phase: "Running"}}
+	rest := &stubREST{reply: Tenant{Ref: "abc123xyz", Name: &name, Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{}), "", "status", "abc123xyz")
 	if err != nil {
 		t.Fatalf("status: %v", err)
