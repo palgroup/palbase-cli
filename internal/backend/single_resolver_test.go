@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
@@ -71,5 +72,37 @@ func TestReadTargetHasOnlyItsDeclaredCallers(t *testing.T) {
 		t.Errorf("these read the committed target directly instead of resolving an environment:\n  %s\n\n"+
 			"a verb that reads ReadTarget acts on whatever the file says and cannot honour --env; "+
 			"use backend.ResolveFor(cmd)", strings.Join(offenders, "\n  "))
+	}
+}
+
+// AND NO SECOND-HAND READER MAY COME BACK.
+//
+// The gate above measures files that call `ReadTarget` DIRECTLY, and that shape
+// is what let ten verbs keep acting on the committed record: they called
+// `PrintTargetFor`, a project-only banner in banner.go, which called
+// `ReadTarget` for them. Every one of those files passed the gate above while
+// ignoring `--env`, and `palbase plan` refused outright in a checkout bound to
+// a product. A list of allowed CALLERS cannot see a new wrapper appear; asking
+// the banner file itself can.
+//
+// banner.go is the whole surface a verb announces itself through, so the rule is
+// narrow and complete: nothing in it reads the committed record. What it has is
+// `PrintResolvedFor`, which asks the resolver — and the resolver reads the file
+// as ONE of its inputs, after a local stack and before a remembered selection.
+func TestTheBannerFileDoesNotReadTheCommittedRecord(t *testing.T) {
+	src, err := os.ReadFile("banner.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(src, []byte("ReadTarget(")) {
+		t.Error("banner.go reads the committed target again — a banner that reads it " +
+			"is a project-only banner, and every verb built on one silently stops " +
+			"honouring --env; announce through PrintResolvedFor instead")
+	}
+	// AND THE RESOLVED BANNER IS STILL THERE: a file that simply lost both
+	// would pass the assertion above and announce nothing at all.
+	if !bytes.Contains(src, []byte("func PrintResolvedFor(")) {
+		t.Error("banner.go no longer exports PrintResolvedFor — the assertion above " +
+			"is then vacuous")
 	}
 }

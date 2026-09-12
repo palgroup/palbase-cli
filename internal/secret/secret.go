@@ -62,10 +62,11 @@ type project struct {
 
 // open resolves where a secret verb acts and announces it.
 func open(cmd *cobra.Command) (project, error) {
-	target, err := backend.PrintTargetFor(cmd)
+	resolved, err := backend.PrintResolvedFor(cmd)
 	if err != nil {
 		return project{}, err
 	}
+	target := resolved.Acting()
 	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
 		return project{}, err

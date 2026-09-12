@@ -241,11 +241,17 @@ func openStackEgress(cmd *cobra.Command) (egress.REST, error) {
 }
 
 // openStackManagement resolves the target, announcing it, and builds the client.
+//
+// IT RESOLVES AN ENVIRONMENT, not just the project. Every verb built on this
+// client acts INSIDE one tenant — a secret, a role, a test user, a log stream —
+// so reading the committed record alone would both ignore `--env` and refuse
+// outright in a checkout bound to a product, which carries no address.
 func openStackManagement(cmd *cobra.Command) (authadmin.REST, error) {
-	target, err := backend.PrintTargetFor(cmd)
+	resolved, err := backend.PrintResolvedFor(cmd)
 	if err != nil {
 		return nil, err
 	}
+	target := resolved.Acting()
 	cred, _, err := backend.Credential(target.URL)
 	if err != nil {
 		return nil, err

@@ -113,7 +113,7 @@ This acts on the project this checkout is bound to. There is one addressing
 mechanism — run ` + "`palbase link <ref>`" + ` to point the checkout at another
 project.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := PrintTargetFor(cmd); err != nil {
+			if _, err := PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			return RefreshSpec(cmd.Context(), cmd.OutOrStdout())

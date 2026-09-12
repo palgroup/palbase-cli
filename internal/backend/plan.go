@@ -44,10 +44,11 @@ the shape of stale text this CLI exists not to ship.
 Nothing is written to the target: the schema half is computed by the project
 itself, which is the same computation the push runs, stopped before it writes.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			target, err := PrintTargetFor(cmd)
+			resolved, err := PrintResolvedFor(cmd)
 			if err != nil {
 				return err
 			}
+			target := resolved.Acting()
 			cred, _, err := Credential(target.URL)
 			if err != nil {
 				return err

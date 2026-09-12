@@ -85,7 +85,7 @@ func createCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := backend.PrintTargetFor(cmd); err != nil {
+			if _, err := backend.PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			if count < 1 {
@@ -114,7 +114,7 @@ func listCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := backend.PrintTargetFor(cmd); err != nil {
+			if _, err := backend.PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			return listOnProject(cmd.Context(), target, cred, jsonOut, cmd.OutOrStdout())
@@ -135,7 +135,7 @@ func templatesCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := backend.PrintTargetFor(cmd); err != nil {
+			if _, err := backend.PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			return templatesOnProject(cmd.Context(), target, cred, jsonOut, cmd.OutOrStdout())
@@ -181,7 +181,7 @@ stack's error message.`,
 			if err != nil {
 				return err
 			}
-			if _, err := backend.PrintTargetFor(cmd); err != nil {
+			if _, err := backend.PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			body, err := json.Marshal(map[string]any{"templates": templates})
@@ -233,7 +233,7 @@ table, which is how the clone gets its own name or handle:
 			if err != nil {
 				return err
 			}
-			if _, err := backend.PrintTargetFor(cmd); err != nil {
+			if _, err := backend.PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			return cloneOnProject(cmd.Context(), target, cred, args[0], email, password,
@@ -257,7 +257,7 @@ func deleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := backend.PrintTargetFor(cmd); err != nil {
+			if _, err := backend.PrintResolvedFor(cmd); err != nil {
 				return err
 			}
 			return deleteOnProject(cmd.Context(), target, cred, args[0], cmd.OutOrStdout())

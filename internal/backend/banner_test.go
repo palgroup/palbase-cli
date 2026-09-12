@@ -7,62 +7,14 @@ import (
 	"testing"
 )
 
-// TestPrintTargetNamesTheLocalStack: while a stack is up, that is where the verb
-// acts, and the line says so plainly — `(local)` is the whole warning that this
-// push is not going to the cloud.
-func TestPrintTargetNamesTheLocalStack(t *testing.T) {
-	inScratchCheckout(t)
-	if err := WriteTarget(Target{URL: "https://todoapp.palbase.studio", Project: "prd_a", Name: "todoapp"}); err != nil {
-		t.Fatal(err)
-	}
-	localRecord, pathErr := localPath()
-	if pathErr != nil {
-		t.Fatal(pathErr)
-	}
-	if err := ensureMachineStateDir(localRecord); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(localRecord, []byte(`{"url":"http://localhost:54321"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	target, err := PrintTarget(&out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := out.String(); got != "▸ http://localhost:54321 (local)\n" {
-		t.Errorf("banner = %q", got)
-	}
-	if !target.Local {
-		t.Error("the resolved target does not know it is local")
-	}
-}
-
-// TestPrintTargetNamesTheCloudProject: no local stack, so the committed project
-// file decides — and it names the PROJECT, because that is all a committed file
-// knows now.
+// THE LOCAL-STACK AND PROJECT-NAME CLAIMS MOVED, THEY DID NOT VANISH.
 //
-// THE ENVIRONMENT HALF OF THIS ASSERTION DID NOT DISAPPEAR, IT MOVED. It used
-// to live here and read `todoapp/staging`, taken from a `Target.Env` field that
-// nothing in production ever wrote — so the banner was tested and unreachable
-// at the same time. Which environment a verb acts on is a question only the
-// resolver can answer, so the `<project>/<env>` assertion belongs to
-// `Resolved.Describe` and `PrintResolved` (see the banner tests beside them).
-func TestPrintTargetNamesTheCloudProject(t *testing.T) {
-	inScratchCheckout(t)
-	if err := WriteTarget(Target{URL: "https://staging.palbase.studio", Project: "prd_a", Name: "todoapp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	if _, err := PrintTarget(&out); err != nil {
-		t.Fatal(err)
-	}
-	if got := out.String(); got != "▸ todoapp\n" {
-		t.Errorf("banner = %q", got)
-	}
-}
+// Two tests stood here and drove `PrintTarget`, the project-only banner that no
+// longer exists (see banner.go for why it went). Their claims live on where the
+// answer does: `(local)` is measured by TestPrintResolvedStillMarksALocalStack
+// below, and "the banner names the project" became "the banner names the
+// project AND the environment" in TestPrintResolvedNamesProjectAndEnvironment —
+// which is the same sentence made reachable.
 
 // TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn is FR-008: the refusal has to
 // carry the fix, and there are two of them — a cloud project and something
@@ -72,7 +24,7 @@ func TestAnUnlinkedCheckoutIsRefusedWithBothWaysIn(t *testing.T) {
 	inScratchCheckout(t)
 
 	var out bytes.Buffer
-	_, err := PrintTarget(&out)
+	_, err := PrintResolvedTo(&out, cmdFor(t))
 	if err == nil {
 		t.Fatal("an unlinked checkout was accepted")
 	}
