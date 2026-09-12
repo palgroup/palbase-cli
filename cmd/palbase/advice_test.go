@@ -86,9 +86,16 @@ func TestTheAdviceGateCatchesARetiredCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The exact words of the retired platform groups (FR-009) and of the two
+	// The exact words of the retired platform groups (FR-009) and of the
 	// addressing verbs the v2 cutover removed.
-	for _, retired := range []string{"ios", "web", "macos", "android", "env", "apps", "github"} {
+	//
+	// `env` LEFT THIS LIST on 2026-09-12, and the control's own warning below
+	// is why the removal is written down rather than done quietly: a negative
+	// control has to name a command that is ACTUALLY gone. `palbase env` is
+	// declared again — deliberately — because the shape it switched between
+	// exists again (see `retiredCommands` in surface_test.go). Six names remain,
+	// so the control still measures.
+	for _, retired := range []string{"ios", "web", "macos", "android", "apps", "github"} {
 		if declared[retired] {
 			t.Errorf("`palbase %s` is declared again — if that is deliberate, this control "+
 				"has to name a command that is actually gone", retired)

@@ -218,6 +218,11 @@ func ReadTarget() (Target, error) {
 	return target, nil
 }
 
+// ReadLinkedProject is readLinkedProject for packages outside this one — the
+// `env` commands need to know which project a checkout belongs to before they
+// can list its environments.
+func ReadLinkedProject() (Target, error) { return readLinkedProject() }
+
 func readLinkedProject() (Target, error) {
 	raw, err := os.ReadFile(projectPath())
 	if errors.Is(err, os.ErrNotExist) {

@@ -87,7 +87,11 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		// command — it had to be hand-written into a file, and a host the
 		// deploy's fail-closed validator rejects only surfaced as a failed
 		// deploy. It is a management endpoint now, like every other setting.
-		"egress", "flags", "init",
+		"egress",
+		// `env` — the environments of the linked project. Retired at the
+		// cutover, back on 2026-09-12; see retiredCommands for why.
+		"env",
+		"flags", "init",
 		// The direct half of the CLI: `link <url>` binds a checkout to a stack
 		// somebody runs, with no project to select and no control plane to ask.
 		"link",
@@ -163,8 +167,18 @@ func TestGolden_RetiredCommandsAreGone(t *testing.T) {
 // is NAMED. Two lists would drift, and the drift is the defect: `env` left the
 // binary on the cutover and stayed in four shipped strings for months, because
 // the prose gate carried its own three-name copy.
+//
+// `env` LEFT THIS LIST ON 2026-09-12, and the entry is worth reading before
+// anyone puts it back. It was retired at the cutover with the reason "verbs for
+// the shape v2 actually has": a project in this cloud WAS its environment, so a
+// verb that switched between environments switched between nothing. That was
+// true when it was written. It stopped being true when the control plane grew
+// `cloud_products` and a second environment per product — measured live
+// 2026-09-11, `/api/v2/projects/zzz/environments` answers 401 where a missing
+// surface answers 404. The command came back because the premise died, not
+// because the rule was relaxed.
 var retiredCommands = []string{
-	"branch", "groups", "group", "org", "organization", "serve", "dev", "apps", "env", "github",
+	"branch", "groups", "group", "org", "organization", "serve", "dev", "apps", "github",
 	"endpoints",       // doctor reports all configured cloud addresses.
 	"archive", "wake", // the cloud manages idle projects automatically.
 	"upgrade", // the cloud reconciles the runtime with the project's SDK.
@@ -206,26 +220,32 @@ func subcommands(t *testing.T, parent string) []string {
 	return nil
 }
 
-// The GLOBAL context flags are exactly --project and --environment (plus the
-// pre-existing --mode). Organization is intentionally NOT a CLI context, and the
-// Palbase branch is gone, so neither --organization nor --branch may exist.
+// THE GLOBAL FLAG SET IS EXACTLY `--env`, and the history is why that sentence
+// has to be written down.
+//
+// The comment here used to say the global flags "are exactly --project and
+// --environment (plus the pre-existing --mode)" while the body asserted there
+// were NONE — a sentence left behind by the retirement it described.
+//
+// `--mode` went first: it selected between two clouds, only one of which was
+// ever deployed, and it was the DEFAULT — a fresh install pointed every command
+// at a host that does not exist.
+//
+// `--project` / `--environment` went in T010 for a sharper reason: they
+// resolved through `GET /api/v2/projects`, which the cloud did not serve. They
+// parsed, they were documented, and they selected NOTHING. A flag offering a
+// choice the product does not have is a flag somebody will use.
+//
+// `--env` comes back because the premise changed, not because the rule did:
+// the route is served now. That is asserted by measuring the ROUTE
+// (TestTheSelectionFlagResolvesThroughALiveRoute), not by trusting this list.
+// The retired NAMES stay retired — a reader who types `--environment` must not
+// be answered by a new mechanism wearing the old name.
 func TestGolden_GlobalFlags(t *testing.T) {
 	var names []string
 	newRootCmd().PersistentFlags().VisitAll(func(f *pflag.Flag) { names = append(names, f.Name) })
 	sort.Strings(names)
-	// THERE ARE NO GLOBAL FLAGS LEFT, and that is the deliverable.
-	//
-	// `--mode` went first: it selected between two clouds, only one of which was
-	// ever deployed, and it was the DEFAULT — a fresh install pointed every
-	// command at a host that does not exist.
-	//
-	// `--project` / `--environment` went in T010 for a sharper reason: they
-	// resolved through `GET /api/v2/projects`, which the v2 cloud does not
-	// serve. They parsed, they were documented, and they selected nothing.
-	//
-	// A flag offering a choice the product does not have is a flag somebody will
-	// use.
-	require.Empty(t, names)
+	require.Equal(t, []string{"env"}, names)
 }
 
 // No command anywhere in the tree may take --branch, --group or --organization.
@@ -714,44 +734,25 @@ func TestRetiredPlatformCommandsAreGone(t *testing.T) {
 	}
 }
 
-// THE SECOND ADDRESSING MECHANISM IS GONE (T010).
+// THE SELECTION FLAG RESOLVES THROUGH A ROUTE THAT ANSWERS.
 //
-// `--project` and `--environment` were global overrides that resolved through
-// `GET /api/v2/projects` — a route the v2 cloud does not serve (measured
-// 2026-08-25: "No route matches this method and path"). So the flags were
-// documented, accepted, and quietly selected nothing in 15+ commands.
+// THIS GATE USED TO BAN THE FLAG. `--project` and `--environment` were global
+// overrides that resolved through `GET /api/v2/projects` — a route the cloud
+// did not serve (measured 2026-08-25: "No route matches this method and path").
+// So the flags were documented, accepted, and quietly selected nothing in 15+
+// commands, and the gate that replaced them banned the NAME and the CALL.
 //
-// What a checkout talks to is `.palbase/project.json`, written by `link`.
-func TestTheSelectionFlagsAreGone(t *testing.T) {
-	bin := buildPalbase(t)
-	out, err := exec.Command(bin, "--help").CombinedOutput()
-	if err != nil {
-		t.Fatalf("palbase --help failed: %v\n%s", err, out)
-	}
-	for _, flag := range []string{"--project", "--environment"} {
-		if strings.Contains(string(out), flag) {
-			t.Errorf("%s still appears in the global help:\n%s", flag, out)
-		}
-	}
-
-	// EVERY COMMAND'S OWN HELP, NOT JUST THE ROOT'S.
-	//
-	// This gate read `palbase --help` and spoke about the whole CLI. The set it
-	// READ and the set it TALKED ABOUT were different questions, and four
-	// subcommands went on describing the flags in their own `Long` text:
-	//
-	//   The global --project / --environment flags select a CLOUD environment.
-	//   In a checkout linked to a project they do not apply, and saying so is
-	//   the point: a flag that is accepted and ignored is worse than one that
-	//   is refused.
-	//
-	// The irony is exact — the paragraph argues that an accepted-and-ignored
-	// flag is worse than a refused one, while describing a flag the binary no
-	// longer parses at all. `palbase push --help`, `spec`, `test-user` and
-	// `flags user` all carried it, and the root help was clean the whole time.
-	//
-	// The tree is walked in-process: a person reads `<command> --help`, and that
-	// text is the command's own, not the root's.
+// BANNING THE NAME WAS NEVER THE RULE. The rule is that a flag must not offer a
+// choice the product cannot make. The route is served now — measured
+// 2026-09-11, unauthenticated: `/api/v2/projects/zzz/environments` → 401 and
+// `/api/v2/environments/zzz/apikey` → 401, where 404 is what a missing surface
+// answers — so the honest gate measures the ROUTE, not the flag's absence.
+//
+// What stays banned is the retired NAMES: a reader who types `--environment`
+// must not be answered by a new mechanism wearing the old name.
+func TestTheSelectionFlagResolvesThroughALiveRoute(t *testing.T) {
+	// THE RETIRED NAMES ARE STILL RETIRED — in the help of every command, and
+	// as a flag anywhere in the tree.
 	var stale []string
 	var walk func(cmd *cobra.Command, path string)
 	walk = func(cmd *cobra.Command, path string) {
@@ -777,13 +778,13 @@ func TestTheSelectionFlagsAreGone(t *testing.T) {
 	walk(newRootCmd(), "")
 	sort.Strings(stale)
 	if len(stale) > 0 {
-		t.Errorf("the second addressing mechanism is still described by the commands themselves:\n%s\n\n"+
-			"a reader who types `<command> --help` is told about a flag the binary answers with "+
-			"`unknown flag`", strings.Join(stale, "\n"))
+		t.Errorf("a retired flag name is described by the commands themselves:\n%s", strings.Join(stale, "\n"))
 	}
 
-	// AND THE ROUTE THEY LEANED ON IS NOT CALLED ANY MORE. A flag can be removed
-	// while the call it justified stays behind, wired to nothing.
+	// AND THE ROUTE THE LIVE FLAG RESOLVES THROUGH IS CALLED FROM PRODUCTION.
+	//
+	// The inverse of what this gate used to assert, for the inverse reason: a
+	// flag whose route nothing calls is the defect that retired the last one.
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -792,12 +793,11 @@ func TestTheSelectionFlagsAreGone(t *testing.T) {
 	found, _ := grep.Output()
 	var live []string
 	for _, line := range strings.Split(strings.TrimSpace(string(found)), "\n") {
-		if line == "" || strings.Contains(line, "_test.go") || strings.Contains(line, "selectiontest") {
+		if line == "" || strings.Contains(line, "_test.go") {
 			continue
 		}
 		// A MENTION IS NOT A CALL. transport/rest.go names the route in a doc
-		// comment as an example of what a path looks like; a gate that cannot
-		// tell prose from code reports a defect that is not there.
+		// comment as an example of what a path looks like.
 		if _, code, ok := strings.Cut(line, ":"); ok {
 			if _, body, ok := strings.Cut(code, ":"); ok && strings.HasPrefix(strings.TrimSpace(body), "//") {
 				continue
@@ -805,8 +805,9 @@ func TestTheSelectionFlagsAreGone(t *testing.T) {
 		}
 		live = append(live, line)
 	}
-	if len(live) > 0 {
-		t.Errorf("the dead route is still called from production code:\n%s", strings.Join(live, "\n"))
+	if len(live) == 0 {
+		t.Error("`--env` is declared but nothing calls the route it resolves through — " +
+			"that is exactly how --project/--environment came to select nothing")
 	}
 }
 

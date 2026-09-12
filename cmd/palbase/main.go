@@ -21,6 +21,7 @@ import (
 	dbcmd "github.com/palgroup/palbase-cli/internal/db"
 	"github.com/palgroup/palbase-cli/internal/debugconsole"
 	"github.com/palgroup/palbase-cli/internal/egress"
+	palbaseenv "github.com/palgroup/palbase-cli/internal/env"
 	"github.com/palgroup/palbase-cli/internal/flags"
 	"github.com/palgroup/palbase-cli/internal/logs"
 	"github.com/palgroup/palbase-cli/internal/members"
@@ -40,6 +41,11 @@ var Version = "dev"
 
 // resolved is populated in PersistentPreRunE and consumed by subcommands.
 var resolved config.Resolved
+
+// selectedEnv carries the root command's --env value into the backend package.
+// A cobra flag cannot be read from a function that takes no command, and the
+// resolver is called from packages that never see the root.
+var selectedEnv string
 
 // authClient is built per invocation from the resolved mode/endpoints.
 var authClient *auth.Client
@@ -307,6 +313,79 @@ func main() {
 	}
 }
 
+// wireEnvironmentLookup teaches the backend package how to ask the control
+// plane which environments a project has.
+//
+// SAME IDIOM AS THE OTHERS. `internal/backend` cannot import the transport —
+// that would tie it to a leaf of the command tree and produce a cycle — so the
+// capability arrives as package-level functions, exactly like
+// `CloudProjectAddress` and `CloudRuntimePreparer` above.
+//
+// ALL FOUR VARIABLES ARE BOUND HERE, and that is checked rather than assumed: a
+// variable with a reader and no writer is a dead wire, and `TenantHost` in
+// particular would surface as "no tenant host configured" on every address the
+// resolver tried to build.
+func wireEnvironmentLookup() {
+	backend.TenantHost = resolved.Endpoints.PublicHost
+
+	backend.EnvironmentsOf = func(ctx context.Context, productID string) ([]backend.Environment, error) {
+		var rows []struct {
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Environments []struct {
+				Ref    string `json:"ref"`
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			} `json:"environments"`
+		}
+		if err := managementREST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err != nil {
+			return nil, err
+		}
+		for _, p := range rows {
+			if p.ID != productID {
+				continue
+			}
+			envs := make([]backend.Environment, 0, len(p.Environments))
+			for _, e := range p.Environments {
+				envs = append(envs, backend.Environment{Ref: e.Ref, Name: e.Name, Status: e.Status})
+			}
+			return envs, nil
+		}
+		return nil, fmt.Errorf("no project of yours has the id %q", productID)
+	}
+
+	backend.ProductOfRef = func(ctx context.Context, ref string) (backend.Product, error) {
+		var row struct {
+			ProjectID string `json:"project_id"`
+			Ref       string `json:"ref"`
+			Name      string `json:"name"`
+		}
+		if err := managementREST().Do(ctx, http.MethodGet,
+			"/api/v2/environments/"+url.PathEscape(ref), nil, &row); err != nil {
+			return backend.Product{}, err
+		}
+		if row.ProjectID == "" {
+			return backend.Product{}, fmt.Errorf("the cloud did not say which project %q belongs to", ref)
+		}
+		// The product's NAME is what a banner prints, and this endpoint answers
+		// about one environment. Ask the project listing for the name; a
+		// failure there is not fatal — an id with no name still migrates.
+		name := row.ProjectID
+		var rows []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := managementREST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err == nil {
+			for _, p := range rows {
+				if p.ID == row.ProjectID && p.Name != "" {
+					name = p.Name
+				}
+			}
+		}
+		return backend.Product{ID: row.ProjectID, Name: name}, nil
+	}
+}
+
 // newRootCmd builds the whole command tree. Extracted from main() so the
 // canonical surface (spec §7.3) can be golden-tested: `palbase --help` IS the
 // contract, and a resurrected `branch` / `groups` command must fail the build,
@@ -347,9 +426,28 @@ func newRootCmd() *cobra.Command {
 				_, ok := tenantRefOf(tenantURL, resolved.Endpoints.PublicHost)
 				return ok
 			}
+			// Which environments a project has is the control plane's answer,
+			// and this is where the backend package learns how to ask.
+			wireEnvironmentLookup()
+			backend.SelectedEnvFlag = selectedEnv
 			return nil
 		},
 	}
+
+	// THE ONE GLOBAL FLAG, and it names the thing a verb acts on.
+	//
+	// There were global flags here once — `--project` and `--environment` —
+	// and they were retired for a sharp reason: they resolved through
+	// `GET /api/v2/projects`, a route the cloud did not serve, so they parsed,
+	// were documented, and selected NOTHING. The route exists now (measured:
+	// 401, not 404) and the gate in surface_test.go asserts that rather than
+	// asserting the flag's absence.
+	//
+	// `--env` and not `--environment`: the retired flag's name is banned by a
+	// gate whose reason still holds — a reader who types the old name should
+	// not be answered by a new mechanism wearing it.
+	rootCmd.PersistentFlags().StringVar(&selectedEnv, "env", "",
+		"environment to act on (name or ref); overrides `palbase env use` for this call only")
 
 	// Cloud lookup is lazy so help needs no account credential.
 	backendResolvers := backend.Resolvers{
@@ -363,6 +461,7 @@ func newRootCmd() *cobra.Command {
 		logoutCmd(),
 		whoamiCmd(),
 		doctorCmd(),
+		palbaseenv.Cmd(palbaseenv.Resolvers{REST: func() palbaseenv.REST { return managementREST() }}),
 		openCmd(),
 		project.Cmd(project.Resolvers{
 			REST:  func() project.REST { return managementREST() },
