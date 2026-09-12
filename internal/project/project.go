@@ -79,16 +79,20 @@ type Environment struct {
 	Status string `json:"status"`
 }
 
-// tenant is what `create`, `status` and `delete` act on — ONE environment,
+// Tenant is what `create`, `status` and `delete` act on — ONE environment,
 // named by its ref. They are not confused about the model: minting a project
 // mints its first environment, and deleting one deletes that tenant's data.
-type tenant struct {
+//
+// EXPORTED because it IS the `/v1/cloud/projects` contract, and the e2e suite
+// measures that contract against the live control plane. A second copy of the
+// shape declared in the test would drift from this one silently.
+type Tenant struct {
 	Ref   string  `json:"ref"`
 	Name  *string `json:"name"`
 	Phase string  `json:"phase"`
 }
 
-func (t tenant) displayName() string {
+func (t Tenant) displayName() string {
 	if t.Name == nil || *t.Name == "" {
 		return "(unnamed)"
 	}
@@ -133,7 +137,7 @@ func createCmd(r Resolvers) *cobra.Command {
 Provisioning is synchronous: the command returns once the tenant is running, so
 the address it prints is one you can link immediately.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var p tenant
+			var p Tenant
 			body := map[string]any{"name": args[0], "tier": tier}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/projects", body, &p); err != nil {
 				return err
@@ -219,7 +223,7 @@ func statusCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Show one project's name and phase",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var p tenant
+			var p Tenant
 			path := "/v1/cloud/projects/" + url.PathEscape(args[0])
 			if err := r.REST().Do(cmd.Context(), http.MethodGet, path, nil, &p); err != nil {
 				return err

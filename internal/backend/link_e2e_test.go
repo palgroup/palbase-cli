@@ -90,19 +90,47 @@ func TestTheWholeChainFromInitToLink(t *testing.T) {
 		t.Fatalf("palbase start --help: %v\n%s", err, out)
 	}
 
-	// ── the committed file carries the version ──────────────────────────────
+	// ── the checkout IS bound, and the repository stays clean ───────────────
 	//
-	// NO SILENT SKIP. This read used to be wrapped in `if err == nil`, and the
-	// file never existed, so the one assertion this test was written for never
-	// ran once. A missing file is now the failure it always was.
-	projectFile := filepath.Join(dir, filepath.FromSlash(projectPath()))
-	body, err := os.ReadFile(projectFile)
-	if err != nil {
-		t.Fatalf("link wrote no %s, so the checkout is not bound and `push` cannot work: %v\n%s",
-			projectFile, err, linkOut)
+	// NO SILENT SKIP. The read here used to be wrapped in `if err == nil` and
+	// the file never existed, so the one assertion this test was written for
+	// never ran once. That lesson holds; what changed is WHERE the binding
+	// lives for a stack on this machine.
+	//
+	// This chain links `http://127.0.0.1:<port>` — an address that exists on
+	// one machine for as long as one stack runs. It goes to this machine's own
+	// state (the same record `palbase start` keeps), never into the
+	// repository: a colleague who cloned a committed copy would get a port of
+	// their own. Measured in this very repository on 2026-09-11, where the
+	// control plane's checkout carried `{"url":"http://127.0.0.1:18098"}`.
+	// ASKED THROUGH THE PRODUCT, not through this process's own seam.
+	//
+	// The binding lives in this machine's state, keyed by the checkout's path
+	// and read from the HOME of whoever asks. This test drives a CHILD PROCESS,
+	// and a child resolves `os.UserHomeDir()` from its own environment — it
+	// cannot see this package's test seam. `useRealMachineHome` documents the
+	// same trap one file over. So the question goes to the binary: `doctor`
+	// prints what the checkout is bound to.
+	doctor := exec.Command(bin, "doctor")
+	doctor.Dir = dir
+	doctorOut, _ := doctor.CombinedOutput()
+	if !strings.Contains(string(doctorOut), srv.URL) {
+		t.Fatalf("link bound nothing the binary can see, so `push` cannot work:\nlink said:\n%s\ndoctor said:\n%s",
+			linkOut, doctorOut)
 	}
-	if !strings.Contains(string(body), "stackVersion") {
-		t.Errorf("%s carries no stackVersion after link:\n%s", projectFile, body)
+	projectFile := filepath.Join(dir, filepath.FromSlash(projectPath()))
+	if _, statErr := os.Stat(projectFile); statErr == nil {
+		body, _ := os.ReadFile(projectFile)
+		t.Errorf("a machine-local address was committed into %s:\n%s", projectFile, body)
+	}
+	// AND THE RETIRED FIELD IS NOT WRITTEN BACK. `stackVersion` is derived from
+	// the installed package on every read now; a file carrying it would be the
+	// banner learning to lie again.
+	if _, statErr := os.Stat(projectFile); statErr == nil {
+		body, _ := os.ReadFile(projectFile)
+		if strings.Contains(string(body), "stackVersion") {
+			t.Errorf("the retired stackVersion field came back:\n%s", body)
+		}
 	}
 
 	// ── the retired surface is not reachable from the shipped binary ────────

@@ -64,7 +64,7 @@ func TestE2E_CreateReadReveal_DPoPBound(t *testing.T) {
 	defer cancel()
 
 	name := fmt.Sprintf("cli-e2e-%d", time.Now().UnixNano())
-	var created project.Project
+	var created project.Tenant
 	require.NoError(t, c.Do(ctx, http.MethodPost, "/v1/cloud/projects",
 		map[string]string{"name": name, "tier": "free"}, &created))
 	require.NotEmpty(t, created.Ref, "create must return the new project's ref")
@@ -79,11 +79,11 @@ func TestE2E_CreateReadReveal_DPoPBound(t *testing.T) {
 	require.Equal(t, name, *created.Name)
 	require.Equal(t, "Running", created.Phase, "provisioning must complete before create returns")
 
-	var status project.Project
+	var status project.Tenant
 	require.NoError(t, c.Do(ctx, http.MethodGet, path, nil, &status))
 	require.Equal(t, created, status)
 
-	var projects []project.Project
+	var projects []project.Tenant
 	require.NoError(t, c.Do(ctx, http.MethodGet, "/v1/cloud/projects", nil, &projects))
 	require.Contains(t, projects, created, "the created project must appear in the caller's list")
 
