@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -109,13 +108,15 @@ func newPushCmd() *cobra.Command {
 The project is built with its installed SDK, packaged and uploaded to the
 linked stack's management API. There is no repository-driven deployment: ` + "`git push`" + ` deploys nothing.
 
-This acts on the project this checkout is bound to. There is one addressing
-mechanism — ` + "`palbase link`" + ` — and no flags that select a different one.`,
+This acts on the project this checkout is bound to, and on the environment
+resolved for this call — ` + "`--env`" + ` names one, ` + "`palbase env use`" + ` remembers one, and
+with more than one and neither given the push REFUSES rather than guessing.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, err := ReadTarget()
+			resolved, err := PrintResolvedFor(cmd)
 			if err != nil {
 				return err
 			}
+			target := resolved.Acting()
 			cred, _, err := Credential(target.URL)
 			if err != nil {
 				return err
@@ -143,12 +144,26 @@ func newPullCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "pull",
 		Args:  cobra.NoArgs,
-		Short: "Update the local backend to the linked project's deployed version",
+		Short: "Replace the backend in this directory with one environment's deployed version",
+		Long: `Replace the backend in this directory with what an environment is serving.
+
+THIS OVERWRITES YOUR SOURCE, so it says which environment it is taking it from
+before it does — and refuses if the tree is dirty. The environment is resolved
+for this call: ` + "`--env`" + ` names one, ` + "`palbase env use`" + ` remembers one, and with more
+than one and neither given it refuses rather than guessing. Pulling production
+over a branch that tracks staging is exactly the accident that costs a day.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, err := ReadTarget()
+			// THE BANNER COMES FIRST, BEFORE THE DIRTY-TREE CHECK.
+			//
+			// This verb replaces the source in front of somebody, so which
+			// environment it is reading from is the one thing they must see —
+			// and if the tree is dirty the refusal then arrives with the target
+			// already named, rather than as a bare complaint about git.
+			resolved, err := PrintResolvedFor(cmd)
 			if err != nil {
 				return err
 			}
+			target := resolved.Acting()
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
@@ -160,7 +175,6 @@ func newPullCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.URL)
 			return fetchDeployedSource(cmd.Context(), target, cred, target.URL, cwd, cmd.OutOrStdout())
 		},
 	}
@@ -169,6 +183,7 @@ func newPullCmd() *cobra.Command {
 // newCloneCmd downloads a cloud project and links the new checkout to it.
 func newCloneCmd(r Resolvers) *cobra.Command {
 	var dirFlag string
+	var envFlag string
 	cmd := &cobra.Command{
 		Use:   "clone <project>",
 		Args:  cobra.ExactArgs(1),
@@ -188,29 +203,36 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 			// The download and the binding are the same two things `link` and
 			// `pull` already do, by address, with no control plane in the path.
 			if !strings.HasPrefix(given, managementProjectIDPrefix) {
-				ref := given
-				if named := refByProjectName(ctx, r, given); named != "" {
-					ref = named
+				// THE ARGUMENT IS A PROJECT, and a project is resolved to its
+				// PRODUCT. The old path resolved a name to one ENVIRONMENT's ref
+				// through `/v1/cloud/projects` — which returns a row per
+				// environment carrying the product's name, so two environments
+				// under one project looked like a collision and the name went
+				// unresolved. `palbase clone todoapp` then built
+				// `https://todoapp.<host>` out of anything ref-shaped.
+				product, envs, err := productByName(ctx, r, given)
+				if err != nil {
+					return err
 				}
-				if !isCanonicalProjectRef(ref) {
-					return fmt.Errorf(
-						"%q is neither a project name nor a ref — `palbase project list` prints both", given)
+				ref, refErr := linkEnvironmentRef(product, envs, envFlag)
+				if refErr != nil {
+					return refErr
 				}
-				// A name that merely LOOKS like a ref would otherwise be built
-				// into an address nothing serves, and the failure would arrive as
-				// a sentence about credentials. Refused here, while the listing
-				// is in hand — and only when the listing actually answered.
-				if refs, asked := knownRefs(ctx, r); asked && !slices.Contains(refs, ref) {
-					return fmt.Errorf(
-						"no project of yours is called %q — `palbase project list` prints the names and refs", given)
+				envName := envFlag
+				for _, e := range envs {
+					if e.Ref == ref {
+						envName = e.Name
+					}
 				}
 				host := r.Endpoints().PublicHost
 				if host == "" {
 					return errors.New("this CLI has no tenant host configured, so a project cannot be reached by ref")
 				}
+				// THE DIRECTORY IS NAMED AFTER THE PROJECT, not after a ref.
+				// `1jhp7jbrm/` is a directory nobody recognises a week later.
 				dir := dirFlag
 				if dir == "" {
-					dir = ref
+					dir = product.Name
 				}
 				target := Target{URL: "https://" + ref + "." + host}
 				if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -224,9 +246,28 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 					ctx, target, cred, target.URL, dir, cmd.OutOrStdout()); err != nil {
 					return err
 				}
-				// Bound the way `link` binds, so push/pull/spec in the new
-				// directory reach the project it came from.
-				return inDir(dir, func() error { return WriteTarget(target) })
+				// BOUND BY IDENTITY, AND THE SELECTION IS SET.
+				//
+				// Without the selection a freshly cloned multi-environment
+				// project would refuse the very next command — correct by the
+				// rules and useless as an experience. The clone KNOWS which
+				// environment it took the source from, so it remembers that one.
+				return inDir(dir, func() error {
+					if err := WriteLinkedIdentity(product, Target{}); err != nil {
+						return err
+					}
+					root, wdErr := os.Getwd()
+					if wdErr != nil {
+						return wdErr
+					}
+					if err := WriteSelection(root, Selection{
+						Project: product.ID, Env: envName, Ref: ref,
+					}); err != nil {
+						return err
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", product.Name, envName)
+					return nil
+				})
 			}
 
 			// Clone accepts a name or ref, as printed by project list.
@@ -236,7 +277,8 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 				given)
 		},
 	}
-	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the repo or environment name)")
+	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the project's name)")
+	cmd.Flags().StringVar(&envFlag, "from-env", "", "environment to take the source from (default: the project's only one)")
 	return cmd
 }
 

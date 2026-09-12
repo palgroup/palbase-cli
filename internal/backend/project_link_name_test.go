@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"os"
@@ -13,12 +14,7 @@ import (
 	"github.com/palgroup/palbase-cli/internal/config"
 )
 
-// `palbase link <ad>` ADI ÇÖZER — yardım metni bunu vaat ediyor.
-//
-// Bir ad çoğu zaman ref ŞEKLİNE de uyar ("ioslinkprobe": 4-24 küçük harf), ve
-// yalnız şekle bakan kod adı sessizce ref sanıp var olmayan bir konağa
-// gidiyordu: "does not look like a Palbase stack" (ölçüldü 25.08.2026).
-// Belgelenmiş ama var olmayan bir davranıştı.
+// nameREST answers a project listing from a fixture.
 type nameREST struct {
 	rows []map[string]any
 	err  error
@@ -38,65 +34,88 @@ func resolvers(rest REST) Resolvers {
 	return Resolvers{REST: func() REST { return rest }}
 }
 
-func TestLinkResolvesAProjectByName(t *testing.T) {
-	rest := &nameREST{rows: []map[string]any{
-		{"ref": "8qitbtucm", "name": "todoapp"},
-		{"ref": "8bbwb2pbm", "name": "centauri"},
-	}}
-	if got := refByProjectName(context.Background(), resolvers(rest), "todoapp"); got != "8qitbtucm" {
-		t.Fatalf("ad çözülmedi: %q", got)
-	}
-	if rest.path != "/v1/cloud/projects" {
-		t.Fatalf("yanlış uç: %s", rest.path)
-	}
-	// Büyük/küçük harf duyarsız: listede gördüğünü yazan insan onu aynen yazmaz.
-	if got := refByProjectName(context.Background(), resolvers(rest), "  TodoApp "); got != "8qitbtucm" {
-		t.Fatalf("harf duyarlılığı: %q", got)
-	}
-}
-
-// BULAMAMAK HATA DEĞİLDİR — çağıran ref yoluna düşer.
+// AD ÇÖZÜMÜ ARTIK ÜRÜNE — ve eski yolun kusuru tam buradaydı.
 //
-// Self-host bir checkout'ta ad çözecek bir defter yoktur ve orada ref/adres tek
-// doğru cevaptır; oturum yokluğunu hata saymak o akışı kırardı.
-func TestAMissForNameIsNotAnError(t *testing.T) {
-	rest := &nameREST{rows: []map[string]any{{"ref": "r1", "name": "baska"}}}
-	if got := refByProjectName(context.Background(), resolvers(rest), "todoapp"); got != "" {
-		t.Fatalf("olmayan ad çözüldü: %q", got)
-	}
-	// Oturum yok / uç okunamıyor.
-	if got := refByProjectName(context.Background(), resolvers(&nameREST{err: errors.New("401")}), "todoapp"); got != "" {
-		t.Fatalf("hata yutulmadı: %q", got)
-	}
-	// REST hiç yok (self-host).
-	if got := refByProjectName(context.Background(), Resolvers{}, "todoapp"); got != "" {
-		t.Fatalf("REST'siz çözüm: %q", got)
-	}
+// `refByProjectName` `/v1/cloud/projects`e soruyordu: o uç ORTAM başına satır
+// döndürüyor ve her satır ÜRÜNÜN adını taşıyor. Yani iki ortamlı bir projede
+// iki satır aynı adı taşıyor, fonksiyon bunu "belirsiz" sayıp BOŞ dönüyor, ve
+// çağıran ref şekli kontrolüne düşüyordu — "todoapp" 7 küçük harf olduğu için
+// `https://todoapp.<host>` kuruluyor ve "does not look like a Palbase stack"
+// deniyordu. Ad çözümü, ortamların ÜRÜN altında geldiği yüzeye taşındı; iki
+// ortam artık tek cevabın içinde ve belirsizlik YOK.
+func TestNameResolvesToTheProductWithItsEnvironments(t *testing.T) {
+	rest := &nameREST{rows: []map[string]any{
+		{"id": "prd_a", "name": "todoapp", "environments": []map[string]any{
+			{"ref": "8qitbtucm", "name": "main", "status": "Running"},
+			{"ref": "mu0028", "name": "staging", "status": "Running"},
+		}},
+		{"id": "prd_b", "name": "centauri", "environments": []map[string]any{
+			{"ref": "8bbwb2pbm", "name": "main", "status": "Running"},
+		}},
+	}}
+	product, envs, err := productByName(context.Background(), resolvers(rest), "todoapp")
+	require.NoError(t, err)
+	require.Equal(t, "prd_a", product.ID)
+	require.Len(t, envs, 2, "iki ortam tek cevabın içinde gelmedi")
+	require.Equal(t, "/api/v2/projects", rest.path)
+
+	// Büyük/küçük harf duyarsız: listede gördüğünü yazan insan onu aynen yazmaz.
+	product, _, err = productByName(context.Background(), resolvers(rest), "  TodoApp ")
+	require.NoError(t, err)
+	require.Equal(t, "prd_a", product.ID)
 }
 
-// AYNI ADDAN İKİ TANE VARSA SEÇMEYİZ.
+// BULAMAMAK ARTIK BİR HATADIR, ve bu bir iyileşme.
+//
+// Eskiden boş dönüyordu ve çağıran ref yoluna düşüyordu — yazım hatası "o
+// adrese ulaşamadım" diye raporlanıyordu. Şimdi ne olmadığı söyleniyor ve
+// kullanıcının projeleri listeleniyor.
+func TestAMissNamesWhatYouActuallyHave(t *testing.T) {
+	rest := &nameREST{rows: []map[string]any{
+		{"id": "prd_b", "name": "baska", "environments": []map[string]any{{"ref": "r1", "name": "main"}}},
+	}}
+	_, _, err := productByName(context.Background(), resolvers(rest), "todoapp")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "todoapp")
+	require.Contains(t, err.Error(), "baska", "red kullanıcının projelerini listelemiyor")
+}
+
+// OTURUM YOKSA SÖYLENİR — self-host akışı adres ister, ad değil.
+func TestNoSessionIsNamedRatherThanGuessed(t *testing.T) {
+	_, _, err := productByName(context.Background(), Resolvers{}, "todoapp")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "palbase login")
+
+	_, _, err = productByName(context.Background(), resolvers(&nameREST{err: errors.New("401")}), "todoapp")
+	require.Error(t, err, "okunamayan bir liste sessizce yutuldu")
+}
+
+// AYNI ADDAN İKİ ÜRÜN VARSA SEÇMEYİZ.
 //
 // Birini seçmek, YANLIŞ projeye bağlanmak olabilir — ve bağlandıktan sonra
-// push oraya gider.
-func TestAnAmbiguousNameResolvesToNothing(t *testing.T) {
+// push oraya gider. Ama artık bu gerçekten İKİ ÜRÜN demek; iki ORTAM değil.
+func TestTwoProductsWithOneNameRefuse(t *testing.T) {
 	rest := &nameREST{rows: []map[string]any{
-		{"ref": "r1", "name": "shop"},
-		{"ref": "r2", "name": "Shop"},
+		{"id": "prd_1", "name": "shop", "environments": []map[string]any{{"ref": "r1", "name": "main"}}},
+		{"id": "prd_2", "name": "Shop", "environments": []map[string]any{{"ref": "r2", "name": "main"}}},
 	}}
-	if got := refByProjectName(context.Background(), resolvers(rest), "shop"); got != "" {
-		t.Fatalf("belirsiz ad çözüldü: %q", got)
-	}
+	_, _, err := productByName(context.Background(), resolvers(rest), "shop")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "id")
 }
 
-// ADSIZ SATIR ÇÖKME ÜRETMEZ: eski projelerin adı NULL olabilir.
-func TestANullNameIsSkipped(t *testing.T) {
+// ORTAMSIZ BİR ÜRÜN ÇÖZÜLÜR ama ondan okunamaz — ve söylenen şey budur.
+func TestAProductWithNoEnvironmentsSaysSo(t *testing.T) {
 	rest := &nameREST{rows: []map[string]any{
-		{"ref": "r1", "name": nil},
-		{"ref": "r2", "name": "todoapp"},
+		{"id": "prd_a", "name": "todoapp", "environments": []map[string]any{}},
 	}}
-	if got := refByProjectName(context.Background(), resolvers(rest), "todoapp"); got != "r2" {
-		t.Fatalf("adsız satır akışı bozdu: %q", got)
-	}
+	product, envs, err := productByName(context.Background(), resolvers(rest), "todoapp")
+	require.NoError(t, err)
+	require.Empty(t, envs)
+
+	_, refErr := linkEnvironmentRef(product, envs, "")
+	require.Error(t, refErr)
+	require.Contains(t, refErr.Error(), "palbase env create")
 }
 
 var _ = http.MethodGet
