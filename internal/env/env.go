@@ -170,9 +170,17 @@ they pull your branch.`,
 }
 
 func listing(envs []environment) string {
+	// Same shape as the resolver's refusal (internal/backend): the refs line up,
+	// because this list is a menu somebody is about to type from.
+	widest := 0
+	for _, e := range envs {
+		if n := len([]rune(e.Name)); n > widest {
+			widest = n
+		}
+	}
 	rows := make([]string, 0, len(envs))
 	for _, e := range envs {
-		rows = append(rows, "  "+e.Name+"   "+e.Ref)
+		rows = append(rows, fmt.Sprintf("  %-*s   %s", widest, e.Name, e.Ref))
 	}
 	return strings.Join(rows, "\n")
 }
