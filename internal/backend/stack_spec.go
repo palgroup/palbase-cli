@@ -40,10 +40,17 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	// No banner here: RefreshSpec runs INSIDE `push` and `link`, which have
 	// already said where they are acting. Announcing it a second time mid-run
 	// reads as a second destination.
-	target, err := ReadTarget()
+	// RESOLVED, NOT READ. Which environment's contract this refreshes is the
+	// resolver's answer — `--env` has to reach here or `palbase spec` would
+	// silently refresh a different environment than the one a person named.
+	// This also retires the last constant: `defaultEnvName` returned the
+	// literal "main" for every cloud checkout, so two environments shared one
+	// directory and the last refresh overwrote the first.
+	resolved, err := Resolve(ctx)
 	if err != nil {
 		return err
 	}
+	target := resolved.Acting()
 	// The resolver's refusal already names both ways in and which address it
 	// looked for. Flattening it into the sentinel replaced all of that with four
 	// words and left the person to guess.
@@ -61,7 +68,7 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 	// by — so a refresh updates the contract for THAT configuration and leaves
 	// the others alone. Refreshing them all would mean reaching every
 	// environment on every push, including production from a laptop.
-	env := defaultEnvName()
+	env := resolved.ArtifactEnv()
 	if target.Local {
 		env = localEnvName
 	}

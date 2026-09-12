@@ -84,6 +84,24 @@ func (r Resolved) Describe() string {
 	return r.URL
 }
 
+// ArtifactEnv is the name the per-environment directory takes.
+//
+// A CLOUD ENVIRONMENT HAS A NAME; A SELF-HOSTED STACK HAS ONE ENVIRONMENT and
+// the app knows it as `main`. That constant used to be the answer for
+// EVERYTHING — `defaultEnvName` returned "main" for every cloud checkout too,
+// so two environments shared one directory and the last link overwrote the
+// first. It survives only where it is actually true: one installation, one
+// identity, one environment.
+func (r Resolved) ArtifactEnv() string {
+	if r.Env != "" {
+		return r.Env
+	}
+	return soleEnvName
+}
+
+// soleEnvName is what a stack with exactly one environment calls it.
+const soleEnvName = "main"
+
 func projectLabel(t Target) string {
 	if t.Name != "" {
 		return t.Name

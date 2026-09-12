@@ -50,6 +50,10 @@ const projectAppID = "project"
 type linkOpts struct {
 	checkoutRoot string
 	url          string
+	// linkedEnv is the NAME of the environment this link read the contract and
+	// the key from. It decides which directory the artifacts land in; it is
+	// never committed.
+	linkedEnv string
 	// product is set when the target was resolved from a cloud project rather
 	// than typed as an address. It decides WHAT the committed file records: an
 	// identity for a cloud project, an address for a stack somebody runs.
@@ -170,6 +174,11 @@ boot generated.`,
 				ref, refErr := linkEnvironmentRef(product, envs, o.env)
 				if refErr != nil {
 					return refErr
+				}
+				for _, e := range envs {
+					if e.Ref == ref {
+						o.linkedEnv = e.Name
+					}
 				}
 				host := r.Endpoints().PublicHost
 				if host == "" {
@@ -484,10 +493,29 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 
+	// A CHECKOUT WITH NO GENERATOR GETS NO PER-ENVIRONMENT ARTIFACTS.
+	//
+	// The consumers of `palbase/environments/<env>/` are `palbe` and
+	// `palbase-swiftgen`, both of which run in an APP checkout. A backend-only
+	// checkout was handed `openapi.json` and `roles.json` on every link and
+	// nothing in the product read them — a diff on every branch, for no reader.
+	// `palbase spec` still writes them on request, because that verb is
+	// somebody asking.
+	linkedEnv := o.linkedEnv
+	if linkedEnv == "" {
+		// A stack somebody runs has ONE environment and the app knows it as
+		// `main` — see Resolved.ArtifactEnv for why that constant survives only
+		// here and not for cloud checkouts.
+		linkedEnv = soleEnvName
+	}
 	// EVERY environment, not the one being linked. An app that holds only the
 	// environment somebody linked last is an app whose address depends on when
 	// it was built — which is how a TestFlight build ends up pointed at staging.
-	envs, specs, err := gatherEnvironments(ctx, target, anon, w)
+	//
+	// The environment NAME is the one this link read from, not a constant: the
+	// old `defaultEnvName` returned "main" for every cloud checkout, so a
+	// second environment overwrote the first one's contract in place.
+	envs, specs, err := gatherEnvironments(ctx, target, linkedEnv, anon, writesPerEnvironmentArtifacts(platforms), w)
 	if err != nil {
 		return err
 	}

@@ -504,14 +504,35 @@ func pathsOf(spec []byte) map[string]bool {
 // left out: an app whose Local configuration disappears because a container was
 // stopped is an app that stops compiling for a reason nobody connects to the
 // container. The entry says what to run instead.
-func gatherEnvironments(ctx context.Context, target Target, key string, w io.Writer) (appEnvironments, map[string][]byte, error) {
+// writesPerEnvironmentArtifacts answers whether THIS checkout has anything that
+// reads them.
+//
+// MEASURED, NOT ASSUMED: the consumers of `palbase/environments/<env>/` are
+// `palbe` (the TypeScript generator, shipped in @palbase/web) and
+// `palbase-swiftgen`. Both run in an APP checkout. A backend-only checkout was
+// given `openapi.json` and `roles.json` on every link and nothing in the
+// product ever read them — a diff on every branch, for no reader. The
+// codebase already carried the lesson in prose (`web_wiring.go`: "a contract
+// nobody reads"); this is the same sentence as a condition.
+//
+// `palbase spec` still writes them on request: that verb is somebody ASKING.
+func writesPerEnvironmentArtifacts(platforms []string) bool {
+	return len(platforms) > 0
+}
+
+// `writeArtifacts` separates REPORTING from WRITING, and the two are genuinely
+// different jobs: whether a project has a contract yet is worth saying in every
+// checkout, while the per-environment FILES only matter where a generator reads
+// them. Collapsing them made a backend link stop telling people "nothing is
+// deployed yet", which is the one thing they needed to hear.
+func gatherEnvironments(ctx context.Context, target Target, envName, key string, writeArtifacts bool, w io.Writer) (appEnvironments, map[string][]byte, error) {
 	envs := appEnvironments{
-		Default:      defaultEnvName(),
+		Default:      envName,
 		Environments: map[string]appEnvironment{},
 	}
 	specs := map[string][]byte{}
 
-	primary := defaultEnvName()
+	primary := envName
 	primaryEnv := appEnvironment{
 		AppID:   projectAppID,
 		BaseURL: target.URL,
@@ -547,11 +568,13 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 	case err != nil:
 		return appEnvironments{}, nil, err
 	default:
-		if err := writeSpec(primary, spec); err != nil {
-			return appEnvironments{}, nil, err
-		}
-		if err := refreshRoles(ctx, target, cred, primary, w); err != nil {
-			return appEnvironments{}, nil, err
+		if writeArtifacts {
+			if err := writeSpec(primary, spec); err != nil {
+				return appEnvironments{}, nil, err
+			}
+			if err := refreshRoles(ctx, target, cred, primary, w); err != nil {
+				return appEnvironments{}, nil, err
+			}
 		}
 		specs[primary] = spec
 	}
@@ -597,16 +620,6 @@ func gatherEnvironments(ctx context.Context, target Target, key string, w io.Wri
 		specs[localEnvName] = localSpec
 	}
 	return envs, specs, nil
-}
-
-// defaultEnvName is what the linked target's environment is called. A cloud
-// project names it; a project you run yourself is its own single environment,
-// and `main` is what every other surface calls that one.
-func defaultEnvName() string {
-	// GEÇİCİ: ortam adı artık `ResolveFor`dan geliyor ve bu fonksiyon T013'te
-	// tamamen düşüyor. Şimdilik sabit, çünkü `Target.Env` alanı kalktı ve
-	// okunacak bir şey kalmadı.
-	return "main"
 }
 
 // groupOf is the project group a target belongs to, for finding its local stack

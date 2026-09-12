@@ -504,3 +504,41 @@ func TestALoopbackLinkBindsTheCheckoutNotTheStage(t *testing.T) {
 	require.Equal(t, "http://127.0.0.1:9999", got.URL)
 	require.True(t, got.Local)
 }
+
+// ── ARTIFACT KURALI (FR-020/021/022) ───────────────────────────────────────
+
+// A CHECKOUT WITH NO GENERATOR GETS NO `environments/` DIRECTORY.
+//
+// Measured before this change: a backend-only checkout received
+// `palbase/environments/main/{openapi.json,roles.json}` on every link, and
+// NOTHING in the product read them — the consumers are `palbe` (the TS
+// generator) and `palbase-swiftgen`, both of which run in an APP checkout. The
+// codebase already knew: `web_wiring.go` carries the line "`Palbase/openapi.json`
+// is a contract nobody reads".
+//
+// So they were a diff on every branch, for no reader.
+func TestABackendOnlyCheckoutGetsNoEnvironmentsDirectory(t *testing.T) {
+	require.False(t, writesPerEnvironmentArtifacts(nil),
+		"a checkout with no client platform was given per-environment artifacts")
+}
+
+// AN APP CHECKOUT STILL GETS THEM — that is what the generators read.
+func TestAnAppCheckoutStillGetsPerEnvironmentArtifacts(t *testing.T) {
+	for _, platform := range []string{"ios", "macos", "web", "android"} {
+		require.True(t, writesPerEnvironmentArtifacts([]string{platform}),
+			"%s has a generator and was given nothing to read", platform)
+	}
+}
+
+// THE DIRECTORY IS NAMED AFTER THE ENVIRONMENT, not after a constant.
+//
+// `defaultEnvName` returned the literal "main" because `Target.Env` had no
+// writer, so EVERY cloud link landed in `environments/main/` — and re-linking
+// to a second environment OVERWROTE the first one's contract in place. Two
+// environments, one directory, and the last link won silently.
+func TestTheEnvironmentDirectoryIsNamedAfterTheEnvironment(t *testing.T) {
+	require.Equal(t, "palbase/environments/staging", EnvDir("staging"))
+	require.Equal(t, "palbase/environments/staging/openapi.json", SpecPath("staging"))
+	require.NotContains(t, EnvDir("staging"), "main",
+		"the environment directory still carries a constant")
+}
