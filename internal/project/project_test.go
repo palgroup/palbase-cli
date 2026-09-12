@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -64,7 +67,7 @@ func run(t *testing.T, r Resolvers, stdin string, args ...string) (string, error
 // the domain, which differs per deployment.
 func TestCreatePrintsALinkableAddress(t *testing.T) {
 	shop := "shop"
-	rest := &stubREST{reply: Project{Ref: "abc123xyz", Name: &shop, Phase: "Running"}}
+	rest := &stubREST{reply: tenant{Ref: "abc123xyz", Name: &shop, Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{domain: "palbase.studio"}), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -85,7 +88,7 @@ func TestCreatePrintsALinkableAddress(t *testing.T) {
 // succeeds — the project exists — but says plainly that the host is unknown
 // rather than printing a confident, wrong address.
 func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
-	rest := &stubREST{reply: Project{Ref: "abc123xyz", Phase: "Running"}}
+	rest := &stubREST{reply: tenant{Ref: "abc123xyz", Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{err: fmt.Errorf("unreachable")}), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -100,24 +103,59 @@ func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
 	}
 }
 
-func TestListShowsEveryProject(t *testing.T) {
-	first, second := "centauri", "penny"
+// THE LISTING IS PROJECTS WITH THEIR ENVIRONMENTS NESTED, and that shape is
+// the point rather than a formatting choice.
+//
+// Flattened is what it used to be: one row per ENVIRONMENT, each carrying the
+// PROJECT's name. So a project with two environments printed the same name
+// twice and a reader could not tell a second environment from a second
+// project — and `palbase link <name>` could not resolve it at all.
+func TestListShowsEveryProjectWithItsEnvironments(t *testing.T) {
 	rest := &stubREST{reply: []Project{
-		{Ref: "aaa", Name: &first, Phase: "Running"},
-		{Ref: "bbb", Name: &second, Phase: "Pending"},
+		{ID: "prd_a", Name: "centauri", Environments: []Environment{
+			{Ref: "aaa", Name: "main", Status: "Running"},
+			{Ref: "aab", Name: "staging", Status: "Running"},
+		}},
+		{ID: "prd_b", Name: "penny", Environments: []Environment{
+			{Ref: "bbb", Name: "main", Status: "Pending"},
+		}},
 	}}
 	out, err := run(t, resolvers(rest, stubCloud{}), "", "list")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if rest.path != "/v1/cloud/projects" {
+	// ONE CALL, and it is the surface that groups environments under products.
+	if rest.path != "/api/v2/projects" {
 		t.Fatalf("wrong path: %s", rest.path)
 	}
-	// AD DA GÖRÜNMELİ, HÜCRE GÖRÜNMEMELİ.
-	for _, want := range []string{"aaa", "Running", "bbb", "centauri", "penny"} {
+	// THE PROJECT NAME APPEARS ONCE per project, not once per environment.
+	if n := strings.Count(out, "centauri"); n != 1 {
+		t.Fatalf("the project name appears %d times, want 1 — repeating it reads as two projects:\n%s", n, out)
+	}
+	// AND BOTH ENVIRONMENTS ARE THERE, by name and by ref.
+	for _, want := range []string{"main", "staging", "aaa", "aab"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("%q missing from:\n%s", want, out)
 		}
+	}
+	// AD DA GÖRÜNMELİ, HÜCRE GÖRÜNMEMELİ.
+	for _, want := range []string{"Running", "bbb", "penny"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("%q missing from:\n%s", want, out)
+		}
+	}
+}
+
+// A PROJECT WITH NO ENVIRONMENTS IS STILL LISTED — it exists, and saying
+// nothing about it would make it unreachable.
+func TestAProjectWithNoEnvironmentsIsStillListed(t *testing.T) {
+	rest := &stubREST{reply: []Project{{ID: "prd_a", Name: "fresh", Environments: nil}}}
+	out, err := run(t, resolvers(rest, stubCloud{}), "", "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(out, "fresh") || !strings.Contains(out, "(none)") {
+		t.Fatalf("an environment-less project vanished from the listing:\n%s", out)
 	}
 }
 
@@ -177,7 +215,7 @@ func TestDeleteWithYesSkipsThePrompt(t *testing.T) {
 // projesi olan biri sekiz opak ref'e bakıyordu.
 func TestStatusNamesTheProject(t *testing.T) {
 	name := "centauri"
-	rest := &stubREST{reply: Project{Ref: "abc123xyz", Name: &name, Phase: "Running"}}
+	rest := &stubREST{reply: tenant{Ref: "abc123xyz", Name: &name, Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{}), "", "status", "abc123xyz")
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -201,5 +239,40 @@ func TestRefIsEscapedIntoThePath(t *testing.T) {
 	}
 	if strings.Contains(rest.path, "../") {
 		t.Fatalf("an unescaped ref reached the path: %s", rest.path)
+	}
+}
+
+// THE STALE SENTENCE MUST NOT COME BACK.
+//
+// This package's doc comment asserted the opposite of the product for weeks: it
+// said a project simply WAS a tenant, with no organisation above it and no
+// environment set below. (The literal words live only in the refusal list
+// below — writing them in prose here would trip the gate this test IS.) True
+// the day it was written, false ever since — the control plane grew `cloud_products` above the tenant
+// row and a verb to add a second environment under it.
+//
+// A doc that contradicts the model is worse than a missing one: it is the thing
+// the next reader believes. So the claim is measured, not trusted.
+func TestThePackageDocDoesNotDenyEnvironments(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file")
+	}
+	body, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "project.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{
+		"no Environment set below it",
+		"A project in the v2 cloud IS a tenant",
+	} {
+		if strings.Contains(string(body), gone) {
+			t.Errorf("the package doc still denies the model it documents: %q", gone)
+		}
+	}
+	// AND IT SAYS THE TRUE THING EXPLICITLY. A gate that only hunts the lie is
+	// satisfied by silence; this one demands the sentence.
+	if !strings.Contains(string(body), "A PROJECT IS A GROUP OF ENVIRONMENTS") {
+		t.Error("the package doc does not state what a project is")
 	}
 }

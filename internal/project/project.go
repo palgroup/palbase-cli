@@ -1,17 +1,26 @@
-// Package project wires `palbase project` over the v2 cloud's control plane
-// (`/v1/cloud/projects*`, Authorization: Bearer <session token>).
+// Package project wires `palbase project` over the cloud's control plane.
 //
-// A project in the v2 cloud IS a tenant: one microVM, one ref, one address.
-// There is no Organization above it and no Environment set below it — the v1
-// shape carried both, and the CLI's own rules record why that was misleading:
-// the real entity was always the project, and "environment" was a presentation
-// label. A branch that needs its own database is its own project.
+// A PROJECT IS A GROUP OF ENVIRONMENTS, and this sentence replaces the opposite
+// one. The doc here used to claim the opposite — that a project in this cloud
+// simply WAS a tenant (one microVM, one ref, one address), with no organisation
+// above it and no environment set below. True when written, false since. It is
+// paraphrased rather than quoted on purpose: the gate below refuses the literal
+// words, and quoting them would keep the claim alive in the very file that
+// retired it. The
+// control plane grew `cloud_products` above the tenant row and a verb to add a
+// second environment under it; the CLI surface says so in its own words
+// (`cli.controller.ts`: "CLI'ın \"project\"i v2'nin ÜRÜNÜ, \"environment\"ı
+// v2'nin PROJESİ"). Measured live 2026-09-11.
 //
-// So the verbs are flat. `create` mints a tenant and hands back the address
-// `palbase link` wants; `list`, `status` and `delete` name it by ref. There is
-// no `use`: the linked target is what a directory acts on, and `palbase link`
-// already writes it. Two mechanisms for "which project is this directory" is
-// how a person ends up pushing to the wrong one.
+// The consequence is not cosmetic. While this doc was believed, `list` printed
+// one row per ENVIRONMENT carrying the PRODUCT's name — so a project with two
+// environments printed the same name twice, and `palbase link <name>` could not
+// resolve it.
+//
+// So `list` prints PROJECTS with their environments nested, in ONE call. There
+// is still no `use`: which environment a directory acts on is `palbase env
+// use`, and which PROJECT it belongs to is `palbase link`. Two mechanisms for
+// one question is how a person ends up pushing to the wrong place.
 package project
 
 import (
@@ -55,20 +64,46 @@ type Resolvers struct {
 // AD İNSANIN VERDİĞİ. `ref` kimliktir ve değişmez; ad değişir. Liste yalnız
 // ref basarken sekiz projesi olan biri sekiz opak dizeye bakıyordu.
 type Project struct {
+	// ID is the PRODUCT's identity — what `palbase link` writes down. It does
+	// not change; the name does.
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Environments []Environment `json:"environments"`
+}
+
+// Environment is one tenant under a project: its own microVM, its own database,
+// its own keys.
+type Environment struct {
+	Ref    string `json:"ref"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// tenant is what `create`, `status` and `delete` act on — ONE environment,
+// named by its ref. They are not confused about the model: minting a project
+// mints its first environment, and deleting one deletes that tenant's data.
+type tenant struct {
 	Ref   string  `json:"ref"`
 	Name  *string `json:"name"`
 	Phase string  `json:"phase"`
 }
 
-// displayName, adı olmayan bir projeyi ref'iyle gösterir.
+func (t tenant) displayName() string {
+	if t.Name == nil || *t.Name == "" {
+		return "(unnamed)"
+	}
+	return *t.Name
+}
+
+// displayName, adı olmayan bir projeyi kimliğiyle gösterir.
 //
 // Boş bırakmak, tabloda adsız bir sütun boşluğu bırakırdı ve "adı yok" ile
 // "sunucu adı unuttu" aynı görünürdü.
 func (p Project) displayName() string {
-	if p.Name == nil || *p.Name == "" {
-		return "(unnamed)"
+	if p.Name == "" {
+		return p.ID
 	}
-	return *p.Name
+	return p.Name
 }
 
 // Cmd returns the `palbase project` parent command.
@@ -98,7 +133,7 @@ func createCmd(r Resolvers) *cobra.Command {
 Provisioning is synchronous: the command returns once the tenant is running, so
 the address it prints is one you can link immediately.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var p Project
+			var p tenant
 			body := map[string]any{"name": args[0], "tier": tier}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/projects", body, &p); err != nil {
 				return err
@@ -134,8 +169,10 @@ func listCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "List the projects you own",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// ONE CALL. The environments come back inside their project, so a
+			// listing of M projects costs one request rather than M+1.
 			var rows []Project
-			if err := r.REST().Do(cmd.Context(), http.MethodGet, "/v1/cloud/projects", nil, &rows); err != nil {
+			if err := r.REST().Do(cmd.Context(), http.MethodGet, "/api/v2/projects", nil, &rows); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -145,10 +182,28 @@ func listCmd(r Resolvers) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No projects yet — create one with `palbase project create <name>`.")
 				return nil
 			}
+			// THE ENVIRONMENTS ARE NESTED, not flattened into sibling rows.
+			//
+			// Flattened is what the old listing did — one row per environment,
+			// each carrying the PROJECT's name — so two environments printed
+			// the same name twice and a reader could not tell a second
+			// environment from a second project.
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tREF\tPHASE")
+			fmt.Fprintln(tw, "PROJECT\tENVIRONMENT\tREF\tSTATUS")
 			for _, p := range rows {
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", p.displayName(), p.Ref, p.Phase)
+				if len(p.Environments) == 0 {
+					fmt.Fprintf(tw, "%s\t(none)\t\t\n", p.displayName())
+					continue
+				}
+				for i, e := range p.Environments {
+					name := p.displayName()
+					if i > 0 {
+						// The project is printed once; the rows under it belong
+						// to it. Repeating the name would read as two projects.
+						name = ""
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, e.Name, e.Ref, e.Status)
+				}
 			}
 			return tw.Flush()
 		},
@@ -164,7 +219,7 @@ func statusCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "Show one project's name and phase",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var p Project
+			var p tenant
 			path := "/v1/cloud/projects/" + url.PathEscape(args[0])
 			if err := r.REST().Do(cmd.Context(), http.MethodGet, path, nil, &p); err != nil {
 				return err
