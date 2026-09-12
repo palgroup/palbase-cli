@@ -334,13 +334,24 @@ func dirExists(dir string) bool {
 // IT ONLY REMOVES WHAT IT MADE, and only while empty: a directory that was
 // already there belongs to whoever put it there, and one with files in it may
 // hold a partial download somebody wants to look at.
-func reapEmptyClone(dir string, existedBefore bool) {
+//
+// IT RETURNS THE DECISION AND NOT THE SYSCALL'S OUTCOME, and that distinction
+// took two mutations to get right.
+//
+// `os.Remove` refuses a non-empty directory by itself, so a test that only
+// looks at the filesystem stays green however this function decides — it
+// measures the kernel, not the rule. Returning `os.Remove(dir) == nil` did not
+// fix that either: a wrong decision then produced `false` because the OS said
+// no, which is the same answer a right decision gives. So the value returned is
+// what was DECIDED, computed before anything is touched.
+func reapEmptyClone(dir string, existedBefore bool) bool {
 	if existedBefore {
-		return
+		return false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) > 0 {
-		return
+		return false
 	}
 	_ = os.Remove(dir)
+	return true
 }
