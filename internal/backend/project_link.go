@@ -575,14 +575,27 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := writeLinkRecord(o, target); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)
+	reportLinked(w, o.product, base, described.Hosting, linkedEnv)
 
 	// ONE DIRECTORY, SO ONE SENTENCE. The closing line used to name a pair
 	// (`.palbase/` hidden, `Palbase/` visible) and branch three ways to say
 	// which halves existed. Everything this CLI writes now lives under
 	// `RootDir()`, so the line names it and cannot drift from the layout: a
 	// spelled-out directory here would be a second truth about where things go.
-	fmt.Fprintf(w, "commit %s/\n", RootDir())
+	// WHAT TO COMMIT, IF ANYTHING.
+	//
+	// A backend-only checkout receives no per-environment artifacts and, when
+	// the stack is one on this machine, no committed record either — so telling
+	// that reader to "commit palbase/" would point them at a directory that
+	// does not exist. The line names what was actually written.
+	switch {
+	case !writesPerEnvironmentArtifacts(platforms) && isLoopbackAddress(base):
+		fmt.Fprintf(w, "this machine remembers this stack; nothing to commit\n")
+	case !writesPerEnvironmentArtifacts(platforms):
+		fmt.Fprintf(w, "commit %s\n", projectPath())
+	default:
+		fmt.Fprintf(w, "commit %s/\n", RootDir())
+	}
 	return nil
 }
 
@@ -873,4 +886,24 @@ Then add palbase/environments to your app target. Set PALBASE_ENV to any
 directory under it; an UNSET one expands to nothing in Xcode, so the include
 pattern matches nothing and the app ships unconfigured.
 `, env)
+}
+
+// reportLinked says what this checkout is now bound to.
+//
+// WHAT IT IS BOUND TO IS NOT AN ADDRESS — except where it is. A cloud link
+// binds to the PRODUCT, and `base` is merely the environment this run read the
+// contract from. Printing the address as the thing linked is the sentence that
+// taught people the old model: they read "linked to https://<ref>.palbase.studio"
+// and concluded the checkout was pinned to that environment. It WAS, and it is
+// not any more, so the sentence had to change with the mechanism.
+//
+// A self-host link is the opposite case and keeps the address: there the URL is
+// the identity, there is no product to name, and the environment is the stack.
+func reportLinked(w io.Writer, product Product, base, hosting, linkedEnv string) {
+	if product.ID == "" {
+		fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, hosting)
+		return
+	}
+	fmt.Fprintf(w, "\nlinked to %s (%s)\n", product.Name, product.ID)
+	fmt.Fprintf(w, "  contract read from %s; each verb resolves its own environment\n", linkedEnv)
 }
