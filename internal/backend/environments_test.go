@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -171,4 +172,137 @@ func TestSelfHostResolvesToItsOwnAddress(t *testing.T) {
 func TestDescribeNamesProjectAndEnvironment(t *testing.T) {
 	r := Resolved{Target: Target{Project: "prd_a", Name: "todoapp"}, Env: "staging"}
 	require.Equal(t, "todoapp/staging", r.Describe())
+}
+
+// ── inceleme bulgularının testleri ──────────────────────────────────────────
+
+// C-1: A FAILED LISTING IS NOT A LICENCE TO GUESS.
+//
+// `isCanonicalProjectRef` is `^[a-z0-9]{4,24}$` — it matches `main`, `prod`,
+// `staging` and `production`, every word a person actually types. The branch
+// this replaces built an address out of whatever was typed whenever the listing
+// failed, so a nil hook or a network blip sent `--env production` to
+// `https://production.<host>` with Source "flag" and no warning.
+func TestAFailedListingRefusesInsteadOfGuessing(t *testing.T) {
+	for _, named := range []string{"production", "prod", "main", "mu0028"} {
+		t.Run(named, func(t *testing.T) {
+			linkedTo(t, Target{Project: "prd_a", Name: "todoapp"})
+			resolverRig(t, twoEnvs)
+			EnvironmentsOf = func(context.Context, string) ([]Environment, error) {
+				return nil, errors.New("control plane unreachable")
+			}
+			SelectedEnvFlag = named
+
+			_, err := ResolveFor(cmdFor(t))
+			require.Error(t, err, "a failed listing must never resolve an address")
+			require.Contains(t, err.Error(), "cannot check")
+			require.Contains(t, err.Error(), named)
+		})
+	}
+}
+
+// C-1, ikinci yarı: the hook being NIL is the same class of failure.
+func TestAnUnwiredHookRefusesInsteadOfGuessing(t *testing.T) {
+	linkedTo(t, Target{Project: "prd_a", Name: "todoapp"})
+	resolverRig(t, twoEnvs)
+	EnvironmentsOf = nil
+	SelectedEnvFlag = "production"
+
+	_, err := ResolveFor(cmdFor(t))
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "https://production.",
+		"an unwired hook built an address out of a typed word")
+}
+
+// I-1: AN OLD CLOUD CHECKOUT IS NOT SELF-HOST.
+//
+// Before the identity format a cloud link wrote {"url":"https://<ref>.<host>"}
+// — URL set, Project empty, the exact shape the self-host branch matches.
+func TestALegacyCloudCheckoutIsNotTreatedAsSelfHost(t *testing.T) {
+	linkedTo(t, Target{URL: "https://mu0028.palbase.studio"})
+	resolverRig(t, twoEnvs)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return true }
+	SelectedEnvFlag = "staging"
+
+	got, err := ResolveFor(cmdFor(t))
+	require.NoError(t, err, "a legacy cloud checkout must not refuse --env as if it were self-host")
+	require.Equal(t, "staging", got.Env)
+}
+
+// I-2: A RUNNING LOCAL STACK WINS, self-host checkout included.
+func TestARunningLocalStackWinsForASelfHostCheckout(t *testing.T) {
+	linkedTo(t, Target{URL: "https://stack.firma.com"})
+	resolverRig(t, nil)
+	local, err := localPath()
+	require.NoError(t, err)
+	require.NoError(t, ensureMachineStateDir(local))
+	require.NoError(t, os.WriteFile(local, []byte(`{"url":"http://127.0.0.1:54321"}`), 0o644))
+
+	got, resolveErr := ResolveFor(cmdFor(t))
+	require.NoError(t, resolveErr)
+	require.Equal(t, "local", got.Source, "a running local stack lost to the committed address")
+	require.Equal(t, "http://127.0.0.1:54321", got.URL)
+}
+
+// M-7: an empty TenantHost must refuse by name, not build "https://ref.".
+func TestAnUnconfiguredTenantHostRefusesByName(t *testing.T) {
+	linkedTo(t, Target{Project: "prd_a", Name: "todoapp"})
+	resolverRig(t, []Environment{{Ref: "j06bwtuum", Name: "main"}})
+	TenantHost = ""
+
+	_, err := ResolveFor(cmdFor(t))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tenant host")
+}
+
+// M-7: a project with NO environments says what to do about it.
+func TestAProjectWithNoEnvironmentsSaysHowToMakeOne(t *testing.T) {
+	linkedTo(t, Target{Project: "prd_a", Name: "todoapp"})
+	resolverRig(t, nil)
+	EnvironmentsOf = func(context.Context, string) ([]Environment, error) { return nil, nil }
+	TenantHost = "palbase.studio"
+
+	_, err := ResolveFor(cmdFor(t))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "palbase env create")
+}
+
+// M-7: `--env <ref>` matches by ref, not only by name.
+func TestTheFlagMatchesByRefAsWellAsName(t *testing.T) {
+	linkedTo(t, Target{Project: "prd_a", Name: "todoapp"})
+	resolverRig(t, twoEnvs)
+	SelectedEnvFlag = "mu0028"
+
+	got, err := ResolveFor(cmdFor(t))
+	require.NoError(t, err)
+	require.Equal(t, "staging", got.Env, "a ref must resolve to its environment's NAME")
+}
+
+// M-7: the flag beats PALBASE_ENV — one is typed now, the other is ambient.
+func TestTheFlagBeatsTheEnvironmentVariable(t *testing.T) {
+	linkedTo(t, Target{Project: "prd_a", Name: "todoapp"})
+	resolverRig(t, twoEnvs)
+	t.Setenv("PALBASE_ENV", "staging")
+	SelectedEnvFlag = "main"
+
+	got, err := ResolveFor(cmdFor(t))
+	require.NoError(t, err)
+	require.Equal(t, "main", got.Env)
+}
+
+// M-4: a corrupt selection is distinguishable from no selection.
+func TestACorruptSelectionIsNotSilentlyTreatedAsAbsent(t *testing.T) {
+	inScratchCheckout(t)
+	root, err := os.Getwd()
+	require.NoError(t, err)
+	path, pathErr := SelectionPath(root)
+	require.NoError(t, pathErr)
+	require.NoError(t, ensureMachineStateDir(path))
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+
+	_, readErr := ReadSelection(root)
+	require.ErrorIs(t, readErr, ErrCorruptSelection,
+		"a corrupt selection reported as 'nothing selected' stays corrupt forever")
 }

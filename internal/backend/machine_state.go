@@ -218,6 +218,12 @@ func PlanStatePath(checkoutRoot string) (string, error) {
 // keyed by the hash of the checkout's absolute path, and `palbase env use` is
 // the only thing that writes it.
 
+// ErrCorruptSelection distinguishes "this checkout has not selected anything"
+// — the normal state of every fresh clone — from "the record is there and
+// unreadable". Collapsing the two would leave a corrupt file silently in place
+// forever.
+var ErrCorruptSelection = errors.New("the remembered environment could not be read")
+
 // Selection is this machine's remembered environment for one checkout.
 type Selection struct {
 	// Project is the product this selection belongs to, and it is the whole
@@ -254,13 +260,18 @@ func ReadSelection(checkoutRoot string) (Selection, error) {
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		// "HİÇ SEÇİLMEMİŞ" NORMAL BİR HÂLDİR — her taze klon onda. Çağıran bir
+		// sonraki kurala düşer; bu bir hata değil, bir cevapsızlıktır.
 		return Selection{}, err
 	}
-	var s Selection
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return Selection{}, fmt.Errorf("read %s: %w", path, err)
+	var sel Selection
+	if err := json.Unmarshal(raw, &sel); err != nil {
+		// BOZUK BİR SEÇİM "YOK" DEĞİLDİR ve sessizce yutulmamalı: sessiz
+		// yutulursa dosya sonsuza kadar bozuk kalır ve kimse öğrenmez.
+		// ErrCorruptSelection ile sarılıyor ki çağıran ikisini AYIRT edebilsin.
+		return Selection{}, fmt.Errorf("%w: %s: %v", ErrCorruptSelection, path, err)
 	}
-	return s, nil
+	return sel, nil
 }
 
 // WriteSelection remembers one environment for this checkout. The WRITER
@@ -274,6 +285,12 @@ func WriteSelection(checkoutRoot string, s Selection) error {
 	if err != nil {
 		return err
 	}
+	// SWEEP FIRST, THEN CREATE — `WriteLocalTarget`la aynı sıra ve aynı sebep:
+	// bu süreç dizinini yaratır, eşzamanlı bir toplayıcı onu HENÜZ BOŞ görür
+	// (boş bir durum dizini tanımı gereği çöptür) ve mkdir ile write arasında
+	// siler; write ENOENT ile düşer ve kullanıcı seçmediği bir yol hakkında
+	// hata okur.
+	reapDeadCheckoutState()
 	if err := ensureMachineStateDir(path); err != nil {
 		return err
 	}

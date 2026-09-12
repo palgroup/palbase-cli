@@ -104,9 +104,32 @@ func ResolveFor(cmd *cobra.Command) (Resolved, error) {
 		return Resolved{}, err
 	}
 
+	// A RUNNING LOCAL STACK WINS, for every checkout — `palbase start` is a
+	// deliberate act happening right now and this is the semantics `ReadTarget`
+	// has always had. It is checked BEFORE the self-host branch because that
+	// branch used to return first and quietly sent verbs at the remote stack
+	// while a local one was up.
+	//
+	// An explicitly named environment still beats it: `--env` is the caller
+	// saying where they mean, and nothing should override that.
+	if envNamed() == "" {
+		if local, localErr := ReadTarget(); localErr == nil && local.Local {
+			return Resolved{Target: local, URL: local.URL, Source: "local"}, nil
+		}
+	}
+
 	// A SELF-HOSTED STACK IS ONE ENVIRONMENT. Saying so by name beats resolving
 	// a flag against a project that does not exist.
-	if strings.TrimSpace(target.URL) != "" && strings.TrimSpace(target.Project) == "" {
+	//
+	// AN OLD CLOUD CHECKOUT IS NOT SELF-HOST. Before the identity format, a
+	// cloud link wrote `{"url":"https://<ref>.<host>"}` — URL set, Project
+	// empty, exactly the shape this branch matches. Swallowing it here would
+	// pin the stale address forever and answer `--env` with "one installation
+	// with one environment", which is false for a cloud project. So the branch
+	// asks whether the address is one of OUR tenants, and a cloud one falls
+	// through to the migration path instead.
+	if strings.TrimSpace(target.URL) != "" && strings.TrimSpace(target.Project) == "" &&
+		!isCloudProjectAddress(target.URL) {
 		if envNamed() != "" {
 			return Resolved{}, fmt.Errorf(
 				"this checkout is linked to %s, which is one installation with one environment — "+
@@ -127,12 +150,6 @@ func ResolveFor(cmd *cobra.Command) (Resolved, error) {
 	// named.
 	if named := envNamed(); named != "" {
 		return resolveNamed(ctx, target, named)
-	}
-
-	// 3. A RUNNING LOCAL STACK WINS over a remembered selection — `palbase
-	// start` is a deliberate act happening right now.
-	if local, localErr := ReadTarget(); localErr == nil && local.Local {
-		return Resolved{Target: local, URL: local.URL, Source: "local"}, nil
 	}
 
 	// 4. THIS MACHINE'S REMEMBERED CHOICE — dropped when it belongs to a
@@ -182,19 +199,24 @@ func environmentsOf(ctx context.Context, productID string) ([]Environment, error
 // no network call at all; only a NAME has to be matched against the project's
 // list.
 func resolveNamed(ctx context.Context, target Target, named string) (Resolved, error) {
+	// A LISTING WE COULD NOT READ IS NOT A LICENCE TO GUESS.
+	//
+	// This branch used to fall back on "it looks like a ref, build the address"
+	// — and that was the fail-open this whole design exists to prevent.
+	// `isCanonicalProjectRef` is `^[a-z0-9]{4,24}$`, which matches `main`,
+	// `prod`, `staging` and `production`: every word a person actually types.
+	// So a failed listing (a network blip, or a hook nobody wired) turned
+	// `--env production` into `https://production.<host>` silently. Worse, it
+	// skipped the membership check the listing path performs, so a ref
+	// belonging to ANOTHER product resolved as if it were this project's.
+	//
+	// We cannot attribute `named` to this project without the list, and acting
+	// on an environment we cannot attribute is exactly what the refusal rule
+	// forbids. The error names the cause so a reader knows it is not a typo.
 	envs, err := environmentsOf(ctx, target.Project)
 	if err != nil {
-		// A REF STILL WORKS WHEN THE LISTING DOES NOT. The address is derivable
-		// without anybody's help, and refusing here would make a network blip
-		// the reason a named environment could not be reached.
-		if isCanonicalProjectRef(named) {
-			url, addrErr := addressOf(named)
-			if addrErr != nil {
-				return Resolved{}, addrErr
-			}
-			return Resolved{Target: target, Env: named, Ref: named, URL: url, Source: "flag"}, nil
-		}
-		return Resolved{}, err
+		return Resolved{}, fmt.Errorf(
+			"cannot check that %q is an environment of %s: %w", named, projectLabel(target), err)
 	}
 	for _, e := range envs {
 		if strings.EqualFold(e.Name, named) || e.Ref == named {
