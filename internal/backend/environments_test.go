@@ -412,3 +412,95 @@ func TestAnUnlinkedCheckoutWithNoStackIsRefusedWithTheWaysIn(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "palbase link")
 }
+
+// ── LINK YAZDIĞI ŞEY (FR-001/FR-003) ───────────────────────────────────────
+
+// A CLOUD LINK WRITES AN IDENTITY, NOT AN ADDRESS.
+//
+// The committed file is read by everybody who clones the repository, on every
+// branch. An address pins one tenant: the project grows a second environment
+// and the file never learns, and switching means editing a committed file —
+// which is a diff on `main` and a diff on `development` for the same code.
+func TestWriteLinkedIdentityWritesNoAddress(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, WriteLinkedIdentity(Product{ID: "prd_9f21c7", Name: "todoapp"}, Target{}))
+
+	after, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "prd_9f21c7", after.Project)
+	require.Equal(t, "todoapp", after.Name)
+	require.Empty(t, after.URL, "a cloud link wrote an environment's address into the repository")
+
+	raw, readErr := os.ReadFile(projectPath())
+	require.NoError(t, readErr)
+	require.NotContains(t, string(raw), "stackVersion")
+	require.NotContains(t, string(raw), "\"env\"")
+}
+
+// A LOOPBACK ADDRESS NEVER ENTERS THE REPOSITORY — it goes to this machine's
+// own state instead, where `palbase start` already keeps one.
+//
+// Measured in this repository on 2026-09-11: the control plane's own checkout
+// carried `{"url":"http://127.0.0.1:18098","stackVersion":"38"}` — a committed
+// file naming a port that exists on exactly one machine, for exactly as long as
+// that stack runs.
+func TestALoopbackAddressIsNeverCommitted(t *testing.T) {
+	for _, addr := range []string{
+		"http://127.0.0.1:54321", "http://localhost:8080", "http://[::1]:9000",
+	} {
+		t.Run(addr, func(t *testing.T) {
+			inScratchCheckout(t)
+			require.NoError(t, WriteSelfHostTarget(Target{URL: addr}))
+
+			// NOT in the repository...
+			_, statErr := os.Stat(projectPath())
+			require.True(t, os.IsNotExist(statErr),
+				"a machine-local address was written into the committed file")
+
+			// ...but still reachable, because linking a stack you started by
+			// hand is a documented flow and must keep working.
+			got, readErr := ReadTarget()
+			require.NoError(t, readErr)
+			require.Equal(t, addr, got.URL)
+			require.True(t, got.Local)
+		})
+	}
+}
+
+// A SELF-HOSTED ADDRESS IS STILL WRITTEN — that path is unchanged and must be.
+func TestASelfHostAddressIsStillCommitted(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, WriteSelfHostTarget(Target{URL: "https://stack.firma.com"}))
+
+	after, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "https://stack.firma.com", after.URL)
+	require.Empty(t, after.Project)
+}
+
+// THE MACHINE-LOCAL RECORD IS KEYED TO THE CHECKOUT, NOT TO WHEREVER THE
+// WRITER HAPPENED TO BE STANDING.
+//
+// `link` does its work in a temporary stage and copies artifacts back, so a
+// writer that asked the cwd would key this machine's state to a directory that
+// is deleted moments later: the record would exist, hashed to nothing, and the
+// link would report success while binding nothing. Measured — eight link tests
+// went red at once.
+func TestALoopbackLinkBindsTheCheckoutNotTheStage(t *testing.T) {
+	inScratchCheckout(t)
+	checkout, err := os.Getwd()
+	require.NoError(t, err)
+
+	stage := t.TempDir()
+	require.NoError(t, os.Chdir(stage))
+	t.Cleanup(func() { _ = os.Chdir(checkout) })
+
+	// Written from the stage, but carrying the checkout it belongs to.
+	require.NoError(t, WriteSelfHostTarget(Target{URL: "http://127.0.0.1:9999", checkoutRoot: checkout}))
+
+	require.NoError(t, os.Chdir(checkout))
+	got, readErr := ReadTarget()
+	require.NoError(t, readErr, "the link bound a directory that no longer exists")
+	require.Equal(t, "http://127.0.0.1:9999", got.URL)
+	require.True(t, got.Local)
+}

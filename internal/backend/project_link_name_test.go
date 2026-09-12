@@ -110,7 +110,18 @@ var _ = http.MethodGet
 // Komut ağdan bir cevap alamayacağı için düşecek; ölçülen şey HANGİ ADRESE
 // gittiği — hata mesajı onu taşıyor.
 func TestTheCommandActuallyResolvesTheName(t *testing.T) {
-	rest := &nameREST{rows: []map[string]any{{"ref": "8qitbtucm", "name": "todoapp"}}}
+	// THE LISTING IS BY PRODUCT NOW, and that is the whole point of the change
+	// this test guards: two environments under one project used to come back as
+	// two rows sharing a name, which the old resolver read as a collision and
+	// refused — so `palbase link todoapp` fell through to the ref-shape check
+	// and built `https://todoapp.palbase.studio`.
+	rest := &nameREST{rows: []map[string]any{{
+		"id": "prd_a", "name": "todoapp",
+		"environments": []map[string]any{
+			{"ref": "8qitbtucm", "name": "main", "status": "Running"},
+			{"ref": "mu0028", "name": "staging", "status": "Running"},
+		},
+	}}}
 	r := Resolvers{
 		REST:      func() REST { return rest },
 		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
@@ -126,7 +137,10 @@ func TestTheCommandActuallyResolvesTheName(t *testing.T) {
 	}
 
 	cmd := newLinkCmd(r)
-	cmd.SetArgs([]string{"todoapp", "--platform", "web"})
+	// `--from-env` names WHICH environment this link reads from; with two of
+	// them and nothing named the command refuses, which is the rule every verb
+	// follows. Naming one keeps this test about NAME RESOLUTION.
+	cmd.SetArgs([]string{"todoapp", "--from-env", "main", "--platform", "web"})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SilenceUsage = true

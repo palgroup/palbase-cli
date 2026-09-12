@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,9 +50,16 @@ const projectAppID = "project"
 type linkOpts struct {
 	checkoutRoot string
 	url          string
-	platforms    []string
-	insecure     bool
-	tokenStdin   bool
+	// product is set when the target was resolved from a cloud project rather
+	// than typed as an address. It decides WHAT the committed file records: an
+	// identity for a cloud project, an address for a stack somebody runs.
+	product    Product
+	platforms  []string
+	insecure   bool
+	tokenStdin bool
+	// env names WHICH environment this link reads the contract and the key
+	// from. It does not enter the committed file — that records the project.
+	env string
 	// Web only, and both optional: where the generated client's import goes,
 	// and what it is called. They travelled with `palbase web link`; the work
 	// they steer moved into this command with the rest of the web wiring.
@@ -136,30 +144,38 @@ boot generated.`,
 			// then had no way to reach a cloud project by name. The only thing
 			// missing was the suffix, and the configured cloud carries it.
 			if o.url != "" && !strings.Contains(o.url, "://") {
-				// ADI ÖNCE DENE. Yardım metni `palbase link todoapp` diyor ve
-				// `project list` artık ADI ilk sütunda gösteriyor — insan orada
-				// gördüğünü yazar. Ama bir ad çoğu zaman ref ŞEKLİNE de uyar
-				// ("ioslinkprobe": 4-24 küçük harf), o yüzden şekil kontrolü tek
-				// başına adı sessizce ref sanıyor ve var olmayan bir konağa
-				// gidiyordu: "does not look like a Palbase stack" (ölçüldü
-				// 25.08.2026). Belgelenmiş ama var olmayan bir davranıştı.
+				// A BARE WORD NAMES A PROJECT, and a project is resolved to its
+				// PRODUCT — not to one environment's address.
 				//
-				// Bulut oturumu yoksa ya da liste okunamazsa SESSİZCE ref yoluna
-				// düşülür: self-host bir checkout'ta ad çözecek bir defter yok
-				// ve orada ref/adres tek doğru cevaptır.
-				if ref := refByProjectName(cmd.Context(), r, o.url); ref != "" {
-					o.url = ref
+				// THE OLD PATH BROKE THE MOMENT A PROJECT GREW A SECOND
+				// ENVIRONMENT. It asked `/v1/cloud/projects`, which returns one
+				// row per ENVIRONMENT carrying the PRODUCT's name, and refused
+				// to choose when two rows shared a name — so `palbase link
+				// todoapp` fell through to the ref-shape check, and "todoapp"
+				// is 7 lowercase letters, so it built `https://todoapp.<host>`
+				// and reported "does not look like a Palbase stack". The
+				// failure named a network problem for a modelling one.
+				//
+				// Now the listing is by product, so two environments are two
+				// entries under ONE answer and nothing is ambiguous.
+				product, envs, err := productByName(cmd.Context(), r, o.url)
+				if err != nil {
+					return err
 				}
-				if !isCanonicalProjectRef(o.url) {
-					return fmt.Errorf(
-						"%q is neither a stack address nor an environment ref "+
-							"(a ref is 4-24 lowercase letters and digits)", o.url)
+				o.product = product
+				// The address to TALK to during this link is one environment's,
+				// and it is only used for this call: the contract, the key and
+				// the public document all come from a running stack. What gets
+				// COMMITTED is the identity (writeLinkRecord).
+				ref, refErr := linkEnvironmentRef(product, envs, o.env)
+				if refErr != nil {
+					return refErr
 				}
 				host := r.Endpoints().PublicHost
 				if host == "" {
-					return fmt.Errorf("this CLI has no tenant host configured, so %q cannot be resolved to an address", o.url)
+					return fmt.Errorf("this CLI has no tenant host configured, so %q cannot be resolved to an address", ref)
 				}
-				o.url = "https://" + o.url + "." + host
+				o.url = "https://" + ref + "." + host
 			}
 			return runLink(cmd.Context(), o, cmd.OutOrStdout())
 		},
@@ -175,6 +191,10 @@ boot generated.`,
 	f.BoolVar(&o.insecure, "insecure", false, "accept the stack's self-signed certificate")
 	f.BoolVar(&o.tokenStdin, "token-stdin", false,
 		"read this stack's key from stdin and remember it for this address (self-hosted stacks)")
+	// WHICH environment this link reads the contract and the key from. The
+	// committed file records the PROJECT either way; this only decides where
+	// the artifacts in this checkout come from.
+	f.StringVar(&o.env, "from-env", "", "environment to read the contract and key from (default: the project's only one)")
 	f.StringVar(&o.entry, "entry", "", "web: entry file to wire the generated client into (auto-detected when absent)")
 	f.StringVar(&o.out, "out", "", "web: name for the generated client (default: palbe.gen.ts)")
 	return cmd
@@ -244,6 +264,106 @@ func knownRefs(ctx context.Context, r Resolvers) ([]string, bool) {
 		}
 	}
 	return refs, true
+}
+
+// productByName resolves what a person typed to ONE product.
+//
+// It asks the CLI surface (`/api/v2/projects`), which groups environments under
+// their product — so a project with two environments is one answer here rather
+// than two rows that look like a collision.
+func productByName(ctx context.Context, r Resolvers, typed string) (Product, []Environment, error) {
+	if r.REST == nil || r.REST() == nil {
+		return Product{}, nil, fmt.Errorf(
+			"%q is not an address, and this CLI has no cloud session to resolve it as a project — "+
+				"`palbase login`, or pass the stack's URL", typed)
+	}
+	var rows []struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Environments []struct {
+			Ref    string `json:"ref"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"environments"`
+	}
+	if err := r.REST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err != nil {
+		return Product{}, nil, err
+	}
+	type match struct {
+		product Product
+		envs    []Environment
+	}
+	var matches []match
+	var known []string
+	for _, p := range rows {
+		known = append(known, p.Name)
+		if !strings.EqualFold(strings.TrimSpace(p.Name), strings.TrimSpace(typed)) && p.ID != typed {
+			continue
+		}
+		envs := make([]Environment, 0, len(p.Environments))
+		for _, e := range p.Environments {
+			envs = append(envs, Environment{Ref: e.Ref, Name: e.Name, Status: e.Status})
+		}
+		matches = append(matches, match{product: Product{ID: p.ID, Name: p.Name}, envs: envs})
+	}
+	switch len(matches) {
+	case 1:
+		// ONE CALL, ONE SOURCE. The environments came back inside the product,
+		// so picking which one to read from asks the cloud nothing further —
+		// and asking through a second channel would let the two disagree.
+		return matches[0].product, matches[0].envs, nil
+	case 0:
+		sort.Strings(known)
+		if len(known) == 0 {
+			return Product{}, nil, fmt.Errorf("you have no projects yet — `palbase project create %s`", typed)
+		}
+		return Product{}, nil, fmt.Errorf("no project of yours is called %q. Yours:\n  %s",
+			typed, strings.Join(known, "\n  "))
+	default:
+		// TWO PRODUCTS, ONE NAME. Choosing would be choosing somebody's
+		// production at random; the id disambiguates and the listing prints it.
+		return Product{}, nil, fmt.Errorf(
+			"%d of your projects are called %q — name one by its id instead (`palbase project list` prints them)",
+			len(matches), typed)
+	}
+}
+
+// linkEnvironmentRef picks the environment this link reads FROM.
+//
+// It is not written down: the contract and the publishable key are facts about
+// one running environment, and which one a later verb acts on is resolved then.
+// With more than one and nothing named, it refuses — the same rule every other
+// verb follows, for the same reason.
+func linkEnvironmentRef(product Product, envs []Environment, named string) (string, error) {
+	if named != "" {
+		for _, e := range envs {
+			if strings.EqualFold(e.Name, named) || e.Ref == named {
+				return e.Ref, nil
+			}
+		}
+		return "", fmt.Errorf("%q is not an environment of %s.\n%s", named, product.Name, listing(envs))
+	}
+	if len(envs) == 1 {
+		return envs[0].Ref, nil
+	}
+	return "", ambiguous(Target{Project: product.ID, Name: product.Name}, envs)
+}
+
+// writeLinkRecord commits WHAT THIS CHECKOUT IS BOUND TO, and the two shapes
+// are not interchangeable.
+//
+// A cloud project is recorded by IDENTITY: the product id and its name, no
+// address. Which environment a verb acts on is resolved per call, so an address
+// here would pin one tenant and make `--env` a lie.
+//
+// A stack somebody runs is recorded by ADDRESS, because that is all it has —
+// one installation, one identity, one pair of keys. That path also refuses a
+// loopback address, which is the defect measured in this very repository.
+func writeLinkRecord(o linkOpts, target Target) error {
+	if o.product.ID != "" {
+		return WriteLinkedIdentity(o.product, target)
+	}
+	return WriteSelfHostTarget(target)
 }
 
 func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
@@ -360,7 +480,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// Remember the target. `login`, `push` and `spec` read it, so none of them
 	// asks for an address again — and a colleague who clones this repository
 	// reaches the same stack without being told which one it is.
-	if err := WriteTarget(target); err != nil {
+	if err := writeLinkRecord(o, target); err != nil {
 		return err
 	}
 
@@ -490,7 +610,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// THE SECOND WriteTarget USED TO CARRY A DERIVED FIELD FORWARD. It does not
 	// any more: `stackVersion` is derived from the installed package on every
 	// read and written nowhere, so there is nothing to re-read and preserve.
-	if err := WriteTarget(target); err != nil {
+	if err := writeLinkRecord(o, target); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", base, described.Hosting)

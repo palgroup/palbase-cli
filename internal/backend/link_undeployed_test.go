@@ -64,7 +64,9 @@ func TestALinkThatFailsStillLeavesThePushReachable(t *testing.T) {
 	if err == nil {
 		t.Fatal("the harness serves no social auth config, so this link was expected to fail")
 	}
-	target, readErr := readLinkedProject()
+	// Through ReadTarget: a loopback address is this machine's state now, and
+	// that is exactly where `push` looks for it.
+	target, readErr := ReadTarget()
 	if readErr != nil {
 		t.Fatalf("the refusal took the project's address with it, so `palbase push` "+
 			"cannot be reached: %v (link said: %v)", readErr, err)
@@ -90,7 +92,11 @@ func TestLinkingABackendToAProjectWithNoContractSucceeds(t *testing.T) {
 		t.Fatalf("a project with nothing deployed could not be linked, so it can never "+
 			"BE deployed: %v\n%s", err, out.String())
 	}
-	target, readErr := readLinkedProject()
+	// READ THROUGH THE PRODUCT'S OWN PATH. A loopback address is this machine's
+	// state now — `ReadTarget` is where every verb looks and where `palbase
+	// start` already writes — so asking the committed file directly would be
+	// asking the wrong half.
+	target, readErr := ReadTarget()
 	if readErr != nil {
 		t.Fatalf("link reported success and bound nothing: %v", readErr)
 	}

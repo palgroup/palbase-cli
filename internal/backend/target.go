@@ -156,11 +156,21 @@ func WriteTarget(t Target) error {
 // NOW. Writing one through the other is how a `palbase start` ends up committing
 // a localhost address into a colleague's checkout.
 func WriteLocalTarget(t Target) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	return writeLocalTargetAt(wd, t)
+}
+
+// writeLocalTargetAt is WriteLocalTarget with the checkout named, for the one
+// caller that runs somewhere else (see WriteSelfHostTarget).
+func writeLocalTargetAt(checkoutRoot string, t Target) error {
 	blob, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return err
 	}
-	dest, err := localPath()
+	dest, err := LocalStatePath(checkoutRoot)
 	if err != nil {
 		return err
 	}
@@ -178,7 +188,7 @@ func WriteLocalTarget(t Target) error {
 	if err := ensureMachineStateDir(dest); err != nil {
 		return err
 	}
-	rememberOrigin(filepath.Dir(dest), ".")
+	rememberOrigin(filepath.Dir(dest), checkoutRoot)
 	return os.WriteFile(dest, append(blob, '\n'), 0o600)
 }
 
@@ -295,4 +305,73 @@ func stackVersion(projectDir string) (string, error) {
 		return "", fmt.Errorf("cannot read a major out of the installed %s version %q", backendPkg, installed)
 	}
 	return major, nil
+}
+
+// WriteLinkedIdentity records which PROJECT this checkout belongs to.
+//
+// NO ADDRESS. The committed file is read by everybody who clones the
+// repository, on every branch, and an address pins one tenant: the project
+// grows a second environment and the file never learns. Worse, switching then
+// means editing a committed file — a diff on `main` and another on
+// `development` for the same code, which is the churn this design removes.
+//
+// `keep` carries forward what belongs to the checkout rather than to the link
+// (today: the OAuth provider selection).
+func WriteLinkedIdentity(product Product, keep Target) error {
+	return WriteTarget(Target{
+		Project:      product.ID,
+		Name:         product.Name,
+		OAuth:        keep.OAuth,
+		Insecure:     keep.Insecure,
+		checkoutRoot: keep.checkoutRoot,
+	})
+}
+
+// WriteSelfHostTarget records a stack somebody runs: one installation, one
+// address, no environments to choose between.
+//
+// A LOOPBACK ADDRESS GOES TO THIS MACHINE'S STATE, NOT THE REPOSITORY — and it
+// is still written, because linking a stack you started by hand is a documented
+// flow the help text offers ("palbase link http://localhost:54321"). What
+// changes is WHERE: measured on 2026-09-11, the control plane's own checkout
+// carried `{"url":"http://127.0.0.1:18098","stackVersion":"38"}`, a committed
+// file naming a port that exists on one machine for as long as one stack runs.
+// A colleague who cloned it got an address pointing at their own empty port.
+//
+// So the same record `palbase start` keeps takes it, and every verb reads it
+// from there exactly as before. Nothing is lost and the repository stays clean.
+func WriteSelfHostTarget(t Target) error {
+	if !isLoopbackAddress(t.URL) {
+		return WriteTarget(t)
+	}
+	// THE REAL CHECKOUT, NOT THE STAGE. `link` does its work in a temporary
+	// tree and copies the artifacts back, so the committed file can be written
+	// relative to the cwd — but this machine's state is keyed by the CHECKOUT's
+	// path, and writing it from inside the stage would key it to a directory
+	// that is deleted moments later. The record would exist, hashed to nothing,
+	// and the link would report success while binding nothing.
+	root := t.checkoutRoot
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		root = wd
+	}
+	return writeLocalTargetAt(root, t)
+}
+
+// isLoopbackAddress parses the host rather than searching the string:
+// `https://localhost.example.com` contains "localhost" and is somebody else's
+// machine.
+func isLoopbackAddress(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }

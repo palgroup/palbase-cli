@@ -468,16 +468,25 @@ func TestLink_ResolvesABareRefToItsAddress(t *testing.T) {
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 
 	err := cmd.Execute()
-	// It cannot finish here — there is no stack at that address in a unit test —
-	// but the ERROR proves the ref became the address instead of being refused
-	// for having no scheme.
+	// A BARE WORD IS A PROJECT NOW, NOT AN ADDRESS — and with no cloud session
+	// there is no ledger to resolve it against. The refusal has to say THAT
+	// rather than turning the word into a host: the old path built
+	// `https://na1m7lt2m.v2.palbase.studio` out of anything ref-shaped and then
+	// reported a connection failure, which names a network problem for a
+	// modelling one.
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "na1m7lt2m.v2.palbase.studio")
-	require.NotContains(t, err.Error(), "has no scheme")
+	require.Contains(t, err.Error(), "palbase login")
+	require.NotContains(t, err.Error(), "na1m7lt2m.v2.palbase.studio",
+		"a bare word was still turned into a host")
 }
 
-// Ve ref'e BENZEMEYEN bir şey hâlâ reddedilir: her şeyi adrese çevirmek, yazım
-// hatasını "o adrese ulaşamadım" diye raporlamak olurdu.
+// Ve bir şeyi adrese ÇEVİRMEK yerine reddetmek hâlâ kural: her şeyi adrese
+// çevirmek, yazım hatasını "o adrese ulaşamadım" diye raporlamak olurdu.
+//
+// Değişen şey REDDİN SEBEBİ. Eskiden "ref şekline uymuyor" derdi ve şekle uyan
+// her kelimeyi (main, prod, staging — hepsi 4-24 küçük harf) sessizce host'a
+// çevirirdi. Şimdi bir kelime PROJE adıdır ve onu çözecek bir defter yoksa
+// söylenen şey budur.
 func TestLink_RefusesSomethingThatIsNeitherAddressNorRef(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cmd := newLinkCmd(Resolvers{
@@ -488,7 +497,7 @@ func TestLink_RefusesSomethingThatIsNeitherAddressNorRef(t *testing.T) {
 	cmd.SetArgs([]string{"Not A Ref"})
 	cmd.SilenceErrors, cmd.SilenceUsage = true, true
 
-	require.ErrorContains(t, cmd.Execute(), "neither a stack address nor an environment ref")
+	require.ErrorContains(t, cmd.Execute(), "is not an address")
 }
 
 // TestLinkingForWebWritesTheWebGeneratorsInputs: `--platform web` must produce
