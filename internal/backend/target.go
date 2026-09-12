@@ -50,6 +50,10 @@ type Target struct {
 	// Empty for a direct URL target.
 	Project string `json:"project,omitempty"`
 	Env     string `json:"env,omitempty"`
+	// Name is what a person calls this project. The ref is the identity and it
+	// never changes; this does — and a banner that printed `prd_9f21c7/staging`
+	// would be correct and useless.
+	Name string `json:"name,omitempty"`
 	// Insecure records that this address still serves the certificate its first
 	// boot generated. Remembered rather than retyped, because a flag somebody
 	// has to repeat is a flag they will eventually paste at the wrong project.
