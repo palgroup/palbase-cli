@@ -42,7 +42,8 @@ type rolesBody struct {
 // when the checkout names no address — "not linked" is a sentence a person can
 // act on; a connection error to an empty URL is not.
 func resolveProject(cmd *cobra.Command) (backend.Target, backend.Credentials, error) {
-	target, err := backend.ReadTarget()
+	resolved, err := backend.ResolveFor(cmd)
+	target := resolved.Acting()
 	if err != nil {
 		return backend.Target{}, backend.Credentials{}, err
 	}

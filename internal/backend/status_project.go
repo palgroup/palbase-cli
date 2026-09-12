@@ -68,7 +68,8 @@ type statusCredential struct {
 // checkout is linked to, or the one the caller selected.
 func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	ctx := cmd.Context()
-	target, err := ReadTarget()
+	resolved, err := Resolve(ctx)
+	target := resolved.Acting()
 	if err != nil {
 		return err
 	}

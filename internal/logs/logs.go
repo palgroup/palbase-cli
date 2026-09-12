@@ -207,7 +207,8 @@ new lines every 2s — Ctrl-C to stop.
   palbase logs --follow                 tail live`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, err := backend.ReadTarget()
+			resolved, err := backend.ResolveFor(cmd)
+			target := resolved.Acting()
 			if err != nil {
 				return err
 			}

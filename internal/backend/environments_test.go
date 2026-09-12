@@ -377,3 +377,38 @@ func TestSelfHostIsNotMigrated(t *testing.T) {
 	require.Equal(t, "https://stack.firma.com", after.URL)
 	require.Empty(t, out.String(), "a self-host checkout was told it migrated")
 }
+
+// A RUNNING LOCAL STACK WINS IN A CHECKOUT THAT WAS NEVER LINKED.
+//
+// This is the normal case for `palbase start`, not an edge: `palbase init`
+// scaffolds a backend with no `project.json`, `start` brings a stack up, and
+// every verb then acts on it. An earlier arrangement read the committed record
+// first and returned ITS error, so a person whose stack was running in front of
+// them was told "this checkout is not linked to a project" — advice for a
+// problem they did not have. Caught by `internal/db`'s suite, which is why the
+// assertion lives here too: the resolver is where the order is decided.
+func TestALocalStackResolvesWithNoCommittedProject(t *testing.T) {
+	inScratchCheckout(t)
+	resolverRig(t, nil)
+
+	local, err := localPath()
+	require.NoError(t, err)
+	require.NoError(t, ensureMachineStateDir(local))
+	require.NoError(t, os.WriteFile(local, []byte(`{"url":"http://127.0.0.1:54321"}`), 0o644))
+
+	got, resolveErr := ResolveFor(cmdFor(t))
+	require.NoError(t, resolveErr, "a running stack was refused because nothing was linked")
+	require.Equal(t, "local", got.Source)
+	require.Equal(t, "http://127.0.0.1:54321", got.URL)
+	require.True(t, got.Target.Local)
+}
+
+// AND WITHOUT ONE, THE REFUSAL STILL CARRIES THE FIX.
+func TestAnUnlinkedCheckoutWithNoStackIsRefusedWithTheWaysIn(t *testing.T) {
+	inScratchCheckout(t)
+	resolverRig(t, nil)
+
+	_, err := ResolveFor(cmdFor(t))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "palbase link")
+}

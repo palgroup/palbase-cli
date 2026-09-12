@@ -310,7 +310,8 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 // holds. Best-effort: a checkout with no stack, or a stack that cannot be
 // reached, leaves the existing file alone and says so in one line.
 func landStackTypes(ctx context.Context, cwd string, out io.Writer) {
-	target, err := ReadTarget()
+	resolved, err := Resolve(ctx)
+	target := resolved.Acting()
 	if err != nil {
 		// Not linked to anything. Nothing to ask, and nothing is wrong.
 		return

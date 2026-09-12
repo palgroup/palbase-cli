@@ -217,7 +217,8 @@ func listProjectDeployments(ctx context.Context, target Target, cred Credentials
 
 // openLinked resolves the target and its credential, then announces the address.
 func openLinked(cmd *cobra.Command) (Target, Credentials, error) {
-	target, err := ReadTarget()
+	resolved, err := ResolveFor(cmd)
+	target := resolved.Acting()
 	if err != nil {
 		return Target{}, Credentials{}, err
 	}

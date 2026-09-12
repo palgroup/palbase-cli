@@ -84,7 +84,8 @@ type local struct {
 // production to a local database, which is the more expensive mistake — they
 // would watch it succeed and believe it.
 func openLocal(cmd *cobra.Command) (local, error) {
-	target, err := backend.ReadTarget()
+	resolved, err := backend.ResolveFor(cmd)
+	target := resolved.Acting()
 	if err == nil && !target.Local {
 		err = fmt.Errorf("this checkout is linked to %s", target.Describe())
 	}

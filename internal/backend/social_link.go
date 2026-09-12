@@ -288,7 +288,8 @@ func RefreshLinkedClients(ctx context.Context, w io.Writer) error {
 	if !web && !apple && !android {
 		return nil
 	}
-	target, err := ReadTarget()
+	resolved, err := Resolve(ctx)
+	target := resolved.Acting()
 	if err != nil {
 		return err
 	}

@@ -310,8 +310,9 @@ func run(ctx context.Context, out, errOut io.Writer, url, topic, code string, er
 // The choice is not made here — it was made once, at `palbase link --insecure`,
 // and is remembered with the target. A flag repeated on every command is a flag
 // somebody eventually types at the wrong address.
-func dialOptions(url string) *websocket.DialOptions {
-	target, err := backend.ReadTarget()
+func dialOptions(ctx context.Context, url string) *websocket.DialOptions {
+	resolved, err := backend.Resolve(ctx)
+	target := resolved.Acting()
 	if err != nil || !target.Insecure {
 		return nil
 	}
@@ -329,7 +330,7 @@ func dialOptions(url string) *websocket.DialOptions {
 
 // stream runs ONE socket: dial, join, then print records until it drops.
 func stream(ctx context.Context, out, errOut io.Writer, url, topic, code string, errorsOnly, asJSON bool, warned map[int]bool) error {
-	conn, _, err := websocket.Dial(ctx, url, dialOptions(url))
+	conn, _, err := websocket.Dial(ctx, url, dialOptions(ctx, url))
 	if err != nil {
 		return err
 	}

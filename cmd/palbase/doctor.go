@@ -174,17 +174,24 @@ func doctorCmd() *cobra.Command {
 				ok("pat", "not set (fine for interactive use; CI needs a Dashboard-issued PAT)")
 			}
 
-			// The link this CLI acts on is a TARGET: a stack address in
-			// palbase/project.json, written by `palbase link` (or, for a
-			// stack on this machine, tracked outside the checkout by
-			// `palbase start` — see backend.LocalStatePath). Reporting the v1
-			// project/environment selection instead would send a person to
-			// `palbase project use`, a verb that no longer exists — the v2
-			// cloud has one project per tenant and one address per project.
+			// TWO LINES, BECAUSE THERE ARE TWO ANSWERS and a doctor that
+			// collapses them hides the question people actually arrive with.
+			//
+			// `link` is what the COMMITTED file says: which project this
+			// checkout belongs to. `env` is where a verb would ACT right now —
+			// the resolver's answer, which depends on a flag, a running local
+			// stack, or this machine's remembered choice. When the second one
+			// refuses, its refusal IS the diagnosis (two environments and none
+			// selected), so it is printed rather than swallowed.
 			if target, terr := backend.ReadTarget(); terr == nil {
 				ok("link", target.Describe())
 			} else {
-				ok("link", "this directory is not linked — run `palbase link <url>` here")
+				ok("link", "this directory is not linked — run `palbase link <project>` here")
+			}
+			if resolved, rerr := backend.ResolveFor(cmd); rerr == nil {
+				ok("env", resolved.Describe()+"  (via "+resolved.Source+")")
+			} else if _, terr := backend.ReadTarget(); terr == nil {
+				bad("env", firstLine(rerr.Error()))
 			}
 
 			// Docker prerequisites, before Node: `palbase start` needs these and
@@ -222,4 +229,13 @@ func openCmd() *cobra.Command {
 			return auth.OpenURL(u)
 		},
 	}
+}
+
+// firstLine keeps a multi-line refusal to one row of the doctor's table; the
+// rest of it belongs to the verb that raised it, not to a status list.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

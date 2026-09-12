@@ -254,11 +254,18 @@ func openStackManagement(cmd *cobra.Command) (authadmin.REST, error) {
 }
 
 func linkedTarget() (linkedProject, error) {
-	t, err := backend.ReadTarget()
+	// RESOLVED, NOT READ. `apikey` and `members` act on one environment's ref,
+	// so which environment is the resolver's answer — reading the committed
+	// record here would make `--env` silently inert for both.
+	//
+	// The resolver signature these feed takes no command, so the context is the
+	// background one; resolution is a short lookup and often no lookup at all
+	// (a remembered selection carries its ref).
+	resolved, err := backend.Resolve(context.Background())
 	if err != nil {
 		return linkedProject{}, err
 	}
-	return linkedProject{target: t}, nil
+	return linkedProject{target: resolved.Acting()}, nil
 }
 
 // Ref names the cloud project, or reports false for anything that is not one —
@@ -509,10 +516,11 @@ func newRootCmd() *cobra.Command {
 		// exports are the same shape `test-user create --json` prints.
 		palbasetest.Cmd(palbasetest.Resolvers{
 			Target: func(cmd *cobra.Command) (palbasetest.Target, error) {
-				target, err := backend.ReadTarget()
+				resolved, err := backend.ResolveFor(cmd)
 				if err != nil {
 					return palbasetest.Target{}, err
 				}
+				target := resolved.Acting()
 				key, keyErr := backend.PublishableKey(cmd.Context(), target)
 				if keyErr != nil {
 					return palbasetest.Target{}, keyErr
@@ -592,11 +600,11 @@ keeps opening a project its owner believes they signed out of.`,
 			// The project's first: it cannot fail for a reason the person needs
 			// to act on, and doing it after a cloud logout that errors would
 			// leave the credential behind with nothing said about it.
-			if target, err := backend.ReadTarget(); err == nil {
-				if err := backend.ForgetCredential(target.URL); err != nil {
+			if resolved, err := backend.ResolveFor(cmd); err == nil {
+				if err := backend.ForgetCredential(resolved.URL); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "forgot the credential for %s\n", target.Describe())
+				fmt.Fprintf(cmd.OutOrStdout(), "forgot the credential for %s\n", resolved.Describe())
 			}
 			return authClient.Logout(cmd.Context())
 		},

@@ -98,18 +98,37 @@ func addressOf(ref string) (string, error) {
 	return "https://" + ref + "." + TenantHost, nil
 }
 
-// ResolveFor answers where this verb acts.
-func ResolveFor(cmd *cobra.Command) (Resolved, error) {
-	target, err := readLinkedProject()
-	if err != nil {
-		return Resolved{}, err
-	}
+// Acting is the target a verb acts on: the committed record carrying the
+// RESOLVED address. Existing verbs take a Target; this is how they get one
+// without learning a second shape.
+func (r Resolved) Acting() Target {
+	t := r.Target
+	t.URL = r.URL
+	return t
+}
 
-	// A RUNNING LOCAL STACK WINS, for every checkout — `palbase start` is a
-	// deliberate act happening right now and this is the semantics `ReadTarget`
-	// has always had. It is checked BEFORE the self-host branch because that
-	// branch used to return first and quietly sent verbs at the remote stack
-	// while a local one was up.
+// ResolveFor answers where this verb acts. The command is used for its context
+// and nothing else — `Resolve` is the same answer for callers that hold only a
+// context.
+func ResolveFor(cmd *cobra.Command) (Resolved, error) {
+	ctx := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		ctx = cmd.Context()
+	}
+	return Resolve(ctx)
+}
+
+// Resolve answers where this verb acts.
+func Resolve(ctx context.Context) (Resolved, error) {
+	// A RUNNING LOCAL STACK WINS, and it is asked FIRST — before the committed
+	// record is even read.
+	//
+	// That order is not a preference, it is the normal case for `palbase start`:
+	// a fresh `palbase init` checkout has no `project.json` at all, `start`
+	// brings a stack up, and every verb then acts on it. Reading the committed
+	// file first would answer "this checkout is not linked to a project" to
+	// somebody whose stack is running in front of them — the same shape of
+	// defect `stackVersion` once had, one layer up.
 	//
 	// An explicitly named environment still beats it: `--env` is the caller
 	// saying where they mean, and nothing should override that.
@@ -117,6 +136,11 @@ func ResolveFor(cmd *cobra.Command) (Resolved, error) {
 		if local, localErr := ReadTarget(); localErr == nil && local.Local {
 			return Resolved{Target: local, URL: local.URL, Source: "local"}, nil
 		}
+	}
+
+	target, err := readLinkedProject()
+	if err != nil {
+		return Resolved{}, err
 	}
 
 	// A SELF-HOSTED STACK IS ONE ENVIRONMENT. Saying so by name beats resolving
@@ -138,11 +162,6 @@ func ResolveFor(cmd *cobra.Command) (Resolved, error) {
 				target.URL)
 		}
 		return Resolved{Target: target, URL: target.URL, Source: "url"}, nil
-	}
-
-	ctx := context.Background()
-	if cmd != nil && cmd.Context() != nil {
-		ctx = cmd.Context()
 	}
 
 	// 1-2. WHAT THE CALLER NAMED, this call only. It never writes the persisted
