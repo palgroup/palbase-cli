@@ -114,7 +114,7 @@ birlikte — yerine konur.
 - **Kol B (ortam modeli)** ve **Kol F (modül sözleşmesi + güvenlik hijyeni)** — Artım 3.
 - **İmaj/pin ağdan çözme** — D-030, kullanıcı kararı ("bu image işine girme"). FR-002'nin tablosu
   pakette dağıtılır, ağda değil.
-- **`v2-cloud` tarafında rota ekleme/kaldırma.** FR-016'nın kapısı sunucunun BUGÜN servis ettiğini
+- **`cloud` tarafında rota ekleme/kaldırma.** FR-016'nın kapısı sunucunun BUGÜN servis ettiğini
   okur; sunucuyu değiştirmez.
 
 ---
