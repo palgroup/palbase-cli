@@ -31,7 +31,9 @@ package backend
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -198,4 +200,83 @@ func PlanStatePath(checkoutRoot string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "plan.json"), nil
+}
+
+// ── WHICH ENVIRONMENT THIS CHECKOUT ACTS ON ─────────────────────────────────
+//
+// THE MAP IS THE SERVER'S; THE CHOICE IS THIS MACHINE'S.
+//
+// What environments a project HAS is a fact the control plane owns, and
+// mirroring it into the repository would be a second source of truth that goes
+// stale the first time somebody adds one. What this checkout is CURRENTLY
+// pointed at is a fact about this machine, and it is deliberately NOT
+// committed: Firebase's maintainer wrote the reason down and it is this
+// project's scenario exactly — "if it were committed into version control you
+// could accidentally switch someone from 'staging' to 'production' instantly".
+//
+// So it lives beside the other per-checkout state under `~/.palbase/checkouts/`,
+// keyed by the hash of the checkout's absolute path, and `palbase env use` is
+// the only thing that writes it.
+
+// Selection is this machine's remembered environment for one checkout.
+type Selection struct {
+	// Project is the product this selection belongs to, and it is the whole
+	// defence against the one failure mode a remembered choice has: a checkout
+	// relinked to a DIFFERENT project must not inherit an address from the
+	// project it left. ResolveFor drops a selection whose project does not
+	// match the committed record.
+	Project string `json:"project"`
+	Env     string `json:"env"`
+	// Ref is carried so resolving costs no network call: the address is
+	// derived from it directly.
+	Ref string `json:"ref"`
+}
+
+// SelectionPath is where this checkout's selection lives. It CREATES NOTHING —
+// asking where a file goes must not leave a directory behind, a defect this
+// package has already paid for once (823 dead directories, measured).
+func SelectionPath(checkoutRoot string) (string, error) {
+	dir, err := machineStateDir(checkoutRoot)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "selection.json"), nil
+}
+
+// ReadSelection answers what this checkout last selected, or an error when
+// nothing has been selected. "Nothing selected" is a legal state — it is what
+// every fresh clone is in — so the caller falls through to the next rule rather
+// than failing.
+func ReadSelection(checkoutRoot string) (Selection, error) {
+	path, err := SelectionPath(checkoutRoot)
+	if err != nil {
+		return Selection{}, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Selection{}, err
+	}
+	var s Selection
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return Selection{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	return s, nil
+}
+
+// WriteSelection remembers one environment for this checkout. The WRITER
+// creates the directory, because a write knows it is a write.
+func WriteSelection(checkoutRoot string, s Selection) error {
+	path, err := SelectionPath(checkoutRoot)
+	if err != nil {
+		return err
+	}
+	blob, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := ensureMachineStateDir(path); err != nil {
+		return err
+	}
+	rememberOrigin(filepath.Dir(path), checkoutRoot)
+	return os.WriteFile(path, append(blob, '\n'), 0o600)
 }
