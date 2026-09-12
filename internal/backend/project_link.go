@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -273,10 +274,25 @@ func productByName(ctx context.Context, r Resolvers, typed string) (Product, []E
 
 // linkEnvironmentRef picks the environment this link reads FROM.
 //
-// It is not written down: the contract and the publishable key are facts about
-// one running environment, and which one a later verb acts on is resolved then.
-// With more than one and nothing named, it refuses — the same rule every other
-// verb follows, for the same reason.
+// LINK BINDS; IT DOES NOT ACT, and that is why it does not refuse here.
+//
+// The fail-closed rule belongs to the verbs that CHANGE an environment: `plan`,
+// `push`, `pull`, a secret, a test user. `link` writes a project identity, and
+// the environment it picks is only where it reads the contract and the
+// publishable key from. Refusing here made the one thing this whole change
+// exists for impossible — "bind me to the project, I will choose the
+// environment when I plan" — and FR-004 says so in as many words: with several
+// environments, link SHALL resolve and SHALL bind. Measured on the product: a
+// second environment appeared and `palbase link linkuat` started refusing.
+//
+// The choice is DETERMINISTIC and it is reported (see reportLinked), so nobody
+// has to guess what was read:
+//
+//	--from-env         the caller said it
+//	the selection      this machine already chose one for this product
+//	the only one       nothing to choose
+//	main               the name this product gives a sole environment
+//	first by name      so two runs of one command agree
 func linkEnvironmentRef(product Product, envs []Environment, named string) (string, error) {
 	if named != "" {
 		for _, e := range envs {
@@ -286,10 +302,28 @@ func linkEnvironmentRef(product Product, envs []Environment, named string) (stri
 		}
 		return "", fmt.Errorf("%q is not an environment of %s.\n%s", named, product.Name, listing(envs))
 	}
+	if len(envs) == 0 {
+		return "", fmt.Errorf("%s has no environments yet — `palbase env create <name>` makes one", product.Name)
+	}
 	if len(envs) == 1 {
 		return envs[0].Ref, nil
 	}
-	return "", ambiguous(Target{Project: product.ID, Name: product.Name}, envs)
+	if sel, err := ReadSelection("."); err == nil && sel.Project == product.ID && sel.Ref != "" {
+		for _, e := range envs {
+			if e.Ref == sel.Ref {
+				return e.Ref, nil
+			}
+		}
+	}
+	ordered := make([]Environment, len(envs))
+	copy(ordered, envs)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
+	for _, e := range ordered {
+		if strings.EqualFold(e.Name, soleEnvName) {
+			return e.Ref, nil
+		}
+	}
+	return ordered[0].Ref, nil
 }
 
 // writeLinkRecord commits WHAT THIS CHECKOUT IS BOUND TO, and the two shapes
@@ -596,7 +630,40 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	default:
 		fmt.Fprintf(w, "commit %s/\n", RootDir())
 	}
+	reportStaleArtifacts(w, o.checkoutRoot, platforms)
 	return nil
+}
+
+// reportStaleArtifacts says so when a checkout still carries a directory this
+// CLI has stopped writing — and leaves it exactly where it is (FR-062).
+//
+// A BACKEND-ONLY CHECKOUT USED TO GET `palbase/environments/<env>/` on every
+// link: an `openapi.json` and a `roles.json` that no generator in this product
+// ever read, appearing as a diff on every branch. It is not written any more.
+// But the copies already committed do not disappear, and a `link` that deleted
+// them would be this CLI reaching into a customer's repository to remove files
+// they committed — so it says the sentence instead and touches nothing.
+//
+// SAYING IT IS THE POINT. Without a word, the directory reads as current: the
+// next person to open it finds a contract with a date on it and no way to know
+// nothing maintains it.
+func reportStaleArtifacts(w io.Writer, checkoutRoot string, platforms []string) {
+	if writesPerEnvironmentArtifacts(platforms) {
+		return // this checkout has a generator; the directory is still its own
+	}
+	dir := filepath.Join(checkoutRoot, RootDir(), envSubdir)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	fmt.Fprintf(w, "\n%s/ is left as it is, and nothing writes it any more: a backend checkout has no\n"+
+		"  generator that reads those files. Delete it when you are ready — %s\n",
+		filepath.Join(RootDir(), envSubdir), strings.Join(names, ", "))
 }
 
 // webPlatform is the one platform whose generator lives in an SDK rather than
