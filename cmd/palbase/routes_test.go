@@ -35,7 +35,14 @@ func TestEveryCloudRouteLiteralIsServed(t *testing.T) {
 	}
 	// cmd/palbase → sdk/cli → sdk → palbase
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
-	controllers := filepath.Join(repoRoot, "..", "..", "cloud", "platform", "server", "controllers")
+	if real, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		repoRoot = real
+	}
+	// CONTROLLERS LIVE IN THEIR MODULES NOW: `modules/<domain>/<name>.controller.ts`.
+	// The server moved to the canonical tree and the flat `controllers/` directory
+	// is gone; reading it would make every run beside the tree SKIP, which the
+	// cross-repo workflow rightly counts as red.
+	controllers := filepath.Join(repoRoot, "..", "..", "cloud", "platform", "server", "modules")
 
 	served, err := servedCloudRoutes(controllers)
 	if err != nil {
@@ -53,6 +60,14 @@ func TestEveryCloudRouteLiteralIsServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ZERO LITERALS IS A BROKEN SCAN, NOT A CLEAN CLI. The walk below does not
+	// follow a symlinked root, and a scan that finds nothing makes every
+	// comparison vacuous — measured: a negative control with a route nobody
+	// serves passed. Same guard as the served side above.
+	if len(literals) == 0 {
+		t.Fatalf("scanned %s but found no /v1/cloud or /api/v2 literals — the scan is wrong, not the code", repoRoot)
+	}
+	t.Logf("%d route literal(s) checked against %d served route(s)", len(literals), len(served))
 
 	var missing []string
 	for _, lit := range literals {
@@ -90,16 +105,41 @@ var (
 // servedCloudRoutes reads the cloud controllers and returns their routes as
 // regexps, with `{param}` standing for one segment.
 func servedCloudRoutes(dir string) ([]servedRoute, error) {
-	entries, err := os.ReadDir(dir)
+	// The directory must exist: a missing tree is "not beside this checkout", and
+	// a walk over nothing would return zero routes with no error at all.
+	if _, err := os.Stat(dir); err != nil {
+		return nil, err
+	}
+	// A SYMLINKED NEIGHBOUR IS STILL A NEIGHBOUR. WalkDir does not follow a
+	// symlinked root: it visits the link itself as a single non-directory entry
+	// and reports zero files — measured, the gate then failed with "found no
+	// routes" beside a perfectly good tree.
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(name, ".ts") && !strings.HasSuffix(name, ".test.ts") {
+			files = append(files, path)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	var out []servedRoute
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".test.ts") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+	for _, file := range files {
+		body, err := os.ReadFile(file)
 		if err != nil {
 			return nil, err
 		}
