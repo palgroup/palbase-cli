@@ -66,31 +66,115 @@ func run(t *testing.T, r Resolvers, stdin string, args ...string) (string, error
 	return out.String(), err
 }
 
-// Creating a project must end with an address the person can act on. Printing
-// only a ref would leave them to assemble the host themselves — and to guess
-// the domain, which differs per deployment.
-func TestCreatePrintsALinkableAddress(t *testing.T) {
-	shop := "shop"
-	rest := &stubREST{reply: Tenant{Ref: "abc123xyz", Name: &shop, Phase: "Running"}}
-	out, err := run(t, resolvers(rest, stubCloud{domain: "palbase.studio"}), "", "create", "shop")
+// routeREST answers the two calls create makes — the POST that creates the
+// project and the listing that says whether its name is unique among the
+// caller's projects — and records the body the POST carried.
+type routeREST struct {
+	created Tenant
+	rows    []Project
+	listErr error
+	sent    any
+}
+
+func (r *routeREST) Do(_ context.Context, method, path string, body, out any) error {
+	var reply any
+	switch {
+	case method == "POST" && path == "/v1/cloud/projects":
+		r.sent = body
+		reply = r.created
+	case method == "GET" && path == "/api/v2/projects":
+		if r.listErr != nil {
+			return r.listErr
+		}
+		reply = r.rows
+	default:
+		return fmt.Errorf("unexpected %s %s", method, path)
+	}
+	raw, err := json.Marshal(reply)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func routed(rest *routeREST) Resolvers {
+	return Resolvers{
+		REST:  func() REST { return rest },
+		Cloud: func() Bootstrapper { return stubCloud{domain: "palbase.studio"} },
+	}
+}
+
+func named(s string) *string { return &s }
+
+// CREATING A PROJECT ENDS WITH THE COMMAND THAT LINKS IT — by name. It used to
+// print an environment's address, and linking by address wrote the retired
+// record shape into the repository.
+func TestCreateSuggestsLinkingByName(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"},
+		rows:    []Project{{ID: "prd_a", Name: "shop"}, {ID: "prd_b", Name: "penny"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if rest.method != "POST" || rest.path != "/v1/cloud/projects" {
-		t.Fatalf("wrong call: %s %s", rest.method, rest.path)
-	}
-	sent, _ := rest.body.(map[string]any)
+	sent, _ := rest.sent.(map[string]any)
 	if sent["name"] != "shop" || sent["tier"] != "free" {
-		t.Fatalf("body did not carry the name and default tier: %#v", rest.body)
+		t.Fatalf("body did not carry the name and default tier: %#v", rest.sent)
 	}
-	if !strings.Contains(out, "palbase link https://abc123xyz.palbase.studio") {
-		t.Fatalf("no linkable address in output:\n%s", out)
+	if !strings.Contains(out, "palbase link shop\n") {
+		t.Fatalf("create did not suggest linking by name:\n%s", out)
+	}
+	if strings.Contains(out, "palbase link https://") {
+		t.Fatalf("create still suggests an address:\n%s", out)
+	}
+}
+
+// A NAME TWO PROJECTS SHARE IS REFUSED BY LINK, so create must not suggest it.
+func TestCreateSuggestsTheRefWhenTheNameIsShared(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"},
+		rows:    []Project{{ID: "prd_a", Name: "shop"}, {ID: "prd_b", Name: "Shop "}},
+	}
+	out, err := run(t, routed(rest), "", "create", "shop")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(out, "palbase link abc123xyz") {
+		t.Fatalf("two projects share the name, and create did not suggest the ref:\n%s", out)
+	}
+}
+
+func TestCreateSuggestsTheRefWhenTheListingFails(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"},
+		listErr: fmt.Errorf("unreachable"),
+	}
+	out, err := run(t, routed(rest), "", "create", "shop")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(out, "palbase link abc123xyz") {
+		t.Fatalf("an unread listing cannot vouch for the name, and create did not fall back to the ref:\n%s", out)
+	}
+}
+
+func TestCreateQuotesANameAShellWouldSplit(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("Todo App"), Phase: "Running"},
+		rows:    []Project{{ID: "prd_a", Name: "Todo App"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "Todo App")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(out, "palbase link 'Todo App'") {
+		t.Fatalf("a name with a space was not quoted for the shell:\n%s", out)
 	}
 }
 
 // The domain comes from the cloud. When it cannot be read, the command still
-// succeeds — the project exists — but says plainly that the host is unknown
-// rather than printing a confident, wrong address.
+// succeeds — the project exists — and never invents a host.
 func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
 	rest := &stubREST{reply: Tenant{Ref: "abc123xyz", Phase: "Running"}}
 	out, err := run(t, resolvers(rest, stubCloud{err: fmt.Errorf("unreachable")}), "", "create", "shop")
@@ -104,6 +188,10 @@ func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
 	// kimliği yutmaz.
 	if !strings.Contains(out, "abc123xyz") || !strings.Contains(out, "Created") {
 		t.Fatalf("did not report the created project:\n%s", out)
+	}
+	// An unnamed project cannot be linked by name; its ref always resolves.
+	if !strings.Contains(out, "palbase link abc123xyz") {
+		t.Fatalf("an unnamed project was not suggested by its ref:\n%s", out)
 	}
 }
 

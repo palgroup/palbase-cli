@@ -30,6 +30,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -131,11 +133,11 @@ func createCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Create a project — one tenant, one address",
+		Short: "Create a project and its first environment",
 		Long: `Create a project on the Palbase cloud.
 
-Provisioning is synchronous: the command returns once the tenant is running, so
-the address it prints is one you can link immediately.`,
+Provisioning is synchronous: the command returns once the first environment is
+running, and the command it prints last links a checkout to the project.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var p Tenant
 			body := map[string]any{"name": args[0], "tier": tier}
@@ -147,23 +149,53 @@ the address it prints is one you can link immediately.`,
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Created %s — %s (%s)\n", p.displayName(), p.Ref, p.Phase)
-
-			// The address is the point of the whole command, so it is built
-			// here rather than left for the person to assemble. The domain
-			// comes from the cloud itself: hard-coding one would make this
-			// binary wrong on every deployment but the one it was built for.
-			domain, err := r.Cloud().TenantDomain(cmd.Context())
-			if err != nil || domain == "" {
-				fmt.Fprintf(out, "\nLink it with: palbase link https://%s.<your-cloud-domain>\n", p.Ref)
-				return nil
-			}
-			fmt.Fprintf(out, "\nLink it with:\n  palbase link https://%s.%s\n", p.Ref, domain)
+			fmt.Fprintf(out, "\nLink it with:\n  %s\n", linkSuggestion(cmd.Context(), r, p))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&tier, "tier", "free", "capacity tier for the new project")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
+}
+
+// linkSuggestion is the command create prints last.
+//
+// A NAME ONLY WHEN THE LISTING VOUCHES FOR IT. Product names are not unique, and
+// `palbase link <name>` refuses a name two projects share — so the name is
+// suggested when the caller's listing shows exactly one project by it, and the
+// new environment's ref otherwise (a ref always resolves to one project). An
+// address is never suggested: linking by address wrote the retired record shape
+// into the repository.
+func linkSuggestion(ctx context.Context, r Resolvers, created Tenant) string {
+	name := ""
+	if created.Name != nil {
+		name = strings.TrimSpace(*created.Name)
+	}
+	if name != "" {
+		var rows []Project
+		if err := r.REST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err == nil {
+			same := 0
+			for _, row := range rows {
+				if strings.EqualFold(strings.TrimSpace(row.Name), name) {
+					same++
+				}
+			}
+			if same == 1 {
+				return "palbase link " + shellQuote(name)
+			}
+		}
+	}
+	return "palbase link " + created.Ref
+}
+
+var plainShellWord = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// shellQuote makes a project name one argument to a POSIX shell.
+func shellQuote(s string) string {
+	if plainShellWord.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func listCmd(r Resolvers) *cobra.Command {
