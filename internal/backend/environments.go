@@ -136,6 +136,20 @@ func ResolveFor(cmd *cobra.Command) (Resolved, error) {
 	return Resolve(ctx)
 }
 
+// selfHostResolved is the one answer for a stack somebody runs, wherever its
+// address is recorded: the committed file (a real hostname) or this machine's
+// state (a loopback address, possibly a tunnel). One installation has one
+// environment, so a named `--env` is refused rather than silently ignored.
+func selfHostResolved(target Target) (Resolved, error) {
+	if envNamed() != "" {
+		return Resolved{}, fmt.Errorf(
+			"this checkout is linked to %s, which is one installation with one environment — "+
+				"--env selects between a cloud project's environments and has nothing to select here",
+			target.URL)
+	}
+	return Resolved{Target: target, URL: target.URL, Source: "url"}, nil
+}
+
 // Resolve answers where this verb acts.
 func Resolve(ctx context.Context) (Resolved, error) {
 	// A RUNNING LOCAL STACK WINS, and it is asked FIRST — before the committed
@@ -150,10 +164,16 @@ func Resolve(ctx context.Context) (Resolved, error) {
 	//
 	// An explicitly named environment still beats it: `--env` is the caller
 	// saying where they mean, and nothing should override that.
-	if envNamed() == "" {
-		if local, localErr := ReadTarget(); localErr == nil && local.Local {
-			return Resolved{Target: local, URL: local.URL, Source: "local"}, nil
-		}
+	local, localErr := ReadTarget()
+	if envNamed() == "" && localErr == nil && local.Local {
+		return Resolved{Target: local, URL: local.URL, Source: "local"}, nil
+	}
+	// A LOOPBACK LINK IS ONE INSTALLATION, just stored on this machine instead of
+	// in the committed file. It answers exactly as a committed self-host address
+	// does — including refusing `--env` by name — and is never "local": that
+	// word means a stack `palbase start` brought up here.
+	if localErr == nil && local.SelfHost {
+		return selfHostResolved(local)
 	}
 
 	target, err := readLinkedProject()
@@ -173,13 +193,7 @@ func Resolve(ctx context.Context) (Resolved, error) {
 	// through to the migration path instead.
 	if strings.TrimSpace(target.URL) != "" && strings.TrimSpace(target.Project) == "" &&
 		!isCloudProjectAddress(target.URL) {
-		if envNamed() != "" {
-			return Resolved{}, fmt.Errorf(
-				"this checkout is linked to %s, which is one installation with one environment — "+
-					"--env selects between a cloud project's environments and has nothing to select here",
-				target.URL)
-		}
-		return Resolved{Target: target, URL: target.URL, Source: "url"}, nil
+		return selfHostResolved(target)
 	}
 
 	// 3. AN OLD CHECKOUT THE MIGRATION COULD NOT MOVE STILL WORKS (FR-061).

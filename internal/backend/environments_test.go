@@ -462,7 +462,12 @@ func TestALoopbackAddressIsNeverCommitted(t *testing.T) {
 			got, readErr := ReadTarget()
 			require.NoError(t, readErr)
 			require.Equal(t, addr, got.URL)
-			require.True(t, got.Local)
+			// STORED HERE, NOT STARTED HERE. This assertion used to be
+			// `got.Local` and it pinned the defect: a linked loopback address
+			// (a tunnel included) read back as the stack `palbase start` keeps,
+			// and push refused it. It is a self-host link recorded on this machine.
+			require.True(t, got.SelfHost)
+			require.False(t, got.Local)
 		})
 	}
 }
@@ -502,7 +507,9 @@ func TestALoopbackLinkBindsTheCheckoutNotTheStage(t *testing.T) {
 	got, readErr := ReadTarget()
 	require.NoError(t, readErr, "the link bound a directory that no longer exists")
 	require.Equal(t, "http://127.0.0.1:9999", got.URL)
-	require.True(t, got.Local)
+	// A link, not a start — see TestALoopbackAddressIsNeverCommitted.
+	require.True(t, got.SelfHost)
+	require.False(t, got.Local)
 }
 
 // ── ARTIFACT KURALI (FR-020/021/022) ───────────────────────────────────────

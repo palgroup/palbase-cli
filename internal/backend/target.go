@@ -65,6 +65,14 @@ type Target struct {
 	// Local is true when this target came from a running dev stack rather than
 	// from the committed file. Not serialised — it is a fact about right now.
 	Local bool `json:"-"`
+	// SelfHost marks a machine-state record that `palbase link <loopback-url>`
+	// wrote, as opposed to the one `palbase start` keeps. Both live in the same
+	// per-machine file because a port on one machine must never be committed —
+	// but WHERE an address is stored and whether a stack was STARTED here are two
+	// different facts. Without this bit every loopback link read back as a local
+	// stack, and a tunnel (`kubectl port-forward` onto 127.0.0.1) was refused on
+	// push as "the stack running on this machine".
+	SelfHost bool `json:"selfHost,omitempty"`
 }
 
 // OnThisMachine says whether this target's stack runs HERE.
@@ -212,7 +220,10 @@ func ReadTarget() (Target, error) {
 		if strings.TrimSpace(running.URL) == "" {
 			return Target{}, fmt.Errorf("%s has no address — run `palbase start` again", local)
 		}
-		running.Local = true
+		// A record `palbase start` wrote is the stack running here; one `link`
+		// wrote names an installation somebody runs — possibly through a tunnel —
+		// and pushing to it is exactly what it is for.
+		running.Local = !running.SelfHost
 		return running, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -344,6 +355,9 @@ func WriteSelfHostTarget(t Target) error {
 	if !isLoopbackAddress(t.URL) {
 		return WriteTarget(t)
 	}
+	// NAMED, NOT STARTED: the record says it came from `link`, so reading it back
+	// does not claim a stack `palbase start` brought up here.
+	t.SelfHost = true
 	// THE REAL CHECKOUT, NOT THE STAGE. `link` does its work in a temporary
 	// tree and copies the artifacts back, so the committed file can be written
 	// relative to the cwd — but this machine's state is keyed by the CHECKOUT's
