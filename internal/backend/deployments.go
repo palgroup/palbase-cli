@@ -226,7 +226,8 @@ func openLinked(cmd *cobra.Command) (Target, Credentials, error) {
 	if err != nil {
 		return Target{}, Credentials{}, err
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+	// THE RESOLVER NAMES THE ENVIRONMENT; a target cannot (FR-085).
+	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", resolved.Describe())
 	return target, cred, nil
 }
 

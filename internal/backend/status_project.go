@@ -88,7 +88,9 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	if jsonOut {
 		return statusAsJSON(ctx, cmd, target, keyEnv, cred, string(source))
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+	// THE RESOLVER NAMES THE ENVIRONMENT; a target cannot (FR-085). This line
+	// printed the project alone while the key below was staging's.
+	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", resolved.Describe())
 
 	out := cmd.OutOrStdout()
 

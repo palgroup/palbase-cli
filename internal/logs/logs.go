@@ -214,7 +214,7 @@ new lines every 2s — Ctrl-C to stop.
 			}
 			if !target.OnThisMachine() {
 				if ref, ok := cloudRefOf(r, target.URL); ok {
-					fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+					fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", resolved.Describe())
 					return showCloud(cmd, r, ref, showCloudOpts{
 						source: source, levels: levels, since: since,
 						query: query, limit: limit, follow: follow, jsonOut: jsonOut,
@@ -233,7 +233,7 @@ new lines every 2s — Ctrl-C to stop.
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", resolved.Describe())
 			return ShowLocal(cmd.Context(), backend.LocalStackProject(dir), LocalOptions{
 				Service: source,
 				Since:   since,

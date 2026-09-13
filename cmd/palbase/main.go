@@ -184,7 +184,12 @@ func tenantRefOf(tenantURL, publicHost string) (string, bool) {
 
 // linkedProject adapts the linked target for commands that need to talk to a
 // project — both to the project itself and to the cloud about it.
-type linkedProject struct{ target backend.Target }
+type linkedProject struct {
+	target backend.Target
+	// label is the resolver's name for where this acts: `<project>/<env>` for a
+	// cloud project. Target.Describe cannot say which environment (FR-085).
+	label string
+}
 
 // stackManagementREST reaches the management surface of the stack this directory
 // is linked to — NOT the cloud control plane.
@@ -271,7 +276,7 @@ func linkedTarget() (linkedProject, error) {
 	if err != nil {
 		return linkedProject{}, err
 	}
-	return linkedProject{target: resolved.Acting()}, nil
+	return linkedProject{target: resolved.Acting(), label: resolved.Describe()}, nil
 }
 
 // Ref names the cloud project, or reports false for anything that is not one —
@@ -281,7 +286,7 @@ func (p linkedProject) Ref() (string, bool) {
 	return tenantRefOf(p.target.URL, resolved.Endpoints.PublicHost)
 }
 
-func (p linkedProject) Describe() string { return p.target.Describe() }
+func (p linkedProject) Describe() string { return p.label }
 
 func (p linkedProject) GetJSON(ctx context.Context, path string, out any) error {
 	return backend.GetManagementJSON(ctx, p.target, path, out)
