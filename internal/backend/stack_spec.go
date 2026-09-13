@@ -172,7 +172,7 @@ func reportStaleContracts(refreshed string, envs appEnvironments, w io.Writer) {
 	}
 	fmt.Fprintf(w, "\nonly %s was refreshed. The others still describe what they last served:\n  %s\n",
 		refreshed, strings.Join(stale, "\n  "))
-	fmt.Fprintln(w, "  `palbase link` fetches every environment's contract; `palbase env use <name>` then `palbase spec` refreshes one.")
+	fmt.Fprintln(w, "  `palbase link` fetches every environment's contract; `palbase spec --env <name>` refreshes one, and `palbase env use <name>` remembers the choice.")
 }
 
 // ErrNoContractYet is the project saying it has no specification to give.

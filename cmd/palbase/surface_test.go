@@ -905,8 +905,12 @@ func TestNothingInProductionReadsTheRetiredSelectionFile(t *testing.T) {
 // A LINK BINDS A PROJECT. After that change, a hint that offers
 // `palbase link <ref>` as the way to reach another environment sends the reader
 // somewhere that cannot move them — the same false door `--environment` was.
-// This reads what the binary PRINTS (string literals, comments excluded), the
-// same way TestNoUserFacingStringIsTurkish does.
+//
+// WHAT THE BINARY PRINTS, NOT WHAT ONE LITERAL HOLDS. A Cobra help text is a
+// raw string, and a raw string cannot carry a backtick, so `palbase link <ref>`
+// sits in a literal of its own between two others and no single literal holds
+// the sentence. A chain of string literals joined with + is folded into the
+// string it prints before it is read.
 func TestNoHintOffersALinkToSwitchEnvironments(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -918,13 +922,58 @@ func TestNoHintOffersALinkToSwitchEnvironments(t *testing.T) {
 		"points it at another",
 		"`palbase link <ref>` again",
 		"`palbase link <ref>` then",
+		"`palbase link <ref>` to refresh",
+	}
+	// Found only in a folded chain (the link help text): proof the fold ran.
+	const foldedWitness = "which environment a command acts on is `palbase env use`"
+
+	var fold func(ast.Expr) (string, bool)
+	fold = func(e ast.Expr) (string, bool) {
+		switch v := e.(type) {
+		case *ast.BasicLit:
+			if v.Kind != token.STRING {
+				return "", false
+			}
+			s, err := strconv.Unquote(v.Value)
+			return s, err == nil
+		case *ast.BinaryExpr:
+			if v.Op != token.ADD {
+				return "", false
+			}
+			l, lok := fold(v.X)
+			r, rok := fold(v.Y)
+			return l + r, lok && rok
+		case *ast.ParenExpr:
+			return fold(v.X)
+		}
+		return "", false
 	}
 
 	fset := token.NewFileSet()
-	var offenders []string
-	files, sawEnvUse := 0, false
+	var offenders, unreadable []string
+	files, sawEnvUse, sawFolded := 0, false, false
+	check := func(path string, pos token.Pos, printed string) {
+		// A help text wraps wherever its line ends; the phrase is the words.
+		printed = strings.Join(strings.Fields(printed), " ")
+		if strings.Contains(printed, "palbase env use") {
+			sawEnvUse = true
+		}
+		if strings.Contains(printed, foldedWitness) {
+			sawFolded = true
+		}
+		for _, phrase := range retired {
+			if strings.Contains(printed, phrase) {
+				rel, _ := filepath.Rel(root, path)
+				offenders = append(offenders, fmt.Sprintf("%s:%d %q", rel, fset.Position(pos).Line, phrase))
+			}
+		}
+	}
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if err != nil {
+			unreadable = append(unreadable, fmt.Sprintf("%s: %v", path, err))
+			return nil
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		parsed, perr := parser.ParseFile(fset, path, nil, 0)
@@ -933,17 +982,15 @@ func TestNoHintOffersALinkToSwitchEnvironments(t *testing.T) {
 		}
 		files++
 		ast.Inspect(parsed, func(n ast.Node) bool {
-			lit, isLit := n.(*ast.BasicLit)
-			if !isLit || lit.Kind != token.STRING {
-				return true
-			}
-			if strings.Contains(lit.Value, "palbase env use") {
-				sawEnvUse = true
-			}
-			for _, phrase := range retired {
-				if strings.Contains(lit.Value, phrase) {
-					rel, _ := filepath.Rel(root, path)
-					offenders = append(offenders, fmt.Sprintf("%s:%d %q", rel, fset.Position(lit.Pos()).Line, phrase))
+			switch v := n.(type) {
+			case *ast.BinaryExpr:
+				if printed, whole := fold(v); whole {
+					check(path, v.Pos(), printed)
+					return false // its literals were read as the string they make
+				}
+			case *ast.BasicLit:
+				if printed, isString := fold(v); isString {
+					check(path, v.Pos(), printed)
 				}
 			}
 			return true
@@ -953,9 +1000,14 @@ func TestNoHintOffersALinkToSwitchEnvironments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
-	// THE SCAN IS MEASURED FIRST: one that read nothing would report silence.
-	if files < 40 || !sawEnvUse {
-		t.Fatalf("the scan read %d files and found `palbase env use`=%v — it is not measuring", files, sawEnvUse)
+	if len(unreadable) > 0 {
+		t.Fatalf("the scan could not read part of the tree, so its silence says nothing about it:\n%s", strings.Join(unreadable, "\n"))
+	}
+	// THE SCAN IS MEASURED FIRST: one that read nothing, or read literals but
+	// never folded a chain, would report silence.
+	if files < 40 || !sawEnvUse || !sawFolded {
+		t.Fatalf("the scan read %d files, found `palbase env use`=%v and a folded help text=%v — it is not measuring",
+			files, sawEnvUse, sawFolded)
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("hints still offer a link as the way to another environment:\n%s", strings.Join(offenders, "\n"))

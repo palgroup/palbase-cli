@@ -106,7 +106,7 @@ Which of those run is read from the COMMITTED config files the link commands
 wrote (palbase/environments/<env>/<platform>-config.json), so a fresh clone
 behaves the same as the machine that linked it.
 
-spec does NOT write the runtime config (base URL + key). Run ` + "`palbase link <ref>`" + `
+spec does NOT write the runtime config (base URL + key). Run ` + "`palbase link`" + `
 to refresh that.
 
 This acts on the project this checkout is bound to. There is one addressing

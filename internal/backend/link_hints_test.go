@@ -12,7 +12,8 @@ func TestTheUnlinkedHintDescribesARefAsItsProject(t *testing.T) {
 	inScratchCheckout(t)
 	_, err := readLinkedProject()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "palbase link <ref>")
+	assert.Regexp(t, "palbase link <ref> +the project that environment belongs to", err.Error(),
+		"the ref form is not described as binding the project its environment belongs to")
 	assert.NotContains(t, err.Error(), "one environment")
 }
 
@@ -23,6 +24,8 @@ func TestStaleContractsNameEnvUse(t *testing.T) {
 		"main": {}, "staging": {},
 	}}, &out)
 	assert.Contains(t, out.String(), "palbase env use")
+	assert.Contains(t, out.String(), "palbase spec --env <name>",
+		"the hint does not name the one call that refreshes an environment while a local stack runs")
 	assert.NotContains(t, out.String(), "palbase link <ref>")
 }
 

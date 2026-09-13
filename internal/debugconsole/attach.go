@@ -240,14 +240,14 @@ var rejectionHelp = map[string]string{
 		"`attach` never joins as a publisher — it presents the pairing code and nothing " +
 		"else — so there is nothing to correct here. Arm again on the device for a fresh " +
 		"code, and report this if it keeps happening.",
-	// `--environment` does NOT override it here: attach resolves the LINKED
-	// project, and in a linked checkout the flag is refused rather than applied.
-	// Sending somebody to a flag that cannot move them is worse than sending
-	// them nowhere — they retype it, get the same rejection, and conclude the
-	// device is at fault.
+	// The root `--env` flag DOES move attach: it resolves the linked project's
+	// environment the way every verb does, so it is the way named here, with
+	// `palbase env use` for making the choice stick. Sending somebody to a flag
+	// that cannot move them is worse than sending them nowhere — they retype it,
+	// get the same rejection, and conclude the device is at fault.
 	"forbidden": "not allowed on this session. A viewer may watch and nothing else. Check that " +
 		"the environment this checkout is linked to is the one the device armed against — " +
-		"`palbase status` shows it, and `palbase env use <name>` switches this checkout to another environment.",
+		"`palbase status` shows it; pass `--env <name>` to attach to another environment, and `palbase env use <name>` remembers the choice.",
 }
 
 func (e rejected) Error() string {
