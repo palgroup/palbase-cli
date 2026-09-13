@@ -461,3 +461,19 @@ func TestCreateSeparatesANameThatStartsWithADash(t *testing.T) {
 		t.Fatalf("a name starting with a dash was suggested without --:\n%s", out)
 	}
 }
+
+// A NAME WITH "://" IN IT is read by `palbase link` as an address, so it gets
+// the ref even when the listing shows exactly one project by it (FR-023).
+func TestCreateSuggestsTheRefForANameLinkWouldReadAsAnAddress(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("a://b"), Phase: "Running"},
+		rows:    []Project{{ID: "proj_a", Name: "a://b"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "a://b")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(out, "palbase link abc123xyz") || strings.Contains(out, "palbase link 'a://b'") {
+		t.Fatalf("a name link would read as an address was suggested as the name:\n%s", out)
+	}
+}

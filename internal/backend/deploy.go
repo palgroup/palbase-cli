@@ -194,16 +194,17 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 
 			// THE ARGUMENT IS WHAT `palbase project list` PRINTS: a project's name,
 			// its id, or one of its environments' refs, resolved against the listing
-			// `link` reads. A value shaped like a management project id used to be
-			// refused by its prefix — but product ids are `proj_…` too, and one is
-			// what the ambiguity refusal tells a person to type, so the listing
-			// decides and nothing is refused by its shape.
-			// THE ARGUMENT IS A PROJECT, and a project is resolved to its
-			// PRODUCT. The old path resolved a name to one ENVIRONMENT's ref
-			// through `/v1/cloud/projects` — which returns a row per
-			// environment carrying the product's name, so two environments
-			// under one project looked like a collision and the name went
-			// unresolved. `palbase clone todoapp` then built
+			// `link` reads. Measured 25.08.2026: `project status 1jhp7jbrm` worked
+			// while `clone 1jhp7jbrm` said there was no such project, because clone
+			// took a management id that no surface printed. A value shaped like one
+			// was refused by its prefix after that — but product ids are `proj_…`
+			// too, and one is what the ambiguity refusal tells a person to type, so
+			// the listing decides and nothing is refused by its shape.
+			//
+			// A name resolves to the PRODUCT. The old path resolved it to one
+			// ENVIRONMENT's ref through `/v1/cloud/projects`, which returns a row per
+			// environment carrying the product's name: two environments under one
+			// project looked like a collision, and `palbase clone todoapp` built
 			// `https://todoapp.<host>` out of anything ref-shaped.
 			product, envs, err := productByName(ctx, r, given)
 			if err != nil {
