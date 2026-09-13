@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/palgroup/palbase-cli/internal/authcontract"
 )
@@ -520,70 +521,204 @@ func writesPerEnvironmentArtifacts(platforms []string) bool {
 	return len(platforms) > 0
 }
 
+// describeLimit is how many environments one link describes at once. A
+// sleeping environment waits out the ready budget, and four of them one after
+// another would make a link take minutes for what is a handful of reads.
+var describeLimit = 4
+
+// environmentAddress is the address one environment of a project serves on. A
+// variable so a test can point refs at its own servers; in the binary it is
+// addressOf, whose host is the one this CLI was configured with.
+var environmentAddress = addressOf
+
+// describedEnvironment is everything one environment answered, read before
+// anything is written.
+type describedEnvironment struct {
+	entry      appEnvironment
+	spec       []byte
+	roles      *stackRoles
+	noContract bool  // the environment answered, and has nothing deployed yet
+	rolesErr   error // the role read failed; the environment is still described
+	err        error // the environment could not be described this run
+}
+
+// describeEnvironment reads one environment: whether it serves (waiting out the
+// ready budget, which is what wakes a sleeping one), its keys, its contract and,
+// when a generator will read them, its roles. It writes nothing.
+func describeEnvironment(ctx context.Context, addr string, insecure, readRoles bool) describedEnvironment {
+	var d describedEnvironment
+	if _, err := describeStack(ctx, addr, insecure); err != nil {
+		d.err = err
+		return d
+	}
+	target := Target{URL: addr, Insecure: insecure}
+	key, root, err := projectKeys(ctx, target)
+	if err != nil {
+		d.err = err
+		return d
+	}
+	d.entry = appEnvironment{AppID: projectAppID, BaseURL: addr, APIKey: key, SealedRoot: root}
+	cred, _, err := Credential(addr)
+	if err != nil {
+		d.err = err
+		return d
+	}
+	switch spec, err := fetchStackSpec(ctx, target, cred); {
+	case errors.Is(err, ErrNoContractYet):
+		d.noContract = true
+		return d
+	case err != nil:
+		d.err = err
+		return d
+	default:
+		d.spec = spec
+	}
+	if readRoles {
+		if roles, err := fetchStackRoles(ctx, target, cred); err != nil {
+			d.rolesErr = err
+		} else {
+			d.roles = &roles
+		}
+	}
+	return d
+}
+
+// gatherEnvironments reads every environment this app can be built against and
+// WRITES NOTHING: it returns the entries, the contracts and the role documents,
+// and the caller decides what reaches the checkout. That split is what keeps an
+// environment that cannot be read this run from being half-written — a new
+// contract beside an old config, or a keyless entry merged over a committed
+// key.
+//
+// With no project (a stack somebody runs, or a loopback address) it describes
+// the one address it was given. With a project it describes EVERY environment
+// of it, at most describeLimit at once: one that is Failed or being deleted is
+// not asked; one that cannot be read is left out and named; the default one
+// failing fails the link.
+//
 // `writeArtifacts` separates REPORTING from WRITING, and the two are genuinely
 // different jobs: whether a project has a contract yet is worth saying in every
-// checkout, while the per-environment FILES only matter where a generator reads
-// them. Collapsing them made a backend link stop telling people "nothing is
-// deployed yet", which is the one thing they needed to hear.
-func gatherEnvironments(ctx context.Context, target Target, envName, key string, writeArtifacts bool, w io.Writer) (appEnvironments, map[string][]byte, error) {
+// checkout, while the role documents only matter where a generator reads them.
+func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, defaultKey string, project []Environment, writeArtifacts bool, w io.Writer) (appEnvironments, map[string][]byte, map[string]stackRoles, error) {
 	envs := appEnvironments{
-		Default:      envName,
+		Default:      defaultEnv,
 		Environments: map[string]appEnvironment{},
 	}
 	specs := map[string][]byte{}
+	roles := map[string]stackRoles{}
+	rolesUnread := func(url, env string, err error) {
+		fmt.Fprintf(w, "roles: %s did not answer for %s — %v\n", url, env, err)
+		fmt.Fprintf(w, "roles: %s keeps what it last held; the generated role types are NOT refreshed\n",
+			rolesPath(env))
+	}
 
-	primary := envName
-	primaryEnv := appEnvironment{
-		AppID:   projectAppID,
-		BaseURL: target.URL,
-		APIKey:  key,
-	}
-	// Best effort, and deliberately not fatal: a stack that cannot answer about
-	// its sealing root is a stack that seals nothing, which is a legal state and
-	// not a reason to refuse the link an operator asked for.
-	if _, root, err := projectKeys(ctx, target); err == nil && root != "" {
-		primaryEnv.SealedRoot = root
-	}
-	envs.Environments[primary] = primaryEnv
-	cred, _, err := Credential(target.URL)
-	if err != nil {
-		return appEnvironments{}, nil, err
-	}
-	// A PROJECT WITH NOTHING DEPLOYED IS STILL A PROJECT YOU CAN BIND TO.
-	//
-	// This refusal closed a loop on itself: `link` refused because the project
-	// had no contract, and the project could get no contract because `push`
-	// reads the binding only `link` writes. The person was told to push by a
-	// command that had just made pushing impossible.
-	//
-	// The environment entry is written either way — it carries the address and
-	// the key, which is what `push` needs — and the contract is fetched later by
-	// `palbase spec`, or by the next `link`, once something answers. The same
-	// leniency the local stack has had all along (see below): a stack that
-	// cannot answer is a legal state, not a reason to refuse the link.
-	switch spec, err := fetchStackSpec(ctx, target, cred); {
-	case errors.Is(err, ErrNoContractYet):
-		fmt.Fprintf(w, "%v\n", err)
-		fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
-	case err != nil:
-		return appEnvironments{}, nil, err
-	default:
-		if writeArtifacts {
-			if err := writeSpec(primary, spec); err != nil {
-				return appEnvironments{}, nil, err
-			}
-			if err := refreshRoles(ctx, target, cred, primary, w); err != nil {
-				return appEnvironments{}, nil, err
+	if len(project) == 0 {
+		primaryEnv := appEnvironment{
+			AppID:   projectAppID,
+			BaseURL: primary.URL,
+			APIKey:  defaultKey,
+		}
+		// Best effort, and deliberately not fatal: a stack that cannot answer about
+		// its sealing root is a stack that seals nothing, which is a legal state and
+		// not a reason to refuse the link an operator asked for.
+		if _, root, err := projectKeys(ctx, primary); err == nil && root != "" {
+			primaryEnv.SealedRoot = root
+		}
+		envs.Environments[defaultEnv] = primaryEnv
+		cred, _, err := Credential(primary.URL)
+		if err != nil {
+			return appEnvironments{}, nil, nil, err
+		}
+		// A PROJECT WITH NOTHING DEPLOYED IS STILL A PROJECT YOU CAN BIND TO.
+		//
+		// This refusal closed a loop on itself: `link` refused because the project
+		// had no contract, and the project could get no contract because `push`
+		// reads the binding only `link` writes. The environment entry is written
+		// either way — it carries the address and the key, which is what `push`
+		// needs — and the contract is fetched later by `palbase spec`, or by the
+		// next `link`, once something answers.
+		switch spec, err := fetchStackSpec(ctx, primary, cred); {
+		case errors.Is(err, ErrNoContractYet):
+			fmt.Fprintf(w, "%v\n", err)
+			fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
+		case err != nil:
+			return appEnvironments{}, nil, nil, err
+		default:
+			specs[defaultEnv] = spec
+			if writeArtifacts {
+				if r, err := fetchStackRoles(ctx, primary, cred); err != nil {
+					rolesUnread(primary.URL, defaultEnv, err)
+				} else {
+					roles[defaultEnv] = r
+				}
 			}
 		}
-		specs[primary] = spec
+	} else {
+		type job struct {
+			env  Environment
+			addr string
+		}
+		var jobs []job
+		for _, e := range project {
+			if unavailableEnvironment(e.Status) {
+				fmt.Fprintf(w, "%s is %s — not asked; its files are left as they are\n", e.Name, e.Status)
+				continue
+			}
+			addr, err := environmentAddress(e.Ref)
+			if err != nil {
+				if e.Name == defaultEnv {
+					return appEnvironments{}, nil, nil, err
+				}
+				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are\n", e.Name, err)
+				continue
+			}
+			jobs = append(jobs, job{env: e, addr: addr})
+		}
+		// The workers only fill their own slot; the map and the output are built
+		// once they are done, in the project's own order.
+		results := make([]describedEnvironment, len(jobs))
+		slots := make(chan struct{}, describeLimit)
+		var wg sync.WaitGroup
+		for i, j := range jobs {
+			wg.Add(1)
+			go func(i int, addr string) {
+				defer wg.Done()
+				slots <- struct{}{}
+				defer func() { <-slots }()
+				results[i] = describeEnvironment(ctx, addr, primary.Insecure, writeArtifacts)
+			}(i, j.addr)
+		}
+		wg.Wait()
+		for i, j := range jobs {
+			d, name := results[i], j.env.Name
+			if d.err != nil {
+				if name == defaultEnv {
+					return appEnvironments{}, nil, nil, fmt.Errorf("%s: %w", name, d.err)
+				}
+				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; "+
+					"run `palbase link` again once it answers\n", name, d.err)
+				continue
+			}
+			envs.Environments[name] = d.entry
+			if d.noContract {
+				fmt.Fprintf(w, "%s has nothing deployed yet — `palbase push --env %s`\n", name, name)
+			} else {
+				specs[name] = d.spec
+			}
+			if d.rolesErr != nil {
+				rolesUnread(d.entry.BaseURL, name, d.rolesErr)
+			}
+			if d.roles != nil {
+				roles[name] = *d.roles
+			}
+		}
 	}
 
 	// The stack on this machine, when there is one and it is not already the
 	// target.
-	localURL := LookupLocalStack(groupOf(target))
-	if localURL == "" || localURL == target.URL {
-		return envs, specs, nil
+	localURL := LookupLocalStack(groupOf(primary))
+	if localURL == "" || localURL == primary.URL {
+		return envs, specs, roles, nil
 	}
 
 	localTarget := Target{URL: localURL, Local: true}
@@ -591,7 +726,7 @@ func gatherEnvironments(ctx context.Context, target Target, envName, key string,
 	if credErr != nil {
 		envs.Environments[localEnvName] = appEnvironment{AppID: projectAppID, BaseURL: localURL}
 		fmt.Fprintf(w, "local: %s is registered but this machine holds no credential for it — `palbase start`\n", localURL)
-		return envs, specs, nil
+		return envs, specs, roles, nil
 	}
 	localKey, keyErr := projectPublishableKey(ctx, localTarget)
 	if keyErr != nil {
@@ -599,7 +734,7 @@ func gatherEnvironments(ctx context.Context, target Target, envName, key string,
 		// is named. A missing entry would be a build configuration that vanishes.
 		envs.Environments[localEnvName] = appEnvironment{AppID: projectAppID, BaseURL: localURL}
 		fmt.Fprintf(w, "local: %s did not answer — run `palbase start`, then `palbase spec` to fill it in\n", localURL)
-		return envs, specs, nil
+		return envs, specs, roles, nil
 	}
 	localEnv := appEnvironment{
 		AppID:   projectAppID,
@@ -611,15 +746,16 @@ func gatherEnvironments(ctx context.Context, target Target, envName, key string,
 	}
 	envs.Environments[localEnvName] = localEnv
 	if localSpec, err := fetchStackSpec(ctx, localTarget, localCred); err == nil {
-		if err := writeSpec(localEnvName, localSpec); err != nil {
-			return appEnvironments{}, nil, err
-		}
-		if err := refreshRoles(ctx, localTarget, localCred, localEnvName, w); err != nil {
-			return appEnvironments{}, nil, err
-		}
 		specs[localEnvName] = localSpec
+		if writeArtifacts {
+			if r, err := fetchStackRoles(ctx, localTarget, localCred); err != nil {
+				rolesUnread(localURL, localEnvName, err)
+			} else {
+				roles[localEnvName] = r
+			}
+		}
 	}
-	return envs, specs, nil
+	return envs, specs, roles, nil
 }
 
 // groupOf is the project group a target belongs to, for finding its local stack

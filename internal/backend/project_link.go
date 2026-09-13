@@ -608,9 +608,33 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// The environment NAME is the one this link read from, not a constant: the
 	// old `defaultEnvName` returned "main" for every cloud checkout, so a
 	// second environment overwrote the first one's contract in place.
-	envs, specs, err := gatherEnvironments(ctx, target, linkedEnv, anon, writesPerEnvironmentArtifacts(platforms), w)
+	envs, specs, roles, err := gatherEnvironments(ctx, target, linkedEnv, anon, nil, writesPerEnvironmentArtifacts(platforms), w)
 	if err != nil {
 		return err
+	}
+	// The contracts and role documents are written as soon as they are read.
+	if writesPerEnvironmentArtifacts(platforms) {
+		names := make([]string, 0, len(specs))
+		for name := range specs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if err := writeSpec(name, specs[name]); err != nil {
+				return err
+			}
+		}
+		roleNames := make([]string, 0, len(roles))
+		for name := range roles {
+			roleNames = append(roleNames, name)
+		}
+		sort.Strings(roleNames)
+		for _, name := range roleNames {
+			if err := writeRolesArtifact(rolesPath(name), roles[name]); err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "✓ wrote %s (%d roles)\n", rolesPath(name), len(roles[name].Roles))
+		}
 	}
 
 	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
