@@ -214,7 +214,7 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				ref, refErr := linkEnvironmentRef(product, envs, envFlag)
+				ref, refErr := cloneEnvironmentRef(product, envs, given, envFlag)
 				if refErr != nil {
 					return refErr
 				}
@@ -294,6 +294,32 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the project's name)")
 	cmd.Flags().StringVar(&envFlag, "from-env", "", "environment to take the source from (default: the project's only one)")
 	return cmd
+}
+
+// cloneEnvironmentRef is which environment `palbase clone <token>` downloads.
+//
+// A REF NAMES AN ENVIRONMENT, and clone downloads one environment's source and
+// remembers it as this checkout's selection — so the environment the person
+// typed is the one they get. A name or an id names only the project, and then
+// the one default rule decides (linkEnvironmentRef). A ref and a --from-env
+// that disagree are two different answers to the same question, and picking
+// one silently is the fail-open this CLI does not do.
+func cloneEnvironmentRef(product Product, envs []Environment, typed, fromEnv string) (string, error) {
+	for _, e := range envs {
+		if e.Ref != typed {
+			continue
+		}
+		if fromEnv != "" && !strings.EqualFold(e.Name, fromEnv) && e.Ref != fromEnv {
+			return "", fmt.Errorf("%s is the ref of %s/%s, but --from-env names %q — drop one of them.\n%s",
+				typed, product.Name, e.Name, fromEnv, listing(envs))
+		}
+		if unavailableEnvironment(e.Status) {
+			return "", fmt.Errorf("%s/%s is %s, so there is no source to download.\n%s",
+				product.Name, e.Name, e.Status, listingWithStatus(envs))
+		}
+		return e.Ref, nil
+	}
+	return linkEnvironmentRef(product, envs, fromEnv)
 }
 
 // managementProjectIDPrefix is what a management project id starts with. Only a
