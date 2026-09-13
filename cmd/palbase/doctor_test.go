@@ -222,3 +222,22 @@ func TestDoctorSaysAnUnboundDirectoryIsNotLinked(t *testing.T) {
 		t.Fatalf("an unbound directory: %+v", lines)
 	}
 }
+
+// THE COMMITTED PROJECT IS WHAT `link` NAMES, even while `palbase start` runs a
+// stack here: the running stack is the `env` line's answer, not the binding.
+func TestDoctorNamesTheProjectWhileAStackRunsHere(t *testing.T) {
+	running := backend.Target{URL: "http://127.0.0.1:54321", Local: true}
+	lines := linkProbes(
+		func() (backend.Target, error) { return backend.Target{Project: "prd_a", Name: "todoapp"}, nil },
+		func() (backend.Target, error) { return running, nil },
+		func() (backend.Resolved, error) {
+			return backend.Resolved{Target: running, URL: running.URL, Source: "local"}, nil
+		},
+	)
+	if len(lines) != 2 || lines[0].detail != "todoapp" {
+		t.Fatalf("the link line did not name the committed project: %+v", lines)
+	}
+	if lines[1].detail != "http://127.0.0.1:54321 (local)  (via local)" {
+		t.Fatalf("the env line did not name the running stack: %+v", lines[1])
+	}
+}

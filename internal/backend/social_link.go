@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -220,9 +221,10 @@ func linkedOAuth(ctx context.Context, target Target, platform, publishableKey, s
 				pairs = append(pairs, pair)
 			}
 			slices.Sort(pairs)
-			return nil, selection, fmt.Errorf("the selected application %q variant %q has no %s client here, and this environment configures the app as %s — "+
-				"give it one application_key and variant in every environment, or set oauth.%s in %s",
-				selection.ApplicationKey, selection.Variant, platform, strings.Join(pairs, ", "), platform, projectPath())
+			return nil, selection, selectionDoesNotFit{detail: fmt.Sprintf(
+				"the selected application %q variant %q has no %s client here, and this environment configures the app as %s — "+
+					"configure the app under the selected pair in this environment, or change oauth.%s in %s",
+				selection.ApplicationKey, selection.Variant, platform, strings.Join(pairs, ", "), platform, projectPath())}
 		}
 	}
 	return &snapshot, selection, nil
@@ -387,4 +389,22 @@ func defaultFirst(source appEnvironments) []string {
 		}
 	}
 	return names
+}
+
+// selectionDoesNotFit is an environment that configures the app under another
+// application or variant than the checkout's selection. It answered, so reading
+// it again changes nothing: its line names its own remedy (FR-013).
+type selectionDoesNotFit struct{ detail string }
+
+func (e selectionDoesNotFit) Error() string { return e.detail }
+
+// droppedEnvironmentLine is what a link says about an environment it leaves as
+// it is. One that did not answer is worth asking again; one whose configuration
+// does not fit the checkout's selection is not.
+func droppedEnvironmentLine(name string, reason error) string {
+	var misfit selectionDoesNotFit
+	if errors.As(reason, &misfit) {
+		return fmt.Sprintf("%s is left as it is: %v\n", name, reason)
+	}
+	return fmt.Sprintf("%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n", name, reason)
 }

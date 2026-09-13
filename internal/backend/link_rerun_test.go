@@ -232,3 +232,43 @@ func TestFromEnvIsRefusedWhileAStackLinkedHereByAddressIsInCharge(t *testing.T) 
 	o := linkOpts{env: "staging"}
 	require.ErrorContains(t, resolveLinkTarget(context.Background(), Resolvers{}, &o), "--from-env")
 }
+
+// UNLINK LEAVES THE STACK `palbase start` RUNS HERE. That record is not a
+// binding somebody made with `link`; `palbase stop` is what ends it (FR-084).
+func TestUnlinkLeavesTheStackPalbaseStartRuns(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, WriteLinkedIdentity(Product{ID: "prd_a", Name: "todoapp"}, Target{}))
+	require.NoError(t, WriteLocalTarget(Target{URL: "http://127.0.0.1:54321"}))
+	local, err := localPath()
+	require.NoError(t, err)
+	before, err := os.ReadFile(local)
+	require.NoError(t, err)
+
+	var out strings.Builder
+	require.NoError(t, runUnlink(&out))
+	after, err := os.ReadFile(local)
+	require.NoError(t, err, "unlink removed the record `palbase start` keeps")
+	assert.Equal(t, string(before), string(after))
+	assert.NoFileExists(t, projectPath())
+	assert.NotContains(t, out.String(), "no longer acts")
+}
+
+// AN UNREADABLE MACHINE RECORD DOES NOT STOP UNLINK. Nothing in it can be read
+// as a stack linked by address, and `Resolve` passes it over too; refusing made
+// the committed binding impossible to remove.
+func TestAnUnreadableMachineRecordDoesNotStopUnlink(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, WriteLinkedIdentity(Product{ID: "prd_a", Name: "todoapp"}, Target{}))
+	require.NoError(t, WriteSelfHostTarget(Target{URL: "http://127.0.0.1:54321"}))
+	local, err := localPath()
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(local, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(local, 0o600) })
+	if _, readErr := os.ReadFile(local); readErr == nil {
+		t.Skip("this user reads a mode-000 file, so the record is not unreadable here")
+	}
+
+	var out strings.Builder
+	require.NoError(t, runUnlink(&out), out.String())
+	assert.NoFileExists(t, projectPath())
+}

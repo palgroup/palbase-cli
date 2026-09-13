@@ -253,6 +253,9 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		if err := publishProjectContract(root, stage); err != nil {
 			return fmt.Errorf("link failed (%v); and the project's address could not be kept: %w", workErr, err)
 		}
+		if err := releaseForProject(o, root, w); err != nil {
+			return fmt.Errorf("link failed (%v); and the stack linked here by address could not be released: %w", workErr, err)
+		}
 		return fmt.Errorf("link failed; previous client artifacts were preserved: %w", workErr)
 	}
 	after := map[string]artifactFile{}
@@ -262,8 +265,10 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := publishLinkArtifacts(root, stage, before, after); err != nil {
 		return err
 	}
-	_, err = io.WriteString(w, strings.ReplaceAll(output.String(), stage, root))
-	return err
+	if _, err := io.WriteString(w, strings.ReplaceAll(output.String(), stage, root)); err != nil {
+		return err
+	}
+	return releaseForProject(o, root, w)
 }
 
 // publishProjectContract copies the linked project's identity out of a stage a

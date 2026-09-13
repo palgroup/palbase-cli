@@ -3,6 +3,8 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -179,6 +181,8 @@ func TestAnEnvironmentTheCheckoutsSelectionDoesNotFitIsNamedOnEveryLink(t *testi
 		require.Contains(t, dropped, "dev", "link %d: dev was not named", run)
 		assert.ErrorContains(t, dropped["dev"], `"shop"`)
 		assert.ErrorContains(t, dropped["dev"], `"consumer"`)
+		var misfit selectionDoesNotFit
+		assert.ErrorAs(t, dropped["dev"], &misfit, "link %d: dev's refusal is not the answered-but-does-not-fit kind", run)
 		assert.Equal(t, "shop", target.OAuth["ios"].ApplicationKey, "link %d: the recorded selection is not the default environment's", run)
 	}
 }
@@ -224,4 +228,18 @@ func TestAnEnvironmentConfiguredUnderAnotherVariantIsNamed(t *testing.T) {
 	assert.NotContains(t, result.Environments, "dev", "dev was written with a variant it does not configure")
 	require.Contains(t, dropped, "dev")
 	assert.ErrorContains(t, dropped["dev"], `"shop" variant "debug"`)
+}
+
+// AN ENVIRONMENT THAT ANSWERED IS NOT TOLD TO ANSWER. One whose configuration
+// does not fit the selection was wrapped like one that could not be read, with
+// "run `palbase link` again once it answers" — advice that changes nothing.
+func TestAnEnvironmentThatDoesNotFitTheSelectionIsNotToldToAnswer(t *testing.T) {
+	misfit := fmt.Errorf("dev/ios: %w", selectionDoesNotFit{detail: `the selected application "shop" variant "release" has no ios client here`})
+	line := droppedEnvironmentLine("dev", misfit)
+	assert.Contains(t, line, "dev is left as it is")
+	assert.NotContains(t, line, "once it answers")
+
+	unread := droppedEnvironmentLine("staging", errors.New("staging/ios: social auth answered 404"))
+	assert.Contains(t, unread, "staging could not be read")
+	assert.Contains(t, unread, "once it answers")
 }

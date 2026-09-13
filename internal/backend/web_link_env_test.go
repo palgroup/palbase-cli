@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -102,4 +103,36 @@ func TestAGeneratorRefusalReachesTheLinksError(t *testing.T) {
 	var out strings.Builder
 	err := runLink(context.Background(), o, &out)
 	require.ErrorContains(t, err, "error: the generator explains itself")
+}
+
+// A LINK THAT FAILS AFTER BINDING THE PROJECT RELEASES THE STACK, AND SAYS SO.
+// The record naming the project is published either way; releasing inside the
+// stage left the release unsaid, and before that a release that did not happen
+// left the stack linked by address winning over the published project.
+func TestAFailedLinkThatBindsTheProjectReleasesTheStackAndSaysSo(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	require.NoError(t, os.WriteFile(palbeGenBin, []byte("#!/bin/sh\necho 'error: the generator explains itself' >&2\nexit 1\n"), 0o755))
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	installed := stackServing(t, linkKeyCanary, nil)
+	require.NoError(t, WriteSelfHostTarget(Target{URL: installed.URL}))
+	o := linkOpts{
+		url:          main.URL,
+		platforms:    []string{"web"},
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
+
+	var out strings.Builder
+	require.Error(t, runLink(context.Background(), o, &out))
+	record, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "prd_a", record.Project, "the failed link published no project record — this test measures nothing")
+	local, err := localPath()
+	require.NoError(t, err)
+	assert.NoFileExists(t, local, "the published record names the project while the stack linked by address still wins")
+	assert.Contains(t, out.String(), "no longer acts on the stack linked here by address")
 }

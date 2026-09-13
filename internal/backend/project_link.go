@@ -543,20 +543,35 @@ func envNameOfRef(envs []Environment, ref string) string {
 // A stack somebody runs is recorded by ADDRESS, because that is all it has —
 // one installation, one identity, one pair of keys. That path also refuses a
 // loopback address, which is the defect measured in this very repository.
-func writeLinkRecord(o linkOpts, target Target, w io.Writer) error {
+func writeLinkRecord(o linkOpts, target Target) error {
 	if o.product.ID == "" {
 		return WriteSelfHostTarget(target)
 	}
-	if err := WriteLinkedIdentity(o.product, target); err != nil {
-		return err
+	return WriteLinkedIdentity(o.product, target)
+}
+
+// releaseForProject releases a stack linked here by address once the committed
+// record names the project this link bound (FR-084).
+//
+// BINDING A PROJECT RELEASES A STACK LINKED HERE BY ADDRESS. That record lives on
+// this machine rather than in the checkout, and every verb prefers it: left in
+// place, the next no-target link or auth refresh pointed the app back at that
+// stack after the person had linked the project. A record `palbase start` wrote
+// is the stack running here and stays.
+//
+// AFTER THE RECORD IS PUBLISHED, WHENEVER IT IS. The record is written into the
+// link's stage and a link that fails later still publishes it; releasing inside
+// the stage made a lasting change and announced it into the buffer the failure
+// threw away.
+func releaseForProject(o linkOpts, root string, w io.Writer) error {
+	if o.product.ID == "" {
+		return nil
 	}
-	// BINDING A PROJECT RELEASES A STACK LINKED HERE BY ADDRESS. That record
-	// lives on this machine rather than in the checkout, and every verb prefers
-	// it: left in place, the next no-target link or auth refresh pointed the app
-	// back at that stack after the person had linked the project. A record
-	// `palbase start` wrote is the stack running here and stays (FR-084). After
-	// the identity, so a link that cannot record the project releases nothing.
-	released, err := forgetLinkedStack(target.checkoutRoot)
+	record, err := readLinkedProject()
+	if err != nil || record.Project != o.product.ID {
+		return nil
+	}
+	released, err := forgetLinkedStack(root)
 	if err != nil {
 		return err
 	}
@@ -582,15 +597,14 @@ func forgetLinkedStack(checkoutRoot string) (bool, error) {
 		return false, err
 	}
 	raw, err := os.ReadFile(local)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
 	if err != nil {
-		return false, err
+		// Absent, or unreadable: nothing here says it is a stack linked by
+		// address, and `Resolve` passes an unreadable record over as well.
+		return false, nil
 	}
 	var record Target
 	if err := decodeTarget(raw, &record); err != nil || !record.SelfHost {
-		// Unreadable, or the stack `palbase start` runs here: not this one's to remove.
+		// Undecodable, or the stack `palbase start` runs here: not this one's to remove.
 		return false, nil
 	}
 	if err := os.Remove(local); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -713,7 +727,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// Remember the target. `login`, `push` and `spec` read it, so none of them
 	// asks for an address again — and a colleague who clones this repository
 	// reaches the same stack without being told which one it is.
-	if err := writeLinkRecord(o, target, w); err != nil {
+	if err := writeLinkRecord(o, target); err != nil {
 		return err
 	}
 
@@ -843,8 +857,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	sort.Strings(droppedNames)
 	for _, name := range droppedNames {
-		fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n",
-			name, dropped[name])
+		fmt.Fprint(w, droppedEnvironmentLine(name, dropped[name]))
 		delete(envs.Environments, name)
 		delete(specs, name)
 		for _, c := range configs {
@@ -949,7 +962,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// THE SECOND WriteTarget USED TO CARRY A DERIVED FIELD FORWARD. It does not
 	// any more: `stackVersion` is derived from the installed package on every
 	// read and written nowhere, so there is nothing to re-read and preserve.
-	if err := writeLinkRecord(o, target, w); err != nil {
+	if err := writeLinkRecord(o, target); err != nil {
 		return err
 	}
 	reportLinked(w, o.product, base, described.Hosting, linkedEnv)

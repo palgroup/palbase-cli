@@ -187,3 +187,19 @@ func TestSurfaceIsListRevealRotate(t *testing.T) {
 		t.Fatalf("unexpected surface: %s", got)
 	}
 }
+
+// REVEAL SAYS WHOSE KEYS BEFORE IT PRINTS THEM (FR-085). The service-role key
+// opens an environment's whole management surface, and it was printed with no
+// line saying which environment it belongs to.
+func TestRevealNamesTheEnvironmentBeforeItsKeys(t *testing.T) {
+	rest := &stubREST{reply: Keys{AnonKey: "pb_project_cPUB", ServiceRoleKey: "pb_project_sSEC"}}
+	target := &stubTarget{ref: "abc123xyz", isCloud: true, describe: "todoapp/staging"}
+	out, err := run(t, rest, target, "", "reveal")
+	if err != nil {
+		t.Fatalf("reveal: %v", err)
+	}
+	banner, secret := strings.Index(out, "▸ todoapp/staging\n"), strings.Index(out, "pb_project_sSEC")
+	if banner < 0 || secret < 0 || banner > secret {
+		t.Fatalf("reveal did not name the environment before its keys:\n%s", out)
+	}
+}

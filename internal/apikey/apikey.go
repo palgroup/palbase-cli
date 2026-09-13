@@ -113,10 +113,14 @@ func revealCmd(r Resolvers) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Print the service-role key — the one that opens the management surface",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := cloudRef(r)
+			target, ref, err := cloudTarget(r)
 			if err != nil {
 				return err
 			}
+			// WHOSE KEYS, BEFORE THE KEY THAT OPENS AN ENVIRONMENT'S WHOLE
+			// MANAGEMENT SURFACE IS PRINTED (FR-085). On stderr, so --json stays
+			// what a script parses.
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
 			var keys Keys
 			if err := r.REST().Do(cmd.Context(), http.MethodGet,
 				"/v1/cloud/projects/"+url.PathEscape(ref)+"/keys", nil, &keys); err != nil {
@@ -194,15 +198,21 @@ the new one.`,
 // cannot — a stack on this machine has no cloud ref, and asking the control
 // plane about it would be asking the wrong authority.
 func cloudRef(r Resolvers) (string, error) {
+	_, ref, err := cloudTarget(r)
+	return ref, err
+}
+
+// cloudTarget is the target a cloud verb acts on, with its ref.
+func cloudTarget(r Resolvers) (Target, string, error) {
 	target, err := r.Target()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	ref, ok := target.Ref()
 	if !ok {
-		return "", fmt.Errorf("%s is not a project on this cloud — its keys are its own", target.Describe())
+		return nil, "", fmt.Errorf("%s is not a project on this cloud — its keys are its own", target.Describe())
 	}
-	return ref, nil
+	return target, ref, nil
 }
 
 func encodeJSON(w io.Writer, v any) error {
