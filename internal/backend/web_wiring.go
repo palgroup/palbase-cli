@@ -1035,7 +1035,7 @@ const webTypesCmd = "palbe-gen --soft || exit 0"
 // existing script with a different value is warned about rather than
 // overwritten, and the `.gitignore` rule that would hide the generated file is
 // reported and never edited.
-func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer) error {
+func wireWebProject(ctx context.Context, entryFlag, outFlag, env string, w io.Writer) error {
 	// A PRECONDITION, not a decision. `runLink` refuses `--platform web` in a
 	// directory with no package.json BEFORE it writes anything (see
 	// refuseUnsupportedPlatforms), so this branch is the guard for a caller that
@@ -1065,12 +1065,18 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag string, w io.Writer)
 		ensurePalbeWeb(ctx, w)
 	}
 
-	// WHICH ENVIRONMENT. The generator needs one, and it is the same answer
-	// `status` gives — derived from the directories on disk, never a second
-	// setting somebody has to keep in step.
-	env, err := selectedWebEnvironment()
-	if err != nil {
-		return err
+	// WHICH ENVIRONMENT. A link names it: the environment it defaulted to,
+	// which is not always the disk's — `--from-env staging`, or this machine's
+	// selection, points the link elsewhere, and a client generated for the
+	// disk default would talk to an environment nobody chose. Every other
+	// caller gets the answer `status` gives, derived from the directories on
+	// disk.
+	if env == "" {
+		selected, err := selectedWebEnvironment()
+		if err != nil {
+			return err
+		}
+		env = selected
 	}
 	generated, err := runPalbeGen(ctx, env, outFlag, w)
 	if err != nil {

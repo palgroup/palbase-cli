@@ -771,7 +771,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// behind `palbase web link` and went unreachable when that command was
 	// retired — so the platform that needs the most setup got the least.
 	if web {
-		if err := wireWebProject(ctx, o.entry, o.out, w); err != nil {
+		if err := wireWebProject(ctx, o.entry, o.out, envs.Default, w); err != nil {
 			return err
 		}
 	}

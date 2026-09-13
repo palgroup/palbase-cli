@@ -1195,7 +1195,7 @@ func runWebLink(t *testing.T, args ...string) string {
 		}
 	}
 	var buf bytes.Buffer
-	require.NoError(t, wireWebProject(context.Background(), entry, out, &buf))
+	require.NoError(t, wireWebProject(context.Background(), entry, out, "", &buf))
 	return buf.String()
 }
 
@@ -1334,7 +1334,7 @@ func TestWebLink_RefusesAnSdkTooOldToWriteTheConfigBarrel(t *testing.T) {
 	// The production entry point, called directly so the REFUSAL is observable —
 	// the test helper asserts NoError and would hide it.
 	var buf bytes.Buffer
-	err := wireWebProject(context.Background(), "", "", &buf)
+	err := wireWebProject(context.Background(), "", "", "", &buf)
 
 	require.Error(t, err, "link succeeded against a generator that cannot write the config barrel")
 	require.Contains(t, err.Error(), ConfigBarrelPath(), "the refusal must name the missing file")
