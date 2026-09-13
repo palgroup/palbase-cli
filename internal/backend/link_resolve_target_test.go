@@ -190,3 +190,23 @@ func TestAnEnvironmentAddressInCapitalsBindsTheProject(t *testing.T) {
 	require.NoError(t, resolveLinkTarget(context.Background(), r, &o))
 	assert.Equal(t, "prd_a", o.product.ID)
 }
+
+// A RECORD FROM BEFORE PROJECTS, LINKED AGAIN WITH NO TARGET, binds the project
+// its address belongs to — the rule typing that address already follows. It
+// used to take the address path and write the retired record shape back.
+func TestANoTargetLinkBindsTheProjectOfARecordFromBeforeProjects(t *testing.T) {
+	inScratchCheckout(t)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(u string) bool { return u == "https://mu0028xyz.palbase.studio" }
+	require.NoError(t, WriteTarget(Target{URL: "https://mu0028xyz.palbase.studio"}))
+
+	o := linkOpts{}
+	r := Resolvers{
+		REST:      func() REST { return twoProjects() },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
+	}
+	require.NoError(t, resolveLinkTarget(context.Background(), r, &o))
+	assert.Equal(t, "prd_a", o.product.ID)
+	assert.Equal(t, "https://8qitbtucm.palbase.studio", o.url, "the link acts on the default environment's address")
+}

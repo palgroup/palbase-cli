@@ -307,11 +307,19 @@ func productByEnvironmentRef(ctx context.Context, r Resolvers, ref string) (Prod
 // address path still needs a credential the stack accepts before it writes.
 func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 	if o.url == "" {
-		// NO TARGET: THE CHECKOUT'S OWN RECORD. `status` tells people to run
-		// `palbase link` when a key went stale, and in a checkout bound to a
-		// project that answered "--url is required" (LV-05). A record that names
-		// a project is linked again as that project; one that carries an
-		// address, or no record at all, leaves the address path to find it.
+		// NO TARGET: WHAT THIS CHECKOUT IS BOUND TO, in the order every verb
+		// resolves it. `status` tells people to run `palbase link` when a key
+		// went stale, and in a checkout bound to a project that answered
+		// "--url is required" (LV-05).
+		//
+		// A stack linked on this machine by address comes first, as it does for
+		// Resolve: re-linking the committed project instead pointed the app at
+		// the cloud while every verb went on acting on that stack.
+		if local, err := ReadTarget(); err == nil && local.SelfHost {
+			o.url = local.URL
+			o.insecure = o.insecure || local.Insecure
+			return nil
+		}
 		if _, statErr := os.Stat(projectPath()); errors.Is(statErr, os.ErrNotExist) {
 			return nil
 		}
@@ -319,15 +327,24 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 		if err != nil {
 			return err
 		}
-		if record.Project == "" {
+		switch {
+		case record.Project != "":
+			again, err := linkOptsForRecord(ctx, record, o.env)
+			if err != nil {
+				return err
+			}
+			o.product, o.environments, o.linkedEnv, o.url = again.product, again.environments, again.linkedEnv, again.url
+			return nil
+		case CloudProjectAddress != nil && CloudProjectAddress(record.URL):
+			// A record from before projects names one environment's address.
+			// Linked again it binds the project that address belongs to, by the
+			// same rule as typing the address; when the listing does not know
+			// it, the address path below keeps it.
+			o.url = record.URL
+		default:
+			// A stack somebody hosts: the address path reads it.
 			return nil
 		}
-		again, err := linkOptsForRecord(ctx, record, o.env)
-		if err != nil {
-			return err
-		}
-		o.product, o.environments, o.linkedEnv, o.url = again.product, again.environments, again.linkedEnv, again.url
-		return nil
 	}
 	bind := func(product Product, envs []Environment) error {
 		// The address to TALK to during this link is the DEFAULT environment's,

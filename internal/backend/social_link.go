@@ -250,6 +250,14 @@ func nativeIdentifiers(platform string) []string {
 func platformEnvironments(ctx context.Context, target *Target, platform string, source appEnvironments) (appEnvironments, map[string]error, error) {
 	result := appEnvironments{Default: source.Default, Environments: map[string]appEnvironment{}}
 	dropped := map[string]error{}
+	// ONE SELECTION PER CHECKOUT, AND IT IS THE COMMITTED ONE. Every environment
+	// is read with what project.json records, never with what an environment
+	// read before it learned: carried across, that asked main for another
+	// environment's application and main's client list came back empty, decided
+	// by which name sorted first. What this run learns is recorded from the
+	// default environment alone.
+	committed := target.OAuth[platform]
+	var learned *OAuthSelection
 	for _, name := range source.names() {
 		env := source.Environments[name]
 		if env.APIKey == "" {
@@ -275,7 +283,7 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 			return true
 		}
 		remote := Target{URL: env.BaseURL, Insecure: target.Insecure}
-		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, env.SealedRoot, target.OAuth[platform])
+		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, env.SealedRoot, committed)
 		if err != nil {
 			reason := fmt.Errorf("%s/%s: %w", name, platform, err)
 			if drop(reason) {
@@ -293,12 +301,18 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 				}
 				return result, dropped, reason
 			}
-			if target.OAuth == nil {
-				target.OAuth = map[string]OAuthSelection{}
+			if name == source.Default {
+				chosen := selection
+				learned = &chosen
 			}
-			target.OAuth[platform] = selection
 		}
 		result.Environments[name] = env
+	}
+	if learned != nil {
+		if target.OAuth == nil {
+			target.OAuth = map[string]OAuthSelection{}
+		}
+		target.OAuth[platform] = *learned
 	}
 	return result, dropped, nil
 }
@@ -317,8 +331,10 @@ func RefreshLinkedClients(ctx context.Context, w io.Writer) error {
 	// A CHECKOUT BOUND TO A PROJECT IS REFRESHED AS THAT PROJECT. Handing the
 	// link the resolved ADDRESS alone wrote the retired record shape and
 	// fetched one environment, so an auth write left every other
-	// environment's config behind (FR-027).
-	if record, recErr := readLinkedProject(); recErr == nil && record.Project != "" {
+	// environment's config behind (FR-027). A stack linked on this machine by
+	// address is not that project: the auth write went to it, because Resolve
+	// prefers it, so it is what gets refreshed.
+	if record, recErr := readLinkedProject(); recErr == nil && record.Project != "" && !resolved.Target.SelfHost {
 		o, err := linkOptsForRecord(ctx, record, resolved.Env)
 		if err != nil {
 			return err
