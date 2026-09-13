@@ -248,3 +248,28 @@ func TestABackendCheckoutAsksOnlyTheEnvironmentItReadsFrom(t *testing.T) {
 	_, err := os.Stat(EnvDir("staging"))
 	assert.True(t, os.IsNotExist(err))
 }
+
+// THE SWEEP'S DIRECTORY LEAVES THE CHECKOUT (FR-017, X-1). The link runs in a
+// stage and publishes file by file: the swept environment's files went, and its
+// directory stayed behind, empty, under the line that said it was removed.
+func TestASweptEnvironmentLeavesNoDirectoryInTheCheckout(t *testing.T) {
+	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	root, err := os.Getwd()
+	require.NoError(t, err)
+	staging := seedGeneratedEnvironment(t, root, "staging")
+	o := linkOpts{
+		url:          main.URL,
+		platforms:    []string{"ios"},
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.Contains(t, out.String(), "the project no longer has that environment", "the sweep did not run — this test measures nothing")
+	assert.NoDirExists(t, staging, "the checkout kept an empty directory for an environment the link said it removed")
+}

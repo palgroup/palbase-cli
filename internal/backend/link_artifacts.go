@@ -484,6 +484,21 @@ func publishArtifacts(root string, before, after map[string]artifactFile) error 
 		}
 		applied = append(applied, path)
 	}
+	// A DIRECTORY THE SWEEP EMPTIED GOES WITH ITS FILES (FR-017). Publishing is
+	// file by file, so a removed environment stayed in the checkout as an empty
+	// directory under the line that said it was removed. Only inside the
+	// environments directory, and only while a directory is empty.
+	environments := filepath.Join(root, filepath.Dir(filepath.FromSlash(EnvDir("any"))))
+	for _, path := range applied {
+		if _, kept := after[path]; kept {
+			continue
+		}
+		for dir := filepath.Dir(filepath.Join(root, path)); strings.HasPrefix(dir, environments+string(filepath.Separator)); dir = filepath.Dir(dir) {
+			if os.Remove(dir) != nil {
+				break
+			}
+		}
+	}
 	return nil
 }
 

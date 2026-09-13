@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -242,4 +243,110 @@ func TestAnEnvironmentThatDoesNotFitTheSelectionIsNotToldToAnswer(t *testing.T) 
 	unread := droppedEnvironmentLine("staging", errors.New("staging/ios: social auth answered 404"))
 	assert.Contains(t, unread, "staging could not be read")
 	assert.Contains(t, unread, "once it answers")
+}
+
+// oauthAndroidServer is oauthAppServer for Android: each target ("shop", or
+// "shop/debug") configures a Google Android client for com.example.app, and the
+// snapshot answers with the client for the application and variant it
+// configures and none for any other.
+func oauthAndroidServer(t *testing.T, targets ...string) *httptest.Server {
+	t.Helper()
+	type configured struct{ appKey, variant string }
+	var configs []configured
+	const (
+		androidClient = "ANDROID.apps.googleusercontent.com"
+		serverClient  = "SERVER.apps.googleusercontent.com"
+		signing       = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD"
+	)
+	native := []any{}
+	for _, target := range targets {
+		appKey, variant, found := strings.Cut(target, "/")
+		if !found {
+			variant = "release"
+		}
+		configs = append(configs, configured{appKey, variant})
+		native = append(native, map[string]any{"key": "google-android-" + appKey + "-" + variant, "enabled": true, "application_key": appKey, "platform": "android", "variant": variant, "package_name": "com.example.app", "android_client_id": androidClient, "server_client_id": serverClient, "signing_certificate_sha1": signing})
+	}
+	providers := map[string]any{}
+	for _, name := range []string{"google", "apple", "microsoft", "github"} {
+		providers[name] = map[string]any{"enabled": false, "browser_clients": []any{}, "native_clients": []any{}}
+	}
+	providers["google"] = map[string]any{"enabled": true, "browser_clients": []any{}, "native_clients": native}
+	admin, err := json.Marshal(map[string]any{"contract_revision": 1, "credentials": []any{}, "providers": providers})
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sealedclient.KeysetPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Palbase-Auth-Contract", "1")
+		switch r.URL.Path {
+		case "/v1/management/auth/social-auth":
+			_, _ = w.Write(admin)
+		case "/auth/oauth/config":
+			asked, askedVariant := r.URL.Query().Get("application_key"), r.URL.Query().Get("variant")
+			clients := []any{}
+			for _, c := range configs {
+				if asked == c.appKey && askedVariant == c.variant {
+					clients = append(clients, map[string]any{"key": "google-android-" + c.appKey + "-" + c.variant, "provider": "google", "mode": "native", "adapter": "google_android_credential_manager", "package_name": "com.example.app", "android_client_id": androidClient, "server_client_id": serverClient, "signing_certificate_sha1": signing})
+				}
+			}
+			snapshot, _ := json.Marshal(map[string]any{"contract_revision": 1, "config_revision": "2", "environment_ref": "env", "application_key": asked, "platform": "android", "variant": askedVariant, "clients": clients})
+			_, _ = w.Write(snapshot)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	linkedAs(t, srv.URL, "operator")
+	return srv
+}
+
+func seedAndroidApp(t *testing.T) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll("app", 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join("app", "build.gradle.kts"),
+		[]byte(`android { defaultConfig { applicationId = "com.example.app" } }`), 0o644))
+}
+
+// AN ANDROID APP IS IDENTIFIED BY THE PACKAGE ITS GRADLE DECLARES (X-6). The
+// selection is learned from the client whose package_name is the app's
+// applicationId — no unit test measured that branch.
+func TestAnAndroidEnvironmentIsReadUnderThePackageItsGradleDeclares(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	main := oauthAndroidServer(t, "shop")
+	source := appEnvironments{Default: "main", Environments: map[string]appEnvironment{
+		"main": {AppID: projectAppID, BaseURL: main.URL, APIKey: "pb_env_cPUBLIC"},
+	}}
+
+	target := Target{URL: main.URL}
+	result, dropped, err := platformEnvironments(context.Background(), &target, "android", source)
+	require.NoError(t, err)
+	require.Empty(t, dropped)
+	require.NotNil(t, result.Environments["main"].OAuth, "main got no auth snapshot")
+	assert.Len(t, result.Environments["main"].OAuth.Clients, 1)
+	assert.Equal(t, "shop", target.OAuth["android"].ApplicationKey)
+}
+
+// AND AN ANDROID ENVIRONMENT UNDER ANOTHER APPLICATION IS NAMED (X-6, FR-013),
+// by the same package_name rule, instead of being written without its client.
+func TestAnAndroidEnvironmentConfiguredUnderAnotherKeyIsNamed(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	dev := oauthAndroidServer(t, "consumer")
+	main := oauthAndroidServer(t, "shop")
+	source := appEnvironments{Default: "main", Environments: map[string]appEnvironment{
+		"dev":  {AppID: projectAppID, BaseURL: dev.URL, APIKey: "pb_env_cPUBLIC"},
+		"main": {AppID: projectAppID, BaseURL: main.URL, APIKey: "pb_env_cPUBLIC"},
+	}}
+
+	target := Target{URL: main.URL}
+	result, dropped, err := platformEnvironments(context.Background(), &target, "android", source)
+	require.NoError(t, err)
+	assert.NotContains(t, result.Environments, "dev", "dev was written with a selection that does not fit it")
+	require.Contains(t, dropped, "dev")
+	var misfit selectionDoesNotFit
+	assert.ErrorAs(t, dropped["dev"], &misfit)
+	assert.ErrorContains(t, dropped["dev"], `"consumer"`)
 }
