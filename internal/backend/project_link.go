@@ -608,33 +608,9 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// The environment NAME is the one this link read from, not a constant: the
 	// old `defaultEnvName` returned "main" for every cloud checkout, so a
 	// second environment overwrote the first one's contract in place.
-	envs, specs, roles, err := gatherEnvironments(ctx, target, linkedEnv, anon, nil, writesPerEnvironmentArtifacts(platforms), w)
+	envs, specs, roles, err := gatherEnvironments(ctx, target, linkedEnv, anon, o.environments, writesPerEnvironmentArtifacts(platforms), w)
 	if err != nil {
 		return err
-	}
-	// The contracts and role documents are written as soon as they are read.
-	if writesPerEnvironmentArtifacts(platforms) {
-		names := make([]string, 0, len(specs))
-		for name := range specs {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			if err := writeSpec(name, specs[name]); err != nil {
-				return err
-			}
-		}
-		roleNames := make([]string, 0, len(roles))
-		for name := range roles {
-			roleNames = append(roleNames, name)
-		}
-		sort.Strings(roleNames)
-		for _, name := range roleNames {
-			if err := writeRolesArtifact(rolesPath(name), roles[name]); err != nil {
-				return err
-			}
-			fmt.Fprintf(w, "✓ wrote %s (%d roles)\n", rolesPath(name), len(roles[name].Roles))
-		}
 	}
 
 	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
@@ -673,22 +649,29 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// The platform list is not decoration: it says which toolchain is on the
 	// other end, and a link that ignores it is a link for one platform wearing
 	// a flag for four.
-	apple := false
-	web := false
+	// EVERY READ FIRST, THEN EVERY WRITE (FR-070).
+	//
+	// An environment whose social read fails for ONE platform is written for
+	// NONE. Writing as each platform was read left half a directory behind — a
+	// web config refreshed beside the previous run's Apple one, a contract newer
+	// than both — and the committed files it already had are the better answer
+	// until `palbase link` can read it again.
+	type platformConfig struct {
+		platform string
+		envs     appEnvironments
+	}
+	var configs []platformConfig
+	dropped := map[string]error{}
 	for _, platform := range platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))
-		selectedEnvs, dropped, configErr := platformEnvironments(ctx, &target, platform, envs)
+		selectedEnvs, droppedHere, configErr := platformEnvironments(ctx, &target, platform, envs)
 		if configErr != nil {
 			return configErr
 		}
-		droppedNames := make([]string, 0, len(dropped))
-		for name := range dropped {
-			droppedNames = append(droppedNames, name)
-		}
-		sort.Strings(droppedNames)
-		for _, name := range droppedNames {
-			fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n",
-				name, dropped[name])
+		for name, reason := range droppedHere {
+			if _, seen := dropped[name]; !seen {
+				dropped[name] = reason
+			}
 		}
 		// APPLE YUVASINI, APPLE PROJESİ OLMAYAN BİR CHECKOUT'A YAZMA.
 		//
@@ -708,18 +691,60 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 			return fmt.Errorf("this checkout has no Xcode project, so an Apple client cannot be generated here — "+
 				"run `palbase link --platform %s` in the app's own checkout (the one holding the .xcodeproj)", platform)
 		}
-		paths, err := writeEnvironmentConfigs([]string{platform}, selectedEnvs)
+		configs = append(configs, platformConfig{platform: platform, envs: selectedEnvs})
+	}
+	droppedNames := make([]string, 0, len(dropped))
+	for name := range dropped {
+		droppedNames = append(droppedNames, name)
+	}
+	sort.Strings(droppedNames)
+	for _, name := range droppedNames {
+		fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n",
+			name, dropped[name])
+		delete(envs.Environments, name)
+		for _, c := range configs {
+			delete(c.envs.Environments, name)
+		}
+	}
+
+	apple := false
+	web := false
+	for _, c := range configs {
+		paths, err := writeEnvironmentConfigs([]string{c.platform}, c.envs)
 		if err != nil {
 			return err
 		}
-		if isApplePlatform(platform) {
+		if isApplePlatform(c.platform) {
 			apple = true
 		}
-		if platform == webPlatform {
+		if c.platform == webPlatform {
 			web = true
 		}
 		for _, p := range paths {
 			fmt.Fprintf(w, "wrote %s\n", p)
+		}
+	}
+	// The contracts and role documents of the environments that survived, and
+	// only where a generator reads them (FR-019).
+	if writesPerEnvironmentArtifacts(platforms) {
+		for _, name := range envs.names() {
+			spec, ok := specs[name]
+			if !ok {
+				continue
+			}
+			if err := writeSpec(name, spec); err != nil {
+				return err
+			}
+		}
+		for _, name := range envs.names() {
+			r, ok := roles[name]
+			if !ok {
+				continue
+			}
+			if err := writeRolesArtifact(rolesPath(name), r); err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "✓ wrote %s (%d roles)\n", rolesPath(name), len(r.Roles))
 		}
 	}
 
@@ -756,7 +781,14 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// Swift only — the web client is generated by `palbe-gen`, which ships in
 	// @palbase/web and reads the committed artifacts offline.
 	if apple {
-		if err := generateForEnvironmentsAt(ctx, envs, w, o.checkoutRoot); err != nil {
+		// KEPT: every environment the project lists, whether or not this run
+		// could read it (FR-016) — plus `local` and what was just written (C-10).
+		keep := envs.names()
+		for _, e := range o.environments {
+			keep = append(keep, e.Name)
+		}
+		keep = append(keep, localEnvName)
+		if err := generateForEnvironmentsAt(ctx, envs, keep, w, o.checkoutRoot); err != nil {
 			return err
 		}
 	}

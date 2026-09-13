@@ -794,16 +794,20 @@ func writeSpec(env string, spec []byte) error {
 // generateForEnvironments emits one client per environment, and one plist for
 // all of them.
 func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Writer) error {
-	return generateForEnvironmentsAt(ctx, envs, w, "")
+	return generateForEnvironmentsAt(ctx, envs, envs.names(), w, "")
 }
 
-func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.Writer, toolRoot string) error {
+// keep is every environment whose directory the sweep must leave alone. It is
+// a parameter, not envs.names(): one link describes every environment of a
+// project, and one it could not read this run is still the project's — its
+// directory is kept even though the map carries no entry for it.
+func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, keep []string, w io.Writer, toolRoot string) error {
 	root, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	// A LEFT-BEHIND ENVIRONMENT BREAKS THE BUILD, so it goes first.
-	if err := removeStaleEnvironmentDirs(root, envs.names(), w); err != nil {
+	if err := removeStaleEnvironmentDirs(root, keep, w); err != nil {
 		return err
 	}
 

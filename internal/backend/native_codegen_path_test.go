@@ -27,7 +27,7 @@ func TestNativeCodegenPath(t *testing.T) {
 		Environments: map[string]appEnvironment{"main": {AppID: projectAppID, BaseURL: "https://x.palbase.studio"}},
 	}
 	var out strings.Builder
-	require.NoError(t, generateForEnvironmentsAt(context.Background(), envs, &out, ""))
+	require.NoError(t, generateForEnvironmentsAt(context.Background(), envs, envs.names(), &out, ""))
 
 	// THE client, at the declared path and nowhere else.
 	require.FileExists(t, filepath.Join(root, filepath.FromSlash(GeneratedPath("main", "ios"))),
