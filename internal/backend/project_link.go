@@ -551,7 +551,9 @@ func writeLinkRecord(o linkOpts, target Target) error {
 }
 
 // releaseForProject releases a stack linked here by address once the committed
-// record names the project this link bound (FR-084).
+// record names the project this link was asked for (FR-084) — also when the link
+// failed before reading anything and the checkout already named that project:
+// the person asked for that project, and the record says so.
 //
 // BINDING A PROJECT RELEASES A STACK LINKED HERE BY ADDRESS. That record lives on
 // this machine rather than in the checkout, and every verb prefers it: left in

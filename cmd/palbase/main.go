@@ -170,8 +170,10 @@ func tenantRefOf(tenantURL, publicHost string) (string, bool) {
 	if err != nil || u.Hostname() == "" {
 		return "", false
 	}
-	suffix := "." + publicHost
-	host := u.Hostname()
+	// A HOST IS CASE-INSENSITIVE (FR-002): `<ref>.PALBASE.STUDIO` is the same
+	// environment, and compared case-sensitively it fell to the address path.
+	suffix := "." + strings.ToLower(publicHost)
+	host := strings.ToLower(u.Hostname())
 	if !strings.HasSuffix(host, suffix) {
 		return "", false
 	}

@@ -246,7 +246,7 @@ var rejectionHelp = map[string]string{
 	// that cannot move them is worse than sending them nowhere — they retype it,
 	// get the same rejection, and conclude the device is at fault.
 	"forbidden": "not allowed on this session. A viewer may watch and nothing else. Check that " +
-		"the environment this checkout is linked to is the one the device armed against — " +
+		"the project this checkout is linked to, and the environment it resolves to, are the ones the device armed against — " +
 		"`palbase status` shows it; pass `--env <name>` to attach to another environment, and `palbase env use <name>` remembers the choice.",
 }
 
