@@ -115,7 +115,7 @@ func linkHelpWritesBlock() string {
 func newLinkCmd(r Resolvers) *cobra.Command {
 	var o linkOpts
 	cmd := &cobra.Command{
-		Use:   "link <target>",
+		Use:   "link [target]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bind this app to a stack and generate its client",
 		Long: `Bind this checkout to a project, and generate the typed client for it.
@@ -174,7 +174,7 @@ boot generated.`,
 	// WHICH environment this link reads the contract and the key from. The
 	// committed file records the PROJECT either way; this only decides where
 	// the artifacts in this checkout come from.
-	f.StringVar(&o.env, "from-env", "", "environment to read the contract and key from (default: the project's only one)")
+	f.StringVar(&o.env, "from-env", "", "environment to read the contract and key from (default: the only available one, else this machine's selection, else main, else the first by name)")
 	f.StringVar(&o.entry, "entry", "", "web: entry file to wire the generated client into (auto-detected when absent)")
 	f.StringVar(&o.out, "out", "", "web: name for the generated client (default: palbe.gen.ts)")
 	return cmd
@@ -203,9 +203,9 @@ func productByName(ctx context.Context, r Resolvers, typed string) (Product, []E
 		// A NAME, AN ID OR ONE OF ITS ENVIRONMENTS' REFS — all three name the
 		// PROJECT, and they are counted together: a word that is one project's
 		// name and another's environment ref is two answers, not a precedence.
-		matched := strings.EqualFold(strings.TrimSpace(p.product.Name), want) || p.product.ID == typed
+		matched := strings.EqualFold(strings.TrimSpace(p.product.Name), want) || p.product.ID == want
 		for _, e := range p.envs {
-			if e.Ref == typed {
+			if e.Ref == want {
 				matched = true
 			}
 		}
@@ -360,7 +360,8 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 	if o.tokenStdin || r.REST == nil || r.REST() == nil || CloudProjectAddress == nil || !CloudProjectAddress(o.url) {
 		return nil
 	}
-	product, envs, found, err := productByEnvironmentRef(ctx, r, refOfURL(o.url))
+	// A host is case-insensitive; a ref is never written in capitals.
+	product, envs, found, err := productByEnvironmentRef(ctx, r, strings.ToLower(refOfURL(o.url)))
 	if err != nil || !found {
 		return nil
 	}
@@ -432,7 +433,7 @@ func linkEnvironmentRef(product Product, envs []Environment, named string) (stri
 				return e.Ref, nil
 			}
 		}
-		return "", fmt.Errorf("%q is not an environment of %s.\n%s", named, product.Name, listing(envs))
+		return "", fmt.Errorf("%q is not an environment of %s.\n%s", named, product.Name, listingWithStatus(envs))
 	}
 	if len(envs) == 0 {
 		return "", fmt.Errorf("%s has no environments yet — `palbase env create <name>` makes one", product.Name)
@@ -474,9 +475,19 @@ func linkEnvironmentRef(product Product, envs []Environment, named string) (stri
 // above is ABOUT the phase, and a list that hides it sends the reader to
 // `palbase project list` to find out why.
 func listingWithStatus(envs []Environment) string {
+	// Lined up like listing(): this is the menu a refusal hands a person.
+	widestName, widestRef := 0, 0
+	for _, e := range envs {
+		if n := len([]rune(e.Name)); n > widestName {
+			widestName = n
+		}
+		if n := len([]rune(e.Ref)); n > widestRef {
+			widestRef = n
+		}
+	}
 	rows := make([]string, 0, len(envs))
 	for _, e := range envs {
-		rows = append(rows, fmt.Sprintf("  %s   %s   %s", e.Name, e.Ref, e.Status))
+		rows = append(rows, strings.TrimRight(fmt.Sprintf("  %-*s   %-*s   %s", widestName, e.Name, widestRef, e.Ref, e.Status), " "))
 	}
 	sort.Strings(rows)
 	return strings.Join(rows, "\n")
@@ -658,7 +669,20 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// The environment NAME is the one this link read from, not a constant: the
 	// old `defaultEnvName` returned "main" for every cloud checkout, so a
 	// second environment overwrote the first one's contract in place.
-	envs, specs, roles, err := gatherEnvironments(ctx, target, linkedEnv, anon, o.environments, writesPerEnvironmentArtifacts(platforms), w)
+	// A CHECKOUT WITH NO CLIENT READS ONE ENVIRONMENT. The others' configs and
+	// contracts have no reader here (FR-019), so describing them waited — up to
+	// the whole readiness budget for one that sleeps — for files nobody writes.
+	// Which of them is Failed or being deleted is still said (FR-015).
+	project := o.environments
+	if !writesPerEnvironmentArtifacts(platforms) {
+		for _, e := range o.environments {
+			if unavailableEnvironment(e.Status) {
+				fmt.Fprintf(w, "%s is %s — not asked\n", e.Name, e.Status)
+			}
+		}
+		project = nil
+	}
+	envs, specs, roles, err := gatherEnvironments(ctx, target, linkedEnv, anon, project, writesPerEnvironmentArtifacts(platforms), w)
 	if err != nil {
 		return err
 	}
@@ -752,6 +776,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n",
 			name, dropped[name])
 		delete(envs.Environments, name)
+		delete(specs, name)
 		for _, c := range configs {
 			delete(c.envs.Environments, name)
 		}

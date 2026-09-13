@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,7 +61,7 @@ func TestOneLinkWritesEveryReadableEnvironmentAndKeepsAFailedOnesFiles(t *testin
 	after, err := os.ReadFile(ConfigPath("staging", webPlatform))
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after), "a failed environment's committed config was rewritten")
-	assert.Contains(t, out.String(), "staging")
+	assert.Contains(t, out.String(), "staging could not be read")
 }
 
 func TestAnEnvironmentThatCannotBeReadGetsNoDirectory(t *testing.T) {
@@ -173,4 +174,77 @@ func TestAnAppleLinkKeepsTheDirectoryOfAnEnvironmentItDidNotRead(t *testing.T) {
 	require.FileExists(t, ConfigPath("main", "ios"))
 	assert.FileExists(t, filepath.Join(staging, "PalbaseGenerated.swift"),
 		"an Apple link deleted the committed files of an environment the project still lists")
+}
+
+// FR-070 FOR THE APPLE GENERATOR: an environment dropped this run keeps its
+// committed contract, roles, config, client and plist byte for byte. The
+// generator is handed the environments that survived, not the ones described.
+func TestADroppedEnvironmentKeepsItsGeneratedAppleFiles(t *testing.T) {
+	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
+	main := stackServing(t, linkKeyMain, nil)
+	staging := iosClientServer(t, linkKeyStaging)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	committed := map[string]string{
+		SpecPath("staging"):             `{"openapi":"3.1.0"}`,
+		RolesPath("staging"):            `{"roles":[]}`,
+		ConfigPath("staging", "ios"):    `{"app_id":"project"}`,
+		GeneratedPath("staging", "ios"): "// generated before",
+		PlistPath("staging"):            "old plist",
+	}
+	for path, body := range committed {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+	}
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"ios"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.Contains(t, out.String(), "staging could not be read", "staging's iOS read did not fail — this test measures nothing")
+	for path, body := range committed {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err, path)
+		assert.Equal(t, body, string(got), "%s was rewritten for an environment this link dropped", path)
+	}
+}
+
+// A CHECKOUT WITH NO CLIENT READS ONE ENVIRONMENT. Describing the others waited
+// — the whole readiness budget for one that sleeps — for files nothing here
+// writes; which environment is Failed is still said, without asking it (FR-015).
+func TestABackendCheckoutAsksOnlyTheEnvironmentItReadsFrom(t *testing.T) {
+	inScratchCheckout(t)
+	prevWait, prevEvery := stackReadyWait, stackReadyRetryEvery
+	stackReadyWait, stackReadyRetryEvery = 300*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { stackReadyWait, stackReadyRetryEvery = prevWait, prevEvery })
+	main := stackServing(t, linkKeyMain, nil)
+	staging, stagingHits := envServer(t, linkKeyStaging, envServerOpts{notReady: true})
+	broken, brokenHits := envServer(t, linkKeyCanary, envServerOpts{})
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL, "brokref000": broken.URL})
+	o := linkOpts{
+		url:       main.URL,
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Archived"},
+			{Name: "broken", Ref: "brokref000", Status: "Failed"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	assert.Zero(t, stagingHits.Load(), "a checkout with no client asked an environment it writes nothing for")
+	assert.Zero(t, brokenHits.Load(), "a Failed environment was asked")
+	assert.Contains(t, out.String(), "broken is Failed")
+	_, err := os.Stat(EnvDir("staging"))
+	assert.True(t, os.IsNotExist(err))
 }

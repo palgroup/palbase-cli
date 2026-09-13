@@ -2,6 +2,8 @@ package backend
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -42,4 +44,49 @@ func TestTheDefaultEnvironmentWhoseSocialReadFailsIsFatal(t *testing.T) {
 	target := Target{URL: main.URL}
 	_, _, err := platformEnvironments(context.Background(), &target, "web", source)
 	require.Error(t, err)
+}
+
+// divergentSnapshotServer answers a social read whose snapshot names another
+// environment than the publishable key does, for a checkout whose Xcode project
+// does identify the configured iOS client — so the read itself succeeds, and
+// the only thing wrong is which environment it is for.
+func divergentSnapshotServer(t *testing.T) string {
+	t.Helper()
+	require.NoError(t, os.Mkdir("Consumer.xcodeproj", 0o755))
+	require.NoError(t, os.WriteFile("Consumer.xcodeproj/project.pbxproj", []byte(`PRODUCT_BUNDLE_IDENTIFIER = com.example.app;`), 0o644))
+	srv := oauthLinkServer(t, strings.Replace(iosSnapshot, `"environment_ref":"env"`, `"environment_ref":"elsewhere"`, 1))
+	return srv.URL
+}
+
+// A SNAPSHOT FOR ANOTHER ENVIRONMENT IS A FAILED READ (FR-013). Written, it
+// would hand the app a client that signs in against the wrong environment.
+func TestANonDefaultEnvironmentWhoseSnapshotDivergesIsDropped(t *testing.T) {
+	inScratchCheckout(t)
+	main := stackServing(t, "pb_project_cMAIN", nil)
+	linkedAs(t, main.URL, "a-credential")
+	staging := divergentSnapshotServer(t)
+	source := appEnvironments{Default: "main", Environments: map[string]appEnvironment{
+		"main":    {AppID: projectAppID, BaseURL: main.URL, APIKey: "pb_project_cMAIN"},
+		"staging": {AppID: projectAppID, BaseURL: staging, APIKey: "pb_env_cPUBLIC"},
+	}}
+
+	target := Target{URL: main.URL}
+	result, dropped, err := platformEnvironments(context.Background(), &target, "ios", source)
+	require.NoError(t, err)
+	require.Contains(t, dropped, "staging")
+	assert.ErrorContains(t, dropped["staging"], "differs from the publishable key")
+	assert.NotContains(t, result.Environments, "staging")
+	assert.Empty(t, target.OAuth, "a dropped environment's client selection was kept")
+}
+
+func TestTheDefaultEnvironmentWhoseSnapshotDivergesIsFatal(t *testing.T) {
+	inScratchCheckout(t)
+	main := divergentSnapshotServer(t)
+	source := appEnvironments{Default: "main", Environments: map[string]appEnvironment{
+		"main": {AppID: projectAppID, BaseURL: main, APIKey: "pb_env_cPUBLIC"},
+	}}
+
+	target := Target{URL: main}
+	_, _, err := platformEnvironments(context.Background(), &target, "ios", source)
+	require.ErrorContains(t, err, "differs from the publishable key")
 }

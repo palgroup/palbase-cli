@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -131,4 +132,61 @@ func TestLinkHelpNamesEveryForm(t *testing.T) {
 	} {
 		assert.Contains(t, cmd.Long, want)
 	}
+}
+
+// A LISTING THAT CANNOT BE READ LEAVES THE ADDRESS ALONE (FR-005). An operator
+// with no session links the control plane's own stack by address, and a person
+// whose session expired still reaches the credential message — neither is
+// refused because the projects could not be listed.
+func TestAnAddressWhoseListingCannotBeReadIsLeftAlone(t *testing.T) {
+	inScratchCheckout(t)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return true }
+
+	o := linkOpts{url: "https://mu0028xyz.palbase.studio"}
+	r := Resolvers{
+		REST:      func() REST { return &nameREST{err: errors.New("401 unauthorized")} },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
+	}
+	require.NoError(t, resolveLinkTarget(context.Background(), r, &o))
+	assert.Empty(t, o.product.ID)
+	assert.Equal(t, "https://mu0028xyz.palbase.studio", o.url)
+}
+
+// AN ADDRESS OUTSIDE THIS CLOUD IS NEVER LOOKED UP: whose projects there are
+// says nothing about a stack somebody runs.
+func TestAnAddressOutsideTheCloudIsNotLookedUp(t *testing.T) {
+	inScratchCheckout(t)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return false }
+
+	rest := twoProjects()
+	o := linkOpts{url: "https://stack.example.com"}
+	r := Resolvers{
+		REST:      func() REST { return rest },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
+	}
+	require.NoError(t, resolveLinkTarget(context.Background(), r, &o))
+	assert.Empty(t, rest.path, "the listing was asked about an address outside this cloud")
+	assert.Equal(t, "https://stack.example.com", o.url)
+}
+
+// A HOST IS CASE-INSENSITIVE. An environment address pasted in capitals is the
+// same environment, and binding it as an address would commit the retired
+// record shape.
+func TestAnEnvironmentAddressInCapitalsBindsTheProject(t *testing.T) {
+	inScratchCheckout(t)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return true }
+
+	o := linkOpts{url: "https://MU0028XYZ.palbase.studio"}
+	r := Resolvers{
+		REST:      func() REST { return twoProjects() },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
+	}
+	require.NoError(t, resolveLinkTarget(context.Background(), r, &o))
+	assert.Equal(t, "prd_a", o.product.ID)
 }

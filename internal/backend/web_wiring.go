@@ -1141,12 +1141,11 @@ func webTypesCmdFor(outFile string) string {
 	return "palbe-gen --out " + quoted + " --soft || exit 0"
 }
 
-// selectedWebEnvironment names the environment a web checkout is wired to.
-//
-// `local` when the machine's stack is what this checkout points at, otherwise
-// the first cloud environment carrying a web config — the same rule
-// `readAppEnvironments` uses, so the wiring and the status view can never
-// disagree about which environment they are talking about.
+// selectedWebEnvironment names the environment a web checkout is wired to when
+// the caller does not name one: the default readAppEnvironments derives from
+// the directories on disk — `main` when there is one, otherwise the first by
+// name that is not `local`, and `local` only when it is the only one — so the
+// wiring and the status view cannot disagree about which environment they mean.
 func selectedWebEnvironment() (string, error) {
 	envs, err := readAppEnvironments(webPlatform)
 	if err != nil {

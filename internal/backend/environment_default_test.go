@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,6 +58,8 @@ func TestLinkRefusesAFromEnvThatIsUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "staging")
 	assert.Contains(t, err.Error(), "Failed")
+	assert.Contains(t, strings.SplitN(err.Error(), "\n", 2)[0], "staging of todoapp is Failed",
+		"the refusal itself names neither the environment nor its status")
 }
 
 func TestLinkRefusesWhenEveryEnvironmentIsUnavailable(t *testing.T) {
@@ -68,6 +71,8 @@ func TestLinkRefusesWhenEveryEnvironmentIsUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Deleting")
 	assert.Contains(t, err.Error(), "Failed")
+	assert.Regexp(t, "main +aaaaaaaaa +Deleting", err.Error())
+	assert.Regexp(t, "staging +bbbbbbbbb +Failed", err.Error())
 }
 
 func TestLinkDefaultSkipsAnUnavailableMain(t *testing.T) {
@@ -80,4 +85,30 @@ func TestLinkDefaultSkipsAnUnavailableMain(t *testing.T) {
 	ref, err := linkEnvironmentRef(Product{ID: "prd_a", Name: "todoapp"}, envs, "")
 	require.NoError(t, err)
 	assert.Equal(t, "ccccccccc", ref, "the default rule must pick the first available name")
+}
+
+// ONE ENVIRONMENT, AND IT IS FAILED (FR-079). The shortcut for a project with a
+// single environment used to come before the status filter.
+func TestLinkRefusesTheOnlyEnvironmentWhenItIsUnavailable(t *testing.T) {
+	envs := []Environment{{Name: "main", Ref: "aaaaaaaaa", Status: "Failed"}}
+	_, err := linkEnvironmentRef(Product{ID: "prd_a", Name: "todoapp"}, envs, "")
+	require.Error(t, err)
+	assert.Contains(t, strings.SplitN(err.Error(), "\n", 2)[0], "nothing to link")
+	assert.Regexp(t, "main +aaaaaaaaa +Failed", err.Error())
+}
+
+// A REMEMBERED CHOICE OF A FAILED ENVIRONMENT IS NOT A CANDIDATE (D-9). This
+// machine chose `main`; `main` has failed since, so the default rule decides
+// among the rest.
+func TestLinkIgnoresASelectionOfAnUnavailableEnvironment(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, WriteSelection(".", Selection{Project: "prd_a", Env: "main", Ref: "aaaaaaaaa"}))
+	envs := []Environment{
+		{Name: "main", Ref: "aaaaaaaaa", Status: "Failed"},
+		{Name: "staging", Ref: "bbbbbbbbb", Status: "Running"},
+		{Name: "canary", Ref: "ccccccccc", Status: "Running"},
+	}
+	ref, err := linkEnvironmentRef(Product{ID: "prd_a", Name: "todoapp"}, envs, "")
+	require.NoError(t, err)
+	assert.Equal(t, "ccccccccc", ref, "the selection of a Failed environment was followed")
 }

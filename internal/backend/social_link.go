@@ -287,7 +287,7 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 		if snapshot != nil {
 			parts := strings.SplitN(env.APIKey, "_", 3)
 			if len(parts) == 3 && parts[0] == "pb" && snapshot.EnvironmentRef != parts[1] {
-				reason := fmt.Errorf("%s/%s: auth snapshot environment differs from the publishable key", name, platform)
+				reason := fmt.Errorf("%s/%s: auth snapshot environment %q differs from the publishable key's %q", name, platform, snapshot.EnvironmentRef, parts[1])
 				if drop(reason) {
 					continue
 				}
