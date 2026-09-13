@@ -307,6 +307,26 @@ func productByEnvironmentRef(ctx context.Context, r Resolvers, ref string) (Prod
 // address path still needs a credential the stack accepts before it writes.
 func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 	if o.url == "" {
+		// NO TARGET: THE CHECKOUT'S OWN RECORD. `status` tells people to run
+		// `palbase link` when a key went stale, and in a checkout bound to a
+		// project that answered "--url is required" (LV-05). A record that names
+		// a project is linked again as that project; one that carries an
+		// address, or no record at all, leaves the address path to find it.
+		if _, statErr := os.Stat(projectPath()); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		record, err := readLinkedProject()
+		if err != nil {
+			return err
+		}
+		if record.Project == "" {
+			return nil
+		}
+		again, err := linkOptsForRecord(ctx, record, o.env)
+		if err != nil {
+			return err
+		}
+		o.product, o.environments, o.linkedEnv, o.url = again.product, again.environments, again.linkedEnv, again.url
 		return nil
 	}
 	bind := func(product Product, envs []Environment) error {
@@ -345,6 +365,36 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 		return nil
 	}
 	return bind(product, envs)
+}
+
+// linkOptsForRecord is the link a committed project record asks for: the
+// project it names, every environment that project has, and the environment
+// this link reads from — chosen by the rule every other form of link uses.
+func linkOptsForRecord(ctx context.Context, record Target, fromEnv string) (linkOpts, error) {
+	if EnvironmentsOf == nil {
+		return linkOpts{}, errors.New("this CLI has no cloud session to list the project's environments — `palbase login`")
+	}
+	product := Product{ID: record.Project, Name: record.Name}
+	envs, err := EnvironmentsOf(ctx, record.Project)
+	if err != nil {
+		return linkOpts{}, err
+	}
+	ref, err := linkEnvironmentRef(product, envs, fromEnv)
+	if err != nil {
+		return linkOpts{}, err
+	}
+	// environmentAddress, not the tenant host spelled out here: it is the one
+	// place an environment's address is built.
+	url, err := environmentAddress(ref)
+	if err != nil {
+		return linkOpts{}, err
+	}
+	return linkOpts{
+		product:      product,
+		environments: envs,
+		linkedEnv:    envNameOfRef(envs, ref),
+		url:          url,
+	}, nil
 }
 
 // linkEnvironmentRef picks the environment this link reads FROM.

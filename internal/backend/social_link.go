@@ -314,5 +314,17 @@ func RefreshLinkedClients(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A CHECKOUT BOUND TO A PROJECT IS REFRESHED AS THAT PROJECT. Handing the
+	// link the resolved ADDRESS alone wrote the retired record shape and
+	// fetched one environment, so an auth write left every other
+	// environment's config behind (FR-027).
+	if record, recErr := readLinkedProject(); recErr == nil && record.Project != "" {
+		o, err := linkOptsForRecord(ctx, record, resolved.Env)
+		if err != nil {
+			return err
+		}
+		o.insecure = target.Insecure
+		return runLink(ctx, o, w)
+	}
 	return runLink(ctx, linkOpts{url: target.URL, insecure: target.Insecure}, w)
 }
