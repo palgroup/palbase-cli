@@ -36,3 +36,15 @@ func TestUnlinkSuggestsLinkingTheProject(t *testing.T) {
 	require.NoError(t, runUnlink(&out))
 	assert.Contains(t, out.String(), "palbase link <project>")
 }
+
+// A STACK SOMEBODY HOSTS IS LINKED AGAIN BY ITS ADDRESS (FR-078). The record
+// names no project, so pointing its owner at `palbase link <project>` sent them
+// looking for a cloud project they never had.
+func TestUnlinkSuggestsTheAddressForAStackSomebodyHosts(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, WriteTarget(Target{URL: "https://stack.example.com"}))
+	var out bytes.Buffer
+	require.NoError(t, runUnlink(&out))
+	assert.Contains(t, out.String(), "re-link with `palbase link <url>`")
+	assert.NotContains(t, out.String(), "palbase link <project>")
+}

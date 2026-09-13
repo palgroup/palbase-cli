@@ -984,6 +984,14 @@ func validatePlatforms(platforms []string) error {
 // somewhere, and it is already there.
 func runUnlink(w io.Writer) error {
 	path := projectPath()
+	// WHAT IT WAS BOUND TO decides how to bind it again, so it is read before it
+	// is removed: a project by its name, a stack somebody hosts by its address.
+	// One sentence for both sent a self-hosted checkout looking for a cloud
+	// project it never had.
+	relink := "`palbase link <project>`"
+	if record, err := readLinkedProject(); err == nil && record.Project == "" && record.URL != "" {
+		relink = "`palbase link <url>`"
+	}
 	switch err := os.Remove(path); {
 	case err == nil:
 		fmt.Fprintf(w, "✓ unlinked — removed %s\n", path)
@@ -999,7 +1007,7 @@ func runUnlink(w io.Writer) error {
 	// which is the sentence below. A branch that cannot run is one more thing a
 	// reader has to prove does nothing.
 	fmt.Fprintln(w, "  generated clients and their imports are left in place")
-	fmt.Fprintln(w, "  re-link with `palbase link <project>`")
+	fmt.Fprintf(w, "  re-link with %s\n", relink)
 	return nil
 }
 
