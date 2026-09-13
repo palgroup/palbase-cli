@@ -677,9 +677,18 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	web := false
 	for _, platform := range platforms {
 		platform = strings.ToLower(strings.TrimSpace(platform))
-		selectedEnvs, configErr := platformEnvironments(ctx, &target, platform, envs)
+		selectedEnvs, dropped, configErr := platformEnvironments(ctx, &target, platform, envs)
 		if configErr != nil {
 			return configErr
+		}
+		droppedNames := make([]string, 0, len(dropped))
+		for name := range dropped {
+			droppedNames = append(droppedNames, name)
+		}
+		sort.Strings(droppedNames)
+		for _, name := range droppedNames {
+			fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n",
+				name, dropped[name])
 		}
 		// APPLE YUVASINI, APPLE PROJESİ OLMAYAN BİR CHECKOUT'A YAZMA.
 		//

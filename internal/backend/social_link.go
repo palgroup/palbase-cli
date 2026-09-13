@@ -247,8 +247,9 @@ func nativeIdentifiers(platform string) []string {
 	return values
 }
 
-func platformEnvironments(ctx context.Context, target *Target, platform string, source appEnvironments) (appEnvironments, error) {
+func platformEnvironments(ctx context.Context, target *Target, platform string, source appEnvironments) (appEnvironments, map[string]error, error) {
 	result := appEnvironments{Default: source.Default, Environments: map[string]appEnvironment{}}
+	dropped := map[string]error{}
 	for _, name := range source.names() {
 		env := source.Environments[name]
 		if env.APIKey == "" {
@@ -259,18 +260,38 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 				result.Environments[name] = env
 				continue
 			}
-			return result, fmt.Errorf("%s: cannot refresh complete platform config while the environment is unavailable", name)
+			return result, dropped, fmt.Errorf("%s: cannot refresh complete platform config while the environment is unavailable", name)
+		}
+		// A NON-DEFAULT ENVIRONMENT THAT CANNOT BE READ IS DROPPED, NOT FATAL.
+		// One link describes every environment now; a social-auth read that
+		// fails for staging must not take down the link of main. The default
+		// environment is what a build without a choice talks to, so for it the
+		// failure still fails the link.
+		drop := func(reason error) bool {
+			if name == source.Default {
+				return false
+			}
+			dropped[name] = reason
+			return true
 		}
 		remote := Target{URL: env.BaseURL, Insecure: target.Insecure}
 		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, env.SealedRoot, target.OAuth[platform])
 		if err != nil {
-			return result, fmt.Errorf("%s/%s: %w", name, platform, err)
+			reason := fmt.Errorf("%s/%s: %w", name, platform, err)
+			if drop(reason) {
+				continue
+			}
+			return result, dropped, reason
 		}
 		env.OAuth = snapshot
 		if snapshot != nil {
 			parts := strings.SplitN(env.APIKey, "_", 3)
 			if len(parts) == 3 && parts[0] == "pb" && snapshot.EnvironmentRef != parts[1] {
-				return result, fmt.Errorf("%s/%s: auth snapshot environment differs from the publishable key", name, platform)
+				reason := fmt.Errorf("%s/%s: auth snapshot environment differs from the publishable key", name, platform)
+				if drop(reason) {
+					continue
+				}
+				return result, dropped, reason
 			}
 			if target.OAuth == nil {
 				target.OAuth = map[string]OAuthSelection{}
@@ -279,7 +300,7 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 		}
 		result.Environments[name] = env
 	}
-	return result, nil
+	return result, dropped, nil
 }
 
 // Called after a client configuration mutation, through the existing link path.
