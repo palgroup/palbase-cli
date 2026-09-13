@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -397,5 +398,66 @@ func TestThePackageDocDoesNotDenyEnvironments(t *testing.T) {
 	// satisfied by silence; this one demands the sentence.
 	if !strings.Contains(string(body), "A PROJECT IS A GROUP OF ENVIRONMENTS") {
 		t.Error("the package doc does not state what a project is")
+	}
+}
+
+// A QUOTE IN THE NAME is where a quoting mistake shows, so the suggestion is
+// read back through a real shell: one argument, and exactly the name.
+func TestCreateQuotesANameWithAQuoteInIt(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("it's"), Phase: "Running"},
+		rows:    []Project{{ID: "proj_a", Name: "it's"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "it's")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	const prefix = "palbase link "
+	i := strings.Index(out, prefix)
+	if i < 0 {
+		t.Fatalf("no link suggestion:\n%s", out)
+	}
+	word := strings.TrimSpace(strings.SplitN(out[i+len(prefix):], "\n", 2)[0])
+	got, err := exec.Command("sh", "-c", "set -- "+word+"; printf '%s|%s' \"$#\" \"$1\"").Output()
+	if err != nil {
+		t.Fatalf("a shell could not read %q: %v", word, err)
+	}
+	if string(got) != "1|it's" {
+		t.Fatalf("the shell read %q back from %q, not the name as one argument", got, word)
+	}
+}
+
+// A NAME THAT IS ANOTHER PROJECT'S REF is two answers to `palbase link`, which
+// counts names, ids and refs together — so create suggests the ref.
+func TestCreateSuggestsTheRefWhenTheNameIsAlsoAnotherProjectsRef(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"},
+		rows: []Project{
+			{ID: "proj_a", Name: "shop"},
+			{ID: "proj_b", Name: "penny", Environments: []Environment{{Ref: "shop", Name: "main", Status: "Running"}}},
+		},
+	}
+	out, err := run(t, routed(rest), "", "create", "shop")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(out, "palbase link abc123xyz") {
+		t.Fatalf("the name is also another project's ref, and create did not suggest the ref:\n%s", out)
+	}
+}
+
+// A NAME THAT STARTS WITH A DASH is a flag to the command line unless `--`
+// comes before it.
+func TestCreateSeparatesANameThatStartsWithADash(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("-shop"), Phase: "Running"},
+		rows:    []Project{{ID: "proj_a", Name: "-shop"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "--", "-shop")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(out, "palbase link -- -shop") {
+		t.Fatalf("a name starting with a dash was suggested without --:\n%s", out)
 	}
 }

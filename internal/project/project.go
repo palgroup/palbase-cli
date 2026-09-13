@@ -160,32 +160,46 @@ running, and the command it prints last links a checkout to the project.`,
 
 // linkSuggestion is the command create prints last.
 //
-// A NAME ONLY WHEN THE LISTING VOUCHES FOR IT. Product names are not unique, and
-// `palbase link <name>` refuses a name two projects share — so the name is
-// suggested when the caller's listing shows exactly one project by it, and the
-// new environment's ref otherwise (a ref always resolves to one project). An
-// address is never suggested: linking by address wrote the retired record shape
-// into the repository.
+// A NAME ONLY WHEN LINK WOULD READ IT AS THIS PROJECT. `palbase link <word>`
+// takes a word as a project's name, its id or one of its environments' refs,
+// counted together — so the name is suggested when exactly one project in the
+// caller's listing answers to it, and the new environment's ref otherwise. A
+// name with "://" in it would be read as an address, so it gets the ref too;
+// a name that starts with a dash is kept, after `--`, so the command line does
+// not take it for a flag. An address is never suggested: linking by address
+// wrote the retired record shape into the repository.
 func linkSuggestion(ctx context.Context, r Resolvers, created Tenant) string {
 	name := ""
 	if created.Name != nil {
 		name = strings.TrimSpace(*created.Name)
 	}
-	if name != "" {
+	if name != "" && !strings.Contains(name, "://") {
 		var rows []Project
-		if err := r.REST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err == nil {
-			same := 0
-			for _, row := range rows {
-				if strings.EqualFold(strings.TrimSpace(row.Name), name) {
-					same++
-				}
+		if err := r.REST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err == nil && answersOnce(rows, name) {
+			if strings.HasPrefix(name, "-") {
+				return "palbase link -- " + shellQuote(name)
 			}
-			if same == 1 {
-				return "palbase link " + shellQuote(name)
-			}
+			return "palbase link " + shellQuote(name)
 		}
 	}
 	return "palbase link " + created.Ref
+}
+
+// answersOnce reports whether exactly one project answers to word the way
+// `palbase link` counts: its name (case and surrounding space aside), its id,
+// or one of its environments' refs — each project at most once.
+func answersOnce(rows []Project, word string) bool {
+	count := 0
+	for _, row := range rows {
+		hit := strings.EqualFold(strings.TrimSpace(row.Name), word) || row.ID == word
+		for _, e := range row.Environments {
+			hit = hit || e.Ref == word
+		}
+		if hit {
+			count++
+		}
+	}
+	return count == 1
 }
 
 var plainShellWord = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
