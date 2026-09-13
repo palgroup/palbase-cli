@@ -77,8 +77,15 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	if err != nil {
 		return err
 	}
+	// THE KEY TO COMPARE IS THE RESOLVED ENVIRONMENT'S. A stack running here is
+	// `local` on disk; a cloud checkout resolved no environment only when it has
+	// one, and then the disk's default is that one.
+	keyEnv := resolved.Env
+	if keyEnv == "" && target.Local {
+		keyEnv = localEnvName
+	}
 	if jsonOut {
-		return statusAsJSON(ctx, cmd, target, cred, string(source))
+		return statusAsJSON(ctx, cmd, target, keyEnv, cred, string(source))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", target.Describe())
 
@@ -158,7 +165,7 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	}
 	cancelSDK()
 
-	reportKeyDrift(ctx, target, cred, out)
+	reportKeyDrift(ctx, target, keyEnv, cred, out)
 	reportCommittedDrift(out)
 
 	// The Info.plist warning that used to be repeated here is GONE with the
@@ -209,12 +216,18 @@ func credentialKindWord(kind Kind) string {
 // every installed build authenticating with something the project no longer
 // accepts, and the app reports it as a sign-in failure. Nothing else in this CLI
 // would notice, because the committed slot is a file and files do not expire.
-func reportKeyDrift(ctx context.Context, target Target, cred Credentials, out io.Writer) {
+func reportKeyDrift(ctx context.Context, target Target, env string, cred Credentials, out io.Writer) {
 	envs, err := readAppEnvironments("ios")
 	if err != nil || len(envs.Environments) == 0 {
 		return
 	}
-	entry, ok := envs.Environments[envs.Default]
+	// EVERY ENVIRONMENT IS ON DISK after a link, so the key to compare is the
+	// one of the environment this command resolved; with none, the one a build
+	// without a choice uses.
+	if env == "" {
+		env = envs.Default
+	}
+	entry, ok := envs.Environments[env]
 	if !ok || entry.APIKey == "" {
 		return
 	}
@@ -233,14 +246,14 @@ func reportKeyDrift(ctx context.Context, target Target, cred Credentials, out io
 	// The keys themselves are not printed — a publishable key is not a secret,
 	// but printing two nearly-identical strings invites reading them for the
 	// difference instead of running the command that fixes it.
-	fmt.Fprintf(out, "app key:      STALE — %s ships a key this project no longer hands out.\n", envs.Default)
+	fmt.Fprintf(out, "app key:      STALE — %s ships a key this project no longer hands out.\n", env)
 	fmt.Fprintln(out, "              Run `palbase link` to refresh it, then rebuild the app.")
 }
 
 // statusAsJSON answers the same questions the text output does, without the
 // advice: a script cannot follow "run palbase push", and prose inside a JSON
 // document would make it unparseable.
-func statusAsJSON(ctx context.Context, cmd *cobra.Command, target Target, cred Credentials, source string) error {
+func statusAsJSON(ctx context.Context, cmd *cobra.Command, target Target, keyEnv string, cred Credentials, source string) error {
 	doc := statusJSON{
 		Project:    target.Describe(),
 		Address:    target.URL,
@@ -266,7 +279,7 @@ func statusAsJSON(ctx context.Context, cmd *cobra.Command, target Target, cred C
 		doc.Deployed = &deployed
 	}
 
-	doc.AppKey = appKeyState(ctx, target)
+	doc.AppKey = appKeyState(ctx, target, keyEnv)
 	sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
 	if running, sErr := projectSDKVersion(sdkCtx, target, cred); sErr == nil {
 		doc.SDK = running
@@ -281,12 +294,15 @@ func statusAsJSON(ctx context.Context, cmd *cobra.Command, target Target, cred C
 // "unchecked" covers both "this checkout ships no key" and "the project could
 // not be asked" — a script that must not run against a stale key treats them the
 // same, and calling either of them "current" is the failure this reports.
-func appKeyState(ctx context.Context, target Target) string {
+func appKeyState(ctx context.Context, target Target, env string) string {
 	envs, err := readAppEnvironments("ios")
 	if err != nil || len(envs.Environments) == 0 {
 		return "unchecked"
 	}
-	entry, ok := envs.Environments[envs.Default]
+	if env == "" {
+		env = envs.Default
+	}
+	entry, ok := envs.Environments[env]
 	if !ok || entry.APIKey == "" {
 		return "unchecked"
 	}

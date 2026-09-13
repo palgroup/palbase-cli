@@ -41,7 +41,7 @@ func TestAStaleAppKeyIsReported(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	reportKeyDrift(context.Background(), Target{URL: srv.URL},
+	reportKeyDrift(context.Background(), Target{URL: srv.URL}, "",
 		Credentials{Value: "a-credential", Kind: KindPerson}, &out)
 
 	if !strings.Contains(out.String(), "STALE") {
@@ -71,7 +71,7 @@ func TestACurrentAppKeySaysSo(t *testing.T) {
 	_ = os.WriteFile(ConfigPath("main", "ios"), blob, 0o644)
 
 	var out bytes.Buffer
-	reportKeyDrift(context.Background(), Target{URL: srv.URL},
+	reportKeyDrift(context.Background(), Target{URL: srv.URL}, "",
 		Credentials{Value: "a-credential", Kind: KindPerson}, &out)
 	if !strings.Contains(out.String(), "current") {
 		t.Errorf("a current key was not confirmed:\n%s", out.String())
@@ -93,7 +93,7 @@ func TestAKeyThatCannotBeCheckedSaysThat(t *testing.T) {
 	_ = os.WriteFile(ConfigPath("main", "ios"), blob, 0o644)
 
 	var out bytes.Buffer
-	reportKeyDrift(context.Background(), Target{URL: unreachable.URL},
+	reportKeyDrift(context.Background(), Target{URL: unreachable.URL}, "",
 		Credentials{Value: "a-credential", Kind: KindPerson}, &out)
 	if !strings.Contains(out.String(), "could not be checked") {
 		t.Errorf("an unreachable project produced silence:\n%s", out.String())
