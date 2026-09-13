@@ -53,7 +53,9 @@ func attachToProject(cmd *cobra.Command, code string, errorsOnly, asJSON bool) (
 	// is the constant it boots with. Read from the code's own answer would be
 	// better still, but the topic shape is the stack's, not the session's.
 	topic := topicFor(projectStackRef, sessionID)
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s · attaching to %s\n", target.URL, topic)
+	// THE RESOLVER NAMES THE ENVIRONMENT (FR-085): the address alone did not say
+	// which of the project's environments this is attaching to.
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s · attaching to %s\n", resolved.Describe(), topic)
 
 	socket := strings.Replace(strings.TrimSuffix(target.URL, "/"), "https://", "wss://", 1)
 	socket = strings.Replace(socket, "http://", "ws://", 1) + "/realtime/v1/websocket?vsn=2.0.0"
