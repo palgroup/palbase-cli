@@ -982,7 +982,7 @@ func runUnlink(w io.Writer) error {
 	// which is the sentence below. A branch that cannot run is one more thing a
 	// reader has to prove does nothing.
 	fmt.Fprintln(w, "  generated clients and their imports are left in place")
-	fmt.Fprintln(w, "  re-link with `palbase link <url>`")
+	fmt.Fprintln(w, "  re-link with `palbase link <project>`")
 	return nil
 }
 

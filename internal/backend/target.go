@@ -234,7 +234,7 @@ func ReadTarget() (Target, error) {
 		return Target{}, err
 	}
 	if strings.TrimSpace(target.URL) == "" {
-		return Target{}, fmt.Errorf("%s has no address — run `palbase link <ref>` again", projectPath())
+		return Target{}, fmt.Errorf("%s names a project, not an address — run `palbase link` to link it again", projectPath())
 	}
 	return target, nil
 }
@@ -253,14 +253,14 @@ func readLinkedProject() (Target, error) {
 		// `.palbase/selection.json` for the project id before it ever looks at
 		// the environment flag, and a checkout with no link has no such file —
 		// so the advice printed here led straight to "no project selected".
-		// A bare ref IS an address this cloud knows (`link` resolves it to
-		// `<ref>.<PublicHost>`), so that is the line that does what the reader
-		// came for.
+		// A bare ref names the project that environment belongs to — `link`
+		// binds the project — so that is the line that does what the reader came
+		// for.
 		return Target{}, errors.New(
 			"this checkout is not linked to a project.\n" +
 				"  palbase link <project>        a project in the cloud\n" +
-				"  palbase link <ref>            one environment of it, by ref\n" +
-				"  palbase link <url>            something running on this machine\n" +
+				"  palbase link <ref>            the project that environment belongs to\n" +
+				"  palbase link <url>            a stack you host, or an environment's address\n" +
 				"  palbase start                 bring one up here and link to it")
 	}
 	if err != nil {

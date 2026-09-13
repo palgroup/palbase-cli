@@ -69,7 +69,7 @@ func resolveProject(cmd *cobra.Command) (backend.Target, backend.Credentials, er
 		// one: the flag selects an environment of a project already named, and
 		// a target with no address has not named one.
 		return backend.Target{}, backend.Credentials{}, fmt.Errorf(
-			"%s names no address — run `palbase link <project>` again, or `palbase link <ref>` for one environment of it",
+			"%s names no address — run `palbase link` again, or pass `--env <name>` to act on another environment",
 			target.Describe())
 	}
 	cred, _, err := backend.Credential(target.URL)

@@ -42,7 +42,11 @@ func TestBrokenLocalTargetNeverFallsBackToCloud(t *testing.T) {
 func TestTargetWithoutAddressRequiresRelinking(t *testing.T) {
 	seedProject(t, Target{Project: "prd_old", Name: "old-project"})
 	_, err := ReadTarget()
-	require.ErrorContains(t, err, "palbase link <ref>")
+	// A project record is linked again with no target (FR-025); the ref form
+	// of this hint belonged to the address model and is retired (FR-077).
+	require.ErrorContains(t, err, "names a project, not an address")
+	require.ErrorContains(t, err, "`palbase link`")
+	require.NotContains(t, err.Error(), "`palbase link <ref>` again", "the retired hint came back")
 }
 
 // BİR HEDEFİN BU MAKİNEDE OLUP OLMADIĞI, ADRESİNDEN OKUNUR.

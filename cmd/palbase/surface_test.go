@@ -901,3 +901,63 @@ func TestNothingInProductionReadsTheRetiredSelectionFile(t *testing.T) {
 			"stack runs here — there is no second mechanism", strings.Join(offences, "\n"))
 	}
 }
+
+// A LINK BINDS A PROJECT. After that change, a hint that offers
+// `palbase link <ref>` as the way to reach another environment sends the reader
+// somewhere that cannot move them — the same false door `--environment` was.
+// This reads what the binary PRINTS (string literals, comments excluded), the
+// same way TestNoUserFacingStringIsTurkish does.
+func TestNoHintOffersALinkToSwitchEnvironments(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file")
+	}
+	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	retired := []string{
+		"one environment of it",
+		"points it at another",
+		"`palbase link <ref>` again",
+		"`palbase link <ref>` then",
+	}
+
+	fset := token.NewFileSet()
+	var offenders []string
+	files, sawEnvUse := 0, false
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		parsed, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		files++
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			lit, isLit := n.(*ast.BasicLit)
+			if !isLit || lit.Kind != token.STRING {
+				return true
+			}
+			if strings.Contains(lit.Value, "palbase env use") {
+				sawEnvUse = true
+			}
+			for _, phrase := range retired {
+				if strings.Contains(lit.Value, phrase) {
+					rel, _ := filepath.Rel(root, path)
+					offenders = append(offenders, fmt.Sprintf("%s:%d %q", rel, fset.Position(lit.Pos()).Line, phrase))
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	// THE SCAN IS MEASURED FIRST: one that read nothing would report silence.
+	if files < 40 || !sawEnvUse {
+		t.Fatalf("the scan read %d files and found `palbase env use`=%v — it is not measuring", files, sawEnvUse)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("hints still offer a link as the way to another environment:\n%s", strings.Join(offenders, "\n"))
+	}
+}

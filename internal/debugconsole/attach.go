@@ -247,7 +247,7 @@ var rejectionHelp = map[string]string{
 	// device is at fault.
 	"forbidden": "not allowed on this session. A viewer may watch and nothing else. Check that " +
 		"the environment this checkout is linked to is the one the device armed against — " +
-		"`palbase status` shows it, and `palbase link <ref>` points it at another.",
+		"`palbase status` shows it, and `palbase env use <name>` switches this checkout to another environment.",
 }
 
 func (e rejected) Error() string {
