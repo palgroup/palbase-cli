@@ -29,6 +29,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	machineStateHome = func() (string, error) { return home, nil }
+	// THE SHELL'S PALBASE_ENV IS NOT THE TESTS'. The web SDK teaches people to
+	// keep it set, and Resolve reads it like --env: a developer's machine failed
+	// a dozen resolution tests CI never saw. A test that wants it sets it.
+	_ = os.Unsetenv("PALBASE_ENV")
 	code := m.Run()
 	_ = os.RemoveAll(home)
 	os.Exit(code)

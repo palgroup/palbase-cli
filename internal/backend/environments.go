@@ -252,7 +252,7 @@ func Resolve(ctx context.Context) (Resolved, error) {
 	// an address from the project it left. The selection carries the ref, so
 	// this path asks the control plane nothing.
 	if sel, selErr := ReadSelection("."); selErr == nil && sel.Ref != "" && sel.Project == target.Project {
-		url, addrErr := addressOf(sel.Ref)
+		url, addrErr := environmentAddress(sel.Ref)
 		if addrErr != nil {
 			return Resolved{}, addrErr
 		}
@@ -265,7 +265,7 @@ func Resolve(ctx context.Context) (Resolved, error) {
 		return Resolved{}, err
 	}
 	if len(envs) == 1 {
-		url, addrErr := addressOf(envs[0].Ref)
+		url, addrErr := environmentAddress(envs[0].Ref)
 		if addrErr != nil {
 			return Resolved{}, addrErr
 		}
@@ -315,7 +315,7 @@ func resolveNamed(ctx context.Context, target Target, named string) (Resolved, e
 	}
 	for _, e := range envs {
 		if strings.EqualFold(e.Name, named) || e.Ref == named {
-			url, addrErr := addressOf(e.Ref)
+			url, addrErr := environmentAddress(e.Ref)
 			if addrErr != nil {
 				return Resolved{}, addrErr
 			}

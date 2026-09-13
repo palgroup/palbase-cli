@@ -77,9 +77,10 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	if err != nil {
 		return err
 	}
-	// THE KEY TO COMPARE IS THE RESOLVED ENVIRONMENT'S. A stack running here is
-	// `local` on disk; a cloud checkout resolved no environment only when it has
-	// one, and then the disk's default is that one.
+	// THE KEY TO COMPARE IS THE RESOLVED ENVIRONMENT'S. A cloud checkout always
+	// resolves one, and a stack running here is `local` on disk. A self-hosted
+	// stack, a loopback link and a record from before projects resolve none;
+	// then the disk's default is compared.
 	keyEnv := resolved.Env
 	if keyEnv == "" && target.Local {
 		keyEnv = localEnvName
@@ -228,7 +229,13 @@ func reportKeyDrift(ctx context.Context, target Target, env string, cred Credent
 		env = envs.Default
 	}
 	entry, ok := envs.Environments[env]
-	if !ok || entry.APIKey == "" {
+	if !ok {
+		// Silence would read as "the key is fine" here too: other environments
+		// are on disk, the one this command acts on is not.
+		fmt.Fprintf(out, "app key:      unchecked — %s has no committed config here; `palbase link` writes it\n", env)
+		return
+	}
+	if entry.APIKey == "" {
 		return
 	}
 
