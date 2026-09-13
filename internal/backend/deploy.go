@@ -192,107 +192,95 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 			ctx := cmd.Context()
 			given := strings.TrimSpace(args[0])
 
-			// A PROJECT IS ITS REF, and the argument is what `palbase project
-			// list` prints: the NAME in the first column or the REF in the
-			// second. This used to take a management project id and nothing
-			// else — a value this CLI shows on no surface at all, not even in
-			// `project list --json` — so the documented argument could not be
-			// obtained. Ölçüldü 25.08.2026: `project status 1jhp7jbrm` çalışırken
-			// `clone 1jhp7jbrm` "böyle bir proje yok" diyordu.
-			//
-			// The download and the binding are the same two things `link` and
-			// `pull` already do, by address, with no control plane in the path.
-			if !strings.HasPrefix(given, managementProjectIDPrefix) {
-				// THE ARGUMENT IS A PROJECT, and a project is resolved to its
-				// PRODUCT. The old path resolved a name to one ENVIRONMENT's ref
-				// through `/v1/cloud/projects` — which returns a row per
-				// environment carrying the product's name, so two environments
-				// under one project looked like a collision and the name went
-				// unresolved. `palbase clone todoapp` then built
-				// `https://todoapp.<host>` out of anything ref-shaped.
-				product, envs, err := productByName(ctx, r, given)
-				if err != nil {
-					return err
-				}
-				ref, refErr := cloneEnvironmentRef(product, envs, given, envFlag)
-				if refErr != nil {
-					return refErr
-				}
-				envName := envFlag
-				for _, e := range envs {
-					if e.Ref == ref {
-						envName = e.Name
-					}
-				}
-				host := r.Endpoints().PublicHost
-				if host == "" {
-					return errors.New("this CLI has no tenant host configured, so a project cannot be reached by ref")
-				}
-				// THE DIRECTORY IS NAMED AFTER THE PROJECT, not after a ref.
-				// `1jhp7jbrm/` is a directory nobody recognises a week later.
-				dir := dirFlag
-				if dir == "" {
-					dir = product.Name
-				}
-				target := Target{URL: "https://" + ref + "." + host}
-				// CLONE ANNOUNCES WHERE IT IS CLONING FROM, like every other
-				// verb. It resolves an environment — the source it downloads is
-				// one environment's deployed code — and a verb that resolves
-				// without saying so is how "this went somewhere I did not mean"
-				// becomes visible only afterwards.
-				fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s/%s\n", product.Name, envName)
-				// MADE HERE, REMOVED IF NOTHING ARRIVES: a clone that failed
-				// must not leave a directory named after the project, because
-				// the next reader cannot tell an empty clone from a clone that
-				// is still running.
-				existed := dirExists(dir)
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					return err
-				}
-				cleanup := func() { reapEmptyClone(dir, existed) }
-				cred, _, credErr := Credential(target.URL)
-				if credErr != nil {
-					cleanup()
-					return credErr
-				}
-				if err := fetchDeployedSource(
-					ctx, target, cred, target.URL, dir, cmd.OutOrStdout()); err != nil {
-					cleanup()
-					return err
-				}
-				// BOUND BY IDENTITY, AND THE SELECTION IS SET.
-				//
-				// Without the selection a freshly cloned multi-environment
-				// project would refuse the very next command — correct by the
-				// rules and useless as an experience. The clone KNOWS which
-				// environment it took the source from, so it remembers that one.
-				return inDir(dir, func() error {
-					if err := WriteLinkedIdentity(product, Target{}); err != nil {
-						return err
-					}
-					root, wdErr := os.Getwd()
-					if wdErr != nil {
-						return wdErr
-					}
-					if err := WriteSelection(root, Selection{
-						Project: product.ID, Env: envName, Ref: ref,
-					}); err != nil {
-						return err
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", product.Name, envName)
-					return nil
-				})
+			// THE ARGUMENT IS WHAT `palbase project list` PRINTS: a project's name,
+			// its id, or one of its environments' refs, resolved against the listing
+			// `link` reads. A value shaped like a management project id used to be
+			// refused by its prefix — but product ids are `proj_…` too, and one is
+			// what the ambiguity refusal tells a person to type, so the listing
+			// decides and nothing is refused by its shape.
+			// THE ARGUMENT IS A PROJECT, and a project is resolved to its
+			// PRODUCT. The old path resolved a name to one ENVIRONMENT's ref
+			// through `/v1/cloud/projects` — which returns a row per
+			// environment carrying the product's name, so two environments
+			// under one project looked like a collision and the name went
+			// unresolved. `palbase clone todoapp` then built
+			// `https://todoapp.<host>` out of anything ref-shaped.
+			product, envs, err := productByName(ctx, r, given)
+			if err != nil {
+				return err
 			}
-
-			// Clone accepts a name or ref, as printed by project list.
-			return fmt.Errorf(
-				"%q is a management project id, and nothing in this CLI prints one.\n"+
-					"  `palbase project list` prints the NAME and the REF — clone takes either",
-				given)
+			ref, refErr := cloneEnvironmentRef(product, envs, given, envFlag)
+			if refErr != nil {
+				return refErr
+			}
+			envName := envFlag
+			for _, e := range envs {
+				if e.Ref == ref {
+					envName = e.Name
+				}
+			}
+			host := r.Endpoints().PublicHost
+			if host == "" {
+				return errors.New("this CLI has no tenant host configured, so a project cannot be reached by ref")
+			}
+			// THE DIRECTORY IS NAMED AFTER THE PROJECT, not after a ref.
+			// `1jhp7jbrm/` is a directory nobody recognises a week later.
+			dir := dirFlag
+			if dir == "" {
+				dir = product.Name
+			}
+			target := Target{URL: "https://" + ref + "." + host}
+			// CLONE ANNOUNCES WHERE IT IS CLONING FROM, like every other
+			// verb. It resolves an environment — the source it downloads is
+			// one environment's deployed code — and a verb that resolves
+			// without saying so is how "this went somewhere I did not mean"
+			// becomes visible only afterwards.
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s/%s\n", product.Name, envName)
+			// MADE HERE, REMOVED IF NOTHING ARRIVES: a clone that failed
+			// must not leave a directory named after the project, because
+			// the next reader cannot tell an empty clone from a clone that
+			// is still running.
+			existed := dirExists(dir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+			cleanup := func() { reapEmptyClone(dir, existed) }
+			cred, _, credErr := Credential(target.URL)
+			if credErr != nil {
+				cleanup()
+				return credErr
+			}
+			if err := fetchDeployedSource(
+				ctx, target, cred, target.URL, dir, cmd.OutOrStdout()); err != nil {
+				cleanup()
+				return err
+			}
+			// BOUND BY IDENTITY, AND THE SELECTION IS SET.
+			//
+			// Without the selection a freshly cloned multi-environment
+			// project would refuse the very next command — correct by the
+			// rules and useless as an experience. The clone KNOWS which
+			// environment it took the source from, so it remembers that one.
+			return inDir(dir, func() error {
+				if err := WriteLinkedIdentity(product, Target{}); err != nil {
+					return err
+				}
+				root, wdErr := os.Getwd()
+				if wdErr != nil {
+					return wdErr
+				}
+				if err := WriteSelection(root, Selection{
+					Project: product.ID, Env: envName, Ref: ref,
+				}); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", product.Name, envName)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dirFlag, "dir", "", "Directory to clone into (default: the project's name)")
-	cmd.Flags().StringVar(&envFlag, "from-env", "", "environment to take the source from (default: the project's only one)")
+	cmd.Flags().StringVar(&envFlag, "from-env", "", "environment to take the source from (default: a ref's own environment; for a name or an id, the only available one, else this machine's selection, else main, else the first by name)")
 	return cmd
 }
 
@@ -310,11 +298,11 @@ func cloneEnvironmentRef(product Product, envs []Environment, typed, fromEnv str
 			continue
 		}
 		if fromEnv != "" && !strings.EqualFold(e.Name, fromEnv) && e.Ref != fromEnv {
-			return "", fmt.Errorf("%s is the ref of %s/%s, but --from-env names %q — drop one of them.\n%s",
-				typed, product.Name, e.Name, fromEnv, listing(envs))
+			return "", fmt.Errorf("%s is the ref of %s/%s, but --from-env names %s — drop one of them.\n%s",
+				typed, product.Name, withStatus(e), fromEnvNamed(envs, fromEnv), listingWithStatus(envs))
 		}
 		if unavailableEnvironment(e.Status) {
-			return "", fmt.Errorf("%s/%s is %s, so there is no source to download.\n%s",
+			return "", fmt.Errorf("%s/%s is %s, so there is no source to download — clone a running environment by its ref.\n%s",
 				product.Name, e.Name, e.Status, listingWithStatus(envs))
 		}
 		return e.Ref, nil
@@ -322,10 +310,26 @@ func cloneEnvironmentRef(product Product, envs []Environment, typed, fromEnv str
 	return linkEnvironmentRef(product, envs, fromEnv)
 }
 
-// managementProjectIDPrefix is what a management project id starts with. Only a
-// value shaped like one takes the management path; everything else is a name or
-// a ref, which is what a person actually has.
-const managementProjectIDPrefix = "proj_"
+// withStatus names an environment, and its status when nothing can be read
+// from it: the fact a person needs to decide which half of a contradiction to
+// drop.
+func withStatus(e Environment) string {
+	if unavailableEnvironment(e.Status) {
+		return e.Name + " (" + e.Status + ")"
+	}
+	return e.Name
+}
+
+// fromEnvNamed is what --from-env names, spelled as the environment it is — a
+// ref is shown by its name — or said plainly when it names none of them.
+func fromEnvNamed(envs []Environment, fromEnv string) string {
+	for _, e := range envs {
+		if strings.EqualFold(e.Name, fromEnv) || e.Ref == fromEnv {
+			return withStatus(e)
+		}
+	}
+	return fmt.Sprintf("%q, which is not one of its environments", fromEnv)
+}
 
 // inDir runs fn with dir as the working directory and restores the old one.
 // WriteTarget writes beside the CURRENT directory by design — every other verb
