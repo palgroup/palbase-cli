@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,10 +18,13 @@ import (
 )
 
 type envServerOpts struct {
-	notReady    bool          // the well-known document answers 503 forever
-	keysRefused bool          // the key read answers 401
-	noContract  bool          // the contract read answers 404 (nothing deployed)
-	readyDelay  time.Duration // the well-known document takes this long
+	notReady         bool          // the well-known document answers 503 forever
+	keysRefused      bool          // the key read answers 401
+	noContract       bool          // the contract read answers 404 (nothing deployed)
+	contractSentence string        // with noContract: the project's own reason, as the runtime words it
+	rolesRefused     bool          // the role read answers 500
+	readyDelay       time.Duration // the well-known document takes this long
+	inFlight, peak   *atomic.Int32 // when set: well-known reads in flight, and the most at once
 }
 
 func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *atomic.Int32) {
@@ -28,8 +32,18 @@ func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *at
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
+		if o.rolesRefused && strings.Contains(r.URL.Path, "roles") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		switch r.URL.Path {
 		case wellKnownPath:
+			if o.inFlight != nil {
+				n := o.inFlight.Add(1)
+				for p := o.peak.Load(); n > p && !o.peak.CompareAndSwap(p, n); p = o.peak.Load() {
+				}
+				defer o.inFlight.Add(-1)
+			}
 			time.Sleep(o.readyDelay)
 			if o.notReady {
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -46,6 +60,12 @@ func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *at
 			_, _ = w.Write([]byte(`{"publishable":"` + key + `"}`))
 		case "/v1/management/openapi":
 			if o.noContract {
+				if o.contractSentence != "" {
+					w.Header().Set("content-type", "application/json")
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"error":"spec_unavailable","error_description":"` + o.contractSentence + `"}`))
+					return
+				}
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
@@ -153,6 +173,24 @@ func TestTheDefaultEnvironmentFailingIsFatal(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A DEFAULT THAT CANNOT BE ASKED IS NOT LEFT AS IT IS (FR-082). Failed, or not
+// in the listing at all, it is still what a build without a choice talks to.
+func TestADefaultEnvironmentThatCannotBeAskedFailsTheDescription(t *testing.T) {
+	inScratchCheckout(t)
+	staging, _ := envServer(t, "pb_staging_cK", envServerOpts{})
+	routeEnvironments(t, map[string]string{"stagref000": staging.URL})
+	project := []Environment{
+		{Name: "main", Ref: "mainref000", Status: "Failed"},
+		{Name: "staging", Ref: "stagref000", Status: "Running"},
+	}
+
+	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: staging.URL}, "main", "", project, true, io.Discard)
+	require.ErrorContains(t, err, "main is Failed")
+
+	_, _, _, err = gatherEnvironments(context.Background(), Target{URL: staging.URL}, "prod", "", project, true, io.Discard)
+	require.ErrorContains(t, err, "prod is not an environment")
+}
+
 func TestAnEnvironmentWithNothingDeployedIsWrittenAndNamed(t *testing.T) {
 	inScratchCheckout(t)
 	main, _ := envServer(t, "pb_main_cK", envServerOpts{})
@@ -171,6 +209,51 @@ func TestAnEnvironmentWithNothingDeployedIsWrittenAndNamed(t *testing.T) {
 	assert.Contains(t, out.String(), "palbase push --env staging")
 }
 
+// THE PROJECT'S OWN SENTENCE SURVIVES. A runtime that was deployed but could not
+// build a document answers the same 404 as one with nothing deployed, and its
+// reason is the whole diagnosis — measured 25.08.2026, when a line that said
+// only "push again" cost hours.
+func TestAnEnvironmentWithNoContractKeepsTheProjectsOwnSentence(t *testing.T) {
+	inScratchCheckout(t)
+	main, _ := envServer(t, "pb_main_cK", envServerOpts{})
+	staging, _ := envServer(t, "pb_staging_cK", envServerOpts{
+		noContract:       true,
+		contractSentence: "the runtime could not build a document: z.lazy schema at /todos",
+	})
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	project := []Environment{
+		{Name: "main", Ref: "mainref000", Status: "Running"},
+		{Name: "staging", Ref: "stagref000", Status: "Running"},
+	}
+
+	var out bytes.Buffer
+	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "z.lazy schema at /todos", "the project's own reason was dropped")
+	assert.Contains(t, out.String(), "palbase push --env staging")
+}
+
+// A ROLE READ THAT FAILS DOES NOT DROP THE ENVIRONMENT (FR-011): its config and
+// contract are still described, its roles are not, and the reason is said.
+func TestAnEnvironmentWhoseRolesCannotBeReadIsStillDescribed(t *testing.T) {
+	inScratchCheckout(t)
+	main, _ := envServer(t, "pb_main_cK", envServerOpts{})
+	staging, _ := envServer(t, "pb_staging_cK", envServerOpts{rolesRefused: true})
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	project := []Environment{
+		{Name: "main", Ref: "mainref000", Status: "Running"},
+		{Name: "staging", Ref: "stagref000", Status: "Running"},
+	}
+
+	var out bytes.Buffer
+	envs, specs, roles, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	require.NoError(t, err, out.String())
+	assert.Contains(t, envs.Environments, "staging", "a failed role read dropped the environment")
+	assert.Contains(t, specs, "staging")
+	assert.NotContains(t, roles, "staging")
+	assert.Contains(t, out.String(), "did not answer for staging")
+}
+
 func TestFourEnvironmentsAreDescribedConcurrently(t *testing.T) {
 	inScratchCheckout(t)
 	byRef := map[string]string{}
@@ -187,4 +270,26 @@ func TestFourEnvironmentsAreDescribedConcurrently(t *testing.T) {
 	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: byRef["mainref000"]}, "main", "pb_main_cK", project, false, io.Discard)
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), 1500*time.Millisecond, "four 500 ms descriptions ran one after another")
+}
+
+// AT MOST describeLimit AT ONCE (C-5). The test above measures that the
+// descriptions are not serial; this one measures the ceiling.
+func TestNoMoreEnvironmentsThanTheLimitAreDescribedAtOnce(t *testing.T) {
+	inScratchCheckout(t)
+	var inFlight, peak atomic.Int32
+	byRef := map[string]string{}
+	var project []Environment
+	for i := 0; i < 2*describeLimit+1; i++ {
+		name := fmt.Sprintf("env%d", i)
+		srv, _ := envServer(t, "pb_"+name+"_cK", envServerOpts{readyDelay: 150 * time.Millisecond, inFlight: &inFlight, peak: &peak})
+		ref := fmt.Sprintf("ref%07d", i)
+		byRef[ref] = srv.URL
+		project = append(project, Environment{Name: name, Ref: ref, Status: "Running"})
+	}
+	routeEnvironments(t, byRef)
+
+	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: byRef["ref0000000"]}, "env0", "pb_env0_cK", project, false, io.Discard)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, peak.Load(), int32(describeLimit), "more environments were described at once than the limit allows")
+	assert.Greater(t, peak.Load(), int32(1), "the environments were described one at a time — this test measures nothing")
 }

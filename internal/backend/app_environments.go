@@ -63,10 +63,11 @@ type appEnvironments struct {
 	// Nothing writes `default_environment` any longer: each environment's config
 	// holds that environment's own fields, so the name is the DIRECTORY and a
 	// key inside the file would be a second copy of it. `readAppEnvironments`
-	// fills this in by taking the first non-`local` environment IN NAME ORDER —
-	// `local` is excluded so a build that forgot to say which environment it
-	// wanted cannot silently talk to somebody's laptop, and the rest is
-	// alphabetical, not a judgement about which one is production.
+	// fills this in with defaultEnvironment: `main` when there is one, otherwise
+	// the first by name that is not `local` — excluded so a build that forgot to
+	// say which environment it wanted cannot silently talk to somebody's laptop —
+	// and `local` only when it is the only one. It is not a judgement about which
+	// one is production.
 	Default      string                    `json:"default_environment"`
 	Environments map[string]appEnvironment `json:"environments"`
 }
@@ -537,7 +538,7 @@ type describedEnvironment struct {
 	entry      appEnvironment
 	spec       []byte
 	roles      *stackRoles
-	noContract bool  // the environment answered, and has nothing deployed yet
+	noContract error // the environment answered and has no contract to give, in the project's own words
 	rolesErr   error // the role read failed; the environment is still described
 	err        error // the environment could not be described this run
 }
@@ -565,7 +566,7 @@ func describeEnvironment(ctx context.Context, addr string, insecure, readRoles b
 	}
 	switch spec, err := fetchStackSpec(ctx, target, cred); {
 	case errors.Is(err, ErrNoContractYet):
-		d.noContract = true
+		d.noContract = err
 		return d
 	case err != nil:
 		d.err = err
@@ -674,6 +675,21 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 			}
 			jobs = append(jobs, job{env: e, addr: addr})
 		}
+		// THE DEFAULT IS READ, OR THE LINK FAILS (FR-014, FR-082). A default that is
+		// Failed, being deleted or missing from the listing is not an environment to
+		// leave as it is: it is what a build without a choice talks to.
+		defaultAsked := false
+		for _, j := range jobs {
+			defaultAsked = defaultAsked || j.env.Name == defaultEnv
+		}
+		if !defaultAsked {
+			for _, e := range project {
+				if e.Name == defaultEnv {
+					return appEnvironments{}, nil, nil, fmt.Errorf("%s is %s, so there is nothing to read from it", e.Name, e.Status)
+				}
+			}
+			return appEnvironments{}, nil, nil, fmt.Errorf("%s is not an environment of this project", defaultEnv)
+		}
 		// The workers only fill their own slot; the map and the output are built
 		// once they are done, in the project's own order.
 		results := make([]describedEnvironment, len(jobs))
@@ -700,8 +716,11 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 				continue
 			}
 			envs.Environments[name] = d.entry
-			if d.noContract {
-				fmt.Fprintf(w, "%s has nothing deployed yet — `palbase push --env %s`\n", name, name)
+			if d.noContract != nil {
+				// THE PROJECT'S OWN SENTENCE IS KEPT. "Nothing deployed" and "deployed,
+				// but the runtime could not build a document" arrive as the same error,
+				// and telling the second one to push again is how a diagnosis took hours.
+				fmt.Fprintf(w, "%s has no contract to give (%v) — `palbase push --env %s`\n", name, d.noContract, name)
 			} else {
 				specs[name] = d.spec
 			}
@@ -905,8 +924,10 @@ func readAppEnvironments(platform string) (appEnvironments, error) {
 		}
 		out.Environments[e.Name()] = env
 	}
-	// `local` is never the default: a build that forgot to say which environment
-	// it wanted must not silently talk to a developer's laptop.
+	// `local` is not the default while any other environment is here: a build
+	// that forgot to say which environment it wanted must not silently talk to a
+	// developer's laptop. A checkout that carries only `local` has nothing else the
+	// default could be.
 	out.Default = defaultEnvironment(out.names())
 	if out.Default == "" && len(out.Environments) > 0 {
 		out.Default = out.names()[0]
