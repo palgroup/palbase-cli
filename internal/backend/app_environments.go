@@ -767,14 +767,40 @@ func readAppEnvironments(platform string) (appEnvironments, error) {
 	}
 	// `local` is never the default: a build that forgot to say which environment
 	// it wanted must not silently talk to a developer's laptop.
-	for _, name := range out.names() {
-		if name != localEnvName {
-			out.Default = name
-			break
-		}
-	}
+	out.Default = defaultEnvironment(out.names())
 	if out.Default == "" && len(out.Environments) > 0 {
 		out.Default = out.names()[0]
 	}
 	return out, nil
+}
+
+// unavailableEnvironment is D-7's filter: an environment in these phases
+// answers nothing, and waiting out the ready budget on it is time spent to
+// learn what the listing already said.
+func unavailableEnvironment(status string) bool {
+	return strings.EqualFold(status, "Failed") || strings.EqualFold(status, "Deleting")
+}
+
+// defaultEnvironment is the ONE rule for "which environment does a checkout act
+// on by default" — `main` when it exists, otherwise the first by name, never
+// `local`. It used to live twice: link preferred `main`, the disk reader took
+// the first non-local name, and the two agreed only while a checkout carried a
+// single environment. One link now writes every environment, so they would
+// have disagreed on the next link.
+func defaultEnvironment(names []string) string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	first := ""
+	for _, n := range sorted {
+		if n == localEnvName {
+			continue
+		}
+		if strings.EqualFold(n, soleEnvName) {
+			return n
+		}
+		if first == "" {
+			first = n
+		}
+	}
+	return first
 }

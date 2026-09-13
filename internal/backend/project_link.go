@@ -289,10 +289,17 @@ func productByName(ctx context.Context, r Resolvers, typed string) (Product, []E
 //	the only one       nothing to choose
 //	main               the name this product gives a sole environment
 //	first by name      so two runs of one command agree
+//
+// An environment that is Failed or being deleted is never a candidate, and
+// naming one with --from-env is refused: there is nothing to read from it.
 func linkEnvironmentRef(product Product, envs []Environment, named string) (string, error) {
 	if named != "" {
 		for _, e := range envs {
 			if strings.EqualFold(e.Name, named) || e.Ref == named {
+				if unavailableEnvironment(e.Status) {
+					return "", fmt.Errorf("%s of %s is %s, so nothing can be read from it — name another with --from-env.\n%s",
+						e.Name, product.Name, e.Status, listingWithStatus(envs))
+				}
 				return e.Ref, nil
 			}
 		}
@@ -301,25 +308,49 @@ func linkEnvironmentRef(product Product, envs []Environment, named string) (stri
 	if len(envs) == 0 {
 		return "", fmt.Errorf("%s has no environments yet — `palbase env create <name>` makes one", product.Name)
 	}
-	if len(envs) == 1 {
-		return envs[0].Ref, nil
+	var usable []Environment
+	for _, e := range envs {
+		if !unavailableEnvironment(e.Status) {
+			usable = append(usable, e)
+		}
+	}
+	if len(usable) == 0 {
+		return "", fmt.Errorf("every environment of %s is failed or being deleted, so there is nothing to link.\n%s",
+			product.Name, listingWithStatus(envs))
+	}
+	if len(usable) == 1 {
+		return usable[0].Ref, nil
 	}
 	if sel, err := ReadSelection("."); err == nil && sel.Project == product.ID && sel.Ref != "" {
-		for _, e := range envs {
+		for _, e := range usable {
 			if e.Ref == sel.Ref {
 				return e.Ref, nil
 			}
 		}
 	}
-	ordered := make([]Environment, len(envs))
-	copy(ordered, envs)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
-	for _, e := range ordered {
-		if strings.EqualFold(e.Name, soleEnvName) {
+	names := make([]string, 0, len(usable))
+	for _, e := range usable {
+		names = append(names, e.Name)
+	}
+	chosen := defaultEnvironment(names)
+	for _, e := range usable {
+		if e.Name == chosen {
 			return e.Ref, nil
 		}
 	}
-	return ordered[0].Ref, nil
+	return usable[0].Ref, nil
+}
+
+// listingWithStatus is listing() with the phase beside each row: the refusal
+// above is ABOUT the phase, and a list that hides it sends the reader to
+// `palbase project list` to find out why.
+func listingWithStatus(envs []Environment) string {
+	rows := make([]string, 0, len(envs))
+	for _, e := range envs {
+		rows = append(rows, fmt.Sprintf("  %s   %s   %s", e.Name, e.Ref, e.Status))
+	}
+	sort.Strings(rows)
+	return strings.Join(rows, "\n")
 }
 
 // envNameOfRef is the NAME the artifact directory takes.
