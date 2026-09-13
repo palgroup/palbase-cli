@@ -21,6 +21,7 @@ func TestWireWebProjectGeneratesTheEnvironmentItIsGiven(t *testing.T) {
 		require.NoError(t, os.MkdirAll(EnvDir(env), 0o755))
 		require.NoError(t, os.WriteFile(ConfigPath(env, webPlatform),
 			[]byte(`{"base_url":"https://`+env+`","api_key":"pb_stub"}`+"\n"), 0o600))
+		require.NoError(t, os.WriteFile(SpecPath(env), []byte(`{"openapi":"3.1.0","paths":{}}`), 0o644))
 	}
 
 	var buf bytes.Buffer
@@ -53,4 +54,52 @@ func TestALinkFromStagingGeneratesTheWebClientForStaging(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(client), "./environments/staging/",
 		"the link generated the web client for the disk default, not the environment it read from")
+}
+
+// A WEB CHECKOUT WHOSE DEFAULT ENVIRONMENT HAS NOTHING DEPLOYED — a new
+// project's first link (FR-012). The generator refuses without a contract; the
+// link failed there, and the stage took every config and the "push" line down
+// with it. The configs are written, the line is said, the client waits.
+func TestAWebLinkToAnEnvironmentWithNothingDeployedWritesItsConfig(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	require.NoError(t, os.RemoveAll(EnvDir("main")), "the stub's seed is a deployed main")
+	main, _ := envServer(t, linkKeyMain, envServerOpts{noContract: true, socialAuth: true})
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	o := linkOpts{
+		url:          main.URL,
+		platforms:    []string{"web"},
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.FileExists(t, ConfigPath("main", webPlatform), "a link to an environment with nothing deployed wrote no config")
+	require.Contains(t, out.String(), "the web client is not generated yet: main has no contract")
+	require.NoFileExists(t, filepath.Join("palbase", "client.ts"), "a client was generated with no contract to generate it from")
+}
+
+// A GENERATOR THAT REFUSES IS HEARD. Its output went to the stage's buffer, which
+// a failed link discards, so the link said only `palbe-gen: exit status 1`.
+func TestAGeneratorRefusalReachesTheLinksError(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	require.NoError(t, os.WriteFile(palbeGenBin, []byte("#!/bin/sh\necho 'error: the generator explains itself' >&2\nexit 1\n"), 0o755))
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	o := linkOpts{
+		url:          main.URL,
+		platforms:    []string{"web"},
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
+
+	var out strings.Builder
+	err := runLink(context.Background(), o, &out)
+	require.ErrorContains(t, err, "error: the generator explains itself")
 }

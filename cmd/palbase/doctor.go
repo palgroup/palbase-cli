@@ -183,15 +183,13 @@ func doctorCmd() *cobra.Command {
 			// stack, or this machine's remembered choice. When the second one
 			// refuses, its refusal IS the diagnosis (two environments and none
 			// selected), so it is printed rather than swallowed.
-			if target, terr := backend.ReadTarget(); terr == nil {
-				ok("link", target.Describe())
-			} else {
-				ok("link", "this directory is not linked — run `palbase link <project>` here")
-			}
-			if resolved, rerr := backend.ResolveFor(cmd); rerr == nil {
-				ok("env", resolved.Describe()+"  (via "+resolved.Source+")")
-			} else if _, terr := backend.ReadTarget(); terr == nil {
-				bad("env", firstLine(rerr.Error()))
+			for _, l := range linkProbes(backend.ReadLinkedProject, backend.ReadTarget,
+				func() (backend.Resolved, error) { return backend.ResolveFor(cmd) }) {
+				if l.ok {
+					ok(l.label, l.detail)
+				} else {
+					bad(l.label, l.detail)
+				}
 			}
 
 			// Docker prerequisites, before Node: `palbase start` needs these and
@@ -238,4 +236,30 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// linkProbes is what doctor says about the binding: which project — or which
+// stack — this checkout is bound to, and where a verb would act right now.
+//
+// A PROJECT RECORD IS A LINK. It names a project and no address, the normal
+// shape since projects are what a checkout binds; read through ReadTarget, which
+// wants an address, every checkout bound to a project was told it was not
+// linked, and the resolver's refusal under it was swallowed.
+func linkProbes(readLinked, readTarget func() (backend.Target, error), resolve func() (backend.Resolved, error)) []probeLine {
+	var lines []probeLine
+	bound := true
+	if linked, err := readLinked(); err == nil {
+		lines = append(lines, probeLine{ok: true, label: "link", detail: linked.Describe()})
+	} else if local, err := readTarget(); err == nil {
+		lines = append(lines, probeLine{ok: true, label: "link", detail: local.Describe()})
+	} else {
+		bound = false
+		lines = append(lines, probeLine{ok: true, label: "link", detail: "this directory is not linked — run `palbase link <project>` here"})
+	}
+	if resolved, err := resolve(); err == nil {
+		lines = append(lines, probeLine{ok: true, label: "env", detail: resolved.Describe() + "  (via " + resolved.Source + ")"})
+	} else if bound {
+		lines = append(lines, probeLine{ok: false, label: "env", detail: firstLine(err.Error())})
+	}
+	return lines
 }

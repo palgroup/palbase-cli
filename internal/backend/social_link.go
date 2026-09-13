@@ -197,6 +197,34 @@ func linkedOAuth(ctx context.Context, target Target, platform, publishableKey, s
 	if snapshot.ApplicationKey != selection.ApplicationKey || snapshot.Variant != selection.Variant || string(snapshot.Platform) != platform {
 		return nil, selection, fmt.Errorf("the stack returned an auth snapshot for a different application, platform or variant")
 	}
+	// A SELECTION THAT DOES NOT FIT THIS ENVIRONMENT. No client for the selected
+	// application and variant, while this environment configures the app under
+	// another pair: written, the app would lose its sign-in client with nothing
+	// said.
+	if len(snapshot.Clients) == 0 {
+		identifiers := nativeIdentifiers(platform)
+		others := map[string]bool{}
+		for _, c := range available {
+			identifier := c.BundleID
+			if platform == "android" {
+				identifier = c.PackageName
+			}
+			if identifier != "" && slices.Contains(identifiers, identifier) &&
+				(c.ApplicationKey != selection.ApplicationKey || c.Variant != selection.Variant) {
+				others[fmt.Sprintf("%q variant %q", c.ApplicationKey, c.Variant)] = true
+			}
+		}
+		if len(others) > 0 {
+			pairs := make([]string, 0, len(others))
+			for pair := range others {
+				pairs = append(pairs, pair)
+			}
+			slices.Sort(pairs)
+			return nil, selection, fmt.Errorf("the selected application %q variant %q has no %s client here, and this environment configures the app as %s — "+
+				"give it one application_key and variant in every environment, or set oauth.%s in %s",
+				selection.ApplicationKey, selection.Variant, platform, strings.Join(pairs, ", "), platform, projectPath())
+		}
+	}
 	return &snapshot, selection, nil
 }
 
@@ -250,15 +278,15 @@ func nativeIdentifiers(platform string) []string {
 func platformEnvironments(ctx context.Context, target *Target, platform string, source appEnvironments) (appEnvironments, map[string]error, error) {
 	result := appEnvironments{Default: source.Default, Environments: map[string]appEnvironment{}}
 	dropped := map[string]error{}
-	// ONE SELECTION PER CHECKOUT, AND IT IS THE COMMITTED ONE. Every environment
-	// is read with what project.json records, never with what an environment
-	// read before it learned: carried across, that asked main for another
-	// environment's application and main's client list came back empty, decided
-	// by which name sorted first. What this run learns is recorded from the
-	// default environment alone.
-	committed := target.OAuth[platform]
+	// ONE SELECTION PER CHECKOUT: the committed one or, when nothing is
+	// committed, the one the DEFAULT environment's read learns. The default is
+	// read first and every other environment with that selection, so the first
+	// link writes what every later link writes. Each environment learning its
+	// own used to record the default's and read the others with it the NEXT
+	// time: their sign-in clients vanished on the second link.
+	readWith := target.OAuth[platform]
 	var learned *OAuthSelection
-	for _, name := range source.names() {
+	for _, name := range defaultFirst(source) {
 		env := source.Environments[name]
 		if env.APIKey == "" {
 			if name != source.Default {
@@ -283,7 +311,7 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 			return true
 		}
 		remote := Target{URL: env.BaseURL, Insecure: target.Insecure}
-		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, env.SealedRoot, committed)
+		snapshot, selection, err := linkedOAuth(ctx, remote, platform, env.APIKey, env.SealedRoot, readWith)
 		if err != nil {
 			reason := fmt.Errorf("%s/%s: %w", name, platform, err)
 			if drop(reason) {
@@ -304,6 +332,9 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 			if name == source.Default {
 				chosen := selection
 				learned = &chosen
+				if readWith.ApplicationKey == "" && readWith.Variant == "" {
+					readWith = chosen
+				}
 			}
 		}
 		result.Environments[name] = env
@@ -343,4 +374,17 @@ func RefreshLinkedClients(ctx context.Context, w io.Writer) error {
 		return runLink(ctx, o, w)
 	}
 	return runLink(ctx, linkOpts{url: target.URL, insecure: target.Insecure}, w)
+}
+
+// defaultFirst is source's environment names with the default one first and
+// the rest in name order.
+func defaultFirst(source appEnvironments) []string {
+	names := source.names()
+	for i, name := range names {
+		if name == source.Default && i > 0 {
+			rest := append(names[:i:i], names[i+1:]...)
+			return append([]string{name}, rest...)
+		}
+	}
+	return names
 }

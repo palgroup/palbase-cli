@@ -307,3 +307,11 @@ func TestAStacksRefusalReachesThePerson(t *testing.T) {
 		t.Errorf("the stack's own explanation was dropped: %v", err)
 	}
 }
+
+// THE SHELL'S PALBASE_ENV IS NOT THE TESTS'. The web SDK teaches people to keep
+// it set, and the resolver reads it like --env: on such a machine a dozen tests
+// here failed that CI never saw. A test that wants it sets it.
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv("PALBASE_ENV")
+	os.Exit(m.Run())
+}

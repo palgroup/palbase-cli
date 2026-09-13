@@ -316,6 +316,10 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 		// Resolve: re-linking the committed project instead pointed the app at
 		// the cloud while every verb went on acting on that stack.
 		if local, err := ReadTarget(); err == nil && local.SelfHost {
+			if o.env != "" {
+				return fmt.Errorf("this checkout acts on the stack linked here by address (%s), which is one installation with one environment — "+
+					"--from-env selects between a project's environments; `palbase link <project> --from-env %s` binds the project instead", local.URL, o.env)
+			}
 			o.url = local.URL
 			o.insecure = o.insecure || local.Insecure
 			return nil
@@ -539,11 +543,60 @@ func envNameOfRef(envs []Environment, ref string) string {
 // A stack somebody runs is recorded by ADDRESS, because that is all it has —
 // one installation, one identity, one pair of keys. That path also refuses a
 // loopback address, which is the defect measured in this very repository.
-func writeLinkRecord(o linkOpts, target Target) error {
-	if o.product.ID != "" {
-		return WriteLinkedIdentity(o.product, target)
+func writeLinkRecord(o linkOpts, target Target, w io.Writer) error {
+	if o.product.ID == "" {
+		return WriteSelfHostTarget(target)
 	}
-	return WriteSelfHostTarget(target)
+	if err := WriteLinkedIdentity(o.product, target); err != nil {
+		return err
+	}
+	// BINDING A PROJECT RELEASES A STACK LINKED HERE BY ADDRESS. That record
+	// lives on this machine rather than in the checkout, and every verb prefers
+	// it: left in place, the next no-target link or auth refresh pointed the app
+	// back at that stack after the person had linked the project. A record
+	// `palbase start` wrote is the stack running here and stays (FR-084). After
+	// the identity, so a link that cannot record the project releases nothing.
+	released, err := forgetLinkedStack(target.checkoutRoot)
+	if err != nil {
+		return err
+	}
+	if released {
+		fmt.Fprintln(w, "✓ this machine no longer acts on the stack linked here by address; this checkout acts on the project")
+	}
+	return nil
+}
+
+// forgetLinkedStack removes this checkout's machine-local record when `link`
+// wrote it for a stack somebody hosts, and leaves any other record alone. It
+// reports whether there was one to remove.
+func forgetLinkedStack(checkoutRoot string) (bool, error) {
+	if checkoutRoot == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return false, err
+		}
+		checkoutRoot = wd
+	}
+	local, err := LocalStatePath(checkoutRoot)
+	if err != nil {
+		return false, err
+	}
+	raw, err := os.ReadFile(local)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var record Target
+	if err := decodeTarget(raw, &record); err != nil || !record.SelfHost {
+		// Unreadable, or the stack `palbase start` runs here: not this one's to remove.
+		return false, nil
+	}
+	if err := os.Remove(local); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, nil
 }
 
 func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
@@ -660,7 +713,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// Remember the target. `login`, `push` and `spec` read it, so none of them
 	// asks for an address again — and a colleague who clones this repository
 	// reaches the same stack without being told which one it is.
-	if err := writeLinkRecord(o, target); err != nil {
+	if err := writeLinkRecord(o, target, w); err != nil {
 		return err
 	}
 
@@ -863,7 +916,15 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// behind `palbase web link` and went unreachable when that command was
 	// retired — so the platform that needs the most setup got the least.
 	if web {
-		if err := wireWebProject(ctx, o.entry, o.out, envs.Default, w); err != nil {
+		// A CONTRACT FIRST. The web client is generated from the environment's
+		// contract and the generator refuses without one: the link failed there,
+		// and the stage took every config and the "nothing deployed" line down
+		// with it — a new project's first link wrote nothing. The configs are
+		// written, the line is said, and the client waits for a push (FR-012).
+		if !isRegularFile(specPath(envs.Default)) {
+			fmt.Fprintf(w, "the web client is not generated yet: %s has no contract — `palbase push --env %s`, then `palbase link`\n",
+				envs.Default, envs.Default)
+		} else if err := wireWebProject(ctx, o.entry, o.out, envs.Default, w); err != nil {
 			return err
 		}
 	}
@@ -888,7 +949,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// THE SECOND WriteTarget USED TO CARRY A DERIVED FIELD FORWARD. It does not
 	// any more: `stackVersion` is derived from the installed package on every
 	// read and written nowhere, so there is nothing to re-read and preserve.
-	if err := writeLinkRecord(o, target); err != nil {
+	if err := writeLinkRecord(o, target, w); err != nil {
 		return err
 	}
 	reportLinked(w, o.product, base, described.Hosting, linkedEnv)
@@ -989,17 +1050,35 @@ func runUnlink(w io.Writer) error {
 	// One sentence for both sent a self-hosted checkout looking for a cloud
 	// project it never had.
 	relink := "`palbase link <project>`"
-	if record, err := readLinkedProject(); err == nil && record.Project == "" && record.URL != "" {
+	record, recErr := readLinkedProject()
+	if recErr == nil && record.Project == "" && record.URL != "" {
 		relink = "`palbase link <url>`"
 	}
+	// A STACK LINKED HERE BY ADDRESS is a binding too, kept on this machine
+	// rather than in the checkout. Unlinking used to leave it in place, say "not
+	// linked", and let every verb go on acting on it.
+	released, err := forgetLinkedStack("")
+	if err != nil {
+		return err
+	}
+	if released && (recErr != nil || record.Project == "") {
+		relink = "`palbase link <url>`"
+	}
+	removed := false
 	switch err := os.Remove(path); {
 	case err == nil:
+		removed = true
 		fmt.Fprintf(w, "✓ unlinked — removed %s\n", path)
 	case os.IsNotExist(err):
-		fmt.Fprintln(w, "this checkout was not linked")
-		return nil
 	default:
 		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	if released {
+		fmt.Fprintln(w, "✓ unlinked — this machine no longer acts on the stack linked here by address")
+	}
+	if !removed && !released {
+		fmt.Fprintln(w, "this checkout was not linked")
+		return nil
 	}
 	// NO "remove the directory if it is empty" BRANCH. It could never fire:
 	// every `link` writes `palbase/.gitattributes`, so something always lives

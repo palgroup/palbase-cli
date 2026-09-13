@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/palgroup/palbase-cli/internal/backend"
 )
 
 // `palbase start` düştü, iki kez, ve iki kez de sebebi docker'ın kendisiydi:
@@ -182,4 +184,41 @@ func TestToolchainProbesNameBunBecausePushBundlesWithIt(t *testing.T) {
 			t.Errorf("node satırı neyin düşeceğini söylemiyor: %q", node.detail)
 		}
 	})
+}
+
+// A CHECKOUT BOUND TO A PROJECT IS LINKED. Its record names a project and no
+// address; doctor read it through ReadTarget, which refuses a record with no
+// address, so every such checkout was told "this directory is not linked" and
+// the resolver's refusal under it was swallowed.
+func TestDoctorSaysACheckoutBoundToAProjectIsLinked(t *testing.T) {
+	lines := linkProbes(
+		func() (backend.Target, error) { return backend.Target{Project: "prd_a", Name: "todoapp"}, nil },
+		func() (backend.Target, error) {
+			return backend.Target{}, errors.New("palbase/project.json names a project, not an address")
+		},
+		func() (backend.Resolved, error) {
+			return backend.Resolved{}, errors.New("todoapp has 2 environments and none is selected\n  main  aaa")
+		},
+	)
+	if len(lines) != 2 {
+		t.Fatalf("want a link line and an env line, got %+v", lines)
+	}
+	if lines[0].label != "link" || !strings.Contains(lines[0].detail, "todoapp") || strings.Contains(lines[0].detail, "not linked") {
+		t.Fatalf("a checkout bound to a project was not reported as linked: %+v", lines[0])
+	}
+	if lines[1].label != "env" || lines[1].ok || lines[1].detail != "todoapp has 2 environments and none is selected" {
+		t.Fatalf("the resolver's refusal was not printed as the diagnosis: %+v", lines[1])
+	}
+}
+
+func TestDoctorSaysAnUnboundDirectoryIsNotLinked(t *testing.T) {
+	notLinked := errors.New("this checkout is not linked to a project")
+	lines := linkProbes(
+		func() (backend.Target, error) { return backend.Target{}, notLinked },
+		func() (backend.Target, error) { return backend.Target{}, notLinked },
+		func() (backend.Resolved, error) { return backend.Resolved{}, notLinked },
+	)
+	if len(lines) != 1 || !strings.Contains(lines[0].detail, "not linked") {
+		t.Fatalf("an unbound directory: %+v", lines)
+	}
 }

@@ -30,6 +30,7 @@ func twoEnvironmentsOf(t *testing.T) {
 func TestLinkWithNoTargetRebindsTheProject(t *testing.T) {
 	inScratchCheckout(t)
 	seedWebCheckout(t)
+	installStubCodegen(t, "// gen") // no npm install: the generator is the stub
 	main := stackServing(t, linkKeyMain, nil)
 	staging := stackServing(t, linkKeyStaging, nil)
 	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
@@ -85,6 +86,7 @@ func TestLinkOptsForRecordNamesTheProjectAndItsEnvironments(t *testing.T) {
 func TestRefreshingClientsAfterAnAuthWriteRebindsTheProject(t *testing.T) {
 	inScratchCheckout(t)
 	seedWebCheckout(t)
+	installStubCodegen(t, "// gen") // no npm install: the generator is the stub
 	main := stackServing(t, linkKeyMain, nil)
 	staging := stackServing(t, linkKeyStaging, nil)
 	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
@@ -135,6 +137,7 @@ func loopbackInstallOverAProject(t *testing.T) *httptest.Server {
 func TestANoTargetLinkFollowsALoopbackInstallBeforeTheProjectRecord(t *testing.T) {
 	inScratchCheckout(t)
 	seedWebCheckout(t)
+	installStubCodegen(t, "// gen") // no npm install: the generator is the stub
 	installed := loopbackInstallOverAProject(t)
 
 	o := linkOpts{platforms: []string{"web"}}
@@ -151,6 +154,7 @@ func TestANoTargetLinkFollowsALoopbackInstallBeforeTheProjectRecord(t *testing.T
 func TestAnAuthRefreshFollowsALoopbackInstallBeforeTheProjectRecord(t *testing.T) {
 	inScratchCheckout(t)
 	seedWebCheckout(t)
+	installStubCodegen(t, "// gen") // no npm install: the generator is the stub
 	installed := loopbackInstallOverAProject(t)
 	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
 	require.NoError(t, os.WriteFile(ConfigPath("main", webPlatform),
@@ -162,4 +166,69 @@ func TestAnAuthRefreshFollowsALoopbackInstallBeforeTheProjectRecord(t *testing.T
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), installed.URL, "the refresh re-pointed the app at the cloud while every verb acts on the install")
 	assert.NoFileExists(t, ConfigPath("staging", webPlatform))
+}
+
+// BINDING THE PROJECT RELEASES A STACK LINKED HERE BY ADDRESS. The loopback
+// link came first and `palbase link <project>` second: the machine-local record
+// the first one wrote survived, so the next no-target link or auth refresh
+// pointed the app back at the stack the person had just left.
+func TestLinkingTheProjectReleasesAStackLinkedHereByAddress(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	main := stackServing(t, linkKeyMain, nil)
+	staging := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	twoEnvironmentsOf(t)
+	installed := stackServing(t, linkKeyCanary, nil)
+	linkedAs(t, installed.URL, "a-credential")
+	require.NoError(t, WriteSelfHostTarget(Target{URL: installed.URL}))
+
+	named := linkOpts{
+		url:       main.URL,
+		platforms: []string{"web"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		},
+	}
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), named, &out), out.String())
+	local, err := localPath()
+	require.NoError(t, err)
+	assert.NoFileExists(t, local, "linking the project left the stack linked here by address in charge")
+	assert.Contains(t, out.String(), "no longer acts on the stack linked here by address")
+
+	again := linkOpts{platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &again))
+	assert.Equal(t, "prd_a", again.product.ID, "a no-target link after linking the project went back to the stack")
+}
+
+// UNLINK RELEASES A STACK LINKED HERE BY ADDRESS. It removed only
+// project.json, said "not linked", and every verb went on acting on the stack.
+func TestUnlinkReleasesAStackLinkedHereByAddress(t *testing.T) {
+	inScratchCheckout(t)
+	installed := stackServing(t, linkKeyCanary, nil)
+	require.NoError(t, WriteSelfHostTarget(Target{URL: installed.URL}))
+
+	var out strings.Builder
+	require.NoError(t, runUnlink(&out))
+	local, err := localPath()
+	require.NoError(t, err)
+	assert.NoFileExists(t, local, "unlink left the stack linked here by address in charge")
+	assert.Contains(t, out.String(), "re-link with `palbase link <url>`")
+	assert.NotContains(t, out.String(), "was not linked")
+}
+
+// --from-env names one of a project's environments; while a stack linked here by
+// address is what this checkout acts on there is nothing to choose between, and
+// ignoring the flag linked the stack as if it had not been given.
+func TestFromEnvIsRefusedWhileAStackLinkedHereByAddressIsInCharge(t *testing.T) {
+	inScratchCheckout(t)
+	_ = loopbackInstallOverAProject(t)
+
+	o := linkOpts{env: "staging"}
+	require.ErrorContains(t, resolveLinkTarget(context.Background(), Resolvers{}, &o), "--from-env")
 }

@@ -158,9 +158,20 @@ func runPalbeGen(ctx context.Context, env, outFlag string, w io.Writer) (bool, e
 	}
 	c := exec.CommandContext(ctx, palbeGenBin, args...)
 	c.Env = append(os.Environ(), "PALBASE_ENV="+env)
-	c.Stdout = w
-	c.Stderr = w
+	// THE GENERATOR'S OUTPUT TRAVELS WITH THE ERROR. It goes to w, and inside a
+	// link w is the stage's buffer, which a failed link throws away: the person
+	// was left with a bare `palbe-gen: exit status 1`.
+	//
+	// ONE WRITER FOR BOTH STREAMS. os/exec copies each stream on its own
+	// goroutine unless Stdout and Stderr are the same comparable writer; two
+	// writers both reaching w raced on it (measured with -race).
+	var output bytes.Buffer
+	out := io.MultiWriter(w, &output)
+	c.Stdout, c.Stderr = out, out
 	if err := c.Run(); err != nil {
+		if said := strings.TrimSpace(output.String()); said != "" {
+			return false, fmt.Errorf("palbe-gen: %w\n%s", err, said)
+		}
 		return false, fmt.Errorf("palbe-gen: %w", err)
 	}
 	// BOTH PRODUCTS, because either one alone is a project that does not

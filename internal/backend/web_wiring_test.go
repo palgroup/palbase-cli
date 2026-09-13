@@ -1229,6 +1229,13 @@ if [ ! -f "$dir/$env/web-config.json" ]; then
   echo "error: $dir/$env/web-config.json is required in dir mode" >&2
   exit 1
 fi
+# The real generator refuses without a contract (palbe/src/gen cli.test.ts:
+# "fails loudly without a spec"); a stub that did not let a link with nothing
+# deployed pass here and fail for every new project.
+if [ ! -f "$dir/$env/openapi.json" ]; then
+  echo "error: no OpenAPI spec at $dir/$env/openapi.json" >&2
+  exit 1
+fi
 mkdir -p "$dir/$env"
 cat > "$dir/$env/$out" <<'PALBE_EOF'
 ` + content + `

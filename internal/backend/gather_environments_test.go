@@ -25,6 +25,7 @@ type envServerOpts struct {
 	rolesRefused     bool          // the role read answers 500
 	readyDelay       time.Duration // the well-known document takes this long
 	inFlight, peak   *atomic.Int32 // when set: well-known reads in flight, and the most at once
+	socialAuth       bool          // the social-auth read answers with no provider enabled (else 404)
 }
 
 func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *atomic.Int32) {
@@ -71,6 +72,13 @@ func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *at
 			}
 			w.Header().Set("content-type", "application/json")
 			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+		case "/v1/management/auth/social-auth":
+			if !o.socialAuth {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Palbase-Auth-Contract", "1")
+			_, _ = w.Write([]byte(`{"contract_revision":1,"credentials":[],"providers":{"google":{"enabled":false,"browser_clients":[],"native_clients":[]},"apple":{"enabled":false,"browser_clients":[],"native_clients":[]},"microsoft":{"enabled":false,"browser_clients":[],"native_clients":[]},"github":{"enabled":false,"browser_clients":[],"native_clients":[]}}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
