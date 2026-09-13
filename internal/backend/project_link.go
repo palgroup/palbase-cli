@@ -58,10 +58,13 @@ type linkOpts struct {
 	// product is set when the target was resolved from a cloud project rather
 	// than typed as an address. It decides WHAT the committed file records: an
 	// identity for a cloud project, an address for a stack somebody runs.
-	product    Product
-	platforms  []string
-	insecure   bool
-	tokenStdin bool
+	product Product
+	// environments are the product's environments as the listing returned
+	// them; empty for a stack somebody runs.
+	environments []Environment
+	platforms    []string
+	insecure     bool
+	tokenStdin   bool
 	// env names WHICH environment this link reads the contract and the key
 	// from. It does not enter the committed file — that records the project.
 	env string
@@ -117,8 +120,17 @@ func newLinkCmd(r Resolvers) *cobra.Command {
 		Short: "Bind this app to a stack and generate its client",
 		Long: `Bind this checkout to a project, and generate the typed client for it.
 
-    palbase link http://localhost:54321      something running on this machine
-    palbase link todoapp                     a project in the cloud
+    palbase link <project>                     a project in the cloud, by name
+    palbase link <ref>                         the project that environment belongs to
+    palbase link https://<ref>.<cloud host>    the same project, by that environment's address
+    palbase link http://localhost:54321        something running on this machine
+    palbase link <url> --token-stdin           a stack you host yourself, its key on stdin
+
+Every form that names a cloud project binds the PROJECT, never one of its
+environments: which environment a command acts on is ` + "`palbase env use`" + ` or
+` + "`--env`" + `. With no target, it links this checkout's project again:
+
+    palbase link
 
 Linking is something you do AS SOMEBODY. Both the publishable key and the
 contract come from the project over authenticated routes — the public document
@@ -142,46 +154,8 @@ boot generated.`,
 			if len(args) == 1 && o.url == "" {
 				o.url = args[0]
 			}
-			// A BARE REF IS AN ADDRESS THIS CLOUD KNOWS, and the help above has
-			// promised so all along: "palbase link <project> — a project in the
-			// cloud". The code refused it and sent people to `palbase ios link`,
-			// which links an iOS APP — no use at all to a backend checkout, which
-			// then had no way to reach a cloud project by name. The only thing
-			// missing was the suffix, and the configured cloud carries it.
-			if o.url != "" && !strings.Contains(o.url, "://") {
-				// A BARE WORD NAMES A PROJECT, and a project is resolved to its
-				// PRODUCT — not to one environment's address.
-				//
-				// THE OLD PATH BROKE THE MOMENT A PROJECT GREW A SECOND
-				// ENVIRONMENT. It asked `/v1/cloud/projects`, which returns one
-				// row per ENVIRONMENT carrying the PRODUCT's name, and refused
-				// to choose when two rows shared a name — so `palbase link
-				// todoapp` fell through to the ref-shape check, and "todoapp"
-				// is 7 lowercase letters, so it built `https://todoapp.<host>`
-				// and reported "does not look like a Palbase stack". The
-				// failure named a network problem for a modelling one.
-				//
-				// Now the listing is by product, so two environments are two
-				// entries under ONE answer and nothing is ambiguous.
-				product, envs, err := productByName(cmd.Context(), r, o.url)
-				if err != nil {
-					return err
-				}
-				o.product = product
-				// The address to TALK to during this link is one environment's,
-				// and it is only used for this call: the contract, the key and
-				// the public document all come from a running stack. What gets
-				// COMMITTED is the identity (writeLinkRecord).
-				ref, refErr := linkEnvironmentRef(product, envs, o.env)
-				if refErr != nil {
-					return refErr
-				}
-				o.linkedEnv = envNameOfRef(envs, ref)
-				host := r.Endpoints().PublicHost
-				if host == "" {
-					return fmt.Errorf("this CLI has no tenant host configured, so %q cannot be resolved to an address", ref)
-				}
-				o.url = "https://" + ref + "." + host
+			if err := resolveLinkTarget(cmd.Context(), r, &o); err != nil {
+				return err
 			}
 			return runLink(cmd.Context(), o, cmd.OutOrStdout())
 		},
@@ -217,34 +191,27 @@ func productByName(ctx context.Context, r Resolvers, typed string) (Product, []E
 			"%q is not an address, and this CLI has no cloud session to resolve it as a project — "+
 				"`palbase login`, or pass the stack's URL", typed)
 	}
-	var rows []struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Environments []struct {
-			Ref    string `json:"ref"`
-			Name   string `json:"name"`
-			Status string `json:"status"`
-		} `json:"environments"`
-	}
-	if err := r.REST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err != nil {
+	listed, err := listCLIProjects(ctx, r)
+	if err != nil {
 		return Product{}, nil, err
 	}
-	type match struct {
-		product Product
-		envs    []Environment
-	}
-	var matches []match
+	want := strings.TrimSpace(typed)
+	var matches []listedProduct
 	var known []string
-	for _, p := range rows {
-		known = append(known, p.Name)
-		if !strings.EqualFold(strings.TrimSpace(p.Name), strings.TrimSpace(typed)) && p.ID != typed {
-			continue
+	for _, p := range listed {
+		known = append(known, p.product.Name)
+		// A NAME, AN ID OR ONE OF ITS ENVIRONMENTS' REFS — all three name the
+		// PROJECT, and they are counted together: a word that is one project's
+		// name and another's environment ref is two answers, not a precedence.
+		matched := strings.EqualFold(strings.TrimSpace(p.product.Name), want) || p.product.ID == typed
+		for _, e := range p.envs {
+			if e.Ref == typed {
+				matched = true
+			}
 		}
-		envs := make([]Environment, 0, len(p.Environments))
-		for _, e := range p.Environments {
-			envs = append(envs, Environment{Ref: e.Ref, Name: e.Name, Status: e.Status})
+		if matched {
+			matches = append(matches, p)
 		}
-		matches = append(matches, match{product: Product{ID: p.ID, Name: p.Name}, envs: envs})
 	}
 	switch len(matches) {
 	case 1:
@@ -257,15 +224,127 @@ func productByName(ctx context.Context, r Resolvers, typed string) (Product, []E
 		if len(known) == 0 {
 			return Product{}, nil, fmt.Errorf("you have no projects yet — `palbase project create %s`", typed)
 		}
-		return Product{}, nil, fmt.Errorf("no project of yours is called %q. Yours:\n  %s",
+		return Product{}, nil, fmt.Errorf("no project of yours is called %q, and none of your environments has that ref. Yours:\n  %s",
 			typed, strings.Join(known, "\n  "))
 	default:
-		// TWO PRODUCTS, ONE NAME. Choosing would be choosing somebody's
-		// production at random; the id disambiguates and the listing prints it.
-		return Product{}, nil, fmt.Errorf(
-			"%d of your projects are called %q — name one by its id instead (`palbase project list` prints them)",
-			len(matches), typed)
+		// TWO PROJECTS, ONE WORD. Choosing would be choosing somebody's
+		// production at random; the ids disambiguate.
+		named := make([]string, 0, len(matches))
+		for _, m := range matches {
+			named = append(named, fmt.Sprintf("%s (%s)", m.product.Name, m.product.ID))
+		}
+		sort.Strings(named)
+		return Product{}, nil, fmt.Errorf("%q matches %d of your projects — %s; name one by its id",
+			typed, len(matches), strings.Join(named, ", "))
 	}
+}
+
+// listedProduct is one project of the CLI listing with its environments.
+type listedProduct struct {
+	product Product
+	envs    []Environment
+}
+
+// listCLIProjects is the ONE listing a link resolves against. A name, an id, a
+// ref and an address all read it, so they cannot disagree about which project
+// an environment belongs to.
+func listCLIProjects(ctx context.Context, r Resolvers) ([]listedProduct, error) {
+	var rows []struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Environments []struct {
+			Ref    string `json:"ref"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"environments"`
+	}
+	if err := r.REST().Do(ctx, http.MethodGet, "/api/v2/projects", nil, &rows); err != nil {
+		return nil, err
+	}
+	out := make([]listedProduct, 0, len(rows))
+	for _, p := range rows {
+		envs := make([]Environment, 0, len(p.Environments))
+		for _, e := range p.Environments {
+			envs = append(envs, Environment{Ref: e.Ref, Name: e.Name, Status: e.Status})
+		}
+		out = append(out, listedProduct{product: Product{ID: p.ID, Name: p.Name}, envs: envs})
+	}
+	return out, nil
+}
+
+// productByEnvironmentRef resolves an address's first label against the
+// caller's ENVIRONMENTS only. A project that happens to be NAMED like a label
+// must not capture it: `https://api.<cloud>` is the control plane's own stack,
+// served under the same suffix, and operators link it by that address.
+func productByEnvironmentRef(ctx context.Context, r Resolvers, ref string) (Product, []Environment, bool, error) {
+	if ref == "" {
+		return Product{}, nil, false, nil
+	}
+	listed, err := listCLIProjects(ctx, r)
+	if err != nil {
+		return Product{}, nil, false, err
+	}
+	for _, p := range listed {
+		for _, e := range p.envs {
+			if e.Ref == ref {
+				return p.product, p.envs, true, nil
+			}
+		}
+	}
+	return Product{}, nil, false, nil
+}
+
+// resolveLinkTarget turns what the command was given into the link it makes.
+//
+// ONE PROJECT, SEVERAL SPELLINGS. A bare word is a project's name, its id or
+// one of its environments' refs, and all three bind the PROJECT. An address
+// under this cloud's tenant host whose first label is one of the caller's
+// environments is the same thing spelled longer and binds the same way — it
+// used to fall through to the self-host writer and commit an address. Anything
+// else stays an address: one this cloud's listing does not know (the control
+// plane's own stack is one), a loopback, a stack somebody runs, an address
+// handed a key on stdin, or any address when the listing cannot be read. The
+// address path still needs a credential the stack accepts before it writes.
+func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
+	if o.url == "" {
+		return nil
+	}
+	bind := func(product Product, envs []Environment) error {
+		// The address to TALK to during this link is the DEFAULT environment's,
+		// and only for this call: the contract, the key and the public document
+		// come from a running stack. What gets COMMITTED is the identity.
+		ref, err := linkEnvironmentRef(product, envs, o.env)
+		if err != nil {
+			return err
+		}
+		host := ""
+		if r.Endpoints != nil {
+			host = r.Endpoints().PublicHost
+		}
+		if host == "" {
+			return fmt.Errorf("this CLI has no tenant host configured, so %q cannot be resolved to an address", ref)
+		}
+		o.product = product
+		o.environments = envs
+		o.linkedEnv = envNameOfRef(envs, ref)
+		o.url = "https://" + ref + "." + host
+		return nil
+	}
+	if !strings.Contains(o.url, "://") {
+		product, envs, err := productByName(ctx, r, o.url)
+		if err != nil {
+			return err
+		}
+		return bind(product, envs)
+	}
+	if o.tokenStdin || r.REST == nil || r.REST() == nil || CloudProjectAddress == nil || !CloudProjectAddress(o.url) {
+		return nil
+	}
+	product, envs, found, err := productByEnvironmentRef(ctx, r, refOfURL(o.url))
+	if err != nil || !found {
+		return nil
+	}
+	return bind(product, envs)
 }
 
 // linkEnvironmentRef picks the environment this link reads FROM.
