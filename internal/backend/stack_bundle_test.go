@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -318,6 +319,60 @@ func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests")); err == nil {
 		t.Error("an empty tests directory was created for a project with none")
+	}
+}
+
+// FR-017: A SUITE BESIDE THE CODE IT TESTS IS BUNDLED, FROM ANYWHERE IN THE
+// PROJECT — not only tests/ (design.md J-17: `modules/notes/note.service.test.ts`,
+// the template's own shape, never reached bundleTests before).
+//
+// FR-017a: AND TWO SUITES NAMED ALIKE IN DIFFERENT MODULES BOTH SURVIVE. The
+// bundler cannot use one output name twice, so without a collision-free
+// staging step the second suite entered would silently overwrite the first —
+// its failures, and its very existence, would vanish from what a deploy runs.
+func TestModuleLocalTestsAreCollectedProjectWideWithoutCollision(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is what bundles a suite")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/x.test.ts", "import { test } from \"node:test\";\ntest(\"a\", () => {});\n")
+	mustWrite(t, dir, "modules/b/x.test.ts", "import { test } from \"node:test\";\ntest(\"b\", () => {});\n")
+	// NEGATİF KONTROLLER: node_modules paket yöneticisinindir, ve
+	// .palbase-build-controllers bu CLI'ın ÖNCEKİ (ya da hâlâ süren) bir
+	// komutun KENDİ staging çıktısıdır — ikisi de projenin kendi testi değil,
+	// ve içine girmek bu projenin OLMAYAN bir süitini toplamak olurdu.
+	mustWrite(t, dir, "node_modules/dep/dep.test.ts", "import { test } from \"node:test\";\ntest(\"dep\", () => {});\n")
+	mustWrite(t, dir, ".palbase-build-controllers/x.test.ts", "import { test } from \"node:test\";\ntest(\"stale\", () => {});\n")
+
+	bundleRoot := t.TempDir()
+	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
+		t.Fatalf("the module-local suites did not bundle: %v", err)
+	}
+
+	outDir := filepath.Join(bundleRoot, ".palbase", "esm", "tests")
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", outDir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	if len(names) != 2 {
+		t.Fatalf("want exactly 2 bundled suites (one per module), got %v", names)
+	}
+	for _, want := range []string{"x.test.js", "b_x.test.js"} {
+		ok := false
+		for _, n := range names {
+			if n == want {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("missing %q among bundled suites %v — one module-local suite overwrote the other (FR-017a)",
+				want, names)
+		}
 	}
 }
 

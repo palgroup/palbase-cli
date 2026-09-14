@@ -288,15 +288,16 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 	return uses, surfaces.AbiGeneration, nil
 }
 
-// testsDir is where a project keeps the suites a deploy runs, and
-// bundledTestsDir is where their build lands. The artifact collects everything
-// under .palbase/esm, so putting them there is what makes them travel.
-const (
-	testsDir        = "tests"
-	bundledTestsDir = ".palbase/esm/tests"
-)
+// bundledTestsDir is where the staged suites' build lands. The artifact
+// collects everything under .palbase/esm, so putting them there is what makes
+// them travel.
+const bundledTestsDir = ".palbase/esm/tests"
 
-// bundleTests builds each *.test.ts into a self-contained module.
+// bundleTests builds every suite collectTestSources finds into a self-
+// contained module — the whole project, not only tests/ (FR-017): a module
+// owns its tests beside the code they exercise, the same way it owns its
+// controllers, and `modules/notes/notes.e2e.test.ts` (the template's own
+// shape, FR-016) never reached this function before this walk existed.
 //
 // ONE BUNDLE PER SUITE, not one for all of them: `bun test` reports per file,
 // and a single blob would collapse every suite into one name in the output a
@@ -318,41 +319,175 @@ const (
 // Ve bu yalniz cop degil: `palbase link` `.palbase` tasiyan bir checkout'u
 // REDDEDIYOR. Yani `push` kendi `link`inin engel saydigi dizini URETIYOR.
 func bundleTests(ctx context.Context, dir, bundleRoot string, w io.Writer) error {
-	root := filepath.Join(dir, testsDir)
-	entries, err := os.ReadDir(root)
+	staged, suites, err := stageTestSuites(dir)
 	if err != nil {
-		return nil // A project with no tests is a legitimate project.
+		return err
 	}
-
-	var suites []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !isTestSource(name) {
-			continue
-		}
-		suites = append(suites, filepath.Join(root, name))
+	if staged != "" {
+		defer func() { _ = os.RemoveAll(staged) }()
 	}
 	if len(suites) == 0 {
-		return nil
+		return nil // A project with no tests is a legitimate project.
 	}
-	sort.Strings(suites)
 
 	outDir := filepath.Join(bundleRoot, filepath.FromSlash(bundledTestsDir))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
 
+	// ONE `bun build` PER SUITE, EACH WITH AN EXPLICIT --outfile — never a
+	// shared --outdir across every entry. `bun build --outdir` derives an
+	// entry's output name from its REAL path (it resolves the symlink
+	// stageTestSuites staged it as) relative to the entries' common root, so
+	// with sources scattered across the actual project tree that derived name
+	// climbs OUT of outDir entirely (`bun build stage/x.test.ts stage/y.test.ts
+	// --outdir=out` wrote `../modules/a/x.test.js`, verified directly against
+	// bun 1.3.9) rather than landing flat inside it. --outfile has no such
+	// derivation: it names the file bun writes, verbatim, so the flat,
+	// collision-free name stageTestSuites already chose is the one that lands —
+	// and the entry can still be the symlink, so a suite's relative import to a
+	// sibling resolves against the REAL file (bun realpaths it), exactly like
+	// TestTheProjectsTestsAreBundledSoTheyCanTravel needs.
+	//
 	// bun:test and node:test are the RUNNER's, not the bundle's. Inlining them
 	// would give each suite its own copy of a registry the runner owns, and the
 	// run would report zero tests while every file executed.
-	args := append([]string{"build"}, suites...)
-	args = append(args, "--target=bun", "--format=esm", "--outdir="+outDir,
-		"--external=bun:test", "--external=node:test", "--external=node:assert")
-	if err := run(ctx, dir, "bun", args...); err != nil {
-		return fmt.Errorf("the tests did not build: %w", err)
+	for _, suite := range suites {
+		out := filepath.Join(outDir, strings.TrimSuffix(filepath.Base(suite), filepath.Ext(suite))+".js")
+		if err := run(ctx, dir, "bun", "build", suite, "--target=bun", "--format=esm", "--outfile="+out,
+			"--external=bun:test", "--external=node:test", "--external=node:assert"); err != nil {
+			return fmt.Errorf("the tests did not build: %w", err)
+		}
 	}
 	fmt.Fprintf(w, "bundled %d test suite(s)\n", len(suites))
 	return nil
+}
+
+// collectTestSources walks the WHOLE project for *.test.* files (FR-017): a
+// suite that lives beside the code it tests never reached bundleTests before
+// this walk existed — only DIRECT CHILDREN of tests/ did, read with a plain,
+// non-recursive os.ReadDir, so `modules/notes/notes.e2e.test.ts` was invisible
+// to it (measured, design.md J-17).
+//
+// The walk and its skip list mirror moduleSources: node_modules and dist are
+// not source (node_modules is often a symlink, for which IsDir() is false),
+// .git is not source, and every `.palbase`/`.palbase-*` tree is this CLI's OWN
+// staging output from an earlier or still-running command — walking into one
+// would collect a build's own copy of a suite a second time.
+func collectTestSources(dir string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() || name == "node_modules" || name == "dist" || name == ".git" {
+			if path != dir && (name == "node_modules" || name == "dist" || name == ".git" ||
+				strings.HasPrefix(name, ".palbase")) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				// SkipDir on a symlink skips its remaining siblings as well.
+				return nil
+			}
+			return nil
+		}
+		if isTestSource(name) {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// stageTestSuites links the suites collectTestSources finds into ONE flat
+// temporary tree, under names derived from each suite's project-relative path
+// so two suites never overwrite each other (C-9, FR-017a), and hands the
+// bundler those paths. An empty result (no error, empty root, nil paths) is
+// the legitimate answer for a project with no tests anywhere.
+//
+// EACH ENTRY IS A SYMLINK TO THE ORIGINAL FILE, not a byte copy: `bun build`
+// resolves a suite's relative imports (one reaching for a sibling helper —
+// TestTheProjectsTestsAreBundledSoTheyCanTravel) against the file's REAL
+// location, the same way Node resolves a package reached through a symlinked
+// node_modules realpaths it (testdeps_test.go's seedEsbuild comment). Copying
+// bytes instead would stage the suite alone and strand that import at the flat
+// staging root, where the sibling was never placed.
+//
+// FLAT, ON PURPOSE. `bun build --outdir` derives an output's name from its
+// entry's path relative to the ENTRIES' OWN common root, so two suites named
+// alike in different directories, built together, silently overwrite one
+// another there — and the runtime's discovery
+// (`v2/runtime/src/candidate-tests.ts`) reads that output directory with a
+// plain, non-recursive `readdir`, so a name that only stayed unique one level
+// down would never be found at all (FR-017a). Every symlink lands directly
+// under the one staging root, so bun's own common root IS that root and the
+// names it derives are exactly the ones chosen here.
+//
+// NAMES ARE THE PLAIN BASENAME whenever nothing else already claimed it — the
+// common, single-suite-per-directory case is unaffected by any of this — and
+// fall back to that basename prefixed with as much of the project-relative
+// directory as it takes to stop colliding, taken from the nearest parent
+// outward, only when it is not.
+func stageTestSuites(dir string) (string, []string, error) {
+	sources, err := collectTestSources(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(sources) == 0 {
+		return "", nil, nil
+	}
+
+	staged, err := os.MkdirTemp("", "palbase-test-stage-*")
+	if err != nil {
+		return "", nil, err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(staged)
+		}
+	}()
+
+	used := map[string]bool{}
+	var out []string
+	for _, src := range sources {
+		rel, err := filepath.Rel(dir, src)
+		if err != nil {
+			return "", nil, err
+		}
+		segs := strings.Split(filepath.ToSlash(rel), "/")
+		name := segs[len(segs)-1]
+		i := len(segs) - 2
+		for used[name] {
+			if i < 0 {
+				// The whole project-relative path is exhausted and STILL
+				// collides — two distinct files claiming one project path,
+				// which cannot happen — but refusing by name beats looping
+				// forever over a bug that lives elsewhere.
+				return "", nil, fmt.Errorf("stageTestSuites: %s has no name free of collision with the suites already staged", rel)
+			}
+			name = segs[i] + "_" + name
+			i--
+		}
+		used[name] = true
+
+		abs, err := filepath.Abs(src)
+		if err != nil {
+			return "", nil, err
+		}
+		dest := filepath.Join(staged, name)
+		if err := os.Symlink(abs, dest); err != nil {
+			return "", nil, err
+		}
+		out = append(out, dest)
+	}
+	ok = true
+	return staged, out, nil
 }
 
 func isTestSource(name string) bool {
