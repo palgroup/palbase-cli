@@ -122,6 +122,8 @@ değildir:
 | `internal/backend/target_test.go` | okuma yolu kapıları | FR-1, FR-2, FR-3, FR-7, FR-8, FR-9 |
 | `internal/backend/migration_selection_test.go` | göç kapıları | FR-4, FR-5, FR-6 |
 | `internal/backend/target_write_unix_test.go` | kısmi yazım testi (`//go:build unix`, `RLIMIT_FSIZE`). Paket testleri Windows için de derlendiği için ayrı dosyada | FR-6 |
+| `internal/backend/link_artifacts.go` | `publishProjectContract` committed dosyayı atomik yazımdan geçirir | FR-6 |
+| `internal/backend/banner.go` | `MigrateLegacyTarget` artık hata döndürmüyor | FR-6 |
 | `docs/paltimate/2026-09-14-eski-project-json/spec.md` | bu belge | — |
 
 ## Kapılar ve kanıt
@@ -132,7 +134,11 @@ değildir:
   kırmızı kanıtı iki tabanda değil, yapısal denetimi kaldıran mutasyondadır. FR-3'ün harf varyantı durumları için de
   aynısı geçerli: iki taban da o anahtarları bugünkü `unknown field` metniyle reddediyordu, bu yüzden kırmızı kanıt
   harf varyantı reddini kaldıran mutasyondadır. FR-5'in boş `env` durumu için de aynısı geçerli: davranış `aa73f2c`de de
-  vardı, kırmızı kanıt boş değeri emekli saymayan mutasyondadır. Çıktılar rapora.
+  vardı, kırmızı kanıt boş değeri emekli saymayan mutasyondadır. Aynısı, tur 4'ün ATOMİK YAZIMI KORUYAN üç testi için
+  geçerli: `os.WriteFile` de symlink'e yazıyordu, artık dosya bırakmıyordu ve var olan dosyanın modunu koruyordu —
+  yani `TestWriteTargetWritesThroughASymlinkedProjectFile`, `TestWriteTargetReplacesTheFileAndLeavesNothingBesideIt` ve
+  `TestAReplacementKeepsTheModeTheFileHad` tabanda YEŞİLDİR; kırmızı kanıtları aşağıdaki symlink, kopya ve mod
+  mutasyonlarıdır. Bunlar atomik yazımın getirdiği YENİ riskleri sabitler, yeni bir davranışı değil. Çıktılar rapora.
   - okuma: `{"url":…,"stackVersion":"39"}`, `{"project":…,"env":…}` ve
     `{"url":…,"project":…,"env":…,"stackVersion":…}` `readLinkedProject` ile hatasız okunur. `ReadTarget` adresli iki
     dosyada hatasız döner; `{project, env}` dosyasında çözümleme hatası yerine bugünkü `names a project, not an address`
@@ -166,7 +172,10 @@ değildir:
       → dosya bayt bayt aynı, satır yok, sonraki `readLinkedProject` hatasız (FR-6).
     - Adres göçü, ürün çözülüyor, makine durumu yazılamaz → dosya bayt bayt aynı, seçim yok, fiil koşar (FR-6).
     - Adres göçü, ürün çözülüyor: seçim yazılır, ardından dosya yazımı düşer → sonraki `Resolve` adres taşıyan dosyada
-      `legacy` döner ve seçimi okumaz (FR-6'nın tek istisnası).
+      `legacy` döner ve seçimi okumaz (FR-6'nın tek istisnası). Makine durumunu okuyan kümenin tamamı `Resolve` DEĞİL:
+      `palbase link` çok ortamlı bir projede varsayılan ortamı `ReadSelection(".")`ten seçiyor
+      (`internal/backend/project_link.go:475`). Bu durumda zararsız, çünkü kalan seçim tam da dosyanın taşıdığı adresin
+      ortamıdır — v0.64'te de yönlendiren oydu.
 - **Mutasyonlar** (her biri tek eşleşmeyle uygulanır, koşulur, bayt bayt geri konur; kırmızı olan iddia adlandırılır):
   - emekli alan tanıma kalkar → okuma testleri kırmızı;
   - FR-3'ün sınırı gevşer (her bilinmeyen alan yutulur) → `bogus` testi kırmızı;
@@ -181,7 +190,15 @@ değildir:
   - boş `env` emekli alan sayılmaz → `env:""` durumu kırmızı;
   - `WriteTarget` atomik değil (doğrudan `os.WriteFile`) → kısmi yazım durumu kırmızı;
   - adres göçünde seçim dosyadan SONRA yazılır → makine durumu yazılamazken fiil koşar durumu kırmızı;
-  - adres göçü satırı kırpmadan `%q` basar → adres satırı sınır durumu kırmızı.
+  - adres göçü satırı kırpmadan `%q` basar → adres satırı sınır durumu kırmızı;
+  - yer değiştirme yerine kopya (`os.Rename` → `os.WriteFile`) → eşzamanlı okuyucu ve kaynak değişmezi kırmızı
+    (`TestAReplacementIsNeverSeenCutByAConcurrentReader`, `TestTheLastActOfAReplacementIsARename`, ve kopya geçici
+    dosyayı bıraktığı için artık-dosya ve symlink testleri de);
+  - symlink çözümü kalkar → symlink testi kırmızı;
+  - var olan dosyanın modu okunmaz → mod testi kırmızı;
+  - `palbase link`in yayımı `os.WriteFile`a döner → "committed dosyanın her yazıcısı atomik" kapısı kırmızı;
+  - terk edilmiş `.project.json-*` süpürülmez, ya da süpürmenin yaş sınırı kalkar → süpürme testi kırmızı;
+  - `CreateTemp` hatasının yolu değiştirilmez → hata metni testi kırmızı.
 - **Tam koşu:** `GOWORK=off go test ./... -race -count=1 -timeout 25m`, `go vet ./...`, `gofmt -l .` boş,
   `golangci-lint run` 0 issue, `go vet -tags e2e ./tests/e2e/`. `ci.yml`nin kapılarıyla aynı. Paketin Docker e2e testi
   (`TestStartServesAndStopCleansUp`) aynı makinede eşzamanlı koşularla compose proje adını paylaşıyor (kapsam dışı
@@ -274,3 +291,14 @@ değildir:
   - Kısmi yazım testi `//go:build unix` taşıyan ayrı dosyada (`target_write_unix_test.go`), çünkü paket testleri Windows
     için de derleniyor. Dosya haritasına eklendi.
   - Docker daemon açıkken e2e testi atlanmaz.
+- 2026-09-14 · inceleme turu 4 (`cli-fix-rev-r4`, PASS, sekiz MINOR) sonrası:
+  - Yer değiştirmenin atomikliği kapısızdı: boyut sınırlı test hatayı hep geçici dosyada üretiyor, `rename` evresine
+    varmıyor. İki kapı eklendi (eşzamanlı okuyucu + kaynak değişmezi) ve mutasyon listesine yazıldı.
+  - Committed dosyanın BEŞİNCİ yazıcısı (`publishProjectContract`, `palbase link`) atomik değildi. Atomik yazım
+    `replaceFileAtomically`ye çıkarıldı; dosya haritasına `internal/backend/link_artifacts.go` ve
+    `internal/backend/banner.go` eklendi.
+  - Dosyanın modu korunuyor (`os.CreateTemp` 0600 üretiyor; `os.WriteFile` modu yalnız oluştururken uyguluyordu).
+  - Terk edilmiş `.project.json-*` artıkları süpürülüyor (yalnız bir saatten eskiler).
+  - Yazılamayan dizinde hata metni committed dosyayı adlandırıyor (PathError'un yolu değiştirilerek).
+  - `MigrateLegacyTarget` artık `error` döndürmüyor; `banner.go`daki dal ölüydü.
+  - FR-6'nın tek istisnasının ikinci okuyucusu (`palbase link`in varsayılan ortamı) adlandırıldı.
