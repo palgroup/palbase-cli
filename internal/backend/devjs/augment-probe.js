@@ -63,10 +63,16 @@ async function main() {
     // project's `typescript` may be absent or a 7.x with no compiler API.
     ts = require('typescript');
   } catch (e) {
+    ts = undefined;
+  }
+  // A PACKAGE NAMED typescript IS NOT A COMPILER (review-T012 I1). TypeScript 7's
+  // CJS entry exports `{ version, versionMajorMinor }` and nothing else, so a
+  // successful require is not the question — the compiler API is.
+  if (!ts || typeof ts.createProgram !== 'function' || !ts.sys) {
     writeResult({
       error:
-        'typescript is not installed where the probe can load it (neither the CLI\'s parser nor this project), ' +
-        'so the generated types cannot be checked — run `npm install` (the scaffold declares it as a devDependency)',
+        'typescript is not installed where the probe can load it (neither the CLI\'s parser nor this project has one ' +
+        'with a compiler API), so the generated types cannot be checked — run `npm install` (the scaffold declares it as a devDependency)',
     });
     return;
   }
@@ -113,8 +119,15 @@ async function main() {
   }
   // A DRIFTED SPECIFIER augments a module that does not exist, silently — and
   // with no stack name to spell, nothing else here would notice.
+  //
+  // IN THE FILE'S OWN MODULE FORMAT (review-T012 C1). Asked with no mode,
+  // node16/nodenext fall back to the "require" condition, and a package whose
+  // types sit only under "import" read as unresolvable while `tsc -p` compiled
+  // the project clean. The implied format of the generated file is the mode the
+  // compiler resolves its augmentations in.
+  const mode = ts.getImpliedNodeFormatForFile(envFile, undefined, ts.sys, options);
   for (const spec of augmented) {
-    if (!ts.resolveModuleName(spec, envFile, options, ts.sys).resolvedModule) {
+    if (!ts.resolveModuleName(spec, envFile, options, ts.sys, undefined, undefined, mode).resolvedModule) {
       findings.push(rel + ': augments ' + JSON.stringify(spec) + ', which TypeScript cannot resolve from this project — the block types nothing');
     }
   }

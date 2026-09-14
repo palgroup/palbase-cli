@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -226,12 +227,16 @@ func plural(n int, one, many string) string {
 // Refused by name: a probe that does not compile, and a probe that cannot run
 // (no typescript to load). A build that cannot say its types land does not get
 // to call itself green. Budgeted by NFR-002 (≤10 s added to a build).
+// augmentationProbeBudget is NFR-002's ceiling on what the probe may add to a
+// build. A var so the refusal a spent budget produces can be measured.
+var augmentationProbeBudget = 10 * time.Second
+
 func verifyAugmentationLands(ctx context.Context, cwd, nodePath string, names StackNames) error {
 	envFile := filepath.Join(cwd, filepath.FromSlash(EnvTypesPath()))
 	if _, err := os.Stat(envFile); err != nil {
 		return nil // nothing was generated — nothing to measure
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, augmentationProbeBudget)
 	defer cancel()
 
 	body, err := buildCheckFS.ReadFile("devjs/augment-probe.js")
@@ -266,6 +271,10 @@ func verifyAugmentationLands(ctx context.Context, cwd, nodePath string, names St
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("the augmentation probe did not finish within %s, the budget a build gives it (NFR-002) — "+
+				"a program too large to check in that time, or a node process that hung", augmentationProbeBudget)
+		}
 		return fmt.Errorf("the augmentation probe did not run: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	var answer struct {

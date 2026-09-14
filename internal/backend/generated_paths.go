@@ -29,14 +29,15 @@ import (
 
 // generatedProjectPaths is EVERY path this CLI writes into someone's project
 // that is not meant to be committed — one declaration, read by the scaffolder
-// and by the rule that repairs an existing checkout.
+// (gitignoreScaffold) for a checkout that has no .gitignore at all.
 //
-// `ours` says whether the repair path adds this entry to a checkout that
-// already has a .gitignore. `node_modules/` and `*.log` are the ecosystem's,
-// not ours — every project already handles them, and appending them to
-// somebody's curated file is noise. The distinction is DECLARED rather than
-// derived from the string: a rule whose subject is guessed is a rule that
-// measures something else.
+// NOTHING IS APPENDED TO AN EXISTING FILE (FR-012a). The repair path used to add
+// the `ours` entries to a curated .gitignore; it only takes retired rules back
+// now (takeBackRetiredIgnoreRules), and a file somebody wrote — even an empty
+// one — gains nothing. `ours` still says whose entry it is: `node_modules/` and
+// `*.log` are the ecosystem's, not this CLI's, and no current entry is ours.
+// The distinction is DECLARED rather than derived from the string: a rule whose
+// subject is guessed is a rule that measures something else (review-T015).
 var generatedProjectPaths = []struct {
 	path, why string
 	ours      bool

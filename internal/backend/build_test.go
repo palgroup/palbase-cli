@@ -152,6 +152,36 @@ func TestRunBuild_OlderMajorDoesNotFailTheLocalBuild(t *testing.T) {
 		"the removed premise must not come back")
 }
 
+// THE BUILD REFUSES A GENERATED FILE THAT DOES NOT LAND (review-T012 M2).
+//
+// verifyAugmentationLands is measured on its own in augmentation_lands_test.go;
+// this is the wiring — `palbase build` itself, over an installed SDK whose
+// renderer drops the trailing `export {};`, must say why and fail rather than
+// report a green build.
+func TestRunBuild_RefusesAGeneratedFileThatDoesNotLand(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "app"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "app", "app.module.ts"),
+		[]byte("import { Module } from \"@palbase/backend\";\n\n"+
+			"@Module({ controllers: [], providers: [], exports: [], imports: [] })\n"+
+			"export class AppModule {}\n"), 0o644))
+	seedInstalledBackend(t, dir, "40.0.0")
+	index := filepath.Join(dir, "node_modules", "@palbase", "backend", "index.js")
+	raw, err := os.ReadFile(index)
+	require.NoError(t, err)
+	broken := strings.Replace(string(raw), `\n\nexport {};\n'`, `\n'`, 1)
+	require.NotEqual(t, string(raw), broken, "the fake renderer's `export {};` was not found — the mutation did not land")
+	require.NoError(t, os.WriteFile(index, []byte(broken), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
+		[]byte(`{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"bundler","strict":true,"skipLibCheck":true,"experimentalDecorators":true}}`), 0o644))
+	useTestParserCache(t)
+
+	var out bytes.Buffer
+	err = runBuild(context.Background(), dir, &out)
+	require.Error(t, err, "a generated file that shadows the SDK passed the build:\n%s", out.String())
+	require.Contains(t, out.String(), "is not a module", "the refusal does not say why:\n%s", out.String())
+}
+
 // runBuild no longer contacts the npm registry at all, so an offline developer
 // cannot be blocked by it. The previous version of this test locked a
 // "registry-down warns but continues" contract; not calling the registry is the
