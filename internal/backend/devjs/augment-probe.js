@@ -107,6 +107,31 @@ async function main() {
     .filter((s) => ts.isModuleDeclaration(s) && ts.isStringLiteral(s.name))
     .map((s) => s.name.text);
 
+  // THE NAMES THE FILE ITSELF DECLARES (review-T012 I2). The names arrive from
+  // the STACK, over the network; the types they are checked against come from
+  // the installed @palbase/backend, and the two drift apart routinely — a stack
+  // with a role configured and a checkout still on 39.x is ordinary skew.
+  // `PalbaseRoleName` arrived WITH roles in 40.0.0, so spelling a role against
+  // an older package refused the build with TS2724 on a file that was exactly
+  // what that package renders. A name is spelled when the file carries it; what
+  // the file does NOT carry is the renderer's business, not this gate's.
+  const stackBlock = envSource.statements.find(
+    (s) => ts.isModuleDeclaration(s) && ts.isStringLiteral(s.name) && s.name.text === '@palbase/backend/stack',
+  );
+  const declares = (iface, name) => {
+    if (!name || !stackBlock || !stackBlock.body || !ts.isModuleBlock(stackBlock.body)) return false;
+    for (const st of stackBlock.body.statements) {
+      if (!ts.isInterfaceDeclaration(st) || st.name.text !== iface) continue;
+      for (const member of st.members) {
+        const n = member.name;
+        if (n && (ts.isIdentifier(n) || ts.isStringLiteral(n)) && n.text === name) return true;
+      }
+    }
+    return false;
+  };
+  const secret = declares('Secrets', req.secret) ? req.secret : '';
+  const role = declares('Roles', req.role) ? req.role : '';
+
   const findings = [];
   // A SCRIPT, NOT A MODULE: every `declare module` in it is an ambient
   // declaration that REPLACES the package's module (FR-005). Asked of the parser
@@ -146,15 +171,15 @@ async function main() {
     lines.push('import type { Tables } from "@palbase/backend/env";');
     probed.push('Tables');
   }
-  if (augmented.includes('@palbase/backend/stack') || req.secret || req.role) {
+  if (augmented.includes('@palbase/backend/stack') || secret || role) {
     lines.push('import type { PalbaseSecretName } from "@palbase/backend/stack";');
     probed.push('PalbaseSecretName');
   }
   lines.push(probed.length ? 'export type __PalbaseProbe = [' + probed.join(', ') + '];' : 'export {};');
-  if (req.secret) lines.push('export const __secret: PalbaseSecretName = ' + JSON.stringify(req.secret) + ';');
-  if (req.role) {
+  if (secret) lines.push('export const __secret: PalbaseSecretName = ' + JSON.stringify(secret) + ';');
+  if (role) {
     lines.push('import type { PalbaseRoleName } from "@palbase/backend/stack";');
-    lines.push('export const __role: PalbaseRoleName = ' + JSON.stringify(req.role) + ';');
+    lines.push('export const __role: PalbaseRoleName = ' + JSON.stringify(role) + ';');
   }
   const probeText = lines.join('\n') + '\n';
 

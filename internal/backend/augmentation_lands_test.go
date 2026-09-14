@@ -200,6 +200,73 @@ func TestAugmentationLandsUnderNodeNextOnAnImportOnlySDK(t *testing.T) {
 	require.NoError(t, verifyFixture(dir, augmentedNames))
 }
 
+// A NAME THE FILE DOES NOT CARRY IS NOT SPELLED (review-T012 tur 2, I2).
+//
+// The names come from the STACK, over the network; the types they are checked
+// against come from the installed @palbase/backend. Those two move apart all the
+// time: a stack with a role configured and a checkout still on 39.x is an
+// ordinary skew. `PalbaseRoleName` arrived WITH roles (40.0.0) — every older SDK
+// has no role concept at all — so spelling a role against one of them refused
+// the build with `TS2724: has no exported member named 'PalbaseRoleName'`, on a
+// file that was exactly what that SDK renders. The probe spells what the FILE
+// declares, the same rule D-23 applies to the blocks.
+func TestAugmentationSpellsOnlyTheNamesTheFileDeclares(t *testing.T) {
+	ts := probeTypeScript(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755))
+	require.NoError(t, os.Symlink(ts, filepath.Join(dir, "node_modules", "typescript")))
+	// A 39.x-shaped SDK: `./stack` with secrets, no role concept at all.
+	mustWrite(t, dir, "node_modules/@palbase/backend/package.json", `{"name":"@palbase/backend","version":"39.1.7",
+  "exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},
+  "./env":{"types":"./dist/env.d.ts","default":"./dist/env.js"},
+  "./stack":{"types":"./dist/stack.d.ts","default":"./dist/stack.js"}}}`)
+	for _, f := range []string{"index.js", "env.js", "stack.js"} {
+		mustWrite(t, dir, "node_modules/@palbase/backend/dist/"+f, "module.exports = {};\n")
+	}
+	mustWrite(t, dir, "node_modules/@palbase/backend/dist/index.d.ts", "export {};\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/dist/env.d.ts", "export interface Tables {}\nexport interface Schemas {}\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/dist/stack.d.ts",
+		"export interface Secrets {}\nexport type PalbaseSecretName = keyof Secrets & string;\n")
+	mustWrite(t, dir, "tsconfig.json", bundlerTSConfig)
+	// What THAT SDK renders: a stack block with secrets and no Roles interface.
+	mustWrite(t, dir, EnvTypesPath(), "declare module \"@palbase/backend/env\" {\n  interface Tables {}\n}\n\n"+
+		"declare module \"@palbase/backend/stack\" {\n  interface Secrets {\n    STRIPE_KEY: true;\n  }\n}\n\nexport {};\n")
+
+	// The stack has a role; this checkout's SDK has never heard of one.
+	err := verifyFixture(dir, StackNames{Secrets: []string{"STRIPE_KEY"}, Roles: []string{"admin"}})
+	require.NoError(t, err, "a checkout whose SDK predates roles was refused for a name its file never carried")
+}
+
+// …AND A NAME THE FILE DOES CARRY IS STILL SPELLED: the guard above must not
+// turn the names half of FR-006 into a no-op. A file that DECLARES a Roles block
+// against a package that has no role type is a landing that did not happen, and
+// it is still refused by name.
+func TestAugmentationStillSpellsARoleTheFileDeclares(t *testing.T) {
+	ts := probeTypeScript(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755))
+	require.NoError(t, os.Symlink(ts, filepath.Join(dir, "node_modules", "typescript")))
+	mustWrite(t, dir, "node_modules/@palbase/backend/package.json", `{"name":"@palbase/backend","version":"39.1.7",
+  "exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},
+  "./env":{"types":"./dist/env.d.ts","default":"./dist/env.js"},
+  "./stack":{"types":"./dist/stack.d.ts","default":"./dist/stack.js"}}}`)
+	for _, f := range []string{"index.js", "env.js", "stack.js"} {
+		mustWrite(t, dir, "node_modules/@palbase/backend/dist/"+f, "module.exports = {};\n")
+	}
+	mustWrite(t, dir, "node_modules/@palbase/backend/dist/index.d.ts", "export {};\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/dist/env.d.ts", "export interface Tables {}\nexport interface Schemas {}\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/dist/stack.d.ts",
+		"export interface Secrets {}\nexport type PalbaseSecretName = keyof Secrets & string;\n")
+	mustWrite(t, dir, "tsconfig.json", bundlerTSConfig)
+	// The file claims roles; the installed package has no role type at all.
+	mustWrite(t, dir, EnvTypesPath(), "declare module \"@palbase/backend/env\" {\n  interface Tables {}\n}\n\n"+
+		"declare module \"@palbase/backend/stack\" {\n  interface Secrets {\n    STRIPE_KEY: true;\n  }\n  interface Roles {\n    admin: true;\n  }\n}\n\nexport {};\n")
+
+	err := verifyFixture(dir, StackNames{Secrets: []string{"STRIPE_KEY"}, Roles: []string{"admin"}})
+	require.Error(t, err, "a file declaring a Roles block against a package with no role type was accepted")
+	require.ErrorContains(t, err, "does not apply")
+}
+
 // A GATE THAT CANNOT MEASURE DOES NOT SAY GREEN.
 func TestAugmentationProbeRefusesWithoutTypeScript(t *testing.T) {
 	dir := selfContainedProject(t, bundlerTSConfig, false)
