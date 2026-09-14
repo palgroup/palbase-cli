@@ -375,38 +375,48 @@ func ambiguous(target Target, envs []Environment) error {
 // word is worse than one that did not change.
 //
 // AND IT DROPS WHAT AN OLDER CLI COMMITTED UNDER A RETIRED FIELD
-// (dropRetiredFields), when rewriting the address has not already done so.
+// (dropRetiredFields), when the address was not this migration's to rewrite.
+//
+// NOTHING IN IT FAILS THE VERB, so the error it returns is nil. Every failure is
+// answered where it happens — a lookup that fails moves nothing, a write that
+// fails leaves what it would have replaced — and a checkout the migration could
+// not read is reported by the verb's own resolution, which reads it again.
 func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 	target, err := readLinkedProject()
 	if err != nil {
 		return nil // nothing linked: nothing to migrate
 	}
-	moved, err := migrateLegacyAddress(ctx, w, target)
-	if err != nil || moved {
-		// A rewritten file carries no retired field: WriteTarget serialises
-		// Target, and the retired values are not part of it.
-		return err
+	if migrateLegacyAddress(ctx, w, target) {
+		// THE CLEANUP IS FOR A CHECKOUT THE ADDRESS MIGRATION DID NOT TAKE. When it
+		// took one, either the file was rewritten — and a rewritten file carries
+		// no retired field: WriteTarget serialises Target, and the retired values
+		// are not part of it — or a write it had begun failed, and a failed
+		// rewrite leaves the file exactly as it was (FR-6), not rewritten a second
+		// way by the cleanup.
+		return nil
 	}
 	dropRetiredFields(w, target)
 	return nil
 }
 
-// migrateLegacyAddress is the address half of MigrateLegacyTarget, and says
-// whether it rewrote the committed file.
-func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool, error) {
+// migrateLegacyAddress is the address half of MigrateLegacyTarget. It says
+// whether the checkout was its to move — a cloud address whose product and
+// environment the cloud named — and says so whether or not its writes then
+// succeed.
+func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) bool {
 	if strings.TrimSpace(target.Project) != "" || strings.TrimSpace(target.URL) == "" {
-		return false, nil // already an identity, or nothing to work with
+		return false // already an identity, or nothing to work with
 	}
 	if !isCloudProjectAddress(target.URL) {
-		return false, nil // a stack somebody runs: one installation, one address
+		return false // a stack somebody runs: one installation, one address
 	}
 	ref := refOfURL(target.URL)
 	if ref == "" || ProductOfRef == nil {
-		return false, nil
+		return false
 	}
 	product, err := ProductOfRef(ctx, ref)
 	if err != nil || strings.TrimSpace(product.ID) == "" {
-		return false, nil
+		return false
 	}
 
 	// THE ENVIRONMENT THE OLD FILE NAMED IS KEPT, and keeping it is the whole
@@ -433,25 +443,26 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 		// FR-061: a migration that cannot finish leaves the checkout exactly as
 		// it was. Writing the identity without the environment would produce
 		// the refusal this comment exists to prevent.
-		return false, nil
+		return false
 	}
 
-	migrated := target
-	migrated.Project = product.ID
-	migrated.Name = product.Name
-	migrated.URL = ""
-	if err := WriteTarget(migrated); err != nil {
-		// A REWRITE THAT FAILED MOVES NOTHING (FR-061), and this is the one error
-		// in the migration that does not fail the verb. It is the write of the
-		// committed file itself — read-only, a full disk — and nothing has changed
-		// yet: the selection below is written only after it. So the checkout is
-		// still the old record, exactly as it was, and the verb carries on against
-		// the address it has. Returning the error here failed every verb in a
-		// read-only checkout the cloud could resolve, with `open
-		// palbase/project.json: permission denied`. The errors after this line
-		// still fail the verb, because by then the file HAS changed.
-		return false, nil
-	}
+	// THE CHOICE IS WRITTEN FIRST AND THE COMMITTED FILE LAST, so that no failure
+	// leaves the checkout half moved (FR-6).
+	//
+	// The other order rewrote the file and then failed on the selection — a
+	// machine-state directory this process cannot write. The file named a
+	// project, nothing on this machine named its environment, the verb failed,
+	// and the next one in a checkout that worked a minute ago refused with "has
+	// 2 environments and none is selected". Measured in review.
+	//
+	// In this order a selection that cannot be written has changed nothing: the
+	// file is still the old address and the verb carries on against it. What a
+	// failure can leave behind is a selection written ahead of a file write that
+	// then fails, and that selection decides nothing: Resolve answers a file that
+	// records an address from the address (its `legacy` branch) and reads no
+	// selection for it. The next verb that can write the file finds the choice
+	// already made and keeps it.
+	//
 	// A DELIBERATE CHOICE IS NOT OVERWRITTEN: somebody who already ran
 	// `palbase env use` on this checkout means it, and the old address is the
 	// staler of the two facts.
@@ -459,14 +470,28 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 	if sel, selErr := ReadSelection("."); selErr != nil || sel.Ref == "" || sel.Project != product.ID {
 		root, wdErr := os.Getwd()
 		if wdErr != nil {
-			return true, wdErr
+			return true
 		}
 		if err := WriteSelection(root, Selection{Project: product.ID, Env: envName, Ref: ref}); err != nil {
-			return true, err
+			return true
 		}
 		kept = envName
 	} else {
 		kept = sel.Env
+	}
+	migrated := target
+	migrated.Project = product.ID
+	migrated.Name = product.Name
+	migrated.URL = ""
+	if err := WriteTarget(migrated); err != nil {
+		// A REWRITE THAT FAILED MOVES NOTHING (FR-061), and it does not fail the
+		// verb. WriteTarget puts the new file in place with one rename or not at
+		// all, so whatever stopped it — a read-only file, a full disk, a quota —
+		// the checkout is still the old record, byte for byte, and the verb
+		// carries on against the address it has. Returning the error here failed
+		// every verb in a read-only checkout the cloud could resolve, with `open
+		// palbase/project.json: permission denied`.
+		return true
 	}
 	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address; "+
 		"this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)",
@@ -478,7 +503,7 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 			droppedValue(*env))
 	}
 	fmt.Fprintln(w)
-	return true, nil
+	return true
 }
 
 // dropRetiredFields rewrites a committed file that still carries a field an

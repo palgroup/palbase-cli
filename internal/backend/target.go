@@ -248,6 +248,24 @@ func retiredFieldSpeltOtherwise(raw []byte) (string, error) {
 }
 
 // WriteTarget records the project this checkout belongs to.
+//
+// THE FILE IS REPLACED WHOLE OR NOT AT ALL (FR-6). `os.WriteFile` truncated the
+// committed file when it opened it and wrote the new bytes after, so a write
+// that failed part way — a full disk, a quota, an I/O error; measured by capping
+// the file size — left a cut `project.json` that every later verb refused as
+// invalid JSON, and the migration that cut it said nothing. The bytes now go to
+// a temporary file beside it, are synced, and take its name in one rename:
+// whatever fails, the file is the old one or the new one.
+//
+// A FILE THIS PROCESS MAY NOT WRITE IS STILL NOT WRITTEN. A rename asks only the
+// directory, so it would replace a read-only `project.json` that `os.WriteFile`
+// refused — a file somebody locked on purpose; a Perforce workspace keeps every
+// file read-only until it is opened for edit. Opening it for writing, without
+// truncating, asks the question the old write asked and changes nothing.
+//
+// A SYMLINK STILL POINTS WHERE IT POINTED. The old write went through it; a
+// rename onto the link would swap it for a copy. So the file it resolves to is
+// the one replaced, from a temporary file in that file's own directory.
 func WriteTarget(t Target) error {
 	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
 		return err
@@ -256,7 +274,47 @@ func WriteTarget(t Target) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(projectPath(), append(blob, '\n'), 0o644)
+	dest := projectPath()
+	if resolved, evalErr := filepath.EvalSymlinks(dest); evalErr == nil {
+		dest = resolved
+	}
+	existing, err := os.OpenFile(dest, os.O_WRONLY, 0)
+	switch {
+	case err == nil:
+		if err := existing.Close(); err != nil {
+			return err
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".project.json-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(name)
+		}
+	}()
+	if _, err := tmp.Write(append(blob, '\n')); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if err := tmp.Sync(); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(name, dest); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }
 
 // ReadTarget returns the linked stack, or an error naming the command that

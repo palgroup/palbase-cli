@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -384,6 +385,61 @@ func TestTheAddressMigrationWritesNoRetiredFieldBack(t *testing.T) {
 	require.NotContains(t, string(written), "stackVersion", "the rewritten file still carries a retired field")
 	require.NotContains(t, string(written), `"env"`, "the rewritten file still carries a retired field")
 	require.Contains(t, string(written), `"project": "prd_a"`, "the address migration did not rewrite the file")
+}
+
+// THE COMMITTED FILE IS REPLACED, AND NOTHING IS LEFT BESIDE IT (FR-6).
+//
+// WriteTarget writes a temporary file next to `project.json` and renames it into
+// place. What lands in the repository must not change with that: the file keeps
+// the mode it had from `os.WriteFile` rather than a temporary file's 0600, and
+// `project.json` is the only thing left in the directory everybody commits.
+func TestWriteTargetReplacesTheFileAndLeavesNothingBesideIt(t *testing.T) {
+	t.Chdir(t.TempDir())
+	require.NoError(t, WriteTarget(Target{URL: "https://mu0028.palbase.studio"}))
+	require.NoError(t, WriteTarget(Target{Project: "prd_a", Name: "todoapp"}))
+
+	got, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "prd_a", got.Project)
+	require.Empty(t, got.URL, "the second write did not replace the first")
+	entries, err := os.ReadDir(RootDir())
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "a write left a file beside the committed one")
+	require.Equal(t, "project.json", entries[0].Name())
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(projectPath())
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o644), info.Mode().Perm(), "the committed file took a temporary file's mode")
+	}
+}
+
+// A SYMLINKED `project.json` STAYS A SYMLINK (FR-6).
+//
+// A checkout can take the file from elsewhere in its repository. `os.WriteFile`
+// wrote through the link; a rename onto the link itself would replace it with a
+// copy — a committed symlink turned into a file, and the file it named left
+// stale.
+func TestWriteTargetWritesThroughASymlinkedProjectFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.MkdirAll(RootDir(), 0o755))
+	require.NoError(t, os.MkdirAll("shared", 0o755))
+	shared := filepath.Join("shared", "project.json")
+	require.NoError(t, os.WriteFile(shared, []byte(`{"url":"https://mu0028.palbase.studio"}`), 0o644))
+	if err := os.Symlink(filepath.Join("..", shared), projectPath()); err != nil {
+		t.Skipf("this platform cannot make the symlink: %v", err)
+	}
+
+	require.NoError(t, WriteTarget(Target{Project: "prd_a", Name: "todoapp"}))
+
+	info, err := os.Lstat(projectPath())
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink, "the rewrite replaced a symlinked project file with a copy")
+	written, err := os.ReadFile(shared)
+	require.NoError(t, err)
+	require.Contains(t, string(written), `"project": "prd_a"`, "the file the link names was not rewritten")
+	entries, err := os.ReadDir("shared")
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "a write left a file beside the one the link names")
 }
 
 // NOTHING IS EVER WRITTEN. The old implementation persisted what it derived, so
