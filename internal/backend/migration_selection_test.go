@@ -3,7 +3,9 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -131,108 +133,166 @@ func TestARetiredStackVersionIsDroppedWhenTheAddressCannotMove(t *testing.T) {
 	require.Contains(t, out.String(), "stackVersion", "the line does not name what was dropped")
 }
 
-// A RETIRED `env` IS A CHOICE, AND IT MOVES TO THIS MACHINE (FR-5).
+// A RETIRED `env` DROPS, IS NAMED, AND CHOOSES NOTHING (FR-5).
 //
-// Before `1fcefcb` the committed file named the environment. Dropping the field
-// and stopping there turns "act on staging" into "which one?" in a
-// two-environment project — the refusal NFR-005 exists to prevent. So the
-// choice moves to where one belongs now: machine-local, where `palbase env use`
-// writes, with the ref the project's own listing gives.
-func TestARetiredEnvironmentMovesToThisMachine(t *testing.T) {
-	root := linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
-	resolverRig(t, twoEnvs)
-
-	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
-
-	sel, err := ReadSelection(root)
-	require.NoError(t, err, "the environment the committed file named was not remembered")
-	require.Equal(t, Selection{Project: "prd_a", Env: "staging", Ref: "mu0028"}, sel)
-	written, err := os.ReadFile(projectPath())
+// Round 1 moved it to this machine's selection, and the verb that ran the
+// migration then acted on that environment in the same run. No release since
+// v0.34.0 routed on this field: `palbase env <slug>` stopped writing it there,
+// and from then until it retired only the banner label and an artifact
+// directory name read it. A committed environment is also exactly how a
+// colleague pulls a branch and pushes to your staging (Target.Project's
+// comment). So it drops, and the line names what it said — quoted, because a
+// committed file must not put control characters on a terminal — and says how
+// to choose one. Nothing is chosen for anybody, and nobody is asked which
+// environments exist.
+func TestARetiredEnvironmentDropsIsNamedAndChoosesNothing(t *testing.T) {
+	// Built, not typed: the file must carry the JSON escape, never the raw byte.
+	control := string(rune(0x1b)) + "[2Jprod"
+	controlJSON, err := json.Marshal(control)
 	require.NoError(t, err)
-	require.NotContains(t, string(written), `"env"`, "the committed file still names an environment")
-	require.Contains(t, out.String(), "staging",
-		"the migration did not say which environment this machine keeps acting on")
-
-	resolved, err := Resolve(context.Background())
-	require.NoError(t, err, "the verb after the migration refuses")
-	require.Equal(t, "staging", resolved.Env)
-	require.Equal(t, "selection", resolved.Source)
-}
-
-// A CHOICE SOMEBODY MADE OUTRANKS THE RETIRED FIELD (FR-5).
-//
-// Somebody who ran `palbase env use` on this checkout meant it, and a field an
-// older CLI committed is the staler of the two facts. The file is still
-// cleaned, and that is asserted FIRST: "nothing was overwritten" is worth
-// nothing unless the migration ran at all.
-func TestARetiredEnvironmentDoesNotOverwriteAChoiceSomebodyMade(t *testing.T) {
-	root := linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
-	resolverRig(t, twoEnvs)
-	require.NoError(t, WriteSelection(root, Selection{Project: "prd_a", Env: "main", Ref: "j06bwtuum"}))
-
-	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
-
-	written, err := os.ReadFile(projectPath())
-	require.NoError(t, err)
-	require.NotContains(t, string(written), `"env"`, "the migration did not run")
-	sel, err := ReadSelection(root)
-	require.NoError(t, err)
-	require.Equal(t, "main", sel.Env, "the retired field overwrote a choice somebody made")
-	require.Contains(t, out.String(), "main")
-}
-
-// A RETIRED FIELD THAT CANNOT BE MOVED LEAVES THE FILE EXACTLY AS IT WAS (FR-6).
-//
-// Dropping `env` without moving the choice is the half-migration FR-5 forbids,
-// so the two stand or fall together; a write that fails is the same outcome.
-// And the verb still runs — the read no longer depends on the migration having
-// happened, which is the assertion that was red before any of this existed.
-func TestARetiredFieldThatCannotBeMovedLeavesTheFileAlone(t *testing.T) {
-	unreachable := func(context.Context, string) ([]Environment, error) {
-		return nil, errors.New("control plane unreachable")
-	}
-	for _, tc := range []struct {
-		name     string
-		raw      string
-		envs     func(context.Context, string) ([]Environment, error)
-		readOnly bool
-	}{
-		{"the listing cannot be read", `{"project":"prd_a","env":"staging"}`, unreachable, false},
-		{"the listing does not name it", `{"project":"prd_a","env":"gone"}`, nil, false},
-		{"the write fails", `{"project":"prd_a","stackVersion":"39"}`, nil, true},
+	for _, tc := range []struct{ name, raw, quoted string }{
+		{"beside a project", `{"project":"prd_a","env":"staging"}`, `"staging"`},
+		{"beside an address that cannot move", `{"url":"https://mu0028.palbase.studio","env":"main"}`, `"main"`},
+		{"beside both, with stackVersion",
+			`{"url":"https://mu0028.palbase.studio","project":"prd_a","env":"main","stackVersion":"39"}`, `"main"`},
+		{"carrying a control sequence", `{"project":"prd_a","env":` + string(controlJSON) + `}`, fmt.Sprintf("%q", control)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := linkedByAnOlderCLI(t, tc.raw)
 			resolverRig(t, twoEnvs)
-			if tc.envs != nil {
-				EnvironmentsOf = tc.envs
+			cloudAddresses(t, true)
+			ProductOfRef = func(context.Context, string) (Product, error) {
+				return Product{}, errors.New("control plane unreachable")
 			}
-			if tc.readOnly {
-				if os.Geteuid() == 0 {
-					t.Skip("root writes through a read-only file, so no write can be made to fail this way")
-				}
-				require.NoError(t, os.Chmod(projectPath(), 0o444))
+			listed := 0
+			EnvironmentsOf = func(context.Context, string) ([]Environment, error) {
+				listed++
+				return twoEnvs, nil
 			}
+
+			var out bytes.Buffer
+			require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+			_, selErr := ReadSelection(root)
+			require.ErrorIs(t, selErr, os.ErrNotExist, "the migration chose an environment from a committed file")
+			written, err := os.ReadFile(projectPath())
+			require.NoError(t, err)
+			require.NotContains(t, string(written), `"env"`, "the committed file still names an environment")
+			require.Contains(t, out.String(), tc.quoted, "the line does not name the value it dropped, quoted")
+			require.NotContains(t, out.String(), "\x1b", "a committed file put a control character on the terminal")
+			require.Contains(t, out.String(), "palbase env use <name>", "the line does not say how to choose one")
+			require.Contains(t, out.String(), "--env <name>", "the line does not say how to choose one")
+			require.Zero(t, listed, "dropping a retired field asked the cloud which environments exist")
+		})
+	}
+}
+
+// AN EXISTING CHOICE IS LEFT BYTE FOR BYTE (FR-5).
+//
+// Whatever this machine already remembers — for this project or for another —
+// the retired field changes none of it. The file is still cleaned, and that is
+// asserted FIRST: an untouched selection is worth nothing unless the migration
+// ran at all.
+func TestARetiredEnvironmentLeavesAnExistingChoiceByteForByte(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sel  Selection
+	}{
+		{"this project's", Selection{Project: "prd_a", Env: "main", Ref: "j06bwtuum"}},
+		{"another project's", Selection{Project: "prd_b", Env: "prod", Ref: "otherref1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
+			resolverRig(t, twoEnvs)
+			require.NoError(t, WriteSelection(root, tc.sel))
+			path, err := SelectionPath(root)
+			require.NoError(t, err)
+			before, err := os.ReadFile(path)
+			require.NoError(t, err)
+
+			var out bytes.Buffer
+			require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+			written, err := os.ReadFile(projectPath())
+			require.NoError(t, err)
+			require.NotContains(t, string(written), `"env"`, "the migration did not run")
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			require.Equal(t, string(before), string(after), "the retired field changed a choice this machine had")
+		})
+	}
+}
+
+// AFTER A RETIRED `env` DROPS, TODAY'S RULES RESOLVE (FR-5).
+//
+// A project with one environment acts on it whatever the file said; a project
+// with two refuses exactly as it does for a checkout that never carried the
+// field. The file says `staging` in both, and in neither does that decide.
+func TestAfterARetiredEnvironmentDropsTodaysRulesResolve(t *testing.T) {
+	t.Run("two environments refuse", func(t *testing.T) {
+		linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
+		resolverRig(t, twoEnvs)
+
+		var out bytes.Buffer
+		require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+		_, err := Resolve(context.Background())
+		require.ErrorContains(t, err, "has 2 environments and none is selected",
+			"a committed environment decided where the verb acts")
+	})
+	t.Run("one environment is the answer", func(t *testing.T) {
+		linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
+		resolverRig(t, twoEnvs[:1]) // only `main`
+
+		var out bytes.Buffer
+		require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+		got, err := Resolve(context.Background())
+		require.NoError(t, err, "a one-environment project refused")
+		require.Equal(t, "main", got.Env)
+		require.Equal(t, "only", got.Source)
+	})
+}
+
+// A REWRITE THAT FAILS LEAVES EVERYTHING AS IT WAS (FR-6).
+//
+// The file byte for byte, no selection, no line — and the verb still reads its
+// target, because the read does not wait on the migration. Round 1 wrote the
+// selection before a rewrite that then failed, so a read-only checkout was
+// routed silently on every run; with `env` choosing nothing that path is gone,
+// and this keeps it gone.
+func TestARetiredFieldWhoseRewriteFailsLeavesEverythingAlone(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"a project and env", `{"project":"prd_a","env":"staging"}`},
+		{"an address and stackVersion", `{"url":"https://8bbwb2pbm.palbase.studio","stackVersion":"39"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("root writes through a read-only file, so no rewrite can be made to fail this way")
+			}
+			root := linkedByAnOlderCLI(t, tc.raw)
+			resolverRig(t, twoEnvs)
+			cloudAddresses(t, true)
+			ProductOfRef = func(context.Context, string) (Product, error) {
+				return Product{}, errors.New("control plane unreachable")
+			}
+			require.NoError(t, os.Chmod(projectPath(), 0o444))
 			before, err := os.ReadFile(projectPath())
 			require.NoError(t, err)
 
 			var out bytes.Buffer
 			require.NoError(t, MigrateLegacyTarget(context.Background(), &out),
-				"a migration that could not finish failed the verb")
+				"a rewrite that failed failed the verb")
 
 			after, err := os.ReadFile(projectPath())
 			require.NoError(t, err)
-			require.Equal(t, string(before), string(after),
-				"a migration that could not finish changed the committed file")
+			require.Equal(t, string(before), string(after), "a rewrite that failed changed the committed file")
 			_, selErr := ReadSelection(root)
-			require.Error(t, selErr, "a choice was remembered for a file that still makes it")
-			require.Empty(t, out.String(), "a migration that did nothing announced something")
+			require.ErrorIs(t, selErr, os.ErrNotExist, "a rewrite that failed still chose an environment")
+			require.Empty(t, out.String(), "a rewrite that failed announced itself")
 
-			got, err := readLinkedProject()
+			_, err = readLinkedProject()
 			require.NoError(t, err, "a file the migration could not rewrite is unreadable")
-			require.Equal(t, "prd_a", got.Project)
 		})
 	}
 }

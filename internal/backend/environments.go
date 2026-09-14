@@ -387,7 +387,7 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 		// Target, and the retired values are not part of it.
 		return err
 	}
-	dropRetiredFields(ctx, w, target)
+	dropRetiredFields(w, target)
 	return nil
 }
 
@@ -466,67 +466,42 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 }
 
 // dropRetiredFields rewrites a committed file that still carries a field an
-// older CLI wrote and this one retired (withoutRetiredFields).
+// older CLI wrote and this one retired (targetFile), and asks nobody anything.
 //
 // The read no longer needs it — both fields are tolerated by name — but every
-// clone of the repository would carry that tolerance forward, and a committed
-// `env` names a choice nothing honours any more.
+// clone of the repository would carry that tolerance forward.
 //
-// `stackVersion` DECIDED NOTHING, so it goes without asking anybody. `env` WAS A
-// CHOICE, and a choice is not dropped: it moves to this machine, where `palbase
-// env use` writes, with the ref from the project's own listing — unless
-// somebody already chose for this project here, which is the fresher of the two
-// facts.
+// `env` IS DROPPED, NOT MOVED. The first attempt moved it to this machine's
+// selection, and the verb running the migration then acted on that environment
+// in the same run. No release since v0.34.0 routed on it: `fda7a7b` removed the
+// `palbase env <slug>` that wrote it, and from then until it retired only the
+// banner label and an artifact directory name read it. A committed environment
+// is how a colleague pulls your branch and pushes to your staging
+// (Target.Project), so the environment is resolved by today's rules — the only
+// one, or a refusal that lists them — and the line says what the file named and
+// how to choose.
 //
-// BEST EFFORT, THE SAME RULE AS THE ADDRESS (FR-061). A listing that cannot be
-// read, an environment it does not name, a write that fails: the committed file
-// stays exactly as it was and the verb carries on.
-func dropRetiredFields(ctx context.Context, w io.Writer, target Target) {
-	retired := target.retired
-	if len(retired.names) == 0 {
+// THE VALUE IS QUOTED. A committed file must not put control characters on
+// somebody's terminal.
+//
+// BEST EFFORT, THE SAME RULE AS THE ADDRESS (FR-061). A rewrite that fails
+// leaves the file exactly as it was and says nothing, and the verb carries on.
+func dropRetiredFields(w io.Writer, target Target) {
+	names := target.retired.names()
+	if len(names) == 0 {
 		return
-	}
-	kept := ""
-	if named := strings.TrimSpace(retired.env); named != "" && strings.TrimSpace(target.Project) != "" {
-		if sel, selErr := ReadSelection("."); selErr == nil && sel.Ref != "" && sel.Project == target.Project {
-			kept = sel.Env
-		} else {
-			envs, err := environmentsOf(ctx, target.Project)
-			if err != nil {
-				return
-			}
-			var chosen *Environment
-			for i := range envs {
-				if strings.EqualFold(envs[i].Name, named) || envs[i].Ref == named {
-					chosen = &envs[i]
-					break
-				}
-			}
-			if chosen == nil {
-				return
-			}
-			root, err := os.Getwd()
-			if err != nil {
-				return
-			}
-			// THE CHOICE MOVES BEFORE THE FILE LOSES IT. The other order, with the
-			// second write failing, is the half-migration this exists to prevent.
-			if err := WriteSelection(root, Selection{Project: target.Project, Env: chosen.Name, Ref: chosen.Ref}); err != nil {
-				return
-			}
-			kept = chosen.Name
-		}
 	}
 	if err := WriteTarget(target); err != nil {
 		return
 	}
 	noun := "field"
-	if len(retired.names) > 1 {
+	if len(names) > 1 {
 		noun = "fields"
 	}
-	fmt.Fprintf(w, "▸ %s no longer carries the retired %s %s", projectPath(), strings.Join(retired.names, " and "), noun)
-	if kept != "" {
-		fmt.Fprintf(w, "; this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)", kept)
+	fmt.Fprintf(w, "▸ %s no longer carries the retired %s %s", projectPath(), strings.Join(names, " and "), noun)
+	if env := target.retired.env; env != nil {
+		fmt.Fprintf(w, "; the environment it named (%q) is not chosen from a committed file — "+
+			"`palbase env use <name>` or `--env <name>` chooses one", *env)
 	}
 	fmt.Fprintln(w)
 }

@@ -235,6 +235,40 @@ func TestACheckoutLinkedBeforeTheFieldsRetiredStillReads(t *testing.T) {
 	}
 }
 
+// THIS MACHINE'S RECORD CARRYING THE RETIRED FIELDS STILL READS, AND IS NEVER
+// REWRITTEN (FR-1, FR-2).
+//
+// `palbase start` and a loopback `link` keep their record under this machine's
+// state and read it through the same decoder as the committed file, so an older
+// CLI's record failed every verb the same way. Only the committed file is the
+// migration's to rewrite: the verb below runs one in this checkout, and this
+// machine's record must come out of it byte for byte.
+func TestALocalRecordCarryingRetiredFieldsReadsAndIsNotRewritten(t *testing.T) {
+	linkedByAnOlderCLI(t, `{"project":"prd_a","stackVersion":"39"}`)
+	resolverRig(t, twoEnvs)
+	local, err := localPath()
+	require.NoError(t, err)
+	require.NoError(t, ensureMachineStateDir(local))
+	const record = `{"url":"http://127.0.0.1:54321","stackVersion":"39","env":"main"}`
+	require.NoError(t, os.WriteFile(local, []byte(record), 0o600))
+
+	got, err := ReadTarget()
+	require.NoError(t, err, "a machine-local record an older CLI wrote is unreadable")
+	require.Equal(t, "http://127.0.0.1:54321", got.URL)
+	require.True(t, got.Local, "the record `palbase start` keeps no longer reads as the stack running here")
+
+	var out bytes.Buffer
+	_, err = PrintResolvedTo(&out, nil)
+	require.NoError(t, err)
+	committed, err := os.ReadFile(projectPath())
+	require.NoError(t, err)
+	require.NotContains(t, string(committed), "stackVersion",
+		"the verb ran no migration, so the assertion below would measure nothing")
+	after, err := os.ReadFile(local)
+	require.NoError(t, err)
+	require.Equal(t, record, string(after), "the migration rewrote this machine's record")
+}
+
 // A FIELD NO TARGET EVER HAD IS STILL REFUSED BY NAME (FR-3).
 //
 // Tolerating the two retired fields must not become tolerating everything: a
@@ -242,6 +276,10 @@ func TestACheckoutLinkedBeforeTheFieldsRetiredStillReads(t *testing.T) {
 // links nothing while saying nothing. The second case is the one that matters —
 // a file that DOES carry a retired field goes down the path that sets those
 // aside, and that path must not relax the rule for whatever is left.
+//
+// THE NAMES ARE EXACT. encoding/json matches keys without regard to case, and
+// by Unicode's folding rather than ASCII's — `ſ` (U+017F) is an `s` to it — so
+// every spelling below would land in a retired field. No CLI ever wrote one.
 func TestAFieldNoTargetEverHadIsStillRefused(t *testing.T) {
 	for _, tc := range []struct{ name, raw, refusal string }{
 		{"alone", `{"url":"https://mu0028.palbase.studio","bogus":1}`, `unknown field "bogus"`},
@@ -251,11 +289,79 @@ func TestAFieldNoTargetEverHadIsStillRefused(t *testing.T) {
 		// Target either.
 		{"a retired field of another shape", `{"url":"https://mu0028.palbase.studio","stackVersion":39}`,
 			"stackVersion"},
+		{"a retired name in capitals", `{"url":"https://mu0028.palbase.studio","STACKVERSION":"39"}`,
+			`unknown field "STACKVERSION"`},
+		{"a retired name in another case", `{"url":"https://mu0028.palbase.studio","Env":"main"}`,
+			`unknown field "Env"`},
+		{"a retired name under Unicode folding", `{"url":"https://mu0028.palbase.studio","ſtackVersion":"39"}`,
+			"unknown field \"ſtackVersion\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			linkedByAnOlderCLI(t, tc.raw)
 			_, err := readLinkedProject()
 			require.ErrorContains(t, err, tc.refusal)
+		})
+	}
+}
+
+// THE STRUCTURAL RULES READ THE FILE AS WRITTEN (FR-8).
+//
+// Tolerating the retired fields must not open a way round the rules every
+// committed file is held to: a duplicate `env` would decode as its last value, a
+// null as absent, an oversized value as a file like any other. Every case
+// carries a retired field, so every one goes down the path that tolerates them,
+// and every one is still refused with today's structural error.
+func TestTheStructuralRulesReadTheFileAsWritten(t *testing.T) {
+	oversized := `{"url":"https://mu0028.palbase.studio","stackVersion":"` + strings.Repeat("9", 257*1024) + `"}`
+	nested := `{"project":"prd_a","env":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `}`
+	for _, tc := range []struct{ name, raw, refusal string }{
+		{"a duplicate retired field", `{"project":"prd_a","env":"main","env":"staging"}`, "/env: duplicate field"},
+		{"a null retired field", `{"project":"prd_a","env":null}`, "/env: null is not accepted"},
+		{"a retired value past the size limit", oversized, "exceeds 256 KiB"},
+		{"a retired value nested too deep", nested, "JSON nesting is too deep"},
+		{"trailing JSON after a retired field", `{"project":"prd_a","stackVersion":"39"} {}`, "contains trailing JSON"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linkedByAnOlderCLI(t, tc.raw)
+			_, err := readLinkedProject()
+			require.ErrorContains(t, err, tc.refusal)
+		})
+	}
+}
+
+// A RETIRED FIELD DOES NOT CHANGE HOW THE REST OF THE FILE DECODES (FR-9).
+//
+// Round 1 set the retired keys aside and decoded a RE-SERIALISED copy of what
+// was left, and that copy was not the file: its keys came back sorted, so which
+// of `url` and `URL` won changed, and every `<` came back as `<` — six
+// bytes for one — so a file inside the size limit could land outside it. The
+// same file with and without a retired field decodes to the same Target,
+// compared as it would be written.
+func TestARetiredFieldDoesNotChangeHowTheRestDecodes(t *testing.T) {
+	nearTheLimit := strings.Repeat("<", 64*1024) + strings.Repeat("a", 256*1024-64*1024-200)
+	for _, tc := range []struct{ name, bare, withRetired string }{
+		{"keys that differ only in case",
+			`{"url":"https://first.palbase.studio","URL":"https://second.palbase.studio"}`,
+			`{"url":"https://first.palbase.studio","URL":"https://second.palbase.studio","stackVersion":"39"}`},
+		{"a name near the size limit that escaping would grow",
+			`{"url":"https://mu0028.palbase.studio","name":"` + nearTheLimit + `"}`,
+			`{"url":"https://mu0028.palbase.studio","name":"` + nearTheLimit + `","stackVersion":"39"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linkedByAnOlderCLI(t, tc.bare)
+			bare, err := readLinkedProject()
+			require.NoError(t, err, "the file without a retired field is unreadable")
+
+			linkedByAnOlderCLI(t, tc.withRetired)
+			withRetired, err := readLinkedProject()
+			require.NoError(t, err, "a retired field changed whether the rest of the file reads")
+
+			bareJSON, err := json.Marshal(bare)
+			require.NoError(t, err)
+			retiredJSON, err := json.Marshal(withRetired)
+			require.NoError(t, err)
+			require.Equal(t, string(bareJSON), string(retiredJSON),
+				"a retired field changed what the rest of the file decodes to")
 		})
 	}
 }
