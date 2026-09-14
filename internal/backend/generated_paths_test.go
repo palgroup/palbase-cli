@@ -573,6 +573,90 @@ func TestReapKeepsATrackedHiddenRootAndNamesIt(t *testing.T) {
 	})
 }
 
+// GIT CEVAP VEREMEZSE COMMIT'Lİ OLABİLECEK KÖK SİLİNMEZ (FR-010, review-T002).
+//
+// "Cevapsızlık = izlenmiyor" kuralı, bir silme yolunda FAIL-OPEN'dı: git'in
+// soruyu yanıtlayamadığı her durumda — keşfi kesen bir ortam değişkeni, git'in
+// okumayı reddettiği bir depo, PATH'te olmayan git — commit'li bir `.palbase`
+// sıradan bir ürün sayılıp siliniyordu. "İzlenmiyor" cevabını yalnız iki şey
+// verebilir: temiz koşup hiçbir yol basmayan git, ve dizinden köke kadar hiç
+// `.git` olmaması.
+func TestReapKeepsAHiddenRootGitCannotAnswerFor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Ölçüldü (review-T002): `GIT_CEILING_DIRECTORIES` deponun kökünü
+	// gösterdiğinde alt dizinden sorulan `git ls-files` "not a git repository"
+	// ile düşüyor. CI sarmalayıcılarından miras kalabilen bir değişken.
+	t.Run("keşif sınırı depo kökünü dışarıda bırakıyor", func(t *testing.T) {
+		repo := t.TempDir()
+		dir := filepath.Join(repo, "backend")
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		gitCheckout(t, repo, "backend/.palbase/project.json")
+		t.Setenv("GIT_CEILING_DIRECTORIES", repo)
+
+		kept := reapRetiredArtifacts(dir)
+
+		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
+			t.Fatalf("keşif sınırı altında izlenen sözleşme silindi: %v", err)
+		}
+		if !slices.Equal(kept, []string{".palbase"}) {
+			t.Errorf("keşif sınırı altında izlenen kök adıyla dönmedi: %v", kept)
+		}
+	})
+
+	// Git'in okuyamadığı bir depo: `.git` bir `gitdir:` işaretçisi ve gösterdiği
+	// yer yok. `safe.directory`'nin "dubious ownership" reddiyle aynı kod yoluna
+	// düşer — git sıfırdan farklı çıkar, hiçbir şey basmaz.
+	t.Run("git depoyu okuyamıyor", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		mustWrite(t, dir, ".git", "gitdir: "+filepath.Join(t.TempDir(), "gone")+"\n")
+
+		kept := reapRetiredArtifacts(dir)
+
+		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
+			t.Fatalf("okunamayan bir depoda .palbase silindi: %v", err)
+		}
+		if !slices.Equal(kept, []string{".palbase"}) {
+			t.Errorf("okunamayan bir depoda kök adıyla dönmedi: %v", kept)
+		}
+	})
+
+	t.Run("depo var ama git PATH'te yok", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		gitCheckout(t, dir, ".palbase/project.json")
+		t.Setenv("PATH", t.TempDir())
+
+		kept := reapRetiredArtifacts(dir)
+
+		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
+			t.Fatalf("git'siz bir makinede commit'li .palbase silindi: %v", err)
+		}
+		if !slices.Equal(kept, []string{".palbase"}) {
+			t.Errorf("git'siz bir makinede kök adıyla dönmedi: %v", kept)
+		}
+	})
+
+	// NEGATİF KONTROL: hiç depo yoksa — git PATH'te olsun olmasın — hiçbir şey
+	// commit'lenmiş olamaz ve kök süpürülür. Aksi hâlde "belirsizse koru" kuralı
+	// FR-010'un asıl vakasını (izlenmeyen fosil) da kurtarırdı.
+	t.Run("depo yok, git de yok", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/esm/controllers/controllers.js", "stale\n")
+		t.Setenv("PATH", t.TempDir())
+
+		kept := reapRetiredArtifacts(dir)
+
+		if len(kept) != 0 {
+			t.Errorf("depo olmayan bir dizinde kök korundu: %v", kept)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".palbase")); !os.IsNotExist(err) {
+			t.Errorf("depo olmayan bir dizinde fosil .palbase kaldı (lstat: %v)", err)
+		}
+	})
+}
+
 // CLI'IN ÜRETTİĞİ HER ŞEY, GIT İZLESE BİLE GİDER (D-5).
 //
 // Yanlışlıkla commit'lenmiş bir hazırlık ağacı yine bir hazırlık ağacıdır. Korunma

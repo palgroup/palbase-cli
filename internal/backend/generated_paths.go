@@ -126,7 +126,8 @@ func gitignoreScaffold() string {
 
 // reapRetiredArtifacts deletes what an older CLI left in this checkout and
 // returns what it would NOT delete: every `keepIfTracked` entry that exists and
-// has a git-tracked file under it, by its declared path.
+// has a git-tracked file under it — or sits in a repository git could not be
+// asked about (see gitTracks) — by its declared path.
 //
 // Best effort by design: refusing a job somebody asked for because a dead
 // directory would not delete trades a doable command for a tidier disk.
@@ -171,11 +172,19 @@ func reapRetiredArtifacts(dir string) []string {
 func SweepRetiredArtifacts(dir string) []string { return reapRetiredArtifacts(dir) }
 
 // gitTracks reports whether git tracks at least one file at or under rel,
-// asked from dir.
+// asked from dir — or whether dir sits in a repository git could not be asked
+// about, which reads the SAME way.
 //
-// NO ANSWER READS AS "NOT TRACKED". Not a repository, and no git on PATH, both
-// mean nothing here can have been committed, so the entry is an ordinary
-// product.
+// AN UNANSWERED QUESTION KEEPS THE PATH. What lets the sweeper delete is the
+// answer "tracked by nothing", and only two things give it: git itself, run
+// cleanly and printing no path; and no `.git` anywhere from dir up to the
+// filesystem root, which means nothing here can have been committed. Everything
+// else — git missing from PATH, a repository git refuses to read (a broken
+// `gitdir:` pointer, its `safe.directory` ownership check), a discovery limit
+// inherited from the environment — is "could not tell", and a directory
+// somebody may have committed is not deleted on a guess. Measured (review-T002):
+// `GIT_CEILING_DIRECTORIES` alone used to make a committed `.palbase` read as
+// untracked, and the sweeper removed it.
 //
 // The repository-LOCATING variables are removed from the child's environment.
 // A git hook exports them relative to the repository root (`GIT_DIR=.git`,
@@ -189,17 +198,52 @@ func SweepRetiredArtifacts(dir string) []string { return reapRetiredArtifacts(di
 // that `os.RemoveAll(".palbase")` deletes. On a case-sensitive filesystem the
 // wider match can only KEEP something, never delete it.
 func gitTracks(dir, rel string) bool {
-	cmd := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ":(icase)"+rel)
+	if !insideAGitCheckout(dir) {
+		return false
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return true
+	}
+	cmd := exec.Command(git, "-C", dir, "ls-files", "-z", "--", ":(icase)"+rel)
 	cmd.Env = withoutGitLocation(os.Environ())
 	out, err := cmd.Output()
-	return err == nil && len(out) > 0
+	if err != nil {
+		return true
+	}
+	return len(out) > 0
+}
+
+// insideAGitCheckout reports whether dir, or any directory above it, carries a
+// `.git` entry — the directory, or the file a worktree or submodule points
+// with. It is asked WITHOUT git, so that "git could not answer" and "there is no
+// repository here" stay two different answers.
+func insideAGitCheckout(dir string) bool {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		// Unplaceable is not "outside every repository".
+		return true
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return false
+		}
+		abs = parent
+	}
 }
 
 // gitLocationEnv are the variables that point git at a repository other than
-// the one it would discover from its working directory.
+// the one it would discover from its working directory, or stop it short of
+// that one: GIT_CEILING_DIRECTORIES set to the repository root makes a
+// subdirectory's `git ls-files` answer "not a git repository".
 var gitLocationEnv = []string{
 	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
 	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+	"GIT_CEILING_DIRECTORIES",
 }
 
 func withoutGitLocation(env []string) []string {

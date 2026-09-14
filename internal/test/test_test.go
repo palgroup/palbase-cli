@@ -171,13 +171,23 @@ func TestUnitRunNeverMintsOrDeletesIdentities(t *testing.T) {
 // a check that reads only stdout sees no summary on a green run).
 func stubBun(t *testing.T, summary, exitCode string) {
 	t.Helper()
+	stubBunStreams(t, "", summary, exitCode)
+}
+
+// stubBunStreams stubs `bun` with what it prints on EACH stream: the unit
+// layer's verdict depends on which one a summary-shaped line arrives on.
+func stubBunStreams(t *testing.T, stdout, stderr, exitCode string) {
+	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("bun stub requires a POSIX shell")
 	}
 	dir := t.TempDir()
 	body := "#!/bin/sh\nprintf 'bun test v1.3.9 (stub)\\n'\n"
-	if summary != "" {
-		body += "cat >&2 <<'SUMMARY'\n" + summary + "\nSUMMARY\n"
+	if stdout != "" {
+		body += "cat <<'STDOUT'\n" + stdout + "\nSTDOUT\n"
+	}
+	if stderr != "" {
+		body += "cat >&2 <<'SUMMARY'\n" + stderr + "\nSUMMARY\n"
 	}
 	body += "exit " + exitCode + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bun"), []byte(body), 0o755))
@@ -185,6 +195,30 @@ func stubBun(t *testing.T, summary, exitCode string) {
 }
 
 const passingSummary = " 3 pass\n 0 fail\n 5 expect() calls\nRan 3 tests across 1 file. [12.00ms]"
+
+// A SUMMARY THE SUITE PRINTS IS NOT BUN'S (review-T004).
+//
+// Measured against a real bun 1.3.9: a test that `console.log`s
+// "Ran 3 tests across 1 file." and then calls `process.exit(0)` leaves exactly
+// that line on STDOUT, nothing on stderr — and the unit layer read it as a pass
+// while two of the three tests never ran. Bun writes its summary to STDERR;
+// stdout is the code under test's.
+func TestUnitRunIgnoresASummaryTheSuitePrintedToStdout(t *testing.T) {
+	stubBunStreams(t, "sample.test.ts:\nRan 3 tests across 1 file.", "", "0")
+	out, err := run(t, Resolvers{}, "--unit")
+	require.Error(t, err, "a summary printed by the suite on stdout passed the gate:\n%s", out)
+	require.Contains(t, err.Error(), "printed no summary")
+}
+
+// THE LAST SUMMARY ON STDERR IS THE RUN'S. Bun ends a completed run with it; a
+// summary-shaped line earlier in the stream was printed by the code under test
+// (`console.error`) and must not decide how many tests ran.
+func TestUnitRunReadsTheLastSummaryOnStderr(t *testing.T) {
+	stubBunStreams(t, "", "Ran 5 tests across 2 files.\n 0 pass\n 0 fail\nRan 0 tests across 0 files. [2.00ms]", "0")
+	out, err := run(t, Resolvers{}, "--unit")
+	require.Error(t, err, "an earlier summary-shaped line outvoted bun's own:\n%s", out)
+	require.Contains(t, err.Error(), "ran 0 tests")
+}
 
 // A RUN THAT RAN NOTHING IS NOT A PASS (FR-015).
 //

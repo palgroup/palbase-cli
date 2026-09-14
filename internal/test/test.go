@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -73,10 +74,11 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase test --unit       the service layer only (no stack needed)
   palbase test --live       the HTTP layer only
 
-The unit layer runs ` + "`bun test`" + ` — the scaffold's test script — over services and
-pure logic, against ` + "`fakeDatabase()`" + ` from @palbase/backend/test. A run that ran no
-test, or that exited without printing its summary, is refused rather than
-reported as a pass. The live layer needs a stack —
+The unit layer runs ` + "`bun test`" + ` directly — the scaffold's test script and the
+runner a deploy grades your suites with, whatever package.json's test script
+says — over services and pure logic, against ` + "`fakeDatabase()`" + ` from
+@palbase/backend/test. A run that ran no test, or that exited without bun
+printing its summary, is refused rather than reported as a pass. The live layer needs a stack —
 this command mints the identities, exports PALBASE_TEST_* and runs the same
 ` + "`npm test`" + ` with them in the environment, so a test that wants a real request
 has one and a test that does not is unaffected.
@@ -96,7 +98,7 @@ are reported; an interrupted process may leave users for test-user delete.`,
 					return fmt.Errorf("resolve the checkout directory: %w", wdErr)
 				}
 				for _, kept := range r.Sweep(dir) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "  kept %s — git tracks a file under it; remove it in a commit\n", kept)
+					fmt.Fprintf(cmd.ErrOrStderr(), "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
 				}
 			}
 			if unitOnly && liveOnly {
@@ -188,25 +190,46 @@ func firstBytes(raw []byte, n int) string {
 // ranSummary is the line `bun test` ends every completed run with.
 var ranSummary = regexp.MustCompile(`(?m)^Ran (\d+) tests? across (\d+) files?\.`)
 
-// runUnitTests runs `bun test` — exactly the scaffold's test script (FR-014) —
-// and refuses a run that cannot say it tested anything (FR-015).
+// runUnitTests runs `bun test` DIRECTLY — the scaffold's test script (FR-014)
+// and the runner a deploy grades a candidate's suites with — and refuses a run
+// that cannot say it tested anything (FR-015). It does not run package.json's
+// `test` script: a project that points that script elsewhere is still graded by
+// bun at deploy, and this layer measures what the deploy will.
 //
 // THE SUMMARY IS READ, NOT ONLY THE EXIT CODE. A project with no test file, and
 // a test file that ends the process with `process.exit(0)` half-way through,
 // both exit 0; only the summary tells them from a pass. The guard used to be a
 // shell script in the scaffold, which any project could edit away, and it lives
-// here now (D-7). Both streams are read: bun writes the summary to STDERR.
+// here now (D-7).
+//
+// ONLY BUN'S STREAM, AND ONLY ITS LAST SUMMARY (review-T004). Bun writes the
+// summary to STDERR, as the last thing a completed run prints. Stdout belongs to
+// the code under test: a suite that `console.log`ged a summary-shaped line and
+// then called `process.exit(0)` left exactly that there — measured against bun
+// 1.3.9, and read as a pass while two of its three tests never ran. A
+// summary-shaped line EARLIER on stderr is the suite's `console.error`, so the
+// last one is the run's. Out of reach stays a suite written to forge bun's final
+// line on purpose: its author controls the tests themselves, and no reading of a
+// stream they can write to outvotes that.
 func runUnitTests(cmd *cobra.Command, out io.Writer) error {
-	var seen bytes.Buffer
-	both := io.MultiWriter(out, &seen)
+	var stderr bytes.Buffer
+	// TWO STREAMS, ONE DESTINATION. With Stdout and Stderr set to different
+	// writers, os/exec copies each pipe on its own goroutine, and both reach
+	// `out` — a writer that need not be safe for concurrent use. Measured under
+	// -race: two goroutines in bytes.(*Buffer).Write, and bun's summary missing
+	// from the output. One lock in front of `out` serialises them.
+	shared := &lockedWriter{w: out}
 	c := exec.CommandContext(cmd.Context(), "bun", "test")
 	c.Env = os.Environ()
-	c.Stdout = both
-	c.Stderr = both
+	c.Stdout = shared
+	c.Stderr = io.MultiWriter(shared, &stderr)
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("bun test: %w", err)
 	}
-	m := ranSummary.FindSubmatch(seen.Bytes())
+	var m [][]byte
+	if all := ranSummary.FindAllSubmatch(stderr.Bytes(), -1); len(all) > 0 {
+		m = all[len(all)-1]
+	}
 	if m == nil {
 		return fmt.Errorf("bun test exited 0 but printed no summary, so it cannot say how many tests ran — " +
 			"a test file that ends the process early looks exactly like this, and it is not a pass")
@@ -216,6 +239,18 @@ func runUnitTests(cmd *cobra.Command, out io.Writer) error {
 			"put a *.test.ts beside the code it covers", string(m[1]))
 	}
 	return nil
+}
+
+// lockedWriter serialises writes to one writer shared by two copy goroutines.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // runNpmTest runs the project's own `npm test`, with `extra` added to the
