@@ -10,6 +10,7 @@
 package test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +34,11 @@ type Resolvers struct {
 	// Mint creates test identities and returns their payload and a cleanup
 	// function bound to exactly those users on the stack that minted them.
 	Mint func(cmd *cobra.Command, count int) ([]byte, func(context.Context) error, error)
+	// Sweep deletes what an older CLI left in the checkout and returns what it
+	// would not delete — a path git tracks — for this command to name (FR-009).
+	// Nil sweeps nothing: a harness that builds the command without the
+	// composition root.
+	Sweep func(dir string) []string
 }
 
 // Target is the address a live test run points at.
@@ -65,8 +73,10 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase test --unit       the service layer only (no stack needed)
   palbase test --live       the HTTP layer only
 
-The unit layer is your own ` + "`npm test`" + `: services and pure logic, against
-` + "`fakeDatabase()`" + ` from @palbase/backend/test. The live layer needs a stack —
+The unit layer runs ` + "`bun test`" + ` — the scaffold's test script — over services and
+pure logic, against ` + "`fakeDatabase()`" + ` from @palbase/backend/test. A run that ran no
+test, or that exited without printing its summary, is refused rather than
+reported as a pass. The live layer needs a stack —
 this command mints the identities, exports PALBASE_TEST_* and runs the same
 ` + "`npm test`" + ` with them in the environment, so a test that wants a real request
 has one and a test that does not is unaffected.
@@ -77,13 +87,25 @@ are reported; an interrupted process may leave users for test-user delete.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			out := cmd.OutOrStdout()
+			// THE SWEEP FIRST (FR-009): what an older CLI left in the checkout goes
+			// before this command refuses or runs anything. A path git tracks is
+			// kept and named — deleting it is a commit a person reviews.
+			if r.Sweep != nil {
+				dir, wdErr := os.Getwd()
+				if wdErr != nil {
+					return fmt.Errorf("resolve the checkout directory: %w", wdErr)
+				}
+				for _, kept := range r.Sweep(dir) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  kept %s — git tracks a file under it; remove it in a commit\n", kept)
+				}
+			}
 			if unitOnly && liveOnly {
 				return fmt.Errorf("--unit and --live are the two halves; pass neither to run both")
 			}
 
 			if !liveOnly {
 				fmt.Fprintln(out, "▸ unit")
-				if err := runNpmTest(cmd, nil, out); err != nil {
+				if err := runUnitTests(cmd, out); err != nil {
 					return fmt.Errorf("unit tests failed: %w", err)
 				}
 			}
@@ -161,6 +183,39 @@ func firstBytes(raw []byte, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// ranSummary is the line `bun test` ends every completed run with.
+var ranSummary = regexp.MustCompile(`(?m)^Ran (\d+) tests? across (\d+) files?\.`)
+
+// runUnitTests runs `bun test` — exactly the scaffold's test script (FR-014) —
+// and refuses a run that cannot say it tested anything (FR-015).
+//
+// THE SUMMARY IS READ, NOT ONLY THE EXIT CODE. A project with no test file, and
+// a test file that ends the process with `process.exit(0)` half-way through,
+// both exit 0; only the summary tells them from a pass. The guard used to be a
+// shell script in the scaffold, which any project could edit away, and it lives
+// here now (D-7). Both streams are read: bun writes the summary to STDERR.
+func runUnitTests(cmd *cobra.Command, out io.Writer) error {
+	var seen bytes.Buffer
+	both := io.MultiWriter(out, &seen)
+	c := exec.CommandContext(cmd.Context(), "bun", "test")
+	c.Env = os.Environ()
+	c.Stdout = both
+	c.Stderr = both
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("bun test: %w", err)
+	}
+	m := ranSummary.FindSubmatch(seen.Bytes())
+	if m == nil {
+		return fmt.Errorf("bun test exited 0 but printed no summary, so it cannot say how many tests ran — " +
+			"a test file that ends the process early looks exactly like this, and it is not a pass")
+	}
+	if n, err := strconv.Atoi(string(m[1])); err != nil || n == 0 {
+		return fmt.Errorf("bun test ran %s tests — a run that tested nothing is not a pass; "+
+			"put a *.test.ts beside the code it covers", string(m[1]))
+	}
+	return nil
 }
 
 // runNpmTest runs the project's own `npm test`, with `extra` added to the

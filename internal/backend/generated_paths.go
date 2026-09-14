@@ -156,6 +156,11 @@ func reapRetiredArtifacts(dir string) []string {
 	return kept
 }
 
+// SweepRetiredArtifacts is reapRetiredArtifacts for a verb that lives outside
+// this package — `palbase test` receives it through its Resolvers (FR-009) —
+// with the same answer: the paths git tracks, kept, for the caller to name.
+func SweepRetiredArtifacts(dir string) []string { return reapRetiredArtifacts(dir) }
+
 // gitTracks reports whether git tracks at least one file at or under rel,
 // asked from dir.
 //

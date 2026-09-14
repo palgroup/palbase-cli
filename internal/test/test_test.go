@@ -161,9 +161,89 @@ func TestMintFailureDoesNotTryDeletingUnknownUsers(t *testing.T) {
 }
 
 func TestUnitRunNeverMintsOrDeletesIdentities(t *testing.T) {
-	stubNpm(t, "0")
+	stubBun(t, passingSummary, "0")
 	_, err := run(t, Resolvers{}, "--unit")
 	require.NoError(t, err)
+}
+
+// stubBun stands in for the unit layer's runner with what `bun test` really
+// prints: a banner on stdout and the summary on STDERR (bun 1.3.9, measured —
+// a check that reads only stdout sees no summary on a green run).
+func stubBun(t *testing.T, summary, exitCode string) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("bun stub requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	body := "#!/bin/sh\nprintf 'bun test v1.3.9 (stub)\\n'\n"
+	if summary != "" {
+		body += "cat >&2 <<'SUMMARY'\n" + summary + "\nSUMMARY\n"
+	}
+	body += "exit " + exitCode + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bun"), []byte(body), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+const passingSummary = " 3 pass\n 0 fail\n 5 expect() calls\nRan 3 tests across 1 file. [12.00ms]"
+
+// A RUN THAT RAN NOTHING IS NOT A PASS (FR-015).
+//
+// The guard used to live in the scaffold's own `scripts/test.sh`, which every
+// project could edit away; it lives in the command now (D-7), so a project that
+// has no tests — or whose runner found none — is told so instead of green.
+func TestUnitRunRefusesARunThatDiscoveredNoTests(t *testing.T) {
+	stubBun(t, " 0 pass\n 0 fail\nRan 0 tests across 0 files. [2.00ms]", "0")
+	out, err := run(t, Resolvers{}, "--unit")
+	require.Error(t, err, "a unit run that ran no test passed:\n%s", out)
+	require.ErrorContains(t, err, "0 tests")
+}
+
+// AN EXIT 0 WITH NO SUMMARY IS NOT A PASS EITHER (FR-015).
+//
+// A test file that calls `process.exit(0)` half-way through ends the runner
+// before it prints what ran — exit code 0, and nothing that says how many tests
+// that was. The scaffold's retired guard caught exactly this with a sabotage
+// file; the command has to.
+func TestUnitRunRefusesAnExitZeroThatPrintedNoSummary(t *testing.T) {
+	stubBun(t, "", "0")
+	out, err := run(t, Resolvers{}, "--unit")
+	require.Error(t, err, "a unit run that printed no summary passed:\n%s", out)
+	require.ErrorContains(t, err, "summary")
+}
+
+// NEGATIVE CONTROL: a run that ran tests and passed is a pass, and the runner's
+// own words reach the person.
+func TestUnitRunPassesARunThatRanTests(t *testing.T) {
+	stubBun(t, passingSummary, "0")
+	out, err := run(t, Resolvers{}, "--unit")
+	require.NoError(t, err)
+	require.Contains(t, out, "Ran 3 tests")
+}
+
+func TestUnitRunThatFailsStillFails(t *testing.T) {
+	stubBun(t, " 2 pass\n 1 fail\nRan 3 tests across 1 file. [9.00ms]", "1")
+	_, err := run(t, Resolvers{}, "--unit")
+	require.ErrorContains(t, err, "unit tests failed")
+}
+
+// THE SWEEP RUNS BEFORE ANY REFUSAL (FR-009).
+//
+// `palbase test` is one of the five verbs that collect what an older CLI left
+// in the checkout, and it does so before it has a chance to refuse anything —
+// a refused command that leaves the litter is the gap FR-009 closes. What the
+// sweep would not delete (git tracks it) is named, never silently kept.
+func TestTheCommandSweepsBeforeAnyRefusal(t *testing.T) {
+	var swept []string
+	r := Resolvers{Sweep: func(dir string) []string {
+		swept = append(swept, dir)
+		return []string{".palbase"}
+	}}
+	out, err := run(t, r, "--unit", "--live")
+	require.Error(t, err, "conflicting flags were accepted")
+	wd, wdErr := os.Getwd()
+	require.NoError(t, wdErr)
+	require.Equal(t, []string{wd}, swept, "the sweep did not run, once, on the checkout, before the refusal")
+	require.Contains(t, out, ".palbase", "a kept path was not named")
 }
 
 func TestUnitAndLiveTogetherIsRefused(t *testing.T) {

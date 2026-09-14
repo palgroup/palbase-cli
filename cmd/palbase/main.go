@@ -545,6 +545,9 @@ func newRootCmd() *cobra.Command {
 				return palbasetest.Target{URL: target.URL, APIKey: key}, nil
 			},
 			Mint: testuser.MintIdentities,
+			// FR-009: this verb collects what an older CLI left in the checkout
+			// before it runs or refuses anything, like build, push, plan and link.
+			Sweep: backend.SweepRetiredArtifacts,
 		}),
 	)
 
