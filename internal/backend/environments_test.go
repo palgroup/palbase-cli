@@ -549,3 +549,55 @@ func TestTheEnvironmentDirectoryIsNamedAfterTheEnvironment(t *testing.T) {
 	require.NotContains(t, EnvDir("staging"), "main",
 		"the environment directory still carries a constant")
 }
+
+// THE RULE THAT CHOOSES AN ENVIRONMENT IS ONE FUNCTION (C-1, FR-007, FR-009).
+//
+// `palbase start` has to pull from the environment every other verb acts on,
+// and a second copy of that order is a second answer waiting to drift.
+func TestResolveProjectEnvironmentFollowsTheVerbOrder(t *testing.T) {
+	linked := Target{Project: "prd_a", Name: "todoapp"}
+
+	t.Run("the flag wins", func(t *testing.T) {
+		linkedTo(t, linked)
+		resolverRig(t, twoEnvs)
+		SelectedEnvFlag = "staging"
+
+		got, err := resolveProjectEnvironment(context.Background(), linked)
+		require.NoError(t, err)
+		require.Equal(t, "staging", got.Env)
+		require.Equal(t, "flag", got.Source)
+	})
+
+	t.Run("then this machine's selection", func(t *testing.T) {
+		linkedTo(t, linked)
+		useTempMachineHome(t)
+		resolverRig(t, twoEnvs)
+		require.NoError(t, WriteSelection(".", Selection{Project: "prd_a", Env: "staging", Ref: "mu0028"}))
+
+		got, err := resolveProjectEnvironment(context.Background(), linked)
+		require.NoError(t, err)
+		require.Equal(t, "staging", got.Env)
+		require.Equal(t, "selection", got.Source)
+	})
+
+	t.Run("then the project's only environment", func(t *testing.T) {
+		linkedTo(t, linked)
+		resolverRig(t, twoEnvs[:1])
+
+		got, err := resolveProjectEnvironment(context.Background(), linked)
+		require.NoError(t, err)
+		require.Equal(t, "main", got.Env)
+		require.Equal(t, "only", got.Source)
+	})
+
+	t.Run("and otherwise it refuses with the list", func(t *testing.T) {
+		linkedTo(t, linked)
+		resolverRig(t, twoEnvs)
+
+		_, err := resolveProjectEnvironment(context.Background(), linked)
+		require.Error(t, err, "two environments and no selection must not resolve")
+		for _, want := range []string{"main", "staging", "--env"} {
+			require.Contains(t, err.Error(), want)
+		}
+	})
+}

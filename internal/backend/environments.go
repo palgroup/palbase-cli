@@ -239,6 +239,18 @@ func Resolve(ctx context.Context) (Resolved, error) {
 			target.URL, named)
 	}
 
+	return resolveProjectEnvironment(ctx, target)
+}
+
+// resolveProjectEnvironment answers WHICH environment of a project a verb acts
+// on — and it is the only place that order lives (C-1).
+//
+// `Resolve` calls it once it has decided this checkout acts on a PROJECT.
+// `palbase start` calls it to choose the environment whose secrets it pulls:
+// two callers, one rule, so a start can never pull from an environment no other
+// verb would touch. A second copy of this order would be a second answer,
+// waiting to drift.
+func resolveProjectEnvironment(ctx context.Context, target Target) (Resolved, error) {
 	// 1-2. WHAT THE CALLER NAMED, this call only. It never writes the persisted
 	// selection: an override is for one call, and a flag that quietly became
 	// the new default would make the NEXT command act on an environment nobody
