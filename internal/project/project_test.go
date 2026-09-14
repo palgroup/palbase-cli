@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubREST records what the command asked the control plane for, and answers
@@ -75,6 +76,10 @@ type routeREST struct {
 	rows    []Project
 	listErr error
 	sent    any
+	// unreachable makes the environment never answer, and statusCalls says
+	// whether create asked at all — the whole point of X-8.
+	unreachable bool
+	statusCalls int
 }
 
 func (r *routeREST) Do(_ context.Context, method, path string, body, out any) error {
@@ -88,6 +93,9 @@ func (r *routeREST) Do(_ context.Context, method, path string, body, out any) er
 			return r.listErr
 		}
 		reply = r.rows
+	case method == "GET" && path == "/v1/cloud/projects/"+r.created.Ref:
+		r.statusCalls++
+		reply = map[string]any{"ref": r.created.Ref, "phase": "Running", "reachable": !r.unreachable}
 	default:
 		return fmt.Errorf("unexpected %s %s", method, path)
 	}
@@ -177,7 +185,8 @@ func TestCreateQuotesANameAShellWouldSplit(t *testing.T) {
 // The domain comes from the cloud. When it cannot be read, the command still
 // succeeds — the project exists — and never invents a host.
 func TestCreateStillSucceedsWhenTheDomainIsUnknown(t *testing.T) {
-	rest := &stubREST{reply: Tenant{Ref: "abc123xyz", Phase: "Running"}}
+	// The same reply answers the status request create ends on.
+	rest := &stubREST{reply: map[string]any{"ref": "abc123xyz", "phase": "Running", "reachable": true}}
 	out, err := run(t, resolvers(rest, stubCloud{err: fmt.Errorf("unreachable")}), "", "create", "shop")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -475,5 +484,94 @@ func TestCreateSuggestsTheRefForANameLinkWouldReadAsAnAddress(t *testing.T) {
 	}
 	if !strings.Contains(out, "palbase link abc123xyz") || strings.Contains(out, "palbase link 'a://b'") {
 		t.Fatalf("a name link would read as an address was suggested as the name:\n%s", out)
+	}
+}
+
+// CREATE RETURNS ONCE THE ENVIRONMENT ANSWERS (X-8). Measured on 0.67.1: create
+// printed "(Running)" and the link command while the environment refused
+// connections for minutes; `palbase plan` right after it got a 500.
+func TestCreateWaitsForTheEnvironmentBeforeSuggestingTheLink(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"},
+		rows:    []Project{{ID: "prd_a", Name: "shop"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "shop")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if rest.statusCalls == 0 {
+		t.Fatal("create returned without asking whether the environment answers")
+	}
+	wait, link := strings.Index(out, "waiting for abc123xyz to answer"), strings.Index(out, "Link it with:")
+	if wait < 0 || link < 0 || wait > link {
+		t.Fatalf("the link was suggested before the environment answered:\n%s", out)
+	}
+}
+
+func TestCreateFailsWhenTheEnvironmentNeverAnswers(t *testing.T) {
+	prevBudget, prevPoll := ReadyBudget, ReadyPoll
+	ReadyBudget, ReadyPoll = 20*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { ReadyBudget, ReadyPoll = prevBudget, prevPoll })
+	rest := &routeREST{
+		created:     Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"},
+		unreachable: true,
+	}
+	out, err := run(t, routed(rest), "", "create", "shop")
+	if err == nil || !strings.Contains(err.Error(), "abc123xyz was created") {
+		t.Fatalf("want a failure that says the project exists, got %v", err)
+	}
+	if strings.Contains(out, "Link it with:") {
+		t.Fatalf("suggested linking an environment that never answered:\n%s", out)
+	}
+}
+
+func TestCreateJSONKeepsTheWaitOffStdout(t *testing.T) {
+	rest := &routeREST{created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"}}
+	cmd := Cmd(routed(rest))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{"create", "shop", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("create --json: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("stdout is not only the JSON document: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "waiting for abc123xyz to answer") {
+		t.Fatalf("the wait was not announced on stderr:\n%s", stderr.String())
+	}
+}
+
+func TestStatusSaysWhetherTheEnvironmentAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		reachable bool
+		row       string
+	}{{true, "yes"}, {false, "no"}} {
+		rest := &stubREST{reply: map[string]any{"ref": "abc123xyz", "name": "shop", "phase": "Running", "reachable": tc.reachable}}
+		out, err := run(t, resolvers(rest, stubCloud{}), "", "status", "abc123xyz")
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		found := false
+		for _, line := range strings.Split(out, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && fields[0] == "Reachable" && fields[1] == tc.row {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("no `Reachable %s` row:\n%s", tc.row, out)
+		}
+		out, err = run(t, resolvers(rest, stubCloud{}), "", "status", "abc123xyz", "--json")
+		if err != nil {
+			t.Fatalf("status --json: %v", err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(out), &doc); err != nil || doc["reachable"] != tc.reachable {
+			t.Fatalf("--json does not carry reachable=%v: %v\n%s", tc.reachable, err, out)
+		}
 	}
 }

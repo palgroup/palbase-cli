@@ -27,6 +27,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
+	// Aliased: this package already calls one LISTING ROW a `project`, and the
+	// two names mean different things — the row is what the plane lists, the
+	// package is what `palbase project` is made of.
+	cloudproject "github.com/palgroup/palbase-cli/internal/project"
 )
 
 // REST is the control-plane transport subset these commands use.
@@ -254,6 +258,13 @@ this command prints that consequence before it asks.`,
 				return err
 			}
 			fmt.Fprintf(out, "Created %s — %s (%s)\n", created.Name, created.Ref, created.Phase)
+			// THE WAY TO USE IT IS PRINTED ONCE IT CAN BE USED. `Running` is
+			// placement, not readiness: measured on 0.67.1 the new environment
+			// refused connections for two minutes after this line, and the
+			// first `palbase plan --env <new>` answered 500.
+			if err := cloudproject.WaitUntilReachable(cmd.Context(), r.REST(), created.Ref, cmd.ErrOrStderr()); err != nil {
+				return err
+			}
 			fmt.Fprintf(out, "\n  palbase env use %s\n", created.Name)
 			return nil
 		},

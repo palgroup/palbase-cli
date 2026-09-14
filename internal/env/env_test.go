@@ -40,6 +40,10 @@ func (s *stubREST) Do(_ context.Context, method, path string, body, out any) err
 	var reply any
 	switch method {
 	case http.MethodGet:
+		if strings.HasPrefix(path, "/v1/cloud/projects/") {
+			reply = map[string]any{"reachable": true}
+			break
+		}
 		reply = s.projects
 	case http.MethodPost:
 		reply = s.created
@@ -64,6 +68,17 @@ func (s *stubREST) last() call {
 		return call{}
 	}
 	return s.calls[len(s.calls)-1]
+}
+
+// lastWrite is the last request that changed something. A create now ends on a
+// status read, so "what did create send" is no longer the last call.
+func (s *stubREST) lastWrite() call {
+	for i := len(s.calls) - 1; i >= 0; i-- {
+		if s.calls[i].method != http.MethodGet {
+			return s.calls[i]
+		}
+	}
+	return call{}
 }
 
 // linkedCheckout puts the test in a scratch directory bound to one project,
@@ -234,10 +249,10 @@ func TestCreateProceedsWhenTheNameIsTyped(t *testing.T) {
 
 	_, err := run(t, rest, "staging2\n", "create", "staging2")
 	require.NoError(t, err)
-	require.Equal(t, http.MethodPost, rest.last().method)
-	require.Equal(t, "/v1/cloud/projects/prd_a/environments", rest.last().path)
+	require.Equal(t, http.MethodPost, rest.lastWrite().method)
+	require.Equal(t, "/v1/cloud/projects/prd_a/environments", rest.lastWrite().path)
 	require.Equal(t, http.MethodGet, rest.calls[0].method, "create acted without reading the project first")
-	sent, _ := rest.last().body.(map[string]any)
+	sent, _ := rest.lastWrite().body.(map[string]any)
 	require.Equal(t, "staging2", sent["name"])
 	// THE ENVELOPE FIELD IS ABSENT unless somebody names one. The server's own
 	// contract says the plan chooses it, so a constant sent from here would be
@@ -256,7 +271,7 @@ func TestCreateSendsTheEnvelopeWhenItIsNamed(t *testing.T) {
 
 	out, err := run(t, rest, "", "create", "staging2", "--tier", "pro", "--yes")
 	require.NoError(t, err)
-	sent, _ := rest.last().body.(map[string]any)
+	sent, _ := rest.lastWrite().body.(map[string]any)
 	require.Equal(t, "pro", sent["tier"])
 	require.Contains(t, out, "pro", "the envelope it will ask for is not printed")
 }
@@ -267,7 +282,20 @@ func TestCreateWithYesSkipsThePrompt(t *testing.T) {
 
 	_, err := run(t, rest, "", "create", "staging2", "--yes")
 	require.NoError(t, err)
-	require.Equal(t, http.MethodPost, rest.last().method)
+	require.Equal(t, http.MethodPost, rest.lastWrite().method)
+}
+
+func TestCreateWaitsForTheEnvironmentBeforeSayingHowToUseIt(t *testing.T) {
+	linkedCheckout(t)
+	rest := &stubREST{projects: twoEnvironments()}
+
+	out, err := run(t, rest, "", "create", "staging2", "--yes")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, rest.last().method)
+	require.Equal(t, "/v1/cloud/projects/new1234", rest.last().path, "env create returned without asking whether the environment answers")
+	require.Contains(t, out, "waiting for new1234 to answer")
+	require.Contains(t, out, "palbase env use staging2")
+	require.Less(t, strings.Index(out, "waiting for new1234 to answer"), strings.Index(out, "palbase env use staging2"))
 }
 
 // DELETE ASKS FOR THE REF, not a yes. Typing it means having read which

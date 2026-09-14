@@ -136,19 +136,24 @@ func createCmd(r Resolvers) *cobra.Command {
 		Short: "Create a project and its first environment",
 		Long: `Create a project on the Palbase cloud.
 
-Provisioning is synchronous: the command returns once the first environment is
-running, and the command it prints last links a checkout to the project.`,
+Provisioning is synchronous: the command returns once the first environment
+answers, and the command it prints last links a checkout to the project.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var p Tenant
 			body := map[string]any{"name": args[0], "tier": tier}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/projects", body, &p); err != nil {
 				return err
 			}
-			if jsonOut {
-				return encodeJSON(cmd.OutOrStdout(), p)
-			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Created %s — %s (%s)\n", p.displayName(), p.Ref, p.Phase)
+			if !jsonOut {
+				fmt.Fprintf(out, "Created %s — %s (%s)\n", p.displayName(), p.Ref, p.Phase)
+			}
+			if err := WaitUntilReachable(cmd.Context(), r.REST(), p.Ref, cmd.ErrOrStderr()); err != nil {
+				return err
+			}
+			if jsonOut {
+				return encodeJSON(out, p)
+			}
 			fmt.Fprintf(out, "\nLink it with:\n  %s\n", linkSuggestion(cmd.Context(), r, p))
 			return nil
 		},
@@ -267,9 +272,15 @@ func statusCmd(r Resolvers) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status <ref>",
 		Args:  cobra.ExactArgs(1),
-		Short: "Show one project's name and phase",
+		Short: "Show one project's name, phase and whether it answers",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var p Tenant
+			// REACHABLE IS NOT THE PHASE. `Running` means placement finished;
+			// whether the environment accepts connections right now is its own
+			// answer, and a person who just created one needs that one.
+			var p struct {
+				Tenant
+				Reachable bool `json:"reachable"`
+			}
 			path := "/v1/cloud/projects/" + url.PathEscape(args[0])
 			if err := r.REST().Do(cmd.Context(), http.MethodGet, path, nil, &p); err != nil {
 				return err
@@ -277,10 +288,15 @@ func statusCmd(r Resolvers) *cobra.Command {
 			if jsonOut {
 				return encodeJSON(cmd.OutOrStdout(), p)
 			}
+			reachable := "no"
+			if p.Reachable {
+				reachable = "yes"
+			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintf(tw, "Name\t%s\n", p.displayName())
 			fmt.Fprintf(tw, "Ref\t%s\n", p.Ref)
 			fmt.Fprintf(tw, "Phase\t%s\n", p.Phase)
+			fmt.Fprintf(tw, "Reachable\t%s\n", reachable)
 			return tw.Flush()
 		},
 	}
