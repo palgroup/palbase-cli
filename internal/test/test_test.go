@@ -232,6 +232,23 @@ func TestUnitRunRefusesARunThatDiscoveredNoTests(t *testing.T) {
 	require.ErrorContains(t, err, "0 tests")
 }
 
+// AND BUN'S OWN "NO TEST FILES" IS THAT SAME REFUSAL, WITH ITS COUNT (FR-015).
+//
+// The stub above prints a summary and exits 0. Real bun does not: measured with
+// bun 1.3.9 in a project with no test file, it writes
+// `error: 0 test files matching **{.test,.spec,_test_,_spec_}.{js,ts,jsx,tsx} in --cwd=…`
+// to stderr, prints no summary, and exits 1 — and the command answered
+// `unit tests failed: bun test: exit status 1`, a refusal that did not say how
+// many tests ran. A fixture that never modelled the runner's real answer never
+// measured this path.
+func TestUnitRunNamesTheCountWhenBunFindsNoTestFile(t *testing.T) {
+	stubBunStreams(t, "", "bun test v1.3.9 (cf6cdbbb)\nerror: 0 test files matching **{.test,.spec,_test_,_spec_}.{js,ts,jsx,tsx} in --cwd=\"/p\"\n", "1")
+	out, err := run(t, Resolvers{}, "--unit")
+	require.Error(t, err, "a unit run with no test file passed:\n%s", out)
+	require.ErrorContains(t, err, "ran 0 tests")
+	require.NotContains(t, err.Error(), "exit status", "the refusal still reads as a crash rather than as what ran")
+}
+
 // AN EXIT 0 WITH NO SUMMARY IS NOT A PASS EITHER (FR-015).
 //
 // A test file that calls `process.exit(0)` half-way through ends the runner

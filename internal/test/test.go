@@ -224,6 +224,14 @@ func runUnitTests(cmd *cobra.Command, out io.Writer) error {
 	c.Stdout = shared
 	c.Stderr = io.MultiWriter(shared, &stderr)
 	if err := c.Run(); err != nil {
+		// A RUNNER THAT FOUND NO TEST FILE IS THE SAME REFUSAL, NOT A CRASH (D-28).
+		// Bun 1.3.9 answers a project with no test file with
+		// `error: 0 test files matching …` on stderr and exit 1 — before any
+		// summary — so reading the summary alone reported `exit status 1` and never
+		// said that nothing ran.
+		if noTestFiles.Match(stderr.Bytes()) {
+			return ranNothing("0")
+		}
 		return fmt.Errorf("bun test: %w", err)
 	}
 	var m [][]byte
@@ -235,10 +243,19 @@ func runUnitTests(cmd *cobra.Command, out io.Writer) error {
 			"a test file that ends the process early looks exactly like this, and it is not a pass")
 	}
 	if n, err := strconv.Atoi(string(m[1])); err != nil || n == 0 {
-		return fmt.Errorf("bun test ran %s tests — a run that tested nothing is not a pass; "+
-			"put a *.test.ts beside the code it covers", string(m[1]))
+		return ranNothing(string(m[1]))
 	}
 	return nil
+}
+
+// noTestFiles is bun's own answer when it discovers no test file at all.
+var noTestFiles = regexp.MustCompile(`(?m)^error: 0 test files matching`)
+
+// ranNothing is the one refusal for a unit run that tested nothing, however the
+// runner said so (FR-015).
+func ranNothing(count string) error {
+	return fmt.Errorf("bun test ran %s tests — a run that tested nothing is not a pass; "+
+		"put a *.test.ts beside the code it covers", count)
 }
 
 // lockedWriter serialises writes to one writer shared by two copy goroutines.
