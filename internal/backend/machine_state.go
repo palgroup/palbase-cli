@@ -297,3 +297,90 @@ func WriteSelection(checkoutRoot string, s Selection) error {
 	rememberOrigin(filepath.Dir(path), checkoutRoot)
 	return os.WriteFile(path, append(blob, '\n'), 0o600)
 }
+
+// ── THE NAMES THIS CHECKOUT'S STACK HOLDS ───────────────────────────────────
+//
+// `palbase/palbase-env.d.ts` carries two kinds of types: the schema in the tree
+// and the NAMES the stack holds — secrets, flags, buckets, roles. The first is
+// always on disk; the second needs the stack, and `palbase build` works offline.
+// So the last answer a successful read produced is kept HERE, beside local.json
+// and plan.json (FR-004), and an unreachable stack renders from it (FR-003).
+//
+// NOT IN THE CHECKOUT: it is what THIS machine last saw, and a committed copy
+// would be a second list of names that drifts from the stack the first time
+// somebody adds a secret.
+
+// StackNamesPath is where this checkout's last successfully read stack names
+// live. It CREATES NOTHING — asking where a file goes must not leave a
+// directory behind (D-010).
+func StackNamesPath(checkoutRoot string) (string, error) {
+	dir, err := machineStateDir(checkoutRoot)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "stack-names.json"), nil
+}
+
+// errNoCachedStackNames is "this machine never read names for this checkout's
+// stack" — the normal state of every fresh clone, told apart from a record that
+// is there and unreadable.
+var errNoCachedStackNames = errors.New("this machine has no stack names cached for this checkout")
+
+// cachedStackNames is the record on disk.
+//
+// URL IS THE WHOLE DEFENCE against a relinked checkout inheriting another
+// stack's names — the rule `Selection.Project` enforces for environments. A
+// checkout pointed somewhere else must not render the secrets of the stack it
+// left as if they existed where it now pushes.
+type cachedStackNames struct {
+	URL   string     `json:"url"`
+	Names StackNames `json:"names"`
+}
+
+// readCachedStackNames answers the names this machine last read from the stack
+// at url for this checkout.
+func readCachedStackNames(checkoutRoot, url string) (StackNames, error) {
+	path, err := StackNamesPath(checkoutRoot)
+	if err != nil {
+		return StackNames{}, err
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return StackNames{}, errNoCachedStackNames
+	}
+	if err != nil {
+		return StackNames{}, err
+	}
+	var rec cachedStackNames
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		// A CORRUPT RECORD IS NOT "NONE": the reason reaches the caller by name,
+		// or the file stays broken forever and nobody learns why.
+		return StackNames{}, fmt.Errorf("%s did not parse: %w", path, err)
+	}
+	if rec.URL != url {
+		return StackNames{}, fmt.Errorf("%w (the cached names were read from %s)", errNoCachedStackNames, rec.URL)
+	}
+	return rec.Names, nil
+}
+
+// writeCachedStackNames remembers what a successful read returned. The WRITER
+// creates the directory, because a write knows it is a write.
+func writeCachedStackNames(checkoutRoot, url string, names StackNames) error {
+	path, err := StackNamesPath(checkoutRoot)
+	if err != nil {
+		return err
+	}
+	blob, err := json.MarshalIndent(cachedStackNames{URL: url, Names: names}, "", "  ")
+	if err != nil {
+		return err
+	}
+	// SWEEP FIRST, THEN CREATE — the same order as WriteSelection, for the same
+	// reason: a concurrent sweep sees a just-created directory EMPTY and removes
+	// it between the mkdir and the write.
+	reapDeadCheckoutState()
+	if err := ensureMachineStateDir(path); err != nil {
+		return err
+	}
+	rememberOrigin(filepath.Dir(path), checkoutRoot)
+	return os.WriteFile(path, append(blob, '\n'), 0o600)
+}

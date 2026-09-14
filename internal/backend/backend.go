@@ -280,16 +280,110 @@ const envTypesFile = "palbase-env.d.ts"
 // compiler, so there is no second list to drift and no check to forget.
 const stackTypesFile = "palbase-stack.d.ts"
 
-// StackNames are the three sets `palbase-stack.d.ts` is rendered from.
+// StackNames are the name sets the stack holds and the generated types are
+// rendered from.
 //
 // Buckets are not plain names: `stack-gen.ts` renders a SHAPE per bucket
 // carrying its variant union, so `getPublicUrl(p, { variant })` refuses a
 // rendition the bucket does not declare. Sending only names made every bucket's
 // union `never` — the generator was ready for this and had nothing to read.
+//
+// Roles are the role NAMES the stack defines (`GET /admin/roles`). Names only:
+// what a role grants is runtime policy, and the `Roles` interface the SDK
+// augments needs nothing but the name — so `{ auth: { role } }` and
+// `user.roles` accept exactly the roles this stack has (FR-002a).
 type StackNames struct {
 	Secrets []string      `json:"secrets"`
 	Flags   []string      `json:"flags"`
 	Buckets []StackBucket `json:"buckets"`
+	Roles   []string      `json:"roles"`
+}
+
+// readStackNamesFn is the seam the cache fall-back is measured through: an
+// unreachable stack cannot be arranged on a machine whose network is fine, and
+// a branch nobody has run is a branch nobody knows works.
+var readStackNamesFn = readStackNames
+
+// readStackNames asks the linked stack for all four name sets: the three
+// `stackNamesFor` reads off the management surface, and the role names from the
+// stack's roles door.
+//
+// ALL OR NOTHING, like the three it extends. A partial answer would render a
+// file that types `Secrets.get()` correctly and `{ auth: { role } }` to nothing
+// — the compile error would land on code that is right.
+//
+// A 404 from the roles door is still an answer: a stack older than RBAC defines
+// no roles, and `fetchStackRoles` says so with an empty list and no error.
+func readStackNames(ctx context.Context, target Target) (StackNames, error) {
+	names, err := stackNamesFor(ctx, target)
+	if err != nil {
+		return StackNames{}, err
+	}
+	cred, _, err := Credential(target.URL)
+	if err != nil {
+		return StackNames{}, fmt.Errorf("no credential for %s", target.Describe())
+	}
+	roles, err := fetchStackRoles(ctx, target, cred)
+	if err != nil {
+		return StackNames{}, err
+	}
+	// fetchStackRoles sorts by name, so the same stack renders the same bytes.
+	names.Roles = make([]string, 0, len(roles.Roles))
+	for _, role := range roles.Roles {
+		names.Roles = append(names.Roles, role.Name)
+	}
+	return names, nil
+}
+
+// stackNamesSource says where the names a render used came from.
+type stackNamesSource int
+
+const (
+	// namesUnavailable: neither the stack nor this machine's cache answered. The
+	// renderer is handed NO names, and the lander keeps the stack block already
+	// on disk rather than narrowing it (FR-003a, NFR-003).
+	namesUnavailable stackNamesSource = iota
+	// namesFromStack: read just now, and cached for the next offline build.
+	namesFromStack
+	// namesFromCache: the stack could not be read; this machine's last answer
+	// stands in for it (FR-003).
+	namesFromCache
+)
+
+// checkoutStackNames is the answer for one checkout: the names, where they came
+// from, and — when that was not the stack — why.
+type checkoutStackNames struct {
+	Names  StackNames
+	Source stackNamesSource
+	// Why is the reason the stack was not the source; nil when it was.
+	Why error
+	// CacheErr is a failed cache write after a successful read. The names are
+	// right; only the next offline build will not have them, which is worth a
+	// line, not a failed build.
+	CacheErr error
+}
+
+// stackNamesForCheckout reads the stack's names for this checkout, remembers a
+// successful answer on this machine (FR-004), and falls back to that memory
+// when the stack cannot be asked (FR-003).
+//
+// NEVER FATAL. `palbase build` works offline (NFR-004): an unreachable stack
+// changes where the names come from, not whether the build passes, and the
+// caller decides what an unavailable answer renders.
+func stackNamesForCheckout(ctx context.Context, checkoutRoot string, target Target) checkoutStackNames {
+	names, err := readStackNamesFn(ctx, target)
+	if err == nil {
+		return checkoutStackNames{
+			Names:    names,
+			Source:   namesFromStack,
+			CacheErr: writeCachedStackNames(checkoutRoot, target.URL, names),
+		}
+	}
+	cached, cacheErr := readCachedStackNames(checkoutRoot, target.URL)
+	if cacheErr == nil {
+		return checkoutStackNames{Names: cached, Source: namesFromCache, Why: err}
+	}
+	return checkoutStackNames{Source: namesUnavailable, Why: errors.Join(err, cacheErr)}
 }
 
 // generateStackTypes writes the project's palbase-stack.d.ts from the names the
