@@ -258,7 +258,12 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 }
 
 // refOfURL, hedef adresinin ilk host etiketi — bulut projelerinde ref budur.
-// Plan dosyasında yalnız İNSAN için: kapı ref'i değil parmak izini ölçer.
+//
+// Plan dosyasında İKİ İŞİ var: kaydın insan tarafından okunan hedefi ve bayat
+// plan reddinin ETİKETİ (`targetLabel`). Parmak izi adresi TAŞIMAZ, bu yüzden
+// `StaleReasons` ayrıca `Target.URL`'i karşılaştırır; iki adres aynı etikete
+// düşerse red tam adresleri yazar. (Bu yorum bir zamanlar "kapı ref'i değil
+// parmak izini ölçer" diyordu; X-7 hedef kontrolünü canlandırınca yanlışlaştı.)
 func refOfURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {

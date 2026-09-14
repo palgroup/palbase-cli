@@ -130,3 +130,17 @@ func TestStaleReasonsNamesAnUnrecordedTarget(t *testing.T) {
 		t.Fatalf("a plan that recorded no target must not pass as this one: %v", got)
 	}
 }
+
+// A REASON THAT REPEATS ITSELF EXPLAINS NOTHING. `TenantHost` is configuration
+// (cmd/palbase/main.go:349), so two clouds can hand the same first host label
+// to two different addresses; the ref alone then reads `target changed mu0028
+// → mu0028`. Fail-closed either way — what was lost is the diagnosis.
+func TestStaleReasonsNamesFullAddressesWhenTheLabelsMatch(t *testing.T) {
+	saved := PlanFile{Target: PlanTarget{URL: "https://mu0028.dev.palbase.studio", Ref: "mu0028"}}
+	current := PlanFile{Target: PlanTarget{URL: "https://mu0028.palbase.studio", Ref: "mu0028"}}
+	const want = "target changed https://mu0028.dev.palbase.studio → https://mu0028.palbase.studio"
+	got := StaleReasons(saved, current)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("a refusal that repeats one label cannot be acted on: %v", got)
+	}
+}

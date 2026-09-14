@@ -200,7 +200,16 @@ func StaleReasons(saved, current PlanFile) []string {
 	// address, so this is the only thing that stops a plan measured on `main`
 	// from being applied to `staging`.
 	if !sameTargetAddress(saved.Target.URL, current.Target.URL) {
-		out = append(out, fmt.Sprintf("target changed %s → %s", targetLabel(saved.Target), targetLabel(current.Target)))
+		was, now := targetLabel(saved.Target), targetLabel(current.Target)
+		if was == now {
+			// THE LABEL DID NOT SEPARATE THEM, so the addresses must. `TenantHost`
+			// is configuration (cmd/palbase/main.go), so two clouds can hand the
+			// same first host label to two different addresses, and a reason that
+			// reads `target changed mu0028 → mu0028` is a refusal nobody can act
+			// on (rv-cli-a).
+			was, now = saved.Target.URL, current.Target.URL
+		}
+		out = append(out, fmt.Sprintf("target changed %s → %s", was, now))
 	}
 	return out
 }
