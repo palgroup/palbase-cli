@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -209,4 +210,68 @@ func TestANoTargetLinkBindsTheProjectOfARecordFromBeforeProjects(t *testing.T) {
 	require.NoError(t, resolveLinkTarget(context.Background(), r, &o))
 	assert.Equal(t, "prd_a", o.product.ID)
 	assert.Equal(t, "https://8qitbtucm.palbase.studio", o.url, "the link acts on the default environment's address")
+}
+
+// unboundCloudAddress serves a project at a loopback address this test declares
+// to be under the cloud's tenant host, with no credential for it anywhere.
+func unboundCloudAddress(t *testing.T) (string, string) {
+	t.Helper()
+	inScratchCheckout(t)
+	t.Setenv(AccessTokenEnv, "")
+	srv := stackServing(t, linkKeyMain, nil)
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(u string) bool { return u == srv.URL }
+	return srv.URL, strings.ToLower(refOfURL(srv.URL))
+}
+
+func listingResolvers(rest *nameREST) Resolvers {
+	return Resolvers{
+		REST:      func() REST { return rest },
+		Endpoints: func() config.Endpoints { return config.Endpoints{PublicHost: "palbase.studio"} },
+	}
+}
+
+// THE CAUSE BEFORE THE ADVICE (X-12). Measured on 0.67.1: a listing that failed
+// once came out as "no credential for this project" for an address the account
+// owned, and the next attempt, seconds later, linked.
+func TestAnUnboundCloudAddressNamesTheListingFailure(t *testing.T) {
+	address, _ := unboundCloudAddress(t)
+	o := linkOpts{url: address}
+	require.NoError(t, resolveLinkTarget(context.Background(),
+		listingResolvers(&nameREST{err: errors.New("503 listing unavailable")}), &o))
+
+	err := runLink(context.Background(), o, io.Discard)
+	require.Error(t, err)
+	msg := err.Error()
+	require.Contains(t, msg, "503 listing unavailable")
+	require.Contains(t, msg, "no credential for this project")
+	assert.Less(t, strings.Index(msg, "503 listing unavailable"), strings.Index(msg, "no credential for this project"),
+		"the credential advice came before the reason the address was not bound")
+}
+
+func TestACloudAddressNoProjectListsNamesItsRef(t *testing.T) {
+	address, ref := unboundCloudAddress(t)
+	o := linkOpts{url: address}
+	require.NoError(t, resolveLinkTarget(context.Background(),
+		listingResolvers(&nameREST{rows: []map[string]any{}}), &o))
+
+	err := runLink(context.Background(), o, io.Discard)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ref+" is not an environment of any project this account can see")
+	assert.Contains(t, err.Error(), "palbase project list")
+}
+
+// A KEY IS STILL A WAY IN. An address the listing did not bind but a stored key
+// opens links exactly as before: the control plane's own stack is linked so.
+func TestAnUnboundCloudAddressWithAKeyStillLinks(t *testing.T) {
+	address, _ := unboundCloudAddress(t)
+	linkedAs(t, address, "pb_project_opens-it")
+	o := linkOpts{url: address}
+	require.NoError(t, resolveLinkTarget(context.Background(),
+		listingResolvers(&nameREST{err: errors.New("503")}), &o))
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	assert.Contains(t, out.String(), "linked to "+address)
 }

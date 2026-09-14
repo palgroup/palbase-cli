@@ -65,6 +65,12 @@ type linkOpts struct {
 	platforms    []string
 	insecure     bool
 	tokenStdin   bool
+	// unbound says WHY an address under this cloud's tenant host was not bound
+	// to a project: the listing could not be read, or it named no environment
+	// with that ref. Nil for every other target. It is reported only when the
+	// address path then finds no credential — a key for the address is still a
+	// valid way in, and the control plane's own stack is linked exactly so.
+	unbound error
 	// env names WHICH environment this link reads the contract and the key
 	// from. It does not enter the committed file — that records the project.
 	env string
@@ -382,11 +388,27 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 		return nil
 	}
 	// A host is case-insensitive; a ref is never written in capitals.
-	product, envs, found, err := productByEnvironmentRef(ctx, r, strings.ToLower(refOfURL(o.url)))
-	if err != nil || !found {
+	ref := strings.ToLower(refOfURL(o.url))
+	product, envs, found, err := productByEnvironmentRef(ctx, r, ref)
+	switch {
+	case err != nil:
+		// THE LISTING'S FAILURE IS CARRIED, NOT SWALLOWED (X-12). The address
+		// path below still runs — a stored key opens an address this listing
+		// cannot describe — but if it finds no credential, the reader must see
+		// what actually went wrong instead of being sent after a key.
+		o.unbound = fmt.Errorf("could not read your projects to bind %s: %w", ref, err)
+		return nil
+	case !found:
+		o.unbound = errNotListed(ref)
 		return nil
 	}
 	return bind(product, envs)
+}
+
+// errNotListed is why an address under this cloud's host was not bound when the
+// listing was read and none of the caller's environments carries its ref.
+func errNotListed(ref string) error {
+	return fmt.Errorf("%s is not an environment of any project this account can see — `palbase project list` shows them", ref)
 }
 
 // linkOptsForRecord is the link a committed project record asks for: the
@@ -723,6 +745,14 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	anon, err := projectPublishableKey(ctx, target)
 	if err != nil {
+		// THE CAUSE BEFORE THE ADVICE (X-12). An address under this cloud that
+		// the listing did not bind falls to the address path, and there the one
+		// thing left to fail is the credential — so the reason it was not bound
+		// vanished behind "no credential", and people went looking for a key
+		// they did not need.
+		if o.unbound != nil && errors.Is(err, ErrNoCredential) {
+			return fmt.Errorf("%v\n%w", o.unbound, err)
+		}
 		return err
 	}
 
