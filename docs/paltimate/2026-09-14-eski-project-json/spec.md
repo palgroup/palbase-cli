@@ -57,13 +57,22 @@ değildir:
 - **FR-4** WHEN bir fiil emekli alan taşıyan bir checkout'ta koştuğunda ve var olan adres → kimlik göçü dosyayı
   yazmadığında THEN `MigrateLegacyTarget` SHALL committed dosyayı emekli alanlar olmadan yeniden yazar ve ne yaptığını
   tek satırla basar. Ağ gerekmez.
-- **FR-5** WHEN committed dosya emekli `env` taşıdığında (`project` ya da `url` ile birlikte; tek emekli alan olarak ya da `stackVersion` ile birlikte) THEN göç
-  SHALL o değeri hiçbir yere TAŞIMAZ: makine-yerel seçim yazılmaz, var olan seçim değişmez. Alan düşer. Basılan satır
-  düşen değeri Go tırnaklamasıyla (`%q`) adlandırır ve ortamın nasıl seçileceğini söyler (`--env <name>`,
-  `palbase env use <name>`). Ortam bugünkü kurallarla çözülür: tek ortamlı projede o ortam, çok ortamlıda bugünkü red.
-  Committed bir ortam hiçbir koşuda doğrudan yönlendirme yapmaz.
-- **FR-6** IF committed dosyanın yeniden yazımı düşerse THEN dosya SHALL bayt bayt aynı kalır, satır basılmaz, makine
-  durumu değişmez ve fiil yine koşar. Göç en iyi çabadır (mevcut FR-061 kuralı).
+- **FR-5** WHEN committed dosya emekli `env` taşıdığında ve emekli alan temizliği koştuğunda THEN göç SHALL o değeri
+  hiçbir yere TAŞIMAZ.
+  - Temizlik, adres → kimlik göçü dosyayı yazmadığında koşar: adres yoktur, adres bir bulut adresi değildir ya da ürünü
+    çözülememiştir. `env` tek emekli alan olabilir ya da `stackVersion` ile birlikte gelebilir.
+  - Makine-yerel seçim yazılmaz, var olan seçim değişmez. Alan düşer.
+  - Basılan satır düşen değeri en çok 64 rune'a kırpılmış ve Go tırnaklamasıyla (`%q`) adlandırır; ortamın nasıl
+    seçileceğini söyler (`--env <name>`, `palbase env use <name>`).
+  - Ortam bugünkü kurallarla çözülür: tek ortamlı projede o ortam, çok ortamlıda bugünkü red.
+  - WHEN adres → kimlik göçü dosyayı yazdığında (bulut adresi ve çözülen ürün) THEN ortam FR-7/D-2'nin kuralıyla
+    ADRESTEN gelir; v0.64'te de yönlendiren adresti. Bu göçün satırı düşen `env` değerini aynı biçimde adlandırır.
+  - Committed bir `env` hiçbir koşuda yönlendirme yapmaz.
+- **FR-6** IF committed dosyanın yeniden yazımı düşerse (emekli alan temizliğinde ya da adres → kimlik göçünde) THEN
+  dosya SHALL bayt bayt aynı kalır, satır basılmaz, makine durumu değişmez ve fiil yine koşar. Göç en iyi çabadır
+  (mevcut FR-061 kuralı; `MigrateLegacyTarget`in kendi yorumu da "a migration that FAILED must leave the checkout
+  exactly as it was … the verb carries on" diyor). Adres göçünün yazım hatası bugün fiili düşürüyor; bu düzeltmenin
+  kapsamındadır.
 - **FR-7** WHEN adres → kimlik göçü dosyayı yazdığında THEN yazılan dosya SHALL emekli alanları taşımaz (`WriteTarget`
   `Target`i serileştirir; emekli değerler dışa açık olmayan bir alanda tutulur ve serileştirilmez).
 - **FR-8** IF emekli alan taşıyan bir dosya `DecodeStrict`in yapısal kurallarından birini çiğnerse (yinelenen anahtar,
@@ -86,9 +95,10 @@ değildir:
   düşmüştür (FR-7). Yazmadıysa emekli alan temizliği ayrı koşar ve yalnız dosyayı yazar; ortam listesi okunmaz, seçim
   yazılmaz (FR-5).
 - **D-3 · Basılan satır.** Mevcut göç satırının biçiminde: hangi dosyanın hangi emekli alanları bıraktığını söyler.
-  `env` düştüyse değerini `%q` ile adlandırır ve ortamın nasıl seçileceğini söyler. Ham değer terminale basılmaz:
-  committed bir dosya terminale kontrol karakteri koyamaz. Satır yalnız yazım başarılıysa basılır (FR-6).
-  [PLAN-FREE: satırın tam İngilizce metni]
+  `env` düştüyse değerini en çok 64 rune'a kırpıp `%q` ile adlandırır ve ortamın nasıl seçileceğini söyler. Adres göçünün
+  satırı da düşen `env`i aynı biçimde adlandırır. Bu satırlar ham değer basmaz: göç satırı üzerinden committed bir dosya
+  terminale kontrol karakteri koyamaz. Ürünün başka yolları için kapsam dışı bulgu 4'e bakın. Satır yalnız yazım
+  başarılıysa basılır (FR-6). [PLAN-FREE: satırların tam İngilizce metni ve kırpma işareti]
 - **D-4 · `DecodeStrict` değişmez.** Emekli alan bilgisi `authcontract`e sızmaz; o paketin öteki sözleşmesi (yerel
   seçimlerin yapısal kuralları) aynı kalır.
 
@@ -107,7 +117,9 @@ değildir:
 - **RED önce:** her yeni ya da değişen test, düzeltmeden ÖNCE (`94c89bd`) koşulur ve kendi iddiasında kırmızıdır. Tur 2'nin
   yeni ya da değişen testleri ayrıca `f42ce18`e karşı da koşulur. FR-5 ve FR-9 testleri orada kendi iddiasında kırmızı
   olmalı. FR-8'in yapısal kurallarını `f42ce18` de uyguluyordu, eksik olan onları tutan testti. Bu yüzden FR-8'in
-  kırmızı kanıtı iki tabanda değil, yapısal denetimi kaldıran mutasyondadır. Çıktılar rapora.
+  kırmızı kanıtı iki tabanda değil, yapısal denetimi kaldıran mutasyondadır. FR-3'ün harf varyantı durumları için de
+  aynısı geçerli: iki taban da o anahtarları bugünkü `unknown field` metniyle reddediyordu, bu yüzden kırmızı kanıt
+  harf varyantı reddini kaldıran mutasyondadır. Çıktılar rapora.
   - okuma: `{"url":…,"stackVersion":"39"}`, `{"project":…,"env":…}` ve
     `{"url":…,"project":…,"env":…,"stackVersion":…}` `readLinkedProject` ile hatasız okunur. `ReadTarget` adresli iki
     dosyada hatasız döner; `{project, env}` dosyasında çözümleme hatası yerine bugünkü `names a project, not an address`
@@ -129,6 +141,12 @@ değildir:
       (FR-5).
     - `project.json` salt okunurken `{project, env}` ve `{url, stackVersion}` → dosya bayt bayt aynı, seçim yok, satır
       yok (FR-6).
+    - Adres göçü, ürün çözülüyor: `{url(bulut), env:"main"}` → dosya `{project, name}`, ortam adresten, satır `"main"`i
+      tırnaklı adlandırır (FR-5).
+    - Adres göçü, ürün çözülüyor, `project.json` salt okunur `{url(bulut), stackVersion}` → dosya bayt bayt aynı, seçim
+      yok, satır yok, fiil koşar (FR-6). Bugün fiil `open palbase/project.json: permission denied` ile düşüyor.
+    - `{project, env:""}` → dosyada `env` yok, satır `("")` (FR-5; boş değer de taşınmış bir alandır).
+    - 100 KiB'lık `env` değeri → satırdaki değer 64 rune'da kırpılmış (FR-5).
 - **Mutasyonlar** (her biri tek eşleşmeyle uygulanır, koşulur, bayt bayt geri konur; kırmızı olan iddia adlandırılır):
   - emekli alan tanıma kalkar → okuma testleri kırmızı;
   - FR-3'ün sınırı gevşer (her bilinmeyen alan yutulur) → `bogus` testi kırmızı;
@@ -136,7 +154,11 @@ değildir:
   - yapısal denetim kalkar (`DecodeStrict` → `json.Unmarshal`) → FR-8'in üç durumu kırmızı;
   - göç `env`i seçime yazar → FR-5 "seçim yazılmaz" testi kırmızı;
   - yazım düşse de satır basılır → FR-6 testi kırmızı;
-  - kalan alanlar yeniden serileştirilerek çözülür → FR-9 denklik testi kırmızı.
+  - kalan alanlar yeniden serileştirilerek çözülür → FR-9 denklik testi kırmızı;
+  - adres göçünün yazım hatası yine fiili düşürür → FR-6'nın adres göçü durumu kırmızı;
+  - adres göçü satırı düşen `env`i adlandırmaz → FR-5'in adres göçü durumu kırmızı;
+  - kırpma kalkar → uzun değer durumu kırmızı;
+  - boş `env` emekli alan sayılmaz → `env:""` durumu kırmızı.
 - **Tam koşu:** `GOWORK=off go test ./... -race -count=1 -timeout 25m`, `go vet ./...`, `gofmt -l .` boş,
   `golangci-lint run` 0 issue, `go vet -tags e2e ./tests/e2e/`. `ci.yml`nin kapılarıyla aynı. Paketin Docker e2e testi
   (`TestStartServesAndStopCleansUp`) aynı makinede eşzamanlı koşularla compose proje adını paylaşıyor (kapsam dışı
@@ -160,6 +182,10 @@ değildir:
    düşürme. Ayrı iş.
 3. `DecodeStrict`in yinelenme denetimi harf duyarlı, `encoding/json`un alan eşleşmesi harf duyarsız: `{"url":…,"URL":…}`
    denetimi geçiyor. Bu düzeltmeden önce de var. D-4 gereği ayrı iş.
+4. Committed bir dosya iki başka yoldan terminale ham kontrol karakteri koyabiliyor:
+   - banner, committed `name`i ham basıyor (`banner.go:72` → `environments.go:105-110`);
+   - `DecodeStrict`in hata yolu metni anahtarı ham basıyor (`authcontract/validate.go:102-104`).
+   Bu düzeltmeden önce de var; göç satırları temiz. D-4 gereği ayrı iş.
 
 ## Yayın
 
@@ -187,3 +213,17 @@ değildir:
   - Kabul edilen davranış (kaygı 3): nesne olmayan bir dosyanın (`[]`, `"x"`) çözüm hatası Go tür adı olarak
     `backend.Target` yerine `decodeTarget`e özel çözüm biçiminin adını taşır. Ret aynıdır. Eski metni korumak hata
     yolunda ikinci bir çözüm demek olurdu ve D-1'e ters düşerdi.
+- 2026-09-14 · bağımsız inceleme tur 2 (`cli-fix-rev`, FIX_REQUIRED, IMPORTANT 1 · MINOR 5) sonrası:
+  - **IMPORTANT-1, FR-5 kısmı:** FR-5'in "seçim yazılmaz" hükmü emekli alan temizliği yoluna daraltıldı. Adres →
+    kimlik göçünde ortam adresten gelir ve o göçün satırı düşen `env`i adlandırır. `{url(bulut), env}` şeklini hiçbir
+    CLI sürümü yazmadı: v0.29–v0.33'te `env` yalnız `project` varken ve `url` silinerek yazılıyordu, v0.34–v0.64'te
+    yazıcısı yoktu.
+  - **IMPORTANT-1, FR-6 kısmı:** FR-6 adres göçünü de kapsıyor. Adres göçünün yazım hatası fiili düşürmeyecek (kod
+    değişikliği).
+  - **MINOR-1:** kabul edilen davranış genişletildi. Her tür hatasında Go tür adı `targetFile`dır; yayın toolchain'i
+    Go 1.26.6'da `targetFile.Target.<alan>`. `Env: 5` artık tür hatası verir. `Env` ile `bogus` birlikteyse hata
+    `bogus`u adlandırır. Ret her durumda aynıdır.
+  - **MINOR-2:** D-3 göç satırlarına daraltıldı; banner ve `DecodeStrict` yol metni kapsam dışı bulgu 4 oldu.
+  - **MINOR-3:** düşen değer 64 rune'a kırpılır.
+  - **MINOR-4:** FR-3 varyant durumlarının kırmızı kanıtı mutasyondadır.
+  - **MINOR-5:** boş `env` durumu testlere eklendi.
