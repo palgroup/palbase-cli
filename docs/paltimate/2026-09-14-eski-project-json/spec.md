@@ -71,8 +71,16 @@ değildir:
 - **FR-6** IF committed dosyanın yeniden yazımı düşerse (emekli alan temizliğinde ya da adres → kimlik göçünde) THEN
   dosya SHALL bayt bayt aynı kalır, satır basılmaz, makine durumu değişmez ve fiil yine koşar. Göç en iyi çabadır
   (mevcut FR-061 kuralı; `MigrateLegacyTarget`in kendi yorumu da "a migration that FAILED must leave the checkout
-  exactly as it was … the verb carries on" diyor). Adres göçünün yazım hatası bugün fiili düşürüyor; bu düzeltmenin
-  kapsamındadır.
+  exactly as it was … the verb carries on" diyor). 
+  - **Yeniden yazım ATOMİKTİR.** `WriteTarget` aynı dizinde geçici bir dosyaya yazar, `Sync` eder, izni `0o644` yapar
+    ve `rename` ile yerine koyar; hata yolunda geçici dosyayı siler. Yazım hangi noktada düşerse düşsün committed
+    dosya ya eski ya yeni hâlindedir, asla kesik değildir. Bu, salt okunur dosya ile dolu disk, kota ve G/Ç hatası
+    için aynı biçimde geçerlidir.
+  - **Adres göçünde makine-yerel seçim dosyadan ÖNCE yazılır.** Seçim yazımı düşerse hiçbir şey değişmemiştir ve fiil
+    koşar.
+  - Seçim yazılıp ardından dosya yazımı düşerse dosya adres taşıyan eski hâlindedir. Çözümleyici bu dosyada seçimi
+    okumaz (`Resolve`un `legacy` dalı), yani önceden yazılmış seçim zararsızdır. FR-6'nın "makine durumu değişmez"
+    hükmünün tek istisnası budur ve bir testle ölçülür.
 - **FR-7** WHEN adres → kimlik göçü dosyayı yazdığında THEN yazılan dosya SHALL emekli alanları taşımaz (`WriteTarget`
   `Target`i serileştirir; emekli değerler dışa açık olmayan bir alanda tutulur ve serileştirilmez).
 - **FR-8** IF emekli alan taşıyan bir dosya `DecodeStrict`in yapısal kurallarından birini çiğnerse (yinelenen anahtar,
@@ -119,7 +127,8 @@ değildir:
   olmalı. FR-8'in yapısal kurallarını `f42ce18` de uyguluyordu, eksik olan onları tutan testti. Bu yüzden FR-8'in
   kırmızı kanıtı iki tabanda değil, yapısal denetimi kaldıran mutasyondadır. FR-3'ün harf varyantı durumları için de
   aynısı geçerli: iki taban da o anahtarları bugünkü `unknown field` metniyle reddediyordu, bu yüzden kırmızı kanıt
-  harf varyantı reddini kaldıran mutasyondadır. Çıktılar rapora.
+  harf varyantı reddini kaldıran mutasyondadır. FR-5'in boş `env` durumu için de aynısı geçerli: davranış `aa73f2c`de de
+  vardı, kırmızı kanıt boş değeri emekli saymayan mutasyondadır. Çıktılar rapora.
   - okuma: `{"url":…,"stackVersion":"39"}`, `{"project":…,"env":…}` ve
     `{"url":…,"project":…,"env":…,"stackVersion":…}` `readLinkedProject` ile hatasız okunur. `ReadTarget` adresli iki
     dosyada hatasız döner; `{project, env}` dosyasında çözümleme hatası yerine bugünkü `names a project, not an address`
@@ -147,6 +156,12 @@ değildir:
       yok, satır yok, fiil koşar (FR-6). Bugün fiil `open palbase/project.json: permission denied` ile düşüyor.
     - `{project, env:""}` → dosyada `env` yok, satır `("")` (FR-5; boş değer de taşınmış bir alandır).
     - 100 KiB'lık `env` değeri → satırdaki değer 64 rune'da kırpılmış (FR-5).
+    - Adres göçü satırı: 100 KiB'lık ve kontrol karakterli `env` → satır 1024 bayttan kısa, ham ESC yok, 65. rune yok (FR-5).
+    - Yeniden yazım ortada düşer (unix'te `RLIMIT_FSIZE`; açılış başarılı, yazım `EFBIG`), hem adres göçünde hem temizlikte
+      → dosya bayt bayt aynı, satır yok, sonraki `readLinkedProject` hatasız (FR-6).
+    - Adres göçü, ürün çözülüyor, makine durumu yazılamaz → dosya bayt bayt aynı, seçim yok, fiil koşar (FR-6).
+    - Adres göçü, ürün çözülüyor: seçim yazılır, ardından dosya yazımı düşer → sonraki `Resolve` adres taşıyan dosyada
+      `legacy` döner ve seçimi okumaz (FR-6'nın tek istisnası).
 - **Mutasyonlar** (her biri tek eşleşmeyle uygulanır, koşulur, bayt bayt geri konur; kırmızı olan iddia adlandırılır):
   - emekli alan tanıma kalkar → okuma testleri kırmızı;
   - FR-3'ün sınırı gevşer (her bilinmeyen alan yutulur) → `bogus` testi kırmızı;
@@ -158,12 +173,17 @@ değildir:
   - adres göçünün yazım hatası yine fiili düşürür → FR-6'nın adres göçü durumu kırmızı;
   - adres göçü satırı düşen `env`i adlandırmaz → FR-5'in adres göçü durumu kırmızı;
   - kırpma kalkar → uzun değer durumu kırmızı;
-  - boş `env` emekli alan sayılmaz → `env:""` durumu kırmızı.
+  - boş `env` emekli alan sayılmaz → `env:""` durumu kırmızı;
+  - `WriteTarget` atomik değil (doğrudan `os.WriteFile`) → kısmi yazım durumu kırmızı;
+  - adres göçünde seçim dosyadan SONRA yazılır → makine durumu yazılamazken fiil koşar durumu kırmızı;
+  - adres göçü satırı kırpmadan `%q` basar → adres satırı sınır durumu kırmızı.
 - **Tam koşu:** `GOWORK=off go test ./... -race -count=1 -timeout 25m`, `go vet ./...`, `gofmt -l .` boş,
   `golangci-lint run` 0 issue, `go vet -tags e2e ./tests/e2e/`. `ci.yml`nin kapılarıyla aynı. Paketin Docker e2e testi
   (`TestStartServesAndStopCleansUp`) aynı makinede eşzamanlı koşularla compose proje adını paylaşıyor (kapsam dışı
   bulgu 2). Bu testte `palbase-002` kaynaklı bir kırmızı son kapıda atlanmaz: test tek başına yeniden koşulur ve
-  sonucu yazılır.
+  sonucu yazılır. Yerel Docker daemon kapalıysa bu oturum makine geneli Docker'ı başlatmaz. O durumda testin kanıtı
+  `ci.yml`nin main'deki GitHub koşusudur: etiketten önce günlükten `TestStartServesAndStopCleansUp`in `--- PASS` ile
+  koştuğu okunur. `SKIP` kanıt sayılmaz.
 - **Canlı kanıt (yayından sonra):**
   - `brew upgrade palbase` → sürüm satırı `0.67.2`.
   - REPRO'nun iki dosyası geçici dizinde `palbase status` ile okuma hatası vermez.
@@ -227,3 +247,16 @@ değildir:
   - **MINOR-3:** düşen değer 64 rune'a kırpılır.
   - **MINOR-4:** FR-3 varyant durumlarının kırmızı kanıtı mutasyondadır.
   - **MINOR-5:** boş `env` durumu testlere eklendi.
+- 2026-09-14 · uygulama tur 3 `fb786f8`; bağımsız inceleme tur 3 (`cli-fix-rev`, FIX_REQUIRED, IMPORTANT 1 · MINOR 5) sonrası:
+  - **IMPORTANT-1:** `WriteTarget` atomik değildi. `os.WriteFile` önce dosyayı kesiyordu ve yazım ortada düşünce
+    (`RLIMIT_FSIZE` ile ölçüldü) `project.json` kesik kalıyordu; tur 3'le birlikte adres göçünde bu sessizdi. →
+    FR-6'ya atomik yazım (geçici dosya, `Sync`, `rename`) yazıldı. Kök sorun önceden de vardı; bu turun katkısı
+    sessizlikti.
+  - **MINOR-1:** adres göçünde seçim artık dosyadan önce yazılıyor. Seçim yazılıp dosya düşerse zararsız olduğu
+    (`legacy` dalı seçimi okumuyor) FR-6'nın tek istisnası olarak yazıldı ve testle ölçülecek.
+  - **MINOR-2:** adres göçü satırının kırpma ve tırnaklamasına test.
+  - **MINOR-3:** Docker e2e testi yerelde koşamadı (daemon kapalı; bu oturum makine geneli Docker'ı başlatmaz). Kanıtı
+    `ci.yml`nin main koşusunda `--- PASS`.
+  - **MINOR-4:** boş `env`in RED istisnası.
+  - **MINOR-5:** "hiçbir göç hatası dosyayı yarım bırakmaz" kuralının kapısı, yazılamaz makine durumu testi.
+  - Uygulama tur 4 taze bir uygulayıcıya gidiyor (düzeltme döngüsünün 4. turu).
