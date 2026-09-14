@@ -1226,33 +1226,39 @@ func insecureTransport() http.RoundTripper {
 // per-machine; none is now.
 func takeBackRetiredIgnoreRules(path string) error {
 	content, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
+
+	// NO FILE AT ALL IS THE ONE CASE THAT GETS WRITTEN (FR-012a). A checkout
+	// without an ignore file has curated nothing, and `link` creating one that
+	// lacked `node_modules/` is how a `git add -A` staged 500 installed files on
+	// a fresh web checkout (08.09.2026).
+	//
+	// AN EMPTY FILE IS NOT THAT CASE. Somebody made it, and what it says is
+	// "nothing is ignored in this repository". The question used to be asked as
+	// `TrimSpace(content) == ""`, which made the two the same and wrote this
+	// CLI's answer over a person's — the one thing FR-012 forbids.
+	if os.IsNotExist(err) {
+		return os.WriteFile(path, []byte(gitignoreScaffold()), 0o644)
+	}
+	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	// NO FILE AT ALL IS NOT A CURATED FILE. Everything below is written to be
-	// careful with somebody else's rules — narrow one, add only ours, take back
-	// only what we retired. None of that applies when there is nothing there,
-	// and treating the two the same produced a `.gitignore` this CLI created for
-	// a JavaScript project without `node_modules/` in it.
-	if strings.TrimSpace(string(content)) == "" {
-		return os.WriteFile(path, []byte(gitignoreScaffold()), 0o644)
-	}
-
-	// STEP 1 — TAKE BACK WHAT WE RETIRED. The directory-wide `.palbase` rule
-	// used to be NARROWED to `.palbase/local.json`, because one file inside it
-	// really was per-machine. Nothing in the checkout is any more: `local.json`
-	// and `plan.json` moved to `~/.palbase/checkouts/<hash>/` and the generated
-	// declaration moved under the committed root. So the rule is not narrowed —
-	// it is dropped, like every other rule whose producer this CLI retired.
+	// TAKE BACK WHAT WE RETIRED, AND TOUCH NOTHING ELSE. The directory-wide
+	// `.palbase` rule used to be NARROWED to `.palbase/local.json`, because one
+	// file inside it really was per-machine. Nothing in the checkout is any more:
+	// `local.json` and `plan.json` moved to `~/.palbase/checkouts/<hash>/` and the
+	// generated declaration moved under the committed root. So the rule is not
+	// narrowed — it is dropped, like every other rule whose producer this CLI
+	// retired, and it is dropped BY THE LIST: the hidden root is a retired path
+	// now (`retiredProjectPaths`), so the hand-written branch that named it here
+	// is gone and the two truths can no longer drift apart.
 	//
 	// Dropping the line is the honest half of a retirement; `reapRetiredArtifacts`
 	// is the other half, and it has already run by the time link reaches here.
 	lines := strings.Split(string(content), "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		if t == ".palbase" || t == ".palbase/" || isRetiredIgnoreRule(line) {
+		if isRetiredIgnoreRule(line) {
 			continue
 		}
 		kept = append(kept, line)

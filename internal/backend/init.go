@@ -190,11 +190,21 @@ func runInit(ctx context.Context, dir, spec string, out io.Writer) error {
 
 	// The template carries no .gitignore, and it cannot: npm RENAMES a packed
 	// .gitignore to .npmignore, which would then start excluding files from
-	// inside the published template. So it is written here.
+	// inside the published template. So it is written here — and ONLY where the
+	// directory has none (FR-012a); `init` accepts a directory that already
+	// carries one, and that file is its owner's answer.
+	//
+	// The line is printed only when a file was actually created: this list is
+	// what `init` wrote, and naming a path it left alone is a claim the reader
+	// has no way to check.
+	_, ignoreErr := os.Stat(filepath.Join(dir, ".gitignore"))
+	scaffoldedIgnore := os.IsNotExist(ignoreErr)
 	if err := writeGitignore(dir); err != nil {
 		return err
 	}
-	fmt.Fprintln(out, "  .gitignore")
+	if scaffoldedIgnore {
+		fmt.Fprintln(out, "  .gitignore")
+	}
 
 	// A second install, now that the template's package.json is the project's:
 	// the first one existed to fetch the template, this one resolves what the
@@ -298,6 +308,10 @@ func copyTemplate(from, to string) ([]string, error) {
 // and leaves the next clone unable to build, went unnarrowed. Two mechanisms
 // maintaining one file is two answers to one question, and the quieter one was
 // wrong.
+//
+// What that one function does now is narrower than it was: it creates a file
+// where there is NONE, and otherwise only takes this CLI's own retired rules
+// back (FR-012, FR-012a, FR-012b). `init` adds nothing of its own on top.
 func writeGitignore(dir string) error {
 	return takeBackRetiredIgnoreRules(filepath.Join(dir, ".gitignore"))
 }
