@@ -39,9 +39,9 @@ package backend
 // android side by side), and two `config.json` files in one directory would
 // collide.
 //
-// SEPARATOR IS ALWAYS `/`. These strings reach git, `.gitattributes` and the
-// Xcode pattern above — `filepath.Join` would write `\` on Windows and the
-// pattern would match nothing there.
+// SEPARATOR IS ALWAYS `/`. These strings reach git and the Xcode pattern above —
+// `filepath.Join` would write `\` on Windows and the pattern would match nothing
+// there.
 
 import (
 	"os"
@@ -151,11 +151,22 @@ func LegacyMarkers() []string {
 }
 
 // CarriesLegacyLayout reports whether this checkout still holds the retired
-// layout, by looking for what only that layout produced.
+// layout in a form only a PERSON can remove.
+//
+// The hidden root counts ONLY when git tracks a file under it (FR-010b). An
+// untracked `.palbase` is an ordinary leftover and `reapRetiredArtifacts`
+// deletes it, so refusing a link over one would refuse a checkout that the
+// sweeper — running earlier in the same command — has already made clean. A
+// tracked one is a commit somebody made, and un-making it is a commit they make:
+// that is what the refusal asks for.
+//
+// The visible root's markers count whether or not they are tracked: the sweeper
+// never names the old layout's contents (D-008), so nothing else will ever take
+// them away.
 func CarriesLegacyLayout(root string) []string {
 	var found []string
 	for _, dir := range LegacyRoots() {
-		if _, err := os.Stat(filepath.Join(root, dir)); err == nil {
+		if _, err := os.Stat(filepath.Join(root, dir)); err == nil && gitTracks(root, dir) {
 			found = append(found, dir)
 		}
 	}

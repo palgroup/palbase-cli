@@ -78,6 +78,8 @@ var retiredProjectPaths = []struct {
 	{path: ".palbase/local.json", why: "the stack in front of you — machine state, moved to ~/.palbase/checkouts/<hash>/"},
 	{path: ".palbase/plan.json", why: "`palbase plan`'s measurement of THIS machine — same move"},
 	{path: envTypesFile, why: "the generated declaration file; it is written under " + rootDir + "/ and committed"},
+	{path: stackTypesFile, why: "the stack's declaration file at the checkout ROOT; its names are rendered into " + rootDir + "/" + envTypesFile},
+	{path: rootDir + "/.gitattributes", why: "`link`'s review markers; the attributes writer is retired and nothing writes them"},
 	{path: ".palbase", why: "the retired hidden root — " + rootDir + "/ replaced it; swept unless git tracks a file under it", keepIfTracked: true},
 }
 
@@ -87,6 +89,13 @@ var retiredProjectPaths = []struct {
 // would delete the directory this CLI just filled. What the OLD visible layout
 // left inside it is recognised by content (`LegacyMarkers`) and refused by
 // `link`, never swept.
+//
+// `palbase/.gitattributes` is the one path under it that IS named, and the shape
+// of the exception is the argument for it: an exact FILE, never a directory and
+// never a glob, whose every byte this CLI wrote (`writeGitattributes` wrote the
+// whole file and never appended to one). Deleting it can take nothing a person
+// put there, and the retirement is not complete until the file it already wrote
+// is gone (FR-011).
 //
 // THE HIDDEN ROOT IS, and that reverses an older rule on purpose. `.palbase` is a
 // real second directory on every filesystem, nothing writes it any more, and

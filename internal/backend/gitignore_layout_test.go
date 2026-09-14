@@ -60,12 +60,32 @@ func TestRetiredPathsNeverNameTheVisibleRoot(t *testing.T) {
 	// would have walked straight through — and `reapRetiredArtifacts` DELETES
 	// what it lists, so on macOS that is every environment the customer has.
 	// A gate must have the shape of its authority.
+	//
+	// ONE EXCEPTION, AND IT IS A FILE NAMED WHOLE THAT THIS CLI WROTE WHOLE:
+	// `palbase/.gitattributes` (FR-011). `writeGitattributes` wrote the entire
+	// file and never appended to one, so deleting it removes only this CLI's own
+	// bytes — never a directory, never a glob, never something a person put
+	// there. The exception names the entry exactly and demands its own deletion:
+	// once the entry leaves the list, an exception left behind would wave the
+	// next one through.
+	writtenWhole := map[string]bool{RootDir() + "/.gitattributes": true}
+	used := map[string]bool{}
 	for _, e := range retiredProjectPaths {
 		first, _, _ := strings.Cut(e.path, "/")
-		if strings.EqualFold(first, RootDir()) {
-			t.Errorf("%q is swept and its first segment differs from %q only by case — on a "+
-				"case-insensitive filesystem this deletes inside the customer's new directory",
-				e.path, RootDir())
+		if !strings.EqualFold(first, RootDir()) {
+			continue
+		}
+		if writtenWhole[e.path] {
+			used[e.path] = true
+			continue
+		}
+		t.Errorf("%q is swept and its first segment differs from %q only by case — on a "+
+			"case-insensitive filesystem this deletes inside the customer's new directory",
+			e.path, RootDir())
+	}
+	for p := range writtenWhole {
+		if !used[p] {
+			t.Errorf("%q is excepted but no retired entry names it any more — delete the exception", p)
 		}
 	}
 }

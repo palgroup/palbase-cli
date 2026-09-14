@@ -26,11 +26,16 @@ func TestLinkLayoutRefusesTheRetiredLayout(t *testing.T) {
 		want string
 	}{
 		{
-			// The hidden root is a real second directory on every filesystem.
-			name: ".palbase",
+			// The hidden root is a real second directory on every filesystem, and
+			// it is refused only when somebody COMMITTED it (FR-010b) — an
+			// untracked one is swept, not refused.
+			name: ".palbase tracked by git",
 			seed: func(t *testing.T) {
 				require.NoError(t, os.MkdirAll(".palbase", 0o755))
 				require.NoError(t, os.WriteFile(filepath.Join(".palbase", "project.json"), []byte(`{"url":"x"}`), 0o644))
+				dir, err := os.Getwd()
+				require.NoError(t, err)
+				gitCheckout(t, dir, ".palbase/project.json")
 			},
 			want: ".palbase",
 		},
@@ -82,6 +87,10 @@ func TestLinkLayoutRefusesBeforeAnySideEffect(t *testing.T) {
 	inScratchCheckout(t)
 	dir, _ := os.Getwd()
 	require.NoError(t, os.MkdirAll(".palbase", 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(".palbase", "project.json"), []byte(`{"url":"x"}`), 0o644))
+	// TRACKED, because only a tracked `.palbase` is refused now (FR-010b); an
+	// untracked one is swept, and then there is nothing to refuse over.
+	gitCheckout(t, dir, ".palbase/project.json")
 
 	before := treeOf(t, dir)
 	err := runLink(context.Background(), linkOpts{url: "https://unused.example", platforms: []string{"ios"}}, io.Discard)

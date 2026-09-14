@@ -73,7 +73,11 @@ func TestCarriesLegacyLayoutSeesContentNotTheName(t *testing.T) {
 		require.NoError(t, os.Remove(p))
 	}
 
-	// And the hidden root, which is a real second directory.
+	// And the hidden root, which is a real second directory — reported only when
+	// git TRACKS a file under it (FR-010b). An untracked one is the sweeper's.
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".palbase"), 0o755))
-	require.NotEmpty(t, CarriesLegacyLayout(root), ".palbase was not seen")
+	require.Empty(t, CarriesLegacyLayout(root), "an untracked .palbase was refused — the sweeper owns it")
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".palbase", "project.json"), []byte(`{"url":"x"}`), 0o644))
+	gitCheckout(t, root, ".palbase/project.json")
+	require.NotEmpty(t, CarriesLegacyLayout(root), "a tracked .palbase was not seen")
 }

@@ -788,12 +788,11 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		return fmt.Errorf("update .gitignore: %w", err)
 	}
 
-	// GENERATED CODE IS MARKED AS SUCH, every link. A spec fetch can move
-	// thousands of lines nobody wrote; unmarked, they arrive in a pull request
-	// as a change somebody has to read.
-	if err := writeGitattributes("."); err != nil {
-		return fmt.Errorf("write %s/.gitattributes: %w", RootDir(), err)
-	}
+	// NOTHING MARKS GENERATED CODE ANY MORE, and that is the retirement, not an
+	// omission: `palbase/.gitattributes` was a second, hidden file this tool kept
+	// in somebody's repository (gitattributes.go, FR-011). The sweep above takes
+	// the one an older link left.
+	//
 	// EACH PLATFORM GETS WHAT ITS OWN GENERATOR READS.
 	//
 	// This loop used to write one document for all of them and then run the
@@ -1095,11 +1094,11 @@ func runUnlink(w io.Writer) error {
 		fmt.Fprintln(w, "this checkout was not linked")
 		return nil
 	}
-	// NO "remove the directory if it is empty" BRANCH. It could never fire:
-	// every `link` writes `palbase/.gitattributes`, so something always lives
-	// there — and `unlink` deliberately leaves the generated clients in place,
-	// which is the sentence below. A branch that cannot run is one more thing a
-	// reader has to prove does nothing.
+	// NO "remove the directory if it is empty" BRANCH. `unlink` deliberately
+	// leaves the generated clients in place, which is the sentence below, and a
+	// directory that does end up empty — a backend-only checkout, now that
+	// `palbase/.gitattributes` is retired — is invisible to git: nothing of it
+	// reaches a commit, so there is nothing for this command to answer for.
 	fmt.Fprintln(w, "  generated clients and their imports are left in place")
 	fmt.Fprintf(w, "  re-link with %s\n", relink)
 	return nil
