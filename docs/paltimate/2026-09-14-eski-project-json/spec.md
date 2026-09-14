@@ -57,7 +57,7 @@ değildir:
 - **FR-4** WHEN bir fiil emekli alan taşıyan bir checkout'ta koştuğunda ve var olan adres → kimlik göçü dosyayı
   yazmadığında THEN `MigrateLegacyTarget` SHALL committed dosyayı emekli alanlar olmadan yeniden yazar ve ne yaptığını
   tek satırla basar. Ağ gerekmez.
-- **FR-5** WHEN committed dosya emekli `env` taşıdığında (`project` ya da `url` ile birlikte ya da tek başına) THEN göç
+- **FR-5** WHEN committed dosya emekli `env` taşıdığında (`project` ya da `url` ile birlikte; tek emekli alan olarak ya da `stackVersion` ile birlikte) THEN göç
   SHALL o değeri hiçbir yere TAŞIMAZ: makine-yerel seçim yazılmaz, var olan seçim değişmez. Alan düşer. Basılan satır
   düşen değeri Go tırnaklamasıyla (`%q`) adlandırır ve ortamın nasıl seçileceğini söyler (`--env <name>`,
   `palbase env use <name>`). Ortam bugünkü kurallarla çözülür: tek ortamlı projede o ortam, çok ortamlıda bugünkü red.
@@ -105,8 +105,9 @@ değildir:
 ## Kapılar ve kanıt
 
 - **RED önce:** her yeni ya da değişen test, düzeltmeden ÖNCE (`94c89bd`) koşulur ve kendi iddiasında kırmızıdır. Tur 2'nin
-  yeni ya da değişen testleri ayrıca `f42ce18`e karşı da koşulur. FR-5, FR-8 ve FR-9 testleri orada kendi iddiasında
-  kırmızı olmalı. Çıktılar rapora.
+  yeni ya da değişen testleri ayrıca `f42ce18`e karşı da koşulur. FR-5 ve FR-9 testleri orada kendi iddiasında kırmızı
+  olmalı. FR-8'in yapısal kurallarını `f42ce18` de uyguluyordu, eksik olan onları tutan testti. Bu yüzden FR-8'in
+  kırmızı kanıtı iki tabanda değil, yapısal denetimi kaldıran mutasyondadır. Çıktılar rapora.
   - okuma: `{"url":…,"stackVersion":"39"}`, `{"project":…,"env":…}` ve
     `{"url":…,"project":…,"env":…,"stackVersion":…}` `readLinkedProject` ile hatasız okunur. `ReadTarget` adresli iki
     dosyada hatasız döner; `{project, env}` dosyasında çözümleme hatası yerine bugünkü `names a project, not an address`
@@ -179,3 +180,10 @@ değildir:
   - FR-1'e makine-yerel kayıt ve "fiilin sonucu bugünkü kurallara kalır" eklendi (MINOR-6, MINOR-7).
   - RED kapısındaki `ReadTarget` cümlesi (IMPORTANT-4) ve canlı kanıt maddesi (IMPORTANT-3) koda göre düzeltildi.
   - MINOR-5 ve MINOR-10 kapsam dışı bulgu olarak kaydedildi.
+- 2026-09-14 · uygulama tur 2 `aa73f2c`. Uygulayıcının kaygıları üzerine iki değişiklik:
+  - FR-8'in RED beklentisi düzeltildi: kırmızı kanıt mutasyondadır, iki tabanda değil (kaygı 1).
+  - FR-5'teki "tek başına" `env` şekli "tek emekli alan olarak" diye düzeltildi. Yalnız `env` taşıyan, ne proje ne adres
+    adlandıran dosyayı `ReadTarget` bugünkü kimlik kuralıyla zaten reddediyor (kaygı 4).
+  - Kabul edilen davranış (kaygı 3): nesne olmayan bir dosyanın (`[]`, `"x"`) çözüm hatası Go tür adı olarak
+    `backend.Target` yerine `decodeTarget`e özel çözüm biçiminin adını taşır. Ret aynıdır. Eski metni korumak hata
+    yolunda ikinci bir çözüm demek olurdu ve D-1'e ters düşerdi.
