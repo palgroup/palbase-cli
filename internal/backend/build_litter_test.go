@@ -41,13 +41,11 @@ func TestReapRetiredArtifactsRemovesWhatAnOlderCLILeft(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// SÖZLEŞME DOSYASI KALMALI: `.palbase/project.json` bir ÜRÜN değil, klonun
-	// ihtiyacı olan sözleşme. Süpürücü `.palbase`'i toptan silseydi projeyi
-	// kiracısından koparırdı.
-	keep := filepath.Join(dir, ".palbase", "project.json")
-	if err := os.WriteFile(keep, []byte(`{"url":"x"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// `.palbase/project.json` ARTIK BURADA KORUNMUYOR. Süpürücü izlenmeyen
+	// `.palbase`'i toptan siliyor (FR-010); korunan, git'in İZLEDİĞİ bir
+	// sözleşme — o iddia `TestReapKeepsATrackedHiddenRootAndNamesIt`'te gerçek bir
+	// git deposuyla ölçülüyor. Bu dizin bir depo değil, yani burada korunacak bir
+	// şey de yok.
 
 	reapRetiredArtifacts(dir)
 
@@ -55,9 +53,6 @@ func TestReapRetiredArtifactsRemovesWhatAnOlderCLILeft(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("kalıntı süpürülmedi: %s", p)
 		}
-	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Errorf("sözleşme dosyası silindi — proje kiracısından koparıldı: %v", err)
 	}
 }
 

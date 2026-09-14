@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -420,5 +422,184 @@ func TestEveryPerMachinePathHelperLivesOutsideTheCheckout(t *testing.T) {
 	body := gitignoreScaffold()
 	if strings.Contains(strings.ToLower(body), "palbase") {
 		t.Errorf("iskelet hâlâ bir palbase yolunu ignore ediyor:\n%s", body)
+	}
+}
+
+// gitCheckout, dir'i GERÇEK bir git deposu yapar ve verilen yolları index'e
+// alır. "İzleniyor mu" sorusunun tek otoritesi git'in kendi index'i; sahte bir
+// fikstür, süpürücünün sorduğu soruyu değil kendini ölçerdi.
+//
+// Makine-global hiçbir şey okunmaz ya da yazılmaz: global ve sistem git
+// yapılandırması boşa yönlendirilir, böylece bir kişinin `core.hooksPath`'i ya da
+// `init.templateDir`'i fikstüre ulaşmaz. HOME'a DOKUNULMAZ — `inScratchCheckout`
+// + `linkedAs` kimlik bilgisini oraya yazmış olabilir.
+func gitCheckout(t *testing.T, dir string, tracked ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		requireToolOnCI(t, "git", err)
+		t.Skip("git yok — izlenme sorusu ölçülemez")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	git := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	git("init", "-q")
+	if len(tracked) > 0 {
+		git(append([]string{"add", "--"}, tracked...)...)
+	}
+}
+
+// İZLENMEYEN GİZLİ KÖK SÜPÜRÜLÜR (FR-010).
+//
+// `.palbase` bir zamanlar sözleşmeyi taşıdığı için "ASLA dokunulmaz" sayılıyordu;
+// o dosya artık `palbase/` altında. Kullanıcının diskinde 36 fosil dizin / ~30 MB
+// ölçüldü ve hiçbir fiil onları toplamıyordu. Git'in izlemediği bir `.palbase`
+// kimsenin commit'i değildir: bir ürün kalıntısıdır ve gider.
+func TestReapSweepsAnUntrackedHiddenRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	t.Run("git deposunda, izlenmiyor", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		mustWrite(t, dir, "package.json", `{}`)
+		// NEGATİF KONTROL: depoda izlenen bir dosya VAR. "Bu depoda herhangi bir şey
+		// izleniyor mu" diye soran bir süpürücü `.palbase`'i burada yanlışlıkla
+		// korurdu.
+		gitCheckout(t, dir, "package.json")
+
+		kept := reapRetiredArtifacts(dir)
+
+		if len(kept) != 0 {
+			t.Errorf("izlenmeyen bir kök korunmuş sayıldı: %v", kept)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".palbase")); !os.IsNotExist(err) {
+			t.Errorf("izlenmeyen .palbase süpürülmedi (stat: %v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "package.json")); err != nil {
+			t.Errorf("süpürücü kişinin kendi dosyasına dokundu: %v", err)
+		}
+	})
+
+	t.Run("git deposu olmayan dizinde", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+
+		kept := reapRetiredArtifacts(dir)
+
+		if len(kept) != 0 {
+			t.Errorf("depo olmayan bir dizinde kök korunmuş sayıldı: %v", kept)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".palbase")); !os.IsNotExist(err) {
+			t.Errorf("depo olmayan dizindeki .palbase süpürülmedi (stat: %v)", err)
+		}
+	})
+}
+
+// İZLENEN GİZLİ KÖK SİLİNMEZ VE ADIYLA DÖNER (FR-010).
+//
+// Commit'lenmiş bir `.palbase`'i silmek, bir kişinin incelemediği bir değişikliği
+// bir ilerleme satırının arkasında yapmaktır. Silme onun commit'i; araç yalnız
+// yolu adlandırır — dönüş değeri çağıranın raporlayacağı şeydir.
+func TestReapKeepsATrackedHiddenRootAndNamesIt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	t.Run("checkout deponun kökü", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		mustWrite(t, dir, ".palbase/esm/controllers/controllers.js", "stale\n")
+		gitCheckout(t, dir, ".palbase/project.json")
+
+		kept := reapRetiredArtifacts(dir)
+
+		if !slices.Equal(kept, []string{".palbase"}) {
+			t.Fatalf("izlenen kök adıyla dönmedi: %v", kept)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
+			t.Errorf("izlenen sözleşme silindi: %v", err)
+		}
+		// İZLENEN KÖKÜN İÇİNDEKİ ÜRÜN YİNE GİDER (D-5): korunan dizin değil, kişinin
+		// commit'i.
+		if _, err := os.Stat(filepath.Join(dir, ".palbase", "esm")); !os.IsNotExist(err) {
+			t.Errorf("izlenen kökün içindeki derleme ürünü kaldı (stat: %v)", err)
+		}
+	})
+
+	// `palbase push`, `palbase build`i pre-push hook olarak kuruyor ve hook ortamı
+	// deponun KÖKÜNE göreli `GIT_DIR`/`GIT_INDEX_FILE` taşıyor. Backend deponun bir
+	// ALT dizinindeyse (`smartex/palbase` gibi) `git -C <alt dizin>` o değişkenleri
+	// yanlış dizine göre çözer, "not a git repository" der — ve cevapsızlık
+	// "izlenmiyor" okunup commit'li dizin silinir.
+	t.Run("checkout deponun alt dizini, git hook ortamında", func(t *testing.T) {
+		repo := t.TempDir()
+		dir := filepath.Join(repo, "backend")
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		gitCheckout(t, repo, "backend/.palbase/project.json")
+		t.Setenv("GIT_DIR", ".git")
+		t.Setenv("GIT_INDEX_FILE", ".git/index")
+
+		kept := reapRetiredArtifacts(dir)
+
+		if !slices.Equal(kept, []string{".palbase"}) {
+			t.Fatalf("hook ortamında izlenen kök adıyla dönmedi: %v", kept)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
+			t.Errorf("hook ortamında izlenen sözleşme silindi: %v", err)
+		}
+	})
+
+	// macOS ve Windows'ta `.palbase` ile `.Palbase` TEK dizin. Harfe duyarlı bir
+	// izlenme sorusu `.Palbase/project.json`'ı görmez, `os.RemoveAll(".palbase")`
+	// ise onu siler.
+	t.Run("izlenen kök başka harf büyüklüğüyle", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".Palbase/project.json", `{"url":"x"}`)
+		gitCheckout(t, dir, ".Palbase/project.json")
+
+		kept := reapRetiredArtifacts(dir)
+
+		if _, err := os.Stat(filepath.Join(dir, ".Palbase", "project.json")); err != nil {
+			t.Fatalf("başka harfle izlenen sözleşme silindi: %v", err)
+		}
+		// Duyarsız dosya sisteminde `.palbase` bu dizinin kendisidir ve adıyla
+		// raporlanmalı; duyarlı birinde ayrı bir addır ve süpürülecek bir şey yoktur.
+		if _, err := os.Lstat(filepath.Join(dir, ".palbase")); err == nil && !slices.Equal(kept, []string{".palbase"}) {
+			t.Errorf("duyarsız dosya sisteminde izlenen kök adıyla dönmedi: %v", kept)
+		}
+	})
+}
+
+// CLI'IN ÜRETTİĞİ HER ŞEY, GIT İZLESE BİLE GİDER (D-5).
+//
+// Yanlışlıkla commit'lenmiş bir hazırlık ağacı yine bir hazırlık ağacıdır. Korunma
+// yalnız `keepIfTracked` diye BİLDİRİLEN girişe aittir; izlenme sorusu ürünlere
+// sorulmaz.
+func TestReapRemovesWhatTheCLIProducedEvenWhenTracked(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	mustWrite(t, dir, deployStagingDir+"/b.ts", "export {}\n")
+	mustWrite(t, dir, stagedControllersDir+"/a.ts", "export {}\n")
+	mustWrite(t, dir, ".palbase/local.json", `{}`)
+	gitCheckout(t, dir, deployStagingDir+"/b.ts", stagedControllersDir+"/a.ts")
+
+	kept := reapRetiredArtifacts(dir)
+
+	for _, p := range []string{deployStagingDir, stagedControllersDir} {
+		if _, err := os.Stat(filepath.Join(dir, p)); !os.IsNotExist(err) {
+			t.Errorf("izlenen bir CLI ürünü kaldı: %s (stat: %v)", p, err)
+		}
+	}
+	// SINIR BİR YOL BİLEŞENİDİR: `.palbase-staged-controllers/…` izleniyor diye
+	// `.palbase` izlenmiş sayılmaz. Önek eşleşmesiyle soran bir sorgu burada kökü
+	// korurdu.
+	if len(kept) != 0 {
+		t.Errorf("izlenen bir KOMŞU yüzünden kök korunmuş sayıldı: %v", kept)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".palbase")); !os.IsNotExist(err) {
+		t.Errorf("izlenmeyen .palbase, izlenen bir komşu yüzünden kaldı (stat: %v)", err)
 	}
 }

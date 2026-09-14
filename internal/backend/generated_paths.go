@@ -21,7 +21,9 @@ package backend
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -46,35 +48,53 @@ var generatedProjectPaths = []struct {
 // retiredProjectPaths is what this CLI USED to write into a checkout and does
 // not write any more.
 //
-// Every one of them now lives in the operating system's temp directory for the
-// length of one command. Nothing here can be produced by this binary, so the
-// cure for one found on disk is DELETION — an ignore rule would only hide a
-// dead file for as long as the repository lives.
+// Nothing here can be produced by this binary, so the cure for one found on
+// disk is DELETION — an ignore rule would only hide a dead file for as long as
+// the repository lives. The working trees open in the operating system's temp
+// directory for the length of one command, the machine state moved to
+// ~/.palbase/checkouts/<hash>/, and what was worth committing moved under the
+// visible root.
 //
-// `reapRetiredArtifacts` deletes them and `ensurePalbaseGitignored` un-writes
+// `reapRetiredArtifacts` deletes them and `takeBackRetiredIgnoreRules` un-writes
 // their rules, which is what makes retiring a producer a complete act rather
 // than half of one: fixing the code that produced a file does not remove the
 // files it already produced.
+//
+// `keepIfTracked` marks the one entry that is not purely a product: the hidden
+// root itself. Everything else goes whatever git thinks of it — a compiled
+// bundle somebody committed by accident is still a compiled bundle — but
+// `.palbase` once held the project's contract, and a person may have committed
+// it. The distinction is DECLARED rather than derived from the name.
 var retiredProjectPaths = []struct {
-	path, why string
+	path, why     string
+	keepIfTracked bool
 }{
-	{".palbase/esm", "the compiled bundle — built into a temp bundle root since 0.61.1"},
-	{".palbase/jobs", "the job manifest — same"},
-	{".palbase/hooks", "the hook manifest — same"},
-	{stagedControllersDir, "`palbase build`'s staging tree; it stages inside the temp deploy tree, never the checkout"},
-	{deployStagingDir, "the deploy stager's tree; it stages into a temp directory"},
-	{linkStagePrefix + "*", "`palbase link`'s staging tree; it opens in the temp directory"},
-	{".palbase/local.json", "the stack in front of you — machine state, moved to ~/.palbase/checkouts/<hash>/"},
-	{".palbase/plan.json", "`palbase plan`'s measurement of THIS machine — same move"},
-	{envTypesFile, "the generated declaration file; it is written under " + rootDir + "/ and committed"},
+	{path: ".palbase/esm", why: "the compiled bundle — built into a temp bundle root since 0.61.1"},
+	{path: ".palbase/jobs", why: "the job manifest — same"},
+	{path: ".palbase/hooks", why: "the hook manifest — same"},
+	{path: stagedControllersDir, why: "`palbase build`'s staging tree; it stages inside the temp deploy tree, never the checkout"},
+	{path: deployStagingDir, why: "the deploy stager's tree; it stages into a temp directory"},
+	{path: linkStagePrefix + "*", why: "`palbase link`'s staging tree; it opens in the temp directory"},
+	{path: ".palbase/local.json", why: "the stack in front of you — machine state, moved to ~/.palbase/checkouts/<hash>/"},
+	{path: ".palbase/plan.json", why: "`palbase plan`'s measurement of THIS machine — same move"},
+	{path: envTypesFile, why: "the generated declaration file; it is written under " + rootDir + "/ and committed"},
+	{path: ".palbase", why: "the retired hidden root — " + rootDir + "/ replaced it; swept unless git tracks a file under it", keepIfTracked: true},
 }
 
-// NOT IN THIS LIST, AND THE ABSENCE IS THE POINT (D-008): the visible root.
+// THE VISIBLE ROOT IS NOT IN THIS LIST, AND THE ABSENCE IS THE POINT (D-008).
 // `reapRetiredArtifacts` DELETES what it names, and on macOS and Windows
 // `palbase` and `Palbase` are ONE directory — sweeping the retired spelling
-// would delete the directory this CLI just filled. A checkout still carrying
-// the old layout is REFUSED by `link` (measured with `CarriesLegacyLayout`),
-// never silently swept.
+// would delete the directory this CLI just filled. What the OLD visible layout
+// left inside it is recognised by content (`LegacyMarkers`) and refused by
+// `link`, never swept.
+//
+// THE HIDDEN ROOT IS, and that reverses an older rule on purpose. `.palbase` is a
+// real second directory on every filesystem, nothing writes it any more, and
+// leaving it for a person to find was measured as 36 directories / ~30 MB on one
+// disk that no verb collected. It used to be untouchable because `project.json`
+// lived in there; the rule is now narrowed to what that was protecting — a
+// directory git TRACKS a file under is kept and named, an untracked one is
+// deleted like any other product.
 
 // gitignoreScaffold is the whole ignore file for a project that has none.
 //
@@ -95,19 +115,32 @@ func gitignoreScaffold() string {
 	return b.String()
 }
 
-// reapRetiredArtifacts deletes what an older CLI left in this checkout.
+// reapRetiredArtifacts deletes what an older CLI left in this checkout and
+// returns what it would NOT delete: every `keepIfTracked` entry that exists and
+// has a git-tracked file under it, by its declared path.
 //
 // Best effort by design: refusing a job somebody asked for because a dead
 // directory would not delete trades a doable command for a tidier disk.
 //
-// `.palbase` ITSELF IS NEVER TOUCHED, and the reason has changed: it used to be
-// that `project.json` and `openapi/` lived in there and had to survive. They do
-// not exist any more — `link` REFUSES a checkout carrying that directory at all
-// (`CarriesLegacyLayout`). Sweeping it here would delete a person's old layout
-// silently, behind a progress line, instead of letting them delete it in a
-// commit they can review. Only the named entries go.
-func reapRetiredArtifacts(dir string) {
+// `.palbase` ITSELF IS SWEPT NOW. It used to be spared because `project.json`
+// and `openapi/` lived in there and had to survive; neither has been written
+// there since the visible root replaced it. What still deserves to survive is
+// what that rule was really about — a file somebody COMMITTED. A tracked
+// `.palbase` is returned, never deleted, so its removal is a commit a person
+// makes and reviews rather than a side effect behind a progress line. The
+// caller names it.
+func reapRetiredArtifacts(dir string) []string {
+	var kept []string
 	for _, e := range retiredProjectPaths {
+		if e.keepIfTracked {
+			if _, err := os.Lstat(filepath.Join(dir, e.path)); err != nil {
+				continue
+			}
+			if gitTracks(dir, e.path) {
+				kept = append(kept, e.path)
+				continue
+			}
+		}
 		if !strings.ContainsAny(e.path, "*?[") {
 			_ = os.RemoveAll(filepath.Join(dir, e.path))
 			continue
@@ -120,6 +153,50 @@ func reapRetiredArtifacts(dir string) {
 			_ = os.RemoveAll(m)
 		}
 	}
+	return kept
+}
+
+// gitTracks reports whether git tracks at least one file at or under rel,
+// asked from dir.
+//
+// NO ANSWER READS AS "NOT TRACKED". Not a repository, and no git on PATH, both
+// mean nothing here can have been committed, so the entry is an ordinary
+// product.
+//
+// The repository-LOCATING variables are removed from the child's environment.
+// A git hook exports them relative to the repository root (`GIT_DIR=.git`,
+// `GIT_INDEX_FILE`), and `palbase push` installs `palbase build` as a pre-push
+// hook. For a backend living in a SUBDIRECTORY of its repository, `-C dir` then
+// resolves them against the wrong directory, git answers "not a git
+// repository", and a committed directory would read as untracked and be deleted.
+//
+// `:(icase)` because `.palbase` and `.Palbase` are one directory on macOS and
+// Windows: a case-sensitive pathspec misses a tracked `.Palbase/project.json`
+// that `os.RemoveAll(".palbase")` deletes. On a case-sensitive filesystem the
+// wider match can only KEEP something, never delete it.
+func gitTracks(dir, rel string) bool {
+	cmd := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ":(icase)"+rel)
+	cmd.Env = withoutGitLocation(os.Environ())
+	out, err := cmd.Output()
+	return err == nil && len(out) > 0
+}
+
+// gitLocationEnv are the variables that point git at a repository other than
+// the one it would discover from its working directory.
+var gitLocationEnv = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+}
+
+func withoutGitLocation(env []string) []string {
+	kept := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(gitLocationEnv, name) {
+			kept = append(kept, kv)
+		}
+	}
+	return kept
 }
 
 // isRetiredIgnoreRule reports whether a `.gitignore` line is one this CLI wrote
