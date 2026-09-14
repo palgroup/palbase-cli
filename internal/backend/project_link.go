@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -330,7 +331,28 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 			o.insecure = o.insecure || local.Insecure
 			return nil
 		}
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		running, hasStart := startRecordAt(wd)
+		// THE STACK `palbase start` RUNS HERE IS WHAT EVERY VERB ACTS ON, so it
+		// is what linking again means — unless a committed record names a
+		// PROJECT, which stays first: a colleague who clones this repository
+		// must reach that project, not a port on somebody's laptop.
+		followStart := func() error {
+			if o.env != "" {
+				return fmt.Errorf("this checkout acts on the stack `palbase start` runs here (%s), which is one installation with one environment — "+
+					"--from-env selects between a project's environments; `palbase link <project> --from-env %s` binds a project instead", running.URL, o.env)
+			}
+			o.url = running.URL
+			o.insecure = o.insecure || running.Insecure
+			return nil
+		}
 		if _, statErr := os.Stat(projectPath()); errors.Is(statErr, os.ErrNotExist) {
+			if hasStart {
+				return followStart()
+			}
 			return nil
 		}
 		record, err := readLinkedProject()
@@ -345,6 +367,8 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 			}
 			o.product, o.environments, o.linkedEnv, o.url = again.product, again.environments, again.linkedEnv, again.url
 			return nil
+		case hasStart:
+			return followStart()
 		case CloudProjectAddress != nil && CloudProjectAddress(record.URL):
 			// A record from before projects names one environment's address.
 			// Linked again it binds the project that address belongs to, by the
@@ -352,7 +376,14 @@ func resolveLinkTarget(ctx context.Context, r Resolvers, o *linkOpts) error {
 			// it, the address path below keeps it.
 			o.url = record.URL
 		default:
-			// A stack somebody hosts: the address path reads it.
+			// A STACK SOMEBODY HOSTS, named by the committed record. This used
+			// to return with no target and rely on runLinkPrepared's fill,
+			// which read the copy of `palbase/` inside the link's stage —
+			// resolving it here keeps one place that decides what a no-target
+			// link binds. `readLinkedProject` already refuses a record with
+			// neither a project nor an address, so this address is non-empty.
+			o.url = record.URL
+			o.insecure = o.insecure || record.Insecure
 			return nil
 		}
 	}
@@ -567,9 +598,50 @@ func envNameOfRef(envs []Environment, ref string) string {
 // loopback address, which is the defect measured in this very repository.
 func writeLinkRecord(o linkOpts, target Target) error {
 	if o.product.ID == "" {
+		// THE STACK `palbase start` RUNS HERE KEEPS ITS OWN RECORD (J-10).
+		// Linking it writes the clients; rewriting the record stamped it as a
+		// stack linked by address, every verb stopped treating it as local, and
+		// `unlink` deleted it while it ran (measured on 0.67.1).
+		if running, ok := startRecordAt(o.checkoutRoot); ok && sameStack(running.URL, target.URL) {
+			return nil
+		}
 		return WriteSelfHostTarget(target)
 	}
 	return WriteLinkedIdentity(o.product, target)
+}
+
+// sameStack says whether two addresses name one stack on this machine: the same
+// scheme and port, and hosts that are both loopback or the same name. A stack
+// `palbase start` announced as 127.0.0.1 is the one a person types as localhost.
+func sameStack(a, b string) bool {
+	ua, errA := url.Parse(strings.TrimSpace(a))
+	ub, errB := url.Parse(strings.TrimSpace(b))
+	if errA != nil || errB != nil || ua.Scheme != ub.Scheme || ua.Port() != ub.Port() {
+		return false
+	}
+	if isLoopbackAddress(a) && isLoopbackAddress(b) {
+		return true
+	}
+	return strings.EqualFold(ua.Hostname(), ub.Hostname())
+}
+
+// startRecordAt answers the machine-local record for a checkout only when
+// `palbase start` wrote it. `link` works inside a stage, so the record is read
+// by the CHECKOUT's root, never by the working directory (CB-38).
+func startRecordAt(checkoutRoot string) (Target, bool) {
+	path, err := LocalStatePath(checkoutRoot)
+	if err != nil {
+		return Target{}, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Target{}, false
+	}
+	var record Target
+	if decodeTarget(raw, &record) != nil || record.SelfHost || strings.TrimSpace(record.URL) == "" {
+		return Target{}, false
+	}
+	return record, true
 }
 
 // releaseForProject releases a stack linked here by address once the committed
@@ -686,16 +758,13 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 	}
 
+	// EVERY NO-TARGET CASE IS RESOLVED BEFORE THIS POINT (D-6). There used to be
+	// an address fill here, and it ran inside the link's STAGE: the machine
+	// record is keyed by the working directory, so it never saw the record
+	// `palbase start` writes, and it only worked for a committed self-hosted
+	// address because the stage copies `palbase/`. `resolveLinkTarget` names
+	// every one of those cases now, in the real checkout.
 	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
-	if base == "" {
-		// A BOUND CHECKOUT ALREADY NAMES ITS ADDRESS. Re-linking is how you
-		// refresh generated clients after a contract change, and demanding the
-		// URL again asks the reader to retype what the committed file says —
-		// which is also how the two drift apart.
-		if target, err := ReadTarget(); err == nil && strings.TrimSpace(target.URL) != "" {
-			base = strings.TrimRight(strings.TrimSpace(target.URL), "/")
-		}
-	}
 	if base == "" {
 		return errors.New("--url is required: the address the stack serves on")
 	}

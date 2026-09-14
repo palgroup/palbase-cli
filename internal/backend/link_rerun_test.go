@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -271,4 +272,171 @@ func TestAnUnreadableMachineRecordDoesNotStopUnlink(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, runUnlink(&out), out.String())
 	assert.NoFileExists(t, projectPath())
+}
+
+// startStackHere records a stack the way `palbase start` does for this checkout
+// and returns it with the path and bytes of that record.
+func startStackHere(t *testing.T) (*httptest.Server, string, []byte) {
+	t.Helper()
+	t.Setenv("PALBASE_ENV", "")
+	stack := stackServing(t, linkKeyMain, nil)
+	linkedAs(t, stack.URL, "a-credential")
+	require.NoError(t, WriteLocalTarget(Target{URL: stack.URL}))
+	local, err := localPath()
+	require.NoError(t, err)
+	before, err := os.ReadFile(local)
+	require.NoError(t, err)
+	return stack, local, before
+}
+
+// THE RECORD IS `start`'S (J-10). Measured on 0.67.1: linking the stack
+// `palbase start` runs rewrote its record as a stack linked by address, every
+// verb stopped treating it as local, and `unlink` deleted it while it ran.
+func TestAnAddressLinkToTheStartStackLeavesItsRecord(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	stack, local, before := startStackHere(t)
+
+	o := linkOpts{url: stack.URL, platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	after, err := os.ReadFile(local)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "linking the stack palbase start runs rewrote its record")
+	resolved, err := Resolve(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "local", resolved.Source)
+}
+
+func TestLocalhostAndLoopbackNameTheSameStartStack(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	stack, local, before := startStackHere(t)
+
+	typed := strings.Replace(stack.URL, "127.0.0.1", "localhost", 1)
+	linkedAs(t, typed, "a-credential")
+	o := linkOpts{url: typed, platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	after, err := os.ReadFile(local)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "localhost and 127.0.0.1 on one port are one stack")
+}
+
+// WITH NO TARGET, THE STACK EVERY VERB ACTS ON. Measured on 0.67.1: in a
+// checkout with no project record and a running start stack, a no-target link
+// answered "--url is required" — its address fill read the stage's record.
+func TestANoTargetLinkFollowsTheStartStack(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	stack, local, before := startStackHere(t)
+
+	o := linkOpts{platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	assert.Equal(t, stack.URL, o.url)
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), stack.URL)
+	after, err := os.ReadFile(local)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after))
+}
+
+func TestFromEnvIsRefusedWhileTheStartStackIsInCharge(t *testing.T) {
+	inScratchCheckout(t)
+	startStackHere(t)
+
+	o := linkOpts{env: "staging"}
+	require.ErrorContains(t, resolveLinkTarget(context.Background(), Resolvers{}, &o), "--from-env")
+}
+
+func TestUnlinkAfterLinkingTheStartStackLeavesItsRecord(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	stack, local, _ := startStackHere(t)
+
+	o := linkOpts{url: stack.URL, platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	var unlinked strings.Builder
+	require.NoError(t, runUnlink(&unlinked))
+	assert.FileExists(t, local, "unlink removed the record palbase start keeps")
+}
+
+// ANOTHER PORT IS ANOTHER STACK, and linking it is a link by address as before.
+func TestALoopbackLinkToAnotherPortIsStillALinkByAddress(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	_, local, _ := startStackHere(t)
+	other := stackServing(t, linkKeyStaging, nil)
+	linkedAs(t, other.URL, "b-credential")
+
+	o := linkOpts{url: other.URL, platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	raw, err := os.ReadFile(local)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"selfHost": true`)
+	assert.Contains(t, string(raw), other.URL)
+}
+
+// A SELF-HOSTED ADDRESS THE CHECKOUT COMMITS IS LINKED AGAIN WITH NO TARGET
+// (FR-036). It worked only because the stage copies `palbase/` and the address
+// fill in runLinkPrepared read that copy; the fill is gone, so the branch that
+// reads the record names the address itself.
+func TestANoTargetLinkRelinksTheAddressTheCommittedRecordNames(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	t.Setenv("PALBASE_ENV", "")
+	stack := stackServing(t, linkKeyMain, nil)
+	linkedAs(t, stack.URL, "a-credential")
+	require.NoError(t, os.MkdirAll(filepath.Dir(projectPath()), 0o755))
+	require.NoError(t, os.WriteFile(projectPath(), []byte(`{"url": "`+stack.URL+`"}`+"\n"), 0o644))
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return false }
+
+	o := linkOpts{platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	assert.Equal(t, stack.URL, o.url, "a no-target link left a committed self-hosted address unresolved")
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+}
+
+// THE STACK `palbase start` RUNS HERE BEATS A COMMITTED ADDRESS (D-6). Every
+// verb resolves to the running stack, so a link that bound the committed
+// address would point the app at something nothing else acts on.
+func TestAStartRecordBeatsACommittedSelfHostAddress(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	stack, local, before := startStackHere(t)
+	other := stackServing(t, linkKeyStaging, nil)
+	require.NoError(t, os.MkdirAll(filepath.Dir(projectPath()), 0o755))
+	require.NoError(t, os.WriteFile(projectPath(), []byte(`{"url": "`+other.URL+`"}`+"\n"), 0o644))
+
+	o := linkOpts{platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	assert.Equal(t, stack.URL, o.url, "a committed address won over the stack palbase start runs")
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	after, err := os.ReadFile(local)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after))
 }
