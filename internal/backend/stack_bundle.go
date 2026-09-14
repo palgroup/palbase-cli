@@ -104,12 +104,12 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 	// toplamak yalnız tidiness değil: yarım bir derlemenin artığı bu koşunun
 	// ürettiğiyle karışırsa "artığı gönderen bir push" mümkün olur.
 	//
-	// KORUNAN YOL ADIYLA SÖYLENİR (FR-010): git'in izlediği — ya da git'e
-	// sorulamadığı için izlenip izlenmediği bilinemeyen — bir `.palbase` silinmez,
-	// ve sessizce bırakılırsa kişi onun neden durduğunu hiç öğrenmez.
-	for _, kept := range reapRetiredArtifacts(dir) {
-		fmt.Fprintf(w, "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
-	}
+	// SESSİZ: korunan yolu adıyla söylemek çağıranın işi. `push` ve `plan` bunu
+	// kendi İLK satırlarında, erken redlerinden önce yapıyor (`sweepCheckout`,
+	// review-T007); burada ikinci kez basmak aynı satırı iki kez gösterirdi.
+	// Çağrı yine de burada kalıyor: bu fonksiyonun kendi erken dönüşü var
+	// (`*.module.ts` yok) ve paketleme yoluna artık girmemeli.
+	reapRetiredArtifacts(dir)
 
 	// No `controllers/` requirement: a module owns its classes wherever it lives,
 	// and requiring a directory the module system does not use turned the

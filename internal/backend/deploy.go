@@ -112,6 +112,8 @@ This acts on the project this checkout is bound to, and on the environment
 resolved for this call — ` + "`--env`" + ` names one, ` + "`palbase env use`" + ` remembers one, and
 with more than one and neither given the push REFUSES rather than guessing.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// THE SWEEP FIRST (FR-009, FR-010) — ahead of every refusal below.
+			sweepCheckout(cmd.ErrOrStderr())
 			resolved, err := PrintResolvedFor(cmd)
 			if err != nil {
 				return err

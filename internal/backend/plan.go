@@ -44,6 +44,8 @@ the shape of stale text this CLI exists not to ship.
 Nothing is written to the target: the schema half is computed by the project
 itself, which is the same computation the push runs, stopped before it writes.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// THE SWEEP FIRST (FR-009, FR-010) — ahead of every refusal below.
+			sweepCheckout(cmd.ErrOrStderr())
 			resolved, err := PrintResolvedFor(cmd)
 			if err != nil {
 				return err
@@ -62,6 +64,27 @@ itself, which is the same computation the push runs, stopped before it writes.`,
 			}
 			return runPlan(cmd.Context(), dir, target, cred, cmd.OutOrStdout())
 		},
+	}
+}
+
+// sweepCheckout runs the sweep for a verb that works in the current directory,
+// before that verb can refuse anything, and names what it kept.
+//
+// `push` and `plan` took their sweep from buildStackArtifact, which runs after
+// the link, the credential, the local stack and the backend-plane checks — so
+// every refused push left a killed run's litter where it was, and the line
+// naming a tracked `.palbase` was locked by no test (review-T007). `link` and
+// `test` already sweep on their first line; these two do now as well.
+//
+// Best effort: a working directory that cannot be resolved is not worth
+// refusing over — the verb's own checks name that failure a line later.
+func sweepCheckout(w io.Writer) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	for _, kept := range reapRetiredArtifacts(dir) {
+		fmt.Fprintf(w, "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
 	}
 }
 
