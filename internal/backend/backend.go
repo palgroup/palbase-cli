@@ -36,7 +36,7 @@ import (
 // modules/backend on every push/PR touching either submodule and fails the
 // moment a copy drifts — there is no Go test for this in this repo.
 //
-//go:embed devjs/build-check.js devjs/env-gen.js devjs/stack-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js devjs/generics.js
+//go:embed devjs/build-check.js devjs/env-gen.js devjs/stack-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js devjs/generics.js devjs/augment-probe.js
 var buildCheckFS embed.FS
 
 // REST is the control-plane transport used to resolve cloud project names.

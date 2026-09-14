@@ -14,12 +14,16 @@ package backend
 // `build` does.
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // retiredDeclaration is one of the author-facing config files @palbase/backend
@@ -206,4 +210,73 @@ func plural(n int, one, many string) string {
 		return fmt.Sprintf("%d %s", n, one)
 	}
 	return fmt.Sprintf("%d %s", n, many)
+}
+
+// verifyAugmentationLands measures whether `palbase/palbase-env.d.ts` is APPLIED,
+// not whether it exists (FR-006): the embedded augment-probe.js compiles a probe
+// with the project's own tsconfig, TypeScript and @palbase/backend, importing a
+// type only the real package exports and — when the stack holds names —
+// spelling one of them.
+//
+// Refused by name: a probe that does not compile, and a probe that cannot run
+// (no typescript installed). A build that cannot say its types land does not
+// get to call itself green. Budgeted by NFR-002 (≤10 s added to a build).
+func verifyAugmentationLands(ctx context.Context, cwd, nodeModules string, names StackNames) error {
+	envFile := filepath.Join(cwd, filepath.FromSlash(EnvTypesPath()))
+	if _, err := os.Stat(envFile); err != nil {
+		return nil // nothing was generated — nothing to measure
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	body, err := buildCheckFS.ReadFile("devjs/augment-probe.js")
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "palbase-augment-probe-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	script := filepath.Join(dir, "augment-probe.js")
+	if err := os.WriteFile(script, body, 0o644); err != nil {
+		return err
+	}
+
+	req := map[string]string{"project_dir": cwd, "env_file": envFile}
+	if len(names.Secrets) > 0 {
+		req["secret"] = names.Secrets[0]
+	}
+	if len(names.Roles) > 0 {
+		req["role"] = names.Roles[0]
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(probeCtx, "node", script)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "NODE_PATH="+nodeModules)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("the augmentation probe did not run: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	var answer struct {
+		Error       string   `json:"error"`
+		Diagnostics []string `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &answer); err != nil {
+		return fmt.Errorf("the augmentation probe answered no JSON: %s", strings.TrimSpace(stdout.String()))
+	}
+	if answer.Error != "" {
+		return fmt.Errorf("the augmentation probe could not run: %s", answer.Error)
+	}
+	if len(answer.Diagnostics) > 0 {
+		return fmt.Errorf("%s is on disk but TypeScript does not apply it — a file that does not end in "+
+			"`export {};` replaces @palbase/backend's modules instead of augmenting them, and a wrong module "+
+			"name augments nothing:\n  %s", EnvTypesPath(), strings.Join(answer.Diagnostics, "\n  "))
+	}
+	return nil
 }

@@ -277,6 +277,16 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	if err := landEnvTypes(buildRoot, cwd, checkoutStackNames{Source: namesUnavailable}, out); err != nil {
 		return err
 	}
+	// …AND THE LANDED FILE IS MEASURED, NOT ITS EXISTENCE (FR-006). A file that
+	// lost `export {};` replaces @palbase/backend's modules instead of augmenting
+	// them, and a drifted module name augments nothing — both leave a green build
+	// and a codebase whose `Secrets.get()` types say nothing. The names the probe
+	// spells arrive with the single render (T019); until then it proves the
+	// package's own types still resolve through the file.
+	if err := verifyAugmentationLands(ctx, cwd, filepath.Join(cwd, "node_modules"), StackNames{}); err != nil {
+		fmt.Fprintf(out, "✗ %v\n", err)
+		return fmt.Errorf("build failed")
+	}
 
 	// There is no config to evaluate. A build produces what a push ships, and a
 	// push ships code and schema: settings reach the stack directly, from
