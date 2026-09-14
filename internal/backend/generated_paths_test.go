@@ -508,6 +508,100 @@ func TestReapSweepsAnUntrackedHiddenRoot(t *testing.T) {
 	})
 }
 
+// trackedHiddenRootLine is what the sweep returns for a `.palbase` it will not
+// delete because git tracks a file under it (or could not be asked) — the whole
+// sentence every verb prints after "kept ".
+const trackedHiddenRootLine = ".palbase — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit"
+
+// WHAT NO CLI WROTE IS NOT THE SWEEP'S TO DELETE (FR-010, D-26).
+//
+// Measured on a real checkout's copy: `.palbase/recovery/` held a maintenance
+// procedure's SQL and pod snapshots — files no palbase CLI has ever written
+// (`git log -S` over every version: nothing) — and an untracked `.palbase` was
+// removed with them in it. The sweep deletes the CLI's own products under the
+// hidden root, removes the directory only when that leaves it empty, and names
+// every entry it left, whether or not the checkout is a repository.
+func TestReapLeavesWhatNoCLIWroteUnderAnUntrackedHiddenRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	products := []string{
+		".palbase/esm/controllers/controllers.js",
+		".palbase/cache/dev/1-x/controllers.js",
+		".palbase/jobs/jobs.manifest.json",
+		".palbase/hooks/hooks.manifest.json",
+		".palbase/openapi/main.json",
+		".palbase/openapi/main.roles.json",
+		".palbase/ios/palbase-config.json",
+		".palbase/android/palbase-config.json",
+		".palbase/project.json",
+		".palbase/local.json",
+		".palbase/plan.json",
+		".palbase/selection.json",
+		".palbase/config.json",
+	}
+	foreign := map[string]string{
+		".palbase/recovery/volume-snapshot.json":              `{"snapshot":"pvc-1"}`,
+		".palbase/recovery/oauth-000014-empty-identities.sql": "delete from auth.identities where false;\n",
+		".palbase/openapi/notes.md":                           "why main.json looks odd\n",
+		".palbase/ios/Secrets.xcconfig":                       "KEY = value\n",
+	}
+	wantKept := []string{
+		".palbase/ios/Secrets.xcconfig — no palbase CLI wrote it; the CLI's own files in the hidden root were removed and this was left where it is",
+		".palbase/openapi/notes.md — no palbase CLI wrote it; the CLI's own files in the hidden root were removed and this was left where it is",
+		".palbase/recovery — no palbase CLI wrote it; the CLI's own files in the hidden root were removed and this was left where it is",
+	}
+	for _, repo := range []bool{false, true} {
+		name := "git deposu olmayan dizinde"
+		if repo {
+			name = "git deposunda, izlenmiyor"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWrite(t, dir, "package.json", `{}`)
+			for _, p := range products {
+				mustWrite(t, dir, p, "// written by a palbase CLI\n")
+			}
+			for p, body := range foreign {
+				mustWrite(t, dir, p, body)
+			}
+			if repo {
+				gitCheckout(t, dir, "package.json")
+			}
+
+			kept := reapRetiredArtifacts(dir)
+
+			for _, p := range products {
+				if _, err := os.Stat(filepath.Join(dir, p)); !os.IsNotExist(err) {
+					t.Errorf("a CLI product survived: %s (stat: %v)", p, err)
+				}
+			}
+			for p, body := range foreign {
+				got, err := os.ReadFile(filepath.Join(dir, p))
+				if err != nil || string(got) != body {
+					t.Errorf("a file no CLI wrote was not left as it was: %s (err: %v, body: %q)", p, err, got)
+				}
+			}
+			if !slices.Equal(kept, wantKept) {
+				t.Errorf("the entries left behind were not named, in order:\n got %q\nwant %q", kept, wantKept)
+			}
+		})
+	}
+
+	// NEGATİF KONTROL: yalnız CLI ürünü taşıyan izlenmeyen kök bütünüyle gider.
+	t.Run("yalnız ürün", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, p := range products {
+			mustWrite(t, dir, p, "// written by a palbase CLI\n")
+		}
+		kept := reapRetiredArtifacts(dir)
+		if len(kept) != 0 {
+			t.Errorf("a hidden root holding only products was reported as kept: %q", kept)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".palbase")); !os.IsNotExist(err) {
+			t.Errorf("a hidden root holding only products was not removed (lstat: %v)", err)
+		}
+	})
+}
+
 // İZLENEN GİZLİ KÖK SİLİNMEZ VE ADIYLA DÖNER (FR-010).
 //
 // Commit'lenmiş bir `.palbase`'i silmek, bir kişinin incelemediği bir değişikliği
@@ -524,7 +618,7 @@ func TestReapKeepsATrackedHiddenRootAndNamesIt(t *testing.T) {
 
 		kept := reapRetiredArtifacts(dir)
 
-		if !slices.Equal(kept, []string{".palbase"}) {
+		if !slices.Equal(kept, []string{trackedHiddenRootLine}) {
 			t.Fatalf("izlenen kök adıyla dönmedi: %v", kept)
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
@@ -552,7 +646,7 @@ func TestReapKeepsATrackedHiddenRootAndNamesIt(t *testing.T) {
 
 		kept := reapRetiredArtifacts(dir)
 
-		if !slices.Equal(kept, []string{".palbase"}) {
+		if !slices.Equal(kept, []string{trackedHiddenRootLine}) {
 			t.Fatalf("hook ortamında izlenen kök adıyla dönmedi: %v", kept)
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
@@ -575,7 +669,7 @@ func TestReapKeepsATrackedHiddenRootAndNamesIt(t *testing.T) {
 		}
 		// Duyarsız dosya sisteminde `.palbase` bu dizinin kendisidir ve adıyla
 		// raporlanmalı; duyarlı birinde ayrı bir addır ve süpürülecek bir şey yoktur.
-		if _, err := os.Lstat(filepath.Join(dir, ".palbase")); err == nil && !slices.Equal(kept, []string{".palbase"}) {
+		if _, err := os.Lstat(filepath.Join(dir, ".palbase")); err == nil && !slices.Equal(kept, []string{trackedHiddenRootLine}) {
 			t.Errorf("duyarsız dosya sisteminde izlenen kök adıyla dönmedi: %v", kept)
 		}
 	})
@@ -607,7 +701,7 @@ func TestReapKeepsAHiddenRootGitCannotAnswerFor(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
 			t.Fatalf("keşif sınırı altında izlenen sözleşme silindi: %v", err)
 		}
-		if !slices.Equal(kept, []string{".palbase"}) {
+		if !slices.Equal(kept, []string{trackedHiddenRootLine}) {
 			t.Errorf("keşif sınırı altında izlenen kök adıyla dönmedi: %v", kept)
 		}
 	})
@@ -625,7 +719,7 @@ func TestReapKeepsAHiddenRootGitCannotAnswerFor(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
 			t.Fatalf("okunamayan bir depoda .palbase silindi: %v", err)
 		}
-		if !slices.Equal(kept, []string{".palbase"}) {
+		if !slices.Equal(kept, []string{trackedHiddenRootLine}) {
 			t.Errorf("okunamayan bir depoda kök adıyla dönmedi: %v", kept)
 		}
 	})
@@ -641,7 +735,7 @@ func TestReapKeepsAHiddenRootGitCannotAnswerFor(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, ".palbase", "project.json")); err != nil {
 			t.Fatalf("git'siz bir makinede commit'li .palbase silindi: %v", err)
 		}
-		if !slices.Equal(kept, []string{".palbase"}) {
+		if !slices.Equal(kept, []string{trackedHiddenRootLine}) {
 			t.Errorf("git'siz bir makinede kök adıyla dönmedi: %v", kept)
 		}
 	})

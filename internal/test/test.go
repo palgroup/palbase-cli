@@ -90,15 +90,15 @@ are reported; an interrupted process may leave users for test-user delete.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			out := cmd.OutOrStdout()
 			// THE SWEEP FIRST (FR-009): what an older CLI left in the checkout goes
-			// before this command refuses or runs anything. A path git tracks is
-			// kept and named — deleting it is a commit a person reviews.
+			// before this command refuses or runs anything. A path git tracks, and a
+			// file no CLI wrote, is kept and named — each arrives as its sentence.
 			if r.Sweep != nil {
 				dir, wdErr := os.Getwd()
 				if wdErr != nil {
 					return fmt.Errorf("resolve the checkout directory: %w", wdErr)
 				}
 				for _, kept := range r.Sweep(dir) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
+					fmt.Fprintf(cmd.ErrOrStderr(), "  kept %s\n", kept)
 				}
 			}
 			if unitOnly && liveOnly {

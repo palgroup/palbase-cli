@@ -80,7 +80,7 @@ var retiredProjectPaths = []struct {
 	{path: envTypesFile, why: "the generated declaration file; it is written under " + rootDir + "/ and committed"},
 	{path: stackTypesFile, why: "the stack's declaration file at the checkout ROOT; its names are rendered into " + rootDir + "/" + envTypesFile},
 	{path: rootDir + "/.gitattributes", why: "`link`'s review markers; the attributes writer is retired and nothing writes them"},
-	{path: ".palbase", why: "the retired hidden root — " + rootDir + "/ replaced it; swept unless git tracks a file under it", keepIfTracked: true},
+	{path: ".palbase", why: "the retired hidden root — " + rootDir + "/ replaced it; its CLI-written entries are swept unless git tracks a file under it, and it goes only when that empties it", keepIfTracked: true},
 }
 
 // THE VISIBLE ROOT IS NOT IN THIS LIST, AND THE ABSENCE IS THE POINT (D-008).
@@ -102,8 +102,33 @@ var retiredProjectPaths = []struct {
 // leaving it for a person to find was measured as 36 directories / ~30 MB on one
 // disk that no verb collected. It used to be untouchable because `project.json`
 // lived in there; the rule is now narrowed to what that was protecting — a
-// directory git TRACKS a file under is kept and named, an untracked one is
-// deleted like any other product.
+// directory git TRACKS a file under is kept and named — and to what the CLI
+// actually produced: an untracked one loses the entries a palbase CLI wrote
+// (hiddenRootProducts), and goes only if that leaves it empty. Anything else in
+// it is a person's, and stays, by name (D-26: a maintenance procedure's SQL and
+// pod snapshots under `.palbase/recovery/` were deleted with the directory).
+
+// keptTrackedWhy and keptForeignWhy finish the sentence every verb prints after
+// "kept <path> — ": why the sweep left something where it is.
+const (
+	keptTrackedWhy = "it may be committed (git tracks a file under it, or could not be asked); remove it in a commit"
+	keptForeignWhy = "no palbase CLI wrote it; the CLI's own files in the hidden root were removed and this was left where it is"
+)
+
+// hiddenRootProducts is everything a palbase CLI release wrote under `.palbase`,
+// read off the releases themselves (`git grep` over v0.40.0–v0.61.0, and the dev
+// stack's `ARTIFACT_CACHE_DIR` from ccc09da) — so the sweep deletes what a CLI
+// can have written and nothing it cannot. Two directories hold a CLI's files
+// beside, possibly, a person's: `openapi/` got one `<env>.json` per environment
+// and each platform directory one `palbase-config.json`; only those go.
+var hiddenRootProducts = struct {
+	dirs, files, jsonDirs, configDirs []string
+}{
+	dirs:       []string{"esm", "jobs", "hooks", "cache"},
+	files:      []string{"project.json", "local.json", "plan.json", "selection.json", "config.json"},
+	jsonDirs:   []string{"openapi"},
+	configDirs: []string{"ios", "macos", "tvos", "watchos", "android", "web"},
+}
 
 // gitignoreScaffold is the whole ignore file for a project that has none.
 //
@@ -125,20 +150,22 @@ func gitignoreScaffold() string {
 }
 
 // reapRetiredArtifacts deletes what an older CLI left in this checkout and
-// returns what it would NOT delete: every `keepIfTracked` entry that exists and
-// has a git-tracked file under it — or sits in a repository git could not be
-// asked about (see gitTracks) — by its declared path.
+// returns what it would NOT delete, each as the whole sentence a verb prints
+// after "kept ": a `keepIfTracked` entry that has a git-tracked file under it —
+// or sits in a repository git could not be asked about (see gitTracks) — and,
+// under an untracked hidden root, every entry no palbase CLI wrote.
 //
 // Best effort by design: refusing a job somebody asked for because a dead
 // directory would not delete trades a doable command for a tidier disk.
 //
-// `.palbase` ITSELF IS SWEPT NOW. It used to be spared because `project.json`
-// and `openapi/` lived in there and had to survive; neither has been written
-// there since the visible root replaced it. What still deserves to survive is
-// what that rule was really about — a file somebody COMMITTED. A tracked
-// `.palbase` is returned, never deleted, so its removal is a commit a person
-// makes and reviews rather than a side effect behind a progress line. The
-// caller names it.
+// `.palbase` ITSELF IS SWEPT NOW — ITS PRODUCTS ARE. It used to be spared because
+// `project.json` and `openapi/` lived in there and had to survive; neither has
+// been written there since the visible root replaced it. What still deserves to
+// survive is what that rule was really about — a file somebody COMMITTED, and a
+// file somebody PUT there. A tracked `.palbase` is returned, never touched, so
+// its removal is a commit a person makes and reviews rather than a side effect
+// behind a progress line; an untracked one keeps what no CLI wrote. The caller
+// names both.
 func reapRetiredArtifacts(dir string) []string {
 	var kept []string
 	for _, e := range retiredProjectPaths {
@@ -147,9 +174,11 @@ func reapRetiredArtifacts(dir string) []string {
 				continue
 			}
 			if gitTracks(dir, e.path) {
-				kept = append(kept, e.path)
+				kept = append(kept, e.path+" — "+keptTrackedWhy)
 				continue
 			}
+			kept = append(kept, reapHiddenRoot(filepath.Join(dir, e.path), e.path)...)
+			continue
 		}
 		if !strings.ContainsAny(e.path, "*?[") {
 			_ = os.RemoveAll(filepath.Join(dir, e.path))
@@ -162,6 +191,65 @@ func reapRetiredArtifacts(dir string) []string {
 		for _, m := range matches {
 			_ = os.RemoveAll(m)
 		}
+	}
+	return kept
+}
+
+// reapHiddenRoot removes hiddenRootProducts from an untracked hidden root, then
+// the root itself if that emptied it, and returns a kept sentence for every entry
+// left behind — sorted, so the same checkout says the same thing every run.
+//
+// A root that is not a real directory (a symbolic link, a file) was not made by
+// a CLI either: it is named and left alone, and nothing is read through it.
+func reapHiddenRoot(root, rel string) []string {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return nil
+	}
+	if !info.IsDir() {
+		return []string{rel + " — " + keptForeignWhy}
+	}
+	for _, d := range hiddenRootProducts.dirs {
+		_ = os.RemoveAll(filepath.Join(root, d))
+	}
+	for _, f := range hiddenRootProducts.files {
+		if fi, err := os.Lstat(filepath.Join(root, f)); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(filepath.Join(root, f))
+		}
+	}
+	for _, d := range hiddenRootProducts.jsonDirs {
+		entries, _ := os.ReadDir(filepath.Join(root, d))
+		for _, ent := range entries {
+			if ent.Type().IsRegular() && strings.HasSuffix(ent.Name(), ".json") {
+				_ = os.Remove(filepath.Join(root, d, ent.Name()))
+			}
+		}
+		_ = os.Remove(filepath.Join(root, d)) // only when empty
+	}
+	for _, d := range hiddenRootProducts.configDirs {
+		if fi, err := os.Lstat(filepath.Join(root, d, "palbase-config.json")); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(filepath.Join(root, d, "palbase-config.json"))
+		}
+		_ = os.Remove(filepath.Join(root, d)) // only when empty
+	}
+	if os.Remove(root) == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return []string{rel + " — " + keptForeignWhy}
+	}
+	var kept []string
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() && (slices.Contains(hiddenRootProducts.jsonDirs, name) || slices.Contains(hiddenRootProducts.configDirs, name)) {
+			inner, _ := os.ReadDir(filepath.Join(root, name))
+			for _, in := range inner {
+				kept = append(kept, rel+"/"+name+"/"+in.Name()+" — "+keptForeignWhy)
+			}
+			continue
+		}
+		kept = append(kept, rel+"/"+name+" — "+keptForeignWhy)
 	}
 	return kept
 }

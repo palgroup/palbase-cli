@@ -76,10 +76,11 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// What git TRACKS — or what sits in a repository git could not be asked
 	// about — is reported and left alone (FR-010). Deleting a committed
 	// directory behind a progress line is not this tool's decision to make;
-	// saying it is there, by name, is. The words are `sweepCheckout`'s, so a
-	// kept path reads the same whichever verb found it.
+	// saying it is there, by name, is — and so is a file no CLI wrote under
+	// `.palbase` (D-26). Each kept entry arrives as its whole sentence, so it
+	// reads the same whichever verb found it.
 	for _, kept := range reapRetiredArtifacts(cwd) {
-		fmt.Fprintf(out, "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
+		fmt.Fprintf(out, "  kept %s\n", kept)
 	}
 
 	// THE SHAPE OF THE CHECKOUT, NEXT — AND BEFORE THE controllers/ EARLY RETURN.

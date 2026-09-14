@@ -84,7 +84,7 @@ func sweepCheckout(w io.Writer) {
 		return
 	}
 	for _, kept := range reapRetiredArtifacts(dir) {
-		fmt.Fprintf(w, "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
+		fmt.Fprintf(w, "  kept %s\n", kept)
 	}
 }
 
