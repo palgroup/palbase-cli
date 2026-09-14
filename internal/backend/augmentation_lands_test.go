@@ -91,6 +91,75 @@ func TestAugmentationDoesNotLandOnAMisnamedModule(t *testing.T) {
 	require.ErrorContains(t, err, "does not apply")
 }
 
+// AN SDK FROM BEFORE THE STACK MODULE STILL BUILDS (D-23).
+//
+// `@palbase/backend/stack` arrived in 22.1.0; measured, 12.0.1 exports ".",
+// "./db", "./env", "./test" and "./purchases" and nothing else — and a ^12
+// project is live, deploying on the 12.x image. A probe that imported a stack
+// type unconditionally refused that project's `palbase build` with
+// `TS2307: Cannot find module '@palbase/backend/stack'`, on a file that
+// augments `@palbase/backend/env` correctly. The probe measures the blocks the
+// file DECLARES, not the ones the newest SDK would render.
+func staleSDKProject(t *testing.T) (dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("node"); err != nil {
+		requireToolOnCI(t, "node", err)
+		t.Skip("node is not on PATH")
+	}
+	ts := filepath.Join(sdkSourceDir(t), "node_modules", "typescript")
+	if _, err := os.Stat(filepath.Join(ts, "package.json")); err != nil {
+		t.Skipf("no typescript beside this checkout to compile the probe with (%v)", err)
+	}
+	dir = t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755))
+	require.NoError(t, os.Symlink(ts, filepath.Join(dir, "node_modules", "typescript")))
+	mustWrite(t, dir, "node_modules/@palbase/backend/package.json", `{"name":"@palbase/backend","version":"12.0.1",
+  "exports":{".":{"types":"./index.d.ts","default":"./index.js"},"./env":{"types":"./env.d.ts","default":"./env.js"}}}`)
+	mustWrite(t, dir, "node_modules/@palbase/backend/index.js", "module.exports = {};\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/index.d.ts", "export {};\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/env.js", "module.exports = {};\n")
+	mustWrite(t, dir, "node_modules/@palbase/backend/env.d.ts", "export interface Tables {}\nexport interface Schemas {}\n")
+	mustWrite(t, dir, "tsconfig.json", `{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"bundler","strict":true,"skipLibCheck":true,"noEmit":true}}`)
+	mustWrite(t, dir, EnvTypesPath(), "declare module \"@palbase/backend/env\" {\n  interface Tables {\n    notes: { row: { id: string }; insert: { id?: string } };\n  }\n}\n\nexport {};\n")
+	return dir
+}
+
+func TestAugmentationLandsOnAnSDKThatHasNoStackModule(t *testing.T) {
+	dir := staleSDKProject(t)
+	require.NoError(t, verifyAugmentationLands(context.Background(), dir, filepath.Join(dir, "node_modules"), StackNames{}))
+}
+
+// …and the shadowing it exists to catch is still caught there, by name: no
+// stack type to lose does not mean no way to tell a script from a module.
+func TestAugmentationWithoutExportBracesIsCaughtOnAnSDKThatHasNoStackModule(t *testing.T) {
+	dir := staleSDKProject(t)
+	path := filepath.Join(dir, filepath.FromSlash(EnvTypesPath()))
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(string(raw), "export {};", "", 1)), 0o644))
+
+	err = verifyAugmentationLands(context.Background(), dir, filepath.Join(dir, "node_modules"), StackNames{})
+	require.ErrorContains(t, err, "does not apply")
+	require.ErrorContains(t, err, "is not a module")
+}
+
+// A DRIFTED MODULE NAME IS CAUGHT WITHOUT ANY NAME TO SPELL. A checkout that is
+// not linked to a stack renders no names, and mutation (b) above only went red
+// because it spelled one.
+func TestAugmentationDoesNotLandOnAMisnamedModuleWithoutNames(t *testing.T) {
+	dir := augmentationProject(t)
+	path := filepath.Join(dir, filepath.FromSlash(EnvTypesPath()))
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	broken := strings.Replace(string(raw), `"@palbase/backend/stack"`, `"@palbase/backend/stak"`, 1)
+	require.NotEqual(t, string(raw), broken)
+	require.NoError(t, os.WriteFile(path, []byte(broken), 0o644))
+
+	err = verifyAugmentationLands(context.Background(), dir, filepath.Join(dir, "node_modules"), StackNames{})
+	require.ErrorContains(t, err, "does not apply")
+	require.ErrorContains(t, err, `"@palbase/backend/stak"`)
+}
+
 // A GATE THAT CANNOT MEASURE DOES NOT SAY GREEN.
 func TestAugmentationProbeRefusesWithoutTypeScript(t *testing.T) {
 	dir := augmentationProject(t)

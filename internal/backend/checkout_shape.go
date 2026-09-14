@@ -213,15 +213,20 @@ func plural(n int, one, many string) string {
 }
 
 // verifyAugmentationLands measures whether `palbase/palbase-env.d.ts` is APPLIED,
-// not whether it exists (FR-006): the embedded augment-probe.js compiles a probe
-// with the project's own tsconfig, TypeScript and @palbase/backend, importing a
-// type only the real package exports and — when the stack holds names —
-// spelling one of them.
+// not whether it exists (FR-006): the embedded augment-probe.js checks the file
+// is a module whose augmented specifiers resolve, then compiles a probe with the
+// project's own tsconfig and @palbase/backend, importing a type only the real
+// module exports for each module the file augments and — when the stack holds
+// names — spelling one of them.
+//
+// nodePath is the NODE_PATH the probe loads `typescript` through: runBuild hands
+// it devNodePath, the CLI's pinned parser first and the project second, as
+// build-check.js gets it.
 //
 // Refused by name: a probe that does not compile, and a probe that cannot run
-// (no typescript installed). A build that cannot say its types land does not
-// get to call itself green. Budgeted by NFR-002 (≤10 s added to a build).
-func verifyAugmentationLands(ctx context.Context, cwd, nodeModules string, names StackNames) error {
+// (no typescript to load). A build that cannot say its types land does not get
+// to call itself green. Budgeted by NFR-002 (≤10 s added to a build).
+func verifyAugmentationLands(ctx context.Context, cwd, nodePath string, names StackNames) error {
 	envFile := filepath.Join(cwd, filepath.FromSlash(EnvTypesPath()))
 	if _, err := os.Stat(envFile); err != nil {
 		return nil // nothing was generated — nothing to measure
@@ -256,7 +261,7 @@ func verifyAugmentationLands(ctx context.Context, cwd, nodeModules string, names
 	}
 	cmd := exec.CommandContext(probeCtx, "node", script)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "NODE_PATH="+nodeModules)
+	cmd.Env = append(os.Environ(), "NODE_PATH="+nodePath)
 	cmd.Stdin = bytes.NewReader(payload)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

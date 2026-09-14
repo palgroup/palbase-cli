@@ -282,8 +282,11 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// them, and a drifted module name augments nothing — both leave a green build
 	// and a codebase whose `Secrets.get()` types say nothing. The names the probe
 	// spells arrive with the single render (T019); until then it proves the
-	// package's own types still resolve through the file.
-	if err := verifyAugmentationLands(ctx, cwd, filepath.Join(cwd, "node_modules"), StackNames{}); err != nil {
+	// package's own types still resolve through the file. TypeScript is loaded
+	// the way build-check.js loads it — the CLI's pinned parser first — so a
+	// project whose own `typescript` is absent or has no compiler API is still
+	// measured rather than refused (D-23).
+	if err := verifyAugmentationLands(ctx, cwd, devNodePath(cwd, out), StackNames{}); err != nil {
 		fmt.Fprintf(out, "✗ %v\n", err)
 		return fmt.Errorf("build failed")
 	}

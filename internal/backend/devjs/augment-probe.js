@@ -10,10 +10,13 @@
  * specifier drifts, and TypeScript augments a module that does not exist. In
  * both cases the file is on disk and the build is green.
  *
- * So this compiles a PROBE with the project's own tsconfig and the project's own
- * installed TypeScript and @palbase/backend: it imports a type that only the
- * REAL package module exports (a shadowing script loses it) and, when the stack
- * holds names, spells one of them (a mis-targeted augmentation cannot supply it).
+ * So this reads the file with the compiler's parser — is it a module, and does
+ * every module it augments resolve? — and then compiles a PROBE with the
+ * project's own tsconfig and installed @palbase/backend: for each module the file
+ * augments it imports a type only the REAL module exports (a shadowing script
+ * loses it) and, when the stack holds names, spells one of them (a mis-targeted
+ * augmentation cannot supply it). Only the blocks the file declares are asked
+ * about, so an SDK older than a module is not refused for lacking it.
  *
  * THE PROBE IS NEVER WRITTEN. It is served to the compiler from memory under a
  * path inside the project directory, so `@palbase/backend` resolves from the
@@ -55,12 +58,15 @@ async function main() {
 
   let ts;
   try {
+    // NODE_PATH decides which: the CLI's pinned parser TypeScript first, the
+    // project's own second — the order build-check.js loads it in, because a
+    // project's `typescript` may be absent or a 7.x with no compiler API.
     ts = require('typescript');
   } catch (e) {
     writeResult({
       error:
-        'typescript is not installed in this project, so the generated types cannot be checked — ' +
-        'run `npm install` (the scaffold declares it as a devDependency)',
+        'typescript is not installed where the probe can load it (neither the CLI\'s parser nor this project), ' +
+        'so the generated types cannot be checked — run `npm install` (the scaffold declares it as a devDependency)',
     });
     return;
   }
@@ -77,20 +83,61 @@ async function main() {
     },
   });
 
+  const options = { ...parsed.options, noEmit: true };
+  const rel = path.relative(projectDir, envFile);
+
+  // THE BLOCKS THE FILE DECLARES, read with the compiler's own parser — and
+  // measured against THOSE, never against what the newest SDK would render. A
+  // probe that imported a stack type unconditionally refused every project on an
+  // SDK from before `@palbase/backend/stack` existed (22.1.0): measured, a
+  // correct env-only file on 12.0.1 came back TS2307 (D-23).
+  const envText = ts.sys.readFile(envFile);
+  if (envText === undefined) {
+    writeResult({ error: 'cannot read ' + envFile });
+    return;
+  }
+  const envSource = ts.createSourceFile(envFile, envText, ts.ScriptTarget.Latest, true);
+  const augmented = envSource.statements
+    .filter((s) => ts.isModuleDeclaration(s) && ts.isStringLiteral(s.name))
+    .map((s) => s.name.text);
+
+  const findings = [];
+  // A SCRIPT, NOT A MODULE: every `declare module` in it is an ambient
+  // declaration that REPLACES the package's module (FR-005). Asked of the parser
+  // directly, so it is caught whichever SDK is installed.
+  if (!ts.isExternalModule(envSource)) {
+    findings.push(
+      rel + ': is not a module — without its trailing `export {};` every `declare module` in it replaces ' +
+        "the @palbase/backend module it names instead of augmenting it",
+    );
+  }
+  // A DRIFTED SPECIFIER augments a module that does not exist, silently — and
+  // with no stack name to spell, nothing else here would notice.
+  for (const spec of augmented) {
+    if (!ts.resolveModuleName(spec, envFile, options, ts.sys).resolvedModule) {
+      findings.push(rel + ': augments ' + JSON.stringify(spec) + ', which TypeScript cannot resolve from this project — the block types nothing');
+    }
+  }
+
   // A name unlikely to collide with anything the project owns; it never exists on disk.
   const probePath = path.join(projectDir, '__palbase_augmentation_probe__.ts');
-  // ONLY WHAT EVERY SUPPORTED MAJOR EXPORTS, unconditionally. `PalbaseRoleName`
-  // arrived with @palbase/backend 40: importing it always refused the build of
-  // every project still on 39 — measured, `palbase init` installs the published
-  // SDK and the scaffold's own build came back TS2724. A project on 39 cannot
-  // render role names anyway (its makeEnvDts ignores them and env-gen.js refuses
-  // that render before anything lands), so the role type is imported only when
-  // this run has a role to spell.
-  const lines = [
-    'import type { PalbaseSecretName } from "@palbase/backend/stack";',
-    'import type { Tables } from "@palbase/backend/env";',
-    'export type __PalbaseProbe = [PalbaseSecretName, Tables];',
-  ];
+  // A TYPE ONLY THE REAL MODULE EXPORTS, for each module the file augments: a
+  // shadowing script loses it. The stack's type is also imported whenever this
+  // run spells a name — names only come from an SDK that renders the stack
+  // block. `PalbaseRoleName` arrived with @palbase/backend 40, so it is imported
+  // only when there is a role to spell (a project on 39 renders none: its
+  // makeEnvDts ignores names and env-gen.js refuses that render first).
+  const lines = [];
+  const probed = [];
+  if (augmented.includes('@palbase/backend/env')) {
+    lines.push('import type { Tables } from "@palbase/backend/env";');
+    probed.push('Tables');
+  }
+  if (augmented.includes('@palbase/backend/stack') || req.secret || req.role) {
+    lines.push('import type { PalbaseSecretName } from "@palbase/backend/stack";');
+    probed.push('PalbaseSecretName');
+  }
+  lines.push(probed.length ? 'export type __PalbaseProbe = [' + probed.join(', ') + '];' : 'export {};');
   if (req.secret) lines.push('export const __secret: PalbaseSecretName = ' + JSON.stringify(req.secret) + ';');
   if (req.role) {
     lines.push('import type { PalbaseRoleName } from "@palbase/backend/stack";');
@@ -98,7 +145,6 @@ async function main() {
   }
   const probeText = lines.join('\n') + '\n';
 
-  const options = { ...parsed.options, noEmit: true };
   const host = ts.createCompilerHost(options);
   const readFile = host.readFile.bind(host);
   const fileExists = host.fileExists.bind(host);
@@ -119,7 +165,8 @@ async function main() {
       const where = d.file ? path.relative(projectDir, d.file.fileName) : '';
       return `${where}: TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`;
     });
-  writeResult(diagnostics.length ? { diagnostics } : {});
+  const all = [...findings, ...diagnostics];
+  writeResult(all.length ? { diagnostics: all } : {});
 }
 
 main().catch((e) => writeResult({ error: String(e && e.message ? e.message : e) }));
