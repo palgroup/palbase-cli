@@ -1623,3 +1623,59 @@ export class Mod`+name+` {}
 	require.NotContains(t, out.String(), "is imported by",
 		"a pressure note fired below the threshold:\n%s", out.String())
 }
+
+// AN SDK TOO OLD TO RENDER THE STACK BLOCK DOES NOT FAIL THE BUILD (final-cli C1).
+//
+// The file's names are kept and the build passes — landEnvTypes' rule, which
+// `TestPreserveStackBlockRefusesAnUnmarkedRenderEvenWithNames` measures on its
+// own. This is the WIRING: `palbase build` over a LINKED checkout whose stack
+// answers, running an `@palbase/backend` older than the single-file renderer —
+// the state every project on 39.x is in the moment this branch's major ships.
+// Without this test the package suite is green and the build hard-refuses, with
+// a message blaming `db/` for a failure that has nothing to do with the schema.
+func TestRunBuild_AnOldRendererKeepsTheNamesAndTheBuildPasses(t *testing.T) {
+	useTempMachineHome(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "app"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "app", "app.module.ts"),
+		[]byte("import { Module } from \"@palbase/backend\";\n\n"+
+			"@Module({ controllers: [], providers: [], exports: [], imports: [] })\n"+
+			"export class AppModule {}\n"), 0o644))
+	// 39.1.6's renderer takes ONE argument: it ignores the names and emits the
+	// env block alone (seedInstalledBackend's fake is exactly that shape) — but
+	// the package DOES carry `./stack`, as every 39.x does, so the file's stack
+	// block still resolves and this test measures the renderer, not the subpath.
+	seedInstalledBackend(t, dir, "39.1.6")
+	pkgDir := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "stack.d.ts"),
+		[]byte("export interface Secrets {}\nexport type PalbaseSecretName = keyof Secrets & string;\n"+
+			"export interface Roles {}\nexport type PalbaseRoleName = keyof Roles & string;\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "stack.js"), []byte("module.exports = {};\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
+		[]byte(`{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"bundler","strict":true,"skipLibCheck":true,"experimentalDecorators":true}}`), 0o644))
+
+	// LINKED, AND THE STACK ANSWERS — the combination namesForBuild turns into a
+	// non-nil names argument. A committed self-host address is the cheapest link
+	// that needs no network of its own.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, RootDir()), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(projectPath())),
+		[]byte(`{"url":"https://prj.example.test","selfHost":true}`), 0o644))
+	withStackNamesReader(t, func(context.Context, Target) (StackNames, error) {
+		return StackNames{Secrets: []string{"STRIPE_KEY"}, Flags: []string{}, Buckets: []StackBucket{}, Roles: []string{}}, nil
+	})
+
+	// …and the file the checkout already carries types that secret.
+	existing := renderedEnvFile(oldTables, filledStack)
+	envFile := filepath.Join(dir, filepath.FromSlash(EnvTypesPath()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(envFile), 0o755))
+	require.NoError(t, os.WriteFile(envFile, []byte(existing), 0o644))
+
+	t.Chdir(dir)
+	var out bytes.Buffer
+	err := runBuild(context.Background(), dir, &out)
+	require.NoError(t, err, "an old renderer failed the whole build:\n%s", out.String())
+	require.Contains(t, out.String(), "not refreshed", "the build says nothing about why the names did not refresh:\n%s", out.String())
+	landed, rerr := os.ReadFile(envFile)
+	require.NoError(t, rerr)
+	require.Equal(t, existing, string(landed), "the old renderer's output dropped the names the file carried")
+}

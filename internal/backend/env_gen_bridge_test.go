@@ -3,7 +3,6 @@ package backend
 import (
 	"bytes"
 	"encoding/json"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -236,7 +235,16 @@ func TestEnvGenBridgeRendersWithoutADatabase(t *testing.T) {
 	require.Contains(t, got, `"STRIPE_KEY": true;`)
 }
 
-func TestEnvGenBridgeRefusesAnSDKThatRendersNoStackBlock(t *testing.T) {
+// ESKİ BİR SDK KÖPRÜYÜ DÜŞÜRMEZ — VERDİKT LANDER'INDIR (D-36, final-cli C1).
+//
+// Köprü bu redde bir noktada düşüyordu ("rendered no stack block … upgrade"),
+// ve o red `palbase build`i BÜTÜNÜYLE düşürüyordu: bağlı her proje, eski bir
+// major'da, `✗ DEPLOY WOULD FAIL: db/` ile — şemayla hiç ilgisi olmayan bir
+// sürüm farkı, şemanın üstüne yıkılarak. Adların düşmesine karşı koruma
+// landEnvTypes'ta ve ORADA ölçülüyor
+// (TestPreserveStackBlockRefusesAnUnmarkedRenderEvenWithNames); köprü render
+// ettiğini yazar, checkout'un dosyasına ne olacağına çağıran karar verir.
+func TestEnvGenBridgeLeavesTheNarrowingVerdictToItsCaller(t *testing.T) {
 	root, bundle, out := bridgeProject(t, fixtureEnvOnlyBackendPkg)
 
 	answer := runEmbeddedBridge(t, "env-gen.js", root, map[string]any{
@@ -244,30 +252,40 @@ func TestEnvGenBridgeRefusesAnSDKThatRendersNoStackBlock(t *testing.T) {
 		"out_path":    out,
 		"names":       wireNames(t, StackNames{Secrets: []string{"STRIPE_KEY"}}),
 	})
-	require.Contains(t, answer.Error, "rendered no stack block")
-	require.Contains(t, answer.Error, "upgrade @palbase/backend")
-	_, err := os.Stat(out)
-	require.ErrorIs(t, err, fs.ErrNotExist, "red, yazımdan ÖNCE gelmeli")
+	require.Empty(t, answer.Error, "eski bir SDK köprüyü düşüremez — build'i düşüren red buydu")
+	rendered := readText(t, out)
+	require.Contains(t, rendered, "// schemas: 1", "şema yarısı yine render edilir")
+	require.NotContains(t, rendered, `declare module "@palbase/backend/stack"`,
+		"bu fikstür stack bloğu RENDER EDEMEZ — testin ölçtüğü durum bu")
 
-	// NEGATİF KONTROL: ad verilmeyen aynı eski SDK yazmaya devam eder — red
-	// adların DÜŞECEK olmasına dair, SDK'nın yaşına dair değil.
+	// NEGATİF KONTROL: ad verilmeyen aynı eski SDK da aynı şeyi yazar — köprünün
+	// cevabı adların verilip verilmediğine göre DEĞİŞMEZ.
 	plain := runEmbeddedBridge(t, "env-gen.js", root, map[string]any{"bundle_path": bundle, "out_path": out})
 	require.Empty(t, plain.Error)
 	require.Contains(t, readText(t, out), "// schemas: 1")
 }
 
+// TEK YAZICI, ÇÜNKÜ İKİNCİSİ ARTIK GÖMÜLÜ DEĞİL (D-36, final-cli I1).
+//
+// Burası eskiden emekli `stack-gen.js`'i koşturup "retired" cevabını ölçüyordu.
+// O cevabı hiçbir müşteri göremezdi: betiği çağıran üretim yolu bu koşuda
+// silindi, yani gömülü ağırlıktı — ve ulaşılabilirlik kapısı onu "kütüphane"
+// sanıp hiç listelemiyordu (kapı da bu turda sıkılaştırıldı). Dosya silindi;
+// ölçü artık "ikinci yazıcı YOK"tur, ve gömülü küme bunu kanıtlar.
 func TestEnvGenBridgeIsTheOnlyWriter(t *testing.T) {
-	root, _, _ := bridgeProject(t, fixtureSingleFileBackendPkg)
-	legacy := filepath.Join(root, "palbase-stack.d.ts")
+	entries, err := buildCheckFS.ReadDir("devjs")
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	require.NotEmpty(t, names)
+	require.NotContains(t, names, "stack-gen.js",
+		"emekli ikinci yazıcı hâlâ gömülü — hiçbir komut onu koşturmuyor")
+	require.Contains(t, names, "env-gen.js", "tek yazıcı gömülü olmalı")
 
-	answer := runEmbeddedBridge(t, "stack-gen.js", root, map[string]any{
-		"names":    wireNames(t, StackNames{Secrets: []string{"STRIPE_KEY"}}),
-		"out_path": legacy,
-	})
-	// Emekli köprü sessizce kaybolmaz: adların NEREYE gittiğini söyler.
-	require.Contains(t, answer.Error, "retired")
-	require.Contains(t, answer.Error, "palbase/palbase-env.d.ts")
-	require.Contains(t, answer.Error, "env-gen.js")
-	_, err := os.Stat(legacy)
-	require.ErrorIs(t, err, fs.ErrNotExist, "emekli köprü dosya yazmamalı")
+	// …ve eski dosyanın adı, onu ARAYAN bir yol olarak hiçbir yerde kalmadı:
+	// gömülü kümede olmayan bir betiği okumak spawn hatası verirdi.
+	_, err = buildCheckFS.ReadFile("devjs/stack-gen.js")
+	require.Error(t, err, "silinen betik hâlâ okunabiliyor")
 }

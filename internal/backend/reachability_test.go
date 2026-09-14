@@ -78,6 +78,26 @@ func TestEveryEmbeddedScriptHasAReachableRunner(t *testing.T) {
 			break
 		}
 		if readerFn == "" {
+			// OKUYUCUSU OLMAYAN BETİK "KÜTÜPHANE" SAYILMAZ, ÖLÇÜLÜR (final-cli I1).
+			//
+			// Burası eskiden koşulsuz `continue` idi: okuyucu bulunamayınca betik
+			// "dizinle seyahat eden kütüphane" kabul ediliyordu. `stack-gen.js`
+			// tam olarak oradan kaçtı — bu koşu üretim okuyucusunu sildi, kapı
+			// onu alt-test olarak bile listelemedi, ve kapının var olma sebebi
+			// (bildirilmiş + test edilmiş + ULAŞILMAZ) sessizce geri geldi.
+			// Kütüphane olmak bir İDDİADIR ve kanıtı, başka bir betiğin onu ADIYLA
+			// çağırmasıdır: `require('./x')` ya da `path.join(__dirname, 'x.js')`.
+			if strings.HasSuffix(base, ".test.js") {
+				continue // dizinin kendi testleri
+			}
+			checked++
+			t.Run(base, func(t *testing.T) {
+				if requiredByAnotherScript(t, scripts, base) {
+					return
+				}
+				t.Errorf("%s'i ADIYLA okuyan bir Go fonksiyonu YOK ve onu çağıran başka bir betik de yok — "+
+					"gömülü, ama hiçbir yoldan koşulamıyor. Ya bir verb'e bağlayın ya silin.", base)
+			})
 			continue
 		}
 		checked++
@@ -99,6 +119,38 @@ func TestEveryEmbeddedScriptHasAReachableRunner(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("adıyla betik okuyan hiçbir fonksiyon bulunamadı — kapı ölçecek bir şey görmüyor")
 	}
+}
+
+// requiredByAnotherScript, betiğin devjs içindeki bir BAŞKA üretim betiği
+// tarafından adıyla çağrılıp çağrılmadığını söyler.
+//
+// Ad TIRNAK İÇİNDE aranır: `require('./x')`, `require('./x.js')` ya da
+// `path.join(__dirname, 'x.js')` (build-check.js `extract_meta.js`'i böyle
+// koşturur). Yorum içinde geçen bir ad — build-check.js kendi kütüphanelerini
+// düzyazıda sayar — kanıt değildir; çağıran bir ifade gerekir.
+func requiredByAnotherScript(t *testing.T, scripts []string, base string) bool {
+	t.Helper()
+	stem := strings.TrimSuffix(base, ".js")
+	for _, other := range scripts {
+		if filepath.Base(other) == base {
+			continue
+		}
+		raw, err := os.ReadFile(other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(raw)
+		for _, spelling := range []string{
+			`'` + base + `'`, `"` + base + `"`,
+			`'./` + stem + `'`, `"./` + stem + `"`,
+			`'./` + base + `'`, `"./` + base + `"`,
+		} {
+			if strings.Contains(src, spelling) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // countCalls, bir fonksiyonun kendi TANIMI dışındaki çağrılarını sayar.

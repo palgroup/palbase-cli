@@ -531,7 +531,7 @@ func landEnvTypes(buildRoot, cwd string, names checkoutStackNames, out io.Writer
 	if names.Source != namesUnavailable && rerr == nil &&
 		!bytes.Contains(body, []byte(palbaseStackBlockBegin)) && bytes.Contains(prev, []byte(palbaseStackBlockBegin)) {
 		fmt.Fprintf(out, "  %s not refreshed — the installed %s rendered no stack block, and writing its "+
-			"output would drop the one this file carries\n", rel, backendPkg)
+			"output would drop the one this file carries; upgrade %s to refresh it\n", rel, backendPkg, backendPkg)
 		return nil
 	}
 

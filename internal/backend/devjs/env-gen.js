@@ -220,19 +220,19 @@ async function main() {
     return;
   }
 
-  // THE BODY, NOT THE DECLARATION. An @palbase/backend older than the single
-  // file takes one argument: it ignores the names and renders the env block
-  // alone. Writing that output would silently drop every secret, flag, bucket
-  // and role name this project types against — a narrowing nobody asked for,
-  // reported as success. Refuse, and name the cure.
-  if (names !== undefined && !dts.includes('declare module "@palbase/backend/stack"')) {
-    writeError(
-      'the installed @palbase/backend rendered no stack block, so the names this stack holds ' +
-        '(secrets, flags, buckets, roles) would be dropped — upgrade @palbase/backend',
-    );
-    return;
-  }
-
+  // AN @palbase/backend OLDER THAN THE SINGLE FILE takes one argument: it
+  // ignores the names and renders the env block alone. That render is written —
+  // here, into the tree the caller named, which for `palbase build` is the
+  // staging copy — and WHAT IT MEANS FOR THE CHECKOUT IS THE CALLER'S CALL:
+  // landEnvTypes keeps whatever stack block the checkout's file already carries
+  // and says so (build.go, TestPreserveStackBlockRefusesAnUnmarkedRenderEvenWithNames).
+  //
+  // THIS SCRIPT USED TO REFUSE HERE, and that refusal failed the whole build for
+  // every linked project on an older SDK — reported as `✗ DEPLOY WOULD FAIL:
+  // db/`, blaming the schema for a version skew (final-cli C1, D-36). A build
+  // that works offline (NFR-004) and never narrows types (FR-003a) does not get
+  // to fail over which major is installed: the file keeps its names, the build
+  // passes, and the line the lander prints names the cure.
   let unchanged;
   try {
     unchanged = landFile(outPath, dts);
