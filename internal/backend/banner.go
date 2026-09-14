@@ -62,9 +62,7 @@ func PrintResolvedTo(w io.Writer, cmd *cobra.Command) (Resolved, error) {
 	}
 	// The migration's own output goes to the same place, because a file that
 	// changed under somebody deserves the same visibility as the target itself.
-	if err := MigrateLegacyTarget(ctx, w); err != nil {
-		return Resolved{}, err
-	}
+	MigrateLegacyTarget(ctx, w)
 	resolved, err := ResolveFor(cmd)
 	if err != nil {
 		return Resolved{}, err

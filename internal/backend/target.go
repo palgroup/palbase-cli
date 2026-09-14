@@ -25,6 +25,7 @@ package backend
 // rather than a re-link.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/palgroup/palbase-cli/internal/authcontract"
 )
@@ -40,6 +42,11 @@ import (
 // Target is where a verb acts.
 type Target struct {
 	checkoutRoot string
+	// retired is what the file this came from still carried under a field this
+	// CLI no longer has (decodeTarget). Unexported, so never serialised: it is
+	// read so an old checkout stays readable and so the migration can say what
+	// it dropped — and nothing can write it back.
+	retired retiredFields
 	// OAuth selects provider clients for this checkout once. Platform records and
 	// native identifiers remain in the server's typed configuration.
 	OAuth map[string]OAuthSelection `json:"oauth,omitempty"`
@@ -129,10 +136,68 @@ func projectPath() string { return path.Join(RootDir(), "project.json") }
 // half moved out entirely, next to the credentials that were already there.
 func localPath() (string, error) { return LocalStatePath(".") }
 
+// retiredFields is what a file an older CLI wrote still carries under a field
+// that has since left Target. Nil is a field the file did not carry; an empty
+// value is still one it did.
+type retiredFields struct {
+	stackVersion *string
+	env          *string
+}
+
+// names lists the retired fields the file carried, in a fixed order, so a
+// migration can say what it dropped.
+func (r retiredFields) names() []string {
+	var names []string
+	if r.stackVersion != nil {
+		names = append(names, "stackVersion")
+	}
+	if r.env != nil {
+		names = append(names, "env")
+	}
+	return names
+}
+
+// targetFile is the shape a committed file or this machine's record decodes
+// into: a Target, and beside it the two fields an older CLI wrote there.
+//
+// `env` (v0.29.0 on) and `stackVersion` (2026-09-05 on) left Target in
+// `1fcefcb` on 2026-09-12, and every checkout linked before then still carries
+// one. The strict decoder refused the whole file by name — on every verb, and
+// on the migration that exists to rewrite such a file.
+//
+// NAMED, NOT A WILDCARD. A key no Target ever had still fails exactly as it
+// did: a misspelt field in a committed file is a finding, and a reader that
+// tolerates everything links nothing while saying nothing.
+type targetFile struct {
+	*Target
+	StackVersion *string `json:"stackVersion"`
+	Env          *string `json:"env"`
+}
+
+// decodeTarget reads a committed file or this machine's record.
+//
+// ONE DECODE, OF THE FILE AS WRITTEN. The structural rules — size, duplicate
+// keys, null, depth, trailing JSON — and the refusal of unknown fields all
+// apply to the bytes on disk. Setting the retired keys aside and decoding a
+// re-serialised remainder was the first attempt, and that remainder was not the
+// file: its keys came back sorted, so which of `url` and `URL` won changed, and
+// every `<` came back six bytes long.
 func decodeTarget(raw []byte, target *Target) error {
-	if err := authcontract.DecodeStrict(raw, target); err != nil {
+	file := targetFile{Target: target}
+	if err := authcontract.DecodeStrict(raw, &file); err != nil {
 		return err
 	}
+	// THE RETIRED NAMES ARE EXACT. encoding/json matched `"STACKVERSION"` or
+	// `"Env"` into the fields above as surely as the real names, and no CLI ever
+	// wrote those spellings.
+	key, err := retiredFieldSpeltOtherwise(raw)
+	if err != nil {
+		return err
+	}
+	if key != "" {
+		return fmt.Errorf("json: unknown field %q", key)
+	}
+	target.retired = retiredFields{stackVersion: file.StackVersion, env: file.Env}
 	for platform := range target.OAuth {
 		if err := validatePlatforms([]string{platform}); err != nil {
 			return fmt.Errorf("oauth: %w", err)
@@ -175,7 +240,98 @@ func checkProjectJSONKeys(blob []byte) error {
 	return nil
 }
 
+// retiredFieldSpeltOtherwise names a top-level key that encoding/json matches to
+// a retired field without spelling it exactly, or "" when there is none.
+//
+// WHICH KEYS MATCH IS ASKED OF encoding/json, NOT RE-IMPLEMENTED. It folds by
+// Unicode — `ſtackVersion` (U+017F) is `stackVersion` to it — and a
+// hand-written comparison is a second opinion that can disagree with the decoder
+// it guards. So each key is decoded alone, with its own value, into the same
+// shape the file was.
+func retiredFieldSpeltOtherwise(raw []byte) (string, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	// The opening brace: DecodeStrict has already refused anything but an object.
+	if _, err := d.Token(); err != nil {
+		return "", err
+	}
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return "", err
+		}
+		key, _ := token.(string)
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return "", err
+		}
+		if key == "stackVersion" || key == "env" {
+			continue
+		}
+		name, err := json.Marshal(key)
+		if err != nil {
+			return "", err
+		}
+		probe := targetFile{Target: &Target{}}
+		if err := json.Unmarshal([]byte("{"+string(name)+":"+string(value)+"}"), &probe); err != nil {
+			return "", err
+		}
+		if probe.StackVersion != nil || probe.Env != nil {
+			return key, nil
+		}
+	}
+	return "", nil
+}
+
+// sweepAbandonedRewrites removes the temporary files a rewrite that never
+// finished left in the committed directory.
+//
+// `palbase/` is the ONE visible directory and it is committed: a SIGKILL, a
+// panic or a laptop lid closed mid-write leaves a `.project.json-1234` there
+// that `git status` shows and `git add palbase/` commits. The deferred remove
+// inside WriteTarget cannot run for a process that is gone, so the next write
+// clears what the last one abandoned.
+//
+// ONLY WHAT IS CLEARLY ABANDONED: a file another process is writing RIGHT NOW
+// carries this same prefix, and removing it would make that rename fail. An
+// hour is far longer than any rewrite and far shorter than a checkout's life.
+// Failures are ignored on purpose — a leftover somebody else owns is not this
+// write's problem.
+func sweepAbandonedRewrites(dir, prefix string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < time.Hour {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
+}
+
 // WriteTarget records the project this checkout belongs to.
+//
+// THE FILE IS REPLACED WHOLE OR NOT AT ALL (FR-6). `os.WriteFile` truncated the
+// committed file when it opened it and wrote the new bytes after, so a write
+// that failed part way — a full disk, a quota, an I/O error; measured by capping
+// the file size — left a cut `project.json` that every later verb refused as
+// invalid JSON, and the migration that cut it said nothing. The bytes now go to
+// a temporary file beside it, are synced, and take its name in one rename:
+// whatever fails, the file is the old one or the new one.
+//
+// A FILE THIS PROCESS MAY NOT WRITE IS STILL NOT WRITTEN. A rename asks only the
+// directory, so it would replace a read-only `project.json` that `os.WriteFile`
+// refused — a file somebody locked on purpose; a Perforce workspace keeps every
+// file read-only until it is opened for edit. Opening it for writing, without
+// truncating, asks the question the old write asked and changes nothing.
+//
+// A SYMLINK STILL POINTS WHERE IT POINTED. The old write went through it; a
+// rename onto the link would swap it for a copy. So the file it resolves to is
+// the one replaced, from a temporary file in that file's own directory.
 func WriteTarget(t Target) error {
 	blob, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
@@ -188,7 +344,92 @@ func WriteTarget(t Target) error {
 	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(projectPath(), append(blob, '\n'), 0o644)
+	return replaceFileAtomically(projectPath(), append(blob, '\n'))
+}
+
+// replaceFileAtomically puts blob at dest whole or not at all, and is the ONE
+// way this package rewrites a file somebody committed.
+//
+// It is a function rather than WriteTarget's body because WriteTarget is not
+// the only writer of `palbase/project.json`: `palbase link` publishes the
+// contract from its stage (publishProjectContract, link_artifacts.go), and that
+// path wrote with `os.WriteFile` while this one was made atomic — the same cut
+// file, through the verb that writes it most often. A guarantee that holds in
+// one writer and not its neighbour is not a guarantee.
+func replaceFileAtomically(dest string, blob []byte) error {
+	// A SYMLINK STILL POINTS WHERE IT POINTED. The old write went through it; a
+	// rename onto the link would swap it for a copy. So the file it resolves to
+	// is the one replaced, from a temporary file in that file's own directory.
+	if resolved, evalErr := filepath.EvalSymlinks(dest); evalErr == nil {
+		dest = resolved
+	}
+	// THE MODE IS THE FILE'S OWN, not the temporary file's. `os.CreateTemp` makes
+	// 0600 and `os.WriteFile` only applies a mode when it CREATES, so a file
+	// somebody chmodded — or a new one under a strict umask — would otherwise
+	// come back with a mode nobody chose. A file that does not exist yet gets
+	// 0644, which is what `os.WriteFile` created it with.
+	mode := os.FileMode(0o644)
+	// A FILE THIS PROCESS MAY NOT WRITE IS STILL NOT WRITTEN. A rename asks only
+	// the directory, so it would replace a read-only file that `os.WriteFile`
+	// refused — one somebody locked on purpose; a Perforce workspace keeps every
+	// file read-only until it is opened for edit. Opening it for writing, without
+	// truncating, asks the question the old write asked and changes nothing.
+	existing, err := os.OpenFile(dest, os.O_WRONLY, 0)
+	switch {
+	case err == nil:
+		if info, statErr := existing.Stat(); statErr == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := existing.Close(); err != nil {
+			return err
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	prefix := "." + filepath.Base(dest) + "-"
+	sweepAbandonedRewrites(filepath.Dir(dest), prefix)
+	tmp, err := os.CreateTemp(filepath.Dir(dest), prefix+"*")
+	if err != nil {
+		// THE REFUSAL NAMES THE FILE THE CALLER ASKED FOR. This process's temporary
+		// file is an implementation detail, and `open palbase/.project.json-9590:
+		// permission denied` sends somebody looking for a path that does not exist.
+		// The path is replaced rather than the error wrapped, so the message is the
+		// one `os.WriteFile` gave and `errors.Is(err, fs.ErrPermission)` still holds.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return &os.PathError{Op: pathErr.Op, Path: dest, Err: pathErr.Err}
+		}
+		return fmt.Errorf("write %s: %w", dest, err)
+	}
+	name := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(name)
+		}
+	}()
+	if _, err := tmp.Write(blob); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if err := tmp.Sync(); err != nil {
+		return errors.Join(err, tmp.Close())
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, mode); err != nil {
+		return err
+	}
+	// THE LAST ACT IS A RENAME, and that is what makes the file whole or old and
+	// never cut: rename(2) replaces the name in one step. A copy here would pass
+	// every test that caps the SIZE of the write — the failure would land in the
+	// temporary file — and bring back exactly the defect this function exists to
+	// remove, so a gate measures this line (TestTheLastActOfAReplacementIsARename).
+	if err := os.Rename(name, dest); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }
 
 // ReadTarget returns the linked stack, or an error naming the command that
