@@ -492,3 +492,25 @@ func TestPushRefusalNamesTheRunDatabaseReasonInFull(t *testing.T) {
 	require.Empty(t, out.String(), "a retired refusal code is still treated as readable")
 	require.True(t, strings.HasPrefix(refused.Error(), "push refused (422): "), refused.Error())
 }
+
+// THE READABLE SET IS CLOSED (review-T033).
+//
+// Membership decides whether a stack's refusal is printed as itself or as
+// escaped JSON, and a code added to the map that no server sends — or a real one
+// dropped from it — left every push test green. Each member is a code the
+// stack's push handler answers with a reason meant to be read; changing the set
+// now means changing this list, on purpose.
+func TestReadableRefusalsAreExactlyTheCodesThatCarryTheirReason(t *testing.T) {
+	var got []string
+	for code, readable := range readableRefusals {
+		require.True(t, readable, "%s is listed as unreadable — a code is either readable or absent", code)
+		got = append(got, code)
+	}
+	require.ElementsMatch(t, []string{
+		"tests_failed",              // the failing assertion
+		"tests_timed_out",           // which suite ran out of time
+		"schema_incompatible",       // the objects to split a migration on
+		"candidate_failed",          // why the candidate never answered
+		"test_database_unavailable", // the unwired process (D-14)
+	}, got)
+}

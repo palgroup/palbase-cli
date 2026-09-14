@@ -52,3 +52,35 @@ func TestProjectJSONRefusesAnEnvironmentKey(t *testing.T) {
 	// NEGATİF KONTROL: izinli anahtarlar geçer.
 	require.NoError(t, checkProjectJSONKeys([]byte(`{"project":"prj_1","name":"shop","url":"https://shop.example"}`)))
 }
+
+// THE WRITER IS WHAT IS GATED, NOT ONLY THE CHECK (review-T014).
+//
+// Every field Target has today is an allowed key, so no real Target reaches the
+// refusal — and deleting the call from WriteTarget left the whole package green.
+// The allowlist is narrowed here instead (by one key, so the map order of the
+// others cannot decide which key is named), and the one production writer has
+// to refuse on its own, before it writes anything.
+func TestProjectJSONWriterRefusesAKeyTheAllowlistDoesNotName(t *testing.T) {
+	inScratchCheckout(t)
+	prev := projectJSONKeys
+	var narrowed []string
+	for _, key := range prev {
+		if key != "name" {
+			narrowed = append(narrowed, key)
+		}
+	}
+	require.Len(t, narrowed, len(prev)-1, "the allowlist no longer names \"name\" — pick another key to narrow")
+	projectJSONKeys = narrowed
+	t.Cleanup(func() { projectJSONKeys = prev })
+	_, dirBefore := os.Stat(RootDir())
+
+	err := WriteTarget(Target{URL: "https://shop.example", Project: "prj_1", Name: "shop"})
+	require.ErrorContains(t, err, `"name"`)
+	require.ErrorContains(t, err, "not a key a committed project record may hold")
+	_, statErr := os.Stat(projectPath())
+	require.ErrorIs(t, statErr, os.ErrNotExist, "a refused record was written anyway")
+	if os.IsNotExist(dirBefore) {
+		_, statErr = os.Stat(RootDir())
+		require.ErrorIs(t, statErr, os.ErrNotExist, "the refusal came after the directory was created")
+	}
+}
