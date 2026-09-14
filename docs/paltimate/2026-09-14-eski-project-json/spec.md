@@ -81,6 +81,9 @@ değildir:
   - Seçim yazılıp ardından dosya yazımı düşerse dosya adres taşıyan eski hâlindedir. Çözümleyici bu dosyada seçimi
     okumaz (`Resolve`un `legacy` dalı), yani önceden yazılmış seçim zararsızdır. FR-6'nın "makine durumu değişmez"
     hükmünün tek istisnası budur ve bir testle ölçülür.
+  - Adres göçü yazmaya başlayıp düşerse (seçimde ya da dosyada), aynı koşuda emekli alan temizliği koşmaz. Böylece "dosya
+    bayt bayt aynı, satır yok" hükmü her durumda tutar. `MigrateLegacyTarget`in hata döndüren yolu kalmaz: hiçbir göç
+    hatası dosyayı yarım bırakmaz ve fiil her durumda koşar.
 - **FR-7** WHEN adres → kimlik göçü dosyayı yazdığında THEN yazılan dosya SHALL emekli alanları taşımaz (`WriteTarget`
   `Target`i serileştirir; emekli değerler dışa açık olmayan bir alanda tutulur ve serileştirilmez).
 - **FR-8** IF emekli alan taşıyan bir dosya `DecodeStrict`in yapısal kurallarından birini çiğnerse (yinelenen anahtar,
@@ -118,6 +121,7 @@ değildir:
 | `internal/backend/environments.go` | `MigrateLegacyTarget` emekli alan temizliği; `env` düşer, taşınmaz | FR-4, FR-5, FR-6 |
 | `internal/backend/target_test.go` | okuma yolu kapıları | FR-1, FR-2, FR-3, FR-7, FR-8, FR-9 |
 | `internal/backend/migration_selection_test.go` | göç kapıları | FR-4, FR-5, FR-6 |
+| `internal/backend/target_write_unix_test.go` | kısmi yazım testi (`//go:build unix`, `RLIMIT_FSIZE`). Paket testleri Windows için de derlendiği için ayrı dosyada | FR-6 |
 | `docs/paltimate/2026-09-14-eski-project-json/spec.md` | bu belge | — |
 
 ## Kapılar ve kanıt
@@ -152,8 +156,9 @@ değildir:
       yok (FR-6).
     - Adres göçü, ürün çözülüyor: `{url(bulut), env:"main"}` → dosya `{project, name}`, ortam adresten, satır `"main"`i
       tırnaklı adlandırır (FR-5).
-    - Adres göçü, ürün çözülüyor, `project.json` salt okunur `{url(bulut), stackVersion}` → dosya bayt bayt aynı, seçim
-      yok, satır yok, fiil koşar (FR-6). Bugün fiil `open palbase/project.json: permission denied` ile düşüyor.
+    - Adres göçü, ürün çözülüyor, `project.json` salt okunur `{url(bulut), stackVersion}` → dosya bayt bayt aynı, satır yok,
+      fiil koşar (FR-6). Seçim FR-6'nın tek istisnası gereği yazılmış olabilir; sonraki `Resolve` `legacy` döner ve seçimi
+      okumaz. (Tur 3 öncesi fiil `open palbase/project.json: permission denied` ile düşüyordu.)
     - `{project, env:""}` → dosyada `env` yok, satır `("")` (FR-5; boş değer de taşınmış bir alandır).
     - 100 KiB'lık `env` değeri → satırdaki değer 64 rune'da kırpılmış (FR-5).
     - Adres göçü satırı: 100 KiB'lık ve kontrol karakterli `env` → satır 1024 bayttan kısa, ham ESC yok, 65. rune yok (FR-5).
@@ -183,7 +188,8 @@ değildir:
   bulgu 2). Bu testte `palbase-002` kaynaklı bir kırmızı son kapıda atlanmaz: test tek başına yeniden koşulur ve
   sonucu yazılır. Yerel Docker daemon kapalıysa bu oturum makine geneli Docker'ı başlatmaz. O durumda testin kanıtı
   `ci.yml`nin main'deki GitHub koşusudur: etiketten önce günlükten `TestStartServesAndStopCleansUp`in `--- PASS` ile
-  koştuğu okunur. `SKIP` kanıt sayılmaz.
+  koştuğu okunur. `SKIP` kanıt sayılmaz. Daemon açıksa test atlanmaz (`-skip` yok) ve tam kapıda koşar. Testin kendi compose yığınını
+  başlatıp durdurması daemon'a dokunmak sayılmaz; daemon'u başlatmak ya da durdurmak yasaktır.
 - **Canlı kanıt (yayından sonra):**
   - `brew upgrade palbase` → sürüm satırı `0.67.2`.
   - REPRO'nun iki dosyası geçici dizinde `palbase status` ile okuma hatası vermez.
@@ -260,3 +266,11 @@ değildir:
   - **MINOR-4:** boş `env`in RED istisnası.
   - **MINOR-5:** "hiçbir göç hatası dosyayı yarım bırakmaz" kuralının kapısı, yazılamaz makine durumu testi.
   - Uygulama tur 4 taze bir uygulayıcıya gidiyor (düzeltme döngüsünün 4. turu).
+- 2026-09-14 · tur 4 uygulayıcısının (`cli-fix-b`) üç sorusu üzerine netleştirmeler:
+  - Salt okunur `project.json` ile ürünü çözülen adres göçü maddesi yeni FR-6'yla çelişiyordu ("seçim yok"). Madde
+    düzeltildi: seçim FR-6'nın tek istisnası gereği yazılmış olabilir ve okunmaz.
+  - Adres göçü düşerse aynı koşuda temizlik koşmaz; `MigrateLegacyTarget`in hata döndüren yolu kalmaz. Bu, FR-6'ya
+    yazıldı.
+  - Kısmi yazım testi `//go:build unix` taşıyan ayrı dosyada (`target_write_unix_test.go`), çünkü paket testleri Windows
+    için de derleniyor. Dosya haritasına eklendi.
+  - Docker daemon açıkken e2e testi atlanmaz.
