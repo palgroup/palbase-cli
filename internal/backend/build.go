@@ -269,7 +269,12 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// below can fail the build. The types describe db/*.ts and nothing else —
 	// a controller with a bad decorator does not make them wrong, and the moment
 	// somebody most needs their editor working is while they are fixing one.
-	if err := landEnvTypes(buildRoot, cwd, out); err != nil {
+	// NO NAMES ARE READ ON THIS PATH YET, and the lander is told so rather than
+	// left to assume: a render that carries no stack names must not replace a
+	// file that has them (FR-003a). The names still come from the separate
+	// `palbase-stack.d.ts` round below, and when the single render takes over
+	// this argument becomes what the stack (or this machine's cache) answered.
+	if err := landEnvTypes(buildRoot, cwd, checkoutStackNames{Source: namesUnavailable}, out); err != nil {
 		return err
 	}
 
@@ -329,13 +334,133 @@ func landStackTypes(ctx context.Context, cwd string, out io.Writer) {
 		stackTypesFile, len(names.Secrets), len(names.Flags), len(names.Buckets))
 }
 
+// ── THE BOUNDARIES OF THE GENERATED FILE ────────────────────────────────────
+//
+// The renderer wraps each of the two blocks it writes — the schema's
+// `@palbase/backend/env` block and the stack's `@palbase/backend/stack` block —
+// in a fixed marker, and this is the CLI's copy of those four strings.
+//
+// They live in two repositories with no compiler between them, so
+// `TestPreserveStackBlockMarkersAreTheRenderers` reads the SDK's own source and
+// fails the moment the two spellings drift. Splicing on a boundary the
+// generated file does not have is how a file gets half a declaration.
+const (
+	palbaseEnvBlockBegin   = "// palbase:env:begin"
+	palbaseEnvBlockEnd     = "// palbase:env:end"
+	palbaseStackBlockBegin = "// palbase:stack:begin"
+	palbaseStackBlockEnd   = "// palbase:stack:end"
+)
+
+// markedSpan locates the ONE block text carries between begin and end, markers
+// included: [start, stop).
+//
+// EXACTLY ONE OF EACH, or this is not a block anything may act on. A file with
+// two begin markers has been hand-edited or concatenated, and guessing which
+// pair is the real one is how a splice eats half a declaration.
+func markedSpan(text, begin, end string) (int, int, error) {
+	if n := strings.Count(text, begin); n != 1 {
+		return 0, 0, fmt.Errorf("%d %q markers, exactly one expected", n, begin)
+	}
+	if n := strings.Count(text, end); n != 1 {
+		return 0, 0, fmt.Errorf("%d %q markers, exactly one expected", n, end)
+	}
+	start := strings.Index(text, begin)
+	stop := strings.Index(text, end)
+	if stop < start+len(begin) {
+		return 0, 0, fmt.Errorf("%q comes before %q", end, begin)
+	}
+	return start, stop + len(end), nil
+}
+
+// preserveStackBlock rewrites the env block of the file already in the checkout
+// and leaves every other byte — the stack block above all — exactly where it
+// was (C-8, FR-003a).
+//
+// `existing` is the file on disk; `envBlock` is the fresh render's env block,
+// markers included. THE `.d.ts` IS NOT PARSED: both ends are written by this
+// product, so the boundaries are known, and a TypeScript parser here would be a
+// second interpreter of a file the generator already knows the shape of.
+func preserveStackBlock(existing, envBlock string) (string, error) {
+	blockStart, blockStop, err := markedSpan(envBlock, palbaseEnvBlockBegin, palbaseEnvBlockEnd)
+	if err != nil {
+		return "", fmt.Errorf("the new env block: %w", err)
+	}
+	if blockStart != 0 || blockStop != len(envBlock) {
+		return "", errors.New("the new env block carries text outside its own markers")
+	}
+	if strings.Contains(envBlock, palbaseStackBlockBegin) || strings.Contains(envBlock, palbaseStackBlockEnd) {
+		return "", errors.New("the new env block carries a stack marker — splicing it would leave two stack blocks in one file")
+	}
+	envStart, envStop, err := markedSpan(existing, palbaseEnvBlockBegin, palbaseEnvBlockEnd)
+	if err != nil {
+		return "", fmt.Errorf("%s: env block: %w", EnvTypesPath(), err)
+	}
+	stackStart, stackStop, err := markedSpan(existing, palbaseStackBlockBegin, palbaseStackBlockEnd)
+	if err != nil {
+		return "", fmt.Errorf("%s: stack block: %w", EnvTypesPath(), err)
+	}
+	if envStart < stackStop && stackStart < envStop {
+		return "", fmt.Errorf("%s: the env and stack blocks overlap", EnvTypesPath())
+	}
+	return existing[:envStart] + envBlock + existing[envStop:], nil
+}
+
+// keepStackBlock lands a fresh render's env block in the file already on disk,
+// carrying that file's stack block over BYTE FOR BYTE.
+//
+// Three shapes reach it, and only one of them splices:
+//   - both sides marked → the splice (preserveStackBlock);
+//   - neither marked → an older renderer writing what it always wrote, and
+//     there is no stack block to keep;
+//   - the render unmarked while the file on disk is not → a DOWNGRADED
+//     @palbase/backend, whose output carries no stack block at all. Writing it
+//     would drop the one this file has, so it is refused by name.
+func keepStackBlock(existing, fresh string) (string, error) {
+	freshStart, freshStop, freshErr := markedSpan(fresh, palbaseEnvBlockBegin, palbaseEnvBlockEnd)
+	existingMarked := strings.Contains(existing, palbaseEnvBlockBegin) ||
+		strings.Contains(existing, palbaseStackBlockBegin)
+
+	if freshErr != nil {
+		if existingMarked {
+			return "", fmt.Errorf("the installed %s renders no marked env block (%w), and writing its "+
+				"output would drop the stack block %s carries", backendPkg, freshErr, EnvTypesPath())
+		}
+		return fresh, nil
+	}
+	if !existingMarked {
+		// A file written before the single-file renderer: it carries the schema
+		// and nothing else, so there is no stack block in it to keep.
+		return fresh, nil
+	}
+	return preserveStackBlock(existing, fresh[freshStart:freshStop])
+}
+
+// whyNoStackNames turns the reason no names were read into the half-sentence
+// the empty-block line prints. ONE LINE: errors.Join separates with newlines,
+// and a person reading a build log gets one line per fact.
+func whyNoStackNames(why error) string {
+	if why == nil {
+		return "this run read no stack names"
+	}
+	return strings.ReplaceAll(why.Error(), "\n", "; ")
+}
+
 // landEnvTypes copies the generated palbase-env.d.ts out of the staging tree and
 // into the checkout, where the project's tsconfig can see it.
 //
 // A no-op in the two cases that are not mistakes: the project declares no
 // database (nothing was generated), or staging fell back to the live tree
 // (generation already wrote there).
-func landEnvTypes(buildRoot, cwd string, out io.Writer) error {
+//
+// AND IT NEVER NARROWS THE STACK BLOCK. The renderer writes both blocks, so a
+// run that could read no names at all would otherwise replace a file typing
+// this project's secrets, flags, buckets and roles with one that types none of
+// them — every `Secrets.get()` in the codebase turning into a compile error
+// that reads "your code is wrong" rather than "the stack could not be asked"
+// (FR-003a, NFR-003). With no names, only the bytes between the env markers
+// move. With names — from the stack or from this machine's cache — the render
+// is the truth, and an empty set it reports is a real answer.
+func landEnvTypes(buildRoot, cwd string, names checkoutStackNames, out io.Writer) error {
 	if buildRoot == cwd {
 		return nil
 	}
@@ -352,7 +477,32 @@ func landEnvTypes(buildRoot, cwd string, out io.Writer) error {
 		return err
 	}
 	dest := filepath.Join(cwd, rel)
-	if prev, rerr := os.ReadFile(dest); rerr == nil && bytes.Equal(prev, body) {
+	prev, rerr := os.ReadFile(dest)
+	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", rel, rerr)
+	}
+
+	if names.Source == namesUnavailable {
+		if rerr != nil {
+			// NOTHING ON DISK TO KEEP. An empty stack block is the right answer
+			// in a checkout that never had one — and the line says why it is
+			// empty, because a file that quietly types nothing is worse than a
+			// file that says it could not be told what to type.
+			fmt.Fprintf(out, "  %s: stack block EMPTY — %s\n", rel, whyNoStackNames(names.Why))
+		} else {
+			kept, keepErr := keepStackBlock(string(prev), string(body))
+			if keepErr != nil {
+				// NOT REFRESHED RATHER THAN NARROWED, and never fatal: a build
+				// that works offline (NFR-004) must not pay for it with types
+				// nobody asked to lose.
+				fmt.Fprintf(out, "  %s not refreshed — %v\n", rel, keepErr)
+				return nil
+			}
+			body = []byte(kept)
+		}
+	}
+
+	if rerr == nil && bytes.Equal(prev, body) {
 		fmt.Fprintf(out, "✓ %s (unchanged)\n", rel)
 		return nil
 	}
