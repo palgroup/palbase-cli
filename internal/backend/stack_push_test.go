@@ -435,6 +435,54 @@ func TestPushNamesWhatMadeThePlanStale(t *testing.T) {
 	}
 }
 
+// A PLAN MEASURED ON ANOTHER ENVIRONMENT IS STALE (X-7, FR-001).
+//
+// Measured on 0.67.1: `palbase plan --env main` was written, `palbase push
+// --env staging` applied it, and the guard that exists for exactly this never
+// fired — `requirePlan` started from the SAVED plan and never filled the
+// target the push had resolved.
+func TestPushRefusesAPlanMeasuredOnAnotherEnvironment(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	pushableCheckout(t, dir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case wellKnownPath:
+			_, _ = w.Write([]byte(`{"hosting":"project","sdk_version":"37.0.2"}`))
+		default:
+			_, _ = w.Write([]byte(`{"in_sync":true,"changes":[],"destructive":[]}`))
+		}
+	}))
+	defer srv.Close()
+	asCloudProject(t, srv.URL)
+
+	p := PlanFile{
+		Version:          1,
+		Target:           PlanTarget{URL: "https://mainref000.palbase.studio", Ref: "mainref000"},
+		BundleDigest:     strings.Repeat("a", 64),
+		SDK:              PlanSDK{Running: "37.0.2", Target: installedBackendVersion(dir)},
+		SchemaPlanDigest: strings.Repeat("b", 64),
+	}
+	p.Fingerprint = Fingerprint(p.BundleDigest, p.SDK.Running, p.SDK.Target, p.SchemaPlanDigest)
+	if err := WritePlanFile(dir, p); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runStackPush(context.Background(), Target{URL: srv.URL},
+		Credentials{Value: "k", Kind: KindKey}, false, false, &out)
+	if err == nil {
+		t.Fatal("a plan measured on another environment was applied")
+	}
+	for _, want := range []string{"plan is stale", "target changed mainref000 → ", "palbase plan"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("stale reason %q not named: %v", want, err)
+		}
+	}
+}
+
 // PLATFORMUN REDDİ KIRPILMADAN BASILIR (FR-049, FR-051).
 //
 // Ölçülmüş ders: aletin hata çıktısını gövde kırpıcısından geçirmek teşhisi

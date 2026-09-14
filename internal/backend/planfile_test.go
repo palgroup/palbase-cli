@@ -97,3 +97,36 @@ func TestFingerprintMatchesTheServersVector(t *testing.T) {
 			"  got  %s\n  want %s (cloud/platform/server/modules/tenants/migrate.test.ts)", got, want)
 	}
 }
+
+// A PLAN MEASURES ONE ENVIRONMENT (X-7, FR-001). The fingerprint does not carry
+// the address, so this reason is the only thing that stops a plan measured on
+// `main` from being applied to `staging`.
+func TestStaleReasonsNamesATargetChange(t *testing.T) {
+	saved := PlanFile{Target: PlanTarget{URL: "https://mainref000.palbase.studio", Ref: "mainref000"}}
+	current := saved
+	current.Target = PlanTarget{URL: "https://stagref000.palbase.studio", Ref: "stagref000"}
+	got := StaleReasons(saved, current)
+	if len(got) != 1 || got[0] != "target changed mainref000 → stagref000" {
+		t.Fatalf("a plan of main applied to staging must name the change: %v", got)
+	}
+}
+
+// THE SAME ENVIRONMENT SPELLED DIFFERENTLY IS NOT A CHANGE (FR-002).
+func TestStaleReasonsTreatsCaseAndATrailingSlashAsTheSameTarget(t *testing.T) {
+	saved := PlanFile{Target: PlanTarget{URL: "https://ABC12345M.palbase.studio/", Ref: "abc12345m"}}
+	current := saved
+	current.Target = PlanTarget{URL: "https://abc12345m.palbase.studio", Ref: "abc12345m"}
+	if got := StaleReasons(saved, current); len(got) != 0 {
+		t.Fatalf("the same environment spelled differently is not a change: %v", got)
+	}
+}
+
+// A PLAN THAT RECORDED NO TARGET CANNOT PASS AS THIS ONE (FR-003).
+func TestStaleReasonsNamesAnUnrecordedTarget(t *testing.T) {
+	saved := PlanFile{}
+	current := PlanFile{Target: PlanTarget{URL: "https://stagref000.palbase.studio", Ref: "stagref000"}}
+	got := StaleReasons(saved, current)
+	if len(got) != 1 || got[0] != "target changed (unrecorded) → stagref000" {
+		t.Fatalf("a plan that recorded no target must not pass as this one: %v", got)
+	}
+}

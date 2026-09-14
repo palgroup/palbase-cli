@@ -55,6 +55,11 @@ func requirePlan(ctx context.Context, dir, bundleRoot string, target Target, cre
 		return PlanFile{}, err
 	}
 	current := saved
+	// THE ADDRESS THIS PUSH RESOLVED, in the shape `palbase plan` records it
+	// (plan.go). Without this line the comparison below compared the saved
+	// target with itself, so "target changed" could never fire and a plan
+	// measured on one environment applied to another (X-7, measured on 0.67.1).
+	current.Target = PlanTarget{URL: target.URL, Ref: refOfURL(target.URL)}
 	current.SDK.Target = installedBackendVersion(dir)
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	running, perr := projectSDKVersion(probeCtx, target, cred)

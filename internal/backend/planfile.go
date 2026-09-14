@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -195,8 +196,31 @@ func StaleReasons(saved, current PlanFile) []string {
 	if saved.SchemaPlanDigest != current.SchemaPlanDigest {
 		out = append(out, "schema plan changed")
 	}
-	if saved.Target.URL != current.Target.URL {
-		out = append(out, "target changed")
+	// THE PLAN MEASURED ONE ENVIRONMENT. The fingerprint does not carry the
+	// address, so this is the only thing that stops a plan measured on `main`
+	// from being applied to `staging`.
+	if !sameTargetAddress(saved.Target.URL, current.Target.URL) {
+		out = append(out, fmt.Sprintf("target changed %s → %s", targetLabel(saved.Target), targetLabel(current.Target)))
 	}
 	return out
+}
+
+// sameTargetAddress compares two plan addresses the way a host is compared:
+// letter case and a trailing slash name the same environment.
+func sameTargetAddress(a, b string) bool {
+	norm := func(s string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(s), "/")) }
+	return norm(a) == norm(b)
+}
+
+// targetLabel names an environment in a stale reason: the ref the plan
+// recorded, the address when it recorded none, and says so when it recorded
+// neither.
+func targetLabel(t PlanTarget) string {
+	switch {
+	case strings.TrimSpace(t.Ref) != "":
+		return t.Ref
+	case strings.TrimSpace(t.URL) != "":
+		return t.URL
+	}
+	return "(unrecorded)"
 }
