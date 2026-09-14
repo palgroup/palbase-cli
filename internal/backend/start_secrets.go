@@ -31,31 +31,49 @@ import (
 	"time"
 )
 
-// pullSecrets copies the linked project's secrets into the local stack.
+// pullSecrets copies the secrets of the environment this checkout RESOLVES TO
+// into the local stack.
 //
-// It never fails a start: the stack is up and usable either way, and a project
-// that cannot be reached right now is a reason to say so, not to refuse the
-// thing that already worked.
+// It never fails a start: the stack is up and usable either way, and an
+// environment that cannot be reached right now is a reason to say so, not to
+// refuse the thing that already worked.
 func pullSecrets(ctx context.Context, group string, local Target, out io.Writer) {
-	source, err := readLinkedProject()
-	if err != nil || source.Project == "" {
-		// NOTHING TO PULL FROM, and this is the ordinary case today rather than
-		// an edge one: a checkout linked to an ADDRESS is pointed at one stack,
-		// and that stack is the one that just started. The source of a pull is a
-		// project GROUP with other environments in it, which is a cloud
-		// concept — `Target.Project` is written by the cloud link, and until
-		// that lands nothing in production sets it.
+	record, err := readLinkedProject()
+	if err != nil {
+		return
+	}
+	if record.Project == "" {
+		// A CHECKOUT LINKED TO AN ADDRESS is pointed at one stack, and that
+		// stack is the one that just started: there is no other environment to
+		// pull from.
 		//
 		// Said rather than skipped: a feature that quietly does nothing is a
 		// feature nobody can tell is missing.
-		if err == nil && source.URL != "" {
+		if record.URL != "" {
 			fmt.Fprintln(out, "  secrets: this checkout is linked to an address, so there is no environment to pull from")
 		}
 		return
 	}
-	sourceCred, _, err := Credential(source.URL)
+	// THE ENVIRONMENT EVERY VERB WOULD ACT ON. A project is several
+	// environments; the one a start pulls from is chosen by the same rule that
+	// chooses where `push` and `secret` go, and the line below NAMES it —
+	// copying one environment's credentials onto a laptop without saying which
+	// is how a production key lands where nobody noticed.
+	//
+	// The committed record carries a PROJECT, not an address, and this used to
+	// ask for a credential for the empty one: measured on 0.67.1 a start in a
+	// project-bound checkout printed "secrets: not pulled — no credential for
+	// todoapp" and pulled nothing, ever.
+	resolved, err := resolveProjectEnvironment(ctx, record)
 	if err != nil {
-		fmt.Fprintf(out, "  secrets: not pulled — no credential for %s\n", source.Describe())
+		fmt.Fprintf(out, "  secrets: not pulled — %v\n", err)
+		return
+	}
+	from := resolved.Describe()
+	source := Target{URL: resolved.URL, Project: record.Project, Name: record.Name}
+	sourceCred, _, err := Credential(resolved.URL)
+	if err != nil {
+		fmt.Fprintf(out, "  secrets: not pulled from %s — %v\n", from, err)
 		return
 	}
 	localCred, _, err := Credential(local.URL)
@@ -65,7 +83,7 @@ func pullSecrets(ctx context.Context, group string, local Target, out io.Writer)
 
 	names, err := secretNames(ctx, source, sourceCred)
 	if err != nil {
-		fmt.Fprintf(out, "  secrets: not pulled — %v\n", err)
+		fmt.Fprintf(out, "  secrets: not pulled from %s — %v\n", from, err)
 		return
 	}
 	if len(names) == 0 {
@@ -103,7 +121,7 @@ func pullSecrets(ctx context.Context, group string, local Target, out io.Writer)
 	// The names are not printed, let alone the values: the count is what an
 	// operator needs, and a list of every credential a project holds is a list
 	// worth reading over somebody's shoulder.
-	line := fmt.Sprintf("  secrets: %d pulled", pulled)
+	line := fmt.Sprintf("  secrets: %d pulled from %s", pulled, from)
 	if kept > 0 {
 		line += fmt.Sprintf(" · %d kept (changed here since)", kept)
 	}
