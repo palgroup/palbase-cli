@@ -141,13 +141,51 @@ func decodeTarget(raw []byte, target *Target) error {
 	return nil
 }
 
-// WriteTarget records the project this checkout belongs to.
-func WriteTarget(t Target) error {
-	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
+// projectJSONKeys is EVERY key `palbase/project.json` may carry, by name (FR-013).
+//
+// AN ALLOWLIST, NOT A BAN LIST. The file is committed, and an environment
+// reference in it is how a colleague pulls your branch and pushes to your
+// staging (Target.Project's comment). A list of forbidden names ("env",
+// "environment") misses the next spelling; a list of permitted ones refuses
+// every field nobody decided belongs in a committed file — including one added
+// to Target tomorrow for something machine-local.
+var projectJSONKeys = []string{"oauth", "url", "project", "name", "insecure", "selfHost"}
+
+// checkProjectJSONKeys refuses a serialised project record carrying a key
+// outside projectJSONKeys, and names the key.
+func checkProjectJSONKeys(blob []byte) error {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(blob, &keys); err != nil {
 		return err
 	}
+	for key := range keys {
+		allowed := false
+		for _, name := range projectJSONKeys {
+			if key == name {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("%s would carry %q, which is not a key a committed project record may hold — "+
+				"an environment is resolved per call and remembered on this machine, never committed",
+				projectPath(), key)
+		}
+	}
+	return nil
+}
+
+// WriteTarget records the project this checkout belongs to.
+func WriteTarget(t Target) error {
 	blob, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
+		return err
+	}
+	// REFUSED BEFORE ANYTHING IS WRITTEN — the directory included.
+	if err := checkProjectJSONKeys(blob); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(RootDir(), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(projectPath(), append(blob, '\n'), 0o644)
