@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -175,6 +177,107 @@ func TestAnOldDeclaredStackVersionDoesNotOverrideTheInstalledSDK(t *testing.T) {
 		t.Errorf("stackVersion = %q, want 39 from the INSTALLED SDK — a committed field "+
 			"that outranks the installed package is how the banner learned to lie", got)
 	}
+}
+
+// linkedByAnOlderCLI writes the committed file exactly as an older CLI left it —
+// by hand, because the fields it carries no longer exist on Target — and moves
+// into that checkout.
+func linkedByAnOlderCLI(t *testing.T, raw string) string {
+	t.Helper()
+	inScratchCheckout(t)
+	root, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(RootDir(), 0o755))
+	require.NoError(t, os.WriteFile(projectPath(), []byte(raw), 0o644))
+	return root
+}
+
+// A CHECKOUT LINKED BEFORE THE FIELDS RETIRED STILL READS (FR-1, FR-2).
+//
+// `1fcefcb` took `env` and `stackVersion` off Target, and the strict decoder
+// then refused every file that still carried one — by name, on every verb:
+// `read palbase/project.json: json: unknown field "stackVersion"`. Measured on
+// a live checkout with the installed 0.67.1. The migration that exists to
+// rewrite such a file reads it through the same decoder, so it never reached
+// one.
+//
+// The test above already held an old file and stayed green through all of it:
+// it calls `stackVersion()`, which never reads the file. The read path was the
+// blind spot, so the read path is what this measures.
+func TestACheckoutLinkedBeforeTheFieldsRetiredStillReads(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, url, project string
+	}{
+		{"stackVersion", `{"url":"https://8bbwb2pbm.palbase.studio","stackVersion":"39"}`,
+			"https://8bbwb2pbm.palbase.studio", ""},
+		{"env", `{"project":"prd_example","env":"main"}`, "", "prd_example"},
+		{"both", `{"url":"https://mu0028.palbase.studio","project":"prd_a","env":"staging","stackVersion":"38"}`,
+			"https://mu0028.palbase.studio", "prd_a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linkedByAnOlderCLI(t, tc.raw)
+
+			got, err := readLinkedProject()
+			require.NoError(t, err, "a file an older CLI wrote is unreadable")
+			require.Equal(t, tc.url, got.URL)
+			require.Equal(t, tc.project, got.Project)
+
+			// EVERY VERB ALSO READS THROUGH ReadTarget. A project identity has no
+			// address and saying so is that function's answer to every such file;
+			// what must be gone is the decode failure in front of it.
+			_, err = ReadTarget()
+			if tc.url != "" {
+				require.NoError(t, err, "ReadTarget refused a file an older CLI wrote")
+			} else {
+				require.ErrorContains(t, err, "names a project, not an address")
+			}
+		})
+	}
+}
+
+// A FIELD NO TARGET EVER HAD IS STILL REFUSED BY NAME (FR-3).
+//
+// Tolerating the two retired fields must not become tolerating everything: a
+// misspelt key in a committed file is a finding, and a reader that swallows it
+// links nothing while saying nothing. The second case is the one that matters —
+// a file that DOES carry a retired field goes down the path that sets those
+// aside, and that path must not relax the rule for whatever is left.
+func TestAFieldNoTargetEverHadIsStillRefused(t *testing.T) {
+	for _, tc := range []struct{ name, raw, refusal string }{
+		{"alone", `{"url":"https://mu0028.palbase.studio","bogus":1}`, `unknown field "bogus"`},
+		{"beside a retired field", `{"url":"https://mu0028.palbase.studio","stackVersion":"39","bogus":1}`,
+			`unknown field "bogus"`},
+		// Every CLI that wrote these wrote a string; any other shape was never a
+		// Target either.
+		{"a retired field of another shape", `{"url":"https://mu0028.palbase.studio","stackVersion":39}`,
+			"stackVersion"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linkedByAnOlderCLI(t, tc.raw)
+			_, err := readLinkedProject()
+			require.ErrorContains(t, err, tc.refusal)
+		})
+	}
+}
+
+// A REWRITTEN FILE CARRIES NO RETIRED FIELD (FR-7).
+//
+// The address migration writes Target back out, and the retired values ride on
+// the Target it read. They are held where serialisation cannot see them; this
+// measures the bytes that land in the repository rather than that intention.
+func TestTheAddressMigrationWritesNoRetiredFieldBack(t *testing.T) {
+	linkedByAnOlderCLI(t, `{"url":"https://mu0028.palbase.studio","env":"staging","stackVersion":"39"}`)
+	resolverRig(t, twoEnvs)
+	cloudAddresses(t, true)
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	written, err := os.ReadFile(projectPath())
+	require.NoError(t, err)
+	require.NotContains(t, string(written), "stackVersion", "the rewritten file still carries a retired field")
+	require.NotContains(t, string(written), `"env"`, "the rewritten file still carries a retired field")
+	require.Contains(t, string(written), `"project": "prd_a"`, "the address migration did not rewrite the file")
 }
 
 // NOTHING IS EVER WRITTEN. The old implementation persisted what it derived, so

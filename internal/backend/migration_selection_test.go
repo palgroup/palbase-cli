@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -94,6 +95,146 @@ func TestAMigrationThatCannotNameTheEnvironmentWritesNothing(t *testing.T) {
 	_, selErr := ReadSelection(root)
 	require.Error(t, selErr, "a selection was remembered for an environment nobody could name")
 	require.Empty(t, out.String(), "a migration that did nothing announced something")
+}
+
+// ── EMEKLİ ALANLAR (`stackVersion`, `env`) ─────────────────────────────────
+
+// A RETIRED `stackVersion` IS DROPPED EVEN WHEN THE ADDRESS CANNOT MOVE (FR-4).
+//
+// The address migration needs the control plane; dropping `stackVersion` does
+// not — the field decided nothing — so an offline verb still leaves a file that
+// a colleague who pulls it reads without any tolerance at all. The listing hook
+// refuses here, so a cleanup that asked the cloud anything writes nothing and
+// this goes red. And it says what it did: a committed file that changed without
+// a word is worse than one that did not change.
+func TestARetiredStackVersionIsDroppedWhenTheAddressCannotMove(t *testing.T) {
+	linkedByAnOlderCLI(t, `{"url":"https://8bbwb2pbm.palbase.studio","stackVersion":"39"}`)
+	resolverRig(t, twoEnvs)
+	cloudAddresses(t, true)
+	ProductOfRef = func(context.Context, string) (Product, error) {
+		return Product{}, errors.New("control plane unreachable")
+	}
+	EnvironmentsOf = func(context.Context, string) ([]Environment, error) {
+		return nil, errors.New("dropping stackVersion must not ask the cloud anything")
+	}
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	written, err := os.ReadFile(projectPath())
+	require.NoError(t, err)
+	require.NotContains(t, string(written), "stackVersion", "the retired field survived a verb")
+	after, err := readLinkedProject()
+	require.NoError(t, err)
+	require.Equal(t, "https://8bbwb2pbm.palbase.studio", after.URL, "dropping a retired field moved the address")
+	require.Contains(t, out.String(), projectPath(), "the file changed without a word")
+	require.Contains(t, out.String(), "stackVersion", "the line does not name what was dropped")
+}
+
+// A RETIRED `env` IS A CHOICE, AND IT MOVES TO THIS MACHINE (FR-5).
+//
+// Before `1fcefcb` the committed file named the environment. Dropping the field
+// and stopping there turns "act on staging" into "which one?" in a
+// two-environment project — the refusal NFR-005 exists to prevent. So the
+// choice moves to where one belongs now: machine-local, where `palbase env use`
+// writes, with the ref the project's own listing gives.
+func TestARetiredEnvironmentMovesToThisMachine(t *testing.T) {
+	root := linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
+	resolverRig(t, twoEnvs)
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	sel, err := ReadSelection(root)
+	require.NoError(t, err, "the environment the committed file named was not remembered")
+	require.Equal(t, Selection{Project: "prd_a", Env: "staging", Ref: "mu0028"}, sel)
+	written, err := os.ReadFile(projectPath())
+	require.NoError(t, err)
+	require.NotContains(t, string(written), `"env"`, "the committed file still names an environment")
+	require.Contains(t, out.String(), "staging",
+		"the migration did not say which environment this machine keeps acting on")
+
+	resolved, err := Resolve(context.Background())
+	require.NoError(t, err, "the verb after the migration refuses")
+	require.Equal(t, "staging", resolved.Env)
+	require.Equal(t, "selection", resolved.Source)
+}
+
+// A CHOICE SOMEBODY MADE OUTRANKS THE RETIRED FIELD (FR-5).
+//
+// Somebody who ran `palbase env use` on this checkout meant it, and a field an
+// older CLI committed is the staler of the two facts. The file is still
+// cleaned, and that is asserted FIRST: "nothing was overwritten" is worth
+// nothing unless the migration ran at all.
+func TestARetiredEnvironmentDoesNotOverwriteAChoiceSomebodyMade(t *testing.T) {
+	root := linkedByAnOlderCLI(t, `{"project":"prd_a","env":"staging"}`)
+	resolverRig(t, twoEnvs)
+	require.NoError(t, WriteSelection(root, Selection{Project: "prd_a", Env: "main", Ref: "j06bwtuum"}))
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	written, err := os.ReadFile(projectPath())
+	require.NoError(t, err)
+	require.NotContains(t, string(written), `"env"`, "the migration did not run")
+	sel, err := ReadSelection(root)
+	require.NoError(t, err)
+	require.Equal(t, "main", sel.Env, "the retired field overwrote a choice somebody made")
+	require.Contains(t, out.String(), "main")
+}
+
+// A RETIRED FIELD THAT CANNOT BE MOVED LEAVES THE FILE EXACTLY AS IT WAS (FR-6).
+//
+// Dropping `env` without moving the choice is the half-migration FR-5 forbids,
+// so the two stand or fall together; a write that fails is the same outcome.
+// And the verb still runs — the read no longer depends on the migration having
+// happened, which is the assertion that was red before any of this existed.
+func TestARetiredFieldThatCannotBeMovedLeavesTheFileAlone(t *testing.T) {
+	unreachable := func(context.Context, string) ([]Environment, error) {
+		return nil, errors.New("control plane unreachable")
+	}
+	for _, tc := range []struct {
+		name     string
+		raw      string
+		envs     func(context.Context, string) ([]Environment, error)
+		readOnly bool
+	}{
+		{"the listing cannot be read", `{"project":"prd_a","env":"staging"}`, unreachable, false},
+		{"the listing does not name it", `{"project":"prd_a","env":"gone"}`, nil, false},
+		{"the write fails", `{"project":"prd_a","stackVersion":"39"}`, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := linkedByAnOlderCLI(t, tc.raw)
+			resolverRig(t, twoEnvs)
+			if tc.envs != nil {
+				EnvironmentsOf = tc.envs
+			}
+			if tc.readOnly {
+				if os.Geteuid() == 0 {
+					t.Skip("root writes through a read-only file, so no write can be made to fail this way")
+				}
+				require.NoError(t, os.Chmod(projectPath(), 0o444))
+			}
+			before, err := os.ReadFile(projectPath())
+			require.NoError(t, err)
+
+			var out bytes.Buffer
+			require.NoError(t, MigrateLegacyTarget(context.Background(), &out),
+				"a migration that could not finish failed the verb")
+
+			after, err := os.ReadFile(projectPath())
+			require.NoError(t, err)
+			require.Equal(t, string(before), string(after),
+				"a migration that could not finish changed the committed file")
+			_, selErr := ReadSelection(root)
+			require.Error(t, selErr, "a choice was remembered for a file that still makes it")
+			require.Empty(t, out.String(), "a migration that did nothing announced something")
+
+			got, err := readLinkedProject()
+			require.NoError(t, err, "a file the migration could not rewrite is unreadable")
+			require.Equal(t, "prd_a", got.Project)
+		})
+	}
 }
 
 // AN UNMIGRATED OLD RECORD STILL RESOLVES — the address it has IS the answer.

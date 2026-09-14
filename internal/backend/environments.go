@@ -373,24 +373,40 @@ func ambiguous(target Target, envs []Environment) error {
 //
 // IT SAYS WHAT IT DID. A committed file that changed under somebody without a
 // word is worse than one that did not change.
+//
+// AND IT DROPS WHAT AN OLDER CLI COMMITTED UNDER A RETIRED FIELD
+// (dropRetiredFields), when rewriting the address has not already done so.
 func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 	target, err := readLinkedProject()
 	if err != nil {
 		return nil // nothing linked: nothing to migrate
 	}
+	moved, err := migrateLegacyAddress(ctx, w, target)
+	if err != nil || moved {
+		// A rewritten file carries no retired field: WriteTarget serialises
+		// Target, and the retired values are not part of it.
+		return err
+	}
+	dropRetiredFields(ctx, w, target)
+	return nil
+}
+
+// migrateLegacyAddress is the address half of MigrateLegacyTarget, and says
+// whether it rewrote the committed file.
+func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool, error) {
 	if strings.TrimSpace(target.Project) != "" || strings.TrimSpace(target.URL) == "" {
-		return nil // already an identity, or nothing to work with
+		return false, nil // already an identity, or nothing to work with
 	}
 	if !isCloudProjectAddress(target.URL) {
-		return nil // a stack somebody runs: one installation, one address
+		return false, nil // a stack somebody runs: one installation, one address
 	}
 	ref := refOfURL(target.URL)
 	if ref == "" || ProductOfRef == nil {
-		return nil
+		return false, nil
 	}
 	product, err := ProductOfRef(ctx, ref)
 	if err != nil || strings.TrimSpace(product.ID) == "" {
-		return nil
+		return false, nil
 	}
 
 	// THE ENVIRONMENT THE OLD FILE NAMED IS KEPT, and keeping it is the whole
@@ -417,7 +433,7 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 		// FR-061: a migration that cannot finish leaves the checkout exactly as
 		// it was. Writing the identity without the environment would produce
 		// the refusal this comment exists to prevent.
-		return nil
+		return false, nil
 	}
 
 	migrated := target
@@ -425,7 +441,7 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 	migrated.Name = product.Name
 	migrated.URL = ""
 	if err := WriteTarget(migrated); err != nil {
-		return err
+		return false, err
 	}
 	// A DELIBERATE CHOICE IS NOT OVERWRITTEN: somebody who already ran
 	// `palbase env use` on this checkout means it, and the old address is the
@@ -434,10 +450,10 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 	if sel, selErr := ReadSelection("."); selErr != nil || sel.Ref == "" || sel.Project != product.ID {
 		root, wdErr := os.Getwd()
 		if wdErr != nil {
-			return wdErr
+			return true, wdErr
 		}
 		if err := WriteSelection(root, Selection{Project: product.ID, Env: envName, Ref: ref}); err != nil {
-			return err
+			return true, err
 		}
 		kept = envName
 	} else {
@@ -446,5 +462,71 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address; "+
 		"this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)\n",
 		projectPath(), product.Name, kept)
-	return nil
+	return true, nil
+}
+
+// dropRetiredFields rewrites a committed file that still carries a field an
+// older CLI wrote and this one retired (withoutRetiredFields).
+//
+// The read no longer needs it — both fields are tolerated by name — but every
+// clone of the repository would carry that tolerance forward, and a committed
+// `env` names a choice nothing honours any more.
+//
+// `stackVersion` DECIDED NOTHING, so it goes without asking anybody. `env` WAS A
+// CHOICE, and a choice is not dropped: it moves to this machine, where `palbase
+// env use` writes, with the ref from the project's own listing — unless
+// somebody already chose for this project here, which is the fresher of the two
+// facts.
+//
+// BEST EFFORT, THE SAME RULE AS THE ADDRESS (FR-061). A listing that cannot be
+// read, an environment it does not name, a write that fails: the committed file
+// stays exactly as it was and the verb carries on.
+func dropRetiredFields(ctx context.Context, w io.Writer, target Target) {
+	retired := target.retired
+	if len(retired.names) == 0 {
+		return
+	}
+	kept := ""
+	if named := strings.TrimSpace(retired.env); named != "" && strings.TrimSpace(target.Project) != "" {
+		if sel, selErr := ReadSelection("."); selErr == nil && sel.Ref != "" && sel.Project == target.Project {
+			kept = sel.Env
+		} else {
+			envs, err := environmentsOf(ctx, target.Project)
+			if err != nil {
+				return
+			}
+			var chosen *Environment
+			for i := range envs {
+				if strings.EqualFold(envs[i].Name, named) || envs[i].Ref == named {
+					chosen = &envs[i]
+					break
+				}
+			}
+			if chosen == nil {
+				return
+			}
+			root, err := os.Getwd()
+			if err != nil {
+				return
+			}
+			// THE CHOICE MOVES BEFORE THE FILE LOSES IT. The other order, with the
+			// second write failing, is the half-migration this exists to prevent.
+			if err := WriteSelection(root, Selection{Project: target.Project, Env: chosen.Name, Ref: chosen.Ref}); err != nil {
+				return
+			}
+			kept = chosen.Name
+		}
+	}
+	if err := WriteTarget(target); err != nil {
+		return
+	}
+	noun := "field"
+	if len(retired.names) > 1 {
+		noun = "fields"
+	}
+	fmt.Fprintf(w, "▸ %s no longer carries the retired %s %s", projectPath(), strings.Join(retired.names, " and "), noun)
+	if kept != "" {
+		fmt.Fprintf(w, "; this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)", kept)
+	}
+	fmt.Fprintln(w)
 }

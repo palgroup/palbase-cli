@@ -40,6 +40,11 @@ import (
 // Target is where a verb acts.
 type Target struct {
 	checkoutRoot string
+	// retired is what the file this came from still carried under a field this
+	// CLI no longer has (withoutRetiredFields). Unexported, so never serialised:
+	// it is read so an old checkout stays readable and so the migration can move
+	// `env` to where a choice belongs — and nothing can write it back.
+	retired retiredFields
 	// OAuth selects provider clients for this checkout once. Platform records and
 	// native identifiers remain in the server's typed configuration.
 	OAuth map[string]OAuthSelection `json:"oauth,omitempty"`
@@ -129,16 +134,85 @@ func projectPath() string { return path.Join(RootDir(), "project.json") }
 // half moved out entirely, next to the credentials that were already there.
 func localPath() (string, error) { return LocalStatePath(".") }
 
+// retiredFields is what a file an older CLI wrote still carries under a field
+// that has since left Target.
+type retiredFields struct {
+	// names lists the retired fields the file carried, so a migration can say
+	// what it dropped even when a value was empty.
+	names        []string
+	stackVersion string
+	env          string
+}
+
 func decodeTarget(raw []byte, target *Target) error {
-	if err := authcontract.DecodeStrict(raw, target); err != nil {
+	retired, rest, err := withoutRetiredFields(raw)
+	if err != nil {
 		return err
 	}
+	if err := authcontract.DecodeStrict(rest, target); err != nil {
+		return err
+	}
+	target.retired = retired
 	for platform := range target.OAuth {
 		if err := validatePlatforms([]string{platform}); err != nil {
 			return fmt.Errorf("oauth: %w", err)
 		}
 	}
 	return nil
+}
+
+// withoutRetiredFields sets aside the fields an older CLI committed and this
+// one no longer has, and returns what is left for the strict decode.
+//
+// `env` (v0.29.0 on) and `stackVersion` (2026-09-05 on) left Target in
+// `1fcefcb` on 2026-09-12, and every checkout linked before then still carries
+// one. The strict decoder refused the whole file by name — on every verb, and
+// on the migration that exists to rewrite such a file, which reads through this
+// same function.
+//
+// NAMED, NOT A WILDCARD. A key no Target ever had still fails exactly as it
+// did: a misspelt field in a committed file is a finding, and a reader that
+// tolerates everything links nothing while saying nothing.
+//
+// THE STRUCTURAL RULES READ THE FILE AS WRITTEN. Setting keys aside first would
+// hide a duplicate, or a null inside a retired value, from them.
+func withoutRetiredFields(raw []byte) (retiredFields, []byte, error) {
+	var fields map[string]json.RawMessage
+	if err := authcontract.DecodeStrict(raw, &fields); err != nil {
+		var notAnObject *json.UnmarshalTypeError
+		if errors.As(err, &notAnObject) {
+			// Not an object at all: the decode into Target names what it is.
+			return retiredFields{}, raw, nil
+		}
+		return retiredFields{}, nil, err
+	}
+	var retired retiredFields
+	for _, field := range []struct {
+		name string
+		into *string
+	}{
+		{"stackVersion", &retired.stackVersion},
+		{"env", &retired.env},
+	} {
+		value, ok := fields[field.name]
+		if !ok {
+			continue
+		}
+		// Every CLI that wrote these wrote a string.
+		if err := json.Unmarshal(value, field.into); err != nil {
+			return retiredFields{}, nil, fmt.Errorf("retired field %q: %w", field.name, err)
+		}
+		retired.names = append(retired.names, field.name)
+		delete(fields, field.name)
+	}
+	if len(retired.names) == 0 {
+		return retiredFields{}, raw, nil
+	}
+	rest, err := json.Marshal(fields)
+	if err != nil {
+		return retiredFields{}, nil, err
+	}
+	return retired, rest, nil
 }
 
 // WriteTarget records the project this checkout belongs to.
