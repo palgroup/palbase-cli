@@ -63,7 +63,7 @@ func TestTheStageNeverTouchesTheCheckout(t *testing.T) {
 	// farklı dosya sistemleri arasında rename EXDEV ile düşer. Çare stage'i
 	// checkout'a sokmak değil, taşımanın EXDEV'i karşılaması.
 	root := t.TempDir()
-	stage, err := newLinkStage(root)
+	stage, err := newLinkStage()
 	if err != nil {
 		t.Fatalf("stage: %v", err)
 	}

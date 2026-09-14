@@ -103,7 +103,12 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 	// öldürülmüş bir koşuysa hâlâ orada duruyorlar. Onları paketleme yolunda
 	// toplamak yalnız tidiness değil: yarım bir derlemenin artığı bu koşunun
 	// ürettiğiyle karışırsa "artığı gönderen bir push" mümkün olur.
-	reapRetiredArtifacts(dir)
+	//
+	// KORUNAN YOL ADIYLA SÖYLENİR (FR-010): git'in izlediği bir `.palbase`
+	// silinmez, ve sessizce bırakılırsa kişi onun neden durduğunu hiç öğrenmez.
+	for _, kept := range reapRetiredArtifacts(dir) {
+		fmt.Fprintf(w, "  kept %s — git tracks a file under it; remove it in a commit\n", kept)
+	}
 
 	// No `controllers/` requirement: a module owns its classes wherever it lives,
 	// and requiring a directory the module system does not use turned the

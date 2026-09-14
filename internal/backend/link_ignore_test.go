@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +26,11 @@ func TestAnOlderCLIsLinkStageIsReapedNotIgnored(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git yok")
 	}
-	dir := t.TempDir()
+	inScratchCheckout(t)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := writeGitignore(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -40,17 +46,25 @@ func TestAnOlderCLIsLinkStageIsReapedNotIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// `link`'in yaptığı ilk şey: yeni alanı açmadan önce eskisini toplamak.
-	fresh, err := newLinkStage(dir)
-	if err != nil {
-		t.Fatal(err)
+	// `link`'in yaptığı ilk şey: bir şeyi reddetmeden, yeni alanı açmadan önce
+	// eskisini toplamak. Ölçüm FİİLİN KENDİSİNDEN: tanınmayan bir platform, ağa
+	// çıkmadan dönen bir erken red — kalıntı bu yolda ancak `runLink`in
+	// BAŞINDAKİ süpürmeyle gidebilir (FR-009).
+	linkErr := runLink(context.Background(),
+		linkOpts{url: "https://unused.example", platforms: []string{"not-a-platform"}}, io.Discard)
+	if linkErr == nil || !strings.Contains(linkErr.Error(), "is not a platform this can link") {
+		t.Fatalf("beklenen erken red değil: %v", linkErr)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(fresh) })
 
 	if _, err := os.Stat(stage); !os.IsNotExist(err) {
 		t.Errorf("kalıntı duruyor: %s — içindeki anahtarla birlikte", stage)
 	}
 	// VE YENİ ALAN MÜŞTERİNİN PROJESİNDE DEĞİL.
+	fresh, err := newLinkStage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(fresh) })
 	if rel, err := filepath.Rel(dir, fresh); err == nil && !strings.HasPrefix(rel, "..") {
 		t.Errorf("hazırlık alanı müşterinin projesinde açıldı: %s", fresh)
 	}

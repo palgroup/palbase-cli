@@ -124,14 +124,16 @@ const linkStagePrefix = ".palbase-link-"
 // gerçek ama çaresi stage'i projeye sokmak değil, taşımanın EXDEV'i
 // karşılaması (`moveTree`).
 //
-// CHECKOUT YİNE DE TOPLANIR: bu CLI'ın bir ara sürümü stage'i checkout'un
-// içine açıyordu, ve o sürümle yarıda kesilmiş bir koşunun kalıntısı hâlâ
-// duruyor olabilir. Toplama emekli yolların TEK listesinden geçer
-// (`reapRetiredArtifacts`) — burada ikinci bir süpürücü yazmak, listeyle bir
-// gün ayrışacak ikinci bir gerçek yazmak olurdu. Üst dizine DOKUNULMAZ: orası
-// bu aracın alanı değil ve silmek de bir yazma fiilidir.
-func newLinkStage(root string) (string, error) {
-	reapRetiredArtifacts(root)
+// CHECKOUT YİNE DE TOPLANIR — ama BURADA DEĞİL: bu CLI'ın bir ara sürümü
+// stage'i checkout'un içine açıyordu, ve o sürümle yarıda kesilmiş bir koşunun
+// kalıntısı hâlâ duruyor olabilir. Toplamayı `runLink` en başta, her erken
+// redden ÖNCE yapar (FR-009): burada, stage açılırken yapılan toplama platform
+// doğrulamasının ve eski düzen kapısının ARKASINDAYDI, ve o redlerden biriyle
+// dönen her koşu kalıntıyı yerinde bırakıyordu. Toplama emekli yolların TEK
+// listesinden geçer (`reapRetiredArtifacts`) — ikinci bir süpürücü, listeyle
+// bir gün ayrışacak ikinci bir gerçek olurdu. Üst dizine DOKUNULMAZ: orası bu
+// aracın alanı değil ve silmek de bir yazma fiilidir.
+func newLinkStage() (string, error) {
 	return os.MkdirTemp("", "palbase-link-*")
 }
 
@@ -140,7 +142,19 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// THE RETIRED LAYOUT IS REFUSED FIRST, BEFORE ANY SIDE EFFECT.
+	// THE SWEEP FIRST (FR-009): what an older CLI left in this checkout goes
+	// before anything below can refuse. It sat inside newLinkStage, behind the
+	// platform checks and the layout gate, so every refused link returned with
+	// the litter still in place.
+	//
+	// What it KEEPS needs no line of its own here: the only entry it keeps is a
+	// hidden root git tracks, and CarriesLegacyLayout refuses exactly that one,
+	// by name, right below.
+	reapRetiredArtifacts(root)
+	// THE RETIRED LAYOUT IS REFUSED NEXT, BEFORE ANY SIDE EFFECT OF ITS OWN.
+	//
+	// The sweep above is not one: it removes only what an older CLI produced
+	// and git does not track, which is exactly what this gate no longer counts.
 	//
 	// There is no migration and there will not be one: a half-old, half-new tree
 	// carries two contracts and two clients, and nothing can say which one the
@@ -169,7 +183,7 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		platforms = detectPlatforms(root)
 	}
 	installWebSDK := slices.Contains(platforms, webPlatform) && !isRegularFile(filepath.Join(root, palbeGenBin))
-	stage, err := newLinkStage(root)
+	stage, err := newLinkStage()
 	if err != nil {
 		return err
 	}
