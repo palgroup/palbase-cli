@@ -440,8 +440,19 @@ func planTestSuites(dir string) ([]testSuite, error) {
 		return nil, err
 	}
 	used := map[string]bool{}
+	// ONE DIRECTORY, TWO NAMES THAT DIFFER ONLY BY LETTER CASE (review-T016 tur 2,
+	// D-21). The naming below gives each its own output, but on a case-sensitive
+	// filesystem `bun build` does not tell `Login.test.ts` from `login.test.ts`
+	// in one directory: both bundles came out carrying the same suite, silently.
+	// Shipping one suite twice and the other not at all is refused, by name.
+	sameDir := map[string]string{}
 	var plan []testSuite
 	for _, src := range sources {
+		if first, ok := sameDir[strings.ToLower(src)]; ok {
+			return nil, fmt.Errorf("%s and %s differ only by letter case, and bun cannot tell them apart in one "+
+				"directory — rename one of them", first, src)
+		}
+		sameDir[strings.ToLower(src)] = src
 		rel, err := filepath.Rel(dir, src)
 		if err != nil {
 			return nil, err

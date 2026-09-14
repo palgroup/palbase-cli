@@ -446,6 +446,39 @@ func TestSuiteNamesFallBackToANumberWhenThePathIsExhausted(t *testing.T) {
 	require.Equal(t, []string{"b_x.test.js", "b_x_2.test.js", "x.test.js"}, bundledSuiteNames(t, dir))
 }
 
+// TWO SUITES THAT DIFFER ONLY BY CASE IN ONE DIRECTORY ARE REFUSED (review-T016
+// tur 2, deviations.md D-21). Each gets its own output name, but on a
+// case-sensitive filesystem `bun build` does not tell `Login.test.ts` from
+// `login.test.ts` in one directory: both bundles came out carrying the same
+// suite, silently.
+func TestSuitesThatDifferOnlyByCaseInOneDirectoryAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/Login.test.ts", oneTestSuite)
+	// On a case-insensitive filesystem the second name IS the first file, so the
+	// fixture cannot exist there. Decided before any assertion, from the
+	// filesystem itself.
+	if _, err := os.Stat(filepath.Join(dir, "modules", "a", "login.test.ts")); err == nil {
+		t.Skip("this filesystem is case-insensitive: Login.test.ts and login.test.ts are one file here")
+	}
+	mustWrite(t, dir, "modules/a/login.test.ts", oneTestSuite)
+
+	_, err := planTestSuites(dir)
+	require.ErrorContains(t, err, "differ only by letter case")
+	require.ErrorContains(t, err, "Login.test.ts")
+	require.ErrorContains(t, err, "login.test.ts")
+}
+
+// …AND THE REFUSAL IS ABOUT ONE DIRECTORY. The same pair in two directories is
+// what the naming already separates; refusing it would refuse a working tree.
+func TestSuitesThatDifferOnlyByCaseInTwoDirectoriesAreNamedApart(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/Login.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/login.test.ts", oneTestSuite)
+	suites, err := planTestSuites(dir)
+	require.NoError(t, err)
+	require.Len(t, suites, 2)
+}
+
 // EACH SUITE IS BUILT FROM ITS OWN FILE (review-T016 CRITICAL-2). The first shape
 // staged a symbolic link per suite, and a symbolic link on Windows needs a
 // privilege an ordinary account does not hold — this CLI ships for Windows. A
