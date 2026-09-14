@@ -630,10 +630,16 @@ func majorOf(version string) int {
 // and `Flags.isEnabled()` to nothing, which is worse than not refreshing —
 // the compile error would land on code that is right.
 func stackNamesFor(ctx context.Context, target Target) (StackNames, error) {
-	cred, _, err := Credential(target.URL)
+	cred, _, err := credentialFn(target.URL)
 	if err != nil {
 		return StackNames{}, fmt.Errorf("no credential for %s", target.Describe())
 	}
+	return stackNamesWith(ctx, target, cred)
+}
+
+// stackNamesWith is stackNamesFor with the credential already resolved — so a
+// caller that also reads the roles resolves it once, not once per read.
+func stackNamesWith(ctx context.Context, target Target, cred Credentials) (StackNames, error) {
 	secrets, err := secretNames(ctx, target, cred)
 	if err != nil {
 		return StackNames{}, err
@@ -642,7 +648,7 @@ func stackNamesFor(ctx context.Context, target Target) (StackNames, error) {
 	if err != nil {
 		return StackNames{}, err
 	}
-	buckets, err := stackBuckets(ctx, target)
+	buckets, err := stackBucketsWith(ctx, target, &cred)
 	if err != nil {
 		return StackNames{}, err
 	}

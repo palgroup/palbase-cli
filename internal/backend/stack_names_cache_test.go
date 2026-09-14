@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +51,7 @@ func TestStackNamesPathLivesBesideTheOtherMachineState(t *testing.T) {
 func TestStackNamesCacheReadsBackWhatWasWritten(t *testing.T) {
 	useTempMachineHome(t)
 	checkout := t.TempDir()
-	const url = "https://prj.example.test"
+	target := Target{URL: "https://prj.example.test", Project: "prj_a"}
 	want := StackNames{
 		Secrets: []string{"STRIPE_KEY"},
 		Flags:   []string{"new_ui"},
@@ -59,11 +60,11 @@ func TestStackNamesCacheReadsBackWhatWasWritten(t *testing.T) {
 	}
 
 	// Taze klon: kayıt yok, ve bu adıyla söylenir.
-	_, err := readCachedStackNames(checkout, url)
+	_, err := readCachedStackNames(checkout, target)
 	require.ErrorIs(t, err, errNoCachedStackNames)
 
-	require.NoError(t, writeCachedStackNames(checkout, url, want))
-	got, err := readCachedStackNames(checkout, url)
+	require.NoError(t, writeCachedStackNames(checkout, target, want))
+	got, err := readCachedStackNames(checkout, target)
 	require.NoError(t, err)
 	require.Equal(t, want, got, "roller dahil dört küme de geri okunmalı")
 
@@ -75,9 +76,106 @@ func TestStackNamesCacheReadsBackWhatWasWritten(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 
 	// NEGATİF KONTROL: başka bir yığına bağlanan checkout eskisinin adlarını
-	// MİRAS ALMAZ.
-	_, err = readCachedStackNames(checkout, "https://other.example.test")
+	// MİRAS ALMAZ — ne başka bir adreste…
+	_, err = readCachedStackNames(checkout, Target{URL: "https://other.example.test", Project: "prj_a"})
 	require.ErrorIs(t, err, errNoCachedStackNames)
+	// …ne de AYNI adreste başka bir projede (review-T009): bir bulut adresi ya
+	// da aynı yerel port, bir link'ten sonra başka bir yığını gösterebilir.
+	_, err = readCachedStackNames(checkout, Target{URL: target.URL, Project: "prj_b"})
+	require.ErrorIs(t, err, errNoCachedStackNames)
+}
+
+// BOZUK BİR KAYIT "YOK" DEĞİLDİR (review-T009 MINOR). Sebep adıyla çağırana
+// ulaşmazsa dosya sonsuza kadar bozuk kalır ve kimse nedenini öğrenmez.
+func TestStackNamesCorruptRecordIsNotNone(t *testing.T) {
+	useTempMachineHome(t)
+	checkout := t.TempDir()
+	target := Target{URL: "https://prj.example.test"}
+	path, err := StackNamesPath(checkout)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+
+	_, err = readCachedStackNames(checkout, target)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, errNoCachedStackNames, "a corrupt record was read as a fresh clone")
+	require.ErrorContains(t, err, "did not parse")
+}
+
+// YAZILAMAYAN ÖNBELLEK BUILD'İ DÜŞÜRMEZ AMA SÖYLENİR (review-T009 IMPORTANT-2).
+// `CacheErr` bu hâli ayırt etmek için var; hiçbir test onu gerçek bir yazma
+// hatasıyla ölçmüyordu, yani alan sessizce anlamsızlaşabilirdi.
+func TestStackNamesCacheWriteFailureIsReported(t *testing.T) {
+	notADirectory := filepath.Join(t.TempDir(), "home-is-a-file")
+	require.NoError(t, os.WriteFile(notADirectory, []byte("x"), 0o600))
+	prev := machineStateHome
+	machineStateHome = func() (string, error) { return notADirectory, nil }
+	t.Cleanup(func() { machineStateHome = prev })
+
+	fresh := StackNames{Secrets: []string{"STRIPE_KEY"}, Flags: []string{}, Buckets: []StackBucket{}, Roles: []string{}}
+	withStackNamesReader(t, func(context.Context, Target) (StackNames, error) { return fresh, nil })
+
+	got := stackNamesForCheckout(context.Background(), t.TempDir(), Target{URL: "https://prj.example.test"})
+	require.Equal(t, namesFromStack, got.Source, "a cache that cannot be written must not change where the names came from")
+	require.Equal(t, fresh, got.Names)
+	require.Error(t, got.CacheErr, "the failed cache write was swallowed")
+}
+
+// KİMLİK TEK KEZ ÇÖZÜLÜR (review-T009 IMPORTANT-1). Bir bulut projesinde her
+// çözüm kontrol düzlemine gerçek bir istek; ikinci çözümün geçici bir hatası
+// zaten okunmuş adları "yığın erişilemez"e çeviriyordu.
+func TestStackNamesReadResolvesTheCredentialOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/management/secrets":
+			_, _ = w.Write([]byte(`{"secrets":[]}`))
+		case "/v1/management/flags":
+			_, _ = w.Write([]byte(`{"flags":[]}`))
+		case "/v1/management/storage/buckets":
+			_, _ = w.Write([]byte(`{"buckets":[]}`))
+		case "/admin/roles":
+			_, _ = w.Write([]byte(`{"roles":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	calls := 0
+	prev := credentialFn
+	credentialFn = func(url string) (Credentials, CredentialSource, error) {
+		calls++
+		return Credentials{Value: "pb_secret_test", Kind: KindKey}, SourceEnv, nil
+	}
+	t.Cleanup(func() { credentialFn = prev })
+
+	_, err := readStackNames(context.Background(), Target{URL: srv.URL})
+	require.NoError(t, err)
+	require.Equal(t, 1, calls, "the credential was resolved %d times for one read", calls)
+}
+
+// LINK ÖNBELLEĞİ UNUTUR (review-T009 IMPORTANT-3). Aynı yerel port bir
+// link'ten sonra başka bir yığını gösterebilir ve URL onu ayırt edemez; yeniden
+// bağlanan bir checkout "yığının dediğinden" başlar.
+func TestLinkForgetsTheStackNamesCache(t *testing.T) {
+	inScratchCheckout(t)
+	useTempMachineHome(t)
+	checkout, err := os.Getwd()
+	require.NoError(t, err)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
+	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
+	linkedAs(t, srv.URL, "a-credential")
+
+	require.NoError(t, writeCachedStackNames(checkout, Target{URL: srv.URL}, StackNames{Secrets: []string{"FROM_THE_OLD_STACK"}}))
+	path, err := StackNamesPath(checkout)
+	require.NoError(t, err)
+	require.FileExists(t, path)
+
+	require.NoError(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, io.Discard))
+
+	_, statErr := os.Stat(path)
+	require.ErrorIs(t, statErr, fs.ErrNotExist, "a relinked checkout kept the names of the stack it was linked to before")
 }
 
 // withStackNamesReader swaps the stack read for one test, through the
@@ -107,7 +205,7 @@ func TestStackNamesFallBackToThisMachinesCache(t *testing.T) {
 	require.NoError(t, got.CacheErr)
 	require.NoError(t, got.Why)
 	require.Equal(t, fresh, got.Names)
-	cached, err := readCachedStackNames(checkout, target.URL)
+	cached, err := readCachedStackNames(checkout, target)
 	require.NoError(t, err)
 	require.Equal(t, fresh, cached)
 
@@ -120,7 +218,7 @@ func TestStackNamesFallBackToThisMachinesCache(t *testing.T) {
 	require.ErrorIs(t, got.Why, unreachable)
 
 	// (3) DÜŞEN OKUMA ÖNBELLEĞİ EZMEZ.
-	cached, err = readCachedStackNames(checkout, target.URL)
+	cached, err = readCachedStackNames(checkout, target)
 	require.NoError(t, err)
 	require.Equal(t, fresh, cached)
 }
@@ -180,6 +278,9 @@ func TestStackNamesReadAsksTheStackForItsRoles(t *testing.T) {
 		target := stack(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
 		names, err := readStackNames(context.Background(), target)
 		require.NoError(t, err)
+		// readStackNames'in KENDİ dönüşümü ölçülüyor: 404 hata değil, ve okuma
+		// sonucu nil değil boş bir kümedir (fetchStackRoles'un 404 cevabı kendi
+		// testlerinde ölçülür — review-T009 MINOR-1).
 		require.NotNil(t, names.Roles, "404 bir cevaptır: rol yok, boş küme olarak render edilir")
 		require.Empty(t, names.Roles)
 	})

@@ -1018,12 +1018,22 @@ type StackBucket struct {
 
 // stackBuckets asks the stack which buckets it actually has.
 func stackBuckets(ctx context.Context, target Target) ([]StackBucket, error) {
+	var cred *Credentials
+	if resolved, _, credErr := credentialFn(target.URL); credErr == nil {
+		cred = &resolved
+	}
+	return stackBucketsWith(ctx, target, cred)
+}
+
+// stackBucketsWith is stackBuckets with the credential already resolved (nil:
+// ask without one, which is what an unresolvable credential always meant here).
+func stackBucketsWith(ctx context.Context, target Target, cred *Credentials) ([]StackBucket, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimSuffix(target.URL, "/")+"/v1/management/storage/buckets", nil)
 	if err != nil {
 		return nil, err
 	}
-	if cred, _, credErr := Credential(target.URL); credErr == nil {
+	if cred != nil {
 		cred.Apply(req)
 	}
 	res, err := stackClient(target).Do(req)

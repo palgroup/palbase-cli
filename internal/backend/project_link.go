@@ -732,6 +732,11 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	if err := writeLinkRecord(o, target); err != nil {
 		return err
 	}
+	// THE NAMES THIS MACHINE CACHED BELONG TO THE STACK IT WAS LINKED TO BEFORE
+	// (review-T009). The same port on this machine — or the same address — can
+	// front a different stack after a relink, and a URL cannot tell them apart;
+	// the next build reads the names from the stack linked now.
+	forgetCachedStackNames(o.checkoutRoot)
 
 	// A CHECKOUT WITH NO GENERATOR GETS NO PER-ENVIRONMENT ARTIFACTS.
 	//

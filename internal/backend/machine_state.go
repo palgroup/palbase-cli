@@ -328,18 +328,31 @@ var errNoCachedStackNames = errors.New("this machine has no stack names cached f
 
 // cachedStackNames is the record on disk.
 //
-// URL IS THE WHOLE DEFENCE against a relinked checkout inheriting another
-// stack's names — the rule `Selection.Project` enforces for environments. A
-// checkout pointed somewhere else must not render the secrets of the stack it
-// left as if they existed where it now pushes.
+// THE ADDRESS AND THE PROJECT TOGETHER name the stack the names came from — the
+// rule `Selection.Project` enforces for environments. A checkout pointed
+// somewhere else must not render the secrets of the stack it left as if they
+// existed where it now pushes. An address alone was not enough (review-T009): a
+// cloud address carries its project, but a port on this machine can front a
+// different stack after a relink, and nothing in the URL says so — which is why
+// `link` also forgets this record (forgetCachedStackNames).
 type cachedStackNames struct {
-	URL   string     `json:"url"`
-	Names StackNames `json:"names"`
+	URL     string     `json:"url"`
+	Project string     `json:"project,omitempty"`
+	Names   StackNames `json:"names"`
 }
 
-// readCachedStackNames answers the names this machine last read from the stack
-// at url for this checkout.
-func readCachedStackNames(checkoutRoot, url string) (StackNames, error) {
+// forgetCachedStackNames removes this checkout's cached names. Best effort: a
+// record that cannot be removed is refused at the next read by its address and
+// project anyway.
+func forgetCachedStackNames(checkoutRoot string) {
+	if path, err := StackNamesPath(checkoutRoot); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
+// readCachedStackNames answers the names this machine last read from target's
+// stack for this checkout.
+func readCachedStackNames(checkoutRoot string, target Target) (StackNames, error) {
 	path, err := StackNamesPath(checkoutRoot)
 	if err != nil {
 		return StackNames{}, err
@@ -357,20 +370,21 @@ func readCachedStackNames(checkoutRoot, url string) (StackNames, error) {
 		// or the file stays broken forever and nobody learns why.
 		return StackNames{}, fmt.Errorf("%s did not parse: %w", path, err)
 	}
-	if rec.URL != url {
-		return StackNames{}, fmt.Errorf("%w (the cached names were read from %s)", errNoCachedStackNames, rec.URL)
+	if rec.URL != target.URL || rec.Project != target.Project {
+		return StackNames{}, fmt.Errorf("%w (the cached names were read from %s)", errNoCachedStackNames,
+			Target{URL: rec.URL, Project: rec.Project}.Describe())
 	}
 	return rec.Names, nil
 }
 
 // writeCachedStackNames remembers what a successful read returned. The WRITER
 // creates the directory, because a write knows it is a write.
-func writeCachedStackNames(checkoutRoot, url string, names StackNames) error {
+func writeCachedStackNames(checkoutRoot string, target Target, names StackNames) error {
 	path, err := StackNamesPath(checkoutRoot)
 	if err != nil {
 		return err
 	}
-	blob, err := json.MarshalIndent(cachedStackNames{URL: url, Names: names}, "", "  ")
+	blob, err := json.MarshalIndent(cachedStackNames{URL: target.URL, Project: target.Project, Names: names}, "", "  ")
 	if err != nil {
 		return err
 	}

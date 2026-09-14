@@ -304,6 +304,12 @@ type StackNames struct {
 // a branch nobody has run is a branch nobody knows works.
 var readStackNamesFn = readStackNames
 
+// credentialFn is Credential behind a seam, so that HOW MANY TIMES a read
+// resolves its credential can be measured. For a cloud project every
+// resolution is a round trip to the control plane (fetchCloudCredential caches
+// nothing), so a read resolves it ONCE and passes it along (review-T009).
+var credentialFn = Credential
+
 // readStackNames asks the linked stack for all four name sets: the three
 // `stackNamesFor` reads off the management surface, and the role names from the
 // stack's roles door.
@@ -315,13 +321,16 @@ var readStackNamesFn = readStackNames
 // A 404 from the roles door is still an answer: a stack older than RBAC defines
 // no roles, and `fetchStackRoles` says so with an empty list and no error.
 func readStackNames(ctx context.Context, target Target) (StackNames, error) {
-	names, err := stackNamesFor(ctx, target)
-	if err != nil {
-		return StackNames{}, err
-	}
-	cred, _, err := Credential(target.URL)
+	// ONE CREDENTIAL FOR ALL FOUR READS. A second resolution cost a second
+	// control-plane round trip, and a transient failure of that one turned names
+	// already read into "the stack could not be asked".
+	cred, _, err := credentialFn(target.URL)
 	if err != nil {
 		return StackNames{}, fmt.Errorf("no credential for %s", target.Describe())
+	}
+	names, err := stackNamesWith(ctx, target, cred)
+	if err != nil {
+		return StackNames{}, err
 	}
 	roles, err := fetchStackRoles(ctx, target, cred)
 	if err != nil {
@@ -376,10 +385,10 @@ func stackNamesForCheckout(ctx context.Context, checkoutRoot string, target Targ
 		return checkoutStackNames{
 			Names:    names,
 			Source:   namesFromStack,
-			CacheErr: writeCachedStackNames(checkoutRoot, target.URL, names),
+			CacheErr: writeCachedStackNames(checkoutRoot, target, names),
 		}
 	}
-	cached, cacheErr := readCachedStackNames(checkoutRoot, target.URL)
+	cached, cacheErr := readCachedStackNames(checkoutRoot, target)
 	if cacheErr == nil {
 		return checkoutStackNames{Names: cached, Source: namesFromCache, Why: err}
 	}

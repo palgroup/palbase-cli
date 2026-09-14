@@ -214,8 +214,9 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	// login → link → BROKEN → push, and the only way through was to read a key
 	// out of the database by hand.
 	//
-	// The fetch is gated by ownership on the server and cached here, so it costs
-	// one round trip per project per machine.
+	// The fetch is gated by ownership on the server and is NOT cached: every
+	// resolution is a round trip to the control plane. A verb that makes several
+	// reads resolves the credential once and passes it along (review-T009).
 	if CloudKeyFetcher != nil {
 		if cred, ok := fetchCloudCredential(url); ok {
 			return cred, SourceCloud, nil
