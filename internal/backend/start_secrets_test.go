@@ -176,3 +176,23 @@ func TestStartKeepsAValueChangedHereSincePulled(t *testing.T) {
 	assert.Contains(t, out.String(), "secrets: 1 pulled from todoapp/main · 1 kept (changed here since)")
 	assert.Equal(t, "b-changed-here", local.values["B"])
 }
+
+// A NAME THE CHOSEN ENVIRONMENT DOES NOT HAVE IS NOT DELETED — AND NOT HIDDEN.
+// Measured by rv-cli-b: after a start on main and a second on staging, the
+// stack still held main's PROD_KEY while the line said "pulled from
+// todoapp/staging". Deleting it would throw away somebody's work; saying
+// nothing let one environment's key sit in a stack labelled another's.
+func TestStartCountsTheNamesTheChosenEnvironmentDoesNotHave(t *testing.T) {
+	local, target := startSecretsRig(t, onlyMain, map[string]*vault{
+		"main": {values: map[string]string{"A": "a-main"}},
+	})
+	local.mu.Lock()
+	local.values["PROD_KEY"] = "from-somewhere-else"
+	local.mu.Unlock()
+
+	var out strings.Builder
+	pullSecrets(context.Background(), "todoapp", target, &out)
+	assert.Contains(t, out.String(), "1 pulled from todoapp/main")
+	assert.Contains(t, out.String(), "1 left (not in todoapp/main)")
+	assert.Equal(t, "from-somewhere-else", local.values["PROD_KEY"], "a local name was deleted")
+}

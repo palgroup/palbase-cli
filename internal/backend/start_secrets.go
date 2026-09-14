@@ -118,12 +118,35 @@ func pullSecrets(ctx context.Context, group string, local Target, out io.Writer)
 		fmt.Fprintf(out, "  secrets: the pull record was not saved — %v\n", err)
 	}
 
+	// WHAT STAYED BEHIND IS PART OF THE ANSWER. The pull adds and overwrites; it
+	// never deletes, because a local name is somebody's work — a SENTRY_DSN
+	// pointed at a throwaway project is exactly what the hash record above
+	// protects. But a stack that still holds another environment's key while
+	// the line reads "pulled from todoapp/staging" is the quiet version of the
+	// accident this whole function exists to prevent, so the names this
+	// environment does not have are counted and said.
+	left := 0
+	if localNames, err := secretNames(ctx, local, localCred); err == nil {
+		have := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			have[name] = struct{}{}
+		}
+		for _, name := range localNames {
+			if _, ok := have[name]; !ok {
+				left++
+			}
+		}
+	}
+
 	// The names are not printed, let alone the values: the count is what an
 	// operator needs, and a list of every credential a project holds is a list
 	// worth reading over somebody's shoulder.
 	line := fmt.Sprintf("  secrets: %d pulled from %s", pulled, from)
 	if kept > 0 {
 		line += fmt.Sprintf(" · %d kept (changed here since)", kept)
+	}
+	if left > 0 {
+		line += fmt.Sprintf(" · %d left (not in %s)", left, from)
 	}
 	fmt.Fprintln(out, line)
 }

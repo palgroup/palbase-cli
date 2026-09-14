@@ -417,6 +417,31 @@ func TestANoTargetLinkRelinksTheAddressTheCommittedRecordNames(t *testing.T) {
 	assert.Equal(t, stack.URL, o.url, "a no-target link left a committed self-hosted address unresolved")
 	var out strings.Builder
 	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+}
+
+// THE RECORD'S `insecure` TRAVELS WITH ITS ADDRESS (FR-036). Measured by
+// rv-cli-c: deleting the carry left every link test green, because no fixture
+// carried the field — a fixture that omits a field never measures it.
+//
+// It is its own test rather than a tail on the one above: a `runLink` leaves a
+// machine-local record behind, and that record is what `resolveLinkTarget`
+// reads FIRST, so a second resolve in the same test measures the machine
+// record's flag instead of the committed one.
+func TestACommittedRecordsInsecureFlagTravelsWithItsAddress(t *testing.T) {
+	inScratchCheckout(t)
+	t.Setenv("PALBASE_ENV", "")
+	prev := CloudProjectAddress
+	t.Cleanup(func() { CloudProjectAddress = prev })
+	CloudProjectAddress = func(string) bool { return false }
+	require.NoError(t, os.MkdirAll(filepath.Dir(projectPath()), 0o755))
+	require.NoError(t, os.WriteFile(projectPath(),
+		[]byte(`{"url": "https://stack.firma.com", "insecure": true}`+"\n"), 0o644))
+
+	o := linkOpts{platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	assert.Equal(t, "https://stack.firma.com", o.url)
+	assert.True(t, o.insecure, "a committed record's insecure flag did not travel with its address")
 }
 
 // THE STACK `palbase start` RUNS HERE BEATS A COMMITTED ADDRESS (D-6). Every
@@ -439,4 +464,32 @@ func TestAStartRecordBeatsACommittedSelfHostAddress(t *testing.T) {
 	after, err := os.ReadFile(local)
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after))
+}
+
+// A `--lan` STACK IS THE STACK RUNNING HERE, typed either way. `palbase start
+// --lan` records the LAN address and binds every interface, so the loopback
+// form the help text teaches is the same process (rv-cli-c).
+func TestALoopbackLinkToALanStartStackLeavesItsRecord(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	installStubCodegen(t, "// gen")
+	t.Setenv("PALBASE_ENV", "")
+	stack := stackServing(t, linkKeyMain, nil)
+	port := stack.URL[strings.LastIndex(stack.URL, ":"):]
+	lan := "http://192.168.7.5" + port
+	require.NoError(t, WriteLocalTarget(Target{URL: lan}))
+	local, err := localPath()
+	require.NoError(t, err)
+	before, err := os.ReadFile(local)
+	require.NoError(t, err)
+	linkedAs(t, stack.URL, "a-credential")
+
+	o := linkOpts{url: stack.URL, platforms: []string{"web"}}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	after, err := os.ReadFile(local)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "linking a --lan stack by its loopback address rewrote its record")
 }

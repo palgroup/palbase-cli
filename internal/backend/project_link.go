@@ -611,15 +611,23 @@ func writeLinkRecord(o linkOpts, target Target) error {
 }
 
 // sameStack says whether two addresses name one stack on this machine: the same
-// scheme and port, and hosts that are both loopback or the same name. A stack
-// `palbase start` announced as 127.0.0.1 is the one a person types as localhost.
+// scheme and port, and hosts that are the same name or at least one of them
+// loopback. A stack `palbase start` announced as 127.0.0.1 is the one a person
+// types as localhost.
 func sameStack(a, b string) bool {
 	ua, errA := url.Parse(strings.TrimSpace(a))
 	ub, errB := url.Parse(strings.TrimSpace(b))
 	if errA != nil || errB != nil || ua.Scheme != ub.Scheme || ua.Port() != ub.Port() {
 		return false
 	}
-	if isLoopbackAddress(a) && isLoopbackAddress(b) {
+	// ONE LOOPBACK SIDE IS ENOUGH. The record compared here is this checkout's
+	// own `palbase start` record, so it always names a stack on THIS machine: a
+	// stack started with `--lan` records its LAN address while binding every
+	// interface, and the loopback form the help text teaches is the same
+	// process. No second stack can hold that port either. Demanding both sides
+	// loopback let `palbase link http://localhost:<port>` re-stamp a `--lan`
+	// stack's record — J-10 in full (rv-cli-c).
+	if isLoopbackAddress(a) || isLoopbackAddress(b) {
 		return true
 	}
 	return strings.EqualFold(ua.Hostname(), ub.Hostname())
