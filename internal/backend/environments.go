@@ -441,7 +441,16 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 	migrated.Name = product.Name
 	migrated.URL = ""
 	if err := WriteTarget(migrated); err != nil {
-		return false, err
+		// A REWRITE THAT FAILED MOVES NOTHING (FR-061), and this is the one error
+		// in the migration that does not fail the verb. It is the write of the
+		// committed file itself — read-only, a full disk — and nothing has changed
+		// yet: the selection below is written only after it. So the checkout is
+		// still the old record, exactly as it was, and the verb carries on against
+		// the address it has. Returning the error here failed every verb in a
+		// read-only checkout the cloud could resolve, with `open
+		// palbase/project.json: permission denied`. The errors after this line
+		// still fail the verb, because by then the file HAS changed.
+		return false, nil
 	}
 	// A DELIBERATE CHOICE IS NOT OVERWRITTEN: somebody who already ran
 	// `palbase env use` on this checkout means it, and the old address is the
@@ -460,8 +469,15 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 		kept = sel.Env
 	}
 	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address; "+
-		"this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)\n",
+		"this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)",
 		projectPath(), product.Name, kept)
+	// THE ADDRESS DECIDED. A retired `env` beside it chose nothing, and the line
+	// says what it named so nobody takes it for the environment kept above.
+	if env := target.retired.env; env != nil {
+		fmt.Fprintf(w, "; the environment the file also named (%s) is not chosen from a committed file",
+			droppedValue(*env))
+	}
+	fmt.Fprintln(w)
 	return true, nil
 }
 
@@ -481,8 +497,8 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) (bool
 // one, or a refusal that lists them — and the line says what the file named and
 // how to choose.
 //
-// THE VALUE IS QUOTED. A committed file must not put control characters on
-// somebody's terminal.
+// THE VALUE IS QUOTED AND CUT (droppedValue), as it is on the address
+// migration's line.
 //
 // BEST EFFORT, THE SAME RULE AS THE ADDRESS (FR-061). A rewrite that fails
 // leaves the file exactly as it was and says nothing, and the verb carries on.
@@ -500,8 +516,27 @@ func dropRetiredFields(w io.Writer, target Target) {
 	}
 	fmt.Fprintf(w, "▸ %s no longer carries the retired %s %s", projectPath(), strings.Join(names, " and "), noun)
 	if env := target.retired.env; env != nil {
-		fmt.Fprintf(w, "; the environment it named (%q) is not chosen from a committed file — "+
-			"`palbase env use <name>` or `--env <name>` chooses one", *env)
+		fmt.Fprintf(w, "; the environment it named (%s) is not chosen from a committed file — "+
+			"`palbase env use <name>` or `--env <name>` chooses one", droppedValue(*env))
 	}
 	fmt.Fprintln(w)
+}
+
+// droppedValue is how a migration line names a value it dropped from a
+// committed file: at most its first 64 runes, quoted.
+//
+// QUOTED, because a committed file must not put a control character on
+// somebody's terminal. CUT, because it must not put a hundred kibibytes there
+// either. The quoting is applied to what is kept, so the cut can never split an
+// escape, and the mark that says it was cut sits outside the quotes.
+func droppedValue(value string) string {
+	const most = 64
+	runes := 0
+	for i := range value {
+		if runes == most {
+			return fmt.Sprintf("%q…", value[:i])
+		}
+		runes++
+	}
+	return fmt.Sprintf("%q", value)
 }

@@ -142,20 +142,27 @@ func TestARetiredStackVersionIsDroppedWhenTheAddressCannotMove(t *testing.T) {
 // directory name read it. A committed environment is also exactly how a
 // colleague pulls a branch and pushes to your staging (Target.Project's
 // comment). So it drops, and the line names what it said — quoted, because a
-// committed file must not put control characters on a terminal — and says how
-// to choose one. Nothing is chosen for anybody, and nobody is asked which
-// environments exist.
+// committed file must not put control characters on a terminal, and cut at 64
+// runes, because it must not put a hundred kibibytes there either — and says
+// how to choose one. An empty value is still a field the file carried. Nothing
+// is chosen for anybody, and nobody is asked which environments exist.
 func TestARetiredEnvironmentDropsIsNamedAndChoosesNothing(t *testing.T) {
 	// Built, not typed: the file must carry the JSON escape, never the raw byte.
 	control := string(rune(0x1b)) + "[2Jprod"
 	controlJSON, err := json.Marshal(control)
 	require.NoError(t, err)
-	for _, tc := range []struct{ name, raw, quoted string }{
-		{"beside a project", `{"project":"prd_a","env":"staging"}`, `"staging"`},
-		{"beside an address that cannot move", `{"url":"https://mu0028.palbase.studio","env":"main"}`, `"main"`},
+	// A two-byte rune, so a cut counted in bytes shows as one.
+	wide := string(rune(0x15f))
+	long := string(bytes.Repeat([]byte(wide), 50*1024)) // 100 KiB
+	kept := string(bytes.Repeat([]byte(wide), 64))
+	for _, tc := range []struct{ name, raw, quoted, uncut string }{
+		{"beside a project", `{"project":"prd_a","env":"staging"}`, `"staging"`, ""},
+		{"beside an address that cannot move", `{"url":"https://mu0028.palbase.studio","env":"main"}`, `"main"`, ""},
 		{"beside both, with stackVersion",
-			`{"url":"https://mu0028.palbase.studio","project":"prd_a","env":"main","stackVersion":"39"}`, `"main"`},
-		{"carrying a control sequence", `{"project":"prd_a","env":` + string(controlJSON) + `}`, fmt.Sprintf("%q", control)},
+			`{"url":"https://mu0028.palbase.studio","project":"prd_a","env":"main","stackVersion":"39"}`, `"main"`, ""},
+		{"carrying a control sequence", `{"project":"prd_a","env":` + string(controlJSON) + `}`, fmt.Sprintf("%q", control), ""},
+		{"empty", `{"project":"prd_a","env":""}`, `("")`, ""},
+		{"a hundred kibibytes long", `{"project":"prd_a","env":"` + long + `"}`, `"` + kept, kept + wide},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := linkedByAnOlderCLI(t, tc.raw)
@@ -178,7 +185,11 @@ func TestARetiredEnvironmentDropsIsNamedAndChoosesNothing(t *testing.T) {
 			written, err := os.ReadFile(projectPath())
 			require.NoError(t, err)
 			require.NotContains(t, string(written), `"env"`, "the committed file still names an environment")
+			require.Less(t, out.Len(), 1024, "a committed value flooded the terminal")
 			require.Contains(t, out.String(), tc.quoted, "the line does not name the value it dropped, quoted")
+			if tc.uncut != "" {
+				require.False(t, bytes.Contains(out.Bytes(), []byte(tc.uncut)), "the line did not cut the value at 64 runes")
+			}
 			require.NotContains(t, out.String(), "\x1b", "a committed file put a control character on the terminal")
 			require.Contains(t, out.String(), "palbase env use <name>", "the line does not say how to choose one")
 			require.Contains(t, out.String(), "--env <name>", "the line does not say how to choose one")
@@ -254,17 +265,54 @@ func TestAfterARetiredEnvironmentDropsTodaysRulesResolve(t *testing.T) {
 	})
 }
 
+// THE ADDRESS MIGRATION NAMES A RETIRED `env` IT DROPS, AND THE ADDRESS DECIDES (FR-5).
+//
+// When the cloud resolves the address, the file becomes an identity and the
+// environment comes from the address — as it did in v0.64, where the address
+// was what routed. The retired `env` beside it decides nothing, and the line
+// says what it named, quoted and cut like the cleanup's, so nobody takes the old
+// value for the environment this machine now acts on.
+func TestTheAddressMigrationNamesARetiredEnvironmentItDrops(t *testing.T) {
+	root := linkedByAnOlderCLI(t, `{"url":"https://mu0028.palbase.studio","env":"main"}`)
+	resolverRig(t, twoEnvs)
+	cloudAddresses(t, true)
+
+	var out bytes.Buffer
+	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+
+	written, err := os.ReadFile(projectPath())
+	require.NoError(t, err)
+	require.Contains(t, string(written), `"project": "prd_a"`, "the address migration did not run")
+	require.NotContains(t, string(written), `"env"`, "the rewritten file still names an environment")
+	sel, err := ReadSelection(root)
+	require.NoError(t, err)
+	require.Equal(t, "staging", sel.Env, "the environment did not come from the address")
+	require.Contains(t, out.String(), `"main"`, "the address migration's line does not name the env it dropped, quoted")
+}
+
 // A REWRITE THAT FAILS LEAVES EVERYTHING AS IT WAS (FR-6).
 //
-// The file byte for byte, no selection, no line — and the verb still reads its
-// target, because the read does not wait on the migration. Round 1 wrote the
-// selection before a rewrite that then failed, so a read-only checkout was
-// routed silently on every run; with `env` choosing nothing that path is gone,
-// and this keeps it gone.
+// The file byte for byte, no selection, no line — and the verb still runs,
+// because the read does not wait on the migration. Round 1 wrote the selection
+// before a rewrite that then failed, so a read-only checkout was routed silently
+// on every run; with `env` choosing nothing that path is gone, and this keeps it
+// gone. The address migration is the other rewrite: when the cloud resolves the
+// address and the file cannot be written, it used to return the write error and
+// fail every verb in that checkout.
 func TestARetiredFieldWhoseRewriteFailsLeavesEverythingAlone(t *testing.T) {
-	for _, tc := range []struct{ name, raw string }{
-		{"a project and env", `{"project":"prd_a","env":"staging"}`},
-		{"an address and stackVersion", `{"url":"https://8bbwb2pbm.palbase.studio","stackVersion":"39"}`},
+	for _, tc := range []struct {
+		name, raw string
+		// resolves lets the cloud name the product, so the rewrite that fails is
+		// the address migration's rather than the cleanup's.
+		resolves bool
+		// runs is set where today's rules resolve a target, so the verb itself
+		// can be run; a two-environment project refuses for its own reasons.
+		runs bool
+	}{
+		{"a project and env", `{"project":"prd_a","env":"staging"}`, false, false},
+		{"an address and stackVersion", `{"url":"https://8bbwb2pbm.palbase.studio","stackVersion":"39"}`, false, true},
+		{"an address the cloud resolves, and stackVersion",
+			`{"url":"https://mu0028.palbase.studio","stackVersion":"39"}`, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if os.Geteuid() == 0 {
@@ -273,8 +321,10 @@ func TestARetiredFieldWhoseRewriteFailsLeavesEverythingAlone(t *testing.T) {
 			root := linkedByAnOlderCLI(t, tc.raw)
 			resolverRig(t, twoEnvs)
 			cloudAddresses(t, true)
-			ProductOfRef = func(context.Context, string) (Product, error) {
-				return Product{}, errors.New("control plane unreachable")
+			if !tc.resolves {
+				ProductOfRef = func(context.Context, string) (Product, error) {
+					return Product{}, errors.New("control plane unreachable")
+				}
 			}
 			require.NoError(t, os.Chmod(projectPath(), 0o444))
 			before, err := os.ReadFile(projectPath())
@@ -293,6 +343,11 @@ func TestARetiredFieldWhoseRewriteFailsLeavesEverythingAlone(t *testing.T) {
 
 			_, err = readLinkedProject()
 			require.NoError(t, err, "a file the migration could not rewrite is unreadable")
+			if tc.runs {
+				var banner bytes.Buffer
+				_, err = PrintResolvedTo(&banner, nil)
+				require.NoError(t, err, "the verb did not run in a checkout whose rewrite failed")
+			}
 		})
 	}
 }
