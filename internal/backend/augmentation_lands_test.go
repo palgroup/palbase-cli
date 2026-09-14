@@ -160,6 +160,24 @@ func TestAugmentationDoesNotLandOnAMisnamedModuleWithoutNames(t *testing.T) {
 	require.ErrorContains(t, err, `"@palbase/backend/stak"`)
 }
 
+// A MODULE RESOLUTION TYPESCRIPT DERIVES IS STILL A MODULE RESOLUTION.
+//
+// FR-007 names only a tsconfig that SETS node/node10/classic, and leaves an
+// absent value alone on purpose (module_resolution.go). But a tsconfig that sets
+// neither `module` nor `moduleResolution` compiles under node10, where the
+// "exports" subpaths the file augments do not resolve — so the file types
+// nothing, and this gate is the one that can say so. Measured when every build
+// began to render the file: a fixture with `{"compilerOptions":{"strict":true}}`
+// was refused here, by name, and rightly.
+func TestAugmentationDoesNotLandUnderADerivedNode10Resolution(t *testing.T) {
+	dir := augmentationProject(t)
+	mustWrite(t, dir, "tsconfig.json", `{"compilerOptions":{"strict":true}}`)
+
+	err := verifyAugmentationLands(context.Background(), dir, filepath.Join(dir, "node_modules"), StackNames{})
+	require.ErrorContains(t, err, "does not apply")
+	require.ErrorContains(t, err, `augments "@palbase/backend/env", which TypeScript cannot resolve`)
+}
+
 // A GATE THAT CANNOT MEASURE DOES NOT SAY GREEN.
 func TestAugmentationProbeRefusesWithoutTypeScript(t *testing.T) {
 	dir := augmentationProject(t)

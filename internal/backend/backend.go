@@ -270,14 +270,11 @@ var envGenExternals = []string{"@palbase/backend", "@palbase/core"}
 // interface so `Database.tables.*` is typed with no import and no generic.
 const envTypesFile = "palbase-env.d.ts"
 
-// stackTypesFile is the derived declaration file for the names the STACK holds.
-// It augments `@palbase/backend/stack`, so `Secrets.get(...)`, the Flags client
-// and `@Upload({ bucket })` accept this project's real names and nothing else.
-//
-// It is the thing that replaced `config/secrets.ts`. That file asked the author
-// to restate, in the repo, names the vault already held, and the push compared
-// the two lists at deploy. This is read FROM the stack and checked by the
-// compiler, so there is no second list to drift and no check to forget.
+// stackTypesFile is RETIRED — nothing renders it any more (FR-008). The names
+// it used to carry (secrets, flags, buckets, roles) are a block of the ONE
+// generated file now, `palbase/palbase-env.d.ts`. The constant survives only so
+// `retiredProjectPaths` (generated_paths.go) can still name the file it sweeps
+// from a checkout that has not rebuilt since.
 const stackTypesFile = "palbase-stack.d.ts"
 
 // StackNames are the name sets the stack holds and the generated types are
@@ -311,7 +308,7 @@ var readStackNamesFn = readStackNames
 var credentialFn = Credential
 
 // readStackNames asks the linked stack for all four name sets: the three
-// `stackNamesFor` reads off the management surface, and the role names from the
+// `stackNamesWith` reads off the management surface, and the role names from the
 // stack's roles door.
 //
 // ALL OR NOTHING, like the three it extends. A partial answer would render a
@@ -395,66 +392,6 @@ func stackNamesForCheckout(ctx context.Context, checkoutRoot string, target Targ
 	return checkoutStackNames{Source: namesUnavailable, Why: errors.Join(err, cacheErr)}
 }
 
-// generateStackTypes writes the project's palbase-stack.d.ts from the names the
-// linked environment's stack holds.
-//
-// A read failure is NOT written through: the existing file is left alone and the
-// error is returned. A stack that is briefly unreachable must not silently
-// narrow a project's types to nothing — that would turn every Secrets.get() in
-// the codebase into a compile error and read as "your code is wrong" rather than
-// "the stack could not be asked".
-func generateStackTypes(ctx context.Context, projectDir, nodeModules string, names StackNames) error {
-	if _, err := exec.LookPath("node"); err != nil {
-		return fmt.Errorf("node not on PATH (Node.js required to generate %s)", stackTypesFile)
-	}
-
-	tmpDir, err := os.MkdirTemp("", "palbase-stackgen-*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	scriptPath := filepath.Join(tmpDir, "stack-gen.js")
-	body, err := buildCheckFS.ReadFile("devjs/stack-gen.js")
-	if err != nil {
-		return fmt.Errorf("read embedded stack-gen.js: %w", err)
-	}
-	if err := os.WriteFile(scriptPath, body, 0o644); err != nil {
-		return err
-	}
-
-	reqData, err := json.Marshal(struct {
-		Names   StackNames `json:"names"`
-		OutPath string     `json:"out_path"`
-	}{Names: names, OutPath: filepath.Join(projectDir, stackTypesFile)})
-	if err != nil {
-		return err
-	}
-
-	evalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(evalCtx, "node", scriptPath)
-	cmd.Dir = projectDir
-	cmd.Env = append(os.Environ(), "NODE_PATH="+nodeModules)
-	cmd.Stdin = bytes.NewReader(reqData)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("stack-gen: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
-	}
-	var res struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-		return fmt.Errorf("parse stack-gen output: %w (output: %s)", err, strings.TrimSpace(stdout.String()))
-	}
-	if res.Error != "" {
-		return fmt.Errorf("stack-gen: %s", res.Error)
-	}
-	return nil
-}
-
 // validateSchemaDeclaration evaluates db/ exactly as generateEnvTypes does and
 // throws the result away.
 //
@@ -472,37 +409,53 @@ func generateStackTypes(ctx context.Context, projectDir, nodeModules string, nam
 // carrying two unnamed FKs to one table reported `created table uat_two_fks`
 // and succeeded.
 func validateSchemaDeclaration(ctx context.Context, projectDir, nodeModules string) error {
+	// NOTHING DECLARED, NOTHING THAT CAN REFUSE TO BOOT. `build` still renders
+	// the one file for a schema-less project — its stack block has nowhere
+	// else to live now that `palbase-stack.d.ts` is retired (FR-008) — but PUSH
+	// asks a narrower question, and asking it here would make node and esbuild
+	// a requirement for pushing a schema-less backend that has nothing for
+	// them to read.
+	if _, err := ReadSchemaSources(projectDir); errors.Is(err, ErrNoSchema) {
+		return nil
+	}
 	tmp, err := os.MkdirTemp("", "palbase-envcheck-*")
 	if err != nil {
 		return err
 	}
 	defer removeTemp(tmp)
-	return runEnvGen(ctx, projectDir, nodeModules, filepath.Join(tmp, envTypesFile))
+	return runEnvGen(ctx, projectDir, nodeModules, filepath.Join(tmp, envTypesFile), nil)
 }
 
-// generateEnvTypes writes the project's palbase-env.d.ts. See runEnvGen.
-func generateEnvTypes(ctx context.Context, projectDir, nodeModules string) error {
+// generateEnvTypes writes the project's ONE generated file. See runEnvGen.
+//
+// names is what the stack block is rendered from; nil is a legal answer — an
+// unreachable stack (or a checkout never linked to one) renders an EMPTY stack
+// block here, and landEnvTypes then decides whether to keep whatever the
+// checkout's file already carried instead (FR-003a).
+func generateEnvTypes(ctx context.Context, projectDir, nodeModules string, names *StackNames) error {
 	dest := filepath.Join(projectDir, filepath.FromSlash(EnvTypesPath()))
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	return runEnvGen(ctx, projectDir, nodeModules, dest)
+	return runEnvGen(ctx, projectDir, nodeModules, dest, names)
 }
 
-func runEnvGen(ctx context.Context, projectDir, nodeModules, outPath string) error {
+func runEnvGen(ctx context.Context, projectDir, nodeModules, outPath string, names *StackNames) error {
 	sources, err := ReadSchemaSources(projectDir)
+	hasSchema := true
 	if errors.Is(err, ErrNoSchema) {
-		return nil // no declaration → nothing to type, skip cleanly
-	}
-	if err != nil {
+		// A PROJECT WITH NO DATABASE STILL GETS THE ONE FILE. It used to be
+		// skipped here, which was right while the stack's names had a file of
+		// their own; they do not any more (FR-008), so skipping would leave a
+		// linked project with no `Secrets`, no `Flags`, no `Buckets` and no
+		// `Roles` at all — for the one reason that has nothing to do with them.
+		hasSchema = false
+	} else if err != nil {
 		return err
 	}
 
 	if _, err := exec.LookPath("node"); err != nil {
-		return fmt.Errorf("node not on PATH (Node.js required to generate palbase-env.d.ts)")
-	}
-	if _, err := exec.LookPath("npx"); err != nil {
-		return fmt.Errorf("npx not on PATH (Node.js required to generate palbase-env.d.ts)")
+		return fmt.Errorf("node not on PATH (Node.js required to generate %s)", filepath.Base(outPath))
 	}
 
 	tmpDir, err := os.MkdirTemp("", "palbase-envgen-*")
@@ -511,17 +464,8 @@ func runEnvGen(ctx context.Context, projectDir, nodeModules, outPath string) err
 	}
 	defer removeTemp(tmpDir)
 
-	// One entry importing every declaration → temp CJS, @palbase/* external.
-	entryPath := filepath.Join(tmpDir, "schemas.entry.mjs")
-	if err := os.WriteFile(entryPath, []byte(envGenEntry(projectDir, sources)), 0o644); err != nil {
-		return err
-	}
-	bundlePath := filepath.Join(tmpDir, "schema.js")
-	if err := bundleSchemaTS(ctx, projectDir, nodeModules, entryPath, bundlePath); err != nil {
-		return fmt.Errorf("bundle %s/: %w", SchemaDir, err)
-	}
-
-	// Extract the embedded env-gen.js bridge next to the bundle.
+	// Extract the embedded env-gen.js bridge regardless of whether there is a
+	// schema to bundle: the STACK block renders either way now.
 	scriptPath := filepath.Join(tmpDir, "env-gen.js")
 	body, err := buildCheckFS.ReadFile("devjs/env-gen.js")
 	if err != nil {
@@ -531,10 +475,26 @@ func runEnvGen(ctx context.Context, projectDir, nodeModules, outPath string) err
 		return err
 	}
 
-	if err := runEnvGenBridge(ctx, projectDir, nodeModules, scriptPath, bundlePath, outPath); err != nil {
-		return err
+	// NO SCHEMA, NO BUNDLE — bundle_path stays empty and the bridge renders an
+	// empty Tables block. esbuild (and the `npx` it needs) is a cost this path
+	// no longer pays: a schema-less project has nothing for it to bundle.
+	var bundlePath string
+	if hasSchema {
+		if _, err := exec.LookPath("npx"); err != nil {
+			return fmt.Errorf("npx not on PATH (Node.js required to generate %s)", filepath.Base(outPath))
+		}
+		// One entry importing every declaration → temp CJS, @palbase/* external.
+		entryPath := filepath.Join(tmpDir, "schemas.entry.mjs")
+		if err := os.WriteFile(entryPath, []byte(envGenEntry(projectDir, sources)), 0o644); err != nil {
+			return err
+		}
+		bundlePath = filepath.Join(tmpDir, "schema.js")
+		if err := bundleSchemaTS(ctx, projectDir, nodeModules, entryPath, bundlePath); err != nil {
+			return fmt.Errorf("bundle %s/: %w", SchemaDir, err)
+		}
 	}
-	return nil
+
+	return runEnvGenBridge(ctx, projectDir, nodeModules, scriptPath, bundlePath, outPath, names)
 }
 
 // bundleSchemaTS runs `npx esbuild` over the generated entry, emitting a CJS
@@ -612,14 +572,20 @@ func envGenEntry(projectDir string, sources []SchemaSource) string {
 // palbase-env.d.ts to outPath. NODE_PATH points at the project's node_modules so
 // the bridge's `require('@palbase/backend')` (for makeEnvDts) resolves to the
 // project's installed SDK.
-func runEnvGenBridge(ctx context.Context, projectDir, nodeModules, scriptPath, bundlePath, outPath string) error {
+func runEnvGenBridge(ctx context.Context, projectDir, nodeModules, scriptPath, bundlePath, outPath string, names *StackNames) error {
 	evalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// `names` IS OMITTED, NOT EMPTIED, when nobody could be asked: an empty
+	// StackNames and an absent one render the same empty block, but only the
+	// absent one tells the bridge this run has nothing to say about the
+	// stack — landEnvTypes upstream is what decides what that means for the
+	// file already in the checkout (FR-003a).
 	reqData, err := json.Marshal(struct {
-		BundlePath string `json:"bundle_path"`
-		OutPath    string `json:"out_path"`
-	}{BundlePath: bundlePath, OutPath: outPath})
+		BundlePath string      `json:"bundle_path,omitempty"`
+		OutPath    string      `json:"out_path"`
+		Names      *StackNames `json:"names,omitempty"`
+	}{BundlePath: bundlePath, OutPath: outPath, Names: names})
 	if err != nil {
 		return err
 	}

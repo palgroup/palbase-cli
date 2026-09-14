@@ -217,7 +217,7 @@ export default defineSchema("billing", { tables: [invoices] });
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	if err := generateEnvTypes(ctx, root, filepath.Join(root, "node_modules")); err != nil {
+	if err := generateEnvTypes(ctx, root, filepath.Join(root, "node_modules"), nil); err != nil {
 		t.Fatalf("generateEnvTypes: %v", err)
 	}
 
@@ -276,17 +276,44 @@ export default defineSchema("billing", { tables: [invoices] });
 	}
 }
 
-// TestGenerateEnvTypesNoSchema asserts the no-op path: a project that declares
-// no database must not error and must not write palbase-env.d.ts.
+// A PROJECT WITH NO DATABASE STILL GETS THE ONE FILE.
+//
+// This asserted the opposite — no db/, no `palbase-env.d.ts` — and that was
+// right while the stack's names had a file of their own. They do not any
+// more: `palbase-stack.d.ts` is retired (FR-008) and its block lives here, so
+// skipping the render would leave a linked project with no `Secrets`, no
+// `Flags`, no `Buckets` and no `Roles` — for the one reason that has nothing
+// to do with any of them. The `Tables` block is simply empty, and rendering
+// it needs no schema bundle at all — `bundleSchemaTS`/npx never run on this
+// path any more.
+//
+// PUSH KEEPS THE NO-OP: it asks whether a declaration would refuse to boot,
+// and a project with nothing declared has nothing that can.
 func TestGenerateEnvTypesNoSchema(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
 	root := t.TempDir()
 	// A plain v1 project: endpoints/ but no db/ at all.
 	mustWrite(t, root, "endpoints/hello/get.ts", "export default { handler: async () => ({}) };\n")
 
-	if err := generateEnvTypes(context.Background(), root, filepath.Join(root, "node_modules")); err != nil {
-		t.Fatalf("generateEnvTypes (no schema) must be a clean no-op, got: %v", err)
+	if err := validateSchemaDeclaration(context.Background(), root, filepath.Join(root, "node_modules")); err != nil {
+		t.Fatalf("a push of a project with no db/ must evaluate nothing, got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(EnvTypesPath()))); !os.IsNotExist(err) {
-		t.Fatalf("palbase-env.d.ts must NOT exist when there is no db/ (stat err: %v)", err)
+
+	mustWrite(t, root, "node_modules/@palbase/backend/package.json",
+		`{"name":"@palbase/backend","version":"0.0.0-test","main":"index.js"}`)
+	mustWrite(t, root, "node_modules/@palbase/backend/index.js", fixtureBackendPkg)
+
+	if err := generateEnvTypes(context.Background(), root, filepath.Join(root, "node_modules"), nil); err != nil {
+		t.Fatalf("generateEnvTypes (no schema): %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(EnvTypesPath())))
+	if err != nil {
+		t.Fatalf("a project with no db/ got no generated file: %v", err)
+	}
+	if got := string(raw); !strings.Contains(got, "interface Tables {}") ||
+		!strings.HasSuffix(strings.TrimRight(got, "\n"), "export {};") {
+		t.Fatalf("the file is not an empty-tables module:\n%s", got)
 	}
 }

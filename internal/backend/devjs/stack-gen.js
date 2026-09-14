@@ -1,31 +1,27 @@
 #!/usr/bin/env node
 /**
- * Palbase stack-type generator bridge.
+ * RETIRED — there is no separate stack type file any more.
  *
- * Generates the project's `palbase-stack.d.ts` from the NAMES its stack holds:
- * the secrets in its vault, the flags in its store, the buckets in its storage.
- * The Go CLI reads those three lists off the management API and hands them here
- * as JSON; this script require()s the project's @palbase/backend for
- * makeStackDts() and writes the returned text.
+ * The names a stack holds (secrets, flags, buckets, roles) are rendered into
+ * `palbase/palbase-env.d.ts`, in the same call that renders the schema: ONE
+ * generated file in a checkout, and one bridge that writes it — `env-gen.js`,
+ * which takes those names as its `names` field. Two writers meant two files to
+ * keep in step, two chances to leave one of them stale, and a second path
+ * writing into the customer's tree.
  *
- * SIMPLER THAN env-gen.js ON PURPOSE, and the difference is the whole point of
- * this change: env-gen has to esbuild-bundle `db/*.ts` because the schema
- * is a DECLARATION the author wrote. There is no file to bundle here. The stack
- * is the authority on which names exist, so this bridge only renders what it is
- * handed.
+ * IT ANSWERS RATHER THAN DISAPPEARING. A caller that still asks for the old
+ * file is told where the names went and nothing is written: a retired bridge
+ * that returned success would leave its caller believing a file exists, and a
+ * missing script would answer with a spawn error that names nothing.
  *
- * Rendering is delegated to the SDK rather than done in Go for the reason
- * `makePurchasesDts` exists: one renderer, so the emitted bytes cannot drift
- * from the augmentation target they have to match.
- *
- * Usage:
- *   echo '{"names":{"secrets":[],"flags":[],"buckets":[]},"out_path":"/p/palbase-stack.d.ts"}' \
- *     | node stack-gen.js
- * Output (stdout, JSON): {} on success, { error } on failure.
+ * Usage (any request): the reason, on stdout, as JSON.
+ * Output (stdout, JSON): { error }.
  */
 'use strict';
 
-const fs = require('fs');
+const RETIRED =
+  "stack-gen.js is retired: a stack's names (secrets, flags, buckets, roles) are rendered into " +
+  'palbase/palbase-env.d.ts by env-gen.js — pass them as its `names` field. Nothing was written.';
 
 function writeResult(result) {
   // Same `process.exit` hazard env-gen.js documents: on a pipe the write is
@@ -34,66 +30,14 @@ function writeResult(result) {
   process.stdout.write(JSON.stringify(result), () => process.exit(0));
 }
 
-function writeError(error) {
-  writeResult({ error: String(error) });
-}
-
 async function main() {
-  const chunks = [];
+  // The request is drained before the refusal is written: a caller still
+  // sending its JSON must read the reason, not an EPIPE from a bridge that had
+  // already gone.
   for await (const chunk of process.stdin) {
-    chunks.push(chunk);
+    void chunk;
   }
-
-  let req;
-  try {
-    req = JSON.parse(Buffer.concat(chunks).toString());
-  } catch (e) {
-    writeError('Invalid JSON input: ' + e.message);
-    return;
-  }
-
-  const { names, out_path: outPath } = req;
-  if (!names || typeof names !== 'object') {
-    writeError('names is required');
-    return;
-  }
-  if (!outPath) {
-    writeError('out_path is required');
-    return;
-  }
-
-  let makeStackDts;
-  try {
-    // The PROJECT's installed @palbase/backend (on NODE_PATH), not a CLI copy:
-    // the generated file augments that package's interfaces, so it has to be
-    // rendered by the same version.
-    ({ makeStackDts } = require('@palbase/backend'));
-  } catch (e) {
-    writeError(
-      '@palbase/backend not found — run `npm install` in the project so its stack names can be typed (' +
-        (e && e.message ? e.message : e) +
-        ')',
-    );
-    return;
-  }
-  if (typeof makeStackDts !== 'function') {
-    writeError('@palbase/backend does not export makeStackDts (upgrade @palbase/backend)');
-    return;
-  }
-
-  try {
-    const dts = makeStackDts({
-      secrets: names.secrets || [],
-      flags: names.flags || [],
-      buckets: names.buckets || [],
-    });
-    fs.writeFileSync(outPath, dts);
-  } catch (err) {
-    writeError('Failed to write palbase-stack.d.ts: ' + (err && err.message ? err.message : err));
-    return;
-  }
-
-  writeResult({});
+  writeResult({ error: RETIRED });
 }
 
-main().catch(writeError);
+main().catch(() => writeResult({ error: RETIRED }));

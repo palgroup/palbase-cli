@@ -75,12 +75,29 @@ func seedInstalledBackend(t *testing.T, dir, version string) {
 			"// blanket Proxy made `registeredControllers()` return undefined and the\n"+
 			"// check died on `not iterable`.\n"+
 			"const decorator = () => () => {};\n"+
+			"// makeEnvDts IS LISTED, not left to the decorator default: `build` now\n"+
+			"// renders the ONE generated file even for a schema-less project (its\n"+
+			"// stack block has nowhere else to live, FR-008), so this fake's render\n"+
+			"// path runs on every skew test whether or not it declares a schema — and\n"+
+			"// the decorator default answers a FUNCTION, which `fs.writeFileSync`\n"+
+			"// rejects.\n"+
+			"function makeEnvDts(schemas) {\n"+
+			"  return 'declare module \"@palbase/backend/env\" {\\n  interface Tables {}\\n}\\n\\nexport {};\\n';\n"+
+			"}\n"+
 			"module.exports = new Proxy(\n"+
 			"  { getRegisteredControllers: () => [], buildContainer: () => ({ owned: [] }),\n"+
 			"    assertNoOrphanEntryPoints: () => {}, jobsOf: () => [], webhooksOf: () => [],\n"+
-			"    hooksOf: () => [] },\n"+
+			"    hooksOf: () => [], makeEnvDts },\n"+
 			"  { get: (t, k) => (k in t ? t[k] : decorator) },\n"+
 			");\n"), 0o644))
+	// …AND THE MODULE THAT FILE AUGMENTS. `build` measures that the file it
+	// renders lands (FR-006), and a `declare module "@palbase/backend/env"`
+	// against a package with no such module is exactly what that gate refuses.
+	// Every real @palbase/backend has carried `./env` (12.0.1 included, D-23);
+	// a fake without it would be refused for a reason this test is not about.
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "env.d.ts"),
+		[]byte("export interface Tables {}\nexport interface Schemas {}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "env.js"), []byte("module.exports = {};\n"), 0o644))
 	// Stub zod-to-json-schema so ensureDevServerTools is a no-op (no real npm
 	// install → the skew tests stay hermetic and fast).
 	ztjs := filepath.Join(dir, "node_modules", "zod-to-json-schema")
@@ -121,6 +138,10 @@ func TestRunBuild_OlderMajorDoesNotFailTheLocalBuild(t *testing.T) {
 			"@Module({ controllers: [], providers: [], exports: [], imports: [] })\n"+
 			"export class AppModule {}\n"), 0o644))
 	seedInstalledBackend(t, dir, "12.0.1")
+	// The tsconfig every scaffolded project carries: the build compiles its
+	// types landing check with the project's own settings (FR-006).
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
+		[]byte(`{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"bundler","strict":true,"skipLibCheck":true,"experimentalDecorators":true}}`), 0o644))
 
 	var out bytes.Buffer
 	err := runBuild(context.Background(), dir, &out)
@@ -1041,8 +1062,14 @@ func TestBuildAcceptsATsconfigWithNoIncludeList(t *testing.T) {
 	writeFixture(t, dir, goodControllerTS)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "jobs", "sweep.ts"), []byte("export default class {}\n"), 0o644))
+	// NO `include`, which is the rule under test — and a moduleResolution that
+	// reads package.json "exports". With none, TypeScript derives node10 from the
+	// default `module`, the generated file's `@palbase/backend/env` and `/stack`
+	// cannot resolve, and the build now measures that and refuses (FR-006): a
+	// project every build renders the one file for is a project whose types have
+	// to land. That refusal is right and is not what this test is about.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tsconfig.json"),
-		[]byte(`{"compilerOptions":{"strict":true}}`), 0o644))
+		[]byte(`{"compilerOptions":{"strict":true,"module":"ESNext","moduleResolution":"bundler"}}`), 0o644))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

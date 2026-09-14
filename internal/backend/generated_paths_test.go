@@ -207,7 +207,15 @@ func TestARealBuildWritesNothingUnexpectedIntoTheProject(t *testing.T) {
 	// the build writes it under `palbase/`, so the entry could never match and the
 	// allowance was inert. A list that cannot fire is not an allowance; it is a
 	// trap for the first fixture that makes the file appear.
-	allowed := map[string]bool{filepath.ToSlash(EnvTypesPath()): true}
+	//
+	// …AND ITS DIRECTORY. Every build renders the one file now, a project with no
+	// schema included (FR-008), so a checkout that had no `palbase/` gains that
+	// directory with it. Derived from the same declaration, so the allowance is
+	// exactly the file and the directories it lives in — nothing beside them.
+	allowed := map[string]bool{}
+	for rel := filepath.ToSlash(EnvTypesPath()); rel != "." && rel != "/"; rel = filepath.ToSlash(filepath.Dir(rel)) {
+		allowed[rel] = true
+	}
 	for _, p := range after {
 		if had[p] || allowed[p] {
 			continue

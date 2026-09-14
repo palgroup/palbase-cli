@@ -65,18 +65,37 @@ gates the real deploy).`,
 // install failed) warn and return nil (fail-open — the server gate is the
 // authoritative backstop).
 func runBuild(ctx context.Context, cwd string, out io.Writer) error {
-	// THE SHAPE OF THE CHECKOUT, FIRST — AND BEFORE THE controllers/ EARLY RETURN.
+	// THE SWEEP FIRST — BEFORE EVERY GATE AND EVERY EARLY RETURN (FR-009).
 	//
-	// Both checks are pure filesystem: no node, no bun, no network, microseconds.
-	// They run ahead of everything because a tree can carry either defect while
-	// having no controllers/ at all, and because the answer is more useful before
-	// sixty lines of route listing than after them.
+	// A retired artefact is what an OLDER CLI wrote into somebody's checkout,
+	// and no verb collected one: measured on the user's disk, 36 directories
+	// and ~30 MB survived every green run. It runs ahead of the refusals below
+	// because those RETURN — a tree carrying a retired declaration would keep
+	// its fossils forever, and the fossils are not what is wrong with it.
 	//
-	// NOT SHORT-CIRCUITED. A checkout that has been through one upgrade tends to
-	// have both, and reporting one at a time turns a single fix into two builds.
+	// What git TRACKS — or what sits in a repository git could not be asked
+	// about — is reported and left alone (FR-010). Deleting a committed
+	// directory behind a progress line is not this tool's decision to make;
+	// saying it is there, by name, is. The words are `sweepCheckout`'s, so a
+	// kept path reads the same whichever verb found it.
+	for _, kept := range reapRetiredArtifacts(cwd) {
+		fmt.Fprintf(out, "  kept %s — it may be committed (git tracks a file under it, or could not be asked); remove it in a commit\n", kept)
+	}
+
+	// THE SHAPE OF THE CHECKOUT, NEXT — AND BEFORE THE controllers/ EARLY RETURN.
+	//
+	// All three checks are pure filesystem: no node, no bun, no network,
+	// microseconds. They run ahead of everything because a tree can carry any
+	// of them while having no controllers/ at all, and because the answer is
+	// more useful before sixty lines of route listing than after them.
+	//
+	// NOT SHORT-CIRCUITED. A checkout that has been through one upgrade tends
+	// to carry more than one, and reporting them one at a time turns a single
+	// fix into three builds.
 	deadDecl := reportDeadDeclarations(cwd, out)
 	blindSpots := reportIncludeBlindSpots(cwd, out)
-	if deadDecl || blindSpots {
+	unreachable := reportUnreachableModuleResolution(cwd, out)
+	if deadDecl || blindSpots || unreachable {
 		return fmt.Errorf("build failed")
 	}
 
@@ -246,68 +265,62 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 		// the pod's global install provides it — point it at the project's copy.
 		fmt.Sprintf("PALBASE_RUNTIME_MODULES=%s", filepath.Join(cwd, "node_modules")),
 	)
+	// THE NAMES THE STACK HOLDS, read before the file is rendered.
+	//
+	// They are the other half of the ONE generated file: `Secrets.get(…)`,
+	// `Flags.isEnabled(…)`, `@Upload({ bucket })` and `{ auth: { role } }` are
+	// compile-checked against them. `build` works offline (NFR-004), so an
+	// unreachable stack — or a checkout never linked to one — is answered by
+	// `namesUnavailable` rather than by failing the build; landEnvTypes then
+	// keeps whatever stack block the checkout's file already carries.
+	names := namesForBuild(ctx, cwd, out)
+
 	// db/ is deploy-fatal too and check mode never looked at it: a schema module
 	// that doesn't export a defineSchema() result passed `palbase build` and then
 	// failed the deploy. generateEnvTypes runs the SAME bundle + bridge the
-	// deploy's extractor does (and is a clean no-op when the project declares no
-	// database), so reuse it rather than restating the rule. It writes into the
-	// staging tree, which is discarded — build validates, it does not mutate.
+	// deploy's extractor does, so reuse it rather than restating the rule. It
+	// writes into the staging tree, which is discarded — build validates, it
+	// does not mutate.
 	//
 	// The refusal names the DIRECTORY, not a file: the failure can be the old
 	// layout, a missing db/public.ts, or one sibling of several that does not
 	// evaluate — and the error carries which.
-	if err := generateEnvTypes(ctx, buildRoot, filepath.Join(cwd, "node_modules")); err != nil {
+	if err := generateEnvTypes(ctx, buildRoot, filepath.Join(cwd, "node_modules"), namesOrNil(names)); err != nil {
 		fmt.Fprintf(out, "✗ DEPLOY WOULD FAIL: %s/ — %v\n", SchemaDir, err)
 		return fmt.Errorf("build failed")
 	}
-	// …and then it LANDS in the checkout. Generating into the staging tree and
-	// discarding it validated the schema and left the person with nothing: their
-	// editor still typed `Database.tables.*` from whatever `palbase-env.d.ts` was
-	// last written, which is the file's whole reason to exist.
+	// …and then it LANDS in the checkout — the ONE generated file, both its
+	// blocks. Generating into the staging tree and discarding it validated the
+	// schema and left the person with nothing: their editor still typed
+	// `Database.tables.*` and `Secrets.get(…)` from whatever was last written,
+	// which is the file's whole reason to exist.
 	//
 	// It is written as soon as the schema is valid, before the controller checks
-	// below can fail the build. The types describe db/*.ts and nothing else —
-	// a controller with a bad decorator does not make them wrong, and the moment
-	// somebody most needs their editor working is while they are fixing one.
-	// NO NAMES ARE READ ON THIS PATH YET, and the lander is told so rather than
-	// left to assume: a render that carries no stack names must not replace a
-	// file that has them (FR-003a). The names still come from the separate
-	// `palbase-stack.d.ts` round below, and when the single render takes over
-	// this argument becomes what the stack (or this machine's cache) answered.
-	if err := landEnvTypes(buildRoot, cwd, checkoutStackNames{Source: namesUnavailable}, out); err != nil {
+	// below can fail the build. The types describe db/*.ts and the stack's names
+	// and nothing else — a controller with a bad decorator does not make them
+	// wrong, and the moment somebody most needs their editor working is while
+	// they are fixing one.
+	if err := landEnvTypes(buildRoot, cwd, names, out); err != nil {
 		return err
 	}
-	// …AND THE LANDED FILE IS MEASURED, NOT ITS EXISTENCE (FR-006). A file that
-	// lost `export {};` replaces @palbase/backend's modules instead of augmenting
-	// them, and a drifted module name augments nothing — both leave a green build
-	// and a codebase whose `Secrets.get()` types say nothing. The names the probe
-	// spells arrive with the single render (T019); until then it proves the
-	// package's own types still resolve through the file. TypeScript is loaded
-	// the way build-check.js loads it — the CLI's pinned parser first — so a
-	// project whose own `typescript` is absent or has no compiler API is still
-	// measured rather than refused (D-23).
-	if err := verifyAugmentationLands(ctx, cwd, devNodePath(cwd, out), StackNames{}); err != nil {
+
+	// AND THE AUGMENTATION HAS TO LAND — measured, not declared (FR-006).
+	//
+	// A `declare module` written against a specifier TypeScript cannot resolve
+	// is a silent no-op in any `.d.ts` (no error, ever), and a file that does
+	// not end with `export {};` SHADOWS the package's types instead of merging
+	// with them. Both produce a green build and an editor that types nothing.
+	//
+	// The probe spells one of the names the render used, so a stack block that
+	// landed but types nothing is caught too. The refusal already names the file
+	// and what TypeScript said about it. TypeScript is loaded the way
+	// build-check.js loads it — the CLI's pinned parser first — so a project
+	// whose own `typescript` is absent or has no compiler API is still measured
+	// rather than refused (D-23).
+	if err := verifyAugmentationLands(ctx, cwd, devNodePath(cwd, out), names.Names); err != nil {
 		fmt.Fprintf(out, "✗ %v\n", err)
 		return fmt.Errorf("build failed")
 	}
-
-	// There is no config to evaluate. A build produces what a push ships, and a
-	// push ships code and schema: settings reach the stack directly, from
-	// whoever changes them, and a copy of them in the source tree could only
-	// disagree with the live one.
-	//
-	// But the NAMES the stack holds are what makes `Secrets.get("…")`,
-	// `Flags.isEnabled("…")` and `@Upload({ bucket })` compile-checked, and
-	// something has to ask for them. `build` is where `palbase-env.d.ts` is
-	// already regenerated, so it is where the other generated file belongs too:
-	// one verb regenerates a project's types, not two.
-	//
-	// BEST-EFFORT ON PURPOSE. `build` works offline — that is its whole shape —
-	// so an unreachable stack is reported and skipped, never fatal, and the
-	// existing file is left exactly as it was. Narrowing a project's types to
-	// nothing because a network call failed would turn every `Secrets.get()` in
-	// the codebase into a compile error reading "your code is wrong".
-	landStackTypes(ctx, cwd, out)
 
 	node.Stdout = out
 	node.Stderr = out
@@ -324,27 +337,33 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	return nil
 }
 
-// landStackTypes regenerates palbase-stack.d.ts from the names the linked stack
-// holds. Best-effort: a checkout with no stack, or a stack that cannot be
-// reached, leaves the existing file alone and says so in one line.
-func landStackTypes(ctx context.Context, cwd string, out io.Writer) {
+// namesForBuild answers which names the stack block is rendered from: read the
+// stack's four sets when this checkout is linked to one (remembering a
+// successful read on this machine, FR-004, and falling back to what it last
+// heard when the stack cannot be asked, FR-003); when this checkout is not
+// linked to any stack at all, there is nothing to ask and nothing to fall back
+// to, and that is said by name rather than silently swallowed.
+func namesForBuild(ctx context.Context, cwd string, out io.Writer) checkoutStackNames {
 	resolved, err := Resolve(ctx)
-	target := resolved.Acting()
 	if err != nil {
-		// Not linked to anything. Nothing to ask, and nothing is wrong.
-		return
+		return checkoutStackNames{Source: namesUnavailable, Why: errors.New("this checkout is not linked to a stack")}
 	}
-	names, err := stackNamesFor(ctx, target)
-	if err != nil {
-		fmt.Fprintf(out, "  %s not refreshed — %v\n", stackTypesFile, err)
-		return
+	names := stackNamesForCheckout(ctx, cwd, resolved.Acting())
+	if names.CacheErr != nil {
+		fmt.Fprintf(out, "  the stack's names were not remembered on this machine — %v\n", names.CacheErr)
 	}
-	if err := generateStackTypes(ctx, cwd, filepath.Join(cwd, "node_modules"), names); err != nil {
-		fmt.Fprintf(out, "  %s not refreshed — %v\n", stackTypesFile, err)
-		return
+	return names
+}
+
+// namesOrNil is what the RENDERER is handed: nil when nothing was read at all,
+// so the bridge emits an empty stack block and landEnvTypes is the one that
+// decides whether the checkout's existing block survives (FR-003a). Names read
+// from the stack OR from this machine's cache are real answers and render.
+func namesOrNil(n checkoutStackNames) *StackNames {
+	if n.Source == namesUnavailable {
+		return nil
 	}
-	fmt.Fprintf(out, "✓ %s (%d secret(s), %d flag(s), %d bucket(s))\n",
-		stackTypesFile, len(names.Secrets), len(names.Flags), len(names.Buckets))
+	return &n.Names
 }
 
 // ── THE BOUNDARIES OF THE GENERATED FILE ────────────────────────────────────
@@ -635,23 +654,15 @@ func majorOf(version string) int {
 	return n
 }
 
-// stackNamesFor asks the linked stack for the three name sets the generated
-// types are rendered from.
+// stackNamesWith asks the linked stack for three of the name sets the generated
+// types are rendered from — secrets, flags, buckets — with the credential
+// already resolved, so readStackNames (which adds the roles) resolves it once,
+// not once per read.
 //
 // One round trip per set, and a failure in ANY of them fails the whole read:
 // a partial answer would generate a file that narrows `Secrets.get()` correctly
 // and `Flags.isEnabled()` to nothing, which is worse than not refreshing —
 // the compile error would land on code that is right.
-func stackNamesFor(ctx context.Context, target Target) (StackNames, error) {
-	cred, _, err := credentialFn(target.URL)
-	if err != nil {
-		return StackNames{}, fmt.Errorf("no credential for %s", target.Describe())
-	}
-	return stackNamesWith(ctx, target, cred)
-}
-
-// stackNamesWith is stackNamesFor with the credential already resolved — so a
-// caller that also reads the roles resolves it once, not once per read.
 func stackNamesWith(ctx context.Context, target Target, cred Credentials) (StackNames, error) {
 	secrets, err := secretNames(ctx, target, cred)
 	if err != nil {

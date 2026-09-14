@@ -255,3 +255,19 @@ func TestEnvGenBridgeRefusesAnSDKThatRendersNoStackBlock(t *testing.T) {
 	require.Empty(t, plain.Error)
 	require.Contains(t, readText(t, out), "// schemas: 1")
 }
+
+func TestEnvGenBridgeIsTheOnlyWriter(t *testing.T) {
+	root, _, _ := bridgeProject(t, fixtureSingleFileBackendPkg)
+	legacy := filepath.Join(root, "palbase-stack.d.ts")
+
+	answer := runEmbeddedBridge(t, "stack-gen.js", root, map[string]any{
+		"names":    wireNames(t, StackNames{Secrets: []string{"STRIPE_KEY"}}),
+		"out_path": legacy,
+	})
+	// Emekli köprü sessizce kaybolmaz: adların NEREYE gittiğini söyler.
+	require.Contains(t, answer.Error, "retired")
+	require.Contains(t, answer.Error, "palbase/palbase-env.d.ts")
+	require.Contains(t, answer.Error, "env-gen.js")
+	_, err := os.Stat(legacy)
+	require.ErrorIs(t, err, fs.ErrNotExist, "emekli köprü dosya yazmamalı")
+}
