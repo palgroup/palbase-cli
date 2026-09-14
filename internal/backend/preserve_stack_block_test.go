@@ -194,6 +194,74 @@ func TestPreserveStackBlockYieldsToNamesThatWereRead(t *testing.T) {
 	require.NotContains(t, string(landed), "STRIPE_KEY", "yığın cevap verdi: artık olmayan bir secret tipte kalamaz")
 }
 
+// A CRLF CHECKOUT STAYS CRLF, AND AN UNCHANGED FILE STAYS UNWRITTEN (review-T010).
+//
+// Git with `core.autocrlf=true` checks the committed file out with CRLF, and the
+// renderer always writes LF. Spliced as-is, the env block landed LF inside a CRLF
+// file — a file with MIXED line endings on disk — and `bytes.Equal` never matched
+// again, so every build rewrote an unchanged file and woke every watcher
+// (FR-001a). The render is compared and written in the checkout's own endings.
+func TestPreserveStackBlockKeepsACRLFCheckoutsLineEndings(t *testing.T) {
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	existing := crlf(renderedEnvFile(newTables, filledStack))
+
+	for _, c := range []struct {
+		name   string
+		source stackNamesSource
+		fresh  string
+	}{
+		{"names unavailable: only the env block moves", namesUnavailable, renderedEnvFile(newTables, "")},
+		{"names read: the render wins", namesFromStack, renderedEnvFile(newTables, filledStack)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			buildRoot, cwd, dest := landFixture(t, existing, c.fresh)
+
+			var out bytes.Buffer
+			require.NoError(t, landEnvTypes(buildRoot, cwd, checkoutStackNames{Source: c.source}, &out))
+
+			landed, err := os.ReadFile(dest)
+			require.NoError(t, err)
+			require.Equal(t, existing, string(landed), "the CRLF file came back rewritten — mixed or LF line endings")
+			require.Contains(t, out.String(), "(unchanged)", "the same content on a CRLF checkout was written again")
+		})
+	}
+}
+
+// NAMES OR NO NAMES, A RENDER WITHOUT A STACK BLOCK DROPS NONE (review-T010).
+//
+// The downgraded-SDK refusal lived only in the unavailable branch. With names
+// read — from the stack or this machine's cache — the same unmarked render
+// replaced a file typing this project's secrets with one typing none of them,
+// under a "✓". The bridge refuses that render too (T011), but the lander must
+// not depend on its caller for the one thing it exists to guarantee.
+func TestPreserveStackBlockRefusesAnUnmarkedRenderEvenWithNames(t *testing.T) {
+	existing := renderedEnvFile(oldTables, filledStack)
+	unmarked := "declare module \"@palbase/backend/env\" {\n  interface Tables {" + newTables + "}\n}\n\nexport {};\n"
+
+	for _, source := range []stackNamesSource{namesFromStack, namesFromCache} {
+		buildRoot, cwd, dest := landFixture(t, existing, unmarked)
+
+		var out bytes.Buffer
+		require.NoError(t, landEnvTypes(buildRoot, cwd,
+			checkoutStackNames{Source: source, Names: StackNames{Secrets: []string{"STRIPE_KEY"}}}, &out))
+
+		landed, err := os.ReadFile(dest)
+		require.NoError(t, err)
+		require.Equal(t, existing, string(landed), "a render with no stack block dropped the file's names")
+		require.Contains(t, out.String(), "not refreshed")
+	}
+}
+
+// OVERLAPPING BLOCKS ARE NOT SPLICED (review-T010 MINOR-1). No other case reaches
+// the overlap check, so without this one it could be deleted and nothing would
+// go red.
+func TestPreserveStackBlockRefusesOverlappingBlocks(t *testing.T) {
+	existing := palbaseEnvBlockBegin + "\n" + palbaseStackBlockBegin + "\n" +
+		palbaseEnvBlockEnd + "\n" + palbaseStackBlockEnd + "\nexport {};\n"
+	_, err := preserveStackBlock(existing, palbaseEnvBlockBegin+"\nx\n"+palbaseEnvBlockEnd)
+	require.ErrorContains(t, err, "overlap")
+}
+
 // A DOWNGRADED SDK MUST NOT COST THE NAMES, and a file that predates the single
 // render has nothing to lose.
 func TestPreserveStackBlockAndAnUnmarkedRender(t *testing.T) {

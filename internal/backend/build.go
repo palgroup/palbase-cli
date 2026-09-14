@@ -422,7 +422,7 @@ func keepStackBlock(existing, fresh string) (string, error) {
 
 	if freshErr != nil {
 		if existingMarked {
-			return "", fmt.Errorf("the installed %s renders no marked env block (%w), and writing its "+
+			return "", fmt.Errorf("the installed %s renders no single marked env block (%w), and writing its "+
 				"output would drop the stack block %s carries", backendPkg, freshErr, EnvTypesPath())
 		}
 		return fresh, nil
@@ -480,6 +480,26 @@ func landEnvTypes(buildRoot, cwd string, names checkoutStackNames, out io.Writer
 	prev, rerr := os.ReadFile(dest)
 	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", rel, rerr)
+	}
+
+	// THE CHECKOUT'S LINE ENDINGS, NOT THE RENDERER'S (review-T010). The file is
+	// committed, and git with `core.autocrlf=true` checks it out with CRLF while
+	// the renderer writes LF. Spliced as-is, an LF env block landed inside a CRLF
+	// file — mixed endings, on disk — and the bytes never compared equal again,
+	// so every build rewrote a file whose content had not changed (FR-001a).
+	if rerr == nil && bytes.Contains(prev, []byte("\r\n")) {
+		body = bytes.ReplaceAll(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n"), []byte("\r\n"))
+	}
+
+	// A RENDER WITH NO STACK BLOCK NEVER REPLACES A FILE THAT HAS ONE, whatever
+	// the names' source (review-T010). An @palbase/backend older than the single
+	// file ignores the names it is handed; writing its output would drop every
+	// secret, flag, bucket and role this project types against, under a "✓".
+	if names.Source != namesUnavailable && rerr == nil &&
+		!bytes.Contains(body, []byte(palbaseStackBlockBegin)) && bytes.Contains(prev, []byte(palbaseStackBlockBegin)) {
+		fmt.Fprintf(out, "  %s not refreshed — the installed %s rendered no stack block, and writing its "+
+			"output would drop the one this file carries\n", rel, backendPkg)
+		return nil
 	}
 
 	if names.Source == namesUnavailable {
