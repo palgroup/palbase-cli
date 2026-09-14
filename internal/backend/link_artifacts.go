@@ -301,7 +301,13 @@ func publishProjectContract(root, stage string) error {
 	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(live, staged, 0o644)
+	// THROUGH THE SAME REPLACEMENT AS EVERY OTHER WRITER OF THIS FILE. This wrote
+	// with `os.WriteFile` while WriteTarget was made atomic, and measured in
+	// review that left the defect the atomic write exists to remove — a write cut
+	// short here produced `{"project":"prd_` and every later verb refused the
+	// checkout as invalid JSON. `link` writes this file more often than the
+	// migration does.
+	return replaceFileAtomically(live, staged)
 }
 
 func publishLinkArtifacts(root, stage string, before, after map[string]artifactFile) error {

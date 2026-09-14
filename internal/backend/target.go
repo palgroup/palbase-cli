@@ -34,6 +34,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/palgroup/palbase-cli/internal/authcontract"
 )
@@ -247,6 +248,37 @@ func retiredFieldSpeltOtherwise(raw []byte) (string, error) {
 	return "", nil
 }
 
+// sweepAbandonedRewrites removes the temporary files a rewrite that never
+// finished left in the committed directory.
+//
+// `palbase/` is the ONE visible directory and it is committed: a SIGKILL, a
+// panic or a laptop lid closed mid-write leaves a `.project.json-1234` there
+// that `git status` shows and `git add palbase/` commits. The deferred remove
+// inside WriteTarget cannot run for a process that is gone, so the next write
+// clears what the last one abandoned.
+//
+// ONLY WHAT IS CLEARLY ABANDONED: a file another process is writing RIGHT NOW
+// carries this same prefix, and removing it would make that rename fail. An
+// hour is far longer than any rewrite and far shorter than a checkout's life.
+// Failures are ignored on purpose — a leftover somebody else owns is not this
+// write's problem.
+func sweepAbandonedRewrites(dir, prefix string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < time.Hour {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
+}
+
 // WriteTarget records the project this checkout belongs to.
 //
 // THE FILE IS REPLACED WHOLE OR NOT AT ALL (FR-6). `os.WriteFile` truncated the
@@ -274,22 +306,62 @@ func WriteTarget(t Target) error {
 	if err != nil {
 		return err
 	}
-	dest := projectPath()
+	return replaceFileAtomically(projectPath(), append(blob, '\n'))
+}
+
+// replaceFileAtomically puts blob at dest whole or not at all, and is the ONE
+// way this package rewrites a file somebody committed.
+//
+// It is a function rather than WriteTarget's body because WriteTarget is not
+// the only writer of `palbase/project.json`: `palbase link` publishes the
+// contract from its stage (publishProjectContract, link_artifacts.go), and that
+// path wrote with `os.WriteFile` while this one was made atomic — the same cut
+// file, through the verb that writes it most often. A guarantee that holds in
+// one writer and not its neighbour is not a guarantee.
+func replaceFileAtomically(dest string, blob []byte) error {
+	// A SYMLINK STILL POINTS WHERE IT POINTED. The old write went through it; a
+	// rename onto the link would swap it for a copy. So the file it resolves to
+	// is the one replaced, from a temporary file in that file's own directory.
 	if resolved, evalErr := filepath.EvalSymlinks(dest); evalErr == nil {
 		dest = resolved
 	}
+	// THE MODE IS THE FILE'S OWN, not the temporary file's. `os.CreateTemp` makes
+	// 0600 and `os.WriteFile` only applies a mode when it CREATES, so a file
+	// somebody chmodded — or a new one under a strict umask — would otherwise
+	// come back with a mode nobody chose. A file that does not exist yet gets
+	// 0644, which is what `os.WriteFile` created it with.
+	mode := os.FileMode(0o644)
+	// A FILE THIS PROCESS MAY NOT WRITE IS STILL NOT WRITTEN. A rename asks only
+	// the directory, so it would replace a read-only file that `os.WriteFile`
+	// refused — one somebody locked on purpose; a Perforce workspace keeps every
+	// file read-only until it is opened for edit. Opening it for writing, without
+	// truncating, asks the question the old write asked and changes nothing.
 	existing, err := os.OpenFile(dest, os.O_WRONLY, 0)
 	switch {
 	case err == nil:
+		if info, statErr := existing.Stat(); statErr == nil {
+			mode = info.Mode().Perm()
+		}
 		if err := existing.Close(); err != nil {
 			return err
 		}
 	case !errors.Is(err, os.ErrNotExist):
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".project.json-*")
+	prefix := "." + filepath.Base(dest) + "-"
+	sweepAbandonedRewrites(filepath.Dir(dest), prefix)
+	tmp, err := os.CreateTemp(filepath.Dir(dest), prefix+"*")
 	if err != nil {
-		return err
+		// THE REFUSAL NAMES THE FILE THE CALLER ASKED FOR. This process's temporary
+		// file is an implementation detail, and `open palbase/.project.json-9590:
+		// permission denied` sends somebody looking for a path that does not exist.
+		// The path is replaced rather than the error wrapped, so the message is the
+		// one `os.WriteFile` gave and `errors.Is(err, fs.ErrPermission)` still holds.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return &os.PathError{Op: pathErr.Op, Path: dest, Err: pathErr.Err}
+		}
+		return fmt.Errorf("write %s: %w", dest, err)
 	}
 	name := tmp.Name()
 	renamed := false
@@ -298,7 +370,7 @@ func WriteTarget(t Target) error {
 			_ = os.Remove(name)
 		}
 	}()
-	if _, err := tmp.Write(append(blob, '\n')); err != nil {
+	if _, err := tmp.Write(blob); err != nil {
 		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
@@ -307,9 +379,14 @@ func WriteTarget(t Target) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(name, 0o644); err != nil {
+	if err := os.Chmod(name, mode); err != nil {
 		return err
 	}
+	// THE LAST ACT IS A RENAME, and that is what makes the file whole or old and
+	// never cut: rename(2) replaces the name in one step. A copy here would pass
+	// every test that caps the SIZE of the write — the failure would land in the
+	// temporary file — and bring back exactly the defect this function exists to
+	// remove, so a gate measures this line (TestTheLastActOfAReplacementIsARename).
 	if err := os.Rename(name, dest); err != nil {
 		return err
 	}

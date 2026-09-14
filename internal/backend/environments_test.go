@@ -325,7 +325,7 @@ func TestALegacyCheckoutIsRewrittenToItsIdentity(t *testing.T) {
 	CloudProjectAddress = func(string) bool { return true }
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	after, err := readLinkedProject()
 	require.NoError(t, err)
@@ -352,8 +352,8 @@ func TestAFailedMigrationLeavesTheCheckoutAlone(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out),
-		"a failed migration must not fail the verb")
+	// tip düzeyinde garanti: göç hiçbir hata döndürmez (a failed migration must not fail the verb)
+	MigrateLegacyTarget(context.Background(), &out)
 
 	after, err := readLinkedProject()
 	require.NoError(t, err)
@@ -370,7 +370,7 @@ func TestSelfHostIsNotMigrated(t *testing.T) {
 	CloudProjectAddress = func(string) bool { return false }
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	after, err := readLinkedProject()
 	require.NoError(t, err)

@@ -377,14 +377,14 @@ func ambiguous(target Target, envs []Environment) error {
 // AND IT DROPS WHAT AN OLDER CLI COMMITTED UNDER A RETIRED FIELD
 // (dropRetiredFields), when the address was not this migration's to rewrite.
 //
-// NOTHING IN IT FAILS THE VERB, so the error it returns is nil. Every failure is
+// NOTHING IN IT FAILS THE VERB, AND IT RETURNS NO ERROR AT ALL. Every failure is
 // answered where it happens — a lookup that fails moves nothing, a write that
 // fails leaves what it would have replaced — and a checkout the migration could
 // not read is reported by the verb's own resolution, which reads it again.
-func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
+func MigrateLegacyTarget(ctx context.Context, w io.Writer) {
 	target, err := readLinkedProject()
 	if err != nil {
-		return nil // nothing linked: nothing to migrate
+		return // nothing linked: nothing to migrate
 	}
 	if migrateLegacyAddress(ctx, w, target) {
 		// THE CLEANUP IS FOR A CHECKOUT THE ADDRESS MIGRATION DID NOT TAKE. When it
@@ -393,10 +393,9 @@ func MigrateLegacyTarget(ctx context.Context, w io.Writer) error {
 		// are not part of it — or a write it had begun failed, and a failed
 		// rewrite leaves the file exactly as it was (FR-6), not rewritten a second
 		// way by the cleanup.
-		return nil
+		return
 	}
 	dropRetiredFields(w, target)
-	return nil
 }
 
 // migrateLegacyAddress is the address half of MigrateLegacyTarget. It says

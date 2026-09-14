@@ -38,7 +38,7 @@ func TestTheMigrationRemembersTheEnvironmentTheAddressNamed(t *testing.T) {
 	cloudAddresses(t, true)
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	sel, err := ReadSelection(root)
 	require.NoError(t, err, "the migration left no remembered environment")
@@ -69,7 +69,7 @@ func TestTheMigrationDoesNotOverwriteAChoiceSomebodyMade(t *testing.T) {
 	}))
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	sel, err := ReadSelection(root)
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestAMigrationThatCannotNameTheEnvironmentWritesNothing(t *testing.T) {
 	cloudAddresses(t, true)
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	after, err := readLinkedProject()
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestARetiredStackVersionIsDroppedWhenTheAddressCannotMove(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	written, err := os.ReadFile(projectPath())
 	require.NoError(t, err)
@@ -178,7 +178,7 @@ func TestARetiredEnvironmentDropsIsNamedAndChoosesNothing(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+			MigrateLegacyTarget(context.Background(), &out)
 
 			_, selErr := ReadSelection(root)
 			require.ErrorIs(t, selErr, os.ErrNotExist, "the migration chose an environment from a committed file")
@@ -222,7 +222,7 @@ func TestARetiredEnvironmentLeavesAnExistingChoiceByteForByte(t *testing.T) {
 			require.NoError(t, err)
 
 			var out bytes.Buffer
-			require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+			MigrateLegacyTarget(context.Background(), &out)
 
 			written, err := os.ReadFile(projectPath())
 			require.NoError(t, err)
@@ -245,7 +245,7 @@ func TestAfterARetiredEnvironmentDropsTodaysRulesResolve(t *testing.T) {
 		resolverRig(t, twoEnvs)
 
 		var out bytes.Buffer
-		require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+		MigrateLegacyTarget(context.Background(), &out)
 
 		_, err := Resolve(context.Background())
 		require.ErrorContains(t, err, "has 2 environments and none is selected",
@@ -256,7 +256,7 @@ func TestAfterARetiredEnvironmentDropsTodaysRulesResolve(t *testing.T) {
 		resolverRig(t, twoEnvs[:1]) // only `main`
 
 		var out bytes.Buffer
-		require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+		MigrateLegacyTarget(context.Background(), &out)
 
 		got, err := Resolve(context.Background())
 		require.NoError(t, err, "a one-environment project refused")
@@ -294,7 +294,7 @@ func TestTheAddressMigrationNamesARetiredEnvironmentItDrops(t *testing.T) {
 			cloudAddresses(t, true)
 
 			var out bytes.Buffer
-			require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+			MigrateLegacyTarget(context.Background(), &out)
 
 			written, err := os.ReadFile(projectPath())
 			require.NoError(t, err)
@@ -351,8 +351,8 @@ func TestARetiredFieldWhoseRewriteFailsLeavesEverythingAlone(t *testing.T) {
 			require.NoError(t, err)
 
 			var out bytes.Buffer
-			require.NoError(t, MigrateLegacyTarget(context.Background(), &out),
-				"a rewrite that failed failed the verb")
+			// tip düzeyinde garanti: göç hiçbir hata döndürmez (a rewrite that failed failed the verb)
+			MigrateLegacyTarget(context.Background(), &out)
 
 			after, err := os.ReadFile(projectPath())
 			require.NoError(t, err)
@@ -397,7 +397,8 @@ func TestAChoiceWrittenAheadOfAFailedRewriteDecidesNothing(t *testing.T) {
 	require.NoError(t, err)
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out), "a rewrite that failed failed the verb")
+	// tip düzeyinde garanti: göç hiçbir hata döndürmez (a rewrite that failed failed the verb)
+	MigrateLegacyTarget(context.Background(), &out)
 
 	after, err := os.ReadFile(projectPath())
 	require.NoError(t, err)
@@ -446,8 +447,8 @@ func TestASelectionThisMachineCannotWriteMovesNothing(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out),
-		"a selection this machine could not write failed the verb")
+	// tip düzeyinde garanti: göç hiçbir hata döndürmez (a selection this machine could not write failed the verb)
+	MigrateLegacyTarget(context.Background(), &out)
 
 	after, err := os.ReadFile(projectPath())
 	require.NoError(t, err)

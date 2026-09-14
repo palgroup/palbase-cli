@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -378,7 +379,7 @@ func TestTheAddressMigrationWritesNoRetiredFieldBack(t *testing.T) {
 	cloudAddresses(t, true)
 
 	var out bytes.Buffer
-	require.NoError(t, MigrateLegacyTarget(context.Background(), &out))
+	MigrateLegacyTarget(context.Background(), &out)
 
 	written, err := os.ReadFile(projectPath())
 	require.NoError(t, err)
@@ -539,5 +540,260 @@ func TestStackVersionDoesNotClobberTheProjectWithALocalStack(t *testing.T) {
 	}
 	if after.Project != "prd_a" || after.Name != "myproj" {
 		t.Errorf("the committed project was replaced: %+v", after)
+	}
+}
+
+// A REPLACEMENT IS NEVER SEEN CUT, and that is the half of FR-6 the size-capped
+// test cannot reach.
+//
+// Capping the write makes the failure land in the TEMPORARY file, so it measures
+// that a failed write leaves the old bytes — not that the swap itself is
+// indivisible. Somebody who replaced the rename with a copy would pass it and
+// bring back the defect this whole change exists to remove (measured in review
+// round 4, MINOR-1).
+//
+// So this reads the file WHILE it is being replaced. A copy is visible in the
+// middle — the reader sees a prefix — while a rename swaps the name in one step,
+// and every read is either the whole old file or the whole new one.
+func TestAReplacementIsNeverSeenCutByAConcurrentReader(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("palbase", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Big enough that a copy takes more than one syscall's worth of time.
+	old := append(bytes.Repeat([]byte("o"), 1<<20), '\n')
+	fresh := append(bytes.Repeat([]byte("n"), 1<<20), '\n')
+	dest := filepath.Join("palbase", "project.json")
+	if err := os.WriteFile(dest, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	cut := make(chan int, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, err := os.ReadFile(dest)
+			if err != nil {
+				continue // the name is never missing, but a reader that races a
+				// rename on some systems may see EINTR; a missing read is not a cut one
+			}
+			if len(got) != len(old) {
+				select {
+				case cut <- len(got):
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < 20; i++ {
+		blob := fresh
+		if i%2 == 1 {
+			blob = old
+		}
+		if err := replaceFileAtomically(dest, blob); err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("replacement %d failed: %v", i, err)
+		}
+	}
+	close(stop)
+	<-done
+
+	select {
+	case n := <-cut:
+		t.Fatalf("a reader saw the committed file at %d bytes while it was being replaced; whole is %d — the swap is not atomic", n, len(old))
+	default:
+	}
+}
+
+// THE LAST ACT OF A REPLACEMENT IS A RENAME, and this reads the source to say so.
+//
+// The behavioural test above catches a copy by racing it; this one catches it by
+// name, so a copy cannot hide behind a machine that happens to be fast. Both
+// exist because review round 4 measured a copy surviving the whole package.
+func TestTheLastActOfAReplacementIsARename(t *testing.T) {
+	src, err := os.ReadFile("target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := bytes.Index(src, []byte("func replaceFileAtomically("))
+	if start < 0 {
+		t.Fatal("replaceFileAtomically is gone; the committed file's writer must still be one function")
+	}
+	end := bytes.Index(src[start:], []byte("\n}\n"))
+	if end < 0 {
+		t.Fatal("replaceFileAtomically has no end")
+	}
+	body := string(src[start : start+end])
+
+	if !strings.Contains(body, "os.Rename(name, dest)") {
+		t.Error("replaceFileAtomically no longer renames the temporary file into place; a copy is not atomic")
+	}
+	if strings.Contains(body, "os.WriteFile(") {
+		t.Error("replaceFileAtomically writes the destination directly; the bytes must reach it through a rename")
+	}
+	if i := strings.Index(body, "os.Rename(name, dest)"); i >= 0 && strings.Contains(body[i:], "tmp.Write(") {
+		t.Error("bytes are written after the rename; the file would be replaced before it is whole")
+	}
+}
+
+// AND NO OTHER WRITER OF THE COMMITTED FILE GOES AROUND IT (review round 4,
+// MINOR-3: `palbase link` published the contract with os.WriteFile while the
+// migration was atomic, and a write cut short there left `{"project":"prd_`).
+func TestEveryWriterOfTheCommittedFileGoesThroughTheAtomicReplacement(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			if !strings.Contains(line, "os.WriteFile(") {
+				continue
+			}
+			if strings.Contains(line, "live") || strings.Contains(line, "projectPath()") {
+				t.Errorf("%s writes the committed file directly: %s", name, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+// THE FILE KEEPS THE MODE SOMEBODY GAVE IT. `os.CreateTemp` makes 0600, so a
+// replacement that renamed the temporary file as it found it would hand every
+// checkout a mode nobody chose — and `os.WriteFile`, which this replaced, only
+// applies a mode when it CREATES, so an existing file kept its own. Review round
+// 4 measured the in-between state: a committed file somebody had chmodded 0600
+// came back 0644 (MINOR-2).
+func TestAReplacementKeepsTheModeTheFileHad(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("palbase", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join("palbase", "project.json")
+	if err := os.WriteFile(dest, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := replaceFileAtomically(dest, []byte(`{"project":"prd_a"}`+"\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("a file locked down to 0600 came back %v; the replacement must keep the mode it found", got)
+	}
+
+	// A file that does not exist yet gets what os.WriteFile created it with.
+	fresh := filepath.Join("palbase", "fresh.json")
+	if err := replaceFileAtomically(fresh, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("a new file came back %v, not 0644 — a temporary file's 0600 reached the checkout", got)
+	}
+}
+
+// A REWRITE THAT NEVER FINISHED DOES NOT STAY IN THE COMMITTED DIRECTORY.
+//
+// `palbase/` is the one visible directory and it is committed: a process killed
+// mid-write cannot run its own cleanup, so what it left would show up in `git
+// status` and go in with `git add palbase/` (review round 4, MINOR-5). The next
+// write clears it — but only what is clearly abandoned, because a file another
+// process is writing RIGHT NOW carries the same prefix and removing it would
+// make that rename fail.
+func TestAWriteSweepsAbandonedRewritesButNotLiveOnes(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("palbase", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join("palbase", "project.json")
+	if err := os.WriteFile(dest, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	abandoned := filepath.Join("palbase", ".project.json-987654321")
+	live := filepath.Join("palbase", ".project.json-123456789")
+	for _, p := range []string{abandoned, live} {
+		if err := os.WriteFile(p, []byte("half"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(abandoned, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := replaceFileAtomically(dest, []byte(`{"project":"prd_a"}`+"\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Errorf("a rewrite abandoned two hours ago is still in the committed directory (%v)", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("a rewrite another process may be writing right now was removed: %v", err)
+	}
+}
+
+// A REFUSAL NAMES THE FILE THE CALLER ASKED FOR, not this process's temporary
+// one. With `palbase/` read-only the old write said `open palbase/project.json:
+// permission denied`; the replacement fails at `os.CreateTemp` and said `open
+// palbase/.project.json-959020014: permission denied` — a path that does not
+// exist and that nobody asked about (review round 4, MINOR-8).
+func TestARefusalNamesTheCommittedFileNotTheTemporaryOne(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("palbase", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join("palbase", "project.json")
+	if err := os.WriteFile(dest, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod("palbase", 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod("palbase", 0o755) })
+
+	err := replaceFileAtomically(dest, []byte(`{"project":"prd_a"}`+"\n"))
+	if err == nil {
+		t.Fatal("a write into a read-only directory succeeded")
+	}
+	if !strings.Contains(err.Error(), dest) {
+		t.Errorf("the refusal does not name %s: %v", dest, err)
+	}
+	if strings.Contains(err.Error(), ".project.json-") {
+		t.Errorf("the refusal names this process's temporary file: %v", err)
 	}
 }
