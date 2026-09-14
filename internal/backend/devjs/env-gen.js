@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 /**
- * Palbase env-type generator bridge.
+ * Palbase type generator bridge — the ONE file a checkout gets.
  *
- * Generates the project's `palbase-env.d.ts` from its `db/*.ts` — one file per
- * schema. This is the local twin of the backend-runtime's schema extraction
+ * Generates the project's `palbase/palbase-env.d.ts` from two sources: its
+ * `db/*.ts` (the schema the author declared) and the NAMES its stack holds
+ * (secrets, flags, buckets, roles), which the Go CLI reads off the stack and
+ * hands over here. The rendered file carries both — one
+ * `declare module "@palbase/backend/env"` block and one
+ * `declare module "@palbase/backend/stack"` block — so a checkout has ONE
+ * generated file rather than two.
+ *
+ * The schema half is the local twin of the backend-runtime's schema extraction
  * (modules/backend internal/runtime/schema_extract.js): the Go CLI writes an
  * entry importing every declaration, esbuild-bundles it to a temp CJS file
  * (with @palbase/* kept external so it resolves to the project's installed
@@ -11,19 +18,23 @@
  *
  * This script require()s the bundle (which exports `modules` — one namespace
  * per schema file — and the matching `names`), require()s the project's
- * @palbase/backend for makeEnvDts(), and writes the returned
- * `palbase-env.d.ts` text to the project root. That file augments the
- * @palbase/backend/env `Tables` interface so handlers get a typed
- * `Database.tables.*` with no import and no generic.
+ * @palbase/backend for makeEnvDts(), and writes what it returns.
  *
  * EVERY schema in ONE call. makeEnvDts names relations across schemas, so it
  * needs both ends of a foreign key in the same invocation; calling it per file
  * would emit a relation pointing at a table it thinks is absent.
  *
+ * `bundle_path` is OPTIONAL, and its absence is not a mistake: a project that
+ * declares no database still gets the file, with an empty `Tables` block and
+ * the stack names it does have. `names` is optional too — without it the stack
+ * block renders EMPTY, and the Go side keeps whatever the file on disk already
+ * had rather than letting an unreachable stack narrow a project's types.
+ *
  * Usage:
- *   echo '{"bundle_path":"/tmp/schema.js","out_path":"/proj/palbase-env.d.ts"}' \
- *     | node env-gen.js
- * Output (stdout, JSON): {} on success, { error } on failure.
+ *   echo '{"bundle_path":"/tmp/schema.js","out_path":"/proj/palbase/palbase-env.d.ts",
+ *          "names":{"secrets":[],"flags":[],"buckets":[],"roles":[]}}' | node env-gen.js
+ * Output (stdout, JSON): {} when the file was written, { "unchanged": true }
+ * when the bytes on disk were already the bytes to write, { error } on failure.
  */
 'use strict';
 
@@ -51,6 +62,83 @@ function writeError(error) {
   writeResult({ error: String(error) });
 }
 
+function messageOf(err) {
+  return err && err.message ? err.message : String(err);
+}
+
+/**
+ * Write the rendered text — unless it is already the text on disk. Answers
+ * whether the file was left as it was.
+ *
+ * FR-001a: rewriting a file whose bytes did not change refreshes its mtime, and
+ * that mtime is what every watcher, `tsc --watch` and build cache keys on. A
+ * generator that rewrites an identical file wakes all of them for nothing, on
+ * every build.
+ *
+ * Only ENOENT is "there is no file yet": a directory in the way, or a
+ * permission error, is a real fault and reaches the caller rather than being
+ * read as "write it then".
+ */
+function landFile(outPath, text) {
+  const next = Buffer.from(text, 'utf8');
+  let prev = null;
+  try {
+    prev = fs.readFileSync(outPath);
+  } catch (err) {
+    if (!err || err.code !== 'ENOENT') throw err;
+  }
+  if (prev !== null && prev.equals(next)) return true;
+  fs.writeFileSync(outPath, next);
+  return false;
+}
+
+// Accept the declaration however the author exported it: the default export
+// (the documented `export default defineSchema(...)`), the module object
+// itself, or any named export that is itself a defineSchema() result (an
+// object carrying `.tables`). Mirrors the runtime's schema_extract.js
+// tolerance, applied once per file.
+const pickSchema = (mod) => {
+  let def = mod && mod.default ? mod.default : mod;
+  if (!def || typeof def !== 'object' || !def.tables) {
+    def =
+      mod && typeof mod === 'object'
+        ? Object.values(mod).find(
+            (v) => v && typeof v === 'object' && v.tables && typeof v.tables === 'object',
+          )
+        : undefined;
+  }
+  return def && typeof def === 'object' && def.tables ? def : undefined;
+};
+
+/** The declarations in an evaluated bundle, in the order the entry listed
+ * them. Throws naming the FILE when one of them exported no schema. */
+function schemasOf(bundle) {
+  const modules = bundle && Array.isArray(bundle.modules) ? bundle.modules : null;
+  const names = bundle && Array.isArray(bundle.names) ? bundle.names : [];
+  if (!modules) {
+    throw new Error('the bundled schema entry exported no `modules` array');
+  }
+
+  const schemas = [];
+  for (let i = 0; i < modules.length; i += 1) {
+    const name = names[i] !== undefined ? names[i] : String(i);
+    const def = pickSchema(modules[i]);
+    if (!def) {
+      // Named, not counted: "one file did not export a schema" sends somebody
+      // to read all of them.
+      throw new Error(
+        'db/' +
+          name +
+          '.ts does not export a defineSchema(...) result — write `export default defineSchema("' +
+          name +
+          '", { tables: [ … ] })`',
+      );
+    }
+    schemas.push(def);
+  }
+  return schemas;
+}
+
 async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) {
@@ -66,13 +154,13 @@ async function main() {
     return;
   }
 
-  const { bundle_path: bundlePath, out_path: outPath } = req;
-  if (!bundlePath) {
-    writeError('bundle_path is required');
-    return;
-  }
+  const { bundle_path: bundlePath, out_path: outPath, names } = req;
   if (!outPath) {
     writeError('out_path is required');
+    return;
+  }
+  if (names !== undefined && (names === null || typeof names !== 'object' || Array.isArray(names))) {
+    writeError('names must be an object carrying secrets, flags, buckets and roles');
     return;
   }
 
@@ -85,7 +173,7 @@ async function main() {
   } catch (e) {
     writeError(
       '@palbase/backend not found — run `npm install` in the project so its db schema can be typed (' +
-        (e && e.message ? e.message : e) +
+        messageOf(e) +
         ')',
     );
     return;
@@ -95,67 +183,65 @@ async function main() {
     return;
   }
 
-  let bundle;
-  try {
-    bundle = require(bundlePath);
-  } catch (err) {
-    writeError('Failed to evaluate schema: ' + (err && err.message ? err.message : err));
-    return;
-  }
-
-  const modules = bundle && Array.isArray(bundle.modules) ? bundle.modules : null;
-  const names = bundle && Array.isArray(bundle.names) ? bundle.names : [];
-  if (!modules) {
-    writeError('the bundled schema entry exported no `modules` array');
-    return;
-  }
-
-  // Accept the declaration however the author exported it: the default export
-  // (the documented `export default defineSchema(...)`), the module object
-  // itself, or any named export that is itself a defineSchema() result (an
-  // object carrying `.tables`). Mirrors the runtime's schema_extract.js
-  // tolerance, applied once per file.
-  const pickSchema = (mod) => {
-    let def = mod && mod.default ? mod.default : mod;
-    if (!def || typeof def !== 'object' || !def.tables) {
-      def =
-        mod && typeof mod === 'object'
-          ? Object.values(mod).find(
-              (v) => v && typeof v === 'object' && v.tables && typeof v.tables === 'object',
-            )
-          : undefined;
-    }
-    return def && typeof def === 'object' && def.tables ? def : undefined;
-  };
-
-  const schemas = [];
-  for (let i = 0; i < modules.length; i += 1) {
-    const name = names[i] !== undefined ? names[i] : String(i);
-    const def = pickSchema(modules[i]);
-    if (!def) {
-      // Named, not counted: "one file did not export a schema" sends somebody
-      // to read all of them.
-      writeError(
-        'db/' +
-          name +
-          '.ts does not export a defineSchema(...) result — write `export default defineSchema("' +
-          name +
-          '", { tables: [ … ] })`',
-      );
+  // NO BUNDLE IS A PROJECT WITH NO DATABASE, not a missing argument: the file is
+  // still written, with an empty `Tables` block and whatever names the stack
+  // holds. A checkout gets one generated file whether or not it declares a
+  // schema.
+  let schemas = [];
+  if (bundlePath) {
+    let bundle;
+    try {
+      bundle = require(bundlePath);
+    } catch (err) {
+      writeError('Failed to evaluate schema: ' + messageOf(err));
       return;
     }
-    schemas.push(def);
+    try {
+      schemas = schemasOf(bundle);
+    } catch (err) {
+      writeError(messageOf(err));
+      return;
+    }
   }
 
+  let dts;
   try {
-    const dts = makeEnvDts(schemas);
-    fs.writeFileSync(outPath, dts);
+    dts =
+      names === undefined
+        ? makeEnvDts(schemas)
+        : makeEnvDts(schemas, {
+            secrets: names.secrets || [],
+            flags: names.flags || [],
+            buckets: names.buckets || [],
+            roles: names.roles || [],
+          });
   } catch (err) {
-    writeError('Failed to write palbase-env.d.ts: ' + (err && err.message ? err.message : err));
+    writeError('Failed to render palbase-env.d.ts: ' + messageOf(err));
     return;
   }
 
-  writeResult({});
+  // THE BODY, NOT THE DECLARATION. An @palbase/backend older than the single
+  // file takes one argument: it ignores the names and renders the env block
+  // alone. Writing that output would silently drop every secret, flag, bucket
+  // and role name this project types against — a narrowing nobody asked for,
+  // reported as success. Refuse, and name the cure.
+  if (names !== undefined && !dts.includes('declare module "@palbase/backend/stack"')) {
+    writeError(
+      'the installed @palbase/backend rendered no stack block, so the names this stack holds ' +
+        '(secrets, flags, buckets, roles) would be dropped — upgrade @palbase/backend',
+    );
+    return;
+  }
+
+  let unchanged;
+  try {
+    unchanged = landFile(outPath, dts);
+  } catch (err) {
+    writeError('Failed to write palbase-env.d.ts: ' + messageOf(err));
+    return;
+  }
+
+  writeResult(unchanged ? { unchanged: true } : {});
 }
 
 main().catch(writeError);
