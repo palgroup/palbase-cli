@@ -377,13 +377,16 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 // A failing suite's output names the assertion; an incompatible schema names the
 // objects to split a migration on. Both are multi-line and both are what the
 // person does next — so they are printed as themselves rather than as 300
-// characters of escaped JSON, which is what the generic path would show.
+// characters of escaped JSON, which is what the generic path would show. A run
+// database the stack could not prepare (`test_database_unavailable`, D-14) is
+// the same kind: it names the process that is not wired, and that is the fix.
+// `test_identities_unavailable` is gone — no server produces it any more.
 var readableRefusals = map[string]bool{
-	"tests_failed":                true,
-	"tests_timed_out":             true,
-	"schema_incompatible":         true,
-	"candidate_failed":            true,
-	"test_identities_unavailable": true,
+	"tests_failed":              true,
+	"tests_timed_out":           true,
+	"schema_incompatible":       true,
+	"candidate_failed":          true,
+	"test_database_unavailable": true,
 }
 
 func renderPushRefusal(w io.Writer, status int, body []byte) error {

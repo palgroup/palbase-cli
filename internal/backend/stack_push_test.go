@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // What a stack push must carry, and what it must never carry.
@@ -459,4 +461,34 @@ func TestPushPrintsAPlatformRefusalInFull(t *testing.T) {
 	if !strings.Contains(s, "report ab12cd34ef56") || !strings.Contains(s, "no customer action") {
 		t.Fatalf("çare cümlesi eksik ya da müşteriye iş yüklüyor:\n%s", s)
 	}
+}
+
+// FR-019i: A RUN DATABASE THE STACK CANNOT PREPARE IS SAID IN FULL.
+//
+// palsvc refuses a push whose tests it cannot isolate from the live database
+// (`422 test_database_unavailable`, D-14), and the reason is several lines a
+// person acts on — which process is not wired, what to set. Printed through the
+// generic path it arrived as 300 characters of escaped JSON. The retired
+// `test_identities_unavailable` is no longer produced by any server, so it no
+// longer earns the readable path either.
+func TestPushRefusalNamesTheRunDatabaseReasonInFull(t *testing.T) {
+	reason := "this stack cannot isolate a deploy's tests from its live database:\nthe run database preparer is not wired into this process"
+	body, err := json.Marshal(map[string]string{"error": "test_database_unavailable", "error_description": reason})
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	refused := renderPushRefusal(&out, 422, body)
+	require.Error(t, refused)
+	require.Equal(t, reason+"\n", out.String(), "the reason was not printed as itself")
+	require.True(t, strings.HasPrefix(refused.Error(), "push refused (test_database_unavailable) — nothing was swapped"), refused.Error())
+	require.NotContains(t, refused.Error(), "{", "the refusal still carries escaped JSON")
+
+	// NEGATİF KONTROL: emekli kod genel yola düşer.
+	retired, err := json.Marshal(map[string]string{"error": "test_identities_unavailable", "error_description": reason})
+	require.NoError(t, err)
+	out.Reset()
+	refused = renderPushRefusal(&out, 422, retired)
+	require.Error(t, refused)
+	require.Empty(t, out.String(), "a retired refusal code is still treated as readable")
+	require.True(t, strings.HasPrefix(refused.Error(), "push refused (422): "), refused.Error())
 }
