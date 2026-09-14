@@ -376,6 +376,99 @@ func TestModuleLocalTestsAreCollectedProjectWideWithoutCollision(t *testing.T) {
 	}
 }
 
+// oneTestSuite is the smallest suite bun bundles: one test, no imports of its own.
+const oneTestSuite = "import { test } from \"node:test\";\ntest(\"x\", () => {});\n"
+
+// bundledSuiteNames bundles dir's suites into a fresh root and answers the
+// output names, sorted — exactly what the runtime's discovery reads.
+func bundledSuiteNames(t *testing.T, dir string) []string {
+	t.Helper()
+	bundleRoot := t.TempDir()
+	require.NoError(t, bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}))
+	entries, err := os.ReadDir(filepath.Join(bundleRoot, ".palbase", "esm", "tests"))
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		// The runtime discovers `*.test.js` and nothing else
+		// (v2/runtime/src/candidate-tests.ts): a name outside that is a suite
+		// that ships and never runs.
+		require.Truef(t, strings.HasSuffix(e.Name(), ".test.js"), "%s would never be discovered by the runtime", e.Name())
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// THE OUTPUT NAME IS THE IDENTITY (review-T016 CRITICAL-1). Collisions used to be
+// looked up by the SOURCE name — `x.test.ts` and `x.test.mts` are two names —
+// while the bundle was written under the name without its extension, where both
+// are `x.test.js`. Two `bun build`s succeeded and the second silently replaced
+// the first: a suite that shipped zero tests while the log said "2 suites".
+func TestSuitesThatDifferOnlyByExtensionBothBundle(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is what bundles a suite")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/x.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/x.test.mts", oneTestSuite)
+
+	require.Equal(t, []string{"a_x.test.js", "x.test.js"}, bundledSuiteNames(t, dir),
+		"two suites named alike up to their extension landed on one output (FR-017a)")
+}
+
+// AND WITHOUT REGARD TO LETTER CASE (review-T016 IMPORTANT-1). On macOS and
+// Windows `Login.test.js` and `login.test.js` are ONE file: a lookup that told
+// them apart let the second bundle land on the first.
+func TestSuitesThatDifferOnlyByLetterCaseBothBundle(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is what bundles a suite")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/Login.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/login.test.ts", oneTestSuite)
+
+	require.Equal(t, []string{"Login.test.js", "b_login.test.js"}, bundledSuiteNames(t, dir))
+}
+
+// A PATH THAT RUNS OUT STILL NAMES A SUITE (review-T016 IMPORTANT-2). The prefix
+// walk can reach the project root and still collide with a file somebody really
+// named that way; refusing the whole push over it traded a working deploy for a
+// naming scheme. A number goes BEFORE `.test.js`, where discovery still sees it.
+func TestSuiteNamesFallBackToANumberWhenThePathIsExhausted(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is what bundles a suite")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "a/x.test.ts", oneTestSuite)
+	mustWrite(t, dir, "b/x.test.ts", oneTestSuite)
+	mustWrite(t, dir, "b_x.test.ts", oneTestSuite)
+
+	require.Equal(t, []string{"b_x.test.js", "b_x_2.test.js", "x.test.js"}, bundledSuiteNames(t, dir))
+}
+
+// EACH SUITE IS BUILT FROM ITS OWN FILE (review-T016 CRITICAL-2). The first shape
+// staged a symbolic link per suite, and a symbolic link on Windows needs a
+// privilege an ordinary account does not hold — this CLI ships for Windows. A
+// per-suite `--outfile` already names the output, so there is nothing to stage:
+// the source is the file itself, and its relative imports resolve where it lives.
+func TestPlanTestSuitesBuildsEachSuiteFromItsOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/x.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/x.test.ts", oneTestSuite)
+
+	suites, err := planTestSuites(dir)
+	require.NoError(t, err)
+	require.Len(t, suites, 2)
+	for _, s := range suites {
+		info, err := os.Lstat(s.Source)
+		require.NoError(t, err)
+		require.Truef(t, info.Mode().IsRegular(), "%s is not the suite's own file", s.Source)
+		require.Truef(t, strings.HasPrefix(s.Source, dir), "%s is outside the project", s.Source)
+	}
+	require.Equal(t, "x.test.js", suites[0].Out)
+	require.Equal(t, "b_x.test.js", suites[1].Out)
+}
+
 // WEBHOOKS TRAVEL. Until this test existed the entry hardcoded `webhooks = []`,
 // so a project's `webhooks/stripe.ts` was compiled into the bundle and then
 // declared absent: the runtime mounts `/webhooks/<name>` from THIS export, so

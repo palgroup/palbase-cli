@@ -325,12 +325,9 @@ const bundledTestsDir = ".palbase/esm/tests"
 // Ve bu yalniz cop degil: `palbase link` `.palbase` tasiyan bir checkout'u
 // REDDEDIYOR. Yani `push` kendi `link`inin engel saydigi dizini URETIYOR.
 func bundleTests(ctx context.Context, dir, bundleRoot string, w io.Writer) error {
-	staged, suites, err := stageTestSuites(dir)
+	suites, err := planTestSuites(dir)
 	if err != nil {
 		return err
-	}
-	if staged != "" {
-		defer func() { _ = os.RemoveAll(staged) }()
 	}
 	if len(suites) == 0 {
 		return nil // A project with no tests is a legitimate project.
@@ -341,26 +338,24 @@ func bundleTests(ctx context.Context, dir, bundleRoot string, w io.Writer) error
 		return err
 	}
 
-	// ONE `bun build` PER SUITE, EACH WITH AN EXPLICIT --outfile — never a
-	// shared --outdir across every entry. `bun build --outdir` derives an
-	// entry's output name from its REAL path (it resolves the symlink
-	// stageTestSuites staged it as) relative to the entries' common root, so
-	// with sources scattered across the actual project tree that derived name
-	// climbs OUT of outDir entirely (`bun build stage/x.test.ts stage/y.test.ts
-	// --outdir=out` wrote `../modules/a/x.test.js`, verified directly against
-	// bun 1.3.9) rather than landing flat inside it. --outfile has no such
-	// derivation: it names the file bun writes, verbatim, so the flat,
-	// collision-free name stageTestSuites already chose is the one that lands —
-	// and the entry can still be the symlink, so a suite's relative import to a
-	// sibling resolves against the REAL file (bun realpaths it), exactly like
-	// TestTheProjectsTestsAreBundledSoTheyCanTravel needs.
+	// ONE `bun build` PER SUITE, EACH FROM ITS OWN FILE WITH AN EXPLICIT
+	// --outfile — never a shared --outdir across every entry. `bun build
+	// --outdir` derives an entry's output name from its path relative to the
+	// entries' common root, so with sources scattered across the project that
+	// derived name climbs OUT of outDir (`--outdir=out` over two staged links
+	// wrote `../modules/a/x.test.js`, verified against bun 1.3.9). --outfile has
+	// no derivation: it names the file bun writes, verbatim, so the flat,
+	// collision-free name planTestSuites chose is the one that lands. And the
+	// entry is the suite's REAL file, so its relative imports resolve where it
+	// lives — no staged copy, and no symbolic link, which Windows refuses to an
+	// ordinary account (review-T016).
 	//
 	// bun:test and node:test are the RUNNER's, not the bundle's. Inlining them
 	// would give each suite its own copy of a registry the runner owns, and the
 	// run would report zero tests while every file executed.
 	for _, suite := range suites {
-		out := filepath.Join(outDir, strings.TrimSuffix(filepath.Base(suite), filepath.Ext(suite))+".js")
-		if err := run(ctx, dir, "bun", "build", suite, "--target=bun", "--format=esm", "--outfile="+out,
+		out := filepath.Join(outDir, suite.Out)
+		if err := run(ctx, dir, "bun", "build", suite.Source, "--target=bun", "--format=esm", "--outfile="+out,
 			"--external=bun:test", "--external=node:test", "--external=node:assert"); err != nil {
 			return fmt.Errorf("the tests did not build: %w", err)
 		}
@@ -410,90 +405,74 @@ func collectTestSources(dir string) ([]string, error) {
 	return out, nil
 }
 
-// stageTestSuites links the suites collectTestSources finds into ONE flat
-// temporary tree, under names derived from each suite's project-relative path
-// so two suites never overwrite each other (C-9, FR-017a), and hands the
-// bundler those paths. An empty result (no error, empty root, nil paths) is
-// the legitimate answer for a project with no tests anywhere.
+// testSuite is one suite to bundle: the file it is built from, and the flat
+// name its bundle lands under in bundledTestsDir.
+type testSuite struct {
+	Source string
+	Out    string
+}
+
+// planTestSuites names every suite collectTestSources finds, so that no two
+// bundles land on one file (C-9, FR-017a). An empty plan (no error, nil) is the
+// legitimate answer for a project with no tests anywhere.
 //
-// EACH ENTRY IS A SYMLINK TO THE ORIGINAL FILE, not a byte copy: `bun build`
-// resolves a suite's relative imports (one reaching for a sibling helper —
-// TestTheProjectsTestsAreBundledSoTheyCanTravel) against the file's REAL
-// location, the same way Node resolves a package reached through a symlinked
-// node_modules realpaths it (testdeps_test.go's seedEsbuild comment). Copying
-// bytes instead would stage the suite alone and strand that import at the flat
-// staging root, where the sibling was never placed.
+// FLAT, ON PURPOSE. The runtime's discovery (`v2/runtime/src/candidate-tests.ts`)
+// reads the output directory with a plain, non-recursive `readdir` and keeps
+// `*.test.js`, so every name here is flat and ends in `.test.js`: a name that
+// stayed unique only one level down, or a number after `.test`, would ship a
+// suite that never runs.
 //
-// FLAT, ON PURPOSE. `bun build --outdir` derives an output's name from its
-// entry's path relative to the ENTRIES' OWN common root, so two suites named
-// alike in different directories, built together, silently overwrite one
-// another there — and the runtime's discovery
-// (`v2/runtime/src/candidate-tests.ts`) reads that output directory with a
-// plain, non-recursive `readdir`, so a name that only stayed unique one level
-// down would never be found at all (FR-017a). Every symlink lands directly
-// under the one staging root, so bun's own common root IS that root and the
-// names it derives are exactly the ones chosen here.
+// THE OUTPUT NAME IS THE IDENTITY. A collision is looked up by what lands on
+// disk, not by what the source is called: `x.test.ts` and `x.test.mts` are two
+// sources and ONE `x.test.js`, and on macOS and Windows `Login.test.js` and
+// `login.test.js` are one file too — so the key has no extension and no case.
+// Looked up by the source name, the second bundle silently replaced the first
+// (review-T016, measured).
 //
 // NAMES ARE THE PLAIN BASENAME whenever nothing else already claimed it — the
-// common, single-suite-per-directory case is unaffected by any of this — and
-// fall back to that basename prefixed with as much of the project-relative
-// directory as it takes to stop colliding, taken from the nearest parent
-// outward, only when it is not.
-func stageTestSuites(dir string) (string, []string, error) {
+// common, single-suite-per-directory case is unaffected — then that basename
+// prefixed with as much of the project-relative directory as it takes to stop
+// colliding, nearest parent outward, and only when the whole path is spent, a
+// number. Sources arrive sorted, so the same tree always gets the same names.
+func planTestSuites(dir string) ([]testSuite, error) {
 	sources, err := collectTestSources(dir)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	if len(sources) == 0 {
-		return "", nil, nil
-	}
-
-	staged, err := os.MkdirTemp("", "palbase-test-stage-*")
-	if err != nil {
-		return "", nil, err
-	}
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.RemoveAll(staged)
-		}
-	}()
-
 	used := map[string]bool{}
-	var out []string
+	var plan []testSuite
 	for _, src := range sources {
 		rel, err := filepath.Rel(dir, src)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		segs := strings.Split(filepath.ToSlash(rel), "/")
-		name := segs[len(segs)-1]
-		i := len(segs) - 2
-		for used[name] {
-			if i < 0 {
-				// The whole project-relative path is exhausted and STILL
-				// collides — two distinct files claiming one project path,
-				// which cannot happen — but refusing by name beats looping
-				// forever over a bug that lives elsewhere.
-				return "", nil, fmt.Errorf("stageTestSuites: %s has no name free of collision with the suites already staged", rel)
-			}
+		stem := testSuiteStem(segs[len(segs)-1])
+		name := stem
+		for i := len(segs) - 2; used[strings.ToLower(name)] && i >= 0; i-- {
 			name = segs[i] + "_" + name
-			i--
 		}
-		used[name] = true
-
-		abs, err := filepath.Abs(src)
-		if err != nil {
-			return "", nil, err
+		// The path is spent and the name is still taken — a file somebody really
+		// named `b_x.test.ts` beside `b/x.test.ts`. Count on the fullest form
+		// rather than refuse the push over a naming scheme.
+		for base, n := name, 2; used[strings.ToLower(name)]; n++ {
+			name = fmt.Sprintf("%s_%d", base, n)
 		}
-		dest := filepath.Join(staged, name)
-		if err := os.Symlink(abs, dest); err != nil {
-			return "", nil, err
-		}
-		out = append(out, dest)
+		used[strings.ToLower(name)] = true
+		plan = append(plan, testSuite{Source: src, Out: name + ".test.js"})
 	}
-	ok = true
-	return staged, out, nil
+	return plan, nil
+}
+
+// testSuiteStem is a suite's file name without its `.test.<ext>` suffix:
+// `note.service.test.mts` → `note.service`.
+func testSuiteStem(name string) string {
+	for _, suffix := range []string{".test.ts", ".test.js", ".test.mts", ".test.mjs"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return strings.TrimSuffix(name, filepath.Ext(name))
 }
 
 func isTestSource(name string) bool {
