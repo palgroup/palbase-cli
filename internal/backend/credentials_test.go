@@ -5,6 +5,7 @@ package backend
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -423,4 +424,57 @@ func TestCredentialStillReportsAMissingCredentialOn401(t *testing.T) {
 	_, _, err := Credential("https://app1prod.v2.palbase.studio")
 	require.ErrorIs(t, err, ErrNoCredential)
 	require.Contains(t, err.Error(), "palbase login")
+}
+
+// FR-011'İN TAŞIMA YARISI — 5xx kadar gerçek, ve canlı ölçüldü.
+//
+// FR-011 harfiyen "5xx OR TRANSPORT" diyor. İlk uygulama çizgiyi STATÜYE
+// çekmişti ve gerekçesi sağlamdı: `CloudKeyFetcher` istek çıkmadan, YEREL olarak
+// "bu adres bu bulutun projesi değil" de üretebiliyor ve onu "soramadım" saymak
+// kendi kendine barındıran her adres için doğru üç-yol mesajını silerdi.
+//
+// Ama ölçtüm (sahte uç `/keys`te bağlantıyı koparıyor): kullanıcı
+// "no credential for this project" + dört yanlış öneri görüyordu — kimliği
+// sağlamken. Ayrım artık YAPIDA: yerel red `ErrNotACloudProject` sentinel'ini
+// sarar, sarmayan her statüsüz hata taşıma arızasıdır.
+func TestCredentialSaysItCouldNotAskWhenTheTransportFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		// Taşıma arızasının şekli: STATÜ YOK.
+		return "", errors.New(`Get "https://api.palbase.studio/v1/cloud/projects/x/keys": dial tcp: connect: connection refused`)
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	_, _, err := Credential("https://app1prod.v2.palbase.studio")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNoCredential,
+		"ulaşılamayan bir düzlem, kişinin kimliği yokmuş gibi bildirildi")
+	require.Contains(t, err.Error(), "could not ask")
+	require.Contains(t, err.Error(), "connection refused", "sebep hayatta kalmalı")
+	require.NotContains(t, err.Error(), "palbase login",
+		"kimlik hiç sorun değilken kimlik tavsiyesi verilmemeli")
+}
+
+// KORUNAN: YEREL red üç-yol mesajını AYNEN korur.
+//
+// Bu adres bu bulutun projesi değil — ne 5xx ne taşıma arızası. Kendi kendine
+// barındıran ya da yerel bir yığın için doğru cevap tam olarak o üç yoldur.
+func TestCredentialStillOffersEveryWayWhenTheAddressIsNotOnThisCloud(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		return "", fmt.Errorf("https://self.hosted.example: %w", ErrNotACloudProject)
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	_, _, err := Credential("https://self.hosted.example")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoCredential, "yerel red hâlâ 'kimlik yok' ailesindedir")
+	require.Contains(t, err.Error(), "palbase login")
+	require.NotContains(t, err.Error(), "could not ask")
 }

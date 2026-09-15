@@ -220,7 +220,10 @@ func wireCloudKeyFetcher() {
 			// Not an address on this cloud (a stack on this machine, or another
 			// deployment). Asking our control plane about it would be asking the
 			// wrong authority.
-			return "", fmt.Errorf("%s is not a project on this cloud", tenantURL)
+			// SENTINEL SARILIR: kimlik adımı bu reddi bir TAŞIMA arızasından
+			// ayırabilsin diye. Ayrımı dize eşleştirmeye bırakmak, bu koşunun
+			// kapattığı kusurun CLI içinde tekrarı olurdu.
+			return "", fmt.Errorf("%s: %w", tenantURL, backend.ErrNotACloudProject)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

@@ -501,6 +501,24 @@ func fetchCloudCredential(url string) (Credentials, bool, error) {
 // The interface is the contract — see transport.APIError.StatusCode, which
 // exists so callers can classify a failure without importing the concrete type.
 func couldNotAsk(err error) bool {
+	// BU ADRES BU BULUTUN PROJESİ DEĞİL — ne 5xx ne taşıma arızası.
+	//
+	// Bu red YEREL üretiliyor, istek hiç çıkmıyor; kendi kendine barındıran ya
+	// da bu makinede koşan bir yığın için doğru cevap "kimliği şu üç yoldan
+	// birinden ver"dir. Onu "soramadım" saymak o üç yolu silerdi. Sentinel
+	// olduğu için ayrım YAPIDA: dize eşleştirmiyoruz.
+	if errors.Is(err, ErrNotACloudProject) {
+		return false
+	}
 	var coded interface{ StatusCode() int }
-	return errors.As(err, &coded) && coded.StatusCode() >= 500
+	if errors.As(err, &coded) {
+		// Statüsü olan bir cevap: yalnız 5xx "cevap veremedim"dir. 401/403
+		// GERÇEK bir reddir ve kimlik ailesinde kalır.
+		return coded.StatusCode() >= 500
+	}
+	// STATÜ YOK = CEVAP HİÇ GELMEDİ. FR-011 "5xx OR TRANSPORT" diyor ve bu
+	// yarısı açıktı: ölçüldü (2026-09-15, sahte uç `/keys`te bağlantıyı
+	// koparıyor) — kullanıcı `no credential for this project` ve dört yanlış
+	// öneri görüyordu, kimliği sağlamken.
+	return true
 }
