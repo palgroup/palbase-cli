@@ -1050,13 +1050,19 @@ func TestBuildAcceptsAPlainModuleUnderConfig(t *testing.T) {
 
 // --- the tsconfig coverage gate -----------------------------------------
 
-// A directory the deploy COMPILES but the tsconfig does not INCLUDE is refused.
+// A directory outside the tsconfig's `include` is still refused — but the CURE moved.
 //
-// `jobs/`, `webhooks/` and `hooks/` are read off disk by the bundler — no
-// controller imports them, so `include` is the only thing that can put them in
-// front of tsc. Measured on the same tree: the include list named neither, and two
-// jobs read `meta.name` — a field `JobMeta` has never had — logging
-// `job: undefined` on their error path for months, green through every gate.
+// This gate used to require the refusal to print `jobs/**/*.ts`, the line to paste
+// into `include`. That was right while the bundler read those directories off disk:
+// `include` was the only thing that could put them in front of tsc, and the tree that
+// prompted this test had two jobs reading `meta.name` — a field `JobMeta` never had —
+// logging `job: undefined` for months, green through every gate.
+//
+// Measured 2026-09-16: nothing walks a directory for entry points any more
+// (`stack_bundle.go` globs `*.module.ts` and nothing else), so widening `include`
+// now buys a type-checked file that STILL never runs. The gate was pinning the very
+// advice FR-053 retires. What the refusal owes the reader is the directory's NAME and
+// the move that makes the code live again — and that the old line is NOT printed.
 func TestBuildRefusesATsconfigThatSkipsACompiledDirectory(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "jobs"), 0o755))
@@ -1067,7 +1073,11 @@ func TestBuildRefusesATsconfigThatSkipsACompiledDirectory(t *testing.T) {
 	var out bytes.Buffer
 	err := runBuild(context.Background(), dir, &out)
 	require.Error(t, err)
-	require.Contains(t, out.String(), "jobs/**/*.ts", "the refusal has to print the line to add")
+	require.Contains(t, out.String(), "jobs/", "the refusal has to name the directory it found")
+	require.Contains(t, out.String(), "modules/<domain>/", "the refusal has to name where the class belongs")
+	require.Contains(t, out.String(), "providers", "the refusal has to name the list that makes it exist")
+	require.NotContains(t, out.String(), "jobs/**/*.ts",
+		"the refusal still prescribes widening `include`, which type-checks a file nothing runs")
 }
 
 // ‼️ NO `include` AT ALL IS NOT A HOLE — tsc then takes the whole directory, which
