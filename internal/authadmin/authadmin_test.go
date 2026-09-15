@@ -307,3 +307,39 @@ func TestAuthTemplatesSetStaysReachable(t *testing.T) {
 		t.Fatalf("the body must travel to the stack, got %s", rest.body)
 	}
 }
+
+// OTURUM ÖMRÜ BAYRAKLARI — ÇÜNKÜ ADLARI BİLMEK KULLANICININ İŞİ DEĞİL.
+//
+// `--json '{"access_token_ttl_seconds":900}'` bir insandan alan adını doğru
+// hatırlamasını ister; yanlış hatırladığında yazma SESSİZCE hiçbir şey yapmaz,
+// çünkü modül okumadığı alanları yok sayar. Adlandırılmış bayrak, CLI'ın var
+// olma sebebidir.
+func TestSettingsSetTakesTokenLifetimeFlags(t *testing.T) {
+	rest := &fakeREST{}
+	run(t, rest, "settings", "set", "--access-token-ttl", "900", "--refresh-token-ttl", "604800")
+	var sent map[string]any
+	if err := json.Unmarshal(rest.body, &sent); err != nil {
+		t.Fatalf("the body is not JSON: %s", rest.body)
+	}
+	if sent["access_token_ttl_seconds"] != float64(900) {
+		t.Errorf("erişim jetonu ömrü modülün alanına dönüşmedi: %s", rest.body)
+	}
+	if sent["refresh_token_ttl_seconds"] != float64(604800) {
+		t.Errorf("yenileme jetonu ömrü modülün alanına dönüşmedi: %s", rest.body)
+	}
+}
+
+// VERİLMEYEN BİR BAYRAK GÖNDERİLMEZ: sıfır bir süre "sıfır saniye" demek
+// olurdu ve API onu reddederdi — ya da daha kötüsü, kabul ederdi.
+func TestSettingsSetOmitsTokenLifetimesWhenNotAsked(t *testing.T) {
+	rest := &fakeREST{}
+	run(t, rest, "settings", "set", "--password-min", "10")
+	var sent map[string]any
+	_ = json.Unmarshal(rest.body, &sent)
+	if _, ok := sent["access_token_ttl_seconds"]; ok {
+		t.Errorf("istenmeyen alan gönderildi: %s", rest.body)
+	}
+	if _, ok := sent["refresh_token_ttl_seconds"]; ok {
+		t.Errorf("istenmeyen alan gönderildi: %s", rest.body)
+	}
+}

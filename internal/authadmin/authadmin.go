@@ -134,6 +134,7 @@ func Cmd(r Resolvers) *cobra.Command {
 		Long: `Everything a panel does to auth, from here.
 
   palbase auth settings get|set --password-min 10 [--json '{...}']
+  palbase auth settings set --access-token-ttl 900 --refresh-token-ttl 604800
   palbase auth providers list
   palbase auth providers enable|disable NAME
   palbase auth providers config set NAME --json @clients.json
@@ -169,11 +170,16 @@ func settingsCmd(r Resolvers) *cobra.Command {
 		pwMax   int
 		confirm bool
 		siteURL string
+		// Oturum ömürleri saniye cinsinden: API'nin alan adları da öyle
+		// (`*_ttl_seconds`), ve bir birim dönüşümü burada iki yerin aynı sayıyı
+		// farklı anlaması demek olurdu.
+		accessTTL  int
+		refreshTTL int
 	)
 	set := &cobra.Command{
 		Use: "set", Short: "Change this project's auth settings", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			named := namedSettings(cmd, pwMin, pwMax, confirm, siteURL)
+			named := namedSettings(cmd, pwMin, pwMax, confirm, siteURL, accessTTL, refreshTTL)
 			fragment, err := parseFragment(body)
 			if err != nil {
 				return err
@@ -183,7 +189,7 @@ func settingsCmd(r Resolvers) *cobra.Command {
 			// back over itself, which reads as a change in every audit log.
 			if len(named) == 0 && len(fragment) == 0 {
 				return fmt.Errorf("nothing to send: name a setting (--password-min, --password-max, " +
-					"--confirm-email, --site-url) or pass the fields to change with --json")
+					"--confirm-email, --site-url, --access-token-ttl, --refresh-token-ttl) or pass the fields to change with --json")
 			}
 			// Send only the requested fields. The API preserves omitted settings;
 			// If-Match prevents a concurrent change after our read from being lost.
@@ -220,6 +226,8 @@ func settingsCmd(r Resolvers) *cobra.Command {
 	set.Flags().IntVar(&pwMax, "password-max", 0, "longest password this project accepts")
 	set.Flags().BoolVar(&confirm, "confirm-email", false, "require a confirmed address before sign-in")
 	set.Flags().StringVar(&siteURL, "site-url", "", "the address links in this project's mail point at")
+	set.Flags().IntVar(&accessTTL, "access-token-ttl", 0, "how many seconds an access token lives (60-86400)")
+	set.Flags().IntVar(&refreshTTL, "refresh-token-ttl", 0, "how many seconds a refresh token lives (3600-7776000)")
 	c.AddCommand(set)
 	return c
 }
@@ -231,7 +239,7 @@ func settingsCmd(r Resolvers) *cobra.Command {
 // that silently does nothing, because the module ignores fields it does not read.
 //
 // Only flags the caller CHANGED are sent; an omitted flag preserves its value.
-func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL string) map[string]any {
+func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL string, accessTTL, refreshTTL int) map[string]any {
 	out := map[string]any{}
 	if cmd.Flags().Changed("password-min") {
 		out["password_min_length"] = pwMin
@@ -244,6 +252,17 @@ func namedSettings(cmd *cobra.Command, pwMin, pwMax int, confirm bool, siteURL s
 	}
 	if cmd.Flags().Changed("site-url") {
 		out["site_url"] = siteURL
+	}
+	// Bu iki ayar bir Ortamın oturum süresini belirler ve sınırları SUNUCU
+	// dayatır (60..86400 / 3600..7776000, ve yenileme erişimden kısa olamaz).
+	// CLI onları burada kopyalamaz: iki yerde duran bir sınır, bir gün
+	// ayrışacak bir sınırdır — ve o gün hangisinin doğru olduğunu kimse
+	// bilmeyecek.
+	if cmd.Flags().Changed("access-token-ttl") {
+		out["access_token_ttl_seconds"] = accessTTL
+	}
+	if cmd.Flags().Changed("refresh-token-ttl") {
+		out["refresh_token_ttl_seconds"] = refreshTTL
 	}
 	return out
 }
