@@ -86,6 +86,32 @@ func wireDPoPSigner() {
 	}
 }
 
+// runtimeProgress is where the runtime verbs announce that they are WAITING.
+//
+// A writer rather than os.Stderr at the call site, for one reason: the backend's
+// CloudRuntimePreparer contract takes no io.Writer, and giving the transport one
+// would invert the layering (see ready.go). This is the composition root, so it
+// is the layer allowed to know what this process's stderr is — and tests swap it
+// to read what a person would have seen.
+var runtimeProgress io.Writer = os.Stderr
+
+// isPlaneStarting reports whether err is one of the plane's named "not yet"
+// answers — the NAME question only.
+//
+// IT PASSES A SAFE METHOD ON PURPOSE, and that is not a claim about what was
+// sent. transport.IsNamedTransient answers two questions at once: "is this one
+// of the plane's transient names?" and "may this method be waited out
+// automatically?". Only the first is wanted here — the POST above is NOT
+// retried and must not be (FR-009a: that path writes before it answers) — and
+// asking the question cannot retry anything, because nothing is re-sent.
+//
+// The alternative was to list the four names again in this file, and a set
+// named in two places is a set that drifts apart. The name has one owner: the
+// transport that receives it.
+func isPlaneStarting(err error) bool {
+	return transport.IsNamedTransient(http.MethodGet, err)
+}
+
 // wireCloudKeyFetcher lets the backend fetch a cloud project's service-role
 // key using the caller's account credential.
 func wireCloudKeyFetcher() {
@@ -99,12 +125,64 @@ func wireCloudKeyFetcher() {
 		}
 		cloud := managementREST()
 		cloud.HTTPClient.Timeout = 5 * time.Minute
+
+		// HAZIRLIK ÖNCE SORULUR, SONRA DEĞİŞTİRİLİR (FR-009a, D-7).
+		//
+		// Taşıma adlandırılmış geçici cevabı yalnız GÜVENLİ yöntemlerde bekler
+		// ve bunun ölçülmüş sebebi var: bu adlara giden düzlem yollarından
+		// ikisi cevabı vermeden ÖNCE yazıyor, yani bir POST'u sessizce
+		// tekrarlamak veri bozar. Ama `push` planını DOSYADAN okuyor, yani
+		// düzleme yaptığı ilk çağrı aşağıdaki POST'tur — yöntem kapısı tek
+		// başına kuralı delerdi ve kullanıcı geçici hâli yine hata olarak
+		// görürdü. Çare ikisi de değil, üçüncüsü: mutasyondan önce GÜVENLİ bir
+		// istekle hazırlığı sor. Deponun kendi kuralı: "hazırlığı İSTEMCİNİN
+		// kullanacağı taşımadan sor", ve `project create` zaten aynı deseni
+		// `WaitUntilReachable` ile kullanıyor.
+		//
+		// UÇ SEÇENEK DEĞİL, TEK ADAY. CLI'ın düzleme yaptığı üç GET'ten yalnız
+		// bu biri hücreye gidiyor: `…/keys` saf bir sorgu ve `…/projects/{ref}`
+		// `reachable` boolean'ı — ikisi de kiracı açılırken 200 döner. Yanlış
+		// ucu seçmek bu yoklamayı sessizce etkisiz kılardı: yoklama geçer, POST
+		// yine geçici hâlin içine gider, ve testler sahte düzleme karşı yeşil
+		// kalırdı.
+		//
+		// YOKLAMA BİR KAPI DEĞİL, NEZAKETEN BEKLEMEDİR: pes ederse push iptal
+		// EDİLMEZ. Burada reddetmek, düzlemin kendisinin istemediği yepyeni bir
+		// push düşme sebebi icat etmek olurdu.
+		probeStart := time.Now()
+		// EC-5: push'un ortasında sessiz dakikalar kabul edilemez. Taşımanın
+		// yazıcısı yok ve ona yazıcı vermek katman sınırını ters çevirirdi —
+		// görünür ilerleme ÇAĞIRANIN işi.
+		fmt.Fprintf(runtimeProgress,
+			"runtime: waiting for %s to be ready before changing it…\n", ref)
+		var readiness json.RawMessage
+		if perr := cloud.Do(ctx, http.MethodGet,
+			"/v1/cloud/projects/"+url.PathEscape(ref)+"/runtime/plan?sdk="+url.QueryEscape(sdkVersion),
+			nil, &readiness); perr != nil {
+			fmt.Fprintf(runtimeProgress,
+				"runtime: %s did not confirm it is ready after %s — changing it anyway (%v)\n",
+				ref, time.Since(probeStart).Round(time.Second), perr)
+		}
+
 		// PLAN GÖVDEDE GİDER (C-6, FR-040). Sunucu ona GÜVENMEZ: parmak izini
 		// kendisi yeniden hesaplar ve `running`i canlı runtime'a sorar. Plan bir
 		// İDDİA, kapı bir ÖLÇÜMDÜR.
 		if err := cloud.Do(ctx, http.MethodPost,
 			"/v1/cloud/projects/"+url.PathEscape(ref)+"/runtime",
 			map[string]any{"sdkVersion": sdkVersion, "plan": plan}, &result); err != nil {
+			// TEKRARLANMAZ, ANLATILIR (FR-009a). Yoklama "hazır" dedikten sonra
+			// bile kiracı iki çağrının arasında kaybolabilir — ve bu POST cevabı
+			// vermeden önce yazmış OLABİLİR, yani sessizce tekrarlamak veri
+			// bozar. Kullanıcı çıplak bir `tenant_unreachable (503)` görmez;
+			// FR-013'ün cümlesini görür: durumun ADI, GEÇEN süre, ne
+			// yapabileceği — ve `%w` ile sarılan `*APIError` üzerinden
+			// `request_id`.
+			if isPlaneStarting(err) {
+				return fmt.Errorf(
+					"%s is still starting after %s — the runtime change was not confirmed; "+
+						"run the same command again: %w",
+					ref, time.Since(probeStart).Round(time.Second), err)
+			}
 			return err
 		}
 		if result.SDKVersion != sdkVersion {
