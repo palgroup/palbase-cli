@@ -322,9 +322,10 @@ func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
 	}
 }
 
-// FR-017: A SUITE BESIDE THE CODE IT TESTS IS BUNDLED, FROM ANYWHERE IN THE
-// PROJECT — not only tests/ (design.md J-17: `modules/notes/note.service.test.ts`,
-// the template's own shape, never reached bundleTests before).
+// FR-017: A DEPLOY SUITE BESIDE THE CODE IT TESTS IS BUNDLED, FROM ANYWHERE IN
+// THE PROJECT — not only tests/ (design.md J-17: `modules/notes/notes.e2e.test.ts`,
+// the template's own shape, never reached bundleTests before). The neighbouring
+// UNIT test stays home: a deploy runs what talks to the release (D-40).
 //
 // FR-017a: AND TWO SUITES NAMED ALIKE IN DIFFERENT MODULES BOTH SURVIVE. The
 // bundler cannot use one output name twice, so without a collision-free
@@ -335,14 +336,16 @@ func TestModuleLocalTestsAreCollectedProjectWideWithoutCollision(t *testing.T) {
 		t.Skip("bun is what bundles a suite")
 	}
 	dir := t.TempDir()
-	mustWrite(t, dir, "modules/a/x.test.ts", "import { test } from \"node:test\";\ntest(\"a\", () => {});\n")
-	mustWrite(t, dir, "modules/b/x.test.ts", "import { test } from \"node:test\";\ntest(\"b\", () => {});\n")
+	mustWrite(t, dir, "modules/a/x.e2e.test.ts", "import { test } from \"node:test\";\ntest(\"a\", () => {});\n")
+	mustWrite(t, dir, "modules/b/x.e2e.test.ts", "import { test } from \"node:test\";\ntest(\"b\", () => {});\n")
+	// NEGATİF KONTROL (D-40): kodun yanındaki BİRİM testi deploy'a girmez.
+	mustWrite(t, dir, "modules/a/x.service.test.ts", "import { test } from \"node:test\";\ntest(\"unit\", () => {});\n")
 	// NEGATİF KONTROLLER: node_modules paket yöneticisinindir, ve
 	// .palbase-build-controllers bu CLI'ın ÖNCEKİ (ya da hâlâ süren) bir
 	// komutun KENDİ staging çıktısıdır — ikisi de projenin kendi testi değil,
 	// ve içine girmek bu projenin OLMAYAN bir süitini toplamak olurdu.
-	mustWrite(t, dir, "node_modules/dep/dep.test.ts", "import { test } from \"node:test\";\ntest(\"dep\", () => {});\n")
-	mustWrite(t, dir, ".palbase-build-controllers/x.test.ts", "import { test } from \"node:test\";\ntest(\"stale\", () => {});\n")
+	mustWrite(t, dir, "node_modules/dep/dep.e2e.test.ts", "import { test } from \"node:test\";\ntest(\"dep\", () => {});\n")
+	mustWrite(t, dir, ".palbase-build-controllers/x.e2e.test.ts", "import { test } from \"node:test\";\ntest(\"stale\", () => {});\n")
 
 	bundleRoot := t.TempDir()
 	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
@@ -362,7 +365,7 @@ func TestModuleLocalTestsAreCollectedProjectWideWithoutCollision(t *testing.T) {
 	if len(names) != 2 {
 		t.Fatalf("want exactly 2 bundled suites (one per module), got %v", names)
 	}
-	for _, want := range []string{"x.test.js", "b_x.test.js"} {
+	for _, want := range []string{"x.e2e.test.js", "b_x.e2e.test.js"} {
 		ok := false
 		for _, n := range names {
 			if n == want {
@@ -409,10 +412,10 @@ func TestSuitesThatDifferOnlyByExtensionBothBundle(t *testing.T) {
 		t.Skip("bun is what bundles a suite")
 	}
 	dir := t.TempDir()
-	mustWrite(t, dir, "modules/a/x.test.ts", oneTestSuite)
-	mustWrite(t, dir, "modules/a/x.test.mts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/x.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/x.e2e.test.mts", oneTestSuite)
 
-	require.Equal(t, []string{"a_x.test.js", "x.test.js"}, bundledSuiteNames(t, dir),
+	require.Equal(t, []string{"a_x.e2e.test.js", "x.e2e.test.js"}, bundledSuiteNames(t, dir),
 		"two suites named alike up to their extension landed on one output (FR-017a)")
 }
 
@@ -424,10 +427,10 @@ func TestSuitesThatDifferOnlyByLetterCaseBothBundle(t *testing.T) {
 		t.Skip("bun is what bundles a suite")
 	}
 	dir := t.TempDir()
-	mustWrite(t, dir, "modules/a/Login.test.ts", oneTestSuite)
-	mustWrite(t, dir, "modules/b/login.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/Login.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/login.e2e.test.ts", oneTestSuite)
 
-	require.Equal(t, []string{"Login.test.js", "b_login.test.js"}, bundledSuiteNames(t, dir))
+	require.Equal(t, []string{"Login.e2e.test.js", "b_login.e2e.test.js"}, bundledSuiteNames(t, dir))
 }
 
 // A PATH THAT RUNS OUT STILL NAMES A SUITE (review-T016 IMPORTANT-2). The prefix
@@ -439,11 +442,11 @@ func TestSuiteNamesFallBackToANumberWhenThePathIsExhausted(t *testing.T) {
 		t.Skip("bun is what bundles a suite")
 	}
 	dir := t.TempDir()
-	mustWrite(t, dir, "a/x.test.ts", oneTestSuite)
-	mustWrite(t, dir, "b/x.test.ts", oneTestSuite)
-	mustWrite(t, dir, "b_x.test.ts", oneTestSuite)
+	mustWrite(t, dir, "a/x.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "b/x.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "b_x.e2e.test.ts", oneTestSuite)
 
-	require.Equal(t, []string{"b_x.test.js", "b_x_2.test.js", "x.test.js"}, bundledSuiteNames(t, dir))
+	require.Equal(t, []string{"b_x.e2e.test.js", "b_x.e2e_2.test.js", "x.e2e.test.js"}, bundledSuiteNames(t, dir))
 }
 
 // TWO SUITES THAT DIFFER ONLY BY CASE IN ONE DIRECTORY ARE REFUSED (review-T016
@@ -453,27 +456,27 @@ func TestSuiteNamesFallBackToANumberWhenThePathIsExhausted(t *testing.T) {
 // suite, silently.
 func TestSuitesThatDifferOnlyByCaseInOneDirectoryAreRefused(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, dir, "modules/a/Login.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/Login.e2e.test.ts", oneTestSuite)
 	// On a case-insensitive filesystem the second name IS the first file, so the
 	// fixture cannot exist there. Decided before any assertion, from the
 	// filesystem itself.
-	if _, err := os.Stat(filepath.Join(dir, "modules", "a", "login.test.ts")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "modules", "a", "login.e2e.test.ts")); err == nil {
 		t.Skip("this filesystem is case-insensitive: Login.test.ts and login.test.ts are one file here")
 	}
-	mustWrite(t, dir, "modules/a/login.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/login.e2e.test.ts", oneTestSuite)
 
 	_, err := planTestSuites(dir)
 	require.ErrorContains(t, err, "differ only by letter case")
-	require.ErrorContains(t, err, "Login.test.ts")
-	require.ErrorContains(t, err, "login.test.ts")
+	require.ErrorContains(t, err, "Login.e2e.test.ts")
+	require.ErrorContains(t, err, "login.e2e.test.ts")
 }
 
 // …AND THE REFUSAL IS ABOUT ONE DIRECTORY. The same pair in two directories is
 // what the naming already separates; refusing it would refuse a working tree.
 func TestSuitesThatDifferOnlyByCaseInTwoDirectoriesAreNamedApart(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, dir, "modules/a/Login.test.ts", oneTestSuite)
-	mustWrite(t, dir, "modules/b/login.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/Login.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/login.e2e.test.ts", oneTestSuite)
 	suites, err := planTestSuites(dir)
 	require.NoError(t, err)
 	require.Len(t, suites, 2)
@@ -486,8 +489,8 @@ func TestSuitesThatDifferOnlyByCaseInTwoDirectoriesAreNamedApart(t *testing.T) {
 // the source is the file itself, and its relative imports resolve where it lives.
 func TestPlanTestSuitesBuildsEachSuiteFromItsOwnFile(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, dir, "modules/a/x.test.ts", oneTestSuite)
-	mustWrite(t, dir, "modules/b/x.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/a/x.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/x.e2e.test.ts", oneTestSuite)
 
 	suites, err := planTestSuites(dir)
 	require.NoError(t, err)
@@ -498,8 +501,8 @@ func TestPlanTestSuitesBuildsEachSuiteFromItsOwnFile(t *testing.T) {
 		require.Truef(t, info.Mode().IsRegular(), "%s is not the suite's own file", s.Source)
 		require.Truef(t, strings.HasPrefix(s.Source, dir), "%s is outside the project", s.Source)
 	}
-	require.Equal(t, "x.test.js", suites[0].Out)
-	require.Equal(t, "b_x.test.js", suites[1].Out)
+	require.Equal(t, "x.e2e.test.js", suites[0].Out)
+	require.Equal(t, "b_x.e2e.test.js", suites[1].Out)
 }
 
 // WEBHOOKS TRAVEL. Until this test existed the entry hardcoded `webhooks = []`,
@@ -1150,4 +1153,42 @@ func TestTheTestBundlerWritesToTheBundleRootNotTheCheckout(t *testing.T) {
 			"`palbase link` refuses a checkout that carries it, so push would " +
 			"create the blocker link rejects")
 	}
+}
+
+// DEPLOY'A AİT SÜİTLER, KİRACININ BÜTÜN TEST KORPUSU DEĞİL (FR-017, D-40).
+//
+// İlk yazımı projedeki HER `*.test.*`'ı topluyordu ve ölçüldü: kontrol düzlemi
+// sunucusunun 160 CI süiti deploy'da runtime'ın 384Mi'lik bellek zarfını
+// doldurup konteyneri `OOMKilled` ile düşürdü (tek başına en ağır süit 425 MB);
+// o kiracı hiç deploy edemez oldu. Deploy'un koştuğu test ile yerelde koşan
+// birim testi ayrı kümelerdir — şablonun kendi ayrımı da budur
+// (`notes.e2e.test.ts` yayına çıkacak release'e karşı HTTP konuşur,
+// `note.service.test.ts` bir stand-in ile mantığı ölçer).
+func TestCollectTakesOnlyTheDeploysOwnSuites(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{
+		"modules/notes/notes.e2e.test.ts",
+		"modules/notes/note.service.test.ts",
+		"modules/shared/canon.test.ts",
+		"tests/health.test.ts",
+		"tests/deep/isolation.test.ts",
+		"db/public.test.ts",
+	} {
+		mustWrite(t, dir, rel, oneTestSuite)
+	}
+
+	got, err := collectTestSources(dir)
+	require.NoError(t, err)
+	var rels []string
+	for _, p := range got {
+		rel, relErr := filepath.Rel(dir, p)
+		require.NoError(t, relErr)
+		rels = append(rels, filepath.ToSlash(rel))
+	}
+	sort.Strings(rels)
+	require.Equal(t, []string{
+		"modules/notes/notes.e2e.test.ts",
+		"tests/deep/isolation.test.ts",
+		"tests/health.test.ts",
+	}, rels, "deploy kiracının birim testlerini de topladı (FR-017)")
 }

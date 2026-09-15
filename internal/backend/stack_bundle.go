@@ -393,7 +393,11 @@ func collectTestSources(dir string) ([]string, error) {
 			}
 			return nil
 		}
-		if isTestSource(name) {
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if isDeployTestSource(filepath.ToSlash(rel)) {
 			out = append(out, path)
 		}
 		return nil
@@ -489,6 +493,34 @@ func testSuiteStem(name string) string {
 func isTestSource(name string) bool {
 	return strings.HasSuffix(name, ".test.ts") || strings.HasSuffix(name, ".test.js") ||
 		strings.HasSuffix(name, ".test.mts") || strings.HasSuffix(name, ".test.mjs")
+}
+
+// isDeployTestSource answers whether a test file is one the DEPLOY runs (FR-017).
+//
+// TWO SETS, NOT ONE. A deploy's test talks to the release about to go live over
+// real HTTP; a unit test measures logic against a stand-in and needs no stack.
+// The scaffold already draws that line by name — `notes.e2e.test.ts` beside
+// `note.service.test.ts` — and this is where the product enforces it: `.e2e.`
+// anywhere in the project, plus everything under `tests/` (any depth), which is
+// where a project that predates the convention keeps its deploy suites.
+//
+// WHY NOT EVERYTHING. It was everything, for one release. Measured (D-40): the
+// control plane's 160 CI suites travelled with its push, the runtime ran them
+// inside its own 384Mi container — one suite alone wanted 425 MB — and the
+// kernel killed the runtime mid-request. palsvc saw `EOF`, the deploy was
+// refused, and that tenant could not ship at all. A gate that can kill the
+// process grading the release is not a gate.
+//
+// rel is the path relative to the project root, in slash form.
+func isDeployTestSource(rel string) bool {
+	base := rel
+	if at := strings.LastIndex(rel, "/"); at >= 0 {
+		base = rel[at+1:]
+	}
+	if !isTestSource(base) {
+		return false
+	}
+	return strings.Contains(base, ".e2e.test.") || strings.HasPrefix(rel, "tests/")
 }
 
 // controllerClassRe finds the class a `@Controller(...)` decorates. It tolerates
