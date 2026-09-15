@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -365,4 +366,61 @@ func TestAForeignAddressStillTakesTheEnvironmentValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, SourceEnv, src)
 	require.NotEmpty(t, cred.Value)
+}
+
+// "I COULD NOT ASK" IS NOT "YOU HAVE NO CREDENTIAL" (FR-011).
+//
+// Measured (CB-20): every verb that touches a project calls Credential first,
+// and a 5xx from the control plane was folded into a bool — so a person whose
+// sign-in was perfectly good read "no credential for this project" plus four
+// suggestions for fixing a problem they did not have.
+//
+// The fixture carries *transport.APIError because that is what the transport
+// hands back; the classification reads its StatusCode() through an interface,
+// so this package still does not import transport.
+func TestCredentialSaysItCouldNotAskWhenThePlaneAnswers5xx(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		return "", &transport.APIError{
+			Code: "internal_error", Description: "Internal error",
+			Status: 503, RequestID: "req_abc123",
+		}
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	_, _, err := Credential("https://app1prod.v2.palbase.studio")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNoCredential,
+		"the plane failing to answer was reported as the person having no credential")
+	require.Contains(t, err.Error(), "could not ask")
+	// THE CAUSE MUST SURVIVE: the status and the request_id are the only threads
+	// from this refusal back to the plane's own logs.
+	require.Contains(t, err.Error(), "503")
+	require.Contains(t, err.Error(), "req_abc123")
+	// AND THE FOUR WRONG SUGGESTIONS MUST NOT APPEAR. Telling somebody to run
+	// `palbase start` or `palbase login` is advice about a credential, and the
+	// credential was never the problem.
+	require.NotContains(t, err.Error(), "palbase start")
+	require.NotContains(t, err.Error(), "palbase login")
+}
+
+// AND A REAL REFUSAL IS STILL A MISSING CREDENTIAL. 401 is the plane answering
+// — not failing to answer — and the three ways in are exactly what that person
+// needs to read.
+func TestCredentialStillReportsAMissingCredentialOn401(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		return "", &transport.APIError{Code: "unauthorized", Status: 401}
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	_, _, err := Credential("https://app1prod.v2.palbase.studio")
+	require.ErrorIs(t, err, ErrNoCredential)
+	require.Contains(t, err.Error(), "palbase login")
 }

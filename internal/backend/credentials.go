@@ -218,7 +218,14 @@ func Credential(url string) (cred Credentials, source CredentialSource, err erro
 	// resolution is a round trip to the control plane. A verb that makes several
 	// reads resolves the credential once and passes it along (review-T009).
 	if CloudKeyFetcher != nil {
-		if cred, ok := fetchCloudCredential(url); ok {
+		// A BROKER THAT DID NOT ANSWER GETS ITS OWN SENTENCE. Falling through to
+		// the refusal below would tell somebody whose sign-in is perfectly good
+		// that they have no credential — see fetchCloudCredential.
+		cred, ok, err := fetchCloudCredential(url)
+		if err != nil {
+			return Credentials{}, "", err
+		}
+		if ok {
 			return cred, SourceCloud, nil
 		}
 	}
@@ -444,14 +451,56 @@ var CloudKeyFetcher func(tenantURL string) (string, error)
 // The control plane is the authority on a cloud project's key. Asking it each
 // time is what "authority" means.
 //
-// A failure here is not reported as an error: the caller is about to produce a
-// message that names every way to supply a credential, and "the cloud said no"
-// is one reason among several — a stack on this machine, a key in the
-// environment, or simply not being signed in are all still valid answers.
-func fetchCloudCredential(url string) (Credentials, bool) {
+// "I COULD NOT ASK" IS NOT "THE ANSWER WAS NO", and this used to fold both into
+// one bool. The retired comment said it deliberately: a failure here "is not
+// reported as an error" because the caller was about to name every way to supply
+// a credential, and "the cloud said no" was one reason among several.
+//
+// That reasoning holds for an ANSWER and breaks for a SILENCE. Measured
+// (CB-20): every verb that touches a project resolves an identity first, so a
+// 5xx from the control plane — the platform's own opening window, which answers
+// a bare `internal_error (500)` for about 75 seconds after a project is made —
+// reached the person as "no credential for this project", followed by four
+// suggestions for a problem they did not have. Their sign-in was fine; the
+// broker was starting.
+//
+// THREE STATES, because there are three: the key (ok), a refusal the caller's
+// message is right about (not ok, no error), and a broker that did not answer
+// (an error the caller passes through in its own words).
+//
+// THE LINE IS THE STATUS, MIRRORING link_token.go: 5xx is "could not ask",
+// everything else is an answer. The status is read through an interface rather
+// than transport's concrete type, so this package stays off transport exactly
+// as CloudKeyFetcher's injection intends.
+//
+// A FAILURE CARRYING NO STATUS IS LEFT ALONE, and that is a decision rather than
+// an oversight: CloudKeyFetcher produces one locally — "<url> is not a project
+// on this cloud" — before any request leaves the machine. It is a fact about the
+// address, and the caller's three-ways-in message is the right answer to it.
+// Classifying every status-less failure as "could not ask" would replace that
+// message for every self-hosted address, which is a real path.
+func fetchCloudCredential(url string) (Credentials, bool, error) {
 	key, err := CloudKeyFetcher(url)
-	if err != nil || strings.TrimSpace(key) == "" {
-		return Credentials{}, false
+	if err != nil {
+		if couldNotAsk(err) {
+			return Credentials{}, false, fmt.Errorf(
+				"could not ask the cloud for %s's key: %w.\n"+
+					"This is the control plane, not your sign-in — run the same command again",
+				url, err)
+		}
+		return Credentials{}, false, nil
 	}
-	return Credentials{Value: key, Kind: kindOf(key)}, true
+	if strings.TrimSpace(key) == "" {
+		return Credentials{}, false, nil
+	}
+	return Credentials{Value: key, Kind: kindOf(key)}, true, nil
+}
+
+// couldNotAsk reports whether err is the control plane failing to ANSWER.
+//
+// The interface is the contract — see transport.APIError.StatusCode, which
+// exists so callers can classify a failure without importing the concrete type.
+func couldNotAsk(err error) bool {
+	var coded interface{ StatusCode() int }
+	return errors.As(err, &coded) && coded.StatusCode() >= 500
 }
