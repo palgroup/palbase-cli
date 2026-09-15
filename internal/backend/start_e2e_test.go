@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -64,7 +65,7 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 	}
 
 	bin := palbaseBinary(t)
-	dir := t.TempDir()
+	dir := e2eCheckout(t)
 
 	init := exec.Command(bin, "init")
 	init.Dir = dir
@@ -151,5 +152,36 @@ func TestStartServesAndStopCleansUp(t *testing.T) {
 	}
 	if _, err := os.Stat(local); !os.IsNotExist(err) {
 		t.Fatalf("stop left %s behind (err=%v)", local, err)
+	}
+}
+
+// e2eCheckout, bu test koşusuna ÖZEL bir checkout dizini açar.
+//
+// `t.TempDir()`in kendisi yetmez: compose proje adı dizinin SON parçasından
+// türüyor (`sanitiseGroup(filepath.Base(dir))`) ve o parça `001`/`002` gibi
+// koşu içi bir sayaçtır. Aynı makinede iki `go test` aynı anda koştuğunda ikisi
+// de `palbase-002` projesini kurar; biri diğerinin konteynerlerini `down` eder
+// ve kaybeden koşu kendi yığınını ayakta bulamaz (ölçüldü, K-6).
+//
+// ÜRÜN DEĞİŞMEZ: grup adının dizinin kendi adı olması `local-stack.md`'de
+// verilmiş bir sözdür. Çakışmanın sahibi testtir, çareyi de test taşır.
+func e2eCheckout(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), fmt.Sprintf("palbase-e2e-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("e2e checkout: %v", err)
+	}
+	return dir
+}
+
+func TestTheE2eCheckoutNameCannotCollideWithAParallelRun(t *testing.T) {
+	first := filepath.Base(e2eCheckout(t))
+	second := filepath.Base(e2eCheckout(t))
+
+	if !strings.HasPrefix(first, "palbase-e2e-") {
+		t.Fatalf("checkout dizininin adı koşuya özel değil: %q — compose projesi bu addan türüyor", first)
+	}
+	if first == second {
+		t.Fatalf("iki checkout aynı adı aldı (%q); paralel koşular birbirinin yığınını ezer", first)
 	}
 }
