@@ -651,9 +651,11 @@ func sameStack(a, b string) bool {
 //     stage, where the working directory is a scratch copy and reading the
 //     record there would find nothing (CB-38).
 //
-// The comment here used to say the record is read "never by the working
-// directory". That was wrong about half its callers and hid the reason the
-// distinction exists: the stage, not the caller's taste.
+// The comment here used to deny the working directory outright. That denial was
+// wrong about half its callers and hid the reason the distinction exists: the
+// stage, not the caller's taste. (The retired sentence is not reproduced here —
+// a banned claim quoted verbatim still reads as the claim to a grep, and to a
+// hurried reader.)
 func startRecordAt(checkoutRoot string) (Target, bool) {
 	path, err := LocalStatePath(checkoutRoot)
 	if err != nil {
