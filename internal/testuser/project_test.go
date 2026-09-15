@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,8 @@ func TestMintCleanupDeletesOnlyReturnedUsersOnTheOriginalProject(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls = append(calls, r.Method+" "+r.URL.Path)
 				switch r.Method + " " + r.URL.Path {
+				case "GET /v1/management/test-users/templates":
+					_, _ = w.Write([]byte(`{"templates":[]}`))
 				case "POST /v1/management/test-users":
 					_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_new1","email":"one@test.invalid"},{"user_id":"usr_new2","email":"two@test.invalid"},{"user_id":"usr_new1"},{}]}`))
 				case "DELETE /v1/management/test-users/usr_new1":
@@ -68,6 +71,7 @@ func TestMintCleanupDeletesOnlyReturnedUsersOnTheOriginalProject(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.Equal(t, []string{
+				"GET /v1/management/test-users/templates",
 				"POST /v1/management/test-users",
 				"DELETE /v1/management/test-users/usr_new1",
 				"DELETE /v1/management/test-users/usr_new2",
@@ -78,6 +82,10 @@ func TestMintCleanupDeletesOnlyReturnedUsersOnTheOriginalProject(t *testing.T) {
 
 func TestMintCleanupHonorsItsDeadlineAndReportsEveryRemainingID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/management/test-users/templates" {
+			_, _ = w.Write([]byte(`{"templates":[]}`))
+			return
+		}
 		if r.Method == http.MethodPost {
 			_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_new1"},{"user_id":"usr_new2"}]}`))
 			return
@@ -98,6 +106,122 @@ func TestMintCleanupHonorsItsDeadlineAndReportsEveryRemainingID(t *testing.T) {
 	require.ErrorContains(t, err, "usr_new1")
 	require.ErrorContains(t, err, "usr_new2")
 	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+// A PROJECT THAT DECLARES ITS FIXTURES GETS THEM BY NAME. `palbase test --live`
+// minted `count` anonymous accounts whatever the stack had been told a test user
+// can be, so a suite written against `signInAs("author")` found `user1` and
+// `user2` instead.
+//
+// The name is the one ASKED FOR. The stack's mint answer carries none —
+// `{email, password, user_id, access_token, inserted}` is the whole credential
+// (v2 admin_users_handlers.go) — so a name read from the answer falls back to the
+// position, which is exactly the fake below: it answers the way the stack does.
+func TestMintIdentitiesProducesEveryDeclaredFixtureByName(t *testing.T) {
+	var calls []string
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/management/test-users/templates":
+			_, _ = w.Write([]byte(`{"templates":[{"name":"author","email":"","tables":["posts"]},{"name":"reader","email":"","tables":[]}]}`))
+		case "POST /v1/management/test-users":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			bodies = append(bodies, body)
+			n := len(bodies)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"users":[{"email":"fixture%d@test.invalid","password":"pw%d","user_id":"usr_%d","access_token":"tok%d","inserted":{"posts":1}}]}`, n, n, n, n)
+		case "DELETE /v1/management/test-users/usr_1", "DELETE /v1/management/test-users/usr_2":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	linkedTo(t, srv.URL)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	raw, cleanup, err := MintIdentities(cmd, 2)
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
+
+	require.Equal(t, []string{
+		"GET /v1/management/test-users/templates",
+		"POST /v1/management/test-users",
+		"POST /v1/management/test-users",
+	}, calls, "one mint per declared fixture, after reading what is declared")
+	require.Len(t, bodies, 2)
+	for i, want := range []string{"author", "reader"} {
+		require.Equal(t, want, bodies[i]["template"], "mint %d did not name its fixture: %v", i+1, bodies[i])
+		require.Equal(t, float64(1), bodies[i]["count"], "a fixture is one identity: %v", bodies[i])
+		require.Equal(t, true, bodies[i]["with_tokens"], "a fixture nobody can sign in as is a row: %v", bodies[i])
+	}
+
+	var payload struct {
+		Identities map[string]map[string]any `json:"identities"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	require.Len(t, payload.Identities, 2, "identities: %s", raw)
+	require.Equal(t, map[string]any{"id": "usr_1", "email": "fixture1@test.invalid", "password": "pw1", "accessToken": "tok1"},
+		payload.Identities["author"], "identities: %s", raw)
+	require.Equal(t, map[string]any{"id": "usr_2", "email": "fixture2@test.invalid", "password": "pw2", "accessToken": "tok2"},
+		payload.Identities["reader"], "identities: %s", raw)
+
+	require.NoError(t, cleanup(context.Background()))
+	require.Equal(t, []string{
+		"DELETE /v1/management/test-users/usr_1",
+		"DELETE /v1/management/test-users/usr_2",
+	}, calls[3:], "cleanup must cover every fixture this run minted")
+}
+
+// A stack that declares NO fixtures keeps today's counted mint — one request, no
+// template — and the person is told why the identities are `user1`, `user2`
+// rather than the names their suite might expect.
+func TestMintIdentitiesWithoutDeclaredFixturesKeepsTheCountedMint(t *testing.T) {
+	var calls []string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/management/test-users/templates":
+			_, _ = w.Write([]byte(`{"templates":[]}`))
+		case "POST /v1/management/test-users":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_, _ = w.Write([]byte(`{"users":[{"user_id":"usr_1","email":"a@test.invalid","password":"p"},{"user_id":"usr_2","email":"b@test.invalid","password":"p"}]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	linkedTo(t, srv.URL)
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+
+	raw, _, err := MintIdentities(cmd, 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"GET /v1/management/test-users/templates",
+		"POST /v1/management/test-users",
+	}, calls)
+	_, named := body["template"]
+	require.False(t, named, "a counted mint names no template: %v", body)
+	require.Equal(t, float64(2), body["count"])
+
+	var payload struct {
+		Identities map[string]any `json:"identities"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	require.Contains(t, payload.Identities, "user1")
+	require.Contains(t, payload.Identities, "user2")
+	require.Contains(t, stderr.String(), "declares no fixture accounts",
+		"the person is not told why the identities have no names")
+	require.Contains(t, stderr.String(), "palbase test-user templates set")
 }
 
 // linkedTo points a scratch checkout at srv and gives it a credential, the way

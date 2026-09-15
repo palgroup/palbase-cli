@@ -83,18 +83,20 @@ func resolveProject(cmd *cobra.Command) (backend.Target, backend.Credentials, er
 // the stack's, not the Studio's — `user_id` here is `id` there — so the two
 // wires are decoded by two types instead of one type with optional halves.
 type stackMinted struct {
-	Users []struct {
-		UserID      string `json:"user_id"`
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		AccessToken string `json:"access_token"`
-		// Name is what a TEMPLATE mint calls this identity; a plain mint sends
-		// none and the position supplies one.
-		Name string `json:"name"`
-		// Inserted is how many rows landed in each table. Empty for a plain
-		// mint, which declares no data.
-		Inserted map[string]int `json:"inserted"`
-	} `json:"users"`
+	Users []stackUser `json:"users"`
+}
+
+type stackUser struct {
+	UserID      string `json:"user_id"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	AccessToken string `json:"access_token"`
+	// Name is what a TEMPLATE mint calls this identity; a plain mint sends
+	// none and the position supplies one.
+	Name string `json:"name"`
+	// Inserted is how many rows landed in each table. Empty for a plain
+	// mint, which declares no data.
+	Inserted map[string]int `json:"inserted"`
 }
 
 // asIdentities renders a mint in the shape `createTestApi({ identities })`
@@ -112,19 +114,27 @@ type stackMinted struct {
 // Names are positional (`user1`, `user2`, …) because a plain mint declares
 // none; a template mint names them and that name is used.
 func asIdentities(res stackMinted) map[string]any {
+	return map[string]any{"identities": identitiesOf(res)}
+}
+
+func identitiesOf(res stackMinted) map[string]any {
 	identities := make(map[string]any, len(res.Users))
 	for i, u := range res.Users {
 		name := u.Name
 		if name == "" {
 			name = fmt.Sprintf("user%d", i+1)
 		}
-		entry := map[string]any{"id": u.UserID, "email": u.Email, "password": u.Password}
-		if u.AccessToken != "" {
-			entry["accessToken"] = u.AccessToken
-		}
-		identities[name] = entry
+		identities[name] = identityOf(u)
 	}
-	return map[string]any{"identities": identities}
+	return identities
+}
+
+func identityOf(u stackUser) map[string]any {
+	entry := map[string]any{"id": u.UserID, "email": u.Email, "password": u.Password}
+	if u.AccessToken != "" {
+		entry["accessToken"] = u.AccessToken
+	}
+	return entry
 }
 
 // stackTemplates is what GET /admin/test-user-templates answers: the
@@ -181,28 +191,76 @@ func trimBody(raw []byte) string {
 	return string(raw)
 }
 
-// MintIdentities creates `count` test identities and returns the SAME payload
+// MintIdentities creates this run's test identities and returns the SAME payload
 // `create --json` prints. Exported so `palbase test` mints through this path
 // rather than shelling out to itself. Cleanup is bound to the minted IDs and
 // original target, so tests cannot redirect it by relinking their checkout.
+//
+// WHAT THE PROJECT DECLARES A TEST USER IS COMES FIRST. `count` anonymous
+// accounts is what a stack with no fixture set can offer; a stack that has been
+// told about `author` and `reader` can offer those, and a suite calling
+// `signInAs("author")` needs exactly that name. So this asks the stack for its
+// declarations and mints one identity per declaration, named by the name it
+// ASKED FOR — the mint answer carries no name (it is email, password, user_id,
+// access_token and the rows inserted), and a name read back from it would fall
+// to the position, `user1`.
 func MintIdentities(cmd *cobra.Command, count int) ([]byte, func(context.Context) error, error) {
 	target, cred, err := resolveProject(cmd)
 	if err != nil {
 		return nil, nil, err
 	}
-	var res stackMinted
-	body := map[string]any{"count": count, "with_tokens": true}
-	if err := callProject(cmd.Context(), target, cred, http.MethodPost, adminTestUsers, body, &res); err != nil {
+	ctx := cmd.Context()
+	var declared stackTemplates
+	if err := callProject(ctx, target, cred, http.MethodGet, adminTemplates, nil, &declared); err != nil {
 		return nil, nil, err
 	}
-	userIDs := make([]string, 0, len(res.Users))
-	seen := make(map[string]bool, len(res.Users))
-	for _, user := range res.Users {
-		if user.UserID != "" && !seen[user.UserID] {
-			userIDs = append(userIDs, user.UserID)
-			seen[user.UserID] = true
+
+	var userIDs []string
+	seen := map[string]bool{}
+	keep := func(res stackMinted) {
+		for _, user := range res.Users {
+			if user.UserID != "" && !seen[user.UserID] {
+				userIDs = append(userIDs, user.UserID)
+				seen[user.UserID] = true
+			}
 		}
 	}
+
+	identities := make(map[string]any, len(declared.Templates))
+	if len(declared.Templates) == 0 {
+		var res stackMinted
+		body := map[string]any{"count": count, "with_tokens": true}
+		if err := callProject(ctx, target, cred, http.MethodPost, adminTestUsers, body, &res); err != nil {
+			return nil, nil, err
+		}
+		keep(res)
+		identities = identitiesOf(res)
+		// Saying so is the difference between a person writing signInAs("author")
+		// and wondering why there is no such identity, and a person declaring one.
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"  this stack declares no fixture accounts, so the identities are positional (user1, user2, …) — "+
+				"declare a set with `palbase test-user templates set --file <path>`")
+	}
+	for _, declaration := range declared.Templates {
+		var res stackMinted
+		// One identity per declaration: a fixture is a named thing, and `count`
+		// copies of it would have to be named something this run invented.
+		body := map[string]any{"count": 1, "with_tokens": true, "template": declaration.Name}
+		if err := callProject(ctx, target, cred, http.MethodPost, adminTestUsers, body, &res); err != nil {
+			return nil, nil, fmt.Errorf("mint the %q fixture: %w", declaration.Name, err)
+		}
+		keep(res)
+		for i, user := range res.Users {
+			name := declaration.Name
+			if i > 0 {
+				// A stack answering one request with several users is out of
+				// contract; dropping them would leave accounts nobody cleans up.
+				name = fmt.Sprintf("%s%d", declaration.Name, i+1)
+			}
+			identities[name] = identityOf(user)
+		}
+	}
+
 	cleanup := func(ctx context.Context) error {
 		var failures []error
 		for _, id := range userIDs {
@@ -218,7 +276,7 @@ func MintIdentities(cmd *cobra.Command, count int) ([]byte, func(context.Context
 		}
 		return errors.Join(failures...)
 	}
-	raw, err := json.Marshal(asIdentities(res))
+	raw, err := json.Marshal(map[string]any{"identities": identities})
 	return raw, cleanup, err
 }
 
