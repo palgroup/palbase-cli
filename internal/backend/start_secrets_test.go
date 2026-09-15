@@ -196,3 +196,35 @@ func TestStartCountsTheNamesTheChosenEnvironmentDoesNotHave(t *testing.T) {
 	assert.Contains(t, out.String(), "1 left (not in todoapp/main)")
 	assert.Equal(t, "from-somewhere-else", local.values["PROD_KEY"], "a local name was deleted")
 }
+
+// KAYNAK BOŞSA DA GERİDE KALAN SÖYLENİR (FR-014).
+//
+// `len(names) == 0 → return` erken dönüşü, bir önceki koşunun eklediği
+// "· N left" kuyruğuna HİÇ varmıyordu: `main`in üç secret'ı yerel yığında
+// dururken `palbase start --env staging` (0 secret) hiçbir şey söylemiyordu —
+// tam da bu dosyanın kendi kuralının tersi.
+func TestStartCountsWhatIsLeftWhenTheEnvironmentHasNoSecrets(t *testing.T) {
+	local, target := startSecretsRig(t, onlyMain, map[string]*vault{
+		"main": {values: map[string]string{}},
+	})
+	local.mu.Lock()
+	local.values["PROD_KEY"] = "from-somewhere-else"
+	local.values["SENTRY_DSN"] = "also-from-somewhere-else"
+	local.mu.Unlock()
+
+	var out strings.Builder
+	pullSecrets(context.Background(), "todoapp", target, &out)
+	assert.Contains(t, out.String(), "0 pulled from todoapp/main")
+	assert.Contains(t, out.String(), "2 left (not in todoapp/main)")
+	assert.Equal(t, "from-somewhere-else", local.values["PROD_KEY"], "a local name was deleted")
+}
+
+// EC-8: kaynak da yerel de boşsa söylenecek bir şey yok — satır BASILMAZ.
+func TestStartSaysNothingWhenBothSidesAreEmpty(t *testing.T) {
+	_, target := startSecretsRig(t, onlyMain, map[string]*vault{
+		"main": {values: map[string]string{}},
+	})
+	var out strings.Builder
+	pullSecrets(context.Background(), "todoapp", target, &out)
+	assert.NotContains(t, out.String(), "secrets:")
+}

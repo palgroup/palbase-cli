@@ -86,7 +86,17 @@ func pullSecrets(ctx context.Context, group string, local Target, out io.Writer)
 		fmt.Fprintf(out, "  secrets: not pulled from %s — %v\n", from, err)
 		return
 	}
+	// KAYNAK BOŞSA DA GERİDE KALAN SÖYLENİR. Bu erken dönüş, bir önceki koşunun
+	// eklediği "· N left" kuyruğuna hiç varmıyordu: `main`in üç secret'ı yerel
+	// yığında dururken `palbase start --env staging` (0 secret) hiçbir şey
+	// söylemiyordu — tam da bu dosyanın kendi kuralının ("a stack that still
+	// holds another environment's key while the line reads pulled from X is the
+	// quiet version of the accident this function exists to prevent") tersi.
 	if len(names) == 0 {
+		if left := leftBehind(ctx, local, localCred, names); left > 0 {
+			fmt.Fprintf(out, "  secrets: 0 pulled from %s · %d left (not in %s)\n", from, left, from)
+		}
+		// Kaynak da yerel de boşsa satır basılmaz: söylenecek bir şey yok.
 		return
 	}
 
@@ -125,18 +135,7 @@ func pullSecrets(ctx context.Context, group string, local Target, out io.Writer)
 	// the line reads "pulled from todoapp/staging" is the quiet version of the
 	// accident this whole function exists to prevent, so the names this
 	// environment does not have are counted and said.
-	left := 0
-	if localNames, err := secretNames(ctx, local, localCred); err == nil {
-		have := make(map[string]struct{}, len(names))
-		for _, name := range names {
-			have[name] = struct{}{}
-		}
-		for _, name := range localNames {
-			if _, ok := have[name]; !ok {
-				left++
-			}
-		}
-	}
+	left := leftBehind(ctx, local, localCred, names)
 
 	// The names are not printed, let alone the values: the count is what an
 	// operator needs, and a list of every credential a project holds is a list
@@ -149,6 +148,31 @@ func pullSecrets(ctx context.Context, group string, local Target, out io.Writer)
 		line += fmt.Sprintf(" · %d left (not in %s)", left, from)
 	}
 	fmt.Fprintln(out, line)
+}
+
+// leftBehind, yerel yığının taşıdığı ama seçilen ortamın TAŞIMADIĞI adları sayar.
+//
+// Hiçbir şey silinmez — yerel bir ad birinin emeğidir — ama bir yığının başka bir
+// ortamın anahtarını taşırken "pulled from todoapp/staging" yazması, bu
+// mekanizmanın önlemek için var olduğu kazanın sessiz hâlidir. Sayı İKİ çağıranın
+// da elinde olmalı: kaynağın boş olduğu yol da, dolu olduğu yol da aynı soruyu
+// sorar ve aynı cevabı vermek zorundadır.
+func leftBehind(ctx context.Context, local Target, cred Credentials, names []string) int {
+	localNames, err := secretNames(ctx, local, cred)
+	if err != nil {
+		return 0
+	}
+	have := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		have[name] = struct{}{}
+	}
+	left := 0
+	for _, name := range localNames {
+		if _, ok := have[name]; !ok {
+			left++
+		}
+	}
+	return left
 }
 
 // changedLocally reports whether this stack's copy has moved since it was pulled.
