@@ -92,18 +92,25 @@ func reportDeadDeclarations(dir string, out io.Writer) bool {
 	return true
 }
 
-// compiledEntryDirs are the directories the deploy reads OFF DISK as entry
+// retiredEntryDirs are the directories the deploy USED TO read off disk as entry
 // points — one default-exported class per file, discovered by walking, never
 // imported by anything.
 //
-// That is the whole criterion, and it is why `models/`, `services/` and `db/` are
-// absent: a controller imports them, so tsc pulls them in transitively from a
-// single include entry. Nothing imports a job. If `jobs/` is not in `include`,
-// the compiler never opens it — and the file still deploys.
-var compiledEntryDirs = []string{"controllers", "jobs", "webhooks", "hooks"}
+// NOTHING WALKS THEM NOW. `moduleSources` (stack_bundle.go) reads one glob,
+// `*.module.ts`, and a class reaches the deploy only because a module imports it
+// and names it in `controllers` or `providers` — wherever on disk the file sits.
+// So a file under one of these four is opened by the compiler only if something
+// imports it, and shipped by the bundler for exactly the same reason.
+//
+// They stay named here because the shape still EXISTS in trees written before the
+// module system, and a person holding one needs to be told the directory stopped
+// meaning anything — not handed an `include` pattern that type-checks a file the
+// deploy will never run.
+var retiredEntryDirs = []string{"controllers", "jobs", "webhooks", "hooks"}
 
-// includeBlindSpots returns the include patterns dir's tsconfig should carry and
-// does not, for entry-point directories that EXIST.
+// includeBlindSpots returns the retired entry-point directories that EXIST in dir
+// and that its tsconfig's `include` leaves out — files two different readers both
+// skip, which is what makes them worth a sentence.
 //
 // ‼️ AN ABSENT `include` IS NOT A BLIND SPOT. tsc then compiles the whole
 // directory, which is strictly more than any list — refusing that would fail the
@@ -131,12 +138,14 @@ func includeBlindSpots(dir string) []string {
 		return false
 	}
 	var missing []string
-	for _, sub := range compiledEntryDirs {
+	for _, sub := range retiredEntryDirs {
 		st, err := os.Stat(filepath.Join(dir, sub))
 		if err != nil || !st.IsDir() || covered(sub) {
 			continue
 		}
-		missing = append(missing, sub+"/**/*.ts")
+		// The DIRECTORY, not an include pattern: the cure is to move the classes,
+		// and a pattern printed here reads as the thing to paste.
+		missing = append(missing, sub)
 	}
 	return missing
 }
@@ -147,14 +156,17 @@ func reportIncludeBlindSpots(dir string, out io.Writer) bool {
 	if len(missing) == 0 {
 		return false
 	}
-	fmt.Fprintf(out, "✗ tsconfig.json leaves %s the deploy ships out of its \"include\" list.\n", plural(len(missing), "directory", "directories"))
-	fmt.Fprintln(out, "  These hold entry points — one default-exported class per file, found by walking the")
-	fmt.Fprintln(out, "  directory. Nothing imports them, so `include` is the only thing that can put them in")
-	fmt.Fprintln(out, "  front of the compiler. A file in one is type-checked by NOTHING until it is running.")
-	fmt.Fprintln(out, "\n  Add to \"include\":")
+	fmt.Fprintf(out, "✗ %s outside the \"include\" list in tsconfig.json, and no bundler reads them either.\n",
+		plural(len(missing), "directory", "directories"))
 	for _, m := range missing {
-		fmt.Fprintf(out, "    %q,\n", m)
+		fmt.Fprintf(out, "    %s/\n", m)
 	}
+	fmt.Fprintln(out, "\n  Nothing walks a directory for entry points: the bundle starts at every `*.module.ts`")
+	fmt.Fprintln(out, "  and reaches a class only because a module imports it and names it. A file here is")
+	fmt.Fprintln(out, "  type-checked by NOTHING and shipped by nothing — it is not a blind spot, it is dead.")
+	fmt.Fprintln(out, "\n  Move each class to `modules/<domain>/` beside that domain's module, and name it in")
+	fmt.Fprintln(out, "  the module's `controllers` or `providers` list. Widening `include` would type-check")
+	fmt.Fprintln(out, "  a file that still never runs.")
 	return true
 }
 
