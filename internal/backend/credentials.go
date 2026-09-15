@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -501,24 +502,19 @@ func fetchCloudCredential(url string) (Credentials, bool, error) {
 // The interface is the contract — see transport.APIError.StatusCode, which
 // exists so callers can classify a failure without importing the concrete type.
 func couldNotAsk(err error) bool {
-	// BU ADRES BU BULUTUN PROJESİ DEĞİL — ne 5xx ne taşıma arızası.
+	// SORU POZİTİF: "düzlem cevap VEREMEDİ mi?"
 	//
-	// Bu red YEREL üretiliyor, istek hiç çıkmıyor; kendi kendine barındıran ya
-	// da bu makinede koşan bir yığın için doğru cevap "kimliği şu üç yoldan
-	// birinden ver"dir. Onu "soramadım" saymak o üç yolu silerdi. Sentinel
-	// olduğu için ayrım YAPIDA: dize eşleştirmiyoruz.
-	if errors.Is(err, ErrNotACloudProject) {
-		return false
+	// Bir önceki hâl bunu tersinden soruyordu ("statüsü yoksa arızadır") ve
+	// kuralın aynasını açtı: oturumu olmayan kullanıcı "this is the control
+	// plane, not your sign-in — run the same command again" görüyordu. Cümle iki
+	// kere yanlıştı — sorun TAM OLARAK sign-in'di, ve tekrar çalıştırmak
+	// sonsuza kadar aynı sonucu verirdi. İstisnaları saymak kümenin BÜYÜMESİNİ
+	// göremez; o yüzden işaret kaynakta konuyor ve burada okunuyor.
+	if errors.Is(err, transport.ErrPlaneUnreachable) {
+		return true
 	}
+	// Statülü bir cevap GELDİ: yalnız 5xx "cevap veremedim"dir. 401/403 GERÇEK
+	// bir reddir ve kimlik ailesinde kalır.
 	var coded interface{ StatusCode() int }
-	if errors.As(err, &coded) {
-		// Statüsü olan bir cevap: yalnız 5xx "cevap veremedim"dir. 401/403
-		// GERÇEK bir reddir ve kimlik ailesinde kalır.
-		return coded.StatusCode() >= 500
-	}
-	// STATÜ YOK = CEVAP HİÇ GELMEDİ. FR-011 "5xx OR TRANSPORT" diyor ve bu
-	// yarısı açıktı: ölçüldü (2026-09-15, sahte uç `/keys`te bağlantıyı
-	// koparıyor) — kullanıcı `no credential for this project` ve dört yanlış
-	// öneri görüyordu, kimliği sağlamken.
-	return true
+	return errors.As(err, &coded) && coded.StatusCode() >= 500
 }

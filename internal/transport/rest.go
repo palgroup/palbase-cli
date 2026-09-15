@@ -199,6 +199,19 @@ func stillStarting(started time.Time, cause error) error {
 		time.Since(started).Round(time.Second), cause)
 }
 
+// ErrPlaneUnreachable, KONTROL DÜZLEMİNİN CEVAP VEREMEDİĞİNİ söyler.
+//
+// ALLOWLIST, DENYLIST DEĞİL. Çağıran "bu bir düzlem arızası mı" sorusunu hata
+// METNİNDEN ya da "statüsü yok, o hâlde arızadır" çıkarımından okumamalı:
+// ikincisi denenmişti ve kuralın tersini açtı — kimlik yokluğu ("not
+// authenticated — run `palbase login`") ve eksik DPoP anahtarı da statüsüzdür,
+// ve onlar KALICI, kullanıcının düzeltebileceği redlerdir. Onları "soramadım,
+// tekrar dene" diye sunmak, bu paketin düzlemde kapattığı yalanın aynası olur.
+//
+// Bu yüzden işaret KAYNAKTA konur ve yalnız taşıma katmanının kendi arıza
+// yolları taşır. İşareti taşımayan hiçbir şey düzlem arızası DEĞİLDİR.
+var ErrPlaneUnreachable = errors.New("the control plane did not answer")
+
 // Do performs one control-plane request, WAITING OUT the plane's named transient
 // answers on safe methods.
 //
@@ -286,13 +299,13 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body, out any)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("management API request: %w", err)
+		return fmt.Errorf("management API request: %w: %w", ErrPlaneUnreachable, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return fmt.Errorf("read response: %w: %w", ErrPlaneUnreachable, err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

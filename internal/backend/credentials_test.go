@@ -443,8 +443,11 @@ func TestCredentialSaysItCouldNotAskWhenTheTransportFails(t *testing.T) {
 
 	CloudProjectAddress = func(string) bool { return true }
 	CloudKeyFetcher = func(string) (string, error) {
-		// Taşıma arızasının şekli: STATÜ YOK.
-		return "", errors.New(`Get "https://api.palbase.studio/v1/cloud/projects/x/keys": dial tcp: connect: connection refused`)
+		// ÜRETİM ŞEKLİ: taşıma katmanı kendi arıza yolunu `ErrPlaneUnreachable`
+		// ile İŞARETLER. Düz bir `errors.New` üretimde asla doğmaz — ve onu
+		// enjekte eden bir fikstür, var olamayacak bir şekli ölçerdi.
+		return "", fmt.Errorf("management API request: %w: %w", transport.ErrPlaneUnreachable,
+			errors.New(`Get "https://api.palbase.studio/v1/cloud/projects/x/keys": dial tcp: connect: connection refused`))
 	}
 	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
 
@@ -477,4 +480,54 @@ func TestCredentialStillOffersEveryWayWhenTheAddressIsNotOnThisCloud(t *testing.
 	require.ErrorIs(t, err, ErrNoCredential, "yerel red hâlâ 'kimlik yok' ailesindedir")
 	require.Contains(t, err.Error(), "palbase login")
 	require.NotContains(t, err.Error(), "could not ask")
+}
+
+// AYNANIN NEGATİF KONTROLÜ — "soramadım" ALLOWLIST'tir, denylist değil.
+//
+// Bir önceki düzeltme (T013) `couldNotAsk`ı "sentinel dışındaki her STATÜSÜZ
+// hata" yapmıştı ve kuralın TERSİNİ açtı: oturumu olmayan bir kullanıcı
+// "this is the control plane, not your sign-in — run the same command again"
+// görüyordu. Cümle iki kere yanlış — sorun TAM OLARAK sign-in'di ve tekrar
+// çalıştırmak sonsuza kadar aynı sonucu verirdi. Bu, düzlemde FR-005'in
+// yasakladığı yalanın CLI'daki aynası.
+//
+// Soru artık POZİTİF: "düzlem cevap VEREMEDİ mi?" İşareti taşımayan hiçbir şey
+// "soramadım" değildir.
+func TestCredentialStillNamesSignInWhenNobodySignedIn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		// `newSignedRequest`in token yokken ürettiği şekil: STATÜSÜZ, ama
+		// düzlemin cevap verememesi DEĞİL.
+		return "", errors.New("not authenticated — run `palbase login` (or, for headless use, export PALBASE_ACCESS_TOKEN)")
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	_, _, err := Credential("https://app1prod.v2.palbase.studio")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoCredential, "kimlik yokluğu kimlik ailesindedir")
+	require.Contains(t, err.Error(), "palbase login", "çare tam olarak budur ve söylenmeli")
+	require.NotContains(t, err.Error(), "could not ask",
+		"kalıcı bir kimlik reddi geçici bir düzlem arızası gibi sunuldu")
+	require.NotContains(t, err.Error(), "run the same command again",
+		"tekrar çalıştırmak sonsuza kadar aynı sonucu verir")
+}
+
+// BOZUK GÖVDE TEKRAR DENEMEKLE DÜZELMEZ: düzlem CEVAP VERDİ, şekli yanlış.
+func TestCredentialDoesNotCallAMalformedBodyAnOutage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AccessTokenEnv, "")
+
+	CloudProjectAddress = func(string) bool { return true }
+	CloudKeyFetcher = func(string) (string, error) {
+		return "", errors.New(`decode response: json: cannot unmarshal string into Go value (body=...)`)
+	}
+	t.Cleanup(func() { CloudProjectAddress, CloudKeyFetcher = nil, nil })
+
+	_, _, err := Credential("https://app1prod.v2.palbase.studio")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "could not ask",
+		"düzlem cevap verdi; bozuk bir gövde onun ulaşılamaz olduğu anlamına gelmez")
 }

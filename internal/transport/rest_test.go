@@ -520,3 +520,25 @@ func TestREST_Do_GivingUpNamesTheStateElapsedAndRequestId(t *testing.T) {
 		require.Contains(t, err.Error(), "req_trans_1")
 	})
 }
+
+// DÜZLEMİN CEVAP VEREMEDİĞİ KAYNAKTA İŞARETLENİR.
+//
+// Çağıranın "bu bir düzlem arızası mı" sorusunu hata METNİNDEN okuması, bu
+// koşunun kapattığı kusurun ta kendisi olurdu. İşaret ALLOWLIST'tir: yalnız
+// taşıma katmanının kendi arıza yolları taşır, başka hiçbir şey.
+func TestREST_PlaneUnreachableIsMarkedAtTheSource(t *testing.T) {
+	t.Run("taşıma arızası işareti TAŞIR", func(t *testing.T) {
+		c := New("http://127.0.0.1:1", "tok_session")
+		err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/me", nil, nil)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrPlaneUnreachable)
+	})
+
+	t.Run("kimlik yokluğu işareti TAŞIMAZ", func(t *testing.T) {
+		c := New("http://127.0.0.1:1", "")
+		err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/me", nil, nil)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrPlaneUnreachable,
+			"kimlik yokluğu düzlemin cevap verememesi DEĞİLDİR")
+	})
+}
