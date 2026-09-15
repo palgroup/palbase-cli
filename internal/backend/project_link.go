@@ -620,22 +620,40 @@ func sameStack(a, b string) bool {
 	if errA != nil || errB != nil || ua.Scheme != ub.Scheme || ua.Port() != ub.Port() {
 		return false
 	}
-	// ONE LOOPBACK SIDE IS ENOUGH. The record compared here is this checkout's
-	// own `palbase start` record, so it always names a stack on THIS machine: a
-	// stack started with `--lan` records its LAN address while binding every
-	// interface, and the loopback form the help text teaches is the same
-	// process. No second stack can hold that port either. Demanding both sides
-	// loopback let `palbase link http://localhost:<port>` re-stamp a `--lan`
-	// stack's record — J-10 in full (rv-cli-c).
-	if isLoopbackAddress(a) || isLoopbackAddress(b) {
+	// A LOOPBACK TARGET IS THIS MACHINE — AND THE RULE IS ASYMMETRIC ON PURPOSE.
+	//
+	// `b` is the address the caller is LINKING TO; `a` is this checkout's own
+	// `palbase start` record. A loopback target always names this machine, so a
+	// stack started with `--lan` (which records its LAN address while binding
+	// every interface) is the same process reached by its loopback form — that
+	// is J-10, and demanding both sides be loopback broke it.
+	//
+	// The converse is NOT true and used to be treated as if it were: with a
+	// loopback RECORD, another machine's address on the same port was called
+	// "the same stack" (measured: sameStack("http://127.0.0.1:54321",
+	// "http://192.168.1.20:54321") → true). Linking then wrote the remote
+	// address into the clients while every verb — db, secrets, functions — kept
+	// running against the local stack. A port number is not an identity.
+	if isLoopbackAddress(b) {
 		return true
 	}
 	return strings.EqualFold(ua.Hostname(), ub.Hostname())
 }
 
 // startRecordAt answers the machine-local record for a checkout only when
-// `palbase start` wrote it. `link` works inside a stage, so the record is read
-// by the CHECKOUT's root, never by the working directory (CB-38).
+// `palbase start` wrote it.
+//
+// THE ROOT IT IS GIVEN DEPENDS ON WHO ASKS, and both callers are correct:
+//
+//   - `resolveLinkTarget` passes the WORKING DIRECTORY, because it runs BEFORE
+//     the stage — at that moment the working directory IS the real checkout.
+//   - `writeLinkRecord` passes the CHECKOUT ROOT, because it runs INSIDE the
+//     stage, where the working directory is a scratch copy and reading the
+//     record there would find nothing (CB-38).
+//
+// The comment here used to say the record is read "never by the working
+// directory". That was wrong about half its callers and hid the reason the
+// distinction exists: the stage, not the caller's taste.
 func startRecordAt(checkoutRoot string) (Target, bool) {
 	path, err := LocalStatePath(checkoutRoot)
 	if err != nil {

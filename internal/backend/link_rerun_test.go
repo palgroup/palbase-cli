@@ -493,3 +493,26 @@ func TestALoopbackLinkToALanStartStackLeavesItsRecord(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after), "linking a --lan stack by its loopback address rewrote its record")
 }
+
+// KURAL ASİMETRİKTİR: kayıt loopback iken aynı porttaki UZAK bir adres BAŞKA
+// bir makinedir.
+//
+// Ölçüldü (2026-09-14): `sameStack("http://127.0.0.1:54321",
+// "http://192.168.1.20:54321")` → true. Kayıt bu checkout'un kendi `palbase
+// start` kaydıdır ve loopback ise yığın BU makinededir; başka bir makinenin
+// aynı numaralı portunu "aynı yığın" saymak, istemcileri uzak yığına yazıp her
+// fiili yerelde bırakıyordu.
+func TestSameStackRefusesAnotherMachineOnTheSamePort(t *testing.T) {
+	// a = KAYIT, b = HEDEF (`writeLinkRecord` böyle çağırıyor).
+	assert.False(t, sameStack("http://127.0.0.1:54321", "http://192.168.1.20:54321"),
+		"loopback bir kayıt, başka bir makinenin aynı portunu aynı yığın saydı")
+
+	// KORUNAN (FR-013): `--lan` ile başlatılmış bir yığının loopback formu AYNI
+	// süreçtir — hedef loopback ise bu makineyi gösterir.
+	assert.True(t, sameStack("http://192.168.7.5:54321", "http://127.0.0.1:54321"),
+		"--lan kaydı, kendi loopback formuyla eşleşmedi")
+
+	// KORUNAN: aynı makine, BAŞKA port → başka yığın.
+	assert.False(t, sameStack("http://127.0.0.1:1", "http://127.0.0.1:2"),
+		"iki farklı port aynı yığın sayıldı")
+}
