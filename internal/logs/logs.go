@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/transport"
 
 	"github.com/spf13/cobra"
 )
@@ -175,7 +176,30 @@ func showCloud(cmd *cobra.Command, r Resolvers, ref string, o showCloudOpts) err
 		}
 		fresh, err := read(followWindow)
 		if err != nil {
-			return err
+			// A WAKING TENANT IS NOT THE END OF THE STREAM (FR-012).
+			//
+			// This returned on any error, so a tenant that woke up or was
+			// swapped underneath a follower took the follower with it — and the
+			// person read the platform's own transient state as the reason
+			// their tail died. The precedent is in this repo: the debug
+			// console's attach loop reconnects rather than exiting.
+			//
+			// A REAL FAILURE STILL ENDS IT: retrying a 404 forever would hide
+			// the cause behind a tail that never prints anything again.
+			if !transport.IsNamedTransient(http.MethodGet, err) {
+				return err
+			}
+			// TO STDERR, NEVER TO THE STREAM: with --json stdout is one
+			// document per line, and a notice printed there would corrupt it
+			// for whatever is parsing.
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %v — still following\n", err)
+			// NO BACKOFF OF ITS OWN, and that is the point: `continue` lands on
+			// the select at the top of this loop, which already waits
+			// followInterval and already honours a cancelled context (EC-3).
+			// The transport spent up to its whole transient budget, backing off
+			// exponentially, before handing this error over — a second budget
+			// stacked here would just be a longer silence.
+			continue
 		}
 		printLines(out, cursor.fresh(fresh), jsonOut)
 	}

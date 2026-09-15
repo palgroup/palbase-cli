@@ -10,13 +10,17 @@ package logs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -152,4 +156,130 @@ func TestFollowCursor_Dedup(t *testing.T) {
 
 	require.Empty(t, c.fresh([]logLine{l("t2", "c"), l("t3", "d")}))
 	require.Empty(t, c.fresh([]logLine{l("t1", "a")}))
+}
+
+// followAnswers answers the follow loop's reads in order, repeating the last
+// answer. An answer is an entries document or an error.
+//
+// A STUB RATHER THAN THE httptest SERVER, deliberately: a named transient on a
+// GET is swallowed INSIDE transport.Do, so a 503 written on the wire would be
+// retried by the transport and never reach this loop at all. What reaches the
+// loop is what the transport hands back after its own budget — which is the
+// shape these answers carry.
+type followAnswers struct {
+	answers []any
+	calls   int
+	paths   []string
+	onCall  func(n int)
+}
+
+func (f *followAnswers) Do(_ context.Context, method, path string, _ any, out any) error {
+	f.calls++
+	f.paths = append(f.paths, path)
+	if f.onCall != nil {
+		f.onCall(f.calls)
+	}
+	if method != http.MethodGet {
+		return fmt.Errorf("unexpected method %s", method)
+	}
+	if !strings.HasPrefix(path, "/v1/panel/environments/app1prod/logs?") {
+		return fmt.Errorf("unexpected path %s", path)
+	}
+	i := f.calls - 1
+	if i >= len(f.answers) {
+		i = len(f.answers) - 1
+	}
+	if err, ok := f.answers[i].(error); ok {
+		return err
+	}
+	raw, err := json.Marshal(map[string]any{"entries": f.answers[i]})
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// runFollow drives `palbase logs --follow` against a stub and cancels the
+// command's context once the stub has been asked cancelAfter times. A
+// cancelAfter nobody reaches leaves the loop to end on its own — which is how
+// the real-failure case is measured.
+func runFollow(t *testing.T, stub *followAnswers, cancelAfter int) (string, string, error) {
+	t.Helper()
+	t.Chdir(t.TempDir())
+
+	prev := followInterval
+	followInterval = time.Millisecond
+	t.Cleanup(func() { followInterval = prev })
+
+	if err := os.MkdirAll(backend.RootDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backend.RootDir(), "project.json"),
+		[]byte(`{"url":"https://app1prod.palbase.studio"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stub.onCall = func(n int) {
+		if cancelAfter > 0 && n >= cancelAfter {
+			cancel()
+		}
+	}
+
+	cmd := Cmd(Resolvers{
+		REST:     func() REST { return stub },
+		CloudRef: func(string) (string, bool) { return "app1prod", true },
+	})
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--follow"})
+	err := cmd.ExecuteContext(ctx)
+	return out.String(), errOut.String(), err
+}
+
+// A WAKING TENANT MUST NOT KILL THE TAIL (FR-012).
+//
+// Measured: `read` failing ended the loop with `return err`, so a tenant that
+// woke up or was swapped underneath a follower took the follower with it — and
+// the person saw the platform's own transient state as the reason their tail
+// died.
+func TestFollowReconnectsWhenTheAnswerIsANamedTransient(t *testing.T) {
+	gaveUp := fmt.Errorf(
+		"the environment is still starting after 4m0s — it usually answers within a minute; run the same command again: %w",
+		&transport.APIError{Code: "tenant_unreachable", Status: 503})
+	stub := &followAnswers{answers: []any{
+		[]map[string]any{{"timestamp": "2026-07-02T10:00:01Z", "severity": "info", "source": "runtime", "body": "before"}},
+		gaveUp,
+		[]map[string]any{
+			{"timestamp": "2026-07-02T10:00:02Z", "severity": "info", "source": "runtime", "body": "after"},
+			{"timestamp": "2026-07-02T10:00:01Z", "severity": "info", "source": "runtime", "body": "before"},
+		},
+	}}
+	out, errOut, err := runFollow(t, stub, 3)
+
+	require.NoError(t, err, "a named transient ended the tail")
+	require.Equal(t, 3, stub.calls, "the loop did not read again after the transient")
+	require.Contains(t, out, "before")
+	require.Contains(t, out, "after", "the lines after the reconnection were never printed")
+	// THE NOTICE GOES TO STDERR, not to the stream. With --json, stdout is a
+	// document per line and a notice printed there would corrupt it.
+	require.Contains(t, errOut, "tenant_unreachable")
+	require.NotContains(t, out, "tenant_unreachable")
+}
+
+// AND A REAL FAILURE STILL ENDS IT. A 404 is the plane answering, not the
+// platform starting; retrying it forever would hide the cause behind a tail
+// that never prints anything again.
+func TestFollowStillExitsOnARealFailure(t *testing.T) {
+	stub := &followAnswers{answers: []any{
+		[]map[string]any{{"timestamp": "2026-07-02T10:00:01Z", "severity": "info", "source": "runtime", "body": "before"}},
+		&transport.APIError{Code: "not_found", Status: 404},
+	}}
+	_, _, err := runFollow(t, stub, 0)
+
+	require.Error(t, err, "a real failure was retried instead of reported")
+	require.Contains(t, err.Error(), "not_found")
+	require.Equal(t, 2, stub.calls)
 }
