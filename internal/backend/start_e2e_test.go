@@ -171,6 +171,22 @@ func e2eCheckout(t *testing.T) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("e2e checkout: %v", err)
 	}
+	// BENZERSİZ AD, SINIRSIZ ARTIK DEMEK DEĞİL.
+	//
+	// Grup adı compose projesinden FAZLASINI anahtarlıyor: yığının üç adlandırılmış
+	// volume'ü (`pgdata`, `artifacts`, `storage`) proje adıyla öneklenir ve
+	// `~/.palbase/stacks/<grup>` altında üretilmiş `.env` durur. `palbase stop`
+	// bilerek `down -v` DEĞİL ("a stop is not a reset") ve o dizini de silmiyor.
+	// Ad `002` iken bunlar yeniden KULLANILIYORDU, yani artık sınırlıydı; koşuya
+	// özel ad onu sınırsız büyümeye çevirir — hem de geliştiricinin gerçek
+	// home'unda. Bu dizini AÇAN test, kapatmakla da yükümlüdür.
+	group := sanitiseGroup(filepath.Base(dir))
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "compose", "-p", "palbase-"+group, "down", "-v", "--remove-orphans").Run()
+		if home, err := os.UserHomeDir(); err == nil {
+			_ = os.RemoveAll(filepath.Join(home, ".palbase", "stacks", group))
+		}
+	})
 	return dir
 }
 
@@ -180,6 +196,12 @@ func TestTheE2eCheckoutNameCannotCollideWithAParallelRun(t *testing.T) {
 
 	if !strings.HasPrefix(first, "palbase-e2e-") {
 		t.Fatalf("checkout dizininin adı koşuya özel değil: %q — compose projesi bu addan türüyor", first)
+	}
+	// SÜREÇ BİLEŞENİ AYRICA ÖLÇÜLÜR: çakışma İKİ SÜREÇ arasında oluyor ve tek
+	// süreç içinde nanosaniye zaten farklı — yani pid çıkarılsa bu test yine
+	// yeşil kalırdı. İddiayı süreçler arasında doğru kılan bileşen budur.
+	if !strings.Contains(first, fmt.Sprintf("-%d-", os.Getpid())) {
+		t.Fatalf("ad bu SÜRECİ adlandırmıyor: %q — iki paralel koşu aynı nanosaniyeyi paylaşmasa da adı süreçten türetmek şarttır", first)
 	}
 	if first == second {
 		t.Fatalf("iki checkout aynı adı aldı (%q); paralel koşular birbirinin yığınını ezer", first)
