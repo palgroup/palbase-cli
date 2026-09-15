@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
 // statusAnswers answers the status route in order, repeating the last answer.
@@ -76,6 +78,44 @@ func TestWaitGivesUpAtTheBudgetAndSaysTheProjectExists(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("%q missing from: %v", want, err)
 		}
+	}
+}
+
+// A NAMED TRANSIENT IS "NOT YET" EVEN WHEN THE TRANSPORT ALREADY GAVE UP ON IT
+// (FR-010).
+//
+// The fixture carries the shape the transport PRODUCES when its own 240s budget
+// runs out — `stillStarting` wraps the plane's *APIError with %w — rather than a
+// bare &APIError. A bare one would pass too, because errors.As unwraps either
+// way, and that is exactly why it is wrong here: it would measure a path the
+// product never takes.
+//
+// TWO LAYERS, ONE RULE, DIFFERENT WINDOWS: the transport swallows the short
+// window inside a single GET, this loop waits out the long one. So the wait ends
+// at three calls, not at the first error.
+func TestWaitKeepsAskingWhenTheTransportGaveUpOnANamedTransient(t *testing.T) {
+	shortReadiness(t, time.Second)
+	gaveUp := fmt.Errorf(
+		"the environment is still starting after 4m0s — it usually answers within a minute; run the same command again: %w",
+		&transport.APIError{Code: "tenant_unreachable", Status: 503})
+	rest := &statusAnswers{answers: []any{
+		gaveUp,
+		gaveUp,
+		map[string]any{"reachable": true},
+	}}
+	var progress bytes.Buffer
+	if err := WaitUntilReachable(context.Background(), rest, "abc123xyz", &progress); err != nil {
+		t.Fatalf("a named transient ended the wait: %v", err)
+	}
+	if rest.calls != 3 {
+		t.Fatalf("asked %d times, want 3", rest.calls)
+	}
+	// EC-5: SILENCE IS THE OTHER HALF OF THIS CHANGE. The wait got longer, so
+	// every round says something — one announcement plus one line per round it
+	// waited through.
+	if got := strings.Count(progress.String(), "\n"); got != 3 {
+		t.Fatalf("the wait printed %d lines, want 3 (announcement + one per waiting round):\n%s",
+			got, progress.String())
 	}
 }
 
