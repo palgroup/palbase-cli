@@ -435,7 +435,13 @@ func localStackKey(url string) (string, bool) {
 // CloudKeyFetcher resolves a tenant address to that project's service-role key
 // by asking the control plane, or returns an error when the caller does not own
 // it (or is not signed in). Injected from main.go so this package stays off the
-// auth and transport packages.
+// AUTH package.
+//
+// "VE TRANSPORT" EMEKLİ EDİLDİ: bu paket artık `internal/transport`ı import
+// ediyor ve bu bilinçli. Gerekçesi `couldNotAsk`ta yazılı — düzlemin cevap
+// verememesi KAYNAKTA işaretleniyor (`transport.ErrPlaneUnreachable`) ve o
+// işareti okumak, hatayı metninden ya da "statüsü yok" çıkarımından tahmin
+// etmekten kat kat güvenli. Enjeksiyon `auth` için hâlâ yürürlükte.
 //
 // Nil means "no cloud configured" — every local flow keeps working untouched.
 var CloudKeyFetcher func(tenantURL string) (string, error)
@@ -469,17 +475,27 @@ var CloudKeyFetcher func(tenantURL string) (string, error)
 // message is right about (not ok, no error), and a broker that did not answer
 // (an error the caller passes through in its own words).
 //
-// THE LINE IS THE STATUS, MIRRORING link_token.go: 5xx is "could not ask",
-// everything else is an answer. The status is read through an interface rather
-// than transport's concrete type, so this package stays off transport exactly
-// as CloudKeyFetcher's injection intends.
+// HAT ARTIK ÖNCE İŞARET, SONRA STATÜ — ve bu iki emekli kararın yerine geçti.
 //
-// A FAILURE CARRYING NO STATUS IS LEFT ALONE, and that is a decision rather than
-// an oversight: CloudKeyFetcher produces one locally — "<url> is not a project
-// on this cloud" — before any request leaves the machine. It is a fact about the
-// address, and the caller's three-ways-in message is the right answer to it.
-// Classifying every status-less failure as "could not ask" would replace that
-// message for every self-hosted address, which is a real path.
+// (1) "THE LINE IS THE STATUS" idi: yalnız 5xx "soramadım" sayılıyordu. O hat
+//
+//	FR-011'in "5xx OR TRANSPORT" yarısını dışarıda bırakıyordu — ölçüldü,
+//	taşıma arızasında kullanıcı "no credential for this project" ve dört
+//	yanlış öneri görüyordu, kimliği sağlamken.
+//
+// (2) Sonra "STATÜSÜ OLMAYAN HER ŞEY SORAMADIM" denendi ve kuralın TERSİNİ
+//
+//	açtı: oturumu olmayan kullanıcı "this is the control plane, not your
+//	sign-in — run the same command again" görüyordu. Sorun TAM OLARAK
+//	sign-in'di ve tekrar çalıştırmak sonsuza kadar aynı sonucu verirdi.
+//
+// Yürürlükteki hat POZİTİF ve ALLOWLIST: düzlemin cevap verememesi KAYNAKTA
+// işaretleniyor (`transport.ErrPlaneUnreachable`, yalnız taşıma katmanının
+// kendi arıza yolları taşır) ve burada okunuyor; ayrıca statülü bir cevap
+// geldiyse 5xx yine "soramadım". İşareti taşımayan hiçbir şey soramadım
+// DEĞİLDİR — bu yüzden yerel "<url> is not a project on this cloud" reddi,
+// kimlik yokluğu ve eksik DPoP anahtarı doğru cevabı (üç-yol mesajı, içinde
+// `palbase login`) almaya devam ediyor.
 func fetchCloudCredential(url string) (Credentials, bool, error) {
 	key, err := CloudKeyFetcher(url)
 	if err != nil {
