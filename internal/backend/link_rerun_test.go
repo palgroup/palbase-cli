@@ -512,6 +512,15 @@ func TestSameStackRefusesAnotherMachineOnTheSamePort(t *testing.T) {
 	assert.True(t, sameStack("http://192.168.7.5:54321", "http://127.0.0.1:54321"),
 		"--lan kaydı, kendi loopback formuyla eşleşmedi")
 
+	// KORUNAN (EC-7): kayıt `--lan` ve hedef AYNI LAN adresi → aynı yığın.
+	//
+	// Asimetrik kuraldan SONRA bu, iki loopback-OLMAYAN adres için kalan TEK
+	// kuraldır (host eşitliği) ve W1 incelemesi ölçtü: o satır `return false`
+	// yapılınca bütün süit yeşil kalıyordu — yani `--lan` kullanıcısını J-10'dan
+	// koruyan kural hiçbir testin görmediği bir satırdı.
+	assert.True(t, sameStack("http://192.168.7.5:54321", "http://192.168.7.5:54321"),
+		"--lan kaydı kendi LAN adresiyle eşleşmedi")
+
 	// KORUNAN: aynı makine, BAŞKA port → başka yığın.
 	assert.False(t, sameStack("http://127.0.0.1:1", "http://127.0.0.1:2"),
 		"iki farklı port aynı yığın sayıldı")
