@@ -449,8 +449,8 @@ function loadControllerClass(controllerPath) {
       ? bundledToSrcRel(controllerPath)
       : path.relative(PROJECT_ROOT, controllerPath);
     throw new Error(
-      `${shown} must default-export a @Controller class ` +
-      `(a controllers/* file decorated with @Controller); got ` +
+      `${shown} exports no @Controller class the module lists — ` +
+      "export the class by name and list it in a module's controllers; got " +
       (Ctrl && Ctrl.__palbase ? `__palbase=${JSON.stringify(Ctrl.__palbase)}` : 'a non-controller export'),
     );
   }
@@ -648,7 +648,7 @@ function registerControllers() {
     // violation must be LOUD — otherwise the dir scan below finds nothing and
     // silently registers 0 routes.
     const msg = err instanceof returnTypes.ReturnTypeError ? err.message : esbuildErr(err);
-    log(`controllers/ build failed — ${msg}`);
+    log(`module bundle failed — ${msg}`);
     return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: msg };
   }
 
@@ -1398,7 +1398,7 @@ async function main() {
   const reg = registerControllers();
 
   const failures = [];
-  if (reg.buildError) failures.push({ file: reg.buildErrorFile || 'controllers/', error: reg.buildError });
+  if (reg.buildError) failures.push({ file: reg.buildErrorFile || 'modules', error: reg.buildError });
   for (const s of reg.skipped || []) failures.push(s);
   // The extractor is SKIPPED once the bundle failed to load or the graph was
   // refused: it loads the same bundle and can only report the same fault a
@@ -1432,12 +1432,12 @@ async function main() {
   if (failures.length === 0 && reg.sawControllerFiles && declaredControllerCount > 0 && reg.routeCount === 0) {
     if (reg.staleSDKSignature) {
       failures.push({
-        file: 'controllers/',
+        file: 'modules',
         error: '@palbase/backend is stale or missing — the @Controller/@Get decorators ' +
           'resolved to undefined. Run `npm install @palbase/backend@latest`.',
       });
     } else {
-      failures.push({ file: 'controllers/', error: `${declaredControllerCount} @Controller class(es) are declared and 0 routes would register` });
+      failures.push({ file: 'modules', error: `${declaredControllerCount} @Controller class(es) are declared and 0 routes would register` });
     }
   }
 
@@ -1495,4 +1495,8 @@ module.exports = {
   BUNDLED_MODULES_FILE, BUNDLED_EXTRACT_DIR,
   stageControllersWithReturnBindings, bundledToSrcRel,
   surfaceClassesIn, checkSurfaceConstructors,
+  // The refusal text a person reads when a file carries no @Controller the
+  // module can list. Exported so a test can measure the SENTENCE rather than
+  // re-typing it: a message nobody asserts drifts back to the retired shape.
+  loadControllerClass,
 };

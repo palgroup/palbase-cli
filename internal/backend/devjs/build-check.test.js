@@ -432,7 +432,37 @@ test('a project with source but NO module fails and says what a module is for', 
 // the source tree and the staged tree at once — so unhooking the manifest from
 // it turns them red.
 
-const { stageControllersWithReturnBindings, bundledToSrcRel } = require('./build-check.js');
+const { stageControllersWithReturnBindings, bundledToSrcRel, loadControllerClass } = require('./build-check.js');
+
+// THE REFUSAL IS THE DOCUMENTATION A PERSON ACTUALLY READS.
+//
+// `palbase build` used to answer a file with no @Controller class by demanding a
+// DEFAULT EXPORT out of a `controllers/*` file — a layout nothing walks any
+// more: the bundle's only entry is `*.module.ts`, and a class reaches the deploy
+// because its module imports it and names it. The old sentence sent a person to
+// rewrite a file that was already right and never mentioned the one line that
+// was missing.
+test('the refusal for a file with no @Controller teaches the module shape, not a default export', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-refusal-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'notes.controller.js');
+  // A plain CJS module: no @Controller anywhere, which is exactly the tree the
+  // refusal exists to describe.
+  fs.writeFileSync(file, 'module.exports = { notAController: true };\n');
+
+  let message = null;
+  try {
+    loadControllerClass(file);
+  } catch (err) {
+    message = err.message;
+  }
+  assert.ok(message, 'loadControllerClass accepted a file carrying no @Controller class');
+  assert.ok(
+    !/default-export/.test(message),
+    `the refusal still demands a default export: ${message}`,
+  );
+  assert.match(message, /list it in a module's controllers/);
+});
 
 // typescriptAvailable probes the parser return_types.js needs, the same way
 // esbuildAvailable() probes esbuild. `go test` provisions it on NODE_PATH

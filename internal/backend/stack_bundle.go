@@ -600,8 +600,13 @@ func moduleSources(root string) ([]string, error) {
 // instances would each get their own AsyncLocalStorage, and the request scope
 // would silently not reach a handler.
 //
-// Controllers are imported for their SIDE EFFECT and never named — @Controller
-// records the class as it decorates it, so a controller needs no export at all.
+// `sources` ARE THE MODULE FILES — `moduleSources` walks for `*.module.ts` and
+// nothing else. They are imported for their SIDE EFFECT and never named: taking
+// a module file's default export would say nothing, because requiring it is what
+// runs @Module, and @Module is what registers the module with everything it
+// lists. A controller reaches this bundle by that route alone — its module
+// imports the class by name and names it in `controllers`. No directory is
+// walked for entry points, here or on deploy.
 func bundleEntry(dir string, sources []string) (string, error) {
 	var b strings.Builder
 	b.WriteString(bundleEntryHeader + "\n")
@@ -716,10 +721,22 @@ func bundleEntry(dir string, sources []string) (string, error) {
 	// açıkken de yeniden adlandırıyor).
 	//
 	// The names come from the SOURCE, read here rather than from the bundle,
-	// because a controller NEED NOT BE EXPORTED — the decorator registers it and
-	// the entry imports the file for its side effect alone. Registration order
-	// is import order, which is this list's order, so the table lines up
-	// position by position.
+	// because the bundled name is precisely the thing under suspicion.
+	// Registration order is import order, which is this list's order, so the
+	// table lines up position by position.
+	//
+	// ‼️ THIS TABLE IS EMPTY ON EVERY TREE WE SHIP, AND THE RENAME IT GUARDS IS
+	// THEREFORE UNGUARDED. `sources` became the `*.module.ts` list when the entry
+	// moved to modules, and `controllerClassNames` looks for `@Controller ...
+	// class X` — which a module file does not declare, because the class lives in
+	// its own `*.controller.ts`. Measured 2026-09-16: 26 `*.module.ts` files in
+	// this repository, zero carrying a @Controller class, so `names` is empty and
+	// the block below is never emitted. The collision it was written for (two
+	// files both declaring `PalaiController`, bundled into one file, renamed to
+	// `PalaiController2` and shipped as a split API namespace) is unchanged —
+	// only the defence is gone. The fix is to read the class names off the
+	// `*.controller.ts` sources in REGISTRATION order, which is not a message
+	// change and is not in this task's scope.
 	//
 	// FAILS CLOSED. A name is restored only when the bundled one is exactly the
 	// source name followed by digits — the bundler's own pattern. If this table
@@ -750,9 +767,10 @@ func bundleEntry(dir string, sources []string) (string, error) {
 	// THE THREE SURFACES THAT TRAVEL BY NAME, unlike controllers.
 	//
 	// @Controller records its class into a global registry as it decorates it,
-	// so a controller needs no export and the entry imports it for the side
-	// effect alone. @Job, @Webhook and @Hook do NOT: each stamps metadata onto
-	// the class and nothing collects it. The runtime reads these three exports
+	// so requiring the module that lists a controller is enough to put it on
+	// `getRegisteredControllers()` above. @Job, @Webhook and @Hook do NOT: each
+	// stamps metadata onto the class and nothing collects it. The runtime reads
+	// these three exports
 	// — collectJobs, mountWebhooks, collectHooks — so the class has to reach
 	// them by name or the surface never exists.
 	//

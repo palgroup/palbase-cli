@@ -171,13 +171,14 @@ async function main() {
       }
     }
 
-    // controllers/ bundles MUST default-export a @Controller CLASS. Anything
-    // else (a stray defineEndpoint, a plain object) is a deploy error — there
-    // is no fallback.
+    // THE BUNDLE MUST CARRY A @Controller CLASS ITS MODULE OWNS. `claimed` is
+    // the delta this import registered, narrowed to what the container says the
+    // module listed; anything else (a stray defineEndpoint, a plain object) is a
+    // deploy error — there is no fallback.
     if (!Ctrl || Ctrl.__palbase !== 'controller') {
       return writeError(
-        'controllers bundle must default-export a @Controller class ' +
-        '(use @Controller / a controllers/* file); got ' +
+        'this bundle carries no @Controller class its module lists — ' +
+        "export the class by name and list it in a module's controllers; got " +
         (Ctrl && Ctrl.__palbase ? `__palbase=${JSON.stringify(Ctrl.__palbase)}` : 'a non-controller export')
       );
     }
