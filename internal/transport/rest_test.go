@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -324,4 +326,197 @@ func TestSessionTokenStillBearer(t *testing.T) {
 	if auth != "Bearer eyJhbGciOiJFUzI1NiJ9.x.y" {
 		t.Fatalf("oturum jetonunun sunumu DEĞİŞTİ: %q", auth)
 	}
+}
+
+// --- FR-009 / FR-013 · ADLANDIRILMIŞ GEÇİCİ CEVAP BEKLENİR, HATA OLARAK BASILMAZ ---
+//
+// Canlı ölçüm (2026-09-15): yeni yaratılan bir projede `palbase plan` 90 saniye
+// hata verdi. Düzlem adlandırılmış ve açıkça tekrar denenebilir bir cevap
+// üretiyordu; onu tüketen CLI o adı hiç tanımıyordu.
+
+// Test bütçeleri: gerçek sayılar dakikalarla ölçülüyor, testler beklemez.
+func shrinkTransientBudget(t *testing.T, budget time.Duration) {
+	t.Helper()
+	ob, omin, omax := TransientBudget, TransientPollMin, TransientPollMax
+	TransientBudget, TransientPollMin, TransientPollMax = budget, time.Millisecond, 2*time.Millisecond
+	t.Cleanup(func() { TransientBudget, TransientPollMin, TransientPollMax = ob, omin, omax })
+}
+
+func transientBody(name string, status int) string {
+	return `{"error":"` + name + `","error_description":"still starting","status":` +
+		strconv.Itoa(status) + `,"request_id":"req_trans_1"}`
+}
+
+func TestREST_Do_WaitsWhileTheAnswerIsANamedTransient(t *testing.T) {
+	shrinkTransientBudget(t, time.Minute)
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		if hits <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(transientBody("tenant_unreachable", 503)))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok_session")
+	require.NoError(t, c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects/p1/runtime/plan", nil, nil))
+	require.Equal(t, 3, hits, "adlandırılmış geçici cevap beklenmeli, kullanıcıya basılmamalı")
+}
+
+// GÜVENSİZ YÖNTEMDE ASLA SESSİZ TEKRAR YOK.
+//
+// Düzlemde bu adlara giden yollardan ikisi cevabı vermeden ÖNCE yazıyor
+// (`retire` `UPDATE cloud_cells` ve K8s `DELETE /tenants/{ref}`; push iki satır
+// INSERT). Bir POST'u sessizce tekrarlamak orada veri bozar. Mutasyon yapan
+// fiilin çaresi tekrar değil, mutasyondan ÖNCE güvenli bir yoklamadır (FR-009a).
+func TestREST_Do_NeverWaitsOnAnUnsafeMethod(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			shrinkTransientBudget(t, time.Minute)
+			var hits int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits++
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(transientBody("tenant_unreachable", 503)))
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, "tok_session")
+			err := c.Do(context.Background(), method, "/v1/cloud/projects/p1/runtime", map[string]any{"x": 1}, nil)
+			require.Error(t, err)
+			require.Equal(t, 1, hits, "%s tekrarlanmamalı: istek ETKİ BIRAKMIŞ olabilir", method)
+		})
+	}
+}
+
+func TestREST_Do_DoesNotWaitForAnUnlistedName(t *testing.T) {
+	shrinkTransientBudget(t, time.Minute)
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(transientBody("delete_incomplete", 503)))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok_session")
+	require.Error(t, c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects/p1", nil, nil))
+	require.Equal(t, 1, hits, "`delete_incomplete` tekrar denenebilir ama SESSİZCE değil — tekrarı çağıranın kararı")
+}
+
+// ARALIK SABİT DEĞİL ARTAN — düzlemin uyanış kilidine kuyruk bırakmamak için.
+//
+// Uyanışın advisory kilidi istek transaction'ı boyunca tutuluyor; sabit 2 sn ile
+// 240 sn ≈ 120 deneme, yani düzleme sıraya giren derin bir kuyruk. Ölçülen soğuk
+// uyanış 14,3 sn olduğuna göre ondan sık sormak zaten boşa.
+func TestREST_Do_BacksOffInsteadOfHammering(t *testing.T) {
+	shrinkTransientBudget(t, time.Minute)
+	TransientPollMin, TransientPollMax = 2*time.Millisecond, 8*time.Millisecond
+
+	var slept []time.Duration
+	orig := sleep
+	sleep = func(d time.Duration) <-chan time.Time {
+		slept = append(slept, d)
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+	t.Cleanup(func() { sleep = orig })
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		if hits <= 5 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(transientBody("wake_in_progress", 429)))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok_session")
+	require.NoError(t, c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects/p1", nil, nil))
+	require.Equal(t, []time.Duration{
+		2 * time.Millisecond, 4 * time.Millisecond, 8 * time.Millisecond,
+		8 * time.Millisecond, 8 * time.Millisecond,
+	}, slept, "aralık artmalı ve tavanda durmalı")
+}
+
+// HER DENEME YENİDEN İMZALANIR: düzlem tekrarlanan bir DPoP proof'unu reddeder.
+func TestREST_Do_ResignsEveryAttempt(t *testing.T) {
+	shrinkTransientBudget(t, time.Minute)
+	var signed int
+	orig := DPoPSigner
+	DPoPSigner = func(method, url, accessToken string) (string, error) {
+		signed++
+		return "proof", nil
+	}
+	t.Cleanup(func() { DPoPSigner = orig })
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		if hits <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(transientBody("cutover_in_progress", 409)))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "pat_machine")
+	require.NoError(t, c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects/p1", nil, nil))
+	require.Equal(t, hits, signed, "her deneme TAZE proof imzalamalı; saklanan bir istek ikinci denemede 401 alırdı")
+}
+
+// FR-013 · PES EDERKEN: durumun ADI, GEÇEN süre, ne yapılabileceği, request_id.
+//
+// İKİ YOL da ölçülür — bütçe denemeler ARASINDA dolduğunda ve bir denemenin
+// ORTASINDA dolduğunda. İkincisinde hata artık `*APIError` değil
+// `context deadline exceeded`tir; onu olduğu gibi döndürmek, tam olarak bu
+// koşunun kaldırdığı şeyi göstermek olurdu.
+func TestREST_Do_GivingUpNamesTheStateElapsedAndRequestId(t *testing.T) {
+	t.Run("bütçe denemeler arasında dolar", func(t *testing.T) {
+		shrinkTransientBudget(t, 20*time.Millisecond)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(transientBody("tenant_unreachable", 503)))
+		}))
+		defer srv.Close()
+
+		c := New(srv.URL, "tok_session")
+		err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects/p1", nil, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "still starting after")
+		require.Contains(t, err.Error(), "run the same command again")
+		require.Contains(t, err.Error(), "req_trans_1", "request_id kullanıcıya görünmeli")
+		require.NotContains(t, err.Error(), "context deadline exceeded")
+	})
+
+	t.Run("bütçe denemenin ortasında dolar", func(t *testing.T) {
+		shrinkTransientBudget(t, 30*time.Millisecond)
+		var hits int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits++
+			if hits == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(transientBody("tenant_unreachable", 503)))
+				return
+			}
+			time.Sleep(300 * time.Millisecond) // bütçeyi denemenin İÇİNDE doldurur
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}))
+		defer srv.Close()
+
+		c := New(srv.URL, "tok_session")
+		err := c.Do(context.Background(), http.MethodGet, "/v1/cloud/projects/p1", nil, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "still starting after", "son adlandırılmış cevap saklanmalı")
+		require.Contains(t, err.Error(), "req_trans_1")
+	})
 }

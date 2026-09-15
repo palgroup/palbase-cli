@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,6 +70,11 @@ func (e *APIError) StatusCode() int { return e.Status }
 // reported exactly that, and the reason had to be read out of the tenant's log.
 func (e *APIError) Error() string {
 	head := fmt.Sprintf("%s (%d)", e.Code, e.Status)
+	// `request_id` TELDEN GELİYORDU AMA HİÇ BASILMIYORDU: kullanıcı bir hata
+	// bildirdiğinde onu düzlemin loglarına bağlayan tek ip budur.
+	if e.RequestID != "" {
+		head += " [request_id " + e.RequestID + "]"
+	}
 	if e.Description != "" {
 		head += ": " + e.Description
 	}
@@ -118,11 +124,149 @@ func (e errorEnvelope) fields() []APIErrorField {
 	return e.Data.Fields
 }
 
+// namedTransients, düzlemin "HENÜZ DEĞİL, yeniden sor" anlamına gelen ADLARIDIR.
+//
+// ADA bakılır, statüye değil: aynı hâl bugün 409, 429 ve 503 ile geliyor ve
+// sınıflandırmayı statüye bağlamak kusuru bir sonraki statüde yeniden doğurur.
+//
+// `delete_incomplete` bilerek YOK: tekrar denenebilir ama sessizce tekrarlanan
+// bir silme kullanıcıyı şaşırtır; onun tekrarı çağıranın kararıdır.
+var namedTransients = map[string]bool{
+	"tenant_unreachable":  true,
+	"wake_in_progress":    true,
+	"cutover_in_progress": true,
+	"no_admitting_cell":   true,
+}
+
+// safeMethod, otomatik beklemenin TEK kapısıdır: yalnız GET ve HEAD.
+//
+// GEREKÇE "GET YAZMAZ" DEĞİL — bu düzlemde yazar. Ölçüldü:
+// `GET /projects/{ref}/runtime/plan` kiracı uyuyorsa uyanış başlatıyor, o da
+// kaydı güncelliyor ve rota yayınlıyor. Gerekçe TEKRARIN ZARARSIZLIĞI: ilan
+// idempotent, ve eşzamanlı ikinci deneme uyanışın advisory kilidinde
+// `wake_in_progress` alıp yine beklenenler arasına düşüyor.
+//
+// POST ve DELETE DIŞARIDA, ve bunun ölçülmüş sebebi var: bu istemcinin 22 çağrı
+// noktasının 5'i POST ve 3'ü DELETE. Düzlemde bu adları üretebilen yollardan
+// ikisi cevabı vermeden ÖNCE yazıyor — `retire` `UPDATE cloud_cells` ve K8s
+// `DELETE /tenants/{ref}` (transaction'la geri alınmaz), push iki satır INSERT.
+// Bugün CLI'ın hiçbir POST/DELETE'i o noktalara ulaşmıyor, ama "bugün ulaşmıyor"
+// bir yorumla korunamaz — kural yöntemin şeklinde durur.
+//
+// Bir mutasyonun beklemesi gerekirse çare bu kapıyı gevşetmek DEĞİL, mutasyondan
+// ÖNCE güvenli bir istekle hazırlığı sormaktır (`main.go`, FR-009a).
+func safeMethod(m string) bool {
+	switch strings.ToUpper(m) {
+	case http.MethodGet, http.MethodHead:
+		return true
+	}
+	return false
+}
+
+// IsNamedTransient, bu cevabın BU YÖNTEM için beklenebilir olup olmadığını söyler.
+func IsNamedTransient(method string, err error) bool {
+	var api *APIError
+	return errors.As(err, &api) && namedTransients[api.Code] && safeMethod(method)
+}
+
+// Beklemenin sınırları.
+//
+// BÜTÇE ÖLÇÜLEN BİR SAYIDAN TÜRER: düzlemin KENDİ en uzun geçici bütçesi
+// `awaitAddress` = 180 sn; yeni proje penceresi canlıda 90 sn ölçüldü; soğuk
+// uyanış 14,3 sn. 240 sn, düzlemin en uzun geçici hâlini artı bir tam yeniden
+// uyanış turunu kapsar.
+//
+// ARALIK SABİT DEĞİL, ÜSTEL — çünkü bekleyen istek düzlemde BEDAVA DEĞİL:
+// tekrarlanan istek tekrarlanan uyanış denemesi demek ve uyanışın advisory
+// kilidi istek transaction'ı boyunca tutuluyor. 2 sn'den başlayıp 15 sn'ye çıkan
+// bir aralık hızlı vakayı da yakalar, kuyruğu da ~20 denemeye indirir.
+var (
+	TransientBudget  = 240 * time.Second
+	TransientPollMin = 2 * time.Second
+	TransientPollMax = 15 * time.Second
+)
+
+// sleep, beklemenin tek zaman kaynağıdır — testler onu değiştirip uyku dizisini
+// ölçüyor. Doğrudan `time.After` çağırmak backoff'u ölçülemez yapardı.
+var sleep = time.After
+
+// stillStarting, pes ederken söylenen cümledir: durumun ADI, GEÇEN süre
+// (yapılandırılmış bütçe değil), kullanıcının ne yapabileceği — ve `%w` ile
+// sarılan `*APIError` üzerinden `request_id`.
+func stillStarting(started time.Time, cause error) error {
+	return fmt.Errorf(
+		"the environment is still starting after %s — it usually answers within a minute; run the same command again: %w",
+		time.Since(started).Round(time.Second), cause)
+}
+
+// Do performs one control-plane request, WAITING OUT the plane's named transient
+// answers on safe methods.
+//
+// Bekleme BURADA, çünkü bu istemcinin 22 çağrı noktası var ve kuralı fiil fiil
+// yamamak 22 ayrı karar üretirdi — eklenen 23'üncü fiil ise kuralın dışında
+// kalırdı. Tam olarak bu desen bu değişikliği doğurdu: bir katman doğru ve
+// adlandırılmış bir cevap üretiyor, tüketen katman o adı tanımıyor.
+//
+// HER DENEME YENİDEN İMZALANIR: makine kimliği DPoP taşır ve düzlem tekrarlanan
+// bir proof'u reddeder, yani isteği saklayıp yeniden göndermek ikinci denemede
+// 401 üretirdi. `doOnce` gövdeyi de her denemede yeniden kurar.
+func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	started := time.Now()
+	var deadline time.Time // ilk geçici cevaba kadar KURULMAZ
+	var lastNamed error    // pes ederken cümleyi ve request_id'yi taşıyan
+	wait := TransientPollMin
+	for {
+		err := c.doOnce(ctx, method, path, body, out)
+
+		if IsNamedTransient(method, err) {
+			lastNamed = err
+			if deadline.IsZero() {
+				// BÜTÇE YALNIZ UYKULARI DEĞİL DENEMELERİ DE SARAR. Tek bir
+				// denemenin kendi bütçesi `plan` için 3 dakika, runtime
+				// hazırlığı için 5 dakika; yalnız uykuları toplasaydık en
+				// kötü hâlde dakikalarca SESSİZLİK üretirdik — yazılmış ama
+				// yürürlükte olmayan bir bütçe.
+				//
+				// İlk denemeyi bilerek sarmıyoruz: uzun ama MEŞRU bir ilk
+				// istek kesilmemeli. Bütçe ancak düzlem "henüz değil"
+				// dedikten SONRA başlar. Çağıranın kendi son tarihi daha
+				// yakınsa `WithDeadline` onu korur — erken olan kazanır.
+				deadline = time.Now().Add(TransientBudget)
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, deadline)
+				defer cancel()
+			}
+			if !time.Now().Before(deadline) {
+				return stillStarting(started, lastNamed)
+			}
+			select {
+			case <-ctx.Done():
+				return stillStarting(started, lastNamed)
+			case <-sleep(wait):
+			}
+			if wait *= 2; wait > TransientPollMax {
+				wait = TransientPollMax
+			}
+			continue
+		}
+
+		// BÜTÇE BİR DENEMENİN ORTASINDA DOLABİLİR — ve o hâlde hata artık
+		// adlandırılmış cevap DEĞİL, `context deadline exceeded`tir. Onu olduğu
+		// gibi döndürmek, kullanıcıya tam olarak bu değişikliğin kaldırdığı şeyi
+		// göstermek olurdu: platformun kendi geçici hâli, anlamsız bir taşıma
+		// hatası kılığında.
+		if lastNamed != nil && errors.Is(err, context.DeadlineExceeded) {
+			return stillStarting(started, lastNamed)
+		}
+		return err
+	}
+}
+
 // Do performs one control-plane request. The path is appended to BaseURL
 // (e.g. "/v1/cloud/projects"). A non-nil body is JSON-encoded. On success the
 // response is decoded directly into out; nil discards it. Non-2xx responses
 // are parsed into an *APIError.
-func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+func (c *Client) doOnce(ctx context.Context, method, path string, body, out any) error {
 	var reqBody io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
