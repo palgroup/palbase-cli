@@ -977,8 +977,22 @@ async function deployExtractErrors() {
   return out;
 }
 
-/** The extractor's way of saying "this bundle registered no controller". */
-const NO_CONTROLLER_IN_BUNDLE = /must default-export a @Controller class[\s\S]*got a non-controller export/;
+/**
+ * The extractor's way of saying "this bundle registered no controller".
+ *
+ * ‼️ A STRING CONTRACT BETWEEN TWO FILES, AND IT HAS ALREADY BROKEN ONCE.
+ * `extract_meta.js`'s refusal was rewritten to teach the module shape (FR-052)
+ * while this pattern went on matching the sentence it replaced. Nothing here
+ * failed — the skip simply stopped skipping, so every providers-only module (a
+ * shared `CoreModule`, the most ordinary reason to write a second module) came
+ * back as `DEPLOY WOULD FAIL`. Measured: four tests in this package, all green
+ * one commit earlier.
+ *
+ * So it is matched on the two halves BOTH sentences share, and
+ * build-check.test.js pins the agreement against extract_meta's real output —
+ * the next rewrite goes red here rather than in a customer's build.
+ */
+const NO_CONTROLLER_IN_BUNDLE = /no @Controller class[\s\S]*got a non-controller export/;
 
 // bundledToSrcRel maps a bundled controller path back to the project-relative
 // SOURCE path (BUNDLE_ROOT/controllers/x.controller.js → controllers/x.controller.ts).
@@ -1499,4 +1513,7 @@ module.exports = {
   // module can list. Exported so a test can measure the SENTENCE rather than
   // re-typing it: a message nobody asserts drifts back to the retired shape.
   loadControllerClass,
+  // The reader half of the string contract with extract_meta.js — exported so a
+  // test can hold it against what that file actually writes.
+  NO_CONTROLLER_IN_BUNDLE,
 };

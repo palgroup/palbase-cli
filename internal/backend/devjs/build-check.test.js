@@ -699,6 +699,63 @@ test('extract_meta drops a controller the module does not own', (t) => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+// A PROVIDERS-ONLY MODULE IS NOT A FAULT, AND THE SKIP THAT SAYS SO IS A STRING.
+//
+// `deployExtractErrors` drops the extractor's "no controller in this bundle"
+// answer, because a shared `CoreModule` owning only providers is the most
+// ordinary reason to write a second module. It recognises that answer by
+// MATCHING THE SENTENCE — so rewriting the sentence in extract_meta.js silently
+// un-skips it and turns every such module into `DEPLOY WOULD FAIL`. That is not
+// hypothetical: it happened when FR-052 rewrote the refusal, and four tests in
+// this package went red while nothing in either file looked wrong.
+//
+// The two halves are measured against each other HERE, through the real
+// extractor process, so the pattern cannot drift off its writer again.
+test('the no-controller skip recognises the refusal extract_meta actually writes', (t) => {
+  if (!parserAvailable()) return t.skip('no TypeScript parser available');
+  const { NO_CONTROLLER_IN_BUNDLE } = require('./build-check.js');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-extract-empty-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sdkDir = path.join(root, 'node_modules', '@palbase', 'backend');
+  fs.mkdirSync(sdkDir, { recursive: true });
+
+  // A stand-in SDK answering the two questions extract_meta asks, with an EMPTY
+  // registry and a container owning nothing — a providers-only module's bundle.
+  fs.writeFileSync(path.join(sdkDir, 'package.json'),
+    JSON.stringify({ name: '@palbase/backend', version: '0.0.0-test', main: 'index.js' }));
+  fs.writeFileSync(path.join(sdkDir, 'index.js'), [
+    'exports.getRegisteredControllers = () => [];',
+    'exports.buildContainer = () => ({ owned: new Set() });',
+    '',
+  ].join('\n'));
+
+  const bundle = path.join(root, 'core.module.js');
+  fs.writeFileSync(bundle, 'require("@palbase/backend");\nmodule.exports = {};\n');
+
+  let out = '';
+  try {
+    out = execFileSync('node', [path.join(__dirname, 'extract_meta.js')], {
+      input: JSON.stringify({ bundle_path: bundle }),
+      encoding: 'utf8',
+      env: Object.assign({}, process.env, {
+        NODE_PATH: path.join(root, 'node_modules') + path.delimiter + parserPath(),
+      }),
+    });
+  } catch (err) {
+    out = String(err.stdout || '') + String(err.stderr || '');
+  }
+
+  const parsed = JSON.parse(out);
+  assert.ok(parsed.error, `the extractor accepted a bundle holding no controller:\n${out}`);
+  assert.match(
+    parsed.error,
+    NO_CONTROLLER_IN_BUNDLE,
+    'build-check would report this as DEPLOY WOULD FAIL — the skip no longer recognises ' +
+      'the extractor\'s own refusal, so a providers-only module cannot build',
+  );
+});
+
 // ── every symbol this file GUARDS ON must be one the SDK EXPORTS ───────────
 //
 // `build-check.js` reaches into `@palbase/backend` behind
