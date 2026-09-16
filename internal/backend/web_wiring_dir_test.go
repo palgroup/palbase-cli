@@ -4,7 +4,7 @@ package backend
 // DIRECTORY, AND THE APP IMPORTS ONE STABLE LINE.
 //
 // `@palbase/web` 10 moved its generator onto the per-environment layout: it
-// reads `<dir>/<env>/{openapi.json, roles.json, web-config.json}`, writes that
+// reads `<dir>/<env>/{openapi.json, web-config.json}`, writes that
 // environment's client inside the same directory, and writes `palbase/client.ts`
 // as the single line an application imports. The environment is chosen by
 // `PALBASE_ENV`, so switching environments never edits the app's own source.

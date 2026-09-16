@@ -517,7 +517,7 @@ func TestALoopbackLinkBindsTheCheckoutNotTheStage(t *testing.T) {
 // A CHECKOUT WITH NO GENERATOR GETS NO `environments/` DIRECTORY.
 //
 // Measured before this change: a backend-only checkout received
-// `palbase/environments/main/{openapi.json,roles.json}` on every link, and
+// `palbase/environments/main/openapi.json` on every link, and
 // NOTHING in the product read them — the consumers are `palbe` (the TS
 // generator) and `palbase-swiftgen`, both of which run in an APP checkout. The
 // codebase already knew: `web_wiring.go` carries the line "`Palbase/openapi.json`

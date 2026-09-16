@@ -46,7 +46,7 @@ func RefreshSpec(ctx context.Context, w io.Writer) error {
 //
 // THIS IS WHERE THE CHURN ACTUALLY CAME FROM. FR-020/021 closed `link`, and
 // `link` runs once; `push` runs all day. A backend-only checkout was still
-// getting `palbase/environments/main/openapi.json` and `roles.json` rewritten
+// getting `palbase/environments/main/openapi.json` rewritten
 // on every deploy — the diff on every branch that this whole change exists to
 // remove, produced by the verb nobody thought to check. Measured on the
 // product: `palbase push` into a fresh `palbase init` checkout, which had just
@@ -109,17 +109,13 @@ func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
 	}
 	fmt.Fprintf(w, "✓ wrote %s (%d bytes)\n", specPath(env), len(spec))
 
-	// THE ROLES ARE PART OF THE CONTRACT, so they are fetched by the same act.
-	// A generated client learns which roles and permissions exist here and
-	// nowhere else (FR-007); fetching them on a separate verb would mean the two
-	// documents could sit a deploy apart, and a name the stack no longer defines
-	// would go on compiling. refreshRoles never fails the round — see its note.
-	if err := refreshRoles(ctx, target, cred, env, w); err != nil {
-		return err
-	}
+	// THE ROLES CAME WITH IT. They travel inside the contract now
+	// (`x-palbase-roles`), so there is no second round and no second file — and
+	// the two documents can no longer sit a deploy apart, because there are not
+	// two documents.
 
 	// NO SECOND COPY FOR WEB. `palbe-gen` used to read its own
-	// `Palbase/openapi.json` and `Palbase/roles.json` — the same bytes as the
+	// `Palbase/openapi.json` — the same bytes as the
 	// per-environment contract, committed twice (measured: 167 KB each, identical
 	// sha256). It now reads the environment directory directly, so `spec` writes
 	// the contract once and there is nothing to mirror.
@@ -248,6 +244,27 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 		return nil, fmt.Errorf(
 			"%w: %s has nothing to describe yet — push a backend to it first (palbase push)",
 			ErrNoContractYet, target.URL)
+	case http.StatusServiceUnavailable:
+		// ROLLER BİLİNEMEDİ — VE BU "SÖZLEŞME YOK" DEĞİLDİR.
+		//
+		// 404 bu üründe YASAL BİR DURUM (`ErrNoContractYet`): hiç push edilmemiş
+		// bir proje öyle cevap verir ve `link` onu kaydedip çareyi söyler. Rol
+		// arızası o dala düşseydi, ÇALIŞAN bir yığın için sessiz bir no-op link
+		// ve YANLIŞ bir çare ("`palbase push`") üretirdi.
+		//
+		// Zarf OKUNUR ve OLDUĞU GİBİ basılır: sebebi yalnız yığın biliyor —
+		// hangi modülün cevap vermediği, ya da hangi kimliğin eksik olduğu — ve
+		// `trimBody` onu 300 karakterde keserdi.
+		var rolesEnvelope struct {
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &rolesEnvelope) == nil &&
+			strings.TrimSpace(rolesEnvelope.Description) != "" {
+			return nil, fmt.Errorf("the stack could not report its roles, so it did not serve a "+
+				"contract at all: %s", strings.TrimSpace(rolesEnvelope.Description))
+		}
+		return nil, errors.New(
+			"the stack could not report its roles, so it did not serve a contract at all")
 	default:
 		return nil, fmt.Errorf("the stack's contract came back %d: %s", res.StatusCode, trimBody(body))
 	}

@@ -15,7 +15,7 @@ import (
 //
 // FR-020/021 closed `link`, and `link` runs once. `push` runs all day. A
 // backend-only checkout was still having `palbase/environments/main/
-// openapi.json` and `roles.json` rewritten on every deploy — the diff on every
+// openapi.json` rewritten on every deploy — the diff on every
 // branch this whole change exists to remove, produced by the verb nobody
 // thought to check. Measured on the product: `palbase push` into a fresh
 // `palbase init` checkout that `link` had just told "no client app here".

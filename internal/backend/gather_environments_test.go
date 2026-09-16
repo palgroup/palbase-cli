@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,7 +21,6 @@ type envServerOpts struct {
 	keysRefused      bool          // the key read answers 401
 	noContract       bool          // the contract read answers 404 (nothing deployed)
 	contractSentence string        // with noContract: the project's own reason, as the runtime words it
-	rolesRefused     bool          // the role read answers 500
 	readyDelay       time.Duration // the well-known document takes this long
 	inFlight, peak   *atomic.Int32 // when set: well-known reads in flight, and the most at once
 	socialAuth       bool          // the social-auth read answers with no provider enabled (else 404)
@@ -33,10 +31,6 @@ func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *at
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		if o.rolesRefused && strings.Contains(r.URL.Path, "roles") {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
 		switch r.URL.Path {
 		case wellKnownPath:
 			if o.inFlight != nil {
@@ -117,7 +111,7 @@ func TestEveryEnvironmentOfTheProjectIsDescribed(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	envs, specs, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	envs, specs, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
 	require.NoError(t, err, out.String())
 	assert.Equal(t, "main", envs.Default)
 	require.Len(t, envs.Environments, 3)
@@ -139,7 +133,7 @@ func TestAFailedEnvironmentIsNotAsked(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	envs, _, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	envs, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
 	require.NoError(t, err)
 	assert.NotContains(t, envs.Environments, "broken")
 	assert.Zero(t, brokenHits.Load(), "a Failed environment was asked")
@@ -161,7 +155,7 @@ func TestAnEnvironmentThatNeverServesIsDroppedNotFatal(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	envs, _, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	envs, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
 	require.NoError(t, err)
 	assert.NotContains(t, envs.Environments, "asleep")
 	assert.Contains(t, out.String(), "asleep")
@@ -177,7 +171,7 @@ func TestTheDefaultEnvironmentFailingIsFatal(t *testing.T) {
 		{Name: "staging", Ref: "stagref000", Status: "Running"},
 	}
 
-	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, io.Discard)
+	_, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, io.Discard)
 	require.Error(t, err)
 }
 
@@ -192,10 +186,10 @@ func TestADefaultEnvironmentThatCannotBeAskedFailsTheDescription(t *testing.T) {
 		{Name: "staging", Ref: "stagref000", Status: "Running"},
 	}
 
-	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: staging.URL}, "main", "", project, true, io.Discard)
+	_, _, err := gatherEnvironments(context.Background(), Target{URL: staging.URL}, "main", "", project, true, io.Discard)
 	require.ErrorContains(t, err, "main is Failed")
 
-	_, _, _, err = gatherEnvironments(context.Background(), Target{URL: staging.URL}, "prod", "", project, true, io.Discard)
+	_, _, err = gatherEnvironments(context.Background(), Target{URL: staging.URL}, "prod", "", project, true, io.Discard)
 	require.ErrorContains(t, err, "prod is not an environment")
 }
 
@@ -210,7 +204,7 @@ func TestAnEnvironmentWithNothingDeployedIsWrittenAndNamed(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	envs, specs, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	envs, specs, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
 	require.NoError(t, err)
 	assert.Contains(t, envs.Environments, "staging")
 	assert.NotContains(t, specs, "staging")
@@ -235,32 +229,20 @@ func TestAnEnvironmentWithNoContractKeepsTheProjectsOwnSentence(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
+	_, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "z.lazy schema at /todos", "the project's own reason was dropped")
 	assert.Contains(t, out.String(), "palbase push --env staging")
 }
 
-// A ROLE READ THAT FAILS DOES NOT DROP THE ENVIRONMENT (FR-011): its config and
-// contract are still described, its roles are not, and the reason is said.
-func TestAnEnvironmentWhoseRolesCannotBeReadIsStillDescribed(t *testing.T) {
-	inScratchCheckout(t)
-	main, _ := envServer(t, "pb_main_cK", envServerOpts{})
-	staging, _ := envServer(t, "pb_staging_cK", envServerOpts{rolesRefused: true})
-	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
-	project := []Environment{
-		{Name: "main", Ref: "mainref000", Status: "Running"},
-		{Name: "staging", Ref: "stagref000", Status: "Running"},
-	}
-
-	var out bytes.Buffer
-	envs, specs, roles, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, "main", "pb_main_cK", project, true, &out)
-	require.NoError(t, err, out.String())
-	assert.Contains(t, envs.Environments, "staging", "a failed role read dropped the environment")
-	assert.Contains(t, specs, "staging")
-	assert.NotContains(t, roles, "staging")
-	assert.Contains(t, out.String(), "did not answer for staging")
-}
+// THE ROLE ROUND IS GONE, AND SO IS THE TEST THAT GUARDED ITS FAILURE.
+//
+// `TestAnEnvironmentWhoseRolesCannotBeReadIsStillDescribed` measured that a
+// refused `GET /admin/roles` left an environment described anyway. There is no
+// such read any more: the roles arrive inside the contract, so a stack that
+// cannot report them does not serve a contract at all — which the CLI now reads
+// as its own failure (see the 503 branch in fetchStackSpec) rather than as a
+// partially-described environment.
 
 func TestFourEnvironmentsAreDescribedConcurrently(t *testing.T) {
 	inScratchCheckout(t)
@@ -275,7 +257,7 @@ func TestFourEnvironmentsAreDescribedConcurrently(t *testing.T) {
 	routeEnvironments(t, byRef)
 
 	start := time.Now()
-	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: byRef["mainref000"]}, "main", "pb_main_cK", project, false, io.Discard)
+	_, _, err := gatherEnvironments(context.Background(), Target{URL: byRef["mainref000"]}, "main", "pb_main_cK", project, false, io.Discard)
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), 1500*time.Millisecond, "four 500 ms descriptions ran one after another")
 }
@@ -296,7 +278,7 @@ func TestNoMoreEnvironmentsThanTheLimitAreDescribedAtOnce(t *testing.T) {
 	}
 	routeEnvironments(t, byRef)
 
-	_, _, _, err := gatherEnvironments(context.Background(), Target{URL: byRef["ref0000000"]}, "env0", "pb_env0_cK", project, false, io.Discard)
+	_, _, err := gatherEnvironments(context.Background(), Target{URL: byRef["ref0000000"]}, "env0", "pb_env0_cK", project, false, io.Discard)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, peak.Load(), int32(describeLimit), "more environments were described at once than the limit allows")
 	assert.Greater(t, peak.Load(), int32(1), "the environments were described one at a time — this test measures nothing")

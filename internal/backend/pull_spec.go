@@ -93,7 +93,6 @@ func newSpecCmd() *cobra.Command {
 directory. Run it after every deploy so the committed API contract stays current.
 
   palbase/environments/<env>/openapi.json   the contract
-  palbase/environments/<env>/roles.json     the role definitions
 
   ios/macos→ regenerates PalbaseGenerated.swift and Palbase-Info.plist beside them,
              using the generator from the palbackend-ios checkout SwiftPM resolved

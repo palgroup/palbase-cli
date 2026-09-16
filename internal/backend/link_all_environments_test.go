@@ -187,7 +187,6 @@ func TestADroppedEnvironmentKeepsItsGeneratedAppleFiles(t *testing.T) {
 	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
 	committed := map[string]string{
 		SpecPath("staging"):             `{"openapi":"3.1.0"}`,
-		RolesPath("staging"):            `{"roles":[]}`,
 		ConfigPath("staging", "ios"):    `{"app_id":"project"}`,
 		GeneratedPath("staging", "ios"): "// generated before",
 		PlistPath("staging"):            "old plist",

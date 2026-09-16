@@ -869,7 +869,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	//
 	// The consumers of `palbase/environments/<env>/` are `palbe` and
 	// `palbase-swiftgen`, both of which run in an APP checkout. A backend-only
-	// checkout was handed `openapi.json` and `roles.json` on every link and
+	// checkout was handed `openapi.json` on every link and
 	// nothing in the product read them — a diff on every branch, for no reader.
 	// `palbase spec` still writes them on request, because that verb is
 	// somebody asking.
@@ -900,7 +900,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 		project = nil
 	}
-	envs, specs, roles, err := gatherEnvironments(ctx, target, linkedEnv, anon, project, writesPerEnvironmentArtifacts(platforms), w)
+	envs, specs, err := gatherEnvironments(ctx, target, linkedEnv, anon, project, writesPerEnvironmentArtifacts(platforms), w)
 	if err != nil {
 		return err
 	}
@@ -1027,16 +1027,6 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 				return err
 			}
 		}
-		for _, name := range envs.names() {
-			r, ok := roles[name]
-			if !ok {
-				continue
-			}
-			if err := writeRolesArtifact(rolesPath(name), r); err != nil {
-				return err
-			}
-			fmt.Fprintf(w, "✓ wrote %s (%d roles)\n", rolesPath(name), len(r.Roles))
-		}
 	}
 
 	if apple {
@@ -1127,7 +1117,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 // CLI has stopped writing — and leaves it exactly where it is (FR-062).
 //
 // A BACKEND-ONLY CHECKOUT USED TO GET `palbase/environments/<env>/` on every
-// link: an `openapi.json` and a `roles.json` that no generator in this product
+// link: an `openapi.json` that no generator in this product
 // ever read, appearing as a diff on every branch. It is not written any more.
 // But the copies already committed do not disappear, and a `link` that deleted
 // them would be this CLI reaching into a customer's repository to remove files
@@ -1137,10 +1127,21 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 // next person to open it finds a contract with a date on it and no way to know
 // nothing maintains it.
 func reportStaleArtifacts(w io.Writer, checkoutRoot string, platforms []string) {
+	dir := filepath.Join(checkoutRoot, RootDir(), envSubdir)
+
+	// THE RETIRED FILE IS REPORTED ABOVE THE EARLY RETURN, on purpose.
+	//
+	// Below, a checkout WITH a generator returns early, and rightly: its
+	// environment directory is still maintained, so calling it stale would be a
+	// lie. `roles.json` is the opposite. Nothing writes it in ANY checkout now,
+	// and the checkouts that HAVE one are exactly the ones with a generator —
+	// so a report placed after that return would speak only to the population
+	// that never had the file.
+	reportRetiredRoles(w, dir)
+
 	if writesPerEnvironmentArtifacts(platforms) {
 		return // this checkout has a generator; the directory is still its own
 	}
-	dir := filepath.Join(checkoutRoot, RootDir(), envSubdir)
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) == 0 {
 		return
@@ -1153,6 +1154,32 @@ func reportStaleArtifacts(w io.Writer, checkoutRoot string, platforms []string) 
 	fmt.Fprintf(w, "\n%s/ is left as it is, and nothing writes it any more: a backend checkout has no\n"+
 		"  generator that reads those files. Delete it when you are ready — %s\n",
 		filepath.Join(RootDir(), envSubdir), strings.Join(names, ", "))
+}
+
+// reportRetiredRoles names every environment still carrying the file, and does
+// NOT delete it: what is in somebody's checkout is theirs (FR-009). Deleting on
+// their behalf would also delete the only evidence of what used to be there.
+func reportRetiredRoles(w io.Writer, envRoot string) {
+	envs, err := os.ReadDir(envRoot)
+	if err != nil {
+		return
+	}
+	carrying := make([]string, 0, len(envs))
+	for _, e := range envs {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(envRoot, e.Name(), RetiredRolesFile)); err == nil {
+			carrying = append(carrying, e.Name())
+		}
+	}
+	if len(carrying) == 0 {
+		return
+	}
+	sort.Strings(carrying)
+	fmt.Fprintf(w, "\n  %s is left as it is, and nothing writes it any more: role definitions now\n"+
+		"  travel inside openapi.json. Delete it when you are ready — %s\n",
+		RetiredRolesFile, strings.Join(carrying, ", "))
 }
 
 // webPlatform is the one platform whose generator lives in an SDK rather than

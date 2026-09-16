@@ -14,7 +14,6 @@ package backend
 //	  client.ts                        web: the stable door to the selected client
 //	  environments/<env>/              everything that exists PER environment
 //	    openapi.json                   the contract
-//	    roles.json                     the role definitions
 //	    Palbase-Info.plist             apple config (both ios and macos slots)
 //	    android-config.json            android config
 //	    web-config.json                web config
@@ -66,7 +65,14 @@ func SpecPath(env string) string { return path.Join(EnvDir(env), "openapi.json")
 // RolesPath is that environment's role definitions, beside its contract — a
 // generator handed the spec finds the roles BY RULE rather than by a second
 // setting somebody has to keep in step.
-func RolesPath(env string) string { return path.Join(EnvDir(env), "roles.json") }
+// RetiredRolesFile is the name `palbase spec` used to write role definitions
+// under, before they moved INSIDE the contract (`x-palbase-roles`).
+//
+// ONE registry, one string. Nothing writes this file any more, but the CLI still
+// has to RECOGNISE it — in LegacyMarkers, and in the stale-artifact report that
+// tells somebody the file in their checkout is nobody's any more. Two copies of
+// a retired name drift apart; this is the one place that remembers it.
+const RetiredRolesFile = "roles.json"
 
 // ConfigPath is what the CLI WRITES for one platform of one environment — the
 // generator's INPUT, and the file `readAppEnvironments` reads back on a relink.
@@ -147,7 +153,7 @@ func LegacyRoots() []string { return []string{".palbase"} }
 // the name cannot tell the two apart. Everything here sat directly under
 // `Palbase/`; the new layout writes only `environments/` and `client.ts`.
 func LegacyMarkers() []string {
-	return []string{"Generated", "Config", "openapi.json", "roles.json", "palbase-config.json"}
+	return []string{"Generated", "Config", "openapi.json", RetiredRolesFile, "palbase-config.json"}
 }
 
 // CarriesLegacyLayout reports whether this checkout still holds the retired

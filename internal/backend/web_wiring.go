@@ -139,7 +139,7 @@ func environmentsRoot() string { return path.Dir(EnvDir("any")) }
 // runPalbeGen requires the SDK generator and its output before wiring imports.
 //
 // IT IS POINTED AT AN ENVIRONMENT, NOT AT A FILE. `@palbase/web` 10 reads
-// `<dir>/<env>/{openapi.json, roles.json, web-config.json}`, writes that
+// `<dir>/<env>/{openapi.json, web-config.json}`, writes that
 // environment's client beside them, and writes the barrel the application
 // imports. The environment comes from `PALBASE_ENV` — the single key the person
 // switches — so nothing in their source changes when they point elsewhere.

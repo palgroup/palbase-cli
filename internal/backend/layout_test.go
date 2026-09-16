@@ -14,7 +14,6 @@ func TestLayoutPaths(t *testing.T) {
 		{RootDir(), "palbase"},
 		{EnvDir("main"), "palbase/environments/main"},
 		{SpecPath("main"), "palbase/environments/main/openapi.json"},
-		{RolesPath("local"), "palbase/environments/local/roles.json"},
 		{ConfigPath("main", "ios"), "palbase/environments/main/ios-config.json"},
 		{ConfigPath("main", "macos"), "palbase/environments/main/macos-config.json"},
 		{PlistPath("main"), "palbase/environments/main/Palbase-Info.plist"},
@@ -50,7 +49,7 @@ func TestEnvironmentDirectoryIsFlat(t *testing.T) {
 		ConfigPath("main", "ios"), ConfigPath("main", "web"), ConfigPath("main", "android"),
 		PlistPath("main"),
 		GeneratedPath("main", "ios"), GeneratedPath("main", "web"),
-		SpecPath("main"), RolesPath("main"),
+		SpecPath("main"),
 	} {
 		if got := strings.Count(p, "/"); got != 3 {
 			t.Errorf("%s: %d ayraç — ortam dizini düz olmalı (palbase/environments/<env>/<dosya>)", p, got)

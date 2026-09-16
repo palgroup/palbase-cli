@@ -228,7 +228,7 @@ func removeStaleEnvironmentDirs(root string, keep []string, w io.Writer) error {
 func isGeneratedEnvironmentFile(name string) bool {
 	const probe = "probe"
 	known := []string{
-		path.Base(SpecPath(probe)), path.Base(RolesPath(probe)), path.Base(PlistPath(probe)),
+		path.Base(SpecPath(probe)), path.Base(PlistPath(probe)),
 		path.Base(GeneratedPath(probe, "ios")), path.Base(GeneratedPath(probe, webPlatform)),
 	}
 	for _, platform := range []string{"ios", "macos", "android", webPlatform} {
@@ -256,22 +256,6 @@ func isGeneratedEnvironmentFile(name string) bool {
 // specPath is where one environment's contract is committed — C-1 owns the
 // shape; this name stays so the call sites read as they always did.
 func specPath(env string) string { return SpecPath(env) }
-
-// rolesPath is where one environment's ROLE DEFINITIONS are committed: beside
-// its contract, in the same directory, differing only in name.
-//
-// Beside it rather than in a directory of its own because the two documents
-// describe the same environment at the same moment and are fetched by one act —
-// and because a generator handed the spec can then find the roles BY RULE
-// instead of by a second setting somebody has to keep in step. `palbase-swiftgen`
-// and `palbe-gen` live in other packages and cannot call this function; the rule
-// is the only thing they can share.
-//
-// THERE IS NO SECOND COPY ANY MORE. The web SDK used to read its own
-// `Palbase/roles.json`, mirrored here by `copyRolesToWeb` — two committed files
-// with the same bytes, and a generator that could be handed a stale one. Both
-// generators now read this one.
-func rolesPath(env string) string { return RolesPath(env) }
 
 // stackRole is one role definition as the generators need it.
 //
@@ -371,47 +355,6 @@ func normalizeRoles(in stackRoles) stackRoles {
 	return out
 }
 
-// refreshRoles brings one environment's role definitions down beside its
-// contract.
-//
-// BEST EFFORT, AND NEVER FATAL ON THE FETCH. Fetching the contract is what a
-// spec round is for; the roles beside it are an addendum, and a stack that will
-// not answer about them is not a reason to refuse the refresh somebody asked
-// for.
-//
-// But "COULD NOT TELL" IS NOT "THERE ARE NONE", and that difference is why this
-// is not one line. On a 404 the stack has ANSWERED — it defines no roles — and
-// the empty artifact is the truth. On anything else the file on disk is left
-// exactly as it is: writing an empty list would delete definitions this run
-// could not produce, the generators would emit no constants from it, and the app
-// would compile with every permission check it used to make silently gone. The
-// reason is printed either way, because an artifact that quietly stopped
-// tracking its stack is the only failure mode here nobody would notice.
-func refreshRoles(ctx context.Context, target Target, cred Credentials, env string, w io.Writer) error {
-	roles, err := fetchStackRoles(ctx, target, cred)
-	if err != nil {
-		fmt.Fprintf(w, "roles: %s did not answer for %s — %v\n", target.URL, env, err)
-		fmt.Fprintf(w, "roles: %s keeps what it last held; the generated role types are NOT refreshed\n",
-			rolesPath(env))
-		return nil
-	}
-	if err := writeRolesArtifact(rolesPath(env), roles); err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "✓ wrote %s (%d roles)\n", rolesPath(env), len(roles.Roles))
-	return nil
-}
-
-func writeRolesArtifact(path string, roles stackRoles) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	blob, err := json.MarshalIndent(roles, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(blob, '\n'), 0o644)
-}
 
 // reportContractDrift says which endpoints one environment has and another does
 // not.
@@ -512,7 +455,7 @@ func pathsOf(spec []byte) map[string]bool {
 // MEASURED, NOT ASSUMED: the consumers of `palbase/environments/<env>/` are
 // `palbe` (the TypeScript generator, shipped in @palbase/web) and
 // `palbase-swiftgen`. Both run in an APP checkout. A backend-only checkout was
-// given `openapi.json` and `roles.json` on every link and nothing in the
+// given `openapi.json` on every link and nothing in the
 // product ever read them — a diff on every branch, for no reader. The
 // codebase already carried the lesson in prose (`web_wiring.go`: "a contract
 // nobody reads"); this is the same sentence as a condition.
@@ -537,9 +480,7 @@ var environmentAddress = addressOf
 type describedEnvironment struct {
 	entry      appEnvironment
 	spec       []byte
-	roles      *stackRoles
 	noContract error // the environment answered and has no contract to give, in the project's own words
-	rolesErr   error // the role read failed; the environment is still described
 	err        error // the environment could not be described this run
 }
 
@@ -574,13 +515,6 @@ func describeEnvironment(ctx context.Context, addr string, insecure, readRoles b
 	default:
 		d.spec = spec
 	}
-	if readRoles {
-		if roles, err := fetchStackRoles(ctx, target, cred); err != nil {
-			d.rolesErr = err
-		} else {
-			d.roles = &roles
-		}
-	}
 	return d
 }
 
@@ -600,18 +534,12 @@ func describeEnvironment(ctx context.Context, addr string, insecure, readRoles b
 // `writeArtifacts` separates REPORTING from WRITING, and the two are genuinely
 // different jobs: whether a project has a contract yet is worth saying in every
 // checkout, while the role documents only matter where a generator reads them.
-func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, defaultKey string, project []Environment, writeArtifacts bool, w io.Writer) (appEnvironments, map[string][]byte, map[string]stackRoles, error) {
+func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, defaultKey string, project []Environment, writeArtifacts bool, w io.Writer) (appEnvironments, map[string][]byte, error) {
 	envs := appEnvironments{
 		Default:      defaultEnv,
 		Environments: map[string]appEnvironment{},
 	}
 	specs := map[string][]byte{}
-	roles := map[string]stackRoles{}
-	rolesUnread := func(url, env string, err error) {
-		fmt.Fprintf(w, "roles: %s did not answer for %s — %v\n", url, env, err)
-		fmt.Fprintf(w, "roles: %s keeps what it last held; the generated role types are NOT refreshed\n",
-			rolesPath(env))
-	}
 
 	if len(project) == 0 {
 		primaryEnv := appEnvironment{
@@ -628,7 +556,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		envs.Environments[defaultEnv] = primaryEnv
 		cred, _, err := Credential(primary.URL)
 		if err != nil {
-			return appEnvironments{}, nil, nil, err
+			return appEnvironments{}, nil, err
 		}
 		// A PROJECT WITH NOTHING DEPLOYED IS STILL A PROJECT YOU CAN BIND TO.
 		//
@@ -643,16 +571,9 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 			fmt.Fprintf(w, "%v\n", err)
 			fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
 		case err != nil:
-			return appEnvironments{}, nil, nil, err
+			return appEnvironments{}, nil, err
 		default:
 			specs[defaultEnv] = spec
-			if writeArtifacts {
-				if r, err := fetchStackRoles(ctx, primary, cred); err != nil {
-					rolesUnread(primary.URL, defaultEnv, err)
-				} else {
-					roles[defaultEnv] = r
-				}
-			}
 		}
 	} else {
 		type job struct {
@@ -668,7 +589,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 			addr, err := environmentAddress(e.Ref)
 			if err != nil {
 				if e.Name == defaultEnv {
-					return appEnvironments{}, nil, nil, err
+					return appEnvironments{}, nil, err
 				}
 				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are\n", e.Name, err)
 				continue
@@ -685,10 +606,10 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		if !defaultAsked {
 			for _, e := range project {
 				if e.Name == defaultEnv {
-					return appEnvironments{}, nil, nil, fmt.Errorf("%s is %s, so there is nothing to read from it", e.Name, e.Status)
+					return appEnvironments{}, nil, fmt.Errorf("%s is %s, so there is nothing to read from it", e.Name, e.Status)
 				}
 			}
-			return appEnvironments{}, nil, nil, fmt.Errorf("%s is not an environment of this project", defaultEnv)
+			return appEnvironments{}, nil, fmt.Errorf("%s is not an environment of this project", defaultEnv)
 		}
 		// The workers only fill their own slot; the map and the output are built
 		// once they are done, in the project's own order.
@@ -709,7 +630,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 			d, name := results[i], j.env.Name
 			if d.err != nil {
 				if name == defaultEnv {
-					return appEnvironments{}, nil, nil, fmt.Errorf("%s: %w", name, d.err)
+					return appEnvironments{}, nil, fmt.Errorf("%s: %w", name, d.err)
 				}
 				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; "+
 					"run `palbase link` again once it answers\n", name, d.err)
@@ -724,12 +645,6 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 			} else {
 				specs[name] = d.spec
 			}
-			if d.rolesErr != nil {
-				rolesUnread(d.entry.BaseURL, name, d.rolesErr)
-			}
-			if d.roles != nil {
-				roles[name] = *d.roles
-			}
 		}
 	}
 
@@ -737,7 +652,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 	// target.
 	localURL := LookupLocalStack(groupOf(primary))
 	if localURL == "" || localURL == primary.URL {
-		return envs, specs, roles, nil
+		return envs, specs, nil
 	}
 
 	localTarget := Target{URL: localURL, Local: true}
@@ -745,7 +660,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 	if credErr != nil {
 		envs.Environments[localEnvName] = appEnvironment{AppID: projectAppID, BaseURL: localURL}
 		fmt.Fprintf(w, "local: %s is registered but this machine holds no credential for it — `palbase start`\n", localURL)
-		return envs, specs, roles, nil
+		return envs, specs, nil
 	}
 	localKey, keyErr := projectPublishableKey(ctx, localTarget)
 	if keyErr != nil {
@@ -753,7 +668,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		// is named. A missing entry would be a build configuration that vanishes.
 		envs.Environments[localEnvName] = appEnvironment{AppID: projectAppID, BaseURL: localURL}
 		fmt.Fprintf(w, "local: %s did not answer — run `palbase start`, then `palbase spec` to fill it in\n", localURL)
-		return envs, specs, roles, nil
+		return envs, specs, nil
 	}
 	localEnv := appEnvironment{
 		AppID:   projectAppID,
@@ -766,15 +681,8 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 	envs.Environments[localEnvName] = localEnv
 	if localSpec, err := fetchStackSpec(ctx, localTarget, localCred); err == nil {
 		specs[localEnvName] = localSpec
-		if writeArtifacts {
-			if r, err := fetchStackRoles(ctx, localTarget, localCred); err != nil {
-				rolesUnread(localURL, localEnvName, err)
-			} else {
-				roles[localEnvName] = r
-			}
-		}
 	}
-	return envs, specs, roles, nil
+	return envs, specs, nil
 }
 
 // groupOf is the project group a target belongs to, for finding its local stack

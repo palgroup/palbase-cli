@@ -14,6 +14,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// servedRoles is the stack's roles door for the NAME-RENDERING path.
+//
+// This helper outlived the artifact it was written for: `palbase spec` no longer
+// fetches roles at all (they travel inside the contract), but `readStackNames`
+// still asks that door for the role NAMES a checkout's build renders. Two
+// different questions, and only one of them retired.
+func servedRoles(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}
+}
+
 // YIĞIN ADLARI MAKİNE-YEREL ÖNBELLEKTE DURUR (FR-003, FR-004).
 //
 // `palbase build` ağsız çalışır; üretilen dosyanın stack bloğu ise yığından

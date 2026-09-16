@@ -84,7 +84,7 @@ func TestLinkRefusesAProductWithNoEnvironments(t *testing.T) {
 // FR-062: THE OLD ARTIFACT DIRECTORY IS NAMED AND LEFT ALONE.
 //
 // A backend-only checkout used to get `palbase/environments/<env>/` on every
-// link — an openapi.json and a roles.json no generator in this product reads —
+// link — an openapi.json no generator in this product reads —
 // and that is what "bu jsonlar falan çok gereksiz change olarak geliyor"
 // described. It is not written any more, but the copies already committed do
 // not vanish, and a `link` that deleted them would be this CLI reaching into a
@@ -148,4 +148,28 @@ func TestTheArtifactDirectoryTakesTheChosenEnvironmentsName(t *testing.T) {
 	// A REF NOBODY HAS HAS NO NAME: the fallback belongs to a stack somebody
 	// runs, and inventing a name here would hide a chooser that went wrong.
 	require.Empty(t, envNameOfRef(linkEnvs, "notaref"))
+}
+
+// THE RETIRED FILE IS REPORTED TO THE CHECKOUTS THAT ACTUALLY HAVE ONE.
+//
+// This is the population the report used to miss entirely: `reportStaleArtifacts`
+// returns early for a checkout WITH a generator, and those are exactly the
+// checkouts that ever carried a `roles.json`. A report placed after that return
+// spoke only to backend-only checkouts, which never had the file.
+func TestRetiredRolesFileIsReportedEvenWhereAGeneratorRuns(t *testing.T) {
+	root := t.TempDir()
+	env := filepath.Join(root, RootDir(), envSubdir, "staging")
+	require.NoError(t, os.MkdirAll(env, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env, RetiredRolesFile), []byte(`{"roles":[]}`), 0o644))
+
+	var out bytes.Buffer
+	reportStaleArtifacts(&out, root, []string{"ios"})
+
+	require.Contains(t, out.String(), RetiredRolesFile,
+		"a checkout carrying the retired file was told nothing")
+	require.Contains(t, out.String(), "staging", "the report does not name the environment")
+
+	// AND IT IS NOT DELETED. What is in somebody's checkout is theirs.
+	_, err := os.Stat(filepath.Join(env, RetiredRolesFile))
+	require.NoError(t, err, "the report deleted the file instead of reporting it")
 }
