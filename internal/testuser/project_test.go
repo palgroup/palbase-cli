@@ -439,3 +439,39 @@ func TestMain(m *testing.M) {
 	_ = os.Unsetenv("PALBASE_ENV")
 	os.Exit(m.Run())
 }
+
+// BİR 2xx, BİR KİMLİK DEĞİLDİR (inceleme C2, ölçüldü).
+//
+// Yığın bildirilen fikstürü kabul edip `{"users":[]}` cevaplarsa döngü SIFIR kez
+// koşuyordu: hata yok, çıkış 0, ve `PALBASE_TEST_IDENTITIES={"identities":{}}`
+// süite gidiyordu. Çağıranın koruması da yakalayamıyor — o yalnız NIL bir haritayı
+// reddediyor, ve boş bir nesne nil değil.
+//
+// Bedeli YANLIŞ YERDE ortaya çıkar: her `signInAs("author")` "no test identity
+// named author" der ve yazarı kendi testine bakmaya gönderir, oysa cevap veren
+// mint'e bakmalıydı. Kusur o cümlenin tam olarak engellemek için yazıldığı şey.
+func TestAFixtureThatMintsNobodyIsRefusedByName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/management/test-users/templates":
+			_, _ = w.Write([]byte(`{"templates":[{"name":"author","email":"","tables":[]}]}`))
+		case "POST /v1/management/test-users":
+			// Sözleşme dışı ama 2xx: kabul etti, kimseyi basmadı.
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"users":[]}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	linkedTo(t, srv.URL)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	raw, cleanup, err := MintIdentities(cmd, 1)
+
+	require.Error(t, err, "a fixture that minted nobody was accepted; payload: %s", raw)
+	require.Contains(t, err.Error(), "author", "the refusal must name the fixture")
+	require.Contains(t, err.Error(), "minted nobody", "the refusal must say what happened")
+	require.Nil(t, cleanup, "nothing was minted, so there is nothing to clean up")
+}

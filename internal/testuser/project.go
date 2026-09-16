@@ -250,6 +250,19 @@ func MintIdentities(cmd *cobra.Command, count int) ([]byte, func(context.Context
 			return nil, nil, fmt.Errorf("mint the %q fixture: %w", declaration.Name, err)
 		}
 		keep(res)
+		// BİR 2xx, BİR KİMLİK DEĞİLDİR. `{"users":[]}` bu döngüyü SIFIR kez
+		// çalıştırır: hata yok, çıkış 0, ve koşu `identities` haritasında o adı
+		// hiç taşımadan devam eder. Bedeli süitte ve YANLIŞ YERDE ortaya çıkar —
+		// her `signInAs("author")` "no test identity named author" der ve yazarı
+		// kendi testine bakmaya gönderir, oysa cevap veren mint'e bakmalıydı.
+		// Ölçüldü (inceleme C2): `err=<nil>`, `payload={"identities":{}}`.
+		if len(res.Users) == 0 {
+			return nil, nil, fmt.Errorf(
+				"the stack accepted the %q fixture and minted nobody: it answered 2xx with an empty "+
+					"`users` list, so this run has no identity by that name. Every `signInAs(%q)` in the "+
+					"suite would fail pointing at the test instead of at the mint",
+				declaration.Name, declaration.Name)
+		}
 		for i, user := range res.Users {
 			name := declaration.Name
 			if i > 0 {
@@ -259,6 +272,22 @@ func MintIdentities(cmd *cobra.Command, count int) ([]byte, func(context.Context
 			}
 			identities[name] = identityOf(user)
 		}
+	}
+
+	// …VE HER BİLDİRİM BİR KİMLİK ÜRETMİŞ OLMALI. Yukarıdaki kontrol tek bir
+	// cevabı ölçüyor; bu, KÜMEYİ ölçüyor — bir adın başka bir adın üzerine
+	// yazması ya da ileride eklenen bir yolun sessizce atlaması hâlinde de
+	// koşu, eksik olanı adıyla söyleyerek durur.
+	if len(declared.Templates) > 0 && len(identities) < len(declared.Templates) {
+		missing := make([]string, 0, len(declared.Templates))
+		for _, declaration := range declared.Templates {
+			if _, ok := identities[declaration.Name]; !ok {
+				missing = append(missing, declaration.Name)
+			}
+		}
+		return nil, nil, fmt.Errorf(
+			"the stack declares %d fixture(s) but this run holds %d identit(ies); missing: %s",
+			len(declared.Templates), len(identities), strings.Join(missing, ", "))
 	}
 
 	cleanup := func(ctx context.Context) error {
