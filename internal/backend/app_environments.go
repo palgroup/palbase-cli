@@ -355,7 +355,6 @@ func normalizeRoles(in stackRoles) stackRoles {
 	return out
 }
 
-
 // reportContractDrift says which endpoints one environment has and another does
 // not.
 //
