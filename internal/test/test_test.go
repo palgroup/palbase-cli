@@ -43,7 +43,22 @@ exit `+exitCode+"\n"), 0o755))
 	return marker
 }
 
+// WHAT THE MINT ANSWERS is an envelope; WHAT THE TESTS READ is the map inside
+// it. The two are not the same string and this pair says so.
 const identities = `{"identities":{"user1":{"id":"u1","email":"a@e.f","password":"p"}}}`
+
+// PALBASE_TEST_IDENTITIES IS A FLAT MAP KEYED BY FIXTURE NAME — not the mint's
+// envelope. Both readers in the SDK take it that way: `testRun.minted(name)`
+// asks `hasOwnProperty(parsed, name)`, and `api.signInAs(name)` indexes
+// `parsed[name]`. The deploy, which is the other writer of this variable,
+// already exports the flat shape (`{"owner":{"id":"u1"}}`).
+//
+// Exporting the envelope was measured end to end on 16.09.2026: a fresh
+// `palbase init` project ran `palbase test --live`, the CLI printed "minted 1
+// identit(ies)", and the scaffold's signed-in e2e half SKIPPED anyway
+// (7 test, 6 pass, 1 skip) because `minted("author")` saw one key named
+// "identities". The old assertion here pinned that bug instead of catching it.
+const exportedIdentities = `{"user1":{"id":"u1","email":"a@e.f","password":"p"}}`
 
 func liveResolvers(mint func(*cobra.Command, int) ([]byte, func(context.Context) error, error)) Resolvers {
 	return Resolvers{
@@ -65,7 +80,7 @@ func TestLiveLayerExportsIdentitiesAndCleansAfterSuccess(t *testing.T) {
 			require.InDelta(t, 30, time.Until(deadline).Seconds(), 2)
 			raw, err := os.ReadFile(marker)
 			require.NoError(t, err, "cleanup must run after npm finishes")
-			require.Equal(t, "http://127.0.0.1:63638\npb_project_x\n"+identities+"\ncandidate\n", string(raw))
+			require.Equal(t, "http://127.0.0.1:63638\npb_project_x\n"+exportedIdentities+"\ncandidate\n", string(raw))
 			cleaned = true
 			return nil
 		}, nil

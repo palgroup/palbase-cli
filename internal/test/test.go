@@ -49,13 +49,19 @@ type Target struct {
 	Candidate string
 }
 
-// mintedIdentities is the shape `test-user create --json` emits — the same one
-// `createTestApi({ identities })` accepts. Decoded here only to count them, so
-// the run can say what it prepared.
+// mintedIdentities is the ENVELOPE `test-user create --json` emits. What the
+// tests receive is the map INSIDE it, and the difference is not cosmetic:
+// `PALBASE_TEST_IDENTITIES` is a FLAT map keyed by fixture name. Both readers
+// in the SDK take it that way — `testRun.minted(name)` asks the parsed object
+// for that key, `api.signInAs(name)` indexes it — and the deploy, which is the
+// other writer of this variable, already exports the flat shape.
+//
+// `json.RawMessage` rather than a typed identity: the inner object carries the
+// access token, the id, the email and the password, and re-marshalling a
+// struct that names only some of those would hand the tests an identity they
+// cannot sign in with.
 type mintedIdentities struct {
-	Identities map[string]struct {
-		Email string `json:"email"`
-	} `json:"identities"`
+	Identities map[string]json.RawMessage `json:"identities"`
 }
 
 // Cmd returns `palbase test`.
@@ -156,10 +162,20 @@ are reported; an interrupted process may leave users for test-user delete.`,
 			}
 			fmt.Fprintf(out, "  minted %d identit(ies) for this run\n", len(minted.Identities))
 
+			// THE ENVELOPE IS UNWRAPPED HERE. Passing `raw` through made the
+			// count above true and the run useless: every `signInAs` and every
+			// `testRun.minted(name)` looked for the fixture name and found one
+			// key called "identities", so the signed-in half of the scaffold's
+			// e2e test SKIPPED while the command reported a mint.
+			exported, mErr := json.Marshal(minted.Identities)
+			if mErr != nil {
+				return fmt.Errorf("re-encode this run's test identities: %w", mErr)
+			}
+
 			env := []string{
 				"PALBASE_TEST_BASE_URL=" + target.URL,
 				"PALBASE_TEST_API_KEY=" + target.APIKey,
-				"PALBASE_TEST_IDENTITIES=" + string(raw),
+				"PALBASE_TEST_IDENTITIES=" + string(exported),
 			}
 			// A local stack serves one version, so there is no candidate to select
 			// and the harness does not ask for one.
