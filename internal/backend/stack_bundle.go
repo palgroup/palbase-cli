@@ -808,7 +808,7 @@ func bundleEntry(dir string, sources []string) (string, error) {
 	// still refused, loudly, by the operationId gate in the runtime's generator.
 	names, err := controllerSourceNames(dir)
 	if err != nil {
-		return "", fmt.Errorf("controller kaynakları yürünemedi: %w", err)
+		return "", fmt.Errorf("the project's controller sources could not be walked: %w", err)
 	}
 	if len(names) > 0 {
 		blob, _ := json.Marshal(names)
