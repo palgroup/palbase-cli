@@ -6,6 +6,8 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,15 +17,20 @@ import (
 	"time"
 )
 
-// packLocalSDK runs `npm pack` on the SDK source in this monorepo and returns
-// the tarball path. Skips when the source is not beside this checkout.
-//
-// The location comes from THIS FILE's path, not the working directory. It used
-// to be os.Getwd(), which silently turned every caller that had chdir'd — and a
-// test that wants a scratch checkout has — into a skip: the run stayed green
-// while proving nothing. A source tree's position relative to its own source
-// file is the one thing a test cannot chdir out from under.
-func sdkSourceDir(t *testing.T) string {
+// packReporter is the slice of *testing.T these helpers use. It is an interface
+// for one reason: the DISPOSITION below — skip on a developer's machine, fail in
+// CI — is itself a gate, and a gate whose own refusal nothing ever exercises is
+// a comment. TestPackLocalSDKFailsInCIWhenTheSDKIsNotBesideThisCheckout hands it
+// a recorder; every other caller hands it a *testing.T.
+type packReporter interface {
+	Helper()
+	Fatal(args ...any)
+	Fatalf(format string, args ...any)
+	Skipf(format string, args ...any)
+	TempDir() string
+}
+
+func sdkSourceDir(t packReporter) string {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -33,10 +40,33 @@ func sdkSourceDir(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "palbase-ts", "backend")
 }
 
-func packLocalSDK(t *testing.T, ctx context.Context) string {
+// packLocalSDK runs `npm pack` on the SDK source in this monorepo and returns
+// the tarball path. Skips when the source is not beside this checkout.
+//
+// The location comes from THIS FILE's path, not the working directory. It used
+// to be os.Getwd(), which silently turned every caller that had chdir'd — and a
+// test that wants a scratch checkout has — into a skip: the run stayed green
+// while proving nothing. A source tree's position relative to its own source
+// file is the one thing a test cannot chdir out from under.
+func packLocalSDK(t packReporter, ctx context.Context) string {
 	t.Helper()
-	sdk := sdkSourceDir(t)
+	return packSDKFrom(t, ctx, sdkSourceDir(t))
+}
+
+// packSDKFrom is packLocalSDK with the source tree named, so the disposition it
+// takes when that tree is absent can be measured against a directory that really
+// is absent — the real one is beside this file and always there.
+func packSDKFrom(t packReporter, ctx context.Context, sdk string) string {
+	t.Helper()
 	if _, err := os.Stat(filepath.Join(sdk, "package.json")); err != nil {
+		// A SKIP IN CI IS A GREEN THAT MEASURED NOTHING — where the tree was
+		// meant to be there. The cross-repo job checks the SDK out beside this
+		// checkout precisely so these gates run; if it is missing there, the
+		// checkout step stopped working and every gate below reported nothing
+		// while the job stayed green.
+		if os.Getenv("CI") != "" && besideTheSDKTree(sdk) {
+			t.Fatalf("the SDK source is not beside this checkout in CI — this is a failure, not a skip: %v", err)
+		}
 		t.Skipf("the SDK source is not beside this checkout: %v", err)
 	}
 	out := t.TempDir()
@@ -57,6 +87,111 @@ func packLocalSDK(t *testing.T, ctx context.Context) string {
 		name = name[i+1:]
 	}
 	return filepath.Join(out, name)
+}
+
+// besideTheSDKTree answers whether this checkout is POSITIONED where the SDK
+// tree belongs: `sdk/cli` next to `sdk/palbase-ts`, which is this monorepo and
+// the cross-repo job — that job checks the CLI out at `sdk/cli` for exactly this
+// reason.
+//
+// palbase-cli's OWN CI clones one PUBLIC repository and cannot clone the private
+// neighbours at all (`.github/workflows/cli-cross-repo-gates.yml` in the monorepo
+// says so, and is why it exists). Measured 16.09.2026 in an isolated checkout of
+// this repository at HEAD with CI=true: 19 of this package's tests reach the line
+// above and skip. Failing there would turn palbase-cli's own `ci.yml` — and the
+// release gate that runs the same suite — permanently red for the shape of the
+// job rather than for a defect.
+func besideTheSDKTree(sdk string) bool {
+	// sdk is <parent>/palbase-ts/backend; the parent is `sdk/` in a monorepo
+	// checkout and the repository's own name in a standalone one.
+	return filepath.Base(filepath.Dir(filepath.Dir(sdk))) == "sdk"
+}
+
+// A SKIP IN CI IS A GREEN THAT MEASURED NOTHING.
+//
+// Every cross-repo gate in this package reaches the SDK tree through the helper
+// above, and when that tree is not beside the checkout the helper skips. On a
+// developer's machine that is right — not everyone clones four repositories. In
+// the cross-repo job the tree IS checked out beside this one, so a skip there
+// means the checkout step silently stopped working and the gates it exists to
+// run measured nothing while the job stayed green.
+//
+// Same disposition as the `npm pack` branch below it, and the same sentence:
+// the cross-repo workflow derives its gate set by grepping this file for
+// "not beside this checkout", so the words are load-bearing.
+func TestPackLocalSDKFailsInCIWhenTheSDKIsNotBesideThisCheckout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ci   string
+		// root is what the CLI checkout's PARENT is called: `sdk` in this
+		// monorepo and in the cross-repo job, the repository's own name when
+		// palbase-cli is cloned by itself.
+		root string
+		want string
+	}{
+		{"in the cross-repo job", "true", "sdk", "fatal"},
+		{"in palbase-cli's own CI, which cannot clone the private neighbours", "true", "palbase-cli", "skip"},
+		{"on a developer's machine", "", "sdk", "skip"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CI", tc.ci)
+			absent := filepath.Join(t.TempDir(), tc.root, "palbase-ts", "backend")
+			got := dispositionOf(t, func(r packReporter) {
+				packSDKFrom(r, context.Background(), absent)
+			})
+			if got.verb != tc.want {
+				t.Errorf("packSDKFrom took the %q disposition, want %q: %s", got.verb, tc.want, got.msg)
+			}
+			if !strings.Contains(got.msg, "not beside this checkout") {
+				t.Errorf("the message does not carry the sentence the cross-repo workflow greps for: %q", got.msg)
+			}
+		})
+	}
+}
+
+type disposition struct {
+	verb string // "fatal" or "skip"
+	msg  string
+}
+
+// dispositionRecorder stands in for *testing.T and records which verb the helper
+// reached for instead of ending this test with it.
+type dispositionRecorder struct {
+	t   *testing.T
+	got disposition
+}
+
+var errStopped = errors.New("the helper ended its test")
+
+func (r *dispositionRecorder) Helper()         {}
+func (r *dispositionRecorder) TempDir() string { return r.t.TempDir() }
+func (r *dispositionRecorder) Fatal(a ...any)  { r.record("fatal", fmt.Sprint(a...)) }
+func (r *dispositionRecorder) Fatalf(f string, a ...any) {
+	r.record("fatal", fmt.Sprintf(f, a...))
+}
+func (r *dispositionRecorder) Skipf(f string, a ...any) { r.record("skip", fmt.Sprintf(f, a...)) }
+
+func (r *dispositionRecorder) record(verb, msg string) {
+	r.got = disposition{verb: verb, msg: msg}
+	// Fatalf and Skipf END the test they are called on. A recorder that merely
+	// returned would let the helper run on past its own refusal and report
+	// whatever the next line did.
+	panic(errStopped)
+}
+
+func dispositionOf(t *testing.T, call func(packReporter)) disposition {
+	t.Helper()
+	r := &dispositionRecorder{t: t}
+	func() {
+		defer func() {
+			if v := recover(); v != nil && v != errStopped {
+				panic(v)
+			}
+		}()
+		call(r)
+		t.Fatal("the helper returned instead of refusing — it found an SDK tree where there is none")
+	}()
+	return r.got
 }
 
 // TestInitRefusesADirectoryWithWorkInIt: `palbase init` writes files, so the one
