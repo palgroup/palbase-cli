@@ -76,7 +76,7 @@ func TestWebWiringGeneratesFromTheEnvironmentDirectory(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.FromSlash(EnvDir(env)), 0o755))
 	require.NoError(t, os.WriteFile(filepath.FromSlash(ConfigPath(env, webPlatform)),
 		[]byte(`{"app_id":"project","base_url":"https://x.palbase.studio","api_key":"pb_project_cKEY"}`), 0o600))
-	require.NoError(t, os.WriteFile(filepath.FromSlash(SpecPath(env)), []byte(`{"openapi":"3.1.0"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.FromSlash(SpecPath(env)), []byte(`{"openapi":"3.1.0""x-palbase-roles":{"roles":[]},}`), 0o600))
 
 	runWebLink(t)
 

@@ -85,7 +85,7 @@ func projectForPush(t *testing.T) (string, string) {
 	write(".palbase/config.json", `{"flags":{}}`)
 	write(".palbase/target.json", `{"url":"https://127.0.0.1"}`)
 	write(".palbase/ios/palbase-config.json", `{"api_key":"pb_selfhost_c…"}`)
-	write(".palbase/openapi.json", `{"openapi":"3.2.0"}`)
+	write(".palbase/openapi.json", `{"openapi":"3.2.0""x-palbase-roles":{"roles":[]},}`)
 	write("node_modules/left-pad/index.js", "// huge")
 	return dir, bundleRoot
 }

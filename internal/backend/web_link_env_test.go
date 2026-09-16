@@ -22,7 +22,7 @@ func TestWireWebProjectGeneratesTheEnvironmentItIsGiven(t *testing.T) {
 		require.NoError(t, os.MkdirAll(EnvDir(env), 0o755))
 		require.NoError(t, os.WriteFile(ConfigPath(env, webPlatform),
 			[]byte(`{"base_url":"https://`+env+`","api_key":"pb_stub"}`+"\n"), 0o600))
-		require.NoError(t, os.WriteFile(SpecPath(env), []byte(`{"openapi":"3.1.0","paths":{}}`), 0o644))
+		require.NoError(t, os.WriteFile(SpecPath(env), []byte(`{"openapi":"3.1.0","x-palbase-roles":{"roles":[]},"paths":{}}`), 0o644))
 	}
 
 	var buf bytes.Buffer

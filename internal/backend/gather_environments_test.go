@@ -65,7 +65,7 @@ func envServer(t *testing.T, key string, o envServerOpts) (*httptest.Server, *at
 				return
 			}
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+			_, _ = w.Write([]byte(`{"openapi":"3.2.0","x-palbase-roles":{"roles":[]},"paths":{}}`))
 		case "/v1/management/auth/social-auth":
 			if !o.socialAuth {
 				w.WriteHeader(http.StatusNotFound)

@@ -475,7 +475,7 @@ func TestTheTarballCarriesNoPalbaseDirectory(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.FromSlash(EnvDir("main"))), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(SpecPath("main"))),
-		[]byte(`{"openapi":"3.1.0"}`), 0o644))
+		[]byte(`{"openapi":"3.1.0""x-palbase-roles":{"roles":[]},}`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, RootDir(), "project.json"),
 		[]byte(`{"url":"https://x.palbase.studio"}`), 0o644))
 	// …and something that IS source, so this is not measuring an empty tarball.

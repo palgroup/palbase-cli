@@ -1206,7 +1206,7 @@ func writeStubArtifacts(t *testing.T) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
 	require.NoError(t, os.WriteFile(SpecPath("main"),
-		[]byte(`{"openapi":"3.1.0","paths":{}}`), 0o644))
+		[]byte(`{"openapi":"3.1.0","x-palbase-roles":{"roles":[]},"paths":{}}`), 0o644))
 	require.NoError(t, os.WriteFile(ConfigPath("main", webPlatform),
 		[]byte(`{"environment_ref":"main","base_url":"https://stub","api_key":"pb_stub"}`+"\n"), 0o600))
 }

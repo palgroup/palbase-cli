@@ -103,7 +103,7 @@ func iosClientServer(t *testing.T, key string) *httptest.Server {
 			_, _ = w.Write([]byte(`{"publishable":"` + key + `"}`))
 		case "/v1/management/openapi":
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+			_, _ = w.Write([]byte(`{"openapi":"3.2.0","x-palbase-roles":{"roles":[]},"paths":{}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -186,7 +186,7 @@ func TestADroppedEnvironmentKeepsItsGeneratedAppleFiles(t *testing.T) {
 	staging := iosClientServer(t, linkKeyStaging)
 	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
 	committed := map[string]string{
-		SpecPath("staging"):             `{"openapi":"3.1.0"}`,
+		SpecPath("staging"):             `{"openapi":"3.1.0""x-palbase-roles":{"roles":[]},}`,
 		ConfigPath("staging", "ios"):    `{"app_id":"project"}`,
 		GeneratedPath("staging", "ios"): "// generated before",
 		PlistPath("staging"):            "old plist",

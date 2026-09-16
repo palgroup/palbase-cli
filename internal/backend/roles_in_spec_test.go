@@ -23,7 +23,7 @@ func TestRolesInSpecLeaveNoSeparateFile(t *testing.T) {
 	if err := os.MkdirAll(env, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	contract := `{"openapi":"3.1.0","paths":{},"x-palbase-roles":{"roles":[` +
+	contract := `{"openapi":"3.1.0","x-palbase-roles":{"roles":[]},"paths":{},"x-palbase-roles":{"roles":[` +
 		`{"name":"author","isDefault":true,"permissions":["posts.write"]}]}}`
 	if err := os.WriteFile(filepath.Join(env, "openapi.json"), []byte(contract), 0o644); err != nil {
 		t.Fatal(err)

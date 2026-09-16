@@ -47,7 +47,7 @@ func linkedProject(t *testing.T, platforms ...string) string {
 	root := t.TempDir()
 	t.Chdir(root)
 	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
-	require.NoError(t, os.WriteFile(specPath("main"), []byte(`{"openapi":"3.1.0"}`), 0o644))
+	require.NoError(t, os.WriteFile(specPath("main"), []byte(`{"openapi":"3.1.0""x-palbase-roles":{"roles":[]},}`), 0o644))
 	for _, p := range platforms {
 		cfg := ConfigPath("main", p)
 		require.NoError(t, os.MkdirAll(filepath.Dir(cfg), 0o755))

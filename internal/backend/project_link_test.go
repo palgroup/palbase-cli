@@ -78,7 +78,7 @@ func stackServing(t *testing.T, anonKey string, extra http.HandlerFunc) *httptes
 				return
 			}
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+			_, _ = w.Write([]byte(`{"openapi":"3.2.0","x-palbase-roles":{"roles":[]},"paths":{}}`))
 			return
 		}
 		if extra != nil {
@@ -246,7 +246,7 @@ func TestTheContractIsFetchedWithTheSessionAndNoKey(t *testing.T) {
 		sawKey = r.Header.Get("apikey")
 		sawBearer = r.Header.Get("Authorization")
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+		_, _ = w.Write([]byte(`{"openapi":"3.2.0","x-palbase-roles":{"roles":[]},"paths":{}}`))
 	}))
 	defer srv.Close()
 
@@ -674,7 +674,7 @@ func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
 				return
 			}
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"openapi":"3.2.0","paths":{}}`))
+			_, _ = w.Write([]byte(`{"openapi":"3.2.0","x-palbase-roles":{"roles":[]},"paths":{}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
