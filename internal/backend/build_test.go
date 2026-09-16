@@ -584,12 +584,32 @@ func TestCheckMode_BrokenSchemaFails(t *testing.T) {
 }
 
 // TestBundleSrcDirKeepsNames pins --keep-names on the embedded build checker's
-// esbuild invocation — prod parity with the deploy bundler, whose bundler_test
-// pins the same flag on its args. The dotted operationId namespace derives from
-// the live Ctrl.name, which only survives esbuild scope-hoisting renames under
-// --keep-names, so dropping the flag would silently rename a controller class
-// that collides with an imported service class (TodosController → TodosController2)
-// and emit a different operationId than the deploy does.
+// bun invocation. It says NOTHING about what the flag achieves, and that
+// silence is deliberate — the comment that stood here made three claims and
+// all three were measured false on 2026-09-16:
+//
+//  1. "prod parity with the deploy bundler, whose bundler_test pins the same
+//     flag on its args" — there is no `bundler_test` and no `deploy/bundler.go`
+//     in this workspace (`find` returns zero for both), and the deploy's real
+//     bundle call (stack_bundle.go) is
+//     `bun build <entry> --target=bun --format=esm --outfile=<out>`: it does
+//     NOT pass --keep-names. So the parity this pinned did not exist.
+//  2. "esbuild scope-hoisting renames" — this checker runs BUN, not esbuild;
+//     bundleSrcDir's own comment says so ("BUN, not esbuild").
+//  3. "Ctrl.name … only survives … under --keep-names" — measured with two
+//     files declaring one class name, using this checker's own arguments:
+//     with and without the flag the output is byte-identical and both yield
+//     `PalaiController2`. The flag does not cover de-duplication of two
+//     top-level identifiers; it defends against minification.
+//
+// What actually protects the published namespace is the name-repair table the
+// deploy's entry module carries (stack_bundle.go), and TestTwoClassesOneName
+// SurviveTheRealModuleWalk measures it — with this flag ON, so the suite itself
+// is the evidence rather than a comment.
+//
+// The flag STAYS: this turn did not measure what it does for the checker's own
+// pipeline beyond the case above, and removing it on an unmeasured hunch would
+// repeat the mistake this comment is correcting.
 func TestBundleSrcDirKeepsNames(t *testing.T) {
 	src, err := buildCheckFS.ReadFile("devjs/build-check.js")
 	require.NoError(t, err)
@@ -601,7 +621,7 @@ func TestBundleSrcDirKeepsNames(t *testing.T) {
 		fn = fn[:end]
 	}
 	require.Contains(t, fn, "'--keep-names'",
-		"bundleSrcDir esbuild args must include --keep-names (dotted-id parity: Ctrl.name must survive bundle scope-hoisting renames)")
+		"bundleSrcDir's bun args must still include --keep-names; if you are removing it, measure what it does first — see this test's comment")
 }
 
 // TestRunBuild_LandsTheTypesInTheCheckout is the T009 lock, and it runs against

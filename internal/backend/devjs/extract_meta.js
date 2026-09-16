@@ -32,8 +32,12 @@
  * (members.getUser). Omitted when the derivation is empty — the generator then
  * falls back to the flat verb-prefixed operationId from method + `path` (the
  * FULL route path, basePath + subpath). `mapKey` is the route fnName; the
- * worker dispatches on it. NOTE: bundles are built with esbuild `--keep-names`
- * (deploy/bundler.go) so the class name survives minification. Per-kind input
+ * worker dispatches on it. NOTE: the class name reaching this extractor is
+ * whatever the BUNDLE registered, and a bundler renames duplicate top-level
+ * identifiers (`PalaiController` → `PalaiController2`). What restores the
+ * source name is the repair table the deploy's entry module carries
+ * (stack_bundle.go), not a flag: measured 2026-09-16, `--keep-names` does not
+ * cover de-duplication, and the deploy's bundle call does not pass it. Per-kind input
  * schemas are SPLIT
  * (bodySchema/querySchema/paramsSchema/headersSchema) rather than a single
  * inputSchema; paramsSchema is synthesized from @Param("<name>") param metas.
@@ -396,8 +400,15 @@ function extractUploadConfig(uploadConfig) {
 // Members → "members". Returns "" when the derivation is empty (a class named
 // exactly "Controller", or an anonymous class) — the sidecar then omits
 // controllerName and the Go generator falls back to the flat operationId.
-// MUST stay byte-for-byte identical to deriveControllerName in
-// @palbase/backend's openapi/discover.ts (the dev-time spec twin).
+// MUST stay byte-for-byte identical to deriveControllerName in build-check.js
+// — the two JS twins really are identical, and that was measured.
+//
+// The TS copy in @palbase/backend's openapi/discover.ts is NOT byte-identical
+// and cannot be: it takes a STRING (`deriveControllerName(className: string)`)
+// while these twins take a CLASS and read `Ctrl.name`. What the three share is
+// BEHAVIOUR, and the table in that package's openapi-controllers.test.ts is
+// what holds it. The previous wording named a byte parity that no reader could
+// ever satisfy.
 function deriveControllerName(Ctrl) {
   let name = typeof Ctrl === 'function' && typeof Ctrl.name === 'string' ? Ctrl.name : '';
   if (name.endsWith('Controller')) name = name.slice(0, -'Controller'.length);

@@ -577,9 +577,14 @@ function joinPath(basePath, subPath) {
 // deriveControllerName lowercases the class name minus its "Controller" suffix:
 // Members → "members". Returns "" when the derivation is empty (a class named
 // exactly "Controller", or an anonymous class). MUST stay byte-for-byte
-// identical to deriveControllerName in the prod extractor (modules/backend
-// internal/runtime/extract_meta.js) and @palbase/backend's openapi/discover.ts
-// — the three spec twins.
+// identical to deriveControllerName in extract_meta.js — the two JS twins, and
+// that identity was measured (their function bodies hash the same).
+//
+// The TS copy in @palbase/backend's openapi/discover.ts is NOT byte-identical
+// and cannot be: it takes a STRING while these twins take a CLASS. The three
+// share BEHAVIOUR, and that package's openapi-controllers.test.ts table is what
+// holds it. (The path this comment used to cite for the prod extractor,
+// `modules/backend internal/runtime/extract_meta.js`, does not exist here.)
 function deriveControllerName(Ctrl) {
   let name = typeof Ctrl === 'function' && typeof Ctrl.name === 'string' ? Ctrl.name : '';
   if (name.endsWith('Controller')) name = name.slice(0, -'Controller'.length);
