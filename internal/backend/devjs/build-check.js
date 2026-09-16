@@ -777,6 +777,10 @@ function registerControllers() {
     if (className) fileByClass.set(className, file);
   }
 
+  // WHICH REGISTERED CONTROLLERS ACTUALLY PRODUCED A ROUTE. A class can be
+  // listed by a module, load cleanly, and still hand back nothing — the shape
+  // the silent-file check below would otherwise call answered.
+  const produced = new Set();
   for (const Ctrl of registeredControllers()) {
     const meta = readControllerMeta(Ctrl);
     const routeList = readControllerRoutes(Ctrl);
@@ -785,6 +789,7 @@ function registerControllers() {
       const method = typeof route.method === 'string' ? route.method.toUpperCase() : '';
       const routeKey = typeof route.fnName === 'string' ? route.fnName : '';
       if (!method || !routeKey) continue;
+      if (typeof Ctrl === 'function' && Ctrl.name) produced.add(Ctrl.name);
       const urlPattern = joinPath(meta.basePath, route.subpath);
       const { regex, paramNames } = urlToRegex(urlPattern);
       routes.set(method + ' ' + urlPattern, {
@@ -829,15 +834,28 @@ function registerControllers() {
   // Raw class names on both sides: `deriveControllerName` strips the
   // "Controller" suffix and lowercases, which is right for an operationId and
   // wrong for matching what the source file declares.
-  const answered = new Set(
+  const registeredNames = new Set(
     registeredControllers()
       .map((c) => (typeof c === 'function' ? c.name : ''))
       .filter(Boolean),
   );
+  const answered = new Set(registeredNames);
   for (const s of skipped) answered.add(withoutExtension(s.file));
   const silent = [];
   for (const { file, className } of sourceControllerFiles()) {
-    if (className && !answered.has(className)) silent.push(file);
+    if (!className) continue;
+    // Never listed: the class is not in the bundle at all.
+    if (!answered.has(className)) {
+      silent.push(file);
+      continue;
+    }
+    // LISTED, LOADED, AND STILL EMPTY. This is the shape the 26.08.2026
+    // measurement actually saw — a controller that went to zero routes while
+    // the report still ended in "build OK — 66 route(s)". Being registered
+    // answered for the class but not for its ENDPOINTS, so the file passed the
+    // check above and its routes left the air unnamed. A file only `skipped`
+    // is excluded: it is already reported once, under its own fault.
+    if (registeredNames.has(className) && !produced.has(className)) silent.push(file);
   }
 
   return {
@@ -887,12 +905,26 @@ function explainLoadFailure(err) {
 
 // sourceControllerFiles lists the *.controller.ts a person actually wrote,
 // project-relative — the list the registration is measured AGAINST.
+// sourceControllerFiles walks the WHOLE PROJECT, not `controllers/`.
+//
+// It used to walk `CONTROLLERS_DIR` alone, and that folder is retired: since
+// the module layout a controller lives at `modules/<domain>/<name>.controller.ts`
+// and nothing is required to sit under `controllers/` at all. On such a tree
+// this function returned an EMPTY list, and two things quietly died with it —
+// the route→file column printed its `'modules'` fallback for every route, and
+// the silent-controller check below had no files to ask about, so a controller
+// that went quiet could not be named. Measured 16.09.2026 on a fresh
+// `palbase init`: `GET /notes  →  modules [list]`, where the file was
+// `modules/notes/notes.controller.ts` all along.
+//
+// Walking the project also keeps the old layout working: `controllers/` is just
+// one more directory under the root.
 function sourceControllerFiles() {
-  if (!fs.existsSync(CONTROLLERS_DIR)) return [];
-  return walk(CONTROLLERS_DIR)
+  if (!fs.existsSync(PROJECT_ROOT)) return [];
+  return walk(PROJECT_ROOT)
     .filter((f) => f.endsWith('.controller.ts'))
     .map((f) => {
-      const rel = path.join('controllers', path.relative(CONTROLLERS_DIR, f));
+      const rel = path.relative(PROJECT_ROOT, f);
       let className = null;
       try {
         const m = /@Controller\s*\([\s\S]*?\)\s*(?:@[\w$]+\s*\([\s\S]*?\)\s*)*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/

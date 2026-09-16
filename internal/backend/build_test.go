@@ -849,10 +849,20 @@ func TestCheckMode_AControllerThatRegistersNothingIsNamed(t *testing.T) {
 		t.Skip("node/npm unavailable or @palbase/backend install failed")
 	}
 	writeFixture(t, dir, goodControllerTS)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "controllers", "quiet.controller.ts"),
+	// THE QUIET CONTROLLER IS OWNED BY A MODULE, and it has to be: since 41.0.0
+	// a class no module lists is refused EARLIER, as an unowned class, so a
+	// fixture that only drops the file into a folder measures that refusal
+	// instead of this one. The question here is narrower and still open — a
+	// controller that IS listed, loads, and registers nothing.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "quiet"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "quiet", "quiet.controller.ts"),
 		[]byte("import { Controller } from \"@palbase/backend\";\n\n"+
 			"@Controller(\"/quiet\")\nexport class QuietController {\n"+
 			"  // its routes were lost in an edit\n}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "quiet", "quiet.module.ts"),
+		[]byte("import { Module } from \"@palbase/backend\";\n"+
+			"import { QuietController } from \"./quiet.controller.ts\";\n\n"+
+			"@Module({ controllers: [QuietController] })\nexport class QuietModule {}\n"), 0o644))
 
 	out, ok := runCheckMode(t, dir)
 	require.False(t, ok, "a controller that registers nothing must fail the build:\n%s", out)
