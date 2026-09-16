@@ -1699,3 +1699,64 @@ func TestRunBuild_AnOldRendererKeepsTheNamesAndTheBuildPasses(t *testing.T) {
 	require.NoError(t, rerr)
 	require.Equal(t, existing, string(landed), "the old renderer's output dropped the names the file carried")
 }
+
+// TestBuildRefusesASurfaceClassNoModuleLists.
+//
+// A `@Job`, `@Webhook` or `@Hook` class that no module lists never reaches
+// `jobsOf(container)`, so it is never scheduled, never called — silently. The
+// build carries a refusal for exactly that, and until 2026-09-16 the refusal
+// COULD NOT FIRE on any real tree: it looked for classes under a root `jobs/`,
+// `webhooks/` or `hooks/` directory, and those directories are retired. The
+// scaffold ships `modules/digest/digest.job.ts`; `existsSync("jobs")` said no,
+// the list came back empty, and nothing was measured. No test named the
+// refusal either, which is how a dead gate stays green.
+//
+// This test writes the surface where the product puts it and leaves it off
+// every module's list.
+func TestBuildRefusesASurfaceClassNoModuleLists(t *testing.T) {
+	requiresRealToolchain(t)
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "digest"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "digest", "digest.job.ts"),
+		[]byte("import { Job, type JobMeta } from \"@palbase/backend\";\n\n"+
+			"@Job({ name: \"orphan-digest\", schedule: \"0 8 * * *\" })\n"+
+			"export class OrphanDigestJob {\n"+
+			"  async run(_meta: JobMeta): Promise<void> {}\n}\n"), 0o644))
+
+	out, ok := runCheckMode(t, dir)
+	require.False(t, ok, "a job no module lists must fail the build:\n%s", out)
+	require.Contains(t, out, "OrphanDigestJob", "the refusal has to name the class:\n%s", out)
+	require.Contains(t, out, "modules/digest/digest.job.ts",
+		"the refusal has to name the file where the product puts a job:\n%s", out)
+	require.Contains(t, out, "providers", "the refusal has to name the list that makes it exist:\n%s", out)
+}
+
+// The positive control for the gate above: the SAME class, listed by a module,
+// builds. Without this the test above would pass on a build that refuses every
+// job, which measures nothing about ownership.
+func TestBuildAcceptsASurfaceClassAModuleLists(t *testing.T) {
+	requiresRealToolchain(t)
+	dir := t.TempDir()
+	if !npmInstallBackend(t, dir) {
+		t.Skip("node/npm unavailable or @palbase/backend install failed")
+	}
+	writeFixture(t, dir, goodControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "digest"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "digest", "digest.job.ts"),
+		[]byte("import { Job, type JobMeta } from \"@palbase/backend\";\n\n"+
+			"@Job({ name: \"owned-digest\", schedule: \"0 8 * * *\" })\n"+
+			"export class OwnedDigestJob {\n"+
+			"  async run(_meta: JobMeta): Promise<void> {}\n}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "digest", "digest.module.ts"),
+		[]byte("import { Module } from \"@palbase/backend\";\n"+
+			"import { OwnedDigestJob } from \"./digest.job.ts\";\n\n"+
+			"@Module({ providers: [OwnedDigestJob] })\nexport class DigestModule {}\n"), 0o644))
+
+	out, ok := runCheckMode(t, dir)
+	require.True(t, ok, "a job a module lists must build:\n%s", out)
+	require.Contains(t, out, "build OK")
+}

@@ -821,8 +821,6 @@ function registerControllers() {
   // ezberden bilmek gerekiyordu. Boşalan (ya da @Controller sınıfını kaybeden)
   // bir dosya bu ağaçta bir rotayı SESSİZCE yayından kaldırır.
   //
-  // A file that failed to LOAD is already reported as `skipped`; naming it twice
-  // would turn one fault into two findings.
   // Compared by CLASS NAME rather than by path, because a route no longer knows
   // which file its controller was written in: the bundle entry is a module, and
   // one module reaches many files.
@@ -839,23 +837,30 @@ function registerControllers() {
       .map((c) => (typeof c === 'function' ? c.name : ''))
       .filter(Boolean),
   );
+  // `skipped` DELIBERATELY DOES NOT FEED THIS SET. It used to: the line added
+  // `withoutExtension(s.file)` — a PATH — to a set that is asked about CLASS
+  // NAMES, so it could never match anything, and it promised an exemption
+  // ("a file already reported as skipped is not named twice") that never ran.
+  // It cannot run for a second reason: nothing pushes to `skipped` any more.
+  // The single-file bundle removed the fault it described — one controller can
+  // no longer fail to load on its own; the whole bundle fails as `buildError`.
+  // The list and its reader are left in place because the shape may come back;
+  // the lie about what they do is not.
   const answered = new Set(registeredNames);
-  for (const s of skipped) answered.add(withoutExtension(s.file));
   const silent = [];
   for (const { file, className } of sourceControllerFiles()) {
     if (!className) continue;
     // Never listed: the class is not in the bundle at all.
     if (!answered.has(className)) {
-      silent.push(file);
+      silent.push({ file, listed: false });
       continue;
     }
     // LISTED, LOADED, AND STILL EMPTY. This is the shape the 26.08.2026
     // measurement actually saw — a controller that went to zero routes while
     // the report still ended in "build OK — 66 route(s)". Being registered
     // answered for the class but not for its ENDPOINTS, so the file passed the
-    // check above and its routes left the air unnamed. A file only `skipped`
-    // is excluded: it is already reported once, under its own fault.
-    if (registeredNames.has(className) && !produced.has(className)) silent.push(file);
+    // check above and its routes left the air unnamed.
+    if (registeredNames.has(className) && !produced.has(className)) silent.push({ file, listed: true });
   }
 
   return {
@@ -1093,11 +1098,30 @@ function esbuildErr(err) {
 //
 // Skipped by NAME, not by type: node_modules is often a SYMLINK and
 // `isDirectory()` is false for one, so a type-gated check walks into it.
-const WALK_SKIP = new Set(['node_modules', 'dist', 'build', '.git']);
+// THIS LIST GREW WHEN THE WALK DID. While `walk()` was only ever pointed at
+// `controllers/` these four were enough. Two callers now start at the PROJECT
+// ROOT — the controller-file scan and the surface scan — so every directory a
+// project keeps beside its code is in the path: build output, coverage
+// reports, framework caches, and the vendored trees a monorepo drops in.
+const WALK_SKIP = new Set([
+  'node_modules', 'dist', 'build', '.git',
+  'coverage', '.next', '.turbo', '.cache', '.venv', 'vendor', 'tmp',
+]);
 
 function walk(dir) {
   const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    // ONE UNREADABLE DIRECTORY IS NOT A BUILD FAILURE. From `controllers/` an
+    // EACCES here was the project's own tree and worth throwing over; from the
+    // project root it can be anything a checkout happens to carry, and an
+    // uncaught throw reaches main()'s outer catch as a FATAL that names a
+    // permission bit instead of the code.
+    return out;
+  }
+  for (const entry of entries) {
     if (WALK_SKIP.has(entry.name) || entry.name.startsWith('.palbase')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walk(full));
@@ -1135,11 +1159,28 @@ function walk(dir) {
 let containerForSurfaces = null;
 let sdkForSurfaces = null;
 
-const SURFACE_DIRS = [
-  ['jobs', 'job class'],
-  ['webhooks', 'webhook class'],
-  ['hooks', 'hook class'],
+// A SURFACE IS FOUND BY ITS FILE NAME, NOT BY A DIRECTORY.
+//
+// This list used to be directory names — `jobs/`, `webhooks/`, `hooks/` under
+// the project root — and those directories are RETIRED. In the module layout a
+// job is `modules/<domain>/<name>.job.ts` and nothing is required to sit under
+// `jobs/` at all, so on a real tree `existsSync` said no, the list came back
+// empty, and the refusal below ("no module lists it, so nothing builds it and
+// it will never run") never ran once. Measured 16.09.2026 on a `palbase init`
+// tree, whose only job is `modules/digest/digest.job.ts`. The tests stayed
+// green because every fixture still created a root `jobs/` — a dead gate with a
+// green test is the exact shape this file exists to refuse.
+//
+// `kindDir` is kept as the key `isSurfaceClass` reads; it is no longer a path.
+const SURFACE_KINDS = [
+  { kindDir: 'jobs', label: 'job class', file: /\.job\.(c?ts|tsx|c?js|mjs)$/i },
+  { kindDir: 'webhooks', label: 'webhook class', file: /\.webhook\.(c?ts|tsx|c?js|mjs)$/i },
+  { kindDir: 'hooks', label: 'hook class', file: /\.hook\.(c?ts|tsx|c?js|mjs)$/i },
 ];
+// The union, used as the bundler's entry filter so the whole project is scanned
+// ONCE for a handful of files rather than three times.
+const SURFACE_FILE_RE = /\.(job|webhook|hook)\.(c?ts|tsx|c?js|mjs)$/i;
+const SURFACE_BUNDLE_DIR = 'surfaces';
 
 // The stamps a decorator leaves, read here the way the CONTROLLER path reads
 // `__palbase !== 'controller'` before it treats a class as a controller.
@@ -1166,10 +1207,10 @@ function isSurfaceClass(value, dirName) {
 /** Every class a surface file exports, decorated or default. Bundled first, for
  * the same reason controllers are: the sources are TypeScript and the extension
  * -less relative imports must resolve the way they do on deploy. */
-function surfaceClassesIn(dirName) {
-  const srcDir = path.join(PROJECT_ROOT, dirName);
+function surfaceClassesInProject() {
+  const srcDir = PROJECT_ROOT;
   if (!fs.existsSync(srcDir)) return [];
-  const outDir = path.join(BUNDLE_ROOT, dirName);
+  const outDir = path.join(BUNDLE_ROOT, SURFACE_BUNDLE_DIR);
   rmBundledTree(outDir);
   // A bundle failure here is a USER-CODE fault (a syntax error, an unresolved
   // import) and reads as one — the controller path does the same at its own
@@ -1177,14 +1218,19 @@ function surfaceClassesIn(dirName) {
   // `FATAL: … Command failed: npx --yes esbuild --bundle …` with the whole
   // argument list, burying esbuild's actual diagnosis.
   try {
-    if (!bundleSrcDir(srcDir, outDir, CONTROLLER_RESOURCE_EXTERNALS, SURFACE_ENTRY_RE)) return [];
+    if (!bundleSrcDir(srcDir, outDir, CONTROLLER_RESOURCE_EXTERNALS, SURFACE_FILE_RE)) return [];
   } catch (err) {
-    return [{ file: path.join(BUNDLE_ROOT, dirName, `${dirName}/`), error: esbuildErr(err) }];
+    return [{ file: path.join(SURFACE_BUNDLE_DIR, '/'), error: esbuildErr(err) }];
   }
 
   const found = [];
   for (const file of walk(outDir)) {
-    if (!/\.(c?js)$/i.test(path.basename(file))) continue;
+    const base = path.basename(file);
+    if (!/\.(c?js)$/i.test(base)) continue;
+    // The KIND comes from the file's own name, which is also what put it in
+    // this bundle. A `.job.js` is asked the job question and no other.
+    const kind = SURFACE_KINDS.find((k) => k.file.test(base.replace(/\.c?js$/i, '.ts')));
+    if (!kind) continue;
     let mod;
     try {
       delete require.cache[require.resolve(file)];
@@ -1193,13 +1239,13 @@ function surfaceClassesIn(dirName) {
       // A file that will not load is reported the way a controller's is; it is
       // not silently skipped, because "did not load" and "declared nothing"
       // deploy very differently.
-      found.push({ file, error: err.message });
+      found.push({ file, kind, error: err.message });
       continue;
     }
     const candidates = [mod && mod.default, ...(mod ? Object.keys(mod).map((k) => mod[k]) : [])];
     for (const value of candidates) {
-      if (isSurfaceClass(value, dirName) && !found.some((f) => f.cls === value)) {
-        found.push({ file, cls: value });
+      if (isSurfaceClass(value, kind.kindDir) && !found.some((f) => f.cls === value)) {
+        found.push({ file, kind, cls: value });
       }
     }
   }
@@ -1228,24 +1274,26 @@ function surfaceClassesIn(dirName) {
  */
 function checkSurfaceConstructors(ownedNames) {
   const failures = [];
-  for (const [dirName, kind] of SURFACE_DIRS) {
-    for (const entry of surfaceClassesIn(dirName)) {
-      const shown = path.join(dirName, path.relative(path.join(BUNDLE_ROOT, dirName), entry.file))
-        .replace(/\.c?js$/i, '.ts');
-      if (entry.error) {
-        failures.push({ file: shown, error: entry.error });
-        continue;
-      }
-      if (!ownedNames) continue; // the graph was refused; that IS the finding
-      const name = typeof entry.cls === 'function' ? entry.cls.name : '';
-      if (!ownedNames.has(name)) {
-        failures.push({
-          file: shown,
-          error:
-            `${kind} ${name || '<anonymous>'} is declared but no module lists it, so nothing ` +
-            `builds it and it will never run — add it to a module's \`providers\``,
-        });
-      }
+  for (const entry of surfaceClassesInProject()) {
+    // The bundle mirrors the project tree, so relativising against the bundle
+    // root gives back the SOURCE path the author wrote — `modules/digest/
+    // digest.job.ts`, not `jobs/digest.ts`.
+    const shown = path
+      .relative(path.join(BUNDLE_ROOT, SURFACE_BUNDLE_DIR), entry.file)
+      .replace(/\.c?js$/i, '.ts');
+    if (entry.error) {
+      failures.push({ file: shown, error: entry.error });
+      continue;
+    }
+    if (!ownedNames) continue; // the graph was refused; that IS the finding
+    const name = typeof entry.cls === 'function' ? entry.cls.name : '';
+    if (!ownedNames.has(name)) {
+      failures.push({
+        file: shown,
+        error:
+          `${entry.kind.label} ${name || '<anonymous>'} is declared but no module lists it, so ` +
+          `nothing builds it and it will never run — add it to a module's \`providers\``,
+      });
     }
   }
   return failures;
@@ -1479,11 +1527,18 @@ async function main() {
   if (!reg.buildError) {
     for (const e of await deployExtractErrors()) failures.push(e);
   }
+  // TWO DIFFERENT FAULTS, TWO DIFFERENT SENTENCES. A file no module lists and a
+  // file that is listed but hands back nothing both end with routes off the
+  // air, but the fix is not the same one — and telling an author their listed
+  // controller "is not listed" sends them to edit a line that is already right.
   for (const f of reg.silent || []) {
     failures.push({
-      file: f,
-      error: 'registered no routes — a deploy would take its endpoints off the air, and the ' +
-        'total route count is the only place that would have shown it',
+      file: f.file,
+      error: f.listed
+        ? 'registered no routes — a deploy would take its endpoints off the air, and the ' +
+          'total route count is the only place that would have shown it'
+        : 'no module lists it, so nothing imports it and its routes never reach the route ' +
+          "table — add the class to a module's `controllers`",
     });
   }
 
@@ -1567,7 +1622,7 @@ module.exports = {
   registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
   BUNDLED_MODULES_FILE, BUNDLED_EXTRACT_DIR,
   stageControllersWithReturnBindings, bundledToSrcRel,
-  surfaceClassesIn, checkSurfaceConstructors,
+  surfaceClassesInProject, checkSurfaceConstructors,
   // The refusal text a person reads when a file carries no @Controller the
   // module can list. Exported so a test can measure the SENTENCE rather than
   // re-typing it: a message nobody asserts drifts back to the retired shape.

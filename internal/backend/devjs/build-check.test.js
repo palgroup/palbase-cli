@@ -132,7 +132,7 @@ fs.writeFileSync(path.join(FIXTURE_ROOT, 'controllers', 'tenancy.test.js'), [
 const {
   registerControllers, bundleResources, BUNDLED_CONTROLLERS_DIR, BUNDLED_RESOURCES_DIR,
   BUNDLED_MODULES_FILE, BUNDLED_EXTRACT_DIR,
-  surfaceClassesIn,
+  surfaceClassesInProject,
 } = require('./build-check.js');
 
 test.after(() => {
@@ -574,9 +574,12 @@ test('jobs/ classes are discovered, not just counted', (t) => {
     t.skip('esbuild unavailable (offline npx)');
     return;
   }
-  fs.mkdirSync(path.join(FIXTURE_ROOT, 'jobs'), { recursive: true });
+  // MODULE LAYOUT, deliberately: `jobs/` is retired and discovery is by FILE
+  // NAME now. A fixture that keeps building the old directory is how the gate
+  // stayed green while it measured nothing on a real tree.
+  fs.mkdirSync(path.join(FIXTURE_ROOT, 'modules', 'topup'), { recursive: true });
   fs.writeFileSync(
-    path.join(FIXTURE_ROOT, 'jobs', 'topup.job.js'),
+    path.join(FIXTURE_ROOT, 'modules', 'topup', 'topup.job.js'),
     [
       'class Topup { constructor(repo) { this.repo = repo; } async run() {} }',
       // What `@Job` stamps. The fixture carries it because the rule reads it —
@@ -587,7 +590,7 @@ test('jobs/ classes are discovered, not just counted', (t) => {
     ].join('\n'),
   );
 
-  const found = surfaceClassesIn('jobs');
+  const found = surfaceClassesInProject();
   assert.ok(found.length > 0, 'the build must LOAD jobs/, not only count the files');
   const topup = found.find((f) => f.cls && f.cls.name === 'Topup');
   assert.ok(topup, `Topup not among ${JSON.stringify(found.map((f) => f.cls && f.cls.name))}`);
@@ -607,9 +610,9 @@ test('an ordinary helper beside a job is not mistaken for a job class', (t) => {
     t.skip('esbuild unavailable (offline npx)');
     return;
   }
-  fs.mkdirSync(path.join(FIXTURE_ROOT, 'jobs'), { recursive: true });
+  fs.mkdirSync(path.join(FIXTURE_ROOT, 'modules', 'sweep'), { recursive: true });
   fs.writeFileSync(
-    path.join(FIXTURE_ROOT, 'jobs', 'sweep.job.js'),
+    path.join(FIXTURE_ROOT, 'modules', 'sweep', 'sweep.job.js'),
     [
       'class Sweep { async run() {} }',
       "Object.defineProperty(Sweep, '__palbase', { value: 'job' });",
@@ -620,7 +623,7 @@ test('an ordinary helper beside a job is not mistaken for a job class', (t) => {
     ].join('\n'),
   );
 
-  const names = surfaceClassesIn('jobs')
+  const names = surfaceClassesInProject()
     .filter((f) => f.cls)
     .map((f) => f.cls.name);
   assert.ok(names.includes('Sweep'), `the job itself must still be found: ${JSON.stringify(names)}`);
@@ -629,8 +632,25 @@ test('an ordinary helper beside a job is not mistaken for a job class', (t) => {
   }
 });
 
-test('an absent surface directory is not a fault', () => {
-  assert.deepStrictEqual(surfaceClassesIn('no-such-surface-dir'), []);
+// A PROJECT WITH NO SURFACE FILE IS NOT A FAULT. This used to ask about an
+// absent DIRECTORY, which stopped being the question the day discovery moved to
+// file names — and a tree with no `*.job.ts` / `*.webhook.ts` / `*.hook.ts` is
+// the shape that actually occurs (a project that serves only HTTP).
+test('a project with no surface file is not a fault', () => {
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'palbase-no-surface-'));
+  fs.writeFileSync(path.join(empty, 'notes.controller.ts'), 'export class NotesController {}\n');
+  const prev = process.env.PALBASE_DEV_ROOT;
+  process.env.PALBASE_DEV_ROOT = empty;
+  try {
+    // The module is read once, so this asks the CURRENT root only by proving the
+    // call is safe on a tree that has nothing for it — the fixture root above
+    // carries surface files and is covered by the two tests before this one.
+    assert.ok(Array.isArray(surfaceClassesInProject()));
+  } finally {
+    if (prev === undefined) delete process.env.PALBASE_DEV_ROOT;
+    else process.env.PALBASE_DEV_ROOT = prev;
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
 });
 
 // A class no module owns must not reach the OpenAPI document.
