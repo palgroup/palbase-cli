@@ -834,3 +834,39 @@ test('every `typeof sdk.X` guard names a symbol the SDK exports', () => {
       `the guard is false every time and the check never runs`,
   );
 });
+
+// BİR SINIFI MODÜL LİSTESİNDEN ÇIKARMAK SESSİZ OLAMAZ (ölçüldü 2026-09-16).
+//
+// Modül controller'ını import eder ve `controllers` listesinde adlandırır. Adı o
+// listeden ÇIKARIN — "sınıfı yazdım, listeye eklemeyi unuttum", en olası yazar
+// hatası — ve import kullanılmaz hâle gelir. Bundler onu TREE-SHAKE eder,
+// `@Controller` dekoratörü hiç koşmaz, sınıf hiç kaydolmaz ve
+// `assertNoOrphanEntryPoints`in reddedecek bir şeyi kalmaz.
+//
+// `palbase build` üzerinden ölçüldü: notes dikeyi sessizce yok olmuş bir ağaçta
+// `build OK — 1 route(s)`. Zorla bir yan etki importu konunca aynı ağaç ADIYLA
+// reddediliyor. Yani kusur kuralda değil, GİRİŞİN NE YÜKLEDİĞİNDEydi: modül
+// grafiği yalnız ZATEN SAHİPLENİLMİŞ olanı içerir, oysa sorulan soru "ağaçta VAR
+// OLAN her sınıfı bir modül sahipleniyor mu".
+test('the build-check entry loads every surface definition, not only the modules', () => {
+  const { SURFACE_DEFINITION_RE } = require('./build-check.js');
+
+  // Yüzey tanımı olan her dosya EŞLEŞİR — biri düşerse o yüzeyin sahipsiz hâli
+  // yeniden sessizleşir.
+  for (const name of [
+    'notes.controller.ts', 'digest.job.ts', 'stripe.webhook.ts',
+    'audit.hook.ts', 'lobby.room.ts', 'notes.controller.tsx', 'notes.controller.js',
+  ]) {
+    assert.equal(SURFACE_DEFINITION_RE.test(name), true, `${name} must be loaded by the entry`);
+  }
+
+  // Test dosyaları DEĞİL: deploy da onları tanım saymıyor, ve `palbase build`
+  // node_modules'suz bir ağaç sahnelediği için `vitest` import eden bir test
+  // build'in tamamını düşürürdü.
+  for (const name of [
+    'notes.controller.test.ts', 'notes.e2e.test.ts', 'notes.service.ts',
+    'notes.module.ts', 'public.ts', 'note.ts',
+  ]) {
+    assert.equal(SURFACE_DEFINITION_RE.test(name), false, `${name} must NOT be loaded by the entry`);
+  }
+});

@@ -318,8 +318,27 @@ function bundleModulesAsOne(srcDir, outFile, externals = []) {
   const entries = walk(srcDir).filter((f) => MODULE_ENTRY_RE.test(path.basename(f)));
   if (entries.length === 0) return null;
 
+  // THE ENTRY LOADS EVERY SURFACE FILE, NOT ONLY THE MODULES — and the reason is
+  // a silence measured 2026-09-16 through `palbase build` itself.
+  //
+  // A module imports its controller and names it in `controllers`. Take the name
+  // OUT of that list — the single most likely authoring mistake, "I wrote the
+  // class and forgot the list" — and the import becomes unused. The bundler
+  // TREE-SHAKES it, the `@Controller` decorator never runs, the class never
+  // registers, and `assertNoOrphanEntryPoints` has nothing to refuse. Measured:
+  // `build OK — 1 route(s)` on a tree whose notes vertical had silently vanished.
+  // With a bare side-effect import forced in, the same tree is refused BY NAME.
+  //
+  // So the question this check asks — "does a module own every decorated class
+  // in this tree?" — cannot be answered from the module graph alone: that graph
+  // only contains what is already owned. The entry has to load what EXISTS.
+  // A file that breaks on import breaks the same way on deploy, so nothing is
+  // hidden by loading it here.
+  const surfaces = walk(srcDir).filter(
+    (f) => SURFACE_DEFINITION_RE.test(path.basename(f)) && !MODULE_ENTRY_RE.test(path.basename(f)),
+  );
   const entryPath = path.join(srcDir, '.build-check-entry.ts');
-  const body = entries
+  const body = [...entries, ...surfaces]
     .map((f) => {
       const rel = path.relative(srcDir, f).split(path.sep).join('/');
       return `import ${JSON.stringify('./' + rel)};`;
@@ -374,6 +393,14 @@ function rmBundledTree(outDir) {
 // A module imports the classes it owns, so bundling one reaches everything that
 // project declares — and nothing it does not.
 const MODULE_ENTRY_RE = /\.module\.(c?ts|tsx|c?js|mjs)$/i;
+
+// Every file that may DEFINE a surface, by the suffix the deploy reads. The
+// build-check entry side-effect-imports all of them so a decorated class is
+// registered whether or not a module already names it — see the note in
+// `bundleModulesAsOne`. Test files are excluded for the same reason the deploy
+// excludes them: a test is not a definition.
+const SURFACE_DEFINITION_RE =
+  /^(?!.*\.(test|e2e\.test)\.(c?ts|tsx|c?js|mts|mjs)$).*\.(controller|job|webhook|hook|room)\.(c?ts|tsx|c?js|mjs)$/i;
 
 // What the DEPLOY treats as a surface definition, spelled the same way here.
 //
@@ -1516,4 +1543,9 @@ module.exports = {
   // The reader half of the string contract with extract_meta.js — exported so a
   // test can hold it against what that file actually writes.
   NO_CONTROLLER_IN_BUNDLE,
+  // The rule that decides which files the build-check entry side-effect-imports.
+  // Exported so a test can measure it directly: the entry's job is to register
+  // what EXISTS, and a rule that quietly stops matching turns the orphan refusal
+  // back into silence.
+  SURFACE_DEFINITION_RE,
 };
