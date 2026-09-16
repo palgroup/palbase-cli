@@ -226,8 +226,11 @@ func settingsCmd(r Resolvers) *cobra.Command {
 	set.Flags().IntVar(&pwMax, "password-max", 0, "longest password this project accepts")
 	set.Flags().BoolVar(&confirm, "confirm-email", false, "require a confirmed address before sign-in")
 	set.Flags().StringVar(&siteURL, "site-url", "", "the address links in this project's mail point at")
-	set.Flags().IntVar(&accessTTL, "access-token-ttl", 0, "how many seconds an access token lives (60-86400)")
-	set.Flags().IntVar(&refreshTTL, "refresh-token-ttl", 0, "how many seconds a refresh token lives (3600-7776000)")
+	// Yardım metni sınırı KOPYALAMAZ — aşağıdaki yorumun kendi kuralı bu. Sunucu
+	// sınırı reddettiğinde gerçek aralığı zaten söylüyor; burada ikinci bir kopya
+	// tutmak, bir gün ayrışacak ikinci bir doğru üretirdi.
+	set.Flags().IntVar(&accessTTL, "access-token-ttl", 0, "how many seconds an access token lives")
+	set.Flags().IntVar(&refreshTTL, "refresh-token-ttl", 0, "how many seconds a refresh token lives")
 	c.AddCommand(set)
 	return c
 }
