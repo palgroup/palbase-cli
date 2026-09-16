@@ -537,6 +537,51 @@ var controllerClassRe = regexp.MustCompile(
 // the order the bundle will register them: file by file, declaration by
 // declaration. A file that cannot be read contributes nothing, which is the
 // fail-closed reading — see the block in bundleEntry that consumes this.
+// controllerSourceNames, projenin `*.controller.ts` KAYNAKLARINI yürür ve her
+// birinin `@Controller` sınıf adını döndürür.
+//
+// NEDEN AYRI BİR YÜRÜYÜŞ. Onarım tablosu buraya kadar `sources`tan
+// dolduruluyordu ve `sources` bir noktada `*.module.ts` listesi oldu. Module
+// dosyası `@Controller` sınıfı BİLDİRMEZ — sınıf kendi `*.controller.ts`
+// dosyasında yaşar, module onu yalnız import eder. Ölçüldü 2026-09-16:
+// palbase-cloud'da 28 `*.module.ts` var, `@Controller` taşıyan SIFIR. Yani
+// tablo her ağaçta boş dönüyordu, onarım hiç emit edilmiyordu, ve hiçbir test
+// kırmızıya dönmüyordu: kapının konusu boş bir listeye dönüşmüştü ve boş liste
+// hiçbir şeyle eşleşmez.
+//
+// SIRA ARANMIYOR ve aranmamalı. Eski blok `__want[i]` ile `__regs[i]`yi
+// pozisyon pozisyon eşliyordu; o biçim, kaynak yürüyüş sırasının KAYIT
+// sırasıyla aynı olmasını gerektirir — ki değildir: kayıt sırası import
+// sırasıdır, import sırası module dosyalarının sırasıdır, ve bir modül
+// kendisiyle yan yana sıralanmayan bir controller'ı import edebilir. Tablo bir
+// KÜME olarak gömülüyor (aşağıdaki blok), böylece sıra hakkında hiçbir şey
+// varsayılmıyor.
+func controllerSourceNames(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path != root && (name == "node_modules" || name == "dist" || name == ".git" ||
+				strings.HasPrefix(name, ".palbase")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(name, ".controller.ts") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return controllerClassNames(files), nil
+}
+
 func controllerClassNames(sources []string) []string {
 	var names []string
 	for _, src := range sources {
@@ -725,37 +770,56 @@ func bundleEntry(dir string, sources []string) (string, error) {
 	// Registration order is import order, which is this list's order, so the
 	// table lines up position by position.
 	//
-	// ‼️ THIS TABLE IS EMPTY ON EVERY TREE WE SHIP, AND THE RENAME IT GUARDS IS
-	// THEREFORE UNGUARDED. `sources` became the `*.module.ts` list when the entry
-	// moved to modules, and `controllerClassNames` looks for `@Controller ...
-	// class X` — which a module file does not declare, because the class lives in
-	// its own `*.controller.ts`. Measured 2026-09-16: 26 `*.module.ts` files in
-	// this repository, zero carrying a @Controller class, so `names` is empty and
-	// the block below is never emitted. The collision it was written for (two
-	// files both declaring `PalaiController`, bundled into one file, renamed to
-	// `PalaiController2` and shipped as a split API namespace) is unchanged —
-	// only the defence is gone. The fix is to read the class names off the
-	// `*.controller.ts` sources in REGISTRATION order, which is not a message
-	// change and is not in this task's scope.
+	// THIS TABLE WAS EMPTY ON EVERY TREE WE SHIPPED, AND THE RENAME IT GUARDS WAS
+	// THEREFORE UNGUARDED — until 2026-09-16. The record stays because the way it
+	// died is the lesson, not a footnote.
 	//
-	// FAILS CLOSED. A name is restored only when the bundled one is exactly the
-	// source name followed by digits — the bundler's own pattern. If this table
-	// ever drifts from what the bundle registered, nothing is renamed and the
-	// behaviour is what it was before this block existed.
+	// `sources` became the `*.module.ts` list when the entry moved to modules, and
+	// `controllerClassNames` looks for `@Controller ... class X` — which a module
+	// file does not declare, because the class lives in its own `*.controller.ts`.
+	// Measured: 28 `*.module.ts` files in palbase-cloud, ZERO carrying a
+	// @Controller class. So `names` came back empty, this block was never emitted,
+	// and NOTHING WENT RED: the gate's own subject had become an empty list, and
+	// an empty list matches nothing and reports silence. The defence was written,
+	// disconnected by an unrelated refactor, and lost without a sound.
+	//
+	// The input now comes from `controllerSourceNames(dir)`, which walks the
+	// `*.controller.ts` sources — and `stack_bundle_test.go` measures that the
+	// table is NON-EMPTY on a tree that declares controllers. Measuring that this
+	// block EXISTS is exactly what failed here; a defence has to be measured by
+	// what it CONTAINS.
+	//
+	// THE MATCH IS UNORDERED, and that is a correction too. The old form paired
+	// `__want[i]` with `__regs[i]` position by position, which requires the source
+	// walk to be in REGISTRATION order — it is not: registration order is import
+	// order, import order is the module files' order, and a module can import a
+	// controller that does not sort next to it (`a.module.ts`→`zeta.controller.ts`,
+	// `b.module.ts`→`alpha.controller.ts` registers Zeta,Alpha while the walk
+	// yields Alpha,Zeta). A shifted table either repairs nothing or renames the
+	// WRONG class in a genuine `Foo`/`Foo2` pair.
+	//
+	// FAILS CLOSED, in two ways. A name present in the source is never touched —
+	// a project that really wrote `Api2Controller` keeps it. And a name is only
+	// repaired when stripping its TRAILING DIGITS yields a name the source
+	// declares; anything else is left exactly as the bundle produced it.
 	//
 	// Two controllers that genuinely share a class name then share a namespace,
 	// which is what the source says; a real clash between their METHOD names is
 	// still refused, loudly, by the operationId gate in the runtime's generator.
-	if names := controllerClassNames(sources); len(names) > 0 {
+	names, err := controllerSourceNames(dir)
+	if err != nil {
+		return "", fmt.Errorf("controller kaynakları yürünemedi: %w", err)
+	}
+	if len(names) > 0 {
 		blob, _ := json.Marshal(names)
 		fmt.Fprintf(&b, `{
-  const __want = %s;
-  const __regs = SDK.getRegisteredControllers();
-  for (let __i = 0; __i < __regs.length && __i < __want.length; __i++) {
-    const __c = __regs[__i], __w = __want[__i];
-    if (!__w || typeof __c !== "function" || __c.name === __w) continue;
-    if (!__c.name.startsWith(__w) || !/^[0-9]+$/.test(__c.name.slice(__w.length))) continue;
-    Object.defineProperty(__c, "name", { value: __w, configurable: true });
+  const __want = new Set(%s);
+  for (const __c of SDK.getRegisteredControllers()) {
+    if (typeof __c !== "function") continue;
+    if (__want.has(__c.name)) continue;
+    const __base = __c.name.replace(/[0-9]+$/, "");
+    if (__base === __c.name || !__want.has(__base)) continue;
+    Object.defineProperty(__c, "name", { value: __base, configurable: true });
   }
 }
 `, blob)

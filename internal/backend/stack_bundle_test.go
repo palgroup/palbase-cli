@@ -1192,3 +1192,177 @@ func TestCollectTakesOnlyTheDeploysOwnSuites(t *testing.T) {
 		"tests/health.test.ts",
 	}, rels, "deploy kiracının birim testlerini de topladı (FR-017)")
 }
+
+// ONARIM TABLOSU BOŞ OLAMAZ (#151).
+//
+// Giriş modülü, bundler'ın tekilleştirme sayacının yayımlanan operation id'lere
+// sızmasını engelleyen bir onarım taşıyor: kaynaktaki sınıf adlarını gömüyor ve
+// bundle'ın verdiği `Foo2` gibi adları geri düzeltiyor. Blok yazılmıştı ve
+// FAIL-CLOSED'dı — ama HER AĞAÇTA ÖLÜYDÜ.
+//
+// Sebep: girdisi `sources`tı ve `sources` bir noktada `*.module.ts` listesi
+// oldu. Module dosyası `@Controller` sınıfı BİLDİRMEZ — sınıf kendi
+// `*.controller.ts` dosyasında yaşar. Ölçüldü 2026-09-16: bu depoda 28
+// `*.module.ts` var, `@Controller` taşıyan SIFIR. Yani tablo boş dönüyor, blok
+// hiç emit edilmiyor ve hiçbir test kırmızıya dönmüyordu — çünkü kapının
+// konusu boş bir listeye dönüşmüştü ve boş liste hiçbir şeyle eşleşmez.
+//
+// Bu kapı tam olarak o sessizliği ölçüyor: VARLIK değil, DOLULUK.
+func TestTheNameRepairTableIsNeverEmptyOnATreeWithControllers(t *testing.T) {
+	dir := writeRealModuleTree(t, "PalaiController", "PalaiController")
+
+	sources, err := moduleSources(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, sources, "fikstür bir *.module.ts yazmadı — test kendi öncülünü kaybetti")
+
+	entry, err := bundleEntry(dir, sources)
+	require.NoError(t, err)
+
+	require.Contains(t, entry, "__want",
+		"giriş modülü ad onarımını hiç emit etmiyor — bundler'ın sayacı sözleşmeye sızar")
+	require.Contains(t, entry, "PalaiController",
+		"onarım tablosu BOŞ: kaynakta bildirilen sınıf adı tabloya girmemiş. "+
+			"Tablo `*.module.ts` listesinden doldurulursa her ağaçta boş kalır — "+
+			"module dosyaları @Controller sınıfı bildirmez.")
+}
+
+// İKİ SINIF TEK AD, GERÇEK MODULE YÜRÜYÜŞÜNDEN.
+//
+// `TestTheBundlerDoesNotGetToNameThePublicAPI` de iki-sınıf-tek-ad kuruyor ama
+// `sources`a controller dosyalarını DOĞRUDAN veriyor — yani üretimde hiç
+// olmayan bir şekil. O yüzden bugün yeşil ve aradığımız kırmızı o değil. Bu
+// test ağacı üretimdeki gibi kuruyor: `*.module.ts` dosyaları ve onların
+// import ettiği `*.controller.ts` dosyaları.
+//
+// `--keep-names` AÇIKKEN koşuyor. Ölçüldü (bun 1.3.9): bayrak bu çakışmayı
+// KAPSAMIYOR — bayraklı ve bayraksız çıktı byte-identical ve ikisinde de
+// `PalaiController2` çıkıyor. Testin bayrakla koşması, bunu bir yorum iddiası
+// olmaktan çıkarıp süitin kendi çıktısı yapıyor.
+func TestTwoClassesOneNameSurviveTheRealModuleWalk(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is not installed")
+	}
+	dir := writeRealModuleTree(t, "PalaiController", "PalaiController")
+
+	sources, err := moduleSources(dir)
+	require.NoError(t, err)
+
+	body, err := bundleEntry(dir, sources)
+	require.NoError(t, err)
+	entry := filepath.Join(dir, ".controllers-entry.ts")
+	require.NoError(t, os.WriteFile(entry, []byte(body), 0o644))
+
+	out := filepath.Join(dir, "bundle.js")
+	build := exec.Command("bun", "build", entry, "--target=bun", "--format=esm", "--keep-names", "--outfile="+out)
+	build.Dir = dir
+	if b, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("bundle failed: %v\n%s", err, b)
+	}
+
+	read := exec.Command("bun", "-e",
+		`const m = await import(process.argv[1]); console.log(m.getRegisteredControllers().map(c => c.name).join(","));`,
+		out)
+	read.Dir = dir
+	got, err := read.CombinedOutput()
+	if err != nil {
+		t.Fatalf("could not read the bundle: %v\n%s", err, got)
+	}
+	names := strings.TrimSpace(string(got))
+	if names != "PalaiController,PalaiController" {
+		t.Errorf("gerçek module yürüyüşünden geçen ağaçta bundler adı DEĞİŞTİRDİ: %q. "+
+			"Yayımlanan namespace bundler'ın tekilleştirme sayacından gelirse, bir dosya "+
+			"eklemek her istemcinin üretilen kodunu kaydırır.", names)
+	}
+}
+
+// KAYNAKTA GERÇEKTEN RAKAMLA BİTEN BİR AD VARSA ONA DOKUNULMAZ.
+//
+// Onarım "sondaki rakamları at, kaynakta var mı bak" kuralıyla çalışıyor.
+// `Api2Controller` diye bir sınıfı kaynakta yazan bir proje, onun `Api`ye
+// çevrilmesini görmemeli — o rakam bundler'ın değil, yazarın.
+func TestARealDigitSuffixedNameIsLeftAlone(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is not installed")
+	}
+	dir := writeRealModuleTree(t, "ApiController", "Api2Controller")
+
+	sources, err := moduleSources(dir)
+	require.NoError(t, err)
+	body, err := bundleEntry(dir, sources)
+	require.NoError(t, err)
+	entry := filepath.Join(dir, ".controllers-entry.ts")
+	require.NoError(t, os.WriteFile(entry, []byte(body), 0o644))
+
+	out := filepath.Join(dir, "bundle.js")
+	build := exec.Command("bun", "build", entry, "--target=bun", "--format=esm", "--keep-names", "--outfile="+out)
+	build.Dir = dir
+	if b, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("bundle failed: %v\n%s", err, b)
+	}
+	read := exec.Command("bun", "-e",
+		`const m = await import(process.argv[1]); console.log(m.getRegisteredControllers().map(c => c.name).sort().join(","));`,
+		out)
+	read.Dir = dir
+	got, err := read.CombinedOutput()
+	if err != nil {
+		t.Fatalf("could not read the bundle: %v\n%s", err, got)
+	}
+	if names := strings.TrimSpace(string(got)); names != "Api2Controller,ApiController" {
+		t.Errorf("kaynakta yazılmış bir rakam onarım tarafından silindi: %q — "+
+			"beklenen \"Api2Controller,ApiController\"", names)
+	}
+}
+
+// writeRealModuleTree, ÜRETİMDEKİ şekli kurar: bir `*.module.ts` ve onun
+// import ettiği iki `*.controller.ts`. Verilen iki sınıf adı aynı olabilir —
+// çakışma fikstürü tam budur.
+func writeRealModuleTree(t *testing.T, classA, classB string) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	sdk := filepath.Join(dir, "node_modules", "@palbase", "backend")
+	require.NoError(t, os.MkdirAll(sdk, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sdk, "package.json"),
+		[]byte(`{"name":"@palbase/backend","version":"99.0.0","type":"module","main":"index.js"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sdk, "index.js"), []byte(`
+const REG = [];
+export function Controller() { return (cls) => { REG.push(cls); return cls; }; }
+export function Module() { return (cls) => cls; }
+export function getRegisteredControllers() { return REG; }
+export function __runWithRuntime() {}
+export function buildModuleClients() { return {}; }
+export const __requestALS = null;
+export function __getRuntime() {}
+`), 0o644))
+
+	ctl := filepath.Join(dir, "controllers")
+	require.NoError(t, os.MkdirAll(ctl, 0o755))
+	files := []struct{ file, class, method string }{
+		{"a.controller.ts", classA, "alpha"},
+		{"b.controller.ts", classB, "beta"},
+	}
+	for _, f := range files {
+		body := `import { Controller } from "@palbase/backend";
+
+@Controller("/palai")
+export class ` + f.class + ` { ` + f.method + `() { return "` + f.method + `"; } }
+`
+		require.NoError(t, os.WriteFile(filepath.Join(ctl, f.file), []byte(body), 0o644))
+	}
+
+	// MODULE DOSYASI: üretimde giriş noktası budur ve controller'lar buraya
+	// import edilerek bundle'a girer. `@Controller` sınıfı BİLDİRMEZ — onarım
+	// tablosunun neden `*.module.ts` listesinden doldurulamayacağının sebebi.
+	mods := filepath.Join(dir, "modules")
+	require.NoError(t, os.MkdirAll(mods, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mods, "palai.module.ts"), []byte(
+		`import { Module } from "@palbase/backend";
+import "../controllers/a.controller";
+import "../controllers/b.controller";
+
+@Module()
+export class PalaiModule {}
+`), 0o644))
+
+	return dir
+}
