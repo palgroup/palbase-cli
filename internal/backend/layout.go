@@ -62,9 +62,6 @@ func EnvDir(env string) string { return path.Join(rootDir, envSubdir, env) }
 // SpecPath is that environment's contract.
 func SpecPath(env string) string { return path.Join(EnvDir(env), "openapi.json") }
 
-// RolesPath is that environment's role definitions, beside its contract — a
-// generator handed the spec finds the roles BY RULE rather than by a second
-// setting somebody has to keep in step.
 // RetiredRolesFile is the name `palbase spec` used to write role definitions
 // under, before they moved INSIDE the contract (`x-palbase-roles`).
 //

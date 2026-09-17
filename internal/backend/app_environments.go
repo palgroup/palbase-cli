@@ -290,8 +290,12 @@ type stackRoles struct {
 //
 // Every OTHER refusal is "could not tell", and it returns an error. So does a
 // 200 with no `roles` key: a proxy's JSON page decodes into this struct without
-// complaint and would otherwise read as "no roles at all". The difference has to
-// survive to the write — see refreshRoles.
+// complaint and would otherwise read as "no roles at all".
+//
+// WHO STILL ASKS THIS, now that the spec round does not: `readStackNames`, for
+// the role NAMES `palbase build` renders into a checkout's name cache. That is a
+// different question from the one this file used to answer, and it is why this
+// function outlived the artifact it was written for.
 func fetchStackRoles(ctx context.Context, target Target, cred Credentials) (stackRoles, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimSuffix(target.URL, "/")+"/admin/roles", nil)
