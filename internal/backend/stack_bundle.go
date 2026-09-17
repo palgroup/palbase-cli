@@ -271,7 +271,11 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 			len(surfaces.Webhooks), strings.Join(surfaces.Webhooks, ", "))
 	}
 	if len(surfaces.Hooks) > 0 {
-		fmt.Fprintf(w, "bundled hook(s) → %s\n", strings.Join(surfaces.Hooks, ", "))
+		events := make([]string, 0, len(surfaces.Hooks))
+		for _, h := range surfaces.Hooks {
+			events = append(events, h.Event)
+		}
+		fmt.Fprintf(w, "bundled hook(s) → %s\n", strings.Join(events, ", "))
 	}
 
 	// @Upload names a bucket that must EXIST, and only the bundle knows which
@@ -940,7 +944,15 @@ console.log(JSON.stringify({
   rooms: SDK.roomsOf(c).length,
   hooks: SDK.hooksOf(c).flatMap((k) => {
     const m = SDK.getHookManifest(k);
-    return [...m.blocking, ...m.listeners];
+    const file = k?.name ?? "";
+    // BLOCKING AYRIMI KORUNUR. Bu satir eskiden [...m.blocking, ...m.listeners]
+    // diye tek bir ad listesine eziyordu; stack'in okudugu manifest tam olarak
+    // bu ayrimi istiyor ve yanlis bildirileni reddediyor. Sira degismiyor:
+    // sinif basina once blocking, sonra listener.
+    return [
+      ...m.blocking.map((event) => ({ event, blocking: true, file })),
+      ...m.listeners.map((event) => ({ event, blocking: false, file })),
+    ];
   }),
   jobs: SDK.jobsOf(c).map((k) => SDK.getJobManifest(k)),
   webhooks: SDK.webhooksOf(c).map((k) => SDK.getWebhookManifest(k).name),
@@ -963,9 +975,25 @@ type bundleSurfaces struct {
 	// be `int`, so the build said "2 hook class(es)" where jobs and webhooks said
 	// what they were. A count cannot tell an operator that a deploy stopped
 	// intercepting an event, which is the one thing they would want to know.
-	Hooks    []string `json:"hooks"`
-	Jobs     []jobDef `json:"jobs"`
-	Webhooks []string `json:"webhooks"`
+	Hooks    []hookDef `json:"hooks"`
+	Jobs     []jobDef  `json:"jobs"`
+	Webhooks []string  `json:"webhooks"`
+}
+
+// hookDef is one declared hook, in the shape the STACK reads it.
+//
+// It used to be a bare event name, and the loss was not cosmetic: the server's
+// manifest needs to know whether an event is intercepted (`@Hook`, blocking) or
+// merely observed (`@On`, listener), and it REFUSES a manifest that says
+// blocking about an event whose trigger runs after the fact. The probe had that
+// distinction in hand — `getHookManifest` returns `{blocking, listeners}` — and
+// flattened it away one line before it was needed.
+type hookDef struct {
+	Event    string `json:"event"`
+	Blocking bool   `json:"blocking"`
+	// The declaring class. Informational, and it earns its place in exactly one
+	// message: the stack names both sides when two records handle one event.
+	File string `json:"file,omitempty"`
 }
 
 type jobDef struct {
@@ -997,6 +1025,63 @@ func readSurfaces(ctx context.Context, dir, bundle string) (*bundleSurfaces, err
 }
 
 func writeDefinitionManifests(_ context.Context, dir string, s *bundleSurfaces, w io.Writer) error {
+	if err := writeHookManifest(dir, s); err != nil {
+		return err
+	}
+	return writeJobManifest(dir, s, w)
+}
+
+// writeHookManifest is the half this function's PLURAL name promised and did
+// not have.
+//
+// WHAT WAS BROKEN. `.palbase/hooks/` is reserved for exactly this file —
+// bundleOutputDirs calls it "the compiled controllers and the two manifests" —
+// and it was always empty. The stack reads the file
+// (hooksmanifest/manifest.go:185), the artifact packs it when present
+// (internal/deploy/artifact.go:599), and archive.go's own comment calls it "the
+// only way" a stack learns its hooks. Nothing wrote it, so a project's @Hook and
+// @On declarations were compiled into the bundle and then registered NOWHERE.
+//
+// MEASURED, palbase/v2 CI 35153323636: the runtime prints five hooks at boot
+// (document.created, file.uploaded, file.deleted, before.user.create,
+// after.session.revoke) while palsvc logs `"count":0` and `"events":[]` one
+// second apart. Five gates fell in that run — 15-14, 16-4 and its consequences
+// 16-6/16-8/16-11 — and the product defect behind them is worse than the gates:
+// a blocking signup hook that refuses nothing is a gate that LOOKS installed.
+func writeHookManifest(dir string, s *bundleSurfaces) error {
+	hooksDir := filepath.Join(dir, ".palbase", "hooks")
+	if len(s.Hooks) == 0 {
+		// Same rule as jobs, same reason: a stale manifest would keep a removed
+		// hook registered, and a BLOCKING one would go on refusing an event
+		// whose code the bundle no longer carries.
+		return os.RemoveAll(hooksDir)
+	}
+	// One handler per event, and it is refused HERE rather than at the stack.
+	// The stack refuses the manifest WHOLE (ParseManifest: "olay başına bir
+	// handler"), which leaves the previous deploy's registrations in place — so
+	// the new hook is silently absent instead of loudly wrong.
+	seen := map[string]string{}
+	for _, h := range s.Hooks {
+		if prev, dup := seen[h.Event]; dup {
+			return fmt.Errorf("two hooks handle %q (%s and %s). One handler per event — "+
+				"delete one, or give it its own event", h.Event, prev, h.File)
+		}
+		seen[h.Event] = h.File
+	}
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return err
+	}
+	blob, err := json.MarshalIndent(map[string]any{"hooks": s.Hooks}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "hooks.manifest.json"), append(blob, '\n'), 0o644); err != nil {
+		return fmt.Errorf("the hook manifest could not be written: %w", err)
+	}
+	return nil
+}
+
+func writeJobManifest(dir string, s *bundleSurfaces, w io.Writer) error {
 	jobsDir := filepath.Join(dir, ".palbase", "jobs")
 	if len(s.Jobs) == 0 {
 		// No jobs, no manifest — and a STALE one must not survive a build that

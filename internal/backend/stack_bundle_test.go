@@ -921,6 +921,86 @@ func TestAStaleJobManifestIsRemovedWhenTheLastJobGoes(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "a stale manifest survived a build with no jobs")
 }
 
+// HOOK MANIFESTI TASINMALI — yoksa @Hook/@On beyanlari SESSIZCE hicbir sey yapmaz.
+//
+// NE KIRILMISTI. `writeDefinitionManifests`'in adi cogul ama yalniz
+// `jobs.manifest.json` yaziyordu. `.palbase/hooks/` dizini tam olarak bu dosya
+// icin ayrilmis (bundleOutputDirs yorumu: "the compiled controllers and the two
+// manifests") ve hep bos kaliyordu. Sunucu onu okuyor
+// (palbase/v2 hooksmanifest/manifest.go:185), artifact varsa pakete koyuyor
+// (artifact.go:599), archive.go'nun kendi yorumu "the only way" diyor — ve
+// uretici yoktu.
+//
+// OLCULDU, palbase/v2 CI 35153323636: runtime acilista bes hook basiyor
+// (document.created, file.uploaded, file.deleted, before.user.create,
+// after.session.revoke) ama palsvc "count":0 ve "events":[] yaziyor. O kosunun
+// kapisinda bes dusus: 15-14, 16-4 ve ardillari 16-6/16-8/16-11.
+func TestHookManifestIsWritten(t *testing.T) {
+	dir := t.TempDir()
+	surfaces := &bundleSurfaces{
+		Controllers: 1,
+		Hooks: []hookDef{
+			{Event: "before.user.create", Blocking: true, File: "SignupGate"},
+			{Event: "document.created", File: "Listeners"},
+			{Event: "file.uploaded", File: "Listeners"},
+		},
+	}
+	require.NoError(t, writeDefinitionManifests(context.Background(), dir, surfaces, &strings.Builder{}))
+
+	blob, err := os.ReadFile(filepath.Join(dir, ".palbase", "hooks", "hooks.manifest.json"))
+	require.NoError(t, err, "palsvc has no hooks to register without this file")
+
+	var manifest struct {
+		Hooks []struct {
+			Event    string `json:"event"`
+			Blocking bool   `json:"blocking"`
+			File     string `json:"file"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(blob, &manifest))
+	require.Len(t, manifest.Hooks, 3)
+	require.Equal(t, "before.user.create", manifest.Hooks[0].Event)
+	require.True(t, manifest.Hooks[0].Blocking,
+		"@Hook bloklar; blocking dusurse kapi kapanmaz ve kayit sessizce gecer")
+	require.Equal(t, "document.created", manifest.Hooks[1].Event)
+	require.False(t, manifest.Hooks[1].Blocking,
+		"@On dinler; blocking:true bildirilirse sunucu MANIFESTIN TAMAMINI reddeder")
+	require.Equal(t, "Listeners", manifest.Hooks[1].File)
+}
+
+// Ayni olayi iki kayit islerse BUILD durur. Sunucu bunu zaten reddediyor
+// (ParseManifest: "olay basina bir handler"), ama orada reddetmek deploy'u
+// yarida birakmak demek — manifest toptan reddedilir ve ESKI kayitlar calismaya
+// devam eder, yani yeni hook sessizce yoktur.
+func TestTwoHooksOnOneEventIsRefused(t *testing.T) {
+	err := writeDefinitionManifests(context.Background(), t.TempDir(), &bundleSurfaces{
+		Hooks: []hookDef{
+			{Event: "before.user.create", Blocking: true, File: "GateA"},
+			{Event: "before.user.create", Blocking: true, File: "GateB"},
+		},
+	}, &strings.Builder{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "before.user.create")
+	require.Contains(t, err.Error(), "GateA")
+	require.Contains(t, err.Error(), "GateB")
+}
+
+// Son hook da silindiyse manifest onunla gitmeli — jobs'ta oldugu gibi ve ayni
+// sebeple: bayat bir manifest, kaldirilmis bir hook'u kayitli tutardi ve
+// bloklayan bir kapi, kodu artik bulunmayan bir olayi reddetmeye devam ederdi.
+func TestAStaleHookManifestIsRemovedWhenTheLastHookGoes(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".palbase", "hooks")
+	require.NoError(t, os.MkdirAll(stale, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stale, "hooks.manifest.json"),
+		[]byte(`{"hooks":[{"event":"before.user.create"}]}`), 0o644))
+
+	require.NoError(t, writeDefinitionManifests(context.Background(), dir, &bundleSurfaces{}, &strings.Builder{}))
+
+	_, err := os.Stat(filepath.Join(stale, "hooks.manifest.json"))
+	require.True(t, os.IsNotExist(err), "a stale hook manifest survived a build with no hooks")
+}
+
 // TestDIGenerationCeilingRefusal is FR-048, and the task that claimed it was
 // ticked with NOTHING behind it: `go test -run TestDIGeneration` answered "no
 // tests to run" and no commit in this repository mentions the FR. The refusal
