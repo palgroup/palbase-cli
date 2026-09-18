@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
 type roleView struct {
@@ -105,12 +106,11 @@ func call(cmd *cobra.Command, method, path string, body any) (*rolesBody, error)
 // describe pulls the human sentence out of the stack's error envelope, falling
 // back to the raw body when it is shaped differently.
 func describe(raw []byte) string {
-	var env struct {
-		Error       string `json:"error"`
-		Description string `json:"error_description"`
-	}
-	if err := json.Unmarshal(raw, &env); err == nil && env.Description != "" {
-		return env.Description
+	if apiErr := transport.EnvelopeError(raw, 0); apiErr != nil && apiErr.Description != "" {
+		if apiErr.RequestID != "" {
+			return apiErr.Description + " [request_id " + apiErr.RequestID + "]"
+		}
+		return apiErr.Description
 	}
 	s := strings.TrimSpace(string(raw))
 	if len(s) > 400 {

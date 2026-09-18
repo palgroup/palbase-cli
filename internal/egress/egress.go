@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
 // Cmd returns the `palbase egress` parent command.
@@ -78,12 +80,8 @@ func write(rest REST, cmd *cobra.Command, f fence) error {
 		return err
 	}
 	if status >= 400 {
-		var e struct {
-			Error       string `json:"error"`
-			Description string `json:"error_description"`
-		}
-		if json.Unmarshal(raw, &e) == nil && e.Description != "" {
-			return fmt.Errorf("%s: %s", e.Error, e.Description)
+		if apiErr := transport.EnvelopeError(raw, status); apiErr != nil {
+			return apiErr
 		}
 		return fmt.Errorf("the stack refused the fence (%d): %s", status, strings.TrimSpace(string(raw)))
 	}

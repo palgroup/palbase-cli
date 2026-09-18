@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/palgroup/palbase-cli/internal/authcontract"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"io"
 	"net/http"
 	"net/url"
@@ -65,12 +66,8 @@ func call(r Resolvers, cmd *cobra.Command, method, path string, body []byte) err
 		return err
 	}
 	if status >= 400 {
-		var e struct {
-			Error       string `json:"error"`
-			Description string `json:"error_description"`
-		}
-		if json.Unmarshal(raw, &e) == nil && e.Description != "" {
-			return fmt.Errorf("%s: %s", e.Error, e.Description)
+		if apiErr := transport.EnvelopeError(raw, status); apiErr != nil {
+			return apiErr
 		}
 		return fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
 	}

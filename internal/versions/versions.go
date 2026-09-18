@@ -22,6 +22,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/transport"
 )
 
 const (
@@ -72,12 +74,8 @@ func call(r Resolvers, cmd *cobra.Command, path string) ([]byte, error) {
 		return nil, fmt.Errorf("this stack runs no module that counts installations")
 	}
 	if status >= 400 {
-		var e struct {
-			Error       string `json:"error"`
-			Description string `json:"error_description"`
-		}
-		if json.Unmarshal(raw, &e) == nil && e.Description != "" {
-			return nil, fmt.Errorf("%s: %s", e.Error, e.Description)
+		if apiErr := transport.EnvelopeError(raw, status); apiErr != nil {
+			return nil, apiErr
 		}
 		return nil, fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
 	}

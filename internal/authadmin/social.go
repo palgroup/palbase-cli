@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/palgroup/palbase-cli/internal/authcontract"
+	"github.com/palgroup/palbase-cli/internal/transport"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,16 +24,16 @@ func socialProvider(name string) bool {
 }
 
 func socialError(status int, raw []byte) error {
-	var result struct {
-		Error       string          `json:"error"`
-		Description string          `json:"error_description"`
-		Fields      json.RawMessage `json:"field_errors"`
-	}
-	if json.Unmarshal(raw, &result) == nil && result.Error != "" {
-		if len(result.Fields) > 0 {
-			return fmt.Errorf("%s: %s\n%s", result.Error, result.Description, result.Fields)
+	if apiErr := transport.EnvelopeError(raw, status); apiErr != nil {
+		// The social surface names its per-field detail `field_errors`, not the
+		// envelope's `fields`; it rides along verbatim, as it always has.
+		var detail struct {
+			Fields json.RawMessage `json:"field_errors"`
 		}
-		return fmt.Errorf("%s: %s", result.Error, result.Description)
+		if json.Unmarshal(raw, &detail) == nil && len(detail.Fields) > 0 {
+			return fmt.Errorf("%w\n%s", apiErr, detail.Fields)
+		}
+		return apiErr
 	}
 	return fmt.Errorf("the social auth API answered %d", status)
 }

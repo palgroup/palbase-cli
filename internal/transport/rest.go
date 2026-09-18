@@ -398,20 +398,36 @@ const patPrefix = "pat_"
 // anlamayacağı bir 401 üretirdi.
 var DPoPSigner func(method, url, accessToken string) (string, error)
 
-func parseError(raw []byte, status int) error {
+// EnvelopeError reads a refusal body as the platform's error envelope and
+// returns nil when the body is not one, so a caller's own sentence for an
+// unshaped body still stands.
+//
+// ONE READER FOR EVERY SURFACE. The control plane and a tenant's own modules
+// answer the same envelope, and five tenant-side readers each decoded only
+// `error` and `error_description` — so `request_id`, the one thread that ties a
+// failure a person reports to the stack's log, was printed for control-plane
+// refusals and dropped for every tenant one (palbase-cli#7 §1).
+func EnvelopeError(raw []byte, status int) *APIError {
 	var env errorEnvelope
-	if json.Unmarshal(raw, &env) == nil && env.Code != "" {
-		st := env.Status
-		if st == 0 {
-			st = status
-		}
-		return &APIError{
-			Code:        env.Code,
-			Description: env.Description,
-			Status:      st,
-			RequestID:   env.RequestID,
-			Fields:      env.fields(),
-		}
+	if json.Unmarshal(raw, &env) != nil || env.Code == "" {
+		return nil
+	}
+	st := env.Status
+	if st == 0 {
+		st = status
+	}
+	return &APIError{
+		Code:        env.Code,
+		Description: env.Description,
+		Status:      st,
+		RequestID:   env.RequestID,
+		Fields:      env.fields(),
+	}
+}
+
+func parseError(raw []byte, status int) error {
+	if apiErr := EnvelopeError(raw, status); apiErr != nil {
+		return apiErr
 	}
 	return &APIError{
 		Code:        "http_error",
