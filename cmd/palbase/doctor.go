@@ -254,7 +254,7 @@ func linkProbes(readLinked, readTarget func() (backend.Target, error), resolve f
 		lines = append(lines, probeLine{ok: true, label: "link", detail: local.Describe()})
 	} else {
 		bound = false
-		lines = append(lines, probeLine{ok: true, label: "link", detail: "this directory is not linked — run `palbase link <project>` here"})
+		lines = append(lines, probeLine{ok: false, label: "link", detail: "this directory is not linked — run `palbase link <project>` here"})
 	}
 	if resolved, err := resolve(); err == nil {
 		lines = append(lines, probeLine{ok: true, label: "env", detail: resolved.Describe() + "  (via " + resolved.Source + ")"})

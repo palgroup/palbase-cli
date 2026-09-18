@@ -221,6 +221,12 @@ func TestDoctorSaysAnUnboundDirectoryIsNotLinked(t *testing.T) {
 	if len(lines) != 1 || !strings.Contains(lines[0].detail, "not linked") {
 		t.Fatalf("an unbound directory: %+v", lines)
 	}
+	// A NEGATIVE STATE CARRIES THE NEGATIVE MARK (palbase-cli#7 §2): `✓ link
+	// this directory is not linked` reads as "the link is fine", and right after
+	// a `link` it reads as "the link took" — the opposite of the sentence.
+	if lines[0].ok {
+		t.Fatalf("an unbound directory is reported with ✓: %+v", lines[0])
+	}
 }
 
 // THE COMMITTED PROJECT IS WHAT `link` NAMES, even while `palbase start` runs a
