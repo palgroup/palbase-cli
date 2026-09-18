@@ -44,10 +44,28 @@ type Resolvers struct {
 
 // Target is the address a live test run points at.
 type Target struct {
-	URL       string
-	APIKey    string
-	Candidate string
+	URL    string
+	APIKey string
 }
+
+// liveCandidate is what `--live` exports as PALBASE_TEST_CANDIDATE: the
+// deliberate choice of the release that is SERVING, named rather than implied.
+//
+// The SDK refuses to build its test client against a remote stack without a
+// candidate token — the header selects the release under test, and a suite with
+// no token would grade whatever happens to be live without saying so. A deploy
+// has a real token (it loaded a candidate and grades it before promoting). This
+// command has none: it grades the live release, by definition, and `live` is
+// the SDK's word for that choice — the client then sends no candidate header,
+// and the runtime serves the live release by its primary contract. The SDK's
+// rule stays intact for everyone who did not set the variable at all. (An SDK
+// older than that word sends it as a token; candidate tokens are random UUIDs,
+// so it selects nothing and the answer is the same live release.)
+//
+// This used to be a `Target.Candidate` field that the composition root never
+// filled, so the export below it never happened and every `--live` run against
+// a real Environment was refused by the SDK (palbase-cloud#153).
+const liveCandidate = "live"
 
 // mintedIdentities is the ENVELOPE `test-user create --json` emits. What the
 // tests receive is the map INSIDE it, and the difference is not cosmetic:
@@ -87,7 +105,10 @@ says — over services and pure logic, against ` + "`fakeDatabase()`" + ` from
 printing its summary, is refused rather than reported as a pass. The live layer needs a stack —
 this command mints the identities, exports PALBASE_TEST_* and runs the same
 ` + "`npm test`" + ` with them in the environment, so a test that wants a real request
-has one and a test that does not is unaffected.
+has one and a test that does not is unaffected. Those requests reach the release
+that is LIVE — this command sets PALBASE_TEST_CANDIDATE=live — so they grade the
+code that is serving, and write real data as the minted identities. A deploy
+grades its own candidate before promoting it; this command cannot.
 
 Identities are minted per run. After the live tests finish, this command deletes
 those identities and their data, including when tests fail. Cleanup failures
@@ -176,11 +197,7 @@ are reported; an interrupted process may leave users for test-user delete.`,
 				"PALBASE_TEST_BASE_URL=" + target.URL,
 				"PALBASE_TEST_API_KEY=" + target.APIKey,
 				"PALBASE_TEST_IDENTITIES=" + string(exported),
-			}
-			// A local stack serves one version, so there is no candidate to select
-			// and the harness does not ask for one.
-			if target.Candidate != "" {
-				env = append(env, "PALBASE_TEST_CANDIDATE="+target.Candidate)
+				"PALBASE_TEST_CANDIDATE=" + liveCandidate,
 			}
 			if err := runNpmTest(cmd, env, out); err != nil {
 				return fmt.Errorf("live tests failed: %w", err)

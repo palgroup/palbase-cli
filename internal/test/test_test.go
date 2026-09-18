@@ -60,10 +60,15 @@ const identities = `{"identities":{"user1":{"id":"u1","email":"a@e.f","password"
 // "identities". The old assertion here pinned that bug instead of catching it.
 const exportedIdentities = `{"user1":{"id":"u1","email":"a@e.f","password":"p"}}`
 
+// THE TARGET HAS THE SHAPE PRODUCTION GIVES IT: an address and a key, nothing
+// else. This fixture used to hand the command a `Candidate` that the composition
+// root never supplied, so it pinned an export production never made — and every
+// `--live` run against a real Environment was refused by the SDK for a variable
+// the CLI never set (palbase-cloud#153).
 func liveResolvers(mint func(*cobra.Command, int) ([]byte, func(context.Context) error, error)) Resolvers {
 	return Resolvers{
 		Target: func(*cobra.Command) (Target, error) {
-			return Target{URL: "http://127.0.0.1:63638", APIKey: "pb_project_x", Candidate: "candidate"}, nil
+			return Target{URL: "http://127.0.0.1:63638", APIKey: "pb_project_x"}, nil
 		},
 		Mint: mint,
 	}
@@ -80,7 +85,7 @@ func TestLiveLayerExportsIdentitiesAndCleansAfterSuccess(t *testing.T) {
 			require.InDelta(t, 30, time.Until(deadline).Seconds(), 2)
 			raw, err := os.ReadFile(marker)
 			require.NoError(t, err, "cleanup must run after npm finishes")
-			require.Equal(t, "http://127.0.0.1:63638\npb_project_x\n"+exportedIdentities+"\ncandidate\n", string(raw))
+			require.Equal(t, "http://127.0.0.1:63638\npb_project_x\n"+exportedIdentities+"\nlive\n", string(raw))
 			cleaned = true
 			return nil
 		}, nil
