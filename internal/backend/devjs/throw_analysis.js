@@ -30,10 +30,19 @@
  *   Cls.m(...)              imported/local class decl → STATIC method body.
  *   fn(...)                 imported/local function decl (or const fn = …).
  *   this.m(...)             same-class method body.
+ *   this.<field>.m(...)     the field's INITIALIZER (as `svc.m` above), or —
+ *                           with none — its DECLARED TYPE: a constructor
+ *                           parameter property (`constructor(private svc: Svc)`,
+ *                           the container's form) or a typed field → class decl
+ *                           → method body. An `abstract class` port resolves as
+ *                           the container resolves it: to the ONE class the
+ *                           modules' `providers` list that extends it
+ *                           (`deps.moduleFiles`); otherwise it is skipped.
  *
  * The THROWN VALUE itself is lowered by resolveThrownExpression, which handles
- * `throw new X(...)`, `throw <local bound to new X(...)>`, and
- * `throw <call>` where the callee RETURNS the error (the factory idiom).
+ * `throw new X(...)`, `throw <local bound to new X(...)>`,
+ * `throw <call>` where the callee RETURNS the error (the factory idiom), and
+ * `cond ? a : b` (both branches) in either position.
  * NOT resolved: a helper declared as a class PROPERTY (`private m = () => …`),
  * because classMethod only matches MethodDeclarations — such a call is skipped
  * silently like any other unresolvable shape.
@@ -343,14 +352,29 @@ function resolveThrownNew(ctx, fileInfo, newExpr, out) {
 // ---------------------------------------------------------------------------
 
 // classMethod finds a (static or instance) method body on a class declaration.
-// classProperty finds a non-static property declaration by name on a class.
-function classProperty(tsapi, classNode, name) {
+// classField finds a non-static instance field by name on a class and returns
+// what can name its value: `{ initializer, type }` (either may be undefined), or
+// null. Two declarations make a field:
+//   - a property declaration (`private svc = new Svc()` / `private svc: Svc`);
+//   - a constructor PARAMETER PROPERTY (`constructor(private readonly svc: Svc)`),
+//     which is how the container hands in every dependency — it is a
+//     ParameterDeclaration on the constructor, never a PropertyDeclaration, and
+//     it has no initializer (palbase-ts#62).
+function classField(tsapi, classNode, name) {
   for (const m of classNode.members) {
-    if (!tsapi.isPropertyDeclaration(m)) continue;
-    if (!m.name || !tsapi.isIdentifier(m.name) || m.name.text !== name) continue;
-    const isStatic = (m.modifiers || []).some((x) => x.kind === tsapi.SyntaxKind.StaticKeyword);
-    if (isStatic) continue;
-    return m;
+    if (tsapi.isPropertyDeclaration(m)) {
+      if (!m.name || !tsapi.isIdentifier(m.name) || m.name.text !== name) continue;
+      const isStatic = (m.modifiers || []).some((x) => x.kind === tsapi.SyntaxKind.StaticKeyword);
+      if (isStatic) continue;
+      return { initializer: m.initializer, type: m.type };
+    }
+    if (tsapi.isConstructorDeclaration(m)) {
+      for (const p of m.parameters) {
+        if (!tsapi.isParameterPropertyDeclaration(p, m)) continue;
+        if (!tsapi.isIdentifier(p.name) || p.name.text !== name) continue;
+        return { initializer: undefined, type: p.type };
+      }
+    }
   }
   return null;
 }
@@ -389,6 +413,119 @@ function resolveInstanceMethodFromInit(ctx, fileInfo, init, methodName, hop = 0)
     }
   }
   return null;
+}
+
+// resolveInstanceMethodFromType resolves `<field>.<methodName>` where the field
+// has no initializer and its DECLARED TYPE names the class — the container
+// resolves a dependency by exactly that type, so the class the annotation names
+// is the class whose instance arrives. Only a plain type reference resolves
+// (`Svc`, `Svc<T>`); a qualified name, a union or an interface names no class
+// body.
+//
+// AN `abstract class` IS A PORT, and the instance that arrives is not of that
+// class: the container hands in THE ONE CLASS IN THE GRAPH THAT EXTENDS IT (the
+// scaffold's own `NoteRepo` → `DbNoteRepo`). The same rule is applied here, over
+// the same graph — the modules' `providers` (see soleProviderExtending). The
+// method is the provider's own, or the port's concrete one it inherits. With no
+// single provider (none, two, or no module list handed in) nothing on the port
+// is walked, not even a concrete method: the class that arrives may override it.
+function resolveInstanceMethodFromType(ctx, fileInfo, type, methodName) {
+  const tsapi = loadTS();
+  if (!type || !tsapi.isTypeReferenceNode(type) || !tsapi.isIdentifier(type.typeName)) return null;
+  const clsBinding = resolveBinding(ctx, fileInfo, type.typeName.text, 0);
+  if (!clsBinding || clsBinding.kind !== 'class') return null;
+  const candidates = [clsBinding];
+  if (isAbstractClass(tsapi, clsBinding.node)) {
+    const impl = soleProviderExtending(ctx, clsBinding);
+    if (!impl) return null;
+    candidates.unshift(impl);
+  }
+  for (const cls of candidates) {
+    const m = classMethod(tsapi, cls.node, methodName, /* static */ false);
+    if (!m) continue;
+    const clsName = cls.node.name ? cls.node.name.text : '<anon>';
+    return {
+      file: cls.file,
+      body: m.body,
+      classNode: cls.node,
+      key: `${cls.file.path}#${clsName}.${methodName}`,
+    };
+  }
+  return null;
+}
+
+function isAbstractClass(tsapi, classNode) {
+  return (classNode.modifiers || []).some((m) => m.kind === tsapi.SyntaxKind.AbstractKeyword);
+}
+
+// sameDeclaration: two bindings name the same class declaration. By path and
+// position rather than node identity — a file reached by two spellings of its
+// path is parsed twice.
+function sameDeclaration(a, b) {
+  return path.resolve(a.file.path) === path.resolve(b.file.path) && a.node.pos === b.node.pos;
+}
+
+// moduleProviders lists the classes every module's `@Module({ providers: [...] })`
+// names — the graph the container builds — resolved to their declarations.
+// Computed once per analysis. null when the caller handed in no module list
+// (`deps.moduleFiles`): then there is no graph to read.
+function moduleProviders(ctx) {
+  if (ctx.providers !== undefined) return ctx.providers;
+  const tsapi = loadTS();
+  const listed = ctx.deps && ctx.deps.moduleFiles;
+  const files = typeof listed === 'function' ? listed() : listed;
+  if (!Array.isArray(files)) {
+    ctx.providers = null;
+    return null;
+  }
+  const out = [];
+  for (const f of files) {
+    const info = loadFile(ctx, f);
+    if (!info) continue;
+    for (const stmt of info.sf.statements) {
+      if (!tsapi.isClassDeclaration(stmt)) continue;
+      const decos = tsapi.getDecorators ? tsapi.getDecorators(stmt) || [] : [];
+      for (const d of decos) {
+        const call = d.expression;
+        if (!tsapi.isCallExpression(call) || call.expression.getText(info.sf) !== 'Module') continue;
+        const spec = call.arguments[0];
+        if (!spec || !tsapi.isObjectLiteralExpression(spec)) continue;
+        for (const prop of spec.properties) {
+          if (!tsapi.isPropertyAssignment(prop) || prop.name.getText(info.sf) !== 'providers') continue;
+          if (!tsapi.isArrayLiteralExpression(prop.initializer)) continue;
+          for (const el of prop.initializer.elements) {
+            if (!tsapi.isIdentifier(el)) continue;
+            const b = resolveBinding(ctx, info, el.text, 0);
+            if (b && b.kind === 'class') out.push(b);
+          }
+        }
+      }
+    }
+  }
+  ctx.providers = out;
+  return out;
+}
+
+// soleProviderExtending answers the container's question for an abstract port:
+// the ONE provider whose `extends` names it. Two is a graph the container
+// refuses to build ("duplicate ownership") and none is one it cannot build
+// ("unowned class"); neither has an answer to type, so both are null. A class
+// that extends the port without being a provider — a test double — is never
+// handed to anyone, and is not counted.
+function soleProviderExtending(ctx, port) {
+  const tsapi = loadTS();
+  const providers = moduleProviders(ctx);
+  if (!providers) return null;
+  const hits = [];
+  for (const p of providers) {
+    if (hits.some((h) => sameDeclaration(h, p))) continue;
+    const ext = (p.node.heritageClauses || []).find((h) => h.token === tsapi.SyntaxKind.ExtendsKeyword);
+    const base = ext && ext.types[0] && ext.types[0].expression;
+    if (!base || !tsapi.isIdentifier(base)) continue;
+    const baseBinding = resolveBinding(ctx, p.file, base.text, 0);
+    if (baseBinding && baseBinding.kind === 'class' && sameDeclaration(baseBinding, port)) hits.push(p);
+  }
+  return hits.length === 1 ? hits[0] : null;
 }
 
 function classMethod(tsapi, classNode, methodName, wantStatic) {
@@ -440,20 +577,24 @@ function resolveCallTarget(ctx, fileInfo, classNode, callExpr) {
       };
     }
 
-    // this.<prop>.m(...) — class property holding a service instance
-    // (`private todos = todoService;` / `private svc = new SvcClass();`) —
-    // the documented thin-controller idiom. Resolve through the PROPERTY
-    // DECLARATION's initializer.
+    // this.<field>.m(...) — a field holding a service instance. Three ways to
+    // declare one, all resolved:
+    //   constructor(private readonly svc: Svc) {}   the container's (and the
+    //                                                guide's) ONLY form — by TYPE
+    //   private svc: Svc;  (assigned in the ctor)    by TYPE
+    //   private svc = new Svc() / = svcSingleton     by INITIALIZER
     if (
       tsapi.isPropertyAccessExpression(callee.expression) &&
       callee.expression.expression.kind === tsapi.SyntaxKind.ThisKeyword &&
       tsapi.isIdentifier(callee.expression.name)
     ) {
       if (!classNode) return null;
-      const propName = callee.expression.name.text;
-      const prop = classProperty(tsapi, classNode, propName);
-      if (!prop || !prop.initializer) return null;
-      return resolveInstanceMethodFromInit(ctx, fileInfo, prop.initializer, methodName);
+      const field = classField(tsapi, classNode, callee.expression.name.text);
+      if (!field) return null;
+      if (field.initializer) {
+        return resolveInstanceMethodFromInit(ctx, fileInfo, field.initializer, methodName);
+      }
+      return resolveInstanceMethodFromType(ctx, fileInfo, field.type, methodName);
     }
 
     if (!tsapi.isIdentifier(callee.expression)) return null; // a.b.c(...) → skip
@@ -501,6 +642,19 @@ function resolveCallTarget(ctx, fileInfo, classNode, callExpr) {
 // two walks are independent and each runs at most once.
 function resolveThrownExpression(ctx, fileInfo, classNode, expr, out, depth, visited) {
   const tsapi = loadTS();
+  // `(x)`, `x as Error`, `x!` are the value they wrap.
+  while (tsapi.isParenthesizedExpression(expr) || tsapi.isAsExpression(expr) || tsapi.isNonNullExpression(expr)) {
+    expr = expr.expression;
+  }
+  // `cond ? a : b` can be either branch, so it contributes both (palbase-ts#62:
+  // `return refused ? new NotFound(...) : cause` used to lose the NotFound). A
+  // branch that names no error — a pass-through parameter — contributes nothing
+  // and does not take the other branch with it.
+  if (tsapi.isConditionalExpression(expr)) {
+    resolveThrownExpression(ctx, fileInfo, classNode, expr.whenTrue, out, depth, visited);
+    resolveThrownExpression(ctx, fileInfo, classNode, expr.whenFalse, out, depth, visited);
+    return;
+  }
   if (tsapi.isNewExpression(expr)) {
     resolveThrownNew(ctx, fileInfo, expr, out);
     return;
@@ -607,7 +761,10 @@ function collectFromBody(ctx, fileInfo, classNode, body, out, depth, visited) {
  * @param {string} controllerPath  the controller's REAL path (relative imports
  *                                 resolve against its directory)
  * @param {{readFile: (p:string)=>string|null, fileExists:(p:string)=>boolean,
- *          projectRoot?: string}} deps
+ *          projectRoot?: string, moduleFiles?: string[]}} deps
+ *   `moduleFiles` — every `*.module.ts` of the project (absolute). It is the
+ *   graph an `abstract class` port is resolved against; without it a port is
+ *   skipped.
  * @returns {{className: string|null, ops: Record<string, Array<{name:string,code:string}>>}
  *          | {error: string}}
  *   `{error}` is returned ONLY for the defineError non-literal-args violation

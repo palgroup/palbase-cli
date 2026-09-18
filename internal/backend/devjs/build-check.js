@@ -199,6 +199,9 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
   const inferencePath = path.join(RUNTIME_MODULES, '@palbase/backend/stager/inferred_returns.js');
   const inferReturn = fs.existsSync(inferencePath)
     ? require(inferencePath).createReturnInference(PROJECT_ROOT) : undefined;
+  // The graph an `abstract class` port resolves against — the same modules the
+  // container builds from (palbase-ts#62). Walked once, not per controller.
+  const modules = moduleFiles(PROJECT_ROOT);
   for (const file of walk(srcDir)) {
     const rel = path.relative(srcDir, file);
     const dest = path.join(stageDir, rel);
@@ -220,6 +223,7 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
         },
         fileExists: (p) => fs.existsSync(p),
         projectRoot: PROJECT_ROOT,
+        moduleFiles: modules,
       });
       // THE APPLICATION RING OF THE CASCADE HAS TO BE EVALUATED TO EXIST.
       //
