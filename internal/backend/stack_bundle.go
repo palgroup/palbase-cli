@@ -111,6 +111,13 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 	// (`*.module.ts` yok) ve paketleme yoluna artık girmemeli.
 	reapRetiredArtifacts(dir)
 
+	// THE SDK THE LOCKFILE PINS, OR NO ARTIFACT (palbase-cli#7 §4) — before
+	// anything is compiled, so nothing built against the wrong SDK exists even
+	// in the temp root.
+	if why := lockfileDriftRefusal(dir); why != "" {
+		return nil, nil, errors.New(why)
+	}
+
 	// No `controllers/` requirement: a module owns its classes wherever it lives,
 	// and requiring a directory the module system does not use turned the
 	// feature-folder layout into a push that could never happen. The precondition

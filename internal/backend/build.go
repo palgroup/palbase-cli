@@ -168,6 +168,12 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// package.json (test fixtures), and in general the version we want is the
 	// one already on disk, not whatever a tool install leaves behind.
 	installed := installedBackendVersion(cwd)
+	// The same refusal push and plan make before bundling (palbase-cli#7 §4):
+	// a build that validates an SDK the lockfile does not pin validates a tree
+	// the deploy will not see.
+	if why := lockfileDriftRefusal(cwd); why != "" {
+		return errors.New(why)
+	}
 
 	// zod-to-json-schema powers the header-rule + schema lowering in the
 	// extractor; without it the header checks degrade (best-effort install).
