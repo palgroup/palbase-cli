@@ -157,3 +157,8 @@ func TestBuildCheckNodeSuite(t *testing.T) {
 func TestTxAnalysisNodeSuite(t *testing.T) {
 	runDevJSSuite(t, "tx_analysis.test.js")
 }
+
+// TestStringsScanNodeSuite runs strings_scan.js's node:test suite — which
+// imports count as the SDK's t(), and which calls are only warned about
+// (FR-015, FR-016). A devjs suite nothing registers here never runs.
+func TestStringsScanNodeSuite(t *testing.T) { runDevJSSuite(t, "strings_scan.test.js") }

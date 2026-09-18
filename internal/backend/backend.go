@@ -35,8 +35,9 @@ import (
 // .github/workflows/stager-copy-parity.yml diffs each file against
 // modules/backend on every push/PR touching either submodule and fails the
 // moment a copy drifts — there is no Go test for this in this repo.
+// strings_scan.js is the CLI's own — the deploy never scans; the table it feeds is committed.
 //
-//go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js devjs/generics.js devjs/augment-probe.js
+//go:embed devjs/build-check.js devjs/env-gen.js devjs/return_types.js devjs/throw_analysis.js devjs/tx_analysis.js devjs/extract_meta.js devjs/generics.js devjs/augment-probe.js devjs/strings_scan.js
 var buildCheckFS embed.FS
 
 // REST is the control-plane transport used to resolve cloud project names.
