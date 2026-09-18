@@ -310,6 +310,12 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	if err := landEnvTypes(buildRoot, cwd, names, out); err != nil {
 		return err
 	}
+	// The replacement exists now, so what it supersedes goes now — the sweep at
+	// the top of this verb had to leave the root declaration files in place
+	// while nothing replaced them (palbase-cli#7 §5), and two copies declaring
+	// the same global types do not compile. Everything else it names is already
+	// gone; the kept sentences were printed then.
+	_ = reapRetiredArtifacts(cwd)
 
 	// AND THE AUGMENTATION HAS TO LAND — measured, not declared (FR-006).
 	//

@@ -789,3 +789,50 @@ func TestReapRemovesWhatTheCLIProducedEvenWhenTracked(t *testing.T) {
 		t.Errorf("izlenmeyen .palbase, izlenen bir komşu yüzünden kaldı (stat: %v)", err)
 	}
 }
+
+// A RETIRED DECLARATION FILE GOES ONLY WHEN ITS REPLACEMENT IS THERE
+// (palbase-cli#7 §5). The root `palbase-env.d.ts` and `palbase-stack.d.ts` were
+// swept before every verb — `plan`, whose help promises it applies nothing,
+// included — while only `palbase build` writes their replacement,
+// `palbase/palbase-env.d.ts`. So a clean checkout ran `palbase plan` and was left
+// with ` D palbase-env.d.ts` and no declarations at all: the project stopped
+// type-checking, and a `git commit -a` would have committed the deletion. With
+// the replacement in place the old files are superseded, and both copies
+// declaring the same global types would not compile — then they go.
+func TestReapRetiresADeclarationFileOnlyOnceItIsSuperseded(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	t.Run("no replacement yet: kept", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, envTypesFile, "declare module \"@palbase/backend/env\" {}\n")
+		mustWrite(t, dir, stackTypesFile, "declare module \"@palbase/backend/stack\" {}\n")
+		gitCheckout(t, dir, envTypesFile, stackTypesFile)
+
+		reapRetiredArtifacts(dir)
+
+		for _, p := range []string{envTypesFile, stackTypesFile} {
+			if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
+				t.Errorf("%s was deleted while nothing replaces it — the project is left without its declarations (stat: %v)", p, err)
+			}
+		}
+	})
+
+	t.Run("replacement written: retired", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, envTypesFile, "declare module \"@palbase/backend/env\" {}\n")
+		mustWrite(t, dir, stackTypesFile, "declare module \"@palbase/backend/stack\" {}\n")
+		mustWrite(t, dir, rootDir+"/"+envTypesFile, "declare module \"@palbase/backend/env\" {}\n")
+		gitCheckout(t, dir, envTypesFile, stackTypesFile)
+
+		reapRetiredArtifacts(dir)
+
+		for _, p := range []string{envTypesFile, stackTypesFile} {
+			if _, err := os.Stat(filepath.Join(dir, p)); !os.IsNotExist(err) {
+				t.Errorf("%s survived although %s/%s replaces it (stat: %v)", p, rootDir, envTypesFile, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, rootDir, envTypesFile)); err != nil {
+			t.Errorf("the replacement itself was touched: %v", err)
+		}
+	})
+}

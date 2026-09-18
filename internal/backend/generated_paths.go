@@ -66,9 +66,17 @@ var generatedProjectPaths = []struct {
 // bundle somebody committed by accident is still a compiled bundle — but
 // `.palbase` once held the project's contract, and a person may have committed
 // it. The distinction is DECLARED rather than derived from the name.
+//
+// `supersededBy` marks an entry that is RETIRED BY A REPLACEMENT rather than by
+// a producer going away: it is swept only once the replacement exists. The two
+// root declaration files are the case — only `palbase build` writes
+// `palbase/palbase-env.d.ts`, and sweeping the old ones before that (every verb
+// sweeps, `plan` included) left a checkout with no declarations at all and a
+// deletion for `git commit -a` to pick up (palbase-cli#7 §5).
 var retiredProjectPaths = []struct {
 	path, why     string
 	keepIfTracked bool
+	supersededBy  string
 }{
 	{path: ".palbase/esm", why: "the compiled bundle — built into a temp bundle root since 0.61.1"},
 	{path: ".palbase/jobs", why: "the job manifest — same"},
@@ -78,8 +86,8 @@ var retiredProjectPaths = []struct {
 	{path: linkStagePrefix + "*", why: "`palbase link`'s staging tree; it opens in the temp directory"},
 	{path: ".palbase/local.json", why: "the stack in front of you — machine state, moved to ~/.palbase/checkouts/<hash>/"},
 	{path: ".palbase/plan.json", why: "`palbase plan`'s measurement of THIS machine — same move"},
-	{path: envTypesFile, why: "the generated declaration file; it is written under " + rootDir + "/ and committed"},
-	{path: stackTypesFile, why: "the stack's declaration file at the checkout ROOT; its names are rendered into " + rootDir + "/" + envTypesFile},
+	{path: envTypesFile, why: "the generated declaration file; it is written under " + rootDir + "/ and committed", supersededBy: rootDir + "/" + envTypesFile},
+	{path: stackTypesFile, why: "the stack's declaration file at the checkout ROOT; its names are rendered into " + rootDir + "/" + envTypesFile, supersededBy: rootDir + "/" + envTypesFile},
 	{path: rootDir + "/.gitattributes", why: "`link`'s review markers; the attributes writer is retired and nothing writes them"},
 	{path: ".palbase", why: "the retired hidden root — " + rootDir + "/ replaced it; its CLI-written entries are swept unless git tracks a file under it, and it goes only when that empties it", keepIfTracked: true},
 }
@@ -170,6 +178,11 @@ func gitignoreScaffold() string {
 func reapRetiredArtifacts(dir string) []string {
 	var kept []string
 	for _, e := range retiredProjectPaths {
+		if e.supersededBy != "" {
+			if _, err := os.Stat(filepath.Join(dir, e.supersededBy)); err != nil {
+				continue // still the project's live copy; nothing replaces it yet
+			}
+		}
 		if e.keepIfTracked {
 			if _, err := os.Lstat(filepath.Join(dir, e.path)); err != nil {
 				continue
