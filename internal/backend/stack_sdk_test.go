@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -126,8 +127,8 @@ func TestStatusSDKComesFromTheSameSourceAsPush(t *testing.T) {
 	require.Equal(t, runs, fromPush)
 
 	got := out.String()
-	require.Containsf(t, got, "sdk:", "status reports no SDK line at all:\n%s", got)
-	sdkLine := regexp.MustCompile(`(?m)^sdk:.*$`).FindString(got)
+	require.Containsf(t, got, "runtime:", "status reports no runtime SDK line at all:\n%s", got)
+	sdkLine := regexp.MustCompile(`(?m)^runtime:.*$`).FindString(got)
 	require.Containsf(t, sdkLine, fromPush,
 		"the sdk line does not carry what push reads (%s):\n%s", fromPush, got)
 	require.NotContainsf(t, sdkLine, builtWith,
@@ -233,4 +234,54 @@ func TestPushLeavesTheCheckoutsOwnSDKInPlace(t *testing.T) {
 	got := out.String()
 	require.Containsf(t, got, runs, "haber projenin koştuğu sürümü adlandırmıyor:\n%s", got)
 	require.Containsf(t, got, declared, "haber bu checkout'un sürümünü adlandırmıyor:\n%s", got)
+}
+
+// THE RUNTIME IS NAMED AS THE RUNTIME, AND A DIFFERENCE IS SAID (palbase-cli#7
+// §3). `sdk: … — what this project RUNS` under `built with SDK …` read as the
+// checkout's own dependency, and the two numbers disagreeing looked like the
+// tree had drifted from live — a wrong diagnosis in the session that reported
+// it. The number is the stack's: it says so, and when the live artifact was
+// built with a different SDK than the runtime serving it, it says that too.
+func TestStatusNamesTheRuntimeAndSaysWhenTheArtifactDiffers(t *testing.T) {
+	for _, tc := range []struct {
+		name, runs, builtWith string
+		differs               bool
+	}{
+		{"moved apart", "23.1.0", "23.0.0", true},
+		{"in step", "23.1.0", "23.1.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inScratchCheckout(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case wellKnownPath:
+					_ = json.NewEncoder(w).Encode(stackDescription{Hosting: "project", SDKVersion: tc.runs})
+				case "/v1/management/deployments/current":
+					_ = json.NewEncoder(w).Encode(deploymentState{Digest: "7c232f1484db", SDKVersion: tc.builtWith})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			require.NoError(t, WriteTarget(Target{URL: srv.URL}))
+			require.NoError(t, StoreCredential(srv.URL, Credentials{Value: "k", Kind: KindKey}))
+
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			cmd.SetErr(io.Discard)
+			cmd.SetContext(context.Background())
+			require.NoError(t, statusOfProject(cmd, false))
+			got := out.String()
+
+			line := regexp.MustCompile(`(?m)^runtime:.*$`).FindString(got)
+			require.Containsf(t, line, tc.runs, "no `runtime:` line names what the stack runs:\n%s", got)
+			require.NotContainsf(t, got, "what this project RUNS",
+				"the runtime's number is still worded as the project's own:\n%s", got)
+			said := strings.Contains(got, "differ")
+			require.Equalf(t, tc.differs, said,
+				"runtime %s vs built with %s — a difference must be said, and only then:\n%s",
+				tc.runs, tc.builtWith, got)
+		})
+	}
 }

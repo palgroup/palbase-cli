@@ -104,6 +104,7 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	// endpoints live, in the same second `palbase deploys` listed them.
 	status, body, err := managementCall(ctx, target, cred, http.MethodGet,
 		"/v1/management/deployments/current", nil, "")
+	builtWith := "" // the live artifact's SDK, compared with the runtime's below
 	switch {
 	case err != nil:
 		return err
@@ -139,6 +140,7 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 		// that predicts nothing about what their next push will do.
 		if deployed.SDKVersion != "" {
 			fmt.Fprintf(out, ", built with SDK %s", deployed.SDKVersion)
+			builtWith = deployed.SDKVersion
 		}
 		fmt.Fprintf(out, "\n              activated %s\n", deployed.ActivatedAt.Local().Format("2006-01-02 15:04"))
 	}
@@ -161,10 +163,21 @@ func statusOfProject(cmd *cobra.Command, jsonOut bool) error {
 	// Silent when it cannot be read. Unlike the app key — where saying nothing
 	// would read as "your key is fine" — the deployed line above still names the
 	// artifact's SDK, so a reader is not left believing something false.
+	//
+	// NAMED AS THE RUNTIME (palbase-cli#7 §3). The label used to be `sdk:` and the
+	// gloss "what this project RUNS", which read as the checkout's own dependency;
+	// under a `built with` line carrying another number it looked like the tree
+	// had drifted from live, and that is the diagnosis it produced. The number is
+	// the stack's, and when the artifact it serves was built with a different SDK
+	// the two were moved separately — which is said, not left to be inferred.
 	sdkCtx, cancelSDK := context.WithTimeout(ctx, 10*time.Second)
 	if running, err := projectSDKVersion(sdkCtx, target, cred); err == nil && running != "" {
-		fmt.Fprintf(out, "sdk:          %s %s — what this project RUNS\n",
+		fmt.Fprintf(out, "runtime:      %s %s — the stack serving this project, not this checkout's dependency\n",
 			backendPkg, running)
+		if builtWith != "" && builtWith != running {
+			fmt.Fprintf(out, "              the live artifact was built with %s: the two differ because the runtime\n"+
+				"              moved without a redeploy — the next push builds with this checkout's SDK\n", builtWith)
+		}
 	}
 	cancelSDK()
 
