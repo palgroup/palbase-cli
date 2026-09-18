@@ -17,7 +17,8 @@ arşivinde taşıyor. Yığın tabloyu artifact'la alıp her isteği kendi `Acce
   takma adlı, ad alanı); yerel `t`, gölgelenen parametre, başka paketin `t`'si sayılmaz. Literal olmayan
   argüman `dosya:satır` ile uyarılır.
 - **D-14 — arşiv.** `palbase/` dizininden yalnız kökteki `palbase/strings.json` taşınır
-  (`shipsFromPalbase`); sözleşme, `project.json` ve iç içe `web/palbase/strings.json` dışarıda kalır.
+  — yürüyüş `palbase/`'e girmez, tablo yürüyüşten sonra tam yoluyla eklenir (`addStringsTable`) ve
+  `.palignore` onu düşüremez; sözleşme, `project.json` ve iç içe `web/palbase/strings.json` dışarıda kalır.
 - **D-17 — etiketler.** `golang.org/x/text` v0.41.0 doğrudan bağımlılık; `canonicalLocale` ve tablo
   doğrulayıcısı yığının `locale.Canonical` / `locale.Parse` kurallarının aynısı — yığının reddedeceği bir
   tablo yazılmaz.

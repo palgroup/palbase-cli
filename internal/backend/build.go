@@ -69,11 +69,12 @@ table once with --source <language>.`,
 	return cmd
 }
 
-// runBuild is the `palbase build` body, factored out so `palbase push`
-// (platform arm) can gate on it inline. Returns an error ONLY for a user-code
+// runBuild is `palbase build` with no flags — the form the tests drive; the
+// command itself calls runBuildWith. Returns an error ONLY for a user-code
 // validation failure (exit 1); environment problems (no controllers, npm
 // install failed) warn and return nil (fail-open — the server gate is the
-// authoritative backstop).
+// authoritative backstop). `palbase push` does not call it: a push ships the
+// committed tree, string table included, as it is.
 func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	return runBuildWith(ctx, cwd, out, buildOptions{})
 }
