@@ -25,7 +25,8 @@ import (
 // The bundle the stack DOES need rides separately — see stackOnlyPalbaseEntries,
 // which is added back explicitly for a self-host push.
 //
-// The one exception is the string table (StringsPath) — see shipsFromPalbase.
+// The one exception is the string table (StringsPath), added by exact path after
+// the walk — see addStringsTable.
 var defaultIgnoreDirs = map[string]bool{
 	".git":         true,
 	".palbase":     true,
@@ -72,7 +73,8 @@ var defaultIgnoreFiles = []string{
 
 // BuildTarball walks dir and returns a gzip-compressed tar with paths relative
 // to dir (no wrapper directory), matching what /internal/push expects. It skips
-// defaultIgnoreDirs and any glob in an optional .palignore file at the root.
+// defaultIgnoreDirs and any glob in an optional .palignore file at the root —
+// except the string table, which always travels when it exists (addStringsTable).
 func BuildTarball(dir string) ([]byte, error) { return buildTarball(dir, "", false) }
 
 // BuildStackTarball is the archive a SELF-HOSTED stack is pushed.
@@ -153,12 +155,6 @@ func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 				if forStack && stackWantsPalbase(rel) {
 					return nil
 				}
-				// The CLI's own directory is walked for ONE file, the string
-				// table; every other entry under it is still refused by the file
-				// check below (D-14).
-				if filepath.ToSlash(rel) == rootDir {
-					return nil
-				}
 				return filepath.SkipDir
 			}
 			return nil
@@ -177,7 +173,7 @@ func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 		// The ignore check runs for FILES too, and `.palbase` is on that list —
 		// so a stack push has to say, once, that these particular entries are
 		// wanted. Everything else in the tree is judged exactly as before.
-		if (hasIgnoredSegment(rel) && (!forStack || !stackWantsPalbase(rel)) && !shipsFromPalbase(rel)) ||
+		if (hasIgnoredSegment(rel) && (!forStack || !stackWantsPalbase(rel))) ||
 			matchesAny(filepath.ToSlash(rel), defaultIgnoreFiles) ||
 			matchesAny(filepath.ToSlash(rel), patterns) {
 			return nil
@@ -186,6 +182,9 @@ func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 	})
 	if walkErr != nil {
 		return nil, walkErr
+	}
+	if err := addStringsTable(tw, dir); err != nil {
+		return nil, err
 	}
 	// ÜRÜNLER AYRI BİR KÖKTEN GELİR. Checkout'ta artık yoklar — orada üretilmeleri
 	// için hiçbir sebep yoktu ve müşterinin projesini kirletiyorlardı. Stack
@@ -433,17 +432,37 @@ func matchesAny(rel string, patterns []string) bool {
 	return false
 }
 
+// addStringsTable puts the backend's string table into the archive — the ONE
+// file under the CLI's own directory that belongs to the backend, because the
+// stack serves from it (D-14, FR-026).
+//
+// Added here, by its exact path, rather than found by the walk: the walk never
+// enters `palbase/`, so a directory under it that cannot be read — or vanishes
+// while a build rewrites it — cannot fail a push for a file that is not the
+// backend's. Only at the checkout's root: a nested `web/palbase/strings.json`
+// is somebody else's.
+//
+// `.palignore` cannot drop it. A table left behind is a release that answers
+// every caller in the source language without a word; a project that wants no
+// table deletes the file. A `palbase` that is a symlink, or a table that is not
+// a regular file, is not followed (CWE-61) — there is then no table to carry.
+func addStringsTable(tw *tar.Writer, dir string) error {
+	root, err := os.Lstat(filepath.Join(dir, rootDir))
+	if err != nil || !root.IsDir() {
+		return nil
+	}
+	rel := filepath.FromSlash(StringsPath())
+	if fi, err := os.Lstat(filepath.Join(dir, rel)); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	return writeTarFile(tw, dir, rel)
+}
+
 // stackWantsPalbase reports whether a `.palbase` path is a BUILD PRODUCT the
 // stack needs, rather than state about the machine that pushed.
 //
 // The allowlist is the point: `.palbase` also holds which stack this checkout is
 // linked to and the slots an app reads, and a push is not the place for either.
-// shipsFromPalbase reports whether rel is the one file under the CLI's own
-// directory that belongs to the backend: the string table the stack serves
-// from (D-14). Only at the checkout's root — a nested `web/palbase/strings.json`
-// is somebody else's.
-func shipsFromPalbase(rel string) bool { return filepath.ToSlash(rel) == StringsPath() }
-
 func stackWantsPalbase(rel string) bool {
 	rel = filepath.ToSlash(rel)
 	if rel == ".palbase" {

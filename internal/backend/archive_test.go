@@ -494,8 +494,8 @@ func TestTheTarballCarriesOnlyTheStringTableFromPalbase(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "app.module.ts"), []byte("export {}\n"), 0o644))
 
 	for name, build := range map[string]func() ([]byte, error){
-		"cloud": func() ([]byte, error) { return BuildTarball(dir) },
-		"stack": func() ([]byte, error) {
+		"build-staging": func() ([]byte, error) { return BuildTarball(dir) },
+		"push": func() ([]byte, error) {
 			bundle := t.TempDir()
 			require.NoError(t, os.MkdirAll(filepath.Join(bundle, ".palbase", "esm", "controllers"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(bundle, ".palbase", "esm", "controllers", "controllers.js"), []byte("export {}\n"), 0o644))
@@ -516,6 +516,74 @@ func TestTheTarballCarriesOnlyTheStringTableFromPalbase(t *testing.T) {
 			}
 		})
 	}
+}
+
+// `.palignore` cannot drop the table (D-14): a pattern written for another file
+// — `*.json`, a bare `strings.json`, a `palbase/*` left from the days the whole
+// directory leaked — would otherwise deploy a release that answers every caller
+// in the source language, and nothing would say so.
+func TestTheStringTableTravelsWhatever_palignoreSays(t *testing.T) {
+	for _, pattern := range []string{"palbase/strings.json", "strings.json", "*.json", "palbase/*", "palbase/**"} {
+		t.Run(pattern, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, RootDir()), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(StringsPath())), []byte("{}\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "main.ts"), []byte("export {}\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ".palignore"), []byte(pattern+"\n"), 0o644))
+			blob, err := BuildTarball(dir)
+			require.NoError(t, err)
+			require.Contains(t, tarEntries(t, blob), StringsPath())
+		})
+	}
+}
+
+// The walk never enters `palbase/`: a directory under it that cannot be read
+// must not fail a push for a file that is not the backend's. (Adding the table
+// by walking INTO palbase/ made `chmod 000 palbase/environments` fail every
+// push — measured in review.)
+func TestAnUnreadableDirectoryUnderPalbaseDoesNotFailThePush(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 000 directory — the condition cannot be built")
+	}
+	dir := t.TempDir()
+	// A DIRECT child of palbase/: a walk that enters palbase/ must read it to
+	// list it, and that read is what failed the push.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.FromSlash(EnvDir("main"))), 0o755))
+	env := filepath.Join(dir, RootDir(), "environments")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(StringsPath())), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.ts"), []byte("export {}\n"), 0o644))
+	require.NoError(t, os.Chmod(env, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(env, 0o755) })
+	blob, err := BuildTarball(dir)
+	require.NoError(t, err)
+	require.Contains(t, tarEntries(t, blob), StringsPath())
+}
+
+// A `palbase` that is a symlink is not followed (CWE-61): the table it points at
+// is outside the tree, and the archive carries no table at all.
+func TestASymlinkedPalbaseDirectoryCarriesNoTable(t *testing.T) {
+	dir := t.TempDir()
+	elsewhere := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(elsewhere, "strings.json"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.Symlink(elsewhere, filepath.Join(dir, RootDir())))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.ts"), []byte("export {}\n"), 0o644))
+	blob, err := BuildTarball(dir)
+	require.NoError(t, err)
+	require.NotContains(t, tarEntries(t, blob), StringsPath())
+}
+
+// `palbase pull` / `clone` bring the translations back: the table is source the
+// developer wrote, not a deploy artifact. If isDeployArtifact ever filtered
+// palbase/, a clone would lose every translation without a word.
+func TestExtractSourceTree_KeepsTheStringTable(t *testing.T) {
+	gz := makeTarGz(t, map[string]string{
+		"main.ts":     "export {}",
+		StringsPath(): `{"version":1,"source":"tr","locales":["tr"],"strings":{}}`,
+	})
+	dst := t.TempDir()
+	require.NoError(t, extractSourceTree(dst, bytes.NewReader(gz)))
+	_, err := os.Stat(filepath.Join(dst, filepath.FromSlash(StringsPath())))
+	require.NoError(t, err, "the string table did not come back with the source")
 }
 
 func TestStringsPathIsTheStacks(t *testing.T) {
