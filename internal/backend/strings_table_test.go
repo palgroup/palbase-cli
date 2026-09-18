@@ -171,6 +171,8 @@ func TestCanonicalLocale_IsTheStacksRule(t *testing.T) { // D-17
 		{"*", "", false}, {"", "", false}, {"xyz", "", false}, {"mul", "", false}, {"und", "", false},
 		{strings.Repeat("x", 65), "", false}, {"und-US", "", false}, {"mul-TR", "", false},
 		{"iw", "he", true}, {"tl", "fil", true},
+		// 65 bytes and a VALID tag to x/text: only the stack's length cap refuses it.
+		{"en-US-u-ca-gregory-co-phonebk-cu-usd-fw-mon-hc-h23-ka-noignore-kb", "", false},
 	} {
 		got, ok := canonicalLocale(tc.in)
 		require.Equal(t, tc.want, got, tc.in)
@@ -211,6 +213,18 @@ func TestReadStringsTable_RefusesAMisfiledTranslation(t *testing.T) {
 		_, _, err := readStringsTable(path)
 		require.ErrorContains(t, err, loc, "a translation under %q was dropped instead of refused", loc)
 	}
+}
+
+// Byte order, not UTF-16 order: U+FF01 (EF BC 81) sorts BEFORE U+1F600
+// (F0 9F 98 80) in UTF-8, and AFTER it in UTF-16 (FF01 > D83D). Go's sort — and
+// the stack — use the first.
+func TestEncodeStringsTable_SortsKeysByUTF8Bytes(t *testing.T) { // D-10
+	tab := &stringsTable{Version: 1, Source: "tr", Locales: []string{"tr"}, Strings: map[string]map[string]stringCell{
+		"\U0001F600": {}, "\uFF01": {},
+	}}
+	body, err := encodeStringsTable(tab)
+	require.NoError(t, err)
+	require.Less(t, strings.Index(string(body), "\uFF01"), strings.Index(string(body), "\U0001F600"))
 }
 
 func TestMergeStringsTable_OrdersAndDedupesLocales(t *testing.T) { // D-10
