@@ -76,9 +76,9 @@ func canonicalLocale(tag string) (string, bool) {
 }
 
 // parseStringsTable applies v2's locale.Parse rules. lenient relaxes exactly
-// ONE of them (D-18): a cell in a language that is no longer in `locales` is
-// dropped and its language returned, instead of refusing the file — removing a
-// language is an edit somebody makes on purpose, and it leaves the file invalid
+// ONE of them (D-18): a cell in a language that is no longer in `locales` — a
+// canonical tag, removed on purpose — is dropped and its language returned,
+// instead of refusing the file; removing a language leaves the file invalid
 // until a build writes it back (FR-032).
 func parseStringsTable(raw []byte, lenient bool) (*stringsTable, []string, error) {
 	if len(raw) > maxStringsTableBytes {
@@ -120,7 +120,13 @@ func parseStringsTable(raw []byte, lenient bool) (*stringsTable, []string, error
 	for key, cells := range t.Strings {
 		for loc, c := range cells {
 			if _, ok := known[loc]; !ok {
-				if !lenient {
+				// Only a REMOVED language is dropped: a canonical tag that is simply
+				// no longer in `locales`. A cell under `en-us` while `locales` says
+				// `en-US`, or under something that is not a tag at all, is a
+				// hand-written translation filed under a typo — dropping it would
+				// delete somebody's work, so it is refused by name like every other
+				// violation (FR-025).
+				if c, isTag := canonicalLocale(loc); !lenient || !isTag || c != loc {
 					return nil, nil, fmt.Errorf("%s: key %q carries locale %q which is not in locales", StringsPath(), key, loc)
 				}
 				delete(cells, loc)
@@ -273,31 +279,13 @@ func writeStringsTable(path string, t *stringsTable) error {
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, body) {
 		return nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+	// The file somebody commits, rewritten the ONE way this package rewrites
+	// such a file (target.go): whole or not at all, through a symlink, keeping
+	// its mode, refusing one that is read-only.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
-	tmp, err := os.CreateTemp(dir, ".strings-*.json")
-	if err != nil {
-		return fmt.Errorf("write %s: %w", StringsPath(), err)
-	}
-	fail := func(err error) error {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return fmt.Errorf("write %s: %w", StringsPath(), err)
-	}
-	if _, err := tmp.Write(body); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("write %s: %w", StringsPath(), err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := replaceFileAtomically(path, body); err != nil {
 		return fmt.Errorf("write %s: %w", StringsPath(), err)
 	}
 	return nil

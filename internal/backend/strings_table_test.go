@@ -198,3 +198,76 @@ func TestReadStringsTable_NoFileIsNoTable(t *testing.T) {
 	require.Nil(t, tab)
 	require.Nil(t, dropped)
 }
+
+// D-18 drops a REMOVED language only. A translation filed under a mis-cased or
+// invalid tag is somebody's work: refused by name, never silently deleted
+// (review of T005, I-2 — measured: "Hello" under `en-us` became `missing`).
+func TestReadStringsTable_RefusesAMisfiledTranslation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), filepath.FromSlash(StringsPath()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	for _, loc := range []string{"en-us", "EN-US", "not a tag"} {
+		body := `{"version":1,"source":"tr","locales":["tr","en-US"],"strings":{"k":{"` + loc + `":{"value":"Hello","state":"translated"}}}}`
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+		_, _, err := readStringsTable(path)
+		require.ErrorContains(t, err, loc, "a translation under %q was dropped instead of refused", loc)
+	}
+}
+
+func TestMergeStringsTable_OrdersAndDedupesLocales(t *testing.T) { // D-10
+	tab := fixtureTable()
+	tab.Locales = []string{"tr", "en", "de", "en"}
+	merged, _, err := mergeStringsTable(tab, []string{tableKey}, "")
+	require.NoError(t, err)
+	require.Equal(t, []string{"tr", "de", "en"}, merged.Locales)
+}
+
+func TestMergeStringsTable_TheSameSourceSpelledOtherwiseIsNoConflict(t *testing.T) { // FR-024
+	merged, _, err := mergeStringsTable(fixtureTable(), []string{tableKey}, "TR")
+	require.NoError(t, err)
+	require.Equal(t, "tr", merged.Source)
+}
+
+func TestMergeStringsTable_DroppedKeysComeBackSorted(t *testing.T) { // FR-019
+	tab := fixtureTable()
+	tab.Strings["b"] = map[string]stringCell{}
+	tab.Strings["a"] = map[string]stringCell{}
+	_, dropped, err := mergeStringsTable(tab, []string{tableKey}, "")
+	require.NoError(t, err)
+	require.Equal(t, []string{"Gözden geçirilecek", "a", "b"}, dropped)
+}
+
+// The table is a file somebody commits: it is rewritten the way target.go
+// rewrites one — through a symlink, keeping its mode, and a read-only file is
+// not written (review of T005, I-1).
+func TestWriteStringsTable_RewritesTheFileTheWayTheCheckoutOwnsIt(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "shared", "strings.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(real), 0o755))
+	require.NoError(t, os.WriteFile(real, []byte("{}\n"), 0o600))
+	path := filepath.Join(dir, filepath.FromSlash(StringsPath()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.Symlink(real, path))
+
+	require.NoError(t, writeStringsTable(path, fixtureTable()))
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	require.NotZero(t, fi.Mode()&os.ModeSymlink, "the symlink was replaced by a copy")
+	info, err := os.Stat(real)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "the file's own mode was not kept")
+	body, err := os.ReadFile(real)
+	require.NoError(t, err)
+	require.Contains(t, string(body), tableKey)
+
+	if os.Geteuid() == 0 {
+		return // root writes a 0444 file; the read-only half cannot be built
+	}
+	require.NoError(t, os.Chmod(real, 0o444))
+	t.Cleanup(func() { _ = os.Chmod(real, 0o644) })
+	tab := fixtureTable()
+	tab.Strings["Yeni"] = map[string]stringCell{}
+	require.Error(t, writeStringsTable(path, tab), "a read-only table was overwritten")
+	after, err := os.ReadFile(real)
+	require.NoError(t, err)
+	require.Equal(t, string(body), string(after))
+}
