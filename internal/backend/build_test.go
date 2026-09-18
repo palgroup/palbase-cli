@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1780,3 +1781,154 @@ func TestBuildAcceptsASurfaceClassAModuleLists(t *testing.T) {
 	require.True(t, ok, "a job a module lists must build:\n%s", out)
 	require.Contains(t, out, "build OK")
 }
+
+func stubStringsScan(t *testing.T, scan stringsScan, err error) {
+	t.Helper()
+	prev := runStringsScanFn
+	runStringsScanFn = func(context.Context, string, string, string) (stringsScan, error) { return scan, err }
+	t.Cleanup(func() { runStringsScanFn = prev })
+}
+
+func writeTable(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(StringsPath()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+	return path
+}
+
+const trTable = `{"version":1,"source":"tr","locales":["tr","en"],"strings":{"Eski":{"en":{"value":"Old","state":"translated"}}}}`
+
+func TestLandStringsTable_WithoutATableSaysHowToStartOne(t *testing.T) { // FR-022
+	dir := t.TempDir()
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba", "Hoşça kal"}}, nil)
+	var out bytes.Buffer
+	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
+	_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(StringsPath())))
+	require.True(t, os.IsNotExist(err), "no table may be written without a source language")
+	require.Equal(t, 1, strings.Count(out.String(), "palbase build --source <language>"), out.String())
+	require.Contains(t, out.String(), "2 t() string(s)")
+}
+
+func TestLandStringsTable_NoStringsNoTableSaysNothing(t *testing.T) {
+	dir := t.TempDir()
+	stubStringsScan(t, stringsScan{Keys: []string{}}, nil)
+	var out bytes.Buffer
+	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
+	require.Empty(t, out.String(), "a backend that uses no t() hears nothing about a table")
+}
+
+func TestLandStringsTable_SourceStartsTheTable(t *testing.T) { // FR-023
+	dir := t.TempDir()
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	var out bytes.Buffer
+	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "TR", "", &out))
+	tab, _, err := readStringsTable(filepath.Join(dir, filepath.FromSlash(StringsPath())))
+	require.NoError(t, err)
+	require.Equal(t, "tr", tab.Source)
+	require.Equal(t, []string{"tr"}, tab.Locales)
+	require.Contains(t, tab.Strings, "Merhaba")
+	require.Contains(t, out.String(), "✓ wrote palbase/strings.json")
+}
+
+func TestLandStringsTable_AConflictingSourceIsRefusedAndTheTableKept(t *testing.T) { // FR-024
+	dir := t.TempDir()
+	path := writeTable(t, dir, trTable)
+	stubStringsScan(t, stringsScan{Keys: []string{"Eski", "Yeni"}}, nil)
+	var out bytes.Buffer
+	require.Error(t, landStringsTable(context.Background(), "", "", dir, "en", "", &out))
+	require.Contains(t, out.String(), "--source en")
+	require.Contains(t, out.String(), "source language is tr")
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, trTable, string(body), "a refused build touched the table")
+}
+
+func TestLandStringsTable_AScannerThatCannotRunTouchesNothing(t *testing.T) { // FR-030
+	dir := t.TempDir()
+	path := writeTable(t, dir, trTable)
+	stubStringsScan(t, stringsScan{}, errors.New("the `typescript` package could not be loaded"))
+	var out bytes.Buffer
+	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out),
+		"the scanner alone does not fail the build (build.go fail-open rule)")
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, trTable, string(body), "an unscanned key set deleted keys (FR-019 must never fire here)")
+	require.Contains(t, out.String(), "palbase/strings.json was not updated in this build")
+	require.Equal(t, 1, strings.Count(out.String(), "\n"), "one line")
+}
+
+func TestLandStringsTable_NamesEveryNonLiteralCall(t *testing.T) { // FR-016
+	dir := t.TempDir()
+	stubStringsScan(t, stringsScan{Keys: []string{}, Dynamic: []stringsScanDynamic{{File: "controllers/a.ts", Line: 12}}}, nil)
+	var out bytes.Buffer
+	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
+	require.Contains(t, out.String(), "controllers/a.ts:12")
+}
+
+func TestLandStringsTable_MergesAndReportsDroppedKeysAndLanguages(t *testing.T) { // FR-019, FR-032 through the step
+	dir := t.TempDir()
+	writeTable(t, dir, `{"version":1,"source":"tr","locales":["tr","en"],"strings":{"Eski":{"en":{"value":"Old","state":"translated"},"de":{"value":"Alt","state":"translated"}}}}`)
+	stubStringsScan(t, stringsScan{Keys: []string{"Yeni"}}, nil)
+	var out bytes.Buffer
+	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
+	require.Contains(t, out.String(), `dropped "Eski"`)
+	require.Contains(t, out.String(), "dropped every de cell")
+	tab, _, err := readStringsTable(filepath.Join(dir, filepath.FromSlash(StringsPath())))
+	require.NoError(t, err)
+	require.Equal(t, map[string]stringCell{"en": {State: cellMissing}}, tab.Strings["Yeni"])
+}
+
+// THROUGH THE VERB (FR-015, FR-023, FR-021): the real scanner, the real staged
+// tree, the local SDK — `palbase build --source tr` writes the table into the
+// checkout, and a second build leaves the bytes alone.
+func TestRunBuild_WritesTheStringsTable(t *testing.T) {
+	requiresRealToolchain(t)
+	dir := t.TempDir()
+	ctxPack, cancelPack := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelPack()
+	sdk := packLocalSDK(t, ctxPack)
+	if !npmInstallProject(t, dir, sdk, "typescript@^5", "zod-to-json-schema") {
+		t.Skip("node/npm unavailable or the install failed")
+	}
+	probe := exec.Command("node", "-e", `try { process.stdout.write(typeof require("@palbase/backend").t === "function" ? "yes" : "no") } catch (e) { process.stdout.write("no") }`)
+	probe.Dir = dir
+	if got, err := probe.Output(); err != nil || strings.TrimSpace(string(got)) != "yes" {
+		t.Skip("the packed SDK exports no t() — this proves the build against the SDK that ships it")
+	}
+	useTestParserCache(t)
+	writeFixture(t, dir, stringsControllerTS)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "db"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realPublicSchema), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	var out bytes.Buffer
+	require.NoError(t, runBuildWith(ctx, dir, &out, buildOptions{source: "tr"}), "build:\n%s", out.String())
+	path := filepath.Join(dir, filepath.FromSlash(StringsPath()))
+	first, err := os.ReadFile(path)
+	require.NoError(t, err, "the build wrote no table:\n%s", out.String())
+	tab, _, err := parseStringsTable(first, false)
+	require.NoError(t, err)
+	require.Equal(t, "tr", tab.Source)
+	require.Contains(t, tab.Strings, "Merhaba {{ad}}")
+
+	out.Reset()
+	require.NoError(t, runBuild(ctx, dir, &out), "second build:\n%s", out.String())
+	second, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, string(first), string(second))
+	require.Contains(t, out.String(), "palbase/strings.json unchanged")
+}
+
+const stringsControllerTS = `import { Controller, Get, QueryParams, t, z } from "@palbase/backend";
+import { TodoSchema } from "../models/todo";
+
+@Controller("/todos")
+export default class TodosController {
+  @Get("/")
+  async list(@QueryParams(z.object({ workout_id: z.string() })) q: any): Promise<z.infer<typeof TodoSchema>> {
+    return { id: "1", title: t("Merhaba {{ad}}", { ad: q.workout_id }) };
+  }
+}
+`

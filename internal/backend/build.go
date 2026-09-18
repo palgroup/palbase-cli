@@ -40,7 +40,8 @@ const buildTempPrefix = "palbase-build-"
 // Studio auth, NO network call. Exit 0 = PASSED (or environment couldn't run it —
 // warned); exit 1 = user-code validation error.
 func newBuildCmd() *cobra.Command {
-	return &cobra.Command{
+	var opts buildOptions
+	cmd := &cobra.Command{
 		Use:   "build",
 		Short: "Validate the backend locally the way a deploy would (catches broken pushes before they ship)",
 		Long: `Run the same validation the deploy runs — stage, bundle, and extract
@@ -48,15 +49,24 @@ controller metadata — against your local tree, so a push that would produce a
 FAILED deploy is caught here first. Exits non-zero on a user-code error
 (bad decorator, return-type, version skew); exits 0 when it passes or when the
 local environment can't run it (a warning is printed and the server still
-gates the real deploy).`,
+gates the real deploy).
+
+It also keeps palbase/strings.json in step with the t() calls in your code:
+new sentences are added, removed ones dropped, translations kept. Start the
+table once with --source <language>.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
 			}
-			return runBuild(cmd.Context(), cwd, cmd.OutOrStdout())
+			return runBuildWith(cmd.Context(), cwd, cmd.OutOrStdout(), opts)
 		},
 	}
+	// Only a project's FIRST build needs it: from then on the table carries its
+	// own source language, and a different one is refused (FR-024).
+	cmd.Flags().StringVar(&opts.source, "source", "",
+		"the language your t() strings are written in — starts palbase/strings.json when it does not exist yet (e.g. --source tr)")
+	return cmd
 }
 
 // runBuild is the `palbase build` body, factored out so `palbase push`
@@ -65,6 +75,17 @@ gates the real deploy).`,
 // install failed) warn and return nil (fail-open — the server gate is the
 // authoritative backstop).
 func runBuild(ctx context.Context, cwd string, out io.Writer) error {
+	return runBuildWith(ctx, cwd, out, buildOptions{})
+}
+
+// buildOptions are the flags `palbase build` takes.
+type buildOptions struct {
+	// source is --source: the language the project's t() keys are written in.
+	source string
+}
+
+// runBuildWith is runBuild with the command's flags.
+func runBuildWith(ctx context.Context, cwd string, out io.Writer, opts buildOptions) error {
 	// THE SWEEP FIRST — BEFORE EVERY GATE AND EVERY EARLY RETURN (FR-009).
 	//
 	// A retired artefact is what an OLDER CLI wrote into somebody's checkout,
@@ -308,6 +329,13 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 	// wrong, and the moment somebody most needs their editor working is while
 	// they are fixing one.
 	if err := landEnvTypes(buildRoot, cwd, names, out); err != nil {
+		return err
+	}
+	// THE STRING TABLE, right after the types and for the same reason (D-19):
+	// it describes the source's sentences, not whether the deploy will pass,
+	// and the controller gates below may still fail this build. It reads the
+	// STAGED tree — the source the deploy receives — and writes the checkout.
+	if err := landStringsTable(ctx, tmpDir, buildRoot, cwd, opts.source, devNodePath(cwd, out), out); err != nil {
 		return err
 	}
 	// The replacement exists now, so what it supersedes goes now — the sweep at
@@ -740,4 +768,104 @@ func hasProjectSource(dir string) bool {
 		return nil
 	})
 	return found
+}
+
+// stringsScan is what devjs/strings_scan.js prints.
+type stringsScan struct {
+	Keys    []string             `json:"keys"`
+	Dynamic []stringsScanDynamic `json:"dynamic"`
+}
+
+type stringsScanDynamic struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
+// runStringsScanFn is the seam the table step is measured through.
+var runStringsScanFn = runStringsScan
+
+// runStringsScan runs the embedded scanner over root with the CLI's pinned
+// TypeScript first on NODE_PATH (D-12, NFR-004). Any non-zero exit, and any
+// output that is not the scanner's one line, is an error — never an empty key
+// set, because an empty key set is a table with every key deleted (FR-030).
+func runStringsScan(ctx context.Context, script, root, nodePath string) (stringsScan, error) {
+	cmd := exec.CommandContext(ctx, "node", script, root)
+	cmd.Env = append(os.Environ(), "NODE_PATH="+nodePath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil {
+		why := strings.TrimSpace(stderr.String())
+		if why == "" {
+			why = err.Error()
+		}
+		return stringsScan{}, errors.New(why)
+	}
+	var s stringsScan
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &s); err != nil {
+		return stringsScan{}, fmt.Errorf("unreadable scanner output: %w", err)
+	}
+	if s.Keys == nil {
+		return stringsScan{}, errors.New("the scanner's output carries no key list")
+	}
+	return s, nil
+}
+
+// landStringsTable is the build's table step: scan, merge, write.
+//
+// A scanner that cannot run leaves the table exactly as it is and says so in
+// one line — a key set nobody measured must never reach the merge, where a
+// missing key is a deleted translation (FR-030). That alone does not fail the
+// build: the same rule as the local validation below, which warns when this
+// machine cannot run it and lets the deploy gate the real push.
+func landStringsTable(ctx context.Context, tmpDir, buildRoot, cwd, source, nodePath string, out io.Writer) error {
+	path := filepath.Join(cwd, filepath.FromSlash(StringsPath()))
+	scan, err := runStringsScanFn(ctx, filepath.Join(tmpDir, "strings_scan.js"), buildRoot, nodePath)
+	if err != nil {
+		fmt.Fprintf(out, "warning: %s was not updated in this build — the t() scanner could not run (%s)\n",
+			StringsPath(), strings.ReplaceAll(err.Error(), "\n", " "))
+		return nil
+	}
+	for _, d := range scan.Dynamic {
+		// Every place the scanner could not read a key from (FR-016): a computed
+		// first argument, `t` used other than as a direct call, or re-exported.
+		fmt.Fprintf(out, "warning: %s:%d — this use of t() cannot be collected into %s (only a direct call "+
+			"whose first argument is a string literal can); it is served in the source language\n",
+			d.File, d.Line, StringsPath())
+	}
+	existing, droppedLocales, err := readStringsTable(path)
+	if err != nil {
+		fmt.Fprintf(out, "✗ %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+	merged, droppedKeys, err := mergeStringsTable(existing, scan.Keys, source)
+	if err != nil {
+		fmt.Fprintf(out, "✗ %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+	if merged == nil {
+		if len(scan.Keys) > 0 {
+			fmt.Fprintf(out, "! %d t() string(s) found and %s does not exist — start it with: palbase build --source <language>\n",
+				len(scan.Keys), StringsPath())
+		}
+		return nil
+	}
+	before, _ := os.ReadFile(path)
+	if err := writeStringsTable(path, merged); err != nil {
+		fmt.Fprintf(out, "✗ %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+	for _, loc := range droppedLocales {
+		fmt.Fprintf(out, "  dropped every %s cell — %s is no longer in locales\n", loc, loc)
+	}
+	for _, k := range droppedKeys {
+		fmt.Fprintf(out, "  dropped %q — no t() call uses it any more\n", k)
+	}
+	after, _ := os.ReadFile(path)
+	if bytes.Equal(before, after) {
+		fmt.Fprintf(out, "✓ %s unchanged (%d string(s))\n", StringsPath(), len(merged.Strings))
+	} else {
+		fmt.Fprintf(out, "✓ wrote %s (%d string(s), %d language(s))\n", StringsPath(), len(merged.Strings), len(merged.Locales))
+	}
+	return nil
 }
