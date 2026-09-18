@@ -464,31 +464,60 @@ func TestStagedControllersDirMatchesBuildCheck(t *testing.T) {
 		"build-check.js must stage into %s — the tarball walk skips exactly that name", stagedControllersDir)
 }
 
-// THE CLI'S OWN DIRECTORY NEVER SHIPS IN A DEPLOY PAYLOAD.
+// THE CLI'S OWN DIRECTORY NEVER SHIPS IN A DEPLOY PAYLOAD — EXCEPT ONE FILE.
 //
 // `defaultIgnoreDirs` named `.palbase` and not `palbase`, so the layout
 // migration quietly put two things back into the tarball that had been excluded
 // all along: every environment's contract, and `project.json` with the target
 // URL and OAuth selections in it. A base64 tarball that reaches Temporal's 4 MB
 // gRPC ceiling kills the deploy with an opaque RESOURCE_EXHAUSTED.
-func TestTheTarballCarriesNoPalbaseDirectory(t *testing.T) {
+//
+// Until D-14 this asserted that NOTHING under palbase/ travelled, and that was
+// right for every file then in it. The string table is the first that belongs
+// to the backend: the stack serves from it, and a push that dropped it would
+// deploy a release that silently answers every caller in the source language
+// (FR-026). The contract and project.json still stay out — asserted below.
+func TestTheTarballCarriesOnlyTheStringTableFromPalbase(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.FromSlash(EnvDir("main"))), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(SpecPath("main"))),
 		[]byte(`{"openapi":"3.1.0""x-palbase-roles":{"roles":[]},}`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, RootDir(), "project.json"),
 		[]byte(`{"url":"https://x.palbase.studio"}`), 0o644))
-	// …and something that IS source, so this is not measuring an empty tarball.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.FromSlash(StringsPath())),
+		[]byte(`{"version":1,"source":"tr","locales":["tr"],"strings":{}}`+"\n"), 0o644))
+	// A nested palbase/strings.json belongs to something else (a web app beside
+	// the backend) and stays out.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "web", RootDir()), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "web", RootDir(), "strings.json"), []byte("{}\n"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "app.module.ts"), []byte("export {}\n"), 0o644))
 
-	blob, err := BuildTarball(dir)
-	require.NoError(t, err)
-
-	names := tarEntries(t, blob)
-	require.Contains(t, names, "modules/app.module.ts", "the tarball carries no source at all")
-	for _, n := range names {
-		require.False(t, strings.HasPrefix(n, RootDir()+"/"),
-			"the deploy payload carries %s — the CLI's own directory is not source", n)
+	for name, build := range map[string]func() ([]byte, error){
+		"cloud": func() ([]byte, error) { return BuildTarball(dir) },
+		"stack": func() ([]byte, error) {
+			bundle := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(bundle, ".palbase", "esm", "controllers"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(bundle, ".palbase", "esm", "controllers", "controllers.js"), []byte("export {}\n"), 0o644))
+			return BuildStackTarball(dir, bundle)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			blob, err := build()
+			require.NoError(t, err)
+			names := tarEntries(t, blob)
+			require.Contains(t, names, "modules/app.module.ts", "the tarball carries no source at all")
+			require.Contains(t, names, StringsPath(), "the string table did not travel — the stack would serve every caller the source language")
+			require.NotContains(t, names, "web/"+RootDir()+"/strings.json")
+			for _, n := range names {
+				if strings.HasPrefix(n, RootDir()+"/") {
+					require.Equal(t, StringsPath(), n, "the deploy payload carries %s — the CLI's own directory is not source", n)
+				}
+			}
+		})
 	}
+}
+
+func TestStringsPathIsTheStacks(t *testing.T) {
+	require.Equal(t, "palbase/strings.json", StringsPath())
 }

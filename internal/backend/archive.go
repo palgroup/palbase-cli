@@ -24,6 +24,8 @@ import (
 //
 // The bundle the stack DOES need rides separately — see stackOnlyPalbaseEntries,
 // which is added back explicitly for a self-host push.
+//
+// The one exception is the string table (StringsPath) — see shipsFromPalbase.
 var defaultIgnoreDirs = map[string]bool{
 	".git":         true,
 	".palbase":     true,
@@ -151,6 +153,12 @@ func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 				if forStack && stackWantsPalbase(rel) {
 					return nil
 				}
+				// The CLI's own directory is walked for ONE file, the string
+				// table; every other entry under it is still refused by the file
+				// check below (D-14).
+				if filepath.ToSlash(rel) == rootDir {
+					return nil
+				}
 				return filepath.SkipDir
 			}
 			return nil
@@ -169,7 +177,7 @@ func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 		// The ignore check runs for FILES too, and `.palbase` is on that list —
 		// so a stack push has to say, once, that these particular entries are
 		// wanted. Everything else in the tree is judged exactly as before.
-		if (hasIgnoredSegment(rel) && (!forStack || !stackWantsPalbase(rel))) ||
+		if (hasIgnoredSegment(rel) && (!forStack || !stackWantsPalbase(rel)) && !shipsFromPalbase(rel)) ||
 			matchesAny(filepath.ToSlash(rel), defaultIgnoreFiles) ||
 			matchesAny(filepath.ToSlash(rel), patterns) {
 			return nil
@@ -430,6 +438,12 @@ func matchesAny(rel string, patterns []string) bool {
 //
 // The allowlist is the point: `.palbase` also holds which stack this checkout is
 // linked to and the slots an app reads, and a push is not the place for either.
+// shipsFromPalbase reports whether rel is the one file under the CLI's own
+// directory that belongs to the backend: the string table the stack serves
+// from (D-14). Only at the checkout's root — a nested `web/palbase/strings.json`
+// is somebody else's.
+func shipsFromPalbase(rel string) bool { return filepath.ToSlash(rel) == StringsPath() }
+
 func stackWantsPalbase(rel string) bool {
 	rel = filepath.ToSlash(rel)
 	if rel == ".palbase" {
