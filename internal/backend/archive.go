@@ -183,7 +183,7 @@ func buildTarball(dir, bundleRoot string, forStack bool) ([]byte, error) {
 	if walkErr != nil {
 		return nil, walkErr
 	}
-	if err := addStringsTable(tw, dir); err != nil {
+	if err := addStringsTable(tw, dir, forStack); err != nil {
 		return nil, err
 	}
 	// ÜRÜNLER AYRI BİR KÖKTEN GELİR. Checkout'ta artık yoklar — orada üretilmeleri
@@ -432,30 +432,55 @@ func matchesAny(rel string, patterns []string) bool {
 	return false
 }
 
-// addStringsTable puts the backend's string table into the archive — the ONE
-// file under the CLI's own directory that belongs to the backend, because the
-// stack serves from it (D-14, FR-026).
+// addStringsTable puts the backend's string table into the archive — the ONLY
+// files under the CLI's own directory that belong to the backend, because the
+// stack serves from them (D-14, FR-037): the old palbase/strings.json when the
+// checkout still has it, and every table entry of palbase/strings/.
 //
-// Added here, by its exact path, rather than found by the walk: the walk never
+// Added here, by exact path, rather than found by the walk: the walk never
 // enters `palbase/`, so a directory under it that cannot be read — or vanishes
 // while a build rewrites it — cannot fail a push for a file that is not the
-// backend's. Only at the checkout's root: a nested `web/palbase/strings.json`
-// is somebody else's.
+// backend's. Only at the checkout's root: a nested `web/palbase/…` is somebody
+// else's. `.palignore` cannot drop them: a table left behind is a release that
+// answers every caller in the source language without a word.
 //
-// `.palignore` cannot drop it. A table left behind is a release that answers
-// every caller in the source language without a word; a project that wants no
-// table deletes the file. A `palbase` that is a symlink, or a table that is not
-// a regular file, is not followed (CWE-61) — there is then no table to carry.
-func addStringsTable(tw *tar.Writer, dir string) error {
+// What a PUSH refuses (refuse = forStack), it refuses by name (FR-038, FR-056):
+// both homes at once; a table file that is not a regular file, or a
+// palbase/strings that is not a real directory — a translation that is not
+// read is lost without a word; and palbase/strings/ under an installed SDK
+// whose stack reads only the old file. The build's staging tree (refuse =
+// false) carries what is there and refuses nothing: the build's own table step
+// names each of these with its own line, and a staging failure would bury it
+// under a sentence about bundling. A `palbase` that is itself a symlink is not
+// followed (CWE-61) and carries no table, as before.
+func addStringsTable(tw *tar.Writer, dir string, refuse bool) error {
 	root, err := os.Lstat(filepath.Join(dir, rootDir))
 	if err != nil || !root.IsDir() {
 		return nil
 	}
-	rel := filepath.FromSlash(StringsPath())
-	if fi, err := os.Lstat(filepath.Join(dir, rel)); err != nil || !fi.Mode().IsRegular() {
+	if refuse {
+		if err := stringsTableRefusal(dir); err != nil {
+			return err
+		}
+	}
+	legacyRel := filepath.FromSlash(StringsPath())
+	if fi, err := os.Lstat(filepath.Join(dir, legacyRel)); err == nil && fi.Mode().IsRegular() {
+		if err := writeTarFile(tw, dir, legacyRel); err != nil {
+			return err
+		}
+	}
+	// A staging tree carries what can be read and refuses nothing; the build's
+	// own table step names the rest (FR-014).
+	names, err := tableDirEntryNames(dir)
+	if err != nil {
 		return nil
 	}
-	return writeTarFile(tw, dir, rel)
+	for _, name := range names {
+		if err := writeTarFile(tw, dir, filepath.Join(filepath.FromSlash(StringsDir()), name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // stackWantsPalbase reports whether a `.palbase` path is a BUILD PRODUCT the

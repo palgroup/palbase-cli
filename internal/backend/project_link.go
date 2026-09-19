@@ -1337,6 +1337,9 @@ const wellKnownPath = "/.well-known/palbase.json"
 type stackDescription struct {
 	Hosting    string `json:"hosting"`
 	SDKVersion string `json:"sdk_version"`
+	// StringsTable is the string table format the stack reads (D-23): 2 for
+	// palbase/strings/. A stack that predates the directory sends nothing.
+	StringsTable int `json:"strings_table"`
 }
 
 func trimBody(b []byte) string {

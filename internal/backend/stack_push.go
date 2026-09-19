@@ -18,8 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -96,11 +98,35 @@ func pushURL(base string, acceptDataLoss, acceptBreaking bool) string {
 	if acceptBreaking {
 		q = append(q, "accept-breaking=true")
 	}
+	// EVERY push says it carries palbase/strings/ (FR-054, D-22). A stack that
+	// sees a push without it knows the client cannot carry the directory, and
+	// refuses a table-less push onto a release that answers from a table.
+	q = append(q, "strings-dir=true")
 	u := base + "/v1/management/push"
 	if len(q) > 0 {
 		u += "?" + strings.Join(q, "&")
 	}
 	return u
+}
+
+// stackReadsStringsDir is FR-057 (D-23): a checkout whose table is
+// palbase/strings/ is pushed only to a stack that says it reads it. A
+// self-hosted stack does not follow the SDK version, and one older than the
+// directory would pack a release with no table and say nothing. A stack that
+// cannot be asked is not assumed to read it.
+func stackReadsStringsDir(ctx context.Context, dir string, target Target) error {
+	if _, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(StringsDir()), metaFileName)); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	described, err := describeStack(ctx, target.URL, target.Insecure)
+	if err != nil {
+		return fmt.Errorf("could not ask this stack whether it reads %s/ (%v) — pushing would risk a release that answers only in the source language", StringsDir(), err)
+	}
+	if described.StringsTable < tableDirVersion {
+		return fmt.Errorf("this stack does not read %s/ (its %s declares no strings_table) — pushing would ship a release "+
+			"that answers only in the source language; update the stack", StringsDir(), wellKnownPath)
+	}
+	return nil
 }
 
 func runStackPush(ctx context.Context, target Target, cred Credentials, approve, acceptBreaking bool, w io.Writer) error {
@@ -239,6 +265,14 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 
 	// KAPI, BU PUSH'UN DERLEDİĞİNİ ÖLÇER. `bundleRoot` buraya geçmeseydi kapı
 	// checkout'u ölçerdi ve orada — 0.61.1'den beri — hiçbir ürün yok.
+	// WHAT WOULD LOSE THE TABLE, before anything changes (FR-038, FR-056): in
+	// the cloud prepareStackRuntime can move the tenant onto the image the
+	// installed SDK names, and an SDK whose stack reads only the old file must
+	// be refused before that, not after.
+	if err := stringsTableRefusal(dir); err != nil {
+		return err
+	}
+
 	if err := prepareStackRuntime(ctx, dir, bundleRoot, target, cred, approve, w); err != nil {
 		return err
 	}
@@ -280,6 +314,11 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 		if why := pushCeilingRefusal(reaches, serves); why != "" {
 			return errors.New(why)
 		}
+	}
+
+	// THE TABLE THE STACK MUST BE ABLE TO READ (FR-057), before anything is sent.
+	if err := stackReadsStringsDir(ctx, dir, target); err != nil {
+		return err
 	}
 
 	// @Upload names a bucket that must EXIST — storage will not create one on

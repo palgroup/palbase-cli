@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -433,4 +434,30 @@ func sdkStringsTable(projectDir string) (declared int, installed string) {
 		return 0, ""
 	}
 	return pkg.Palbase.StringsTable, pkg.Version
+}
+
+// stringsTableRefusal is what a PUSH refuses about the checkout's table
+// (FR-038, FR-056), by name; nil when the table can travel. The archive calls
+// it, and so does the push BEFORE prepareStackRuntime — in the cloud that step
+// can move the tenant onto the image an old SDK names, and a refusal must come
+// before anything changes (FR-056).
+func stringsTableRefusal(dir string) error {
+	if root, err := os.Lstat(filepath.Join(dir, rootDir)); err != nil || !root.IsDir() {
+		return nil // a symlinked palbase/ is not followed and carries no table (CWE-61)
+	}
+	names, err := tableDirEntryNames(dir)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(names, metaFileName) {
+		return nil
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(StringsPath()))); err == nil && fi.Mode().IsRegular() {
+		return errBothTables()
+	}
+	if declared, installed := sdkStringsTable(dir); declared < tableDirVersion && installed != "" {
+		return fmt.Errorf("%s/ needs @palbase/backend 41.3.0 or later, and this project's is %s — its stack reads only %s; "+
+			"upgrade the SDK (npm install @palbase/backend@latest)", StringsDir(), installed, StringsPath())
+	}
+	return nil
 }

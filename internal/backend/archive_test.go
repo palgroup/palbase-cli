@@ -511,7 +511,9 @@ func TestTheTarballCarriesOnlyTheStringTableFromPalbase(t *testing.T) {
 			require.NotContains(t, names, "web/"+RootDir()+"/strings.json")
 			for _, n := range names {
 				if strings.HasPrefix(n, RootDir()+"/") {
-					require.Equal(t, StringsPath(), n, "the deploy payload carries %s — the CLI's own directory is not source", n)
+					_, isTableFile := strings.CutPrefix(n, StringsDir()+"/")
+					require.True(t, n == StringsPath() || isTableFile,
+						"the deploy payload carries %s — the CLI's own directory is not source", n)
 				}
 			}
 		})
@@ -588,4 +590,87 @@ func TestExtractSourceTree_KeepsTheStringTable(t *testing.T) {
 
 func TestStringsPathIsTheStacks(t *testing.T) {
 	require.Equal(t, "palbase/strings.json", StringsPath())
+}
+
+func TestTheTarballCarriesTheStringsDirectory(t *testing.T) { // FR-037
+	dir := t.TempDir()
+	writeRel(t, dir, "main.ts", "export {}\n")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en.json", `{"Merhaba":{"value":"Hello","state":"translated"}}`)
+	writeRel(t, dir, "palbase/strings/.DS_Store", "junk")
+	writeRel(t, dir, "palbase/strings/drafts/fr.json", "{}")
+	writeRel(t, dir, ".palignore", "palbase/strings/*\n*.json\n")
+	blob, err := BuildTarball(dir)
+	require.NoError(t, err)
+	names := tarEntries(t, blob)
+	require.Contains(t, names, "palbase/strings/_meta.json")
+	require.Contains(t, names, "palbase/strings/en.json", ".palignore cannot drop the table (D-14)")
+	require.NotContains(t, names, "palbase/strings/.DS_Store")
+	require.NotContains(t, names, "palbase/strings/drafts/fr.json")
+}
+
+func TestTheTarballCarriesTheOldFileBesideALeftover(t *testing.T) { // FR-037, D-4
+	dir := t.TempDir()
+	writeRel(t, dir, "main.ts", "export {}\n")
+	writeRel(t, dir, "palbase/strings.json", `{"version":1,"source":"tr","locales":["tr","en"],"strings":{}}`)
+	writeRel(t, dir, "palbase/strings/en.json", "{}")
+	blob, err := BuildTarball(dir)
+	require.NoError(t, err, "without _meta.json the directory is a leftover; the stack decides, the push carries")
+	names := tarEntries(t, blob)
+	require.Contains(t, names, StringsPath())
+	require.Contains(t, names, "palbase/strings/en.json")
+}
+
+func TestAPushRefusesWhatWouldLoseTheTable(t *testing.T) { // FR-038, FR-056
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T, dir string)
+		wantIn string
+	}{
+		{"iki tablo", func(t *testing.T, dir string) {
+			writeRel(t, dir, "palbase/strings.json", "{}")
+			writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+		}, "palbase/strings.json and palbase/strings/ both exist"},
+		{"sembolik bağ", func(t *testing.T, dir string) {
+			writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+			writeRel(t, dir, "elsewhere.json", "{}")
+			require.NoError(t, os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, "palbase", "strings", "fr.json")))
+		}, "palbase/strings/fr.json is not a regular file"},
+		{"dizin değil", func(t *testing.T, dir string) {
+			writeRel(t, dir, "palbase/strings", "a file")
+		}, "palbase/strings is not a directory"},
+		{"eski SDK", func(t *testing.T, dir string) {
+			installSDK(t, dir, 0, "41.2.0")
+			writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+		}, "palbase/strings/ needs @palbase/backend 41.3.0 or later, and this project's is 41.2.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeRel(t, dir, "main.ts", "export {}\n")
+			tc.setup(t, dir)
+			bundle := t.TempDir()
+			writeRel(t, bundle, ".palbase/esm/controllers/controllers.js", "export {}\n")
+			_, err := BuildStackTarball(dir, bundle)
+			require.ErrorContains(t, err, tc.wantIn)
+			// The build's staging tree refuses none of it: the build's own table
+			// step names each case with its C-8 line (FR-003, FR-014, FR-056),
+			// and a staging failure would bury it under a sentence about bundling.
+			_, err = BuildTarball(dir)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestExtractSourceTree_KeepsTheStringsDirectory(t *testing.T) { // FR-037: pull/clone bring it back
+	gz := makeTarGz(t, map[string]string{
+		"main.ts":                    "export {}",
+		"palbase/strings/_meta.json": dirMetaTR,
+		"palbase/strings/en.json":    "{}",
+	})
+	dst := t.TempDir()
+	require.NoError(t, extractSourceTree(dst, bytes.NewReader(gz)))
+	for _, rel := range []string{"palbase/strings/_meta.json", "palbase/strings/en.json"} {
+		_, err := os.Stat(filepath.Join(dst, filepath.FromSlash(rel)))
+		require.NoError(t, err, "%s did not come back with the source", rel)
+	}
 }

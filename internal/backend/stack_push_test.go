@@ -7,6 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -241,10 +244,10 @@ func TestPushURL_CarriesBothConsents(t *testing.T) {
 		dataLoss, breaking bool
 		want               string
 	}{
-		{false, false, base + "/v1/management/push"},
-		{true, false, base + "/v1/management/push?accept-data-loss=true"},
-		{false, true, base + "/v1/management/push?accept-breaking=true"},
-		{true, true, base + "/v1/management/push?accept-data-loss=true&accept-breaking=true"},
+		{false, false, base + "/v1/management/push?strings-dir=true"},
+		{true, false, base + "/v1/management/push?accept-data-loss=true&strings-dir=true"},
+		{false, true, base + "/v1/management/push?accept-breaking=true&strings-dir=true"},
+		{true, true, base + "/v1/management/push?accept-data-loss=true&accept-breaking=true&strings-dir=true"},
 	} {
 		if got := pushURL(base, tc.dataLoss, tc.breaking); got != tc.want {
 			t.Errorf("pushURL(dataLoss=%v, breaking=%v) = %q, beklenen %q",
@@ -561,4 +564,66 @@ func TestReadableRefusalsAreExactlyTheCodesThatCarryTheirReason(t *testing.T) {
 		"candidate_failed",          // why the candidate never answered
 		"test_database_unavailable", // the unwired process (D-14)
 	}, got)
+}
+
+func TestStackReadsStringsDir(t *testing.T) { // FR-057, D-23
+	serve := func(doc string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != wellKnownPath {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, doc)
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	withDir := t.TempDir()
+	writeRel(t, withDir, "palbase/strings/_meta.json", dirMetaTR)
+	withoutDir := t.TempDir()
+
+	reads := serve(`{"hosting":"project","strings_table":2}`)
+	older := serve(`{"hosting":"project"}`)
+	ctx := context.Background()
+
+	require.NoError(t, stackReadsStringsDir(ctx, withDir, Target{URL: reads.URL}))
+	require.NoError(t, stackReadsStringsDir(ctx, withoutDir, Target{URL: older.URL}), "no directory, nothing to ask")
+	err := stackReadsStringsDir(ctx, withDir, Target{URL: older.URL})
+	require.ErrorContains(t, err, "this stack does not read palbase/strings/")
+	require.ErrorContains(t, err, "update the stack")
+	dead := serve("")
+	dead.Close()
+	require.ErrorContains(t, stackReadsStringsDir(ctx, withDir, Target{URL: dead.URL}),
+		"could not ask this stack whether it reads palbase/strings/")
+}
+
+// The table's refusals come BEFORE prepareStackRuntime (FR-056): measured on the
+// function's own syntax tree, so a comment naming either call cannot satisfy it.
+func TestRunStackPush_RefusesTheTableBeforeTheRuntimeMoves(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "stack_push.go", nil, 0)
+	require.NoError(t, err)
+	pos := map[string]token.Pos{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "runStackPush" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			if call, ok := m.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok {
+					if _, seen := pos[id.Name]; !seen {
+						pos[id.Name] = call.Pos()
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+	require.NotZero(t, pos["stringsTableRefusal"], "runStackPush does not call stringsTableRefusal")
+	require.NotZero(t, pos["prepareStackRuntime"], "runStackPush does not call prepareStackRuntime")
+	require.Less(t, pos["stringsTableRefusal"], pos["prepareStackRuntime"])
+	require.Less(t, pos["prepareStackRuntime"], pos["stackReadsStringsDir"], "the target is asked AFTER the runtime is prepared (FR-057)")
 }
