@@ -249,6 +249,15 @@ func putSecret(ctx context.Context, target Target, cred Credentials, name, value
 
 // managementCall is one request to a project's management surface.
 func managementCall(ctx context.Context, target Target, cred Credentials, method, path string, body []byte, contentType string) (int, []byte, error) {
+	return managementCallWithin(ctx, target, cred, method, path, body, contentType, 30*time.Second)
+}
+
+// managementCallWithin is managementCall with the caller's deadline. It is the
+// SAME door — one place where the credential, the client and readCapped's rule
+// live — because a second door for one caller would drift from this one. A
+// translation batch waits on a model (D-13); everything else is configuration
+// and keeps managementCall's 30 seconds.
+func managementCallWithin(ctx context.Context, target Target, cred Credentials, method, path string, body []byte, contentType string, timeout time.Duration) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = strings.NewReader(string(body))
@@ -262,7 +271,7 @@ func managementCall(ctx context.Context, target Target, cred Credentials, method
 		req.Header.Set("Content-Type", contentType)
 	}
 	client := stackClient(target)
-	client.Timeout = 30 * time.Second
+	client.Timeout = timeout
 
 	res, err := client.Do(req)
 	if err != nil {

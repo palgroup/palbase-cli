@@ -992,6 +992,11 @@ func landStringsTable(ctx context.Context, tmpDir, buildRoot, cwd string, opts b
 	} else {
 		fmt.Fprintf(out, "✓ %s/ unchanged (%d string(s))\n", StringsDir(), len(merged.Strings))
 	}
+	if opts.translate {
+		if err := translateMissing(ctx, cwd, merged, out); err != nil {
+			return fmt.Errorf("build failed")
+		}
+	}
 	return nil
 }
 

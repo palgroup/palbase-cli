@@ -2133,3 +2133,32 @@ export default class TodosController {
   }
 }
 `
+
+func TestLandStringsTable_AddThenTranslate(t *testing.T) { // FR-017 through the step, FR-009
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	stubStringsScan(t, stringsScan{Keys: []string{"Kartınız reddedildi ({{amount}} ₺)"}}, nil)
+	calls := stubTranslation(t, func(dest string, keys []string) ([]string, error) {
+		return []string{"Votre carte a été refusée ({{amount}} ₺)"}, nil
+	})
+	out, err := land(t, dir, buildOptions{add: []string{"fr"}, translate: true})
+	require.NoError(t, err, out)
+	require.Len(t, *calls, 1)
+	require.Equal(t, "fr", (*calls)[0].dest)
+	require.Contains(t, out, "✓ added fr")
+	require.Contains(t, out, "✓ translated 1 string(s) into fr")
+	require.Contains(t, readRel(t, dir, "palbase/strings/fr.json"), "\"value\": \"Votre carte a été refusée ({{amount}} ₺)\",\n    \"state\": \"needs_review\"")
+}
+
+func TestLandStringsTable_ATranslationFailureFailsTheBuild(t *testing.T) { // FR-020
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en.json", "{}")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	stubTranslation(t, func(string, []string) ([]string, error) { return nil, errors.New("this stack has no translation door") })
+	out, err := land(t, dir, buildOptions{translate: true})
+	require.Error(t, err)
+	require.Contains(t, out, "✗ translation stopped: this stack has no translation door")
+}
