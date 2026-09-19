@@ -2017,6 +2017,39 @@ func TestLandStringsTable_ALeftoverOfAnotherLanguageStopsTheMove(t *testing.T) {
 	require.Equal(t, trTable, string(body))
 }
 
+func TestBuildCmd_FlagsReachTheBuildOptions(t *testing.T) { // FR-011, FR-009, FR-017
+	// Koşu doğrulayıcısı (MINOR-1): tablo testlerinin hepsi landStringsTable'ı
+	// DOĞRUDAN çağırıyordu, yani bayrak adları hiçbir Go testinde sürülmüyordu —
+	// `--sources` diye yazılmış bir bayrak bütün süiti yeşil bırakırdı ve kusur
+	// ancak CI harness'inde gerçek ikilide görünürdü.
+	real := buildRun
+	t.Cleanup(func() { buildRun = real })
+	for _, tc := range []struct {
+		args []string
+		want buildOptions
+	}{
+		{nil, buildOptions{}},
+		{[]string{"--source", "tr"}, buildOptions{source: "tr"}},
+		{[]string{"--add", "en", "--add", "de"}, buildOptions{add: []string{"en", "de"}}},
+		{[]string{"--translate"}, buildOptions{translate: true}},
+		{[]string{"--source", "tr", "--add", "fr", "--translate"}, buildOptions{source: "tr", add: []string{"fr"}, translate: true}},
+	} {
+		var got buildOptions
+		called := false
+		buildRun = func(_ context.Context, _ string, _ io.Writer, opts buildOptions) error {
+			called, got = true, opts
+			return nil
+		}
+		cmd := newBuildCmd()
+		cmd.SetArgs(tc.args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		require.NoError(t, cmd.Execute(), "%v", tc.args)
+		require.True(t, called, "%v: build hiç koşmadı — bu vaka hiçbir şey ölçmez", tc.args)
+		require.Equal(t, tc.want, got, "%v", tc.args)
+	}
+}
+
 func TestLandStringsTable_ALeftoverNamedAfterTheSourceStopsTheMove(t *testing.T) { // FR-002, D-2
 	// Bitiş incelemesi (I1): kalıntı kapısı `t.Locales`'e bakıyordu ve o liste
 	// KAYNAK dili de taşıdığı için `<kaynak>.json` "bilinen dil" sayılıp geçiyordu.

@@ -41,6 +41,12 @@ const buildTempPrefix = "palbase-build-"
 // required) is caught before it produces a FAILED deploy. Non-interactive, no
 // Studio auth, NO network call. Exit 0 = PASSED (or environment couldn't run it —
 // warned); exit 1 = user-code validation error.
+// buildRun is the seam the command calls, so a test can measure WHICH options a
+// flag produced without running a whole build (the push command's `stackPush`
+// does the same). The flags are the only way a person reaches --source, --add
+// and --translate; a name typo here is a feature nobody can run.
+var buildRun = runBuildWith
+
 func newBuildCmd() *cobra.Command {
 	var opts buildOptions
 	cmd := &cobra.Command{
@@ -62,7 +68,7 @@ once with --source <language>, open a language with --add <language>, and let
 			if err != nil {
 				return err
 			}
-			return runBuildWith(cmd.Context(), cwd, cmd.OutOrStdout(), opts)
+			return buildRun(cmd.Context(), cwd, cmd.OutOrStdout(), opts)
 		},
 	}
 	// Only a project's FIRST build needs it: from then on the table carries its
