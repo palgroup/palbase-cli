@@ -167,6 +167,10 @@ func TestTranslateMissing_AnOverlongSentenceIsNamedAndNotSent(t *testing.T) { //
 	var out bytes.Buffer
 	require.NoError(t, translateMissing(context.Background(), t.TempDir(), tableWith([]string{"tr", "en"}, long, "Merhaba"), &out))
 	require.Contains(t, out.String(), "was not written — the sentence is over 64 KiB and cannot be sent")
+	// A 64 KiB sentence printed whole is not a diagnostic line, it is the file
+	// again (bitiş incelemesi M4): name it by its head and its size.
+	require.Less(t, out.Len(), 1<<10, "teşhis satırı cümlenin tamamını basmaz")
+	require.Contains(t, out.String(), "…")
 	for _, c := range *calls {
 		for _, k := range c.keys {
 			require.NotEqual(t, long, k)

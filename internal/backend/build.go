@@ -881,9 +881,25 @@ func landStringsTable(ctx context.Context, tmpDir, buildRoot, cwd string, opts b
 	}
 
 	existing, layout, droppedLocales, err := readTable(cwd)
-	if errors.Is(err, errNoTableMeta) && opts.source != "" && dirMode {
-		existing, err = adoptTableDir(cwd, opts.source)
-		layout = layoutDir
+	if errors.Is(err, errNoTableMeta) {
+		switch {
+		case opts.source != "" && dirMode:
+			existing, err = adoptTableDir(cwd, opts.source)
+			layout = layoutDir
+		case !dirMode:
+			// WHAT `--source` CANNOT DO HERE (D-21, FR-055). The directory is the
+			// format the project's OWN stack reads, and this project's stack reads
+			// only the old file — so no `--source` starts a table here, and the
+			// generic remedy would send the author around the same refusal forever.
+			// Name the one thing that changes the answer instead.
+			v := installed
+			if v == "" {
+				v = "not installed"
+			}
+			err = fmt.Errorf("%s/ carries language files but no %s, and this project cannot start one: its %s is %s, "+
+				"and that stack reads only %s — install 41.3.0 or later (npm install %s@latest) and build again, or move those files aside",
+				StringsDir(), metaFileName, backendPkg, v, StringsPath(), backendPkg)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(out, "✗ %v\n", err)

@@ -234,6 +234,15 @@ func readTable(cwd string) (*stringsTable, tableLayout, []string, error) {
 		// have would enter the table unread once _meta.json lands (FR-002).
 		for name := range files {
 			stem, _ := strings.CutSuffix(name, ".json")
+			// The SOURCE language never has a file (D-2): its text is the key.
+			// `t.Locales` carries the source, so reading "known" off that list
+			// let a leftover named after it through silently — a rule that does
+			// not hold where it is read is not a rule.
+			if stem == t.Source {
+				return nil, layoutNone, nil, fmt.Errorf("%s/%s is beside %s without %s, and %s is the source language — "+
+					"the source has no file of its own (its text is the key): delete it, then build again",
+					StringsDir(), name, StringsPath(), metaFileName, stem)
+			}
 			known := false
 			for _, loc := range t.Locales {
 				if loc == stem {
@@ -445,15 +454,28 @@ func stringsTableRefusal(dir string) error {
 	if root, err := os.Lstat(filepath.Join(dir, rootDir)); err != nil || !root.IsDir() {
 		return nil // a symlinked palbase/ is not followed and carries no table (CWE-61)
 	}
+	// THE OLD FILE COUNTS WHATEVER ITS TYPE IS — the same measure the build's
+	// readTable takes (os.Lstat), because one rule guarded by two layers must
+	// carry one penalty. A link is refused on its own account below: the archive
+	// does not follow links (CWE-61), so it cannot travel, and a push that says
+	// `strings-dir=true` would ship a release answering in the source language
+	// while the checkout looks like it has a table.
+	legacy, legacyErr := os.Lstat(filepath.Join(dir, filepath.FromSlash(StringsPath())))
 	names, err := tableDirEntryNames(dir)
 	if err != nil {
 		return err
 	}
-	if !slices.Contains(names, metaFileName) {
-		return nil
-	}
-	if fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(StringsPath()))); err == nil && fi.Mode().IsRegular() {
+	hasMeta := slices.Contains(names, metaFileName)
+	if legacyErr == nil && hasMeta {
 		return errBothTables()
+	}
+	if legacyErr == nil && !legacy.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (%s) — a push does not follow links, so it cannot carry the table: "+
+			"replace it with the file itself, or delete it and let the build write %s/",
+			StringsPath(), legacy.Mode().Type(), StringsDir())
+	}
+	if !hasMeta {
+		return nil
 	}
 	if declared, installed := sdkStringsTable(dir); declared < tableDirVersion && installed != "" {
 		return fmt.Errorf("%s/ needs @palbase/backend 41.3.0 or later, and this project's is %s — its stack reads only %s; "+

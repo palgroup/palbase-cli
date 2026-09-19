@@ -163,6 +163,17 @@ func TestReadTable_EveryLayout(t *testing.T) { // D-2, D-4
 		_, _, _, err := readTable(dir)
 		require.ErrorContains(t, err, "palbase/strings/fr.json is beside palbase/strings.json without _meta.json, and fr is not a language of palbase/strings.json")
 	})
+	t.Run("eski tablonun KAYNAK diliyle aynı adlı kalıntı", func(t *testing.T) {
+		// D-2 kaynak dilin dosyasını MUTLAK yasaklıyor: kaynağın metni anahtarın
+		// kendisidir. `t.Locales` kaynağı da taşıdığı için bu dosya "bilinen dil"
+		// sayılıp sessizce geçiyordu (W2 incelemesi) — kural okuduğu yerde geçerli
+		// değilse kural değildir.
+		dir := t.TempDir()
+		writeRel(t, dir, "palbase/strings.json", legacy)
+		writeRel(t, dir, "palbase/strings/tr.json", `{"Merhaba":{"value":"Merhaba","state":"translated"}}`)
+		_, _, _, err := readTable(dir)
+		require.ErrorContains(t, err, "palbase/strings/tr.json is beside palbase/strings.json without _meta.json, and tr is the source language")
+	})
 	t.Run("meta'sız dizin", func(t *testing.T) {
 		dir := t.TempDir()
 		writeRel(t, dir, "palbase/strings/en.json", `{}`)

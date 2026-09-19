@@ -2017,6 +2017,28 @@ func TestLandStringsTable_ALeftoverOfAnotherLanguageStopsTheMove(t *testing.T) {
 	require.Equal(t, trTable, string(body))
 }
 
+func TestLandStringsTable_ALeftoverNamedAfterTheSourceStopsTheMove(t *testing.T) { // FR-002, D-2
+	// Bitiş incelemesi (I1): kalıntı kapısı `t.Locales`'e bakıyordu ve o liste
+	// KAYNAK dili de taşıdığı için `<kaynak>.json` "bilinen dil" sayılıp geçiyordu.
+	// Göç eski dosyayı siliyordu ve geriye HİÇBİR okuyucunun kabul etmediği bir
+	// dizin kalıyordu — build yeşil, sonraki her okuma kırmızı. Yeşil bir satırın
+	// ardından kilitlenen checkout, sessiz kayıptan bir tık daha iyidir; ikisi de
+	// kabul edilmez.
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	legacy := writeTable(t, dir, trTable)
+	writeRel(t, dir, "palbase/strings/tr.json", `{"Eski":{"value":"Eski","state":"translated"}}`)
+	stubStringsScan(t, stringsScan{Keys: []string{"Eski"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.Error(t, err)
+	require.Contains(t, out, "palbase/strings/tr.json is beside palbase/strings.json without _meta.json, and tr is the source language")
+	body, readErr := os.ReadFile(legacy)
+	require.NoError(t, readErr, "reddedilen bir build eski dosyayı silmez")
+	require.Equal(t, trTable, string(body))
+	_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings", "_meta.json"))
+	require.True(t, os.IsNotExist(statErr), "göç başlamadı")
+}
+
 func TestLandStringsTable_WarnsAboutAPlaceholderAPersonDropped(t *testing.T) { // FR-016
 	dir := t.TempDir()
 	installSDK(t, dir, 2, "41.3.0")
@@ -2072,6 +2094,38 @@ func TestLandStringsTable_AnUnknownSDKKeepsAnExistingDirectory(t *testing.T) { /
 	_, err := land(t, dir, buildOptions{})
 	require.NoError(t, err)
 	require.Contains(t, readRel(t, dir, "palbase/strings/en.json"), `"Merhaba"`)
+}
+
+func TestLandStringsTable_MetaLessDirectoryWithoutDirModeNamesTheRealRemedy(t *testing.T) { // FR-055, D-21
+	// W2 incelemesi: _meta.json'suz dil dosyaları için ret her zaman
+	// "palbase build --source <language>" diyordu, ama dizin kipi kapalıyken
+	// (kurulu SDK bilinmiyor ya da dizini okumayan bir sürüm) o komut aynı reddi
+	// SONSUZA DEK verir. Çalışmayan bir çare öneren bir hata mesajı, hatanın
+	// kendisinden beterdir: yazarı döngüye sokar.
+	for _, tc := range []struct {
+		name, version string
+		declared      int
+		want          string
+	}{
+		{"SDK kurulu değil", "", 0, "its @palbase/backend is not installed"},
+		{"SDK dizini okumuyor", "41.2.0", 0, "its @palbase/backend is 41.2.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.version != "" {
+				installSDK(t, dir, tc.declared, tc.version)
+			}
+			writeRel(t, dir, "palbase/strings/en.json", `{"Merhaba":{"value":"Hello","state":"translated"}}`)
+			stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+			out, err := land(t, dir, buildOptions{source: "tr"})
+			require.Error(t, err)
+			require.Contains(t, out, tc.want)
+			require.Contains(t, out, "npm install @palbase/backend@latest")
+			require.NotContains(t, out, "start it with: palbase build --source", "önerdiği komut bu durumda çalışmaz")
+			_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings", "_meta.json"))
+			require.True(t, os.IsNotExist(statErr), "reddedilen bir build tabloyu başlatmaz")
+		})
+	}
 }
 
 func TestLandStringsTable_ScannerFailureWithAddFails(t *testing.T) { // FR-015, FR-022

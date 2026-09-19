@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -159,7 +160,8 @@ func translateMissing(ctx context.Context, cwd string, t *stringsTable, out io.W
 		written := 0
 		for _, batch := range translateBatches(p.keys) {
 			if len(batch) == 1 && len(batch[0]) > translateMaxKeyBytes {
-				fmt.Fprintf(out, "! %s: %q was not written — the sentence is over 64 KiB and cannot be sent\n", p.loc, batch[0])
+				fmt.Fprintf(out, "! %s: %q (%d bytes) was not written — the sentence is over 64 KiB and cannot be sent\n",
+					p.loc, headOf(batch[0], 120), len(batch[0]))
 				continue
 			}
 			texts, err := translateCallFn(ctx, target, cred, t.Source, p.loc, batch)
@@ -199,4 +201,18 @@ func translateMissing(ctx context.Context, cwd string, t *stringsTable, out io.W
 		}
 	}
 	return nil
+}
+
+// headOf is the first n bytes of a key, with an ellipsis when it was cut: a
+// diagnostic line names the sentence, it does not reprint it (a key may be
+// 64 KiB, and a terminal full of one string tells nobody which one it was).
+func headOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

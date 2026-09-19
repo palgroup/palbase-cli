@@ -639,6 +639,21 @@ func TestAPushRefusesWhatWouldLoseTheTable(t *testing.T) { // FR-038, FR-056
 		{"dizin değil", func(t *testing.T, dir string) {
 			writeRel(t, dir, "palbase/strings", "a file")
 		}, "palbase/strings is not a directory"},
+		{"sembolik bağlı eski dosya, dizinsiz", func(t *testing.T, dir string) {
+			// Bitiş incelemesi M2: arşiv bağı İZLEMEZ, yani bu dosya yola çıkamaz —
+			// ama push `strings-dir=true` dediği için yığının FR-053 kapısı da
+			// susardı ve sürüm sessizce tablosuz çıkardı.
+			writeRel(t, dir, "elsewhere.json", `{"version":1,"source":"tr","locales":["tr"],"strings":{}}`)
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, "palbase"), 0o755))
+			require.NoError(t, os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, "palbase", "strings.json")))
+		}, "palbase/strings.json is not a regular file"},
+		{"sembolik bağlı eski dosya ve dizin — build'in cümlesinin AYNISI", func(t *testing.T, dir string) {
+			// Bitiş incelemesi M1: "tablonun tek evi var" kuralı build'de her dosya
+			// tipini sayıyordu, push'ta yalnız düzenli dosyayı — aynı kural, iki ceza.
+			writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+			writeRel(t, dir, "elsewhere.json", "{}")
+			require.NoError(t, os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, "palbase", "strings.json")))
+		}, "palbase/strings.json and palbase/strings/ both exist"},
 		{"eski SDK", func(t *testing.T, dir string) {
 			installSDK(t, dir, 0, "41.2.0")
 			writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
