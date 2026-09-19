@@ -1,5 +1,10 @@
 package backend
 
+// NOT (2026-09-19): bu dosya ESKİ tek dosyalı tablonun (palbase/strings.json)
+// yardımcılarını ölçüyor ve yaşamaya devam ediyor, çünkü bugün canlı olan her
+// artifact onu taşıyor (NFR-006). Aşağıdaki FR/D atıfları bu koşunun
+// numaralandırmasıdır; önceki koşunun numaralarıyla karıştırılmamalı.
+
 import (
 	"os"
 	"path/filepath"
@@ -24,7 +29,7 @@ func fixtureTable() *stringsTable {
 	}
 }
 
-func TestMergeStringsTable_NewKeyGetsAMissingCellPerLanguage(t *testing.T) { // FR-017
+func TestMergeStringsTable_NewKeyGetsAMissingCellPerLanguage(t *testing.T) { // FR-005
 	merged, dropped, err := mergeStringsTable(fixtureTable(), []string{tableKey, "Gözden geçirilecek", "Yeni"}, "")
 	require.NoError(t, err)
 	require.Empty(t, dropped)
@@ -32,7 +37,7 @@ func TestMergeStringsTable_NewKeyGetsAMissingCellPerLanguage(t *testing.T) { // 
 		"a new key gets a missing cell in every language but the source")
 }
 
-func TestMergeStringsTable_KeepsEveryExistingCell(t *testing.T) { // FR-018
+func TestMergeStringsTable_KeepsEveryExistingCell(t *testing.T) { // FR-006
 	before := fixtureTable()
 	merged, _, err := mergeStringsTable(before, []string{tableKey, "Gözden geçirilecek"}, "")
 	require.NoError(t, err)
@@ -46,14 +51,14 @@ func TestMergeStringsTable_KeepsEveryExistingCell(t *testing.T) { // FR-018
 	require.Equal(t, stringCell{State: cellMissing}, merged.Strings["Gözden geçirilecek"]["de"])
 }
 
-func TestMergeStringsTable_DropsKeysTheCodeNoLongerUses(t *testing.T) { // FR-019
+func TestMergeStringsTable_DropsKeysTheCodeNoLongerUses(t *testing.T) { // FR-007
 	merged, dropped, err := mergeStringsTable(fixtureTable(), []string{tableKey}, "")
 	require.NoError(t, err)
 	require.Equal(t, []string{"Gözden geçirilecek"}, dropped)
 	require.NotContains(t, merged.Strings, "Gözden geçirilecek")
 }
 
-func TestMergeStringsTable_ANewLanguageGetsMissingCells(t *testing.T) { // FR-020
+func TestMergeStringsTable_ANewLanguageGetsMissingCells(t *testing.T) { // FR-008
 	tab := fixtureTable()
 	tab.Locales = append(tab.Locales, "fr")
 	merged, _, err := mergeStringsTable(tab, []string{tableKey}, "")
@@ -62,7 +67,7 @@ func TestMergeStringsTable_ANewLanguageGetsMissingCells(t *testing.T) { // FR-02
 	require.Equal(t, stringCell{State: cellMissing}, merged.Strings[tableKey]["fr"])
 }
 
-func TestWriteStringsTable_TheBytesAreD10sAndStable(t *testing.T) { // FR-021, D-10
+func TestWriteStringsTable_TheBytesAreStable(t *testing.T) { // D-3 (eski D-10), NFR-006
 	path := filepath.Join(t.TempDir(), filepath.FromSlash(StringsPath()))
 	tab := &stringsTable{Version: 1, Source: "tr", Locales: []string{"tr", "en"}, Strings: map[string]map[string]stringCell{
 		"İ": {"en": {State: cellMissing}}, "Z": {"en": {State: cellMissing}},
@@ -95,14 +100,14 @@ func TestWriteStringsTable_TheBytesAreD10sAndStable(t *testing.T) { // FR-021, D
 	require.Equal(t, info.ModTime(), info2.ModTime(), "identical bytes must not be rewritten")
 }
 
-func TestMergeStringsTable_NoTableAndNoSourceWritesNothing(t *testing.T) { // FR-022's merge half
+func TestMergeStringsTable_NoTableAndNoSourceWritesNothing(t *testing.T) { // FR-012'nin merge yarısı
 	merged, dropped, err := mergeStringsTable(nil, []string{"Merhaba"}, "")
 	require.NoError(t, err)
 	require.Nil(t, merged)
 	require.Nil(t, dropped)
 }
 
-func TestMergeStringsTable_SourceStartsATableInCanonicalForm(t *testing.T) { // FR-023
+func TestMergeStringsTable_SourceStartsATableInCanonicalForm(t *testing.T) { // FR-011
 	merged, _, err := mergeStringsTable(nil, []string{"Merhaba"}, "TR")
 	require.NoError(t, err)
 	require.Equal(t, "tr", merged.Source)
@@ -112,7 +117,7 @@ func TestMergeStringsTable_SourceStartsATableInCanonicalForm(t *testing.T) { // 
 	require.ErrorContains(t, err, "not a language tag")
 }
 
-func TestMergeStringsTable_ADifferentSourceIsRefusedNamingBoth(t *testing.T) { // FR-024
+func TestMergeStringsTable_ADifferentSourceIsRefusedNamingBoth(t *testing.T) { // FR-013
 	_, _, err := mergeStringsTable(fixtureTable(), []string{tableKey}, "en")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "en")
@@ -122,7 +127,7 @@ func TestMergeStringsTable_ADifferentSourceIsRefusedNamingBoth(t *testing.T) { /
 	require.Equal(t, "tr", merged.Source)
 }
 
-func TestWriteStringsTable_RefusesWhatTheStackRefuses(t *testing.T) { // FR-025
+func TestWriteStringsTable_RefusesWhatTheStackRefuses(t *testing.T) { // FR-014
 	path := filepath.Join(t.TempDir(), filepath.FromSlash(StringsPath()))
 	bad := &stringsTable{Version: 1, Source: "tr", Locales: []string{"tr", "en"},
 		Strings: map[string]map[string]stringCell{"k": {"en": {Value: "x", State: "draft"}}}}
@@ -138,7 +143,7 @@ func TestWriteStringsTable_RefusesWhatTheStackRefuses(t *testing.T) { // FR-025
 
 // v2's TestParseRefuses, case for case (v2/internal/platform/locale/table_test.go:34):
 // the stack and the build refuse the same tables for the same named reason.
-func TestParseStringsTable_CarriesTheStacksRefusals(t *testing.T) { // FR-025, D-17
+func TestParseStringsTable_CarriesTheStacksRefusals(t *testing.T) { // FR-014'ün kural listesi, eski dosya için NFR-006
 	for _, tc := range []struct{ name, body, wantIn string }{
 		{"tanınmayan üst alan", `{"version":1,"source":"tr","locales":["tr"],"strings":{},"extra":1}`, "extra"},
 		{"desteklenmeyen sürüm", `{"version":2,"source":"tr","locales":["tr"],"strings":{}}`, "version"},
@@ -162,7 +167,7 @@ func TestParseStringsTable_CarriesTheStacksRefusals(t *testing.T) { // FR-025, D
 }
 
 // v2's TestCanonical cases (chain_test.go:8) plus the aliases the stack applies.
-func TestCanonicalLocale_IsTheStacksRule(t *testing.T) { // D-17
+func TestCanonicalLocale_IsTheStacksRule(t *testing.T) { // D-2 (ad kuralı), D-15
 	for _, tc := range []struct {
 		in, want string
 		ok       bool
@@ -180,7 +185,7 @@ func TestCanonicalLocale_IsTheStacksRule(t *testing.T) { // D-17
 	}
 }
 
-func TestReadStringsTable_DropsALanguageRemovedFromLocales(t *testing.T) { // FR-032, D-18
+func TestReadStringsTable_DropsALanguageRemovedFromLocales(t *testing.T) { // NFR-006 (eski biçim), göç yolunda FR-002
 	path := filepath.Join(t.TempDir(), filepath.FromSlash(StringsPath()))
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(`{"version":1,"source":"tr","locales":["tr","en"],"strings":{"k":{"en":{"value":"E","state":"translated"},"de":{"value":"D","state":"translated"}}}}`), 0o644))
@@ -201,7 +206,7 @@ func TestReadStringsTable_NoFileIsNoTable(t *testing.T) {
 	require.Nil(t, dropped)
 }
 
-// D-18 drops a REMOVED language only. A translation filed under a mis-cased or
+// NFR-006'nın eski-dosya okuması bir ÇIKARILMIŞ dili düşürür, yalnız onu. A translation filed under a mis-cased or
 // invalid tag is somebody's work: refused by name, never silently deleted
 // (review of T005, I-2 — measured: "Hello" under `en-us` became `missing`).
 func TestReadStringsTable_RefusesAMisfiledTranslation(t *testing.T) {
@@ -218,7 +223,7 @@ func TestReadStringsTable_RefusesAMisfiledTranslation(t *testing.T) {
 // Byte order, not UTF-16 order: U+FF01 (EF BC 81) sorts BEFORE U+1F600
 // (F0 9F 98 80) in UTF-8, and AFTER it in UTF-16 (FF01 > D83D). Go's sort — and
 // the stack — use the first.
-func TestEncodeStringsTable_SortsKeysByUTF8Bytes(t *testing.T) { // D-10
+func TestEncodeStringsTable_SortsKeysByUTF8Bytes(t *testing.T) { // D-3 (eski D-10)
 	tab := &stringsTable{Version: 1, Source: "tr", Locales: []string{"tr"}, Strings: map[string]map[string]stringCell{
 		"\U0001F600": {}, "\uFF01": {},
 	}}
@@ -227,7 +232,7 @@ func TestEncodeStringsTable_SortsKeysByUTF8Bytes(t *testing.T) { // D-10
 	require.Less(t, strings.Index(string(body), "\uFF01"), strings.Index(string(body), "\U0001F600"))
 }
 
-func TestMergeStringsTable_OrdersAndDedupesLocales(t *testing.T) { // D-10
+func TestMergeStringsTable_OrdersAndDedupesLocales(t *testing.T) { // D-3 (eski D-10)
 	tab := fixtureTable()
 	tab.Locales = []string{"tr", "en", "de", "en"}
 	merged, _, err := mergeStringsTable(tab, []string{tableKey}, "")
@@ -235,13 +240,13 @@ func TestMergeStringsTable_OrdersAndDedupesLocales(t *testing.T) { // D-10
 	require.Equal(t, []string{"tr", "de", "en"}, merged.Locales)
 }
 
-func TestMergeStringsTable_TheSameSourceSpelledOtherwiseIsNoConflict(t *testing.T) { // FR-024
+func TestMergeStringsTable_TheSameSourceSpelledOtherwiseIsNoConflict(t *testing.T) { // FR-013
 	merged, _, err := mergeStringsTable(fixtureTable(), []string{tableKey}, "TR")
 	require.NoError(t, err)
 	require.Equal(t, "tr", merged.Source)
 }
 
-func TestMergeStringsTable_DroppedKeysComeBackSorted(t *testing.T) { // FR-019
+func TestMergeStringsTable_DroppedKeysComeBackSorted(t *testing.T) { // FR-007
 	tab := fixtureTable()
 	tab.Strings["b"] = map[string]stringCell{}
 	tab.Strings["a"] = map[string]stringCell{}
