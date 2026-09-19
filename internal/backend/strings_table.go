@@ -1,6 +1,7 @@
 package backend
 
-// strings_table.go — palbase/strings.json, the backend's string table (D-2).
+// strings_table.go — the string table in memory, and its OLD single-file form
+// (palbase/strings.json) that strings_dir.go moves into palbase/strings/.
 //
 // `palbase build` owns this file's SHAPE and nothing else: the keys come from
 // the t() calls the scanner found, the translations from whoever filled them
@@ -210,9 +211,9 @@ func mergeStringsTable(existing *stringsTable, keys []string, sourceFlag string)
 		}
 		base = &stringsTable{Version: 1, Source: flag, Locales: []string{flag}, Strings: map[string]map[string]stringCell{}}
 	} else if flag != "" && flag != base.Source {
-		return nil, nil, fmt.Errorf("--source %s conflicts with %s, whose source language is %s — every key in it is a "+
+		return nil, nil, fmt.Errorf("--source %s conflicts with the table, whose source language is %s — every key in it is a "+
 			"%s sentence, so changing the source language is a migration of every key, not a flag",
-			flag, StringsPath(), base.Source, base.Source)
+			flag, base.Source, base.Source)
 	}
 
 	locales := orderedLocales(base.Source, base.Locales)
@@ -231,11 +232,20 @@ func mergeStringsTable(existing *stringsTable, keys []string, sourceFlag string)
 		for loc, c := range base.Strings[k] {
 			cells[loc] = c
 		}
+		// A key with nothing but whitespace is its own translation in every
+		// language (FR-005): no person or model has anything to add, and a
+		// `missing` cell would be a sentence the stack refuses to translate.
+		blank := strings.TrimSpace(k) == ""
 		for _, loc := range locales {
 			if loc == base.Source {
 				continue
 			}
-			if _, ok := cells[loc]; !ok {
+			c, ok := cells[loc]
+			if blank && (!ok || c.State == cellMissing) {
+				cells[loc] = stringCell{Value: k, State: cellTranslated}
+				continue
+			}
+			if !ok {
 				cells[loc] = stringCell{Value: "", State: cellMissing}
 			}
 		}

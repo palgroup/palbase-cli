@@ -1,5 +1,5 @@
 'use strict';
-// strings_scan.js — the keys of palbase/strings.json, read from the deploy tree.
+// strings_scan.js — the keys of palbase/strings/, read from the deploy tree.
 //
 // Usage: node strings_scan.js <root>
 // Prints ONE line: {"keys":[…],"dynamic":[{"file","line"}]}. Exit 0 only when

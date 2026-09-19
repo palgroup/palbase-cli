@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -51,9 +53,10 @@ FAILED deploy is caught here first. Exits non-zero on a user-code error
 local environment can't run it (a warning is printed and the server still
 gates the real deploy).
 
-It also keeps palbase/strings.json in step with the t() calls in your code:
-new sentences are added, removed ones dropped, translations kept. Start the
-table once with --source <language>.`,
+It also keeps palbase/strings/ in step with the t() calls in your code: new
+sentences are added, removed ones dropped, translations kept. Start the table
+once with --source <language>, open a language with --add <language>, and let
+--translate fill the missing sentences with AI on your project's own OpenAI key.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -65,7 +68,11 @@ table once with --source <language>.`,
 	// Only a project's FIRST build needs it: from then on the table carries its
 	// own source language, and a different one is refused (FR-024).
 	cmd.Flags().StringVar(&opts.source, "source", "",
-		"the language your t() strings are written in — starts palbase/strings.json when it does not exist yet (e.g. --source tr)")
+		"the language your t() strings are written in — starts palbase/strings/ when there is no table yet (e.g. --source tr)")
+	cmd.Flags().StringArrayVar(&opts.add, "add", nil,
+		"open a language in palbase/strings/, every sentence missing (repeatable, e.g. --add en --add de)")
+	cmd.Flags().BoolVar(&opts.translate, "translate", false,
+		"translate every missing sentence on the linked stack with the project's OPENAI_API_KEY; written as needs_review")
 	return cmd
 }
 
@@ -83,6 +90,10 @@ func runBuild(ctx context.Context, cwd string, out io.Writer) error {
 type buildOptions struct {
 	// source is --source: the language the project's t() keys are written in.
 	source string
+	// add is --add, repeatable: a language to open in palbase/strings/ (FR-009).
+	add []string
+	// translate is --translate: fill the missing cells with AI (FR-017).
+	translate bool
 }
 
 // runBuildWith is runBuild with the command's flags.
@@ -161,6 +172,10 @@ func runBuildWith(ctx context.Context, cwd string, out io.Writer, opts buildOpti
 	// without reading a directory name.
 	if !hasProjectSource(cwd) {
 		fmt.Fprintln(out, "no TypeScript sources — nothing to validate")
+		if flags := tableFlags(opts); flags != "" {
+			fmt.Fprintf(out, "✗ %s did not run — there are no TypeScript sources, so there are no sentences\n", flags)
+			return fmt.Errorf("build failed")
+		}
 		return nil
 	}
 
@@ -336,7 +351,7 @@ func runBuildWith(ctx context.Context, cwd string, out io.Writer, opts buildOpti
 	// it describes the source's sentences, not whether the deploy will pass,
 	// and the controller gates below may still fail this build. It reads the
 	// STAGED tree — the source the deploy receives — and writes the checkout.
-	if err := landStringsTable(ctx, tmpDir, buildRoot, cwd, opts.source, devNodePath(cwd, out), out); err != nil {
+	if err := landStringsTable(ctx, tmpDir, buildRoot, cwd, opts, devNodePath(cwd, out), out); err != nil {
 		return err
 	}
 	// The replacement exists now, so what it supersedes goes now — the sweep at
@@ -812,42 +827,225 @@ func runStringsScan(ctx context.Context, script, root, nodePath string) (strings
 	return s, nil
 }
 
-// landStringsTable is the build's table step: scan, merge, write.
+// tableFlags names what was asked of the table beyond keeping it in step —
+// the flags whose not happening must fail the build (FR-022).
+func tableFlags(opts buildOptions) string {
+	switch {
+	case len(opts.add) > 0 && opts.translate:
+		return "--add/--translate"
+	case len(opts.add) > 0:
+		return "--add"
+	case opts.translate:
+		return "--translate"
+	}
+	return ""
+}
+
+// landStringsTable is the build's table step: scan, read, merge, write — in
+// the format the project's own stack reads (D-21).
 //
 // A scanner that cannot run leaves the table exactly as it is and says so in
 // one line — a key set nobody measured must never reach the merge, where a
-// missing key is a deleted translation (FR-030). That alone does not fail the
-// build: the same rule as the local validation below, which warns when this
-// machine cannot run it and lets the deploy gate the real push.
-func landStringsTable(ctx context.Context, tmpDir, buildRoot, cwd, source, nodePath string, out io.Writer) error {
-	path := filepath.Join(cwd, filepath.FromSlash(StringsPath()))
+// missing key is a deleted translation. That alone does not fail the build,
+// unless --add or --translate asked for something that now cannot happen.
+func landStringsTable(ctx context.Context, tmpDir, buildRoot, cwd string, opts buildOptions, nodePath string, out io.Writer) error {
+	flags := tableFlags(opts)
+	refuse := func(why string) error {
+		fmt.Fprintf(out, "✗ %s did not run — %s\n", flags, why)
+		return fmt.Errorf("build failed")
+	}
+	// WHICH TABLE THIS BUILD KEEPS — decided before the scan, because every line
+	// it prints names the table's home (D-21, FR-055): palbase/strings/ when the
+	// installed SDK declares its stack reads it, or when the directory is already
+	// there and the SDK cannot be measured; the old single file otherwise.
+	declared, installed := sdkStringsTable(cwd)
+	_, metaErr := os.Lstat(filepath.Join(cwd, filepath.FromSlash(StringsDir()), metaFileName))
+	dirMode := declared >= tableDirVersion || (installed == "" && metaErr == nil)
+	home := StringsPath()
+	if dirMode {
+		home = StringsDir() + "/"
+	}
 	scan, err := runStringsScanFn(ctx, filepath.Join(tmpDir, "strings_scan.js"), buildRoot, nodePath)
 	if err != nil {
 		fmt.Fprintf(out, "warning: %s was not updated in this build — the t() scanner could not run (%s)\n",
-			StringsPath(), strings.ReplaceAll(err.Error(), "\n", " "))
+			home, strings.ReplaceAll(err.Error(), "\n", " "))
+		if flags != "" {
+			return refuse("the t() scanner could not run, so the table's sentences are not known")
+		}
 		return nil
 	}
 	for _, d := range scan.Dynamic {
-		// Every place the scanner could not read a key from (FR-016): a computed
-		// first argument, `t` used other than as a direct call, or re-exported.
 		fmt.Fprintf(out, "warning: %s:%d — this use of t() cannot be collected into %s (only a direct call "+
 			"whose first argument is a string literal can); it is served in the source language\n",
-			d.File, d.Line, StringsPath())
+			d.File, d.Line, home)
 	}
-	existing, droppedLocales, err := readStringsTable(path)
+
+	existing, layout, droppedLocales, err := readTable(cwd)
+	if errors.Is(err, errNoTableMeta) && opts.source != "" && dirMode {
+		existing, err = adoptTableDir(cwd, opts.source)
+		layout = layoutDir
+	}
 	if err != nil {
 		fmt.Fprintf(out, "✗ %v\n", err)
 		return fmt.Errorf("build failed")
 	}
-	merged, droppedKeys, err := mergeStringsTable(existing, scan.Keys, source)
+	if layout == layoutDir && !dirMode && installed != "" {
+		fmt.Fprintf(out, "✗ %s/ needs @palbase/backend 41.3.0 or later, and this project's is %s — its stack reads only %s; "+
+			"upgrade the SDK (npm install @palbase/backend@latest)\n", StringsDir(), installed, StringsPath())
+		return fmt.Errorf("build failed")
+	}
+	if !dirMode {
+		if flags != "" {
+			v := installed
+			if v == "" {
+				v = "not installed"
+			}
+			return refuse(fmt.Sprintf("this project's @palbase/backend is %s; the %s/ table and translation need 41.3.0 or later "+
+				"(npm install @palbase/backend@latest)", v, StringsDir()))
+		}
+		return landLegacyTable(existing, droppedLocales, scan.Keys, opts.source, cwd, out)
+	}
+
+	adds := make([]string, 0, len(opts.add))
+	for _, raw := range opts.add {
+		c, ok := canonicalLocale(raw)
+		if !ok {
+			fmt.Fprintf(out, "✗ --add %q is not a language tag\n", raw)
+			return fmt.Errorf("build failed")
+		}
+		adds = append(adds, c)
+	}
+	merged, droppedKeys, err := mergeStringsTable(existing, scan.Keys, opts.source)
 	if err != nil {
 		fmt.Fprintf(out, "✗ %v\n", err)
 		return fmt.Errorf("build failed")
 	}
 	if merged == nil {
+		if flags != "" {
+			return refuse("there is no string table — start it with: palbase build --source <language>")
+		}
 		if len(scan.Keys) > 0 {
+			fmt.Fprintf(out, "! %d t() string(s) found and there is no string table — start it with: palbase build --source <language>\n",
+				len(scan.Keys))
+		}
+		return nil
+	}
+	var added, already []string
+	for _, tag := range adds {
+		if tag == merged.Source {
+			fmt.Fprintf(out, "✗ --add %s: %s is the source language — its text is the key itself and has no file\n", tag, tag)
+			return fmt.Errorf("build failed")
+		}
+		if slices.Contains(merged.Locales, tag) || slices.Contains(added, tag) {
+			already = append(already, tag)
+			continue
+		}
+		added = append(added, tag)
+	}
+	if len(added) > 0 {
+		merged.Locales = orderedLocales(merged.Source, append(merged.Locales, added...))
+		for key, row := range merged.Strings {
+			for _, tag := range added {
+				if strings.TrimSpace(key) == "" {
+					row[tag] = stringCell{Value: key, State: cellTranslated}
+				} else {
+					row[tag] = stringCell{State: cellMissing}
+				}
+			}
+		}
+	}
+
+	changed := false
+	if layout == layoutLegacy {
+		if err := migrateLegacyTable(cwd, merged); err != nil {
+			fmt.Fprintf(out, "✗ %v\n", err)
+			return fmt.Errorf("build failed")
+		}
+		fmt.Fprintf(out, "✓ moved %s into %s/ — commit the new directory and the deletion\n", StringsPath(), StringsDir())
+		changed = true
+	} else if changed, err = writeTableDir(cwd, merged); err != nil {
+		fmt.Fprintf(out, "✗ %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+	for _, loc := range droppedLocales {
+		fmt.Fprintf(out, "  dropped every %s cell — %s is no longer in locales\n", loc, loc)
+	}
+	for _, k := range droppedKeys {
+		fmt.Fprintf(out, "  dropped %q — no t() call uses it any more\n", k)
+	}
+	for _, tag := range added {
+		missing := 0
+		for _, row := range merged.Strings {
+			if row[tag].State == cellMissing {
+				missing++
+			}
+		}
+		fmt.Fprintf(out, "✓ added %s — %s/%s.json, %d string(s) to translate (fill them in, or run: palbase build --translate)\n",
+			tag, StringsDir(), tag, missing)
+	}
+	for _, tag := range already {
+		fmt.Fprintf(out, "  %s is already in %s/\n", tag, StringsDir())
+	}
+	warnPlaceholders(merged, out)
+	if changed {
+		fmt.Fprintf(out, "✓ wrote %s/ (%d string(s), %d language(s))\n", StringsDir(), len(merged.Strings), len(merged.Locales))
+	} else {
+		fmt.Fprintf(out, "✓ %s/ unchanged (%d string(s))\n", StringsDir(), len(merged.Strings))
+	}
+	return nil
+}
+
+// warnPlaceholders is FR-016: a person's translation whose {{…}} differ from
+// its sentence is named, and the build goes on — the words are theirs.
+func warnPlaceholders(t *stringsTable, out io.Writer) {
+	keys := make([]string, 0, len(t.Strings))
+	for k := range t.Strings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, loc := range t.Locales {
+		if loc == t.Source {
+			continue
+		}
+		for _, key := range keys {
+			c := t.Strings[key][loc]
+			if c.State == cellMissing || c.State == "" {
+				continue
+			}
+			dropped, added := placeholderDiff(key, c.Value)
+			if len(dropped) > 0 {
+				fmt.Fprintf(out, "warning: %s/%s.json: %q — the translation drops %s\n", StringsDir(), loc, key, braces(dropped))
+			}
+			if len(added) > 0 {
+				fmt.Fprintf(out, "warning: %s/%s.json: %q — the translation adds %s\n", StringsDir(), loc, key, braces(added))
+			}
+		}
+	}
+}
+
+// braces renders placeholder names the way a reader wrote them.
+func braces(names []string) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = "{{" + n + "}}"
+	}
+	return strings.Join(out, ", ")
+}
+
+// landLegacyTable is the previous run's table step, VERBATIM in behaviour, for
+// a project whose installed SDK's stack reads only palbase/strings.json
+// (FR-055, D-21).
+func landLegacyTable(existing *stringsTable, droppedLocales, keys []string, source, cwd string, out io.Writer) error {
+	path := filepath.Join(cwd, filepath.FromSlash(StringsPath()))
+	merged, droppedKeys, err := mergeStringsTable(existing, keys, source)
+	if err != nil {
+		fmt.Fprintf(out, "✗ %v\n", err)
+		return fmt.Errorf("build failed")
+	}
+	if merged == nil {
+		if len(keys) > 0 {
 			fmt.Fprintf(out, "! %d t() string(s) found and %s does not exist — start it with: palbase build --source <language>\n",
-				len(scan.Keys), StringsPath())
+				len(keys), StringsPath())
 		}
 		return nil
 	}

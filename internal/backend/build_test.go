@@ -1799,84 +1799,291 @@ func writeTable(t *testing.T, dir, body string) string {
 
 const trTable = `{"version":1,"source":"tr","locales":["tr","en"],"strings":{"Eski":{"en":{"value":"Old","state":"translated"}}}}`
 
-func TestLandStringsTable_WithoutATableSaysHowToStartOne(t *testing.T) { // FR-022
-	dir := t.TempDir()
-	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba", "Hoşça kal"}}, nil)
+// installSDK plants the project's installed @palbase/backend: its version and
+// what it declares its stack reads (D-21). 0 declares nothing.
+func installSDK(t *testing.T, dir string, stringsTable int, version string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"version":%q}`, version)
+	if stringsTable > 0 {
+		body = fmt.Sprintf(`{"version":%q,"palbase":{"stringsTable":%d}}`, version, stringsTable)
+	}
+	writeRel(t, dir, "node_modules/@palbase/backend/package.json", body)
+}
+
+func land(t *testing.T, dir string, opts buildOptions) (string, error) {
+	t.Helper()
 	var out bytes.Buffer
-	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
-	_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(StringsPath())))
-	require.True(t, os.IsNotExist(err), "no table may be written without a source language")
-	require.Equal(t, 1, strings.Count(out.String(), "palbase build --source <language>"), out.String())
-	require.Contains(t, out.String(), "2 t() string(s)")
+	err := landStringsTable(context.Background(), "", "", dir, opts, "", &out)
+	return out.String(), err
+}
+
+const trDirEn = `{"Eski":{"value":"Old","state":"translated"}}`
+
+func TestLandStringsTable_WithoutATableSaysHowToStartOne(t *testing.T) { // FR-012
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba", "Hoşça kal"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings"))
+	require.True(t, os.IsNotExist(statErr), "no table may be written without a source language")
+	require.Equal(t, 1, strings.Count(out, "palbase build --source <language>"), out)
+	require.Contains(t, out, "2 t() string(s) found and there is no string table")
 }
 
 func TestLandStringsTable_NoStringsNoTableSaysNothing(t *testing.T) {
 	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
 	stubStringsScan(t, stringsScan{Keys: []string{}}, nil)
-	var out bytes.Buffer
-	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
-	require.Empty(t, out.String(), "a backend that uses no t() hears nothing about a table")
+	out, err := land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.Empty(t, out, "a backend that uses no t() hears nothing about a table")
 }
 
-func TestLandStringsTable_SourceStartsTheTable(t *testing.T) { // FR-023
+func TestLandStringsTable_SourceStartsTheTable(t *testing.T) { // FR-011
 	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
 	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
-	var out bytes.Buffer
-	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "TR", "", &out))
-	tab, _, err := readStringsTable(filepath.Join(dir, filepath.FromSlash(StringsPath())))
+	out, err := land(t, dir, buildOptions{source: "TR"})
 	require.NoError(t, err)
-	require.Equal(t, "tr", tab.Source)
-	require.Equal(t, []string{"tr"}, tab.Locales)
-	require.Contains(t, tab.Strings, "Merhaba")
-	require.Contains(t, out.String(), "✓ wrote palbase/strings.json")
+	require.Equal(t, dirMetaTR, readRel(t, dir, "palbase/strings/_meta.json"))
+	require.Contains(t, out, "✓ wrote palbase/strings/ (1 string(s), 1 language(s))")
+	_, layout, _, err := readTable(dir)
+	require.NoError(t, err)
+	require.Equal(t, layoutDir, layout)
 }
 
-func TestLandStringsTable_AConflictingSourceIsRefusedAndTheTableKept(t *testing.T) { // FR-024
+func TestLandStringsTable_AConflictingSourceIsRefusedAndTheTableKept(t *testing.T) { // FR-013
 	dir := t.TempDir()
-	path := writeTable(t, dir, trTable)
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en.json", trDirEn)
 	stubStringsScan(t, stringsScan{Keys: []string{"Eski", "Yeni"}}, nil)
-	var out bytes.Buffer
-	require.Error(t, landStringsTable(context.Background(), "", "", dir, "en", "", &out))
-	require.Contains(t, out.String(), "--source en")
-	require.Contains(t, out.String(), "source language is tr")
-	body, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, trTable, string(body), "a refused build touched the table")
+	out, err := land(t, dir, buildOptions{source: "en"})
+	require.Error(t, err)
+	require.Contains(t, out, "--source en")
+	require.Contains(t, out, "source language is tr")
+	require.Equal(t, dirMetaTR, readRel(t, dir, "palbase/strings/_meta.json"))
+	require.Equal(t, trDirEn, readRel(t, dir, "palbase/strings/en.json"), "a refused build touched the table")
 }
 
-func TestLandStringsTable_AScannerThatCannotRunTouchesNothing(t *testing.T) { // FR-030
+func TestLandStringsTable_AScannerThatCannotRunTouchesNothing(t *testing.T) { // FR-015
 	dir := t.TempDir()
-	path := writeTable(t, dir, trTable)
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en.json", trDirEn)
 	stubStringsScan(t, stringsScan{}, errors.New("the `typescript` package could not be loaded"))
-	var out bytes.Buffer
-	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out),
-		"the scanner alone does not fail the build (build.go fail-open rule)")
-	body, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, trTable, string(body), "an unscanned key set deleted keys (FR-019 must never fire here)")
-	require.Contains(t, out.String(), "palbase/strings.json was not updated in this build")
-	require.Equal(t, 1, strings.Count(out.String(), "\n"), "one line")
+	out, err := land(t, dir, buildOptions{})
+	require.NoError(t, err, "the scanner alone does not fail the build (build.go fail-open rule)")
+	require.Equal(t, trDirEn, readRel(t, dir, "palbase/strings/en.json"), "an unscanned key set deleted keys")
+	require.Contains(t, out, "palbase/strings/ was not updated in this build")
+	require.Equal(t, 1, strings.Count(out, "\n"), "one line")
 }
 
-func TestLandStringsTable_NamesEveryNonLiteralCall(t *testing.T) { // FR-016
+func TestLandStringsTable_NamesEveryNonLiteralCall(t *testing.T) {
 	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
 	stubStringsScan(t, stringsScan{Keys: []string{}, Dynamic: []stringsScanDynamic{{File: "controllers/a.ts", Line: 12}}}, nil)
-	var out bytes.Buffer
-	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
-	require.Contains(t, out.String(), "controllers/a.ts:12")
+	out, err := land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.Contains(t, out, "controllers/a.ts:12")
+	require.Contains(t, out, "cannot be collected into palbase/strings/")
 }
 
-func TestLandStringsTable_MergesAndReportsDroppedKeysAndLanguages(t *testing.T) { // FR-019, FR-032 through the step
+func TestLandStringsTable_MergesAndReportsDroppedKeysAndLanguages(t *testing.T) { // FR-002, FR-007
 	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
 	writeTable(t, dir, `{"version":1,"source":"tr","locales":["tr","en"],"strings":{"Eski":{"en":{"value":"Old","state":"translated"},"de":{"value":"Alt","state":"translated"}}}}`)
 	stubStringsScan(t, stringsScan{Keys: []string{"Yeni"}}, nil)
-	var out bytes.Buffer
-	require.NoError(t, landStringsTable(context.Background(), "", "", dir, "", "", &out))
-	require.Contains(t, out.String(), `dropped "Eski"`)
-	require.Contains(t, out.String(), "dropped every de cell")
-	tab, _, err := readStringsTable(filepath.Join(dir, filepath.FromSlash(StringsPath())))
+	out, err := land(t, dir, buildOptions{})
 	require.NoError(t, err)
-	require.Equal(t, map[string]stringCell{"en": {State: cellMissing}}, tab.Strings["Yeni"])
+	require.Contains(t, out, `dropped "Eski"`)
+	require.Contains(t, out, "dropped every de cell")
+	require.Contains(t, out, "✓ moved palbase/strings.json into palbase/strings/")
+	require.Contains(t, readRel(t, dir, "palbase/strings/en.json"), "\"Yeni\": {\n    \"value\": \"\",\n    \"state\": \"missing\"")
+	_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings.json"))
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestLandStringsTable_BothTablesAreRefused(t *testing.T) { // FR-003
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	legacy := writeTable(t, dir, trTable)
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	stubStringsScan(t, stringsScan{Keys: []string{"Eski"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.Error(t, err)
+	require.Contains(t, out, "✗ palbase/strings.json and palbase/strings/ both exist")
+	body, _ := os.ReadFile(legacy)
+	require.Equal(t, trTable, string(body))
+	require.Equal(t, dirMetaTR, readRel(t, dir, "palbase/strings/_meta.json"))
+}
+
+func TestLandStringsTable_UnchangedTwice(t *testing.T) { // FR-004
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	_, err := land(t, dir, buildOptions{source: "tr", add: []string{"en"}})
+	require.NoError(t, err)
+	before := readRel(t, dir, "palbase/strings/en.json")
+	out, err := land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.Contains(t, out, "✓ palbase/strings/ unchanged (1 string(s))")
+	require.Equal(t, before, readRel(t, dir, "palbase/strings/en.json"))
+}
+
+func TestLandStringsTable_AddOpensALanguage(t *testing.T) { // FR-009, FR-010
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba", "Hoşça kal"}}, nil)
+	out, err := land(t, dir, buildOptions{add: []string{"en-us", "de"}})
+	require.NoError(t, err)
+	require.Contains(t, out, "✓ added en-US — palbase/strings/en-US.json, 2 string(s) to translate")
+	require.Contains(t, out, "✓ added de — palbase/strings/de.json, 2 string(s) to translate")
+	require.Contains(t, readRel(t, dir, "palbase/strings/en-US.json"), "\"Merhaba\": {\n    \"value\": \"\",\n    \"state\": \"missing\"")
+	out, err = land(t, dir, buildOptions{add: []string{"de"}})
+	require.NoError(t, err)
+	require.Contains(t, out, "  de is already in palbase/strings/")
+	for _, bad := range []struct{ tag, wantIn string }{
+		{"tr", "tr is the source language"},
+		{"not a tag!", "is not a language tag"},
+	} {
+		out, err = land(t, dir, buildOptions{add: []string{bad.tag}})
+		require.Error(t, err, bad.tag)
+		require.Contains(t, out, bad.wantIn)
+	}
+}
+
+func TestLandStringsTable_AddWithoutATableIsRefused(t *testing.T) { // FR-010, FR-022
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	out, err := land(t, dir, buildOptions{add: []string{"en"}})
+	require.Error(t, err)
+	require.Contains(t, out, "✗ --add did not run — there is no string table")
+	_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings"))
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestLandStringsTable_AHandLanguageFileIsFilledIn(t *testing.T) { // FR-008
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/fr.json", "{}")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	_, err := land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.Contains(t, readRel(t, dir, "palbase/strings/fr.json"), `"Merhaba"`)
+}
+
+func TestLandStringsTable_SourceAdoptsLanguageFilesWithoutMeta(t *testing.T) { // FR-011, FR-014
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/en.json", `{"Merhaba":{"value":"Hello","state":"translated"}}`)
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.Error(t, err)
+	require.Contains(t, out, "_meta.json is missing")
+	require.Contains(t, out, "palbase build --source <language>")
+	_, err = land(t, dir, buildOptions{source: "tr"})
+	require.NoError(t, err)
+	require.Equal(t, dirMetaTR, readRel(t, dir, "palbase/strings/_meta.json"))
+	require.Contains(t, readRel(t, dir, "palbase/strings/en.json"), `"value": "Hello"`)
+}
+
+func TestLandStringsTable_AnInvalidFileIsRefusedByName(t *testing.T) { // FR-014
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en-us.json", "{}")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.Error(t, err)
+	require.Contains(t, out, "palbase/strings/en-us.json")
+	require.Contains(t, out, "name the file en-US.json")
+}
+
+func TestLandStringsTable_ALeftoverOfAnotherLanguageStopsTheMove(t *testing.T) { // FR-002
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	legacy := writeTable(t, dir, trTable)
+	writeRel(t, dir, "palbase/strings/fr.json", "{}")
+	stubStringsScan(t, stringsScan{Keys: []string{"Eski"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.Error(t, err)
+	require.Contains(t, out, "palbase/strings/fr.json is beside palbase/strings.json without _meta.json")
+	body, _ := os.ReadFile(legacy)
+	require.Equal(t, trTable, string(body))
+}
+
+func TestLandStringsTable_WarnsAboutAPlaceholderAPersonDropped(t *testing.T) { // FR-016
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en.json", `{"Kart {{amount}} ₺":{"value":"Card ₺","state":"translated"}}`)
+	stubStringsScan(t, stringsScan{Keys: []string{"Kart {{amount}} ₺"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.NoError(t, err, "a warning, not a failure")
+	require.Contains(t, out, `warning: palbase/strings/en.json: "Kart {{amount}} ₺" — the translation drops {{amount}}`)
+}
+
+func TestLandStringsTable_AnOlderSDKKeepsTheSingleFile(t *testing.T) { // FR-055, D-21
+	dir := t.TempDir()
+	installSDK(t, dir, 0, "41.2.0")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	out, err := land(t, dir, buildOptions{source: "tr"})
+	require.NoError(t, err)
+	require.Contains(t, out, "✓ wrote palbase/strings.json")
+	_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings"))
+	require.True(t, os.IsNotExist(statErr), "an older SDK's stack cannot read the directory")
+	legacy := writeTable(t, dir, trTable)
+	stubStringsScan(t, stringsScan{Keys: []string{"Eski"}}, nil)
+	out, err = land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.NotContains(t, out, "moved")
+	_, err = os.Stat(legacy)
+	require.NoError(t, err, "no migration under an older SDK")
+	out, err = land(t, dir, buildOptions{add: []string{"de"}})
+	require.Error(t, err)
+	require.Contains(t, out, "✗ --add did not run — this project's @palbase/backend is 41.2.0")
+	stubStringsScan(t, stringsScan{}, errors.New("typescript missing"))
+	out, err = land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.Contains(t, out, "palbase/strings.json was not updated in this build", "the single-file mode names its own file")
+}
+
+func TestLandStringsTable_AnOlderSDKRefusesADirectory(t *testing.T) { // FR-056
+	dir := t.TempDir()
+	installSDK(t, dir, 0, "41.2.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	out, err := land(t, dir, buildOptions{})
+	require.Error(t, err)
+	require.Contains(t, out, "✗ palbase/strings/ needs @palbase/backend 41.3.0 or later, and this project's is 41.2.0")
+	require.Equal(t, dirMetaTR, readRel(t, dir, "palbase/strings/_meta.json"))
+}
+
+func TestLandStringsTable_AnUnknownSDKKeepsAnExistingDirectory(t *testing.T) { // FR-055
+	dir := t.TempDir()
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	writeRel(t, dir, "palbase/strings/en.json", "{}")
+	stubStringsScan(t, stringsScan{Keys: []string{"Merhaba"}}, nil)
+	_, err := land(t, dir, buildOptions{})
+	require.NoError(t, err)
+	require.Contains(t, readRel(t, dir, "palbase/strings/en.json"), `"Merhaba"`)
+}
+
+func TestLandStringsTable_ScannerFailureWithAddFails(t *testing.T) { // FR-015, FR-022
+	dir := t.TempDir()
+	installSDK(t, dir, 2, "41.3.0")
+	writeRel(t, dir, "palbase/strings/_meta.json", dirMetaTR)
+	stubStringsScan(t, stringsScan{}, errors.New("typescript missing"))
+	out, err := land(t, dir, buildOptions{add: []string{"en"}})
+	require.Error(t, err)
+	require.Contains(t, out, "✗ --add did not run — the t() scanner could not run")
+	_, statErr := os.Stat(filepath.Join(dir, "palbase", "strings", "en.json"))
+	require.True(t, os.IsNotExist(statErr))
 }
 
 // THROUGH THE VERB (FR-015, FR-023, FR-021): the real scanner, the real staged
@@ -1904,21 +2111,15 @@ func TestRunBuild_WritesTheStringsTable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	var out bytes.Buffer
-	require.NoError(t, runBuildWith(ctx, dir, &out, buildOptions{source: "tr"}), "build:\n%s", out.String())
-	path := filepath.Join(dir, filepath.FromSlash(StringsPath()))
-	first, err := os.ReadFile(path)
-	require.NoError(t, err, "the build wrote no table:\n%s", out.String())
-	tab, _, err := parseStringsTable(first, false)
-	require.NoError(t, err)
-	require.Equal(t, "tr", tab.Source)
-	require.Contains(t, tab.Strings, "Merhaba {{ad}}")
+	require.NoError(t, runBuildWith(ctx, dir, &out, buildOptions{source: "tr", add: []string{"en"}}), "build:\n%s", out.String())
+	require.Equal(t, dirMetaTR, readRel(t, dir, "palbase/strings/_meta.json"), "the build wrote no table:\n%s", out.String())
+	first := readRel(t, dir, "palbase/strings/en.json")
+	require.Contains(t, first, "\"Merhaba {{ad}}\": {\n    \"value\": \"\",\n    \"state\": \"missing\"")
 
 	out.Reset()
 	require.NoError(t, runBuild(ctx, dir, &out), "second build:\n%s", out.String())
-	second, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, string(first), string(second))
-	require.Contains(t, out.String(), "palbase/strings.json unchanged")
+	require.Equal(t, first, readRel(t, dir, "palbase/strings/en.json"))
+	require.Contains(t, out.String(), "palbase/strings/ unchanged")
 }
 
 const stringsControllerTS = `import { Controller, Get, QueryParams, t, z } from "@palbase/backend";

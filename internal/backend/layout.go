@@ -113,12 +113,17 @@ func GeneratedPath(env, platform string) string {
 // whole of `palbase/` is trackable now (NFR-001).
 func EnvTypesPath() string { return path.Join(rootDir, envTypesFile) }
 
-// StringsPath is the backend's string table: the source-language sentences its
-// t() calls use, and their translations (D-2). Committed, written by `palbase
-// build`, and — alone of everything under this directory — shipped with the
-// deploy, because the stack serves from it (D-14, FR-026). The stack spells it
-// the same way (v2 internal/platform/locale.StringsPath).
+// StringsPath is the backend string table's OLD single-file home, as a v0.70.0
+// CLI wrote it. `palbase build` moves it into StringsDir; a checkout that still
+// has it is read (and pushed) as it is — a stack reads both (D-4).
 func StringsPath() string { return path.Join(rootDir, "strings.json") }
+
+// StringsDir is the backend's string table: `_meta.json` naming the source
+// language, and one `<tag>.json` per other language (D-1). Committed, written
+// by `palbase build`, and — alone of everything under this directory besides
+// the old StringsPath — shipped with the deploy, because the stack serves from
+// it. The stack spells it the same way (v2 internal/platform/locale.StringsDir).
+func StringsDir() string { return path.Join(rootDir, "strings") }
 
 // ClientBarrelPath is the ONE line a web application imports.
 //

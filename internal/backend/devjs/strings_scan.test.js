@@ -1,5 +1,5 @@
 // Unit tests for strings_scan.js — the source of every key in
-// palbase/strings.json (FR-015), of the build's warnings for a t() use it
+// palbase/strings/ (FR-015), of the build's warnings for a t() use it
 // cannot read (FR-016), and of its refusal to hand back a partial key set
 // (FR-030).
 //

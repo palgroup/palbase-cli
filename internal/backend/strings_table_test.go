@@ -285,3 +285,13 @@ func TestWriteStringsTable_RewritesTheFileTheWayTheCheckoutOwnsIt(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, string(body), string(after))
 }
+
+func TestMergeStringsTable_ABlankKeyIsItsOwnTranslation(t *testing.T) { // FR-005, D-12
+	base := &stringsTable{Version: 1, Source: "tr", Locales: []string{"tr", "en"},
+		Strings: map[string]map[string]stringCell{" ": {"en": {State: cellMissing}}}}
+	merged, _, err := mergeStringsTable(base, []string{"", " ", "Merhaba"}, "")
+	require.NoError(t, err)
+	require.Equal(t, stringCell{Value: "", State: cellTranslated}, merged.Strings[""]["en"])
+	require.Equal(t, stringCell{Value: " ", State: cellTranslated}, merged.Strings[" "]["en"], "an existing missing cell of a blank key is filled too")
+	require.Equal(t, stringCell{State: cellMissing}, merged.Strings["Merhaba"]["en"])
+}
