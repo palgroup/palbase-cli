@@ -85,6 +85,11 @@ var stackImages = []stackImage{
 	{env: "PBC_POSTGRES_IMAGE", repo: "pgvector/pgvector", pinned: "pg16", upstream: true},
 }
 
+// platformEnv, bu imajın platformunu taşıyan compose değişkeni.
+func (i stackImage) platformEnv() string {
+	return strings.TrimSuffix(i.env, "_IMAGE") + "_PLATFORM"
+}
+
 // stackImage identifies a container image and its compose variable.
 type stackImage struct {
 	env, repo string
@@ -281,7 +286,8 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 		fmt.Fprintf(out, "  %s\n", img.ref(sdkVersion))
 	}
 
-	if err := imagesPresent(ctx, stackImages, sdkVersion); err != nil {
+	platforms, err := resolveStackImages(ctx, stackImages, sdkVersion, out)
+	if err != nil {
 		return err
 	}
 
@@ -294,7 +300,7 @@ func runStart(ctx context.Context, dir string, reset, lan bool, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	if err := recordStackImages(envFile, sdkVersion); err != nil {
+	if err := recordStackImages(envFile, sdkVersion, platforms); err != nil {
 		return err
 	}
 
@@ -526,24 +532,133 @@ func stackDirectory(group string) (string, error) {
 	return writeVendoredStack(group)
 }
 
-// imagesPresent checks the exact image references compose will use and preserves
-// registry failures, so a missing release and a denied request remain distinct.
-func imagesPresent(ctx context.Context, images []stackImage, version string) error {
+// resolveStackImages checks the exact image references compose will use and
+// preserves registry failures, so a missing release and a denied request remain
+// distinct. It returns the PLATFORM each image must run as, keyed by the compose
+// variable that carries it.
+//
+// MİMARİ SESSİZCE ÖNBELLEKTEN GELİYORDU (palgroup/palbase#3). `docker image
+// inspect` bir imajın VARLIĞINI ölçer, MİMARİSİNİ değil — ölçüldü, arm64 bir
+// daemon'da:
+//
+//	docker image inspect pb-dbg/alpine:amd64only   → exit 0 ("var")
+//	docker image inspect --format {{.Architecture}} … → amd64
+//
+// Compose dosyasında `platform:` olmadığı için o yabancı kopya sessizce koşuyor:
+// aynı laboratuvarda `docker compose up` çıktısı `x86_64` verdi. Apple Silicon'da
+// bunun bedeli qemu-x86_64 altında koşan bir PostgreSQL ve backend'lerin
+// exit code 2 ile ölüp crash recovery'ye düşmesiydi (#3: bir günde SEKİZ kez).
+//
+// `platform:` dolu olduğunda compose eşleşmeyen önbelleği KULLANMIYOR, doğru
+// varyantı çekiyor (aynı laboratuvarda ölçüldü: "Pulling"). Boş değer ise
+// bugünkü davranış — bu yüzden platform ÇÖZÜLEMEDİĞİNDE boş kalır, koşu
+// engellenmez.
+func resolveStackImages(ctx context.Context, images []stackImage, version string, out io.Writer) (map[string]string, error) {
+	host := hostPlatform(ctx)
+	platforms := make(map[string]string, len(images))
 	for _, want := range images {
 		image := want.ref(version)
-		if exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil {
+		platforms[want.env] = ""
+		cached, isCached := cachedImagePlatform(ctx, image)
+		if isCached && (host == "" || cached == host) {
+			if host != "" {
+				platforms[want.env] = host
+			}
 			continue
 		}
+		// Ya yerelde hiç yok, ya da YABANCI mimaride. İkisinin de cevabı
+		// kayıttadır: bu etiket bu makinenin platformunu yayımlıyor mu?
 		output, err := exec.CommandContext(ctx, "docker", "manifest", "inspect", image).CombinedOutput()
 		if err != nil {
+			if isCached {
+				// Yabancı mimarili bir kopya var ve kayda ulaşılamıyor: koşuyu
+				// kesmiyoruz, ama sessiz de kalmıyoruz — #3'ün asıl zararı,
+				// emülasyonun HİÇBİR yerde yazmamasıydı.
+				warnEmulated(out, image, cached, host)
+				continue
+			}
 			reason := strings.TrimSpace(string(output))
 			if reason == "" {
 				reason = err.Error()
 			}
-			return fmt.Errorf("cannot fetch %s: %s", image, reason)
+			return nil, fmt.Errorf("cannot fetch %s: %s", image, reason)
+		}
+		if host == "" || !manifestPublishes(output, host) {
+			if isCached && host != "" {
+				warnEmulated(out, image, cached, host)
+			}
+			continue
+		}
+		platforms[want.env] = host
+		if isCached {
+			fmt.Fprintf(out, "  %s is cached as %s on a %s host — taking the native build instead\n", image, cached, host)
 		}
 	}
-	return nil
+	return platforms, nil
+}
+
+func warnEmulated(out io.Writer, image, cached, host string) {
+	fmt.Fprintf(out, "  ! %s is %s on a %s host — it will run under emulation\n", image, cached, host)
+}
+
+// hostPlatform, DAEMON'ın platformu — bu binary'nin değil.
+//
+// `runtime.GOARCH` yanlış cevaptır: docker bağlamı uzak bir makineyi ya da
+// başka mimaride bir VM'i gösteriyor olabilir, ve imaj ORADA koşacak.
+// Okunamıyorsa boş döner: platform pin'lenmez, davranış bugünküyle aynı kalır.
+func hostPlatform(ctx context.Context) string {
+	output, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}").Output()
+	if err != nil {
+		return ""
+	}
+	platform := strings.TrimSpace(string(output))
+	osName, arch, ok := strings.Cut(platform, "/")
+	if !ok || osName == "" || arch == "" {
+		return ""
+	}
+	return platform
+}
+
+// cachedImagePlatform, YERELDEKİ kopyanın platformu — ve varlık cevabı.
+func cachedImagePlatform(ctx context.Context, image string) (string, bool) {
+	output, err := exec.CommandContext(ctx, "docker", "image", "inspect",
+		"--format", "{{.Os}}/{{.Architecture}}", image).Output()
+	if err != nil {
+		return "", false
+	}
+	platform := strings.TrimSpace(string(output))
+	if platform == "" || strings.HasPrefix(platform, "/") || strings.HasSuffix(platform, "/") {
+		// İmaj var ama platformu okunamadı: varlığı yine de doğru cevap.
+		return "", true
+	}
+	return platform, true
+}
+
+// manifestPublishes, etiketin bu platformu yayımlayıp yayımlamadığını söyler.
+// Çok mimarili bir liste de, tek bir manifest de aynı soruyu cevaplar.
+func manifestPublishes(manifest []byte, platform string) bool {
+	var list struct {
+		Manifests []struct {
+			Platform struct {
+				OS   string `json:"os"`
+				Arch string `json:"architecture"`
+			} `json:"platform"`
+		} `json:"manifests"`
+		Architecture string `json:"architecture"`
+		OS           string `json:"os"`
+	}
+	if err := json.Unmarshal(manifest, &list); err != nil {
+		return false
+	}
+	for _, entry := range list.Manifests {
+		if entry.Platform.OS+"/"+entry.Platform.Arch == platform {
+			return true
+		}
+	}
+	if len(list.Manifests) == 0 && list.OS != "" {
+		return list.OS+"/"+list.Architecture == platform
+	}
+	return false
 }
 
 // groupName is what this stack is called on this machine: the linked project's
@@ -644,10 +759,15 @@ func ensureBootValues(ctx context.Context, envFile, sdkVersion string, out io.Wr
 // `node_modules`'ı silen herkes yığınını durduramaz hâle gelirdi.
 //
 // Her `start` yeniden yazar: dosya bir kayıt, bir otorite değil.
-func recordStackImages(envFile, sdkVersion string) error {
-	values := make(map[string]string, len(stackImages))
+func recordStackImages(envFile, sdkVersion string, platforms map[string]string) error {
+	values := make(map[string]string, 2*len(stackImages))
 	for _, img := range stackImages {
 		values[img.env] = img.ref(sdkVersion)
+		// HER ZAMAN YAZILIR, çözülemediğinde BOŞ olarak (#3): bir önceki
+		// koşunun yazdığı platform dosyada kalırsa, docker bağlamı başka
+		// mimarideki bir daemon'a taşındığında compose çekilemeyecek bir
+		// varyant ister ve yığın hiç kalkmaz.
+		values[img.platformEnv()] = platforms[img.env]
 	}
 	return setEnvValues(envFile, values)
 }

@@ -990,7 +990,7 @@ func TestRecordStackImagesWritesEveryVariable(t *testing.T) {
 	if err := os.WriteFile(envFile, []byte("PALBASE_HTTP_PORT=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordStackImages(envFile, "33.0.2"); err != nil {
+	if err := recordStackImages(envFile, "33.0.2", nil); err != nil {
 		t.Fatalf("beklenmeyen hata: %v", err)
 	}
 	raw, err := os.ReadFile(envFile)
@@ -1021,10 +1021,10 @@ func TestRecordStackImagesReplacesAnOlderVersion(t *testing.T) {
 	if err := os.WriteFile(envFile, []byte("PALBASE_HTTP_PORT=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordStackImages(envFile, "32.0.0"); err != nil {
+	if err := recordStackImages(envFile, "32.0.0", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordStackImages(envFile, "33.0.2"); err != nil {
+	if err := recordStackImages(envFile, "33.0.2", nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(envFile)

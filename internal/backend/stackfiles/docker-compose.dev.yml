@@ -140,6 +140,14 @@ services:
   # same file inside the same image.
   envoy:
     image: ${PBC_EDGE_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
+    # PLATFORMU CLI ÇÖZER (palgroup/palbase#3). Bu anahtar boşken docker,
+    # önbellekte hangi mimari varsa ONU koşturur — Apple Silicon'da bir kez
+    # çekilmiş amd64 bir imaj aylarca qemu altında koşar ve tek belirtisi
+    # backend'lerin exit code 2 ile ölüp crash recovery'ye düşmesidir. Dolu
+    # olduğunda docker eşleşmeyen önbelleği kullanmaz, doğru varyantı çeker.
+    # CLI, imaj bu platformu yayımlamıyorsa DEĞİŞKENİ BOŞ yazar ve uyarır:
+    # emülasyon bir seçenek olarak kalır, ama sessiz kalmaz.
+    platform: ${PBC_EDGE_PLATFORM:-}
     command: ["-c", "/etc/envoy/bootstrap.dev.yaml"]
     ports:
       # PALBASE_HTTP_BIND is 127.0.0.1 unless somebody deliberately widened it
@@ -164,6 +172,14 @@ services:
   # connects into that gap.
   postgres:
     image: ${PBC_POSTGRES_IMAGE:?set by the CLI}
+    # PLATFORMU CLI ÇÖZER (palgroup/palbase#3). Bu anahtar boşken docker,
+    # önbellekte hangi mimari varsa ONU koşturur — Apple Silicon'da bir kez
+    # çekilmiş amd64 bir imaj aylarca qemu altında koşar ve tek belirtisi
+    # backend'lerin exit code 2 ile ölüp crash recovery'ye düşmesidir. Dolu
+    # olduğunda docker eşleşmeyen önbelleği kullanmaz, doğru varyantı çeker.
+    # CLI, imaj bu platformu yayımlamıyorsa DEĞİŞKENİ BOŞ yazar ve uyarır:
+    # emülasyon bir seçenek olarak kalır, ama sessiz kalmaz.
+    platform: ${PBC_POSTGRES_PLATFORM:-}
     environment:
       POSTGRES_USER: palbase
       POSTGRES_DB: palbase
@@ -195,6 +211,14 @@ services:
     # ez — ama o an lokalin buluttan AYRIŞIR, ve bu koşunun bütün amacı o
     # ayrışmayı bitirmekti. CLI, imaj bulunamazsa derleme komutunu yazdırır.
     image: ${PBC_PALSVC_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
+    # PLATFORMU CLI ÇÖZER (palgroup/palbase#3). Bu anahtar boşken docker,
+    # önbellekte hangi mimari varsa ONU koşturur — Apple Silicon'da bir kez
+    # çekilmiş amd64 bir imaj aylarca qemu altında koşar ve tek belirtisi
+    # backend'lerin exit code 2 ile ölüp crash recovery'ye düşmesidir. Dolu
+    # olduğunda docker eşleşmeyen önbelleği kullanmaz, doğru varyantı çeker.
+    # CLI, imaj bu platformu yayımlamıyorsa DEĞİŞKENİ BOŞ yazar ve uyarır:
+    # emülasyon bir seçenek olarak kalır, ama sessiz kalmaz.
+    platform: ${PBC_PALSVC_PLATFORM:-}
     command:
       - "--modules"
       # Katalogun TAMAMI. `jobs` 2026-08-26'da eklendi: self-host'un maskesinde
@@ -297,6 +321,14 @@ services:
     # The DEV target, pulled: it carries the bundler and TypeScript the stager
     # needs. The production image comes up healthy and then refuses every save.
     image: ${PBC_RUNTIME_IMAGE:?set by the CLI — the one source of the version is the installed @palbase/backend}
+    # PLATFORMU CLI ÇÖZER (palgroup/palbase#3). Bu anahtar boşken docker,
+    # önbellekte hangi mimari varsa ONU koşturur — Apple Silicon'da bir kez
+    # çekilmiş amd64 bir imaj aylarca qemu altında koşar ve tek belirtisi
+    # backend'lerin exit code 2 ile ölüp crash recovery'ye düşmesidir. Dolu
+    # olduğunda docker eşleşmeyen önbelleği kullanmaz, doğru varyantı çeker.
+    # CLI, imaj bu platformu yayımlamıyorsa DEĞİŞKENİ BOŞ yazar ve uyarır:
+    # emülasyon bir seçenek olarak kalır, ama sessiz kalmaz.
+    platform: ${PBC_RUNTIME_PLATFORM:-}
     # The dev compiler writes into the host checkout as the invoking developer.
     user: ${PALBASE_RUNTIME_USER:-1000:1000}
     # READINESS IS THE RUNTIME'S OWN ANSWER, not the edge's.
