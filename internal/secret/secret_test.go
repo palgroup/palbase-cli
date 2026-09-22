@@ -41,16 +41,6 @@ func projectHolding(t *testing.T, secrets map[string]string) (*httptest.Server, 
 			w.Header().Set("content-type", "application/json")
 			_ = json.NewEncoder(w).Encode(list)
 
-		case strings.HasSuffix(r.URL.Path, "/value") && r.Method == http.MethodGet:
-			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/management/secrets/"), "/value")
-			value, ok := secrets[name]
-			if !ok {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			w.Header().Set("content-type", "text/plain")
-			_, _ = w.Write([]byte(value))
-
 		case r.Method == http.MethodPut:
 			var body struct {
 				Value string `json:"value"`

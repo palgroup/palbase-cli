@@ -393,9 +393,8 @@ func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		// A command may ask for a SPECIFIC exit status rather than a failure —
 		// `db plan --detailed-exitcode` reports "there are changes" as 2, which CI
-		// branches on. Such an error
-		// carries no message: printing an empty line above a meaningful status
-		// code would read as a crash.
+		// branches on. Such an error carries no message: printing an empty line
+		// above a meaningful status code would read as a crash.
 		//
 		// The interface asks for TWO methods, and the second one is the point.
 		// `*exec.ExitError` has `ExitCode() int` too, so a one-method interface
