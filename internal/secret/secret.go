@@ -7,8 +7,8 @@
 // no flag that asks for values on a terminal. The old group's `pull` wrote every
 // decrypted secret to .env.local, which is how a production credential ends up
 // in a screen share, a backup, and eventually a repository. A secret set here is
-// sealed in the project's vault and read by exactly two things: the deployed code
-// at boot, and `palbase run` when it hands a child process its environment.
+// sealed in the project's vault and read by the code that runs in the stack —
+// deployed, and on a local stack through `palbase start`'s pull.
 //
 // THE PROJECT IS THE TARGET. These verbs act on whatever this checkout is linked
 // to — the stack on this machine while one is running, the linked environment
@@ -46,8 +46,8 @@ func Cmd() *cobra.Command {
   palbase secret remove NAME        Take one away
 
 There is no .env file: nothing here reads one and nothing here writes one. The
-deployed code gets these at boot, and ` + "`palbase run`" + ` gives them to a command you
-run on this machine without writing them down anywhere.`,
+code running in the stack reads them — deployed, or on this machine after
+` + "`palbase start`" + ` pulls them into the local stack.`,
 	}
 	cmd.AddCommand(setCmd(), listCmd(), removeCmd())
 	return cmd

@@ -7,12 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -206,103 +204,6 @@ func TestListShowsNamesAndWhenTheyChanged(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("the listing is missing %q:\n%s", want, out)
 		}
-	}
-}
-
-// TestRunGivesTheChildTheValues is FR-031, and it asserts all three halves: the
-// child SEES the value, the parent does NOT, and nothing was written down.
-func TestRunGivesTheChildTheValues(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the child here is a POSIX shell")
-	}
-	srv, _ := projectHolding(t, map[string]string{"SENTRY_DSN": theValue})
-	dir := linkedCheckout(t, srv.URL)
-
-	var out, errOut bytes.Buffer
-	cmd := RunCmd()
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"sh", "-c", "printf %s \"$SENTRY_DSN\""})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("run: %v\n%s", err, errOut.String())
-	}
-
-	if out.String() != theValue {
-		t.Errorf("the child did not see the value: %q", out.String())
-	}
-	if os.Getenv("SENTRY_DSN") != "" {
-		t.Error("the value leaked into THIS process, so everything it starts next inherits it")
-	}
-	if strings.Contains(errOut.String(), theValue) {
-		t.Errorf("the value was announced:\n%s", errOut.String())
-	}
-	if !strings.Contains(errOut.String(), "SENTRY_DSN") {
-		t.Errorf("the names were not announced, so nobody can see what the command was given:\n%s", errOut.String())
-	}
-
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".env") {
-			t.Errorf("run wrote %s", e.Name())
-		}
-		if e.IsDir() {
-			continue
-		}
-		body, _ := os.ReadFile(filepath.Join(dir, e.Name()))
-		if strings.Contains(string(body), theValue) {
-			t.Errorf("the value was written to %s", e.Name())
-		}
-	}
-}
-
-// TestRunCarriesTheChildsExitStatus: `palbase run -- npm test` that fails must
-// fail, or a green CI step is meaningless.
-func TestRunCarriesTheChildsExitStatus(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the child here is a POSIX shell")
-	}
-	srv, _ := projectHolding(t, map[string]string{})
-	linkedCheckout(t, srv.URL)
-
-	cmd := RunCmd()
-	cmd.SetOut(new(bytes.Buffer))
-	cmd.SetErr(new(bytes.Buffer))
-	cmd.SetArgs([]string{"sh", "-c", "exit 3"})
-	err := cmd.ExecuteContext(context.Background())
-	if err == nil {
-		t.Fatal("a failing command reported success")
-	}
-	var coded interface{ ExitCode() int }
-	if !errors.As(err, &coded) {
-		t.Fatalf("the error carries no exit status: %T", err)
-	}
-	if coded.ExitCode() != 3 {
-		t.Errorf("exit status = %d", coded.ExitCode())
-	}
-	if err.Error() != "" {
-		t.Errorf("a message would print above the child's own output: %q", err.Error())
-	}
-}
-
-// TestRunPassesTheChildsOwnFlagsThrough: everything after `--` is the child's,
-// including flags cobra would otherwise reject.
-func TestRunPassesTheChildsOwnFlagsThrough(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the child here is a POSIX shell")
-	}
-	srv, _ := projectHolding(t, map[string]string{})
-	linkedCheckout(t, srv.URL)
-
-	var out bytes.Buffer
-	cmd := RunCmd()
-	cmd.SetOut(&out)
-	cmd.SetErr(new(bytes.Buffer))
-	cmd.SetArgs([]string{"sh", "-c", "printf %s \"$1\"", "sh", "--watch"})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if out.String() != "--watch" {
-		t.Errorf("the child's flag did not reach it: %q", out.String())
 	}
 }
 

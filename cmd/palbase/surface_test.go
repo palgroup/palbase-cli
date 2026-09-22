@@ -107,7 +107,6 @@ func TestGolden_TopLevelCommands(t *testing.T) {
 		"push",
 		"roles",
 		"rollback",
-		"run",
 		"secret",
 		"spec",
 		"start",

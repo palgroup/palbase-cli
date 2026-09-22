@@ -393,7 +393,7 @@ func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		// A command may ask for a SPECIFIC exit status rather than a failure —
 		// `db plan --detailed-exitcode` reports "there are changes" as 2, which CI
-		// branches on, and `palbase run` carries its child's status. Such an error
+		// branches on. Such an error
 		// carries no message: printing an empty line above a meaningful status
 		// code would read as a crash.
 		//
@@ -594,7 +594,6 @@ func newRootCmd() *cobra.Command {
 			Target: func() (members.Target, error) { return linkedTarget() },
 		}),
 		secret.Cmd(),
-		secret.RunCmd(),
 		dbcmd.Cmd(),
 		storage.Cmd(storage.Resolvers{REST: func(cmd *cobra.Command) (storage.REST, error) { return openStackManagement(cmd) }}),
 		flags.Cmd(flags.Resolvers{
@@ -670,7 +669,7 @@ For a headless run — CI, an agent in a container — there is no sign-in at al
 set PALBASE_ACCESS_TOKEN and every command resolves it.
 
 Two things do NOT come through here:
-  a project running on this machine   ` + "`palbase start`" + ` writes that credential itself
+  a project running on this machine   ` + "`palbase start`" + ` brings its stack up, and the stack holds its own key
   a stack you host yourself           ` + "`palbase link <url> --token-stdin`" + ``,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Only a NON-default deployment announces itself. See printDeployment.
@@ -694,8 +693,8 @@ func logoutCmd() *cobra.Command {
 checkout is linked to.
 
 Both, because "log out" means one thing to a person and this machine holds two
-kinds of credential: the cloud session, and whatever ` + "`palbase start`" + ` or
-` + "`palbase link`" + ` wrote for a project. Leaving the second behind is how a machine
+kinds of credential: the cloud session, and the key
+` + "`palbase link`" + ` stored for a project. Leaving the second behind is how a machine
 keeps opening a project its owner believes they signed out of.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// The project's first: it cannot fail for a reason the person needs
