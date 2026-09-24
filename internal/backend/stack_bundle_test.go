@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -275,20 +276,20 @@ func TestTheProjectsTestsAreBundledSoTheyCanTravel(t *testing.T) {
 		[]byte("export const WHO = \"todos\";\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "tests", "todos.test.ts"), []byte(
+	if err := os.WriteFile(filepath.Join(dir, "tests", "todos.e2e.test.ts"), []byte(
 		"import { test } from \"node:test\";\nimport { WHO } from \"./helper.ts\";\ntest(WHO, () => {});\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	bundleRoot := t.TempDir()
-	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
+	if err := bundleTests(context.Background(), dir, bundleRoot, deploySelection{}, &strings.Builder{}); err != nil {
 		t.Fatalf("the suite did not bundle: %v", err)
 	}
 
 	// BUNDLE KOKUNDE, checkout'ta DEGIL. Bu satir eskiden `dir`i okuyordu ve
 	// boylece urunun musterinin projesine yazilmasini SABITLIYORDU — 0.61.1'in
 	// gocunun kacirdigi tek uretici tam da buydu.
-	built := filepath.Join(bundleRoot, ".palbase", "esm", "tests", "todos.test.js")
+	built := filepath.Join(bundleRoot, ".palbase", "esm", "tests", "todos.e2e.test.js")
 	body, err := os.ReadFile(built)
 	if err != nil {
 		t.Fatalf("the bundled suite is not where the artifact collects it: %v", err)
@@ -314,7 +315,7 @@ func TestTheProjectsTestsAreBundledSoTheyCanTravel(t *testing.T) {
 func TestAProjectWithNoTestsBundlesNothingAndIsNotRefused(t *testing.T) {
 	dir := t.TempDir()
 	bundleRoot := t.TempDir()
-	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
+	if err := bundleTests(context.Background(), dir, bundleRoot, deploySelection{}, &strings.Builder{}); err != nil {
 		t.Fatalf("a project that declares no tests was refused: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests")); err == nil {
@@ -348,7 +349,7 @@ func TestModuleLocalTestsAreCollectedProjectWideWithoutCollision(t *testing.T) {
 	mustWrite(t, dir, ".palbase-build-controllers/x.e2e.test.ts", "import { test } from \"node:test\";\ntest(\"stale\", () => {});\n")
 
 	bundleRoot := t.TempDir()
-	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
+	if err := bundleTests(context.Background(), dir, bundleRoot, deploySelection{}, &strings.Builder{}); err != nil {
 		t.Fatalf("the module-local suites did not bundle: %v", err)
 	}
 
@@ -387,7 +388,7 @@ const oneTestSuite = "import { test } from \"node:test\";\ntest(\"x\", () => {})
 func bundledSuiteNames(t *testing.T, dir string) []string {
 	t.Helper()
 	bundleRoot := t.TempDir()
-	require.NoError(t, bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}))
+	require.NoError(t, bundleTests(context.Background(), dir, bundleRoot, deploySelection{}, &strings.Builder{}))
 	entries, err := os.ReadDir(filepath.Join(bundleRoot, ".palbase", "esm", "tests"))
 	require.NoError(t, err)
 	var names []string
@@ -465,7 +466,7 @@ func TestSuitesThatDifferOnlyByCaseInOneDirectoryAreRefused(t *testing.T) {
 	}
 	mustWrite(t, dir, "modules/a/login.e2e.test.ts", oneTestSuite)
 
-	_, err := planTestSuites(dir)
+	_, err := planTestSuites(dir, deploySelection{})
 	require.ErrorContains(t, err, "differ only by letter case")
 	require.ErrorContains(t, err, "Login.e2e.test.ts")
 	require.ErrorContains(t, err, "login.e2e.test.ts")
@@ -477,7 +478,7 @@ func TestSuitesThatDifferOnlyByCaseInTwoDirectoriesAreNamedApart(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, dir, "modules/a/Login.e2e.test.ts", oneTestSuite)
 	mustWrite(t, dir, "modules/b/login.e2e.test.ts", oneTestSuite)
-	suites, err := planTestSuites(dir)
+	suites, err := planTestSuites(dir, deploySelection{})
 	require.NoError(t, err)
 	require.Len(t, suites, 2)
 }
@@ -492,7 +493,7 @@ func TestPlanTestSuitesBuildsEachSuiteFromItsOwnFile(t *testing.T) {
 	mustWrite(t, dir, "modules/a/x.e2e.test.ts", oneTestSuite)
 	mustWrite(t, dir, "modules/b/x.e2e.test.ts", oneTestSuite)
 
-	suites, err := planTestSuites(dir)
+	suites, err := planTestSuites(dir, deploySelection{})
 	require.NoError(t, err)
 	require.Len(t, suites, 2)
 	for _, s := range suites {
@@ -1212,17 +1213,17 @@ func TestTheTestBundlerWritesToTheBundleRootNotTheCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 	suite := "export function noop() { return 1 }\n"
-	if err := os.WriteFile(filepath.Join(dir, "tests", "a.test.ts"), []byte(suite), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "tests", "a.e2e.test.ts"), []byte(suite), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := bundleTests(context.Background(), dir, bundleRoot, &strings.Builder{}); err != nil {
+	if err := bundleTests(context.Background(), dir, bundleRoot, deploySelection{}, &strings.Builder{}); err != nil {
 		t.Fatalf("bundleTests: %v", err)
 	}
 
 	// (1) Ürün BUNDLE KÖKÜNDE — yoksa süit artifact'la seyahat etmez ve
 	// deploy'un koştuğu testler sessizce hiç olmaz.
-	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests", "a.test.js")); err != nil {
+	if _, err := os.Stat(filepath.Join(bundleRoot, ".palbase", "esm", "tests", "a.e2e.test.js")); err != nil {
 		t.Errorf("suite did not land in the bundle root: %v", err)
 	}
 
@@ -1244,6 +1245,10 @@ func TestTheTestBundlerWritesToTheBundleRootNotTheCheckout(t *testing.T) {
 // birim testi ayrı kümelerdir — şablonun kendi ayrımı da budur
 // (`notes.e2e.test.ts` yayına çıkacak release'e karşı HTTP konuşur,
 // `note.service.test.ts` bir stand-in ile mantığı ölçer).
+//
+// tests/ is no longer sent whole (FR-001, palgroup/palbase#13): a unit test kept
+// there ran in the deploy like any other, and 86 of one tenant's 87 were not
+// deploy suites.
 func TestCollectTakesOnlyTheDeploysOwnSuites(t *testing.T) {
 	dir := t.TempDir()
 	for _, rel := range []string{
@@ -1257,7 +1262,7 @@ func TestCollectTakesOnlyTheDeploysOwnSuites(t *testing.T) {
 		mustWrite(t, dir, rel, oneTestSuite)
 	}
 
-	got, err := collectTestSources(dir)
+	got, err := collectTestSources(dir, deploySelection{})
 	require.NoError(t, err)
 	var rels []string
 	for _, p := range got {
@@ -1268,9 +1273,7 @@ func TestCollectTakesOnlyTheDeploysOwnSuites(t *testing.T) {
 	sort.Strings(rels)
 	require.Equal(t, []string{
 		"modules/notes/notes.e2e.test.ts",
-		"tests/deep/isolation.test.ts",
-		"tests/health.test.ts",
-	}, rels, "deploy kiracının birim testlerini de topladı (FR-017)")
+	}, rels, "deploy kiracının birim testlerini de topladı (FR-001)")
 }
 
 // ONARIM TABLOSU BOŞ OLAMAZ (#151).
@@ -1445,4 +1448,197 @@ export class PalaiModule {}
 `), 0o644))
 
 	return dir
+}
+
+// THE GOLDEN FIXTURE (D-6). The same tree, the same package.json variants and
+// the same expected names are asserted in palbase's v2/runtime/src/dev.test.ts
+// against runtime/scripts/bundle-controllers.sh — the other bundler. A test in
+// one repository cannot call the other's selector, so the fixture is the
+// contract: change it here, change it there, in the same round.
+var deployGoldenTree = map[string]string{
+	"modules/notes/notes.e2e.test.ts":               oneTestSuite,
+	"modules/notes/note.service.test.ts":            oneTestSuite,
+	"modules/billing/notes.e2e.test.ts":             oneTestSuite,
+	"tests/health.e2e.test.ts":                      oneTestSuite,
+	"tests/health.test.ts":                          oneTestSuite,
+	"tests/deep/isolation.test.ts":                  oneTestSuite,
+	"tests/deep/helper.ts":                          "export const HELPER = 1;\n",
+	"node_modules/dep/dep.e2e.test.ts":              oneTestSuite,
+	"dist/old.e2e.test.ts":                          oneTestSuite,
+	".palbase-staged-controllers/stale.e2e.test.ts": oneTestSuite,
+}
+
+const (
+	goldenD2   = `2 test file(s) under tests/ are not deploy suites and were not sent: tests/deep/isolation.test.ts, tests/health.test.ts — name one *.e2e.test.* to send it, or list what the deploy runs in package.json "palbase.deployTests"`
+	goldenS1   = `1 test file(s) under tests/ are not in package.json "palbase.deployTests" and were not sent: tests/deep/isolation.test.ts — list them there to send them`
+	goldenS2a  = `2 test file(s) under tests/ are not in package.json "palbase.deployTests" and were not sent: tests/deep/isolation.test.ts, tests/health.e2e.test.ts — list them there to send them`
+	goldenS2b  = `2 test file(s) under tests/ are not in package.json "palbase.deployTests" and were not sent: tests/deep/isolation.test.ts, tests/health.test.ts — list them there to send them`
+	goldenS3   = `3 test file(s) under tests/ are not in package.json "palbase.deployTests" and were not sent: tests/deep/isolation.test.ts, tests/health.e2e.test.ts, tests/health.test.ts — list them there to send them`
+	goldenNone = `bundled 0 deploy suite(s): "palbase.deployTests" in package.json matched no test file`
+)
+
+var deployGoldenCases = []struct {
+	name, pkg string
+	suites    []string
+	zero      bool
+	note      string
+}{
+	{"V0 no package.json", "", []string{"health.e2e.test.js", "notes.e2e.test.js", "notes_notes.e2e.test.js"}, false, goldenD2},
+	{"V1 no palbase key", `{"name":"golden","private":true,"type":"module"}`, []string{"health.e2e.test.js", "notes.e2e.test.js", "notes_notes.e2e.test.js"}, false, goldenD2},
+	{"V2 a directory", `{"palbase":{"deployTests":["tests/"]}}`, []string{"health.e2e.test.js", "health.test.js", "isolation.test.js"}, false, ""},
+	{"V3 a star and a path", `{"palbase":{"deployTests":["modules/*/notes.e2e.test.ts","tests/health.test.ts"]}}`, []string{"health.test.js", "notes.e2e.test.js", "notes_notes.e2e.test.js"}, false, goldenS2a},
+	{"V4 a question mark", `{"palbase":{"deployTests":["tests/health.e?e.test.ts"]}}`, []string{"health.e2e.test.js"}, false, goldenS2b},
+	{"V5 a bare name is not a path", `{"palbase":{"deployTests":["health.e2e.test.ts"]}}`, nil, true, goldenS3},
+	{"V6 an empty list sends nothing", `{"palbase":{"deployTests":[]}}`, nil, true, goldenS3},
+	{"V7 a star stops at a slash", `{"palbase":{"deployTests":["tests/*.test.ts"]}}`, []string{"health.e2e.test.js", "health.test.js"}, false, goldenS1},
+	{"V8 palbase that is not an object", `{"palbase":"x"}`, []string{"health.e2e.test.js", "notes.e2e.test.js", "notes_notes.e2e.test.js"}, false, goldenD2},
+}
+
+var deployGoldenRefusals = []struct{ name, pkg, says string }{
+	{"R1 unparseable", `{`, `package.json could not be read as JSON`},
+	{"R2 a string", `{"palbase":{"deployTests":"tests/"}}`, `package.json: "palbase.deployTests" must be an array of paths`},
+	{"R3 null", `{"palbase":{"deployTests":null}}`, `package.json: "palbase.deployTests" must be an array of paths`},
+	{"R4 a number entry", `{"palbase":{"deployTests":["tests/",3]}}`, `package.json: "palbase.deployTests"[1] (3) must be a non-empty string`},
+	{"R5 an empty entry", `{"palbase":{"deployTests":[""]}}`, `package.json: "palbase.deployTests"[0] ("") must be a non-empty string`},
+	{"R6 double star", `{"palbase":{"deployTests":["tests/**"]}}`, `package.json: "palbase.deployTests"[0] ("tests/**") uses "**"`},
+	{"R7 brackets", `{"palbase":{"deployTests":["tests/[ab].test.ts"]}}`, `package.json: "palbase.deployTests"[0] ("tests/[ab].test.ts") uses "["`},
+	{"R8 braces", `{"palbase":{"deployTests":["{a,b}.e2e.test.ts"]}}`, `package.json: "palbase.deployTests"[0] ("{a,b}.e2e.test.ts") uses "{"`},
+	{"R9 a backslash", `{"palbase":{"deployTests":["tests\\health.test.ts"]}}`, `package.json: "palbase.deployTests"[0] ("tests\\health.test.ts") uses "\\"`},
+}
+
+func writeDeployGolden(t *testing.T, pkg string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for rel, body := range deployGoldenTree {
+		mustWrite(t, dir, rel, body)
+	}
+	if pkg != "" {
+		mustWrite(t, dir, "package.json", pkg)
+	}
+	return dir
+}
+
+// FR-001, FR-002, FR-004 — the selection, its names, and what it says it left behind.
+func TestDeploySelectionGoldenFixture(t *testing.T) {
+	for _, c := range deployGoldenCases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := writeDeployGolden(t, c.pkg)
+			sel, err := readDeploySelection(dir)
+			require.NoError(t, err)
+			suites, err := planTestSuites(dir, sel)
+			require.NoError(t, err)
+			names := make([]string, 0, len(suites))
+			for _, s := range suites {
+				names = append(names, s.Out)
+			}
+			sort.Strings(names)
+			if len(c.suites) == 0 {
+				require.Empty(t, names)
+			} else {
+				require.Equal(t, c.suites, names)
+			}
+			unsent, err := unsentUnderTests(dir, sel)
+			require.NoError(t, err)
+			want := ""
+			if c.note != "" {
+				want = "note: " + c.note
+			}
+			require.Equal(t, want, deployNote(unsent, sel))
+		})
+	}
+}
+
+// …and the lines a push prints, through the real bundler (bun builds each suite).
+func TestDeploySelectionGoldenFixtureBundles(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		t.Skip("bun is what bundles a suite")
+	}
+	for _, c := range deployGoldenCases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := writeDeployGolden(t, c.pkg)
+			sel, err := readDeploySelection(dir)
+			require.NoError(t, err)
+			bundleRoot := t.TempDir()
+			var out strings.Builder
+			require.NoError(t, bundleTests(context.Background(), dir, bundleRoot, sel, &out))
+			entries, _ := os.ReadDir(filepath.Join(bundleRoot, ".palbase", "esm", "tests"))
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			sort.Strings(names)
+			if len(c.suites) == 0 {
+				require.Empty(t, names)
+			} else {
+				require.Equal(t, c.suites, names)
+				require.Contains(t, out.String(), fmt.Sprintf("bundled %d test suite(s)\n", len(c.suites)))
+			}
+			if c.zero {
+				require.Contains(t, out.String(), goldenNone+"\n")
+			} else {
+				require.NotContains(t, out.String(), "0 deploy suite(s)")
+			}
+			if c.note != "" {
+				require.Contains(t, out.String(), "note: "+c.note+"\n")
+			} else {
+				require.NotContains(t, out.String(), "note:")
+			}
+		})
+	}
+}
+
+// FR-003 — a selection this bundler cannot read is refused, naming file, field and entry.
+func TestDeploySelectionRefusals(t *testing.T) {
+	for _, r := range deployGoldenRefusals {
+		t.Run(r.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWrite(t, dir, "package.json", r.pkg)
+			_, err := readDeploySelection(dir)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), r.says)
+		})
+	}
+}
+
+// FR-003 — "before bundling starts": the refusal arrives before anything is compiled or written.
+func TestABadSelectionIsRefusedBeforeAnythingIsBuilt(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "package.json", `{"palbase":{"deployTests":["tests/**"]}}`)
+	bundleRoot := t.TempDir()
+	_, _, err := buildStackArtifact(context.Background(), dir, bundleRoot, &strings.Builder{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"palbase.deployTests"[0] ("tests/**") uses "**"`)
+	entries, readErr := os.ReadDir(bundleRoot)
+	require.NoError(t, readErr)
+	require.Empty(t, entries, "a refused selection left build products behind")
+}
+
+// FR-004 — the first three paths, then a count of the rest.
+func TestDeployNoteNamesTheFirstThreeAndCountsTheRest(t *testing.T) {
+	unsent := []string{"tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts", "tests/d.test.ts", "tests/e.test.ts"}
+	require.Equal(t,
+		`note: 5 test file(s) under tests/ are not deploy suites and were not sent: tests/a.test.ts, tests/b.test.ts, tests/c.test.ts, … — name one *.e2e.test.* to send it, or list what the deploy runs in package.json "palbase.deployTests"`,
+		deployNote(unsent, deploySelection{}))
+	require.Equal(t, "", deployNote(nil, deploySelection{}))
+}
+
+// D-7 — the small dialect: `*` and `?` never cross `/`, and a pattern is a WHOLE path.
+func TestMatchDeployPattern(t *testing.T) {
+	for _, c := range []struct {
+		pattern, rel string
+		want         bool
+	}{
+		{"tests/*.test.ts", "tests/a.test.ts", true},
+		{"tests/*.test.ts", "tests/deep/a.test.ts", false},
+		{"tests/?.test.ts", "tests/a.test.ts", true},
+		{"tests/?.test.ts", "tests/ab.test.ts", false},
+		{"tests/?.test.ts", "tests//.test.ts", false},
+		{"a/*/c.test.ts", "a/b/c.test.ts", true},
+		{"*", "a/b", false},
+		{"tests/health.test.ts", "health.test.ts", false},
+		{"tests/health.test.ts", "tests/health.test.ts", true},
+		{"tests/*", "tests/", true},
+	} {
+		require.Equalf(t, c.want, matchDeployPattern(c.pattern, c.rel), "%q ~ %q", c.pattern, c.rel)
+	}
 }

@@ -118,6 +118,19 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 		return nil, nil, errors.New(why)
 	}
 
+	// THE DEPLOY'S TEST SELECTION, BEFORE ANYTHING IS COMPILED (FR-003).
+	//
+	// package.json's "palbase.deployTests" decides which suites travel, and one
+	// this bundler cannot read is refused HERE, naming the field and the entry —
+	// not after the controllers were built, and never by quietly taking the
+	// default instead of what the author wrote. The stack's bundler
+	// (runtime/scripts/bundle-controllers.sh) refuses the same entries at the
+	// same point.
+	sel, err := readDeploySelection(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// No `controllers/` requirement: a module owns its classes wherever it lives,
 	// and requiring a directory the module system does not use turned the
 	// feature-folder layout into a push that could never happen. The precondition
@@ -297,7 +310,7 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 	// The project's own tests, bundled so they can travel. A deploy runs them
 	// against the release it just built, in a container that has no node_modules
 	// — so the resolution happens here, where they are.
-	if err := bundleTests(ctx, dir, bundleRoot, w); err != nil {
+	if err := bundleTests(ctx, dir, bundleRoot, sel, w); err != nil {
 		return nil, nil, err
 	}
 
@@ -310,11 +323,9 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 // them travel.
 const bundledTestsDir = ".palbase/esm/tests"
 
-// bundleTests builds every suite collectTestSources finds into a self-
-// contained module — the whole project, not only tests/ (FR-017): a module
-// owns its tests beside the code they exercise, the same way it owns its
-// controllers, and `modules/notes/notes.e2e.test.ts` (the template's own
-// shape, FR-016) never reached this function before this walk existed.
+// bundleTests builds every suite the deploy's selection names (FR-001, FR-002)
+// into a self-contained module, and says what it left behind under tests/
+// (FR-004).
 //
 // ONE BUNDLE PER SUITE, not one for all of them: `bun test` reports per file,
 // and a single blob would collapse every suite into one name in the output a
@@ -323,70 +334,64 @@ const bundledTestsDir = ".palbase/esm/tests"
 // Only *.test.* files become suites. A helper beside them is pulled IN by the
 // suite that imports it; emitted as its own file it would be run, report zero
 // tests, and read as a suite that silently does nothing.
-// KAYNAK `dir`DEN OKUNUR, URUN `bundleRoot`A YAZILIR — ve bu iki kok ayri
-// olmak ZORUNDA.
 //
-// Cikti eskiden `dir` altina gidiyordu ve bu, 0.61.1'in "her urun gecici bir
-// bundle kokune" gocunun KACIRDIGI tek ureticiydi: ayni fonksiyondaki diger
-// her cikti (`controllers.js`, `package.json`, jobs, hooks) `bundleRoot`
-// kullaniyor. Olculdu 11.09.2026: `.palbase/` silinip commit'lendikten ve
-// `palbase link` gectikten SONRA, `palbase plan` musterinin checkout'una
-// 13 MB geri yazdi.
-//
-// Ve bu yalniz cop degil: `palbase link` `.palbase` tasiyan bir checkout'u
-// REDDEDIYOR. Yani `push` kendi `link`inin engel saydigi dizini URETIYOR.
-func bundleTests(ctx context.Context, dir, bundleRoot string, w io.Writer) error {
-	suites, err := planTestSuites(dir)
+// KAYNAK `dir`DEN OKUNUR, ÜRÜN `bundleRoot`A YAZILIR — ve bu iki kök ayrı
+// olmak ZORUNDA. Çıktı eskiden `dir` altına gidiyordu; ölçüldü 11.09.2026:
+// `palbase plan` müşterinin checkout'una 13 MB geri yazdı, ve `palbase link`
+// `.palbase` taşıyan bir checkout'u REDDEDİYOR.
+func bundleTests(ctx context.Context, dir, bundleRoot string, sel deploySelection, w io.Writer) error {
+	suites, err := planTestSuites(dir, sel)
 	if err != nil {
 		return err
 	}
-	if len(suites) == 0 {
-		return nil // A project with no tests is a legitimate project.
-	}
-
-	outDir := filepath.Join(bundleRoot, filepath.FromSlash(bundledTestsDir))
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	unsent, err := unsentUnderTests(dir, sel)
+	if err != nil {
 		return err
 	}
 
-	// ONE `bun build` PER SUITE, EACH FROM ITS OWN FILE WITH AN EXPLICIT
-	// --outfile — never a shared --outdir across every entry. `bun build
-	// --outdir` derives an entry's output name from its path relative to the
-	// entries' common root, so with sources scattered across the project that
-	// derived name climbs OUT of outDir (`--outdir=out` over two staged links
-	// wrote `../modules/a/x.test.js`, verified against bun 1.3.9). --outfile has
-	// no derivation: it names the file bun writes, verbatim, so the flat,
-	// collision-free name planTestSuites chose is the one that lands. And the
-	// entry is the suite's REAL file, so its relative imports resolve where it
-	// lives — no staged copy, and no symbolic link, which Windows refuses to an
-	// ordinary account (review-T016).
-	//
-	// bun:test and node:test are the RUNNER's, not the bundle's. Inlining them
-	// would give each suite its own copy of a registry the runner owns, and the
-	// run would report zero tests while every file executed.
-	for _, suite := range suites {
-		out := filepath.Join(outDir, suite.Out)
-		if err := run(ctx, dir, "bun", "build", suite.Source, "--target=bun", "--format=esm", "--outfile="+out,
-			"--external=bun:test", "--external=node:test", "--external=node:assert"); err != nil {
-			return fmt.Errorf("the tests did not build: %w", err)
+	if len(suites) > 0 {
+		outDir := filepath.Join(bundleRoot, filepath.FromSlash(bundledTestsDir))
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return err
 		}
+		// ONE `bun build` PER SUITE, EACH FROM ITS OWN FILE WITH AN EXPLICIT
+		// --outfile — never a shared --outdir across every entry. `bun build
+		// --outdir` derives an entry's output name from its path relative to the
+		// entries' common root, so with sources scattered across the project that
+		// derived name climbs OUT of outDir (verified against bun 1.3.9). --outfile
+		// names the file bun writes, verbatim, so the flat, collision-free name
+		// planTestSuites chose is the one that lands.
+		//
+		// bun:test and node:test are the RUNNER's, not the bundle's. Inlining them
+		// would give each suite its own copy of a registry the runner owns, and the
+		// run would report zero tests while every file executed.
+		for _, suite := range suites {
+			out := filepath.Join(outDir, suite.Out)
+			if err := run(ctx, dir, "bun", "build", suite.Source, "--target=bun", "--format=esm", "--outfile="+out,
+				"--external=bun:test", "--external=node:test", "--external=node:assert"); err != nil {
+				return fmt.Errorf("the tests did not build: %w", err)
+			}
+		}
+		fmt.Fprintf(w, "bundled %d test suite(s)\n", len(suites))
+	} else if sel.declared {
+		// A selection that matches nothing ships nothing — and says so, because a
+		// deploy that grades zero suites must not read like one that graded some.
+		fmt.Fprintln(w, `bundled 0 deploy suite(s): "palbase.deployTests" in package.json matched no test file`)
 	}
-	fmt.Fprintf(w, "bundled %d test suite(s)\n", len(suites))
+	if note := deployNote(unsent, sel); note != "" {
+		fmt.Fprintln(w, note)
+	}
 	return nil
 }
 
-// collectTestSources walks the WHOLE project for *.test.* files (FR-017): a
-// suite that lives beside the code it tests never reached bundleTests before
-// this walk existed — only DIRECT CHILDREN of tests/ did, read with a plain,
-// non-recursive os.ReadDir, so `modules/notes/notes.e2e.test.ts` was invisible
-// to it (measured, design.md J-17).
+// projectTestFiles walks the WHOLE project for *.test.* files and answers them
+// relative to dir, slash-separated, sorted.
 //
 // The walk and its skip list mirror moduleSources: node_modules and dist are
 // not source (node_modules is often a symlink, for which IsDir() is false),
 // .git is not source, and every `.palbase`/`.palbase-*` tree is this CLI's OWN
-// staging output from an earlier or still-running command — walking into one
-// would collect a build's own copy of a suite a second time.
-func collectTestSources(dir string) ([]string, error) {
+// staging output from an earlier or still-running command.
+func projectTestFiles(dir string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -404,19 +409,53 @@ func collectTestSources(dir string) ([]string, error) {
 			}
 			return nil
 		}
+		if !isTestSource(name) {
+			return nil
+		}
 		rel, relErr := filepath.Rel(dir, path)
 		if relErr != nil {
 			return relErr
 		}
-		if isDeployTestSource(filepath.ToSlash(rel)) {
-			out = append(out, path)
-		}
+		out = append(out, filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	sort.Strings(out)
+	return out, nil
+}
+
+// collectTestSources answers the suites the deploy runs, as paths under dir.
+func collectTestSources(dir string, sel deploySelection) ([]string, error) {
+	rels, err := projectTestFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, rel := range rels {
+		if isDeployTestSource(rel, sel) {
+			out = append(out, filepath.Join(dir, filepath.FromSlash(rel)))
+		}
+	}
+	return out, nil
+}
+
+// unsentUnderTests answers the test files under tests/ that the selection does
+// NOT send (FR-004). tests/ is where a project that predates the convention
+// keeps its suites, and a test that silently stops travelling is a gate that
+// silently stops grading — so the push counts them out loud.
+func unsentUnderTests(dir string, sel deploySelection) ([]string, error) {
+	rels, err := projectTestFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, rel := range rels {
+		if strings.HasPrefix(rel, "tests/") && !isDeployTestSource(rel, sel) {
+			out = append(out, rel)
+		}
+	}
 	return out, nil
 }
 
@@ -427,39 +466,35 @@ type testSuite struct {
 	Out    string
 }
 
-// planTestSuites names every suite collectTestSources finds, so that no two
-// bundles land on one file (C-9, FR-017a). An empty plan (no error, nil) is the
-// legitimate answer for a project with no tests anywhere.
+// planTestSuites names every suite the selection sends, so that no two bundles
+// land on one file (C-9, FR-017a). An empty plan (no error, nil) is the
+// legitimate answer for a project with no deploy suites.
 //
 // FLAT, ON PURPOSE. The runtime's discovery (`v2/runtime/src/candidate-tests.ts`)
 // reads the output directory with a plain, non-recursive `readdir` and keeps
-// `*.test.js`, so every name here is flat and ends in `.test.js`: a name that
-// stayed unique only one level down, or a number after `.test`, would ship a
-// suite that never runs.
+// `*.test.js`, so every name here is flat and ends in `.test.js`.
 //
 // THE OUTPUT NAME IS THE IDENTITY. A collision is looked up by what lands on
-// disk, not by what the source is called: `x.test.ts` and `x.test.mts` are two
-// sources and ONE `x.test.js`, and on macOS and Windows `Login.test.js` and
-// `login.test.js` are one file too — so the key has no extension and no case.
-// Looked up by the source name, the second bundle silently replaced the first
-// (review-T016, measured).
+// disk: `x.test.ts` and `x.test.mts` are ONE `x.test.js`, and on macOS and
+// Windows `Login.test.js` and `login.test.js` are one file too — so the key has
+// no extension and no case.
 //
-// NAMES ARE THE PLAIN BASENAME whenever nothing else already claimed it — the
-// common, single-suite-per-directory case is unaffected — then that basename
-// prefixed with as much of the project-relative directory as it takes to stop
-// colliding, nearest parent outward, and only when the whole path is spent, a
-// number. Sources arrive sorted, so the same tree always gets the same names.
-func planTestSuites(dir string) ([]testSuite, error) {
-	sources, err := collectTestSources(dir)
+// NAMES ARE THE PLAIN BASENAME whenever nothing else already claimed it, then
+// that basename prefixed with as much of the project-relative directory as it
+// takes to stop colliding, nearest parent outward, and only when the whole
+// path is spent, a number. Sources arrive sorted, so the same tree always gets
+// the same names — and runtime/scripts/bundle-controllers.sh names them the
+// same way (FR-018).
+func planTestSuites(dir string, sel deploySelection) ([]testSuite, error) {
+	sources, err := collectTestSources(dir, sel)
 	if err != nil {
 		return nil, err
 	}
 	used := map[string]bool{}
 	// ONE DIRECTORY, TWO NAMES THAT DIFFER ONLY BY LETTER CASE (review-T016 tur 2,
-	// D-21). The naming below gives each its own output, but on a case-sensitive
-	// filesystem `bun build` does not tell `Login.test.ts` from `login.test.ts`
-	// in one directory: both bundles came out carrying the same suite, silently.
-	// Shipping one suite twice and the other not at all is refused, by name.
+	// D-21): on a case-sensitive filesystem `bun build` does not tell
+	// `Login.test.ts` from `login.test.ts` in one directory, and both bundles came
+	// out carrying the same suite, silently. Refused, by name.
 	sameDir := map[string]string{}
 	var plan []testSuite
 	for _, src := range sources {
@@ -478,9 +513,6 @@ func planTestSuites(dir string) ([]testSuite, error) {
 		for i := len(segs) - 2; used[strings.ToLower(name)] && i >= 0; i-- {
 			name = segs[i] + "_" + name
 		}
-		// The path is spent and the name is still taken — a file somebody really
-		// named `b_x.test.ts` beside `b/x.test.ts`. Count on the fullest form
-		// rather than refuse the push over a naming scheme.
 		for base, n := name, 2; used[strings.ToLower(name)]; n++ {
 			name = fmt.Sprintf("%s_%d", base, n)
 		}
@@ -506,24 +538,98 @@ func isTestSource(name string) bool {
 		strings.HasSuffix(name, ".test.mts") || strings.HasSuffix(name, ".test.mjs")
 }
 
-// isDeployTestSource answers whether a test file is one the DEPLOY runs (FR-017).
+// deploySelection is what package.json's "palbase.deployTests" says the deploy
+// runs (FR-002). The zero value is the DEFAULT — no key — and sends every
+// *.e2e.test.* file (FR-001). declared with no items is a real answer: an
+// empty list sends nothing.
+type deploySelection struct {
+	items    []string
+	declared bool
+}
+
+// readDeploySelection reads the selection and refuses one this bundler cannot
+// read, naming the file, the field and the entry (FR-003). No package.json,
+// or one without the key, is the default.
+//
+// The walk into the document is by OBJECT at every step, the same way the
+// stack's bundler does it with optional chaining: `"palbase": "x"` or a
+// package.json that is an array carries no selection, and takes the default.
+func readDeploySelection(projectDir string) (deploySelection, error) {
+	raw, err := os.ReadFile(filepath.Join(projectDir, "package.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return deploySelection{}, nil
+	}
+	if err != nil {
+		return deploySelection{}, fmt.Errorf(`package.json could not be read (%v) — the deploy's test selection, "palbase.deployTests", lives there`, err)
+	}
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return deploySelection{}, fmt.Errorf(`package.json could not be read as JSON (%v) — the deploy's test selection, "palbase.deployTests", lives there`, err)
+	}
+	obj, _ := doc.(map[string]any)
+	pal, _ := obj["palbase"].(map[string]any)
+	listed, present := pal["deployTests"]
+	if !present {
+		return deploySelection{}, nil
+	}
+	arr, ok := listed.([]any)
+	if !ok {
+		return deploySelection{}, fmt.Errorf(`package.json: "palbase.deployTests" must be an array of paths, and it is %s`, jsonText(listed))
+	}
+	items := make([]string, 0, len(arr))
+	for i, v := range arr {
+		at := fmt.Sprintf(`package.json: "palbase.deployTests"[%d] (%s)`, i, jsonText(v))
+		s, isString := v.(string)
+		if !isString || s == "" {
+			return deploySelection{}, fmt.Errorf("%s must be a non-empty string", at)
+		}
+		if strings.Contains(s, "**") {
+			return deploySelection{}, fmt.Errorf(`%s uses "**", which the deploy selection does not read: end a directory with "/" to take every test under it`, at)
+		}
+		for _, ch := range []string{"[", "]", "{", "}", `\`} {
+			if strings.Contains(s, ch) {
+				return deploySelection{}, fmt.Errorf(`%s uses %s, which the deploy selection does not read: only "*" and "?" match, within one path segment`, at, jsonText(ch))
+			}
+		}
+		items = append(items, s)
+	}
+	return deploySelection{items: items, declared: true}, nil
+}
+
+// jsonText renders a value the way JSON.stringify does in the stack's bundler —
+// no HTML escaping — so the two refusals quote an entry identically.
+func jsonText(v any) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Sprint(v)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// isDeployTestSource answers whether a test file is one the DEPLOY runs.
 //
 // TWO SETS, NOT ONE. A deploy's test talks to the release about to go live over
 // real HTTP; a unit test measures logic against a stand-in and needs no stack.
-// The scaffold already draws that line by name — `notes.e2e.test.ts` beside
-// `note.service.test.ts` — and this is where the product enforces it: `.e2e.`
-// anywhere in the project, plus everything under `tests/` (any depth), which is
-// where a project that predates the convention keeps its deploy suites.
+// The scaffold draws that line by name — `notes.e2e.test.ts` beside
+// `note.service.test.ts` — and so does the default here: `.e2e.test.` in the
+// file name, anywhere in the project (FR-001). Nothing else, and in particular
+// not "everything under tests/": that rule sent 86 of one tenant's 87 files,
+// unit tests and `docker exec` scripts alike, into the stack's own memory
+// (palgroup/palbase#13).
 //
-// WHY NOT EVERYTHING. It was everything, for one release. Measured (D-40): the
-// control plane's 160 CI suites travelled with its push, the runtime ran them
-// inside its own 384Mi container — one suite alone wanted 425 MB — and the
-// kernel killed the runtime mid-request. palsvc saw `EOF`, the deploy was
-// refused, and that tenant could not ship at all. A gate that can kill the
-// process grading the release is not a gate.
+// A project whose deploy suites live elsewhere lists them in package.json's
+// "palbase.deployTests", and then ONLY that list decides (FR-002): an entry
+// ending in `/` takes every test under that directory, any other entry is a
+// matchDeployPattern over the whole path — never over the bare file name.
+//
+// WHY NOT EVERYTHING. It was everything, for one release (D-40): the control
+// plane's 160 CI suites ran inside the runtime's 384Mi container and the kernel
+// killed the runtime mid-request.
 //
 // rel is the path relative to the project root, in slash form.
-func isDeployTestSource(rel string) bool {
+func isDeployTestSource(rel string, sel deploySelection) bool {
 	base := rel
 	if at := strings.LastIndex(rel, "/"); at >= 0 {
 		base = rel[at+1:]
@@ -531,7 +637,70 @@ func isDeployTestSource(rel string) bool {
 	if !isTestSource(base) {
 		return false
 	}
-	return strings.Contains(base, ".e2e.test.") || strings.HasPrefix(rel, "tests/")
+	if !sel.declared {
+		return strings.Contains(base, ".e2e.test.")
+	}
+	for _, item := range sel.items {
+		if strings.HasSuffix(item, "/") {
+			if strings.HasPrefix(rel, item) {
+				return true
+			}
+			continue
+		}
+		if matchDeployPattern(item, rel) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchDeployPattern is D-7's small matcher, written by hand in BOTH bundlers
+// (the other copy is in runtime/scripts/bundle-controllers.sh, in palbase):
+// `*` is any run of characters except `/`, `?` is one character except `/`,
+// everything else is itself, and the pattern must cover the WHOLE path. Go's
+// path.Match and Bun.Glob do not read the same dialect (`**`, `{}`, `[!]`), so
+// neither is used — the smallest common dialect is what keeps two
+// implementations equal.
+func matchDeployPattern(pattern, rel string) bool {
+	p, s := []rune(pattern), []rune(rel)
+	pi, si, star, mark := 0, 0, -1, 0
+	for si < len(s) {
+		switch {
+		case pi < len(p) && p[pi] == '*':
+			star, mark = pi, si
+			pi++
+		case pi < len(p) && (p[pi] == s[si] || (p[pi] == '?' && s[si] != '/')):
+			pi++
+			si++
+		case star >= 0 && s[mark] != '/':
+			mark++
+			pi, si = star+1, mark
+		default:
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
+}
+
+// deployNote is FR-004's one line: how many test files under tests/ stay home,
+// the first three, and the remedy — which depends on whether the project
+// already chose its own selection.
+func deployNote(unsent []string, sel deploySelection) string {
+	if len(unsent) == 0 {
+		return ""
+	}
+	shown, more := unsent, ""
+	if len(shown) > 3 {
+		shown, more = shown[:3], ", …"
+	}
+	list := strings.Join(shown, ", ") + more
+	if sel.declared {
+		return fmt.Sprintf(`note: %d test file(s) under tests/ are not in package.json "palbase.deployTests" and were not sent: %s — list them there to send them`, len(unsent), list)
+	}
+	return fmt.Sprintf(`note: %d test file(s) under tests/ are not deploy suites and were not sent: %s — name one *.e2e.test.* to send it, or list what the deploy runs in package.json "palbase.deployTests"`, len(unsent), list)
 }
 
 // controllerClassRe finds the class a `@Controller(...)` decorates. It tolerates
