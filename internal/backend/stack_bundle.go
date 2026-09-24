@@ -19,7 +19,11 @@ package backend
 // two implementations of one contract. What keeps them honest is the end of a
 // push: the stack activates the artifact and REFUSES it unless the runtime is
 // serving endpoints from it, so a bundle this file builds wrongly fails the push
-// that built it rather than becoming a quiet 404 later.
+// that built it rather than becoming a quiet 404 later. The deploy's TEST
+// selection is not caught by activation — a suite left behind serves nothing —
+// so there the two are held together by one golden fixture asserted on both
+// sides (D-6: stack_bundle_test.go here, runtime/src/dev.test.ts there) and by
+// deploy/cli_harness.sh comparing the two bundles' listings.
 import (
 	"context"
 	"encoding/json"
@@ -358,9 +362,13 @@ func bundleTests(ctx context.Context, dir, bundleRoot string, sel deploySelectio
 		// --outfile — never a shared --outdir across every entry. `bun build
 		// --outdir` derives an entry's output name from its path relative to the
 		// entries' common root, so with sources scattered across the project that
-		// derived name climbs OUT of outDir (verified against bun 1.3.9). --outfile
+		// derived name climbs OUT of outDir (`--outdir=out` over two staged links
+		// wrote `../modules/a/x.test.js`, verified against bun 1.3.9). --outfile
 		// names the file bun writes, verbatim, so the flat, collision-free name
-		// planTestSuites chose is the one that lands.
+		// planTestSuites chose is the one that lands. And the entry is the suite's
+		// REAL file, so its relative imports resolve where it lives — no staged
+		// copy, and no symbolic link, which Windows refuses to an ordinary account
+		// (review-T016).
 		//
 		// bun:test and node:test are the RUNNER's, not the bundle's. Inlining them
 		// would give each suite its own copy of a registry the runner owns, and the
@@ -390,7 +398,8 @@ func bundleTests(ctx context.Context, dir, bundleRoot string, sel deploySelectio
 // The walk and its skip list mirror moduleSources: node_modules and dist are
 // not source (node_modules is often a symlink, for which IsDir() is false),
 // .git is not source, and every `.palbase`/`.palbase-*` tree is this CLI's OWN
-// staging output from an earlier or still-running command.
+// staging output from an earlier or still-running command — walking into one
+// would collect a build's own copy of a suite a second time.
 func projectTestFiles(dir string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
@@ -477,7 +486,8 @@ type testSuite struct {
 // THE OUTPUT NAME IS THE IDENTITY. A collision is looked up by what lands on
 // disk: `x.test.ts` and `x.test.mts` are ONE `x.test.js`, and on macOS and
 // Windows `Login.test.js` and `login.test.js` are one file too — so the key has
-// no extension and no case.
+// no extension and no case. Looked up by the source name, the second bundle
+// silently replaced the first (review-T016, measured).
 //
 // NAMES ARE THE PLAIN BASENAME whenever nothing else already claimed it, then
 // that basename prefixed with as much of the project-relative directory as it
@@ -513,6 +523,9 @@ func planTestSuites(dir string, sel deploySelection) ([]testSuite, error) {
 		for i := len(segs) - 2; used[strings.ToLower(name)] && i >= 0; i-- {
 			name = segs[i] + "_" + name
 		}
+		// The path is spent and the name is still taken — a file somebody really
+		// named `b_x.test.ts` beside `b/x.test.ts`. Count on the fullest form
+		// rather than refuse the push over a naming scheme.
 		for base, n := name, 2; used[strings.ToLower(name)]; n++ {
 			name = fmt.Sprintf("%s_%d", base, n)
 		}
@@ -551,9 +564,9 @@ type deploySelection struct {
 // read, naming the file, the field and the entry (FR-003). No package.json,
 // or one without the key, is the default.
 //
-// The walk into the document is by OBJECT at every step, the same way the
-// stack's bundler does it with optional chaining: `"palbase": "x"` or a
-// package.json that is an array carries no selection, and takes the default.
+// The walk into the document is by OBJECT at every step, as the stack's
+// bundler's `isObject` walk does: `"palbase": "x"` or a package.json that is an
+// array carries no selection, and takes the default.
 func readDeploySelection(projectDir string) (deploySelection, error) {
 	raw, err := os.ReadFile(filepath.Join(projectDir, "package.json"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -597,7 +610,10 @@ func readDeploySelection(projectDir string) (deploySelection, error) {
 }
 
 // jsonText renders a value the way JSON.stringify does in the stack's bundler —
-// no HTML escaping — so the two refusals quote an entry identically.
+// no HTML escaping — so the two refusals quote a string, number or boolean entry
+// identically. Not every value: Go sorts an object's keys and JSON.stringify
+// keeps them in order, and `-0` or `1e400` read differently on the two sides —
+// both still refuse, only the quoted text differs.
 func jsonText(v any) string {
 	var b strings.Builder
 	enc := json.NewEncoder(&b)

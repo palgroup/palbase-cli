@@ -1642,3 +1642,41 @@ func TestMatchDeployPattern(t *testing.T) {
 		require.Equalf(t, c.want, matchDeployPattern(c.pattern, c.rel), "%q ~ %q", c.pattern, c.rel)
 	}
 }
+
+// FR-002 THROUGH THE PRODUCTION PATH (review rv-w1-t002 I-1). The golden tests
+// call the selector and the bundler directly; this one goes through
+// buildStackArtifact, so a build that read "palbase.deployTests" and then threw
+// it away — bundling the default instead — fails here. The fixture is chosen so
+// the two answers differ: the declared selection sends only tests/unit.test.ts,
+// the default would send only the module's e2e suite.
+func TestAPushBundlesTheDeclaredSelection(t *testing.T) {
+	requiresRealToolchain(t)
+	dir := t.TempDir()
+	buildableBackend(t, dir)
+	pkg := filepath.Join(dir, "package.json")
+	raw, err := os.ReadFile(pkg)
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	doc["palbase"] = map[string]any{"deployTests": []string{"tests/"}}
+	edited, err := json.Marshal(doc)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(pkg, edited, 0o644))
+	mustWrite(t, dir, "tests/unit.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/x/x.e2e.test.ts", oneTestSuite)
+
+	bundleRoot := t.TempDir()
+	var log strings.Builder
+	_, _, err = buildStackArtifact(context.Background(), dir, bundleRoot, &log)
+	require.NoError(t, err, log.String())
+
+	entries, err := os.ReadDir(filepath.Join(bundleRoot, ".palbase", "esm", "tests"))
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	require.Equal(t, []string{"unit.test.js"}, names, "the push did not bundle what package.json declared")
+	require.Contains(t, log.String(), "bundled 1 test suite(s)\n")
+	require.NotContains(t, log.String(), "note:")
+}
