@@ -119,9 +119,11 @@
 #
 # ── one thing to know about file ownership ──────────────────────────────────
 #
-# The bundler writes .palbase/ INTO the project, the way it does when you run it
-# by hand. The runtime container is uid 1000, so on Linux the project directory
-# has to be writable by uid 1000; on Docker Desktop the bind mount is presented
+# Nothing is built INTO the project: the bundler's output and the per-save
+# build copies stay in the runtime container (ARTIFACT_CACHE_DIR, below), where
+# `git status` and the CLI's sweep never see them (palgroup/palbase#11). The
+# runtime runs as the uid in PALBASE_RUNTIME_USER — the CLI passes yours — and
+# reads the project as that user; on Docker Desktop the bind mount is presented
 # as the container's user and there is nothing to do.
 
 # A name of its own, so bringing this up cannot disturb the four-container stack
@@ -329,7 +331,8 @@ services:
     # CLI, imaj bu platformu yayımlamıyorsa DEĞİŞKENİ BOŞ yazar ve uyarır:
     # emülasyon bir seçenek olarak kalır, ama sessiz kalmaz.
     platform: ${PBC_RUNTIME_PLATFORM:-}
-    # The dev compiler writes into the host checkout as the invoking developer.
+    # Runs as the invoking developer, so what it reads and removes in the host
+    # checkout (an older runtime's leftovers) is theirs to begin with.
     user: ${PALBASE_RUNTIME_USER:-1000:1000}
     # READINESS IS THE RUNTIME'S OWN ANSWER, not the edge's.
     #
@@ -348,7 +351,21 @@ services:
       # The switch. With it set, the artifact path is not taken at all — there
       # is no ARTIFACT_BLOB_URL here and nothing looks for one.
       PALBASE_DEV_CONTROLLERS: /app/project
-      ARTIFACT_CACHE_DIR: /app/project/.palbase/cache
+      # EVERYTHING THE RUNTIME MAKES STAYS IN THE CONTAINER (palgroup/palbase#11):
+      # the bundler's output and the per-save build copies both live under this
+      # path, never in your checkout. They used to be written to
+      # /app/project/.palbase/, where they showed up in `git status` and where
+      # every CLI verb's sweep deletes them: measured 24.09.2026, a `palbase
+      # build` beside a running stack removed its bundle and build copies, and
+      # one that landed mid-rebuild refused that save with `ENOENT: … mkdir
+      # '/app/project/.palbase-staged-controllers/234/palbase'`.
+      #
+      # /tmp and not a volume: the process runs as YOUR uid (`user:` above), and
+      # a volume starts out owned by the image's `bun` user — measured 24.09.2026,
+      # uid 501 gets `Permission denied` on it, which is why the old
+      # `artifactcache` volume went. /tmp is writable by any uid, and nothing
+      # here needs to outlive the container: every boot builds afresh.
+      ARTIFACT_CACHE_DIR: /tmp/palbase-dev
       PALBASE_STACK_REF: ${PALBASE_STACK_REF:-project}
       DATABASE_URL: postgres://palbase:${POSTGRES_PASSWORD:-}@postgres:5432/palbase?sslmode=disable
       DB_ROLE: ${RUNTIME_DB_ROLE:-backend_authenticated}
@@ -372,8 +389,9 @@ services:
       PALBASE_SERVICE_ROLE_KEY: ${PALBASE_SERVICE_ROLE_KEY:-}
       REALTIME_INGESTION_SECRET: ${REALTIME_INGESTION_SECRET:-}
     volumes:
-      # The project, read-WRITE: the bundler writes .palbase/ into it, exactly
-      # as it does when a deploy runs it on your machine.
+      # The project. Nothing is BUILT into it — see ARTIFACT_CACHE_DIR — and it
+      # stays writable only so the bundler can remove what an older runtime's
+      # builds left in it (`.palbase-staged-controllers/`).
       - ${PALBASE_PROJECT_DIR:?set PALBASE_PROJECT_DIR — the project this stack serves}:/app/project
     # NOT `node_modules` — the project's own dependencies are its own, and the
     # bundle a deploy produces inlines whatever the project resolved. Masking
