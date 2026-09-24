@@ -169,7 +169,7 @@ func TestARefusalAPersonMustReadIsPrintedInFull(t *testing.T) {
 	long := "the tests failed against the new release, so it was discarded and the " +
 		"previous one keeps serving.\n" + strings.Repeat("  todos › ownership is enforced — expected 403, got 200\n", 12)
 
-	for _, code := range []string{"tests_failed", "tests_timed_out", "schema_incompatible", "candidate_failed"} {
+	for _, code := range []string{"tests_failed", "tests_timed_out", "schema_incompatible", "candidate_failed", "schema_apply_failed"} {
 		var out strings.Builder
 		body := []byte(`{"error":"` + code + `","error_description":` + quote(long) + `,"status":422}`)
 		err := renderPushRefusal(&out, 422, body)
@@ -563,6 +563,7 @@ func TestReadableRefusalsAreExactlyTheCodesThatCarryTheirReason(t *testing.T) {
 		"schema_incompatible",       // the objects to split a migration on
 		"candidate_failed",          // why the candidate never answered
 		"test_database_unavailable", // the unwired process (D-14)
+		"schema_apply_failed",       // why the live schema could not take the change after the tests passed
 	}, got)
 }
 

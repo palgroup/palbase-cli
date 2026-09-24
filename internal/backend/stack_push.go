@@ -419,6 +419,10 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 // characters of escaped JSON, which is what the generic path would show. A run
 // database the stack could not prepare (`test_database_unavailable`, D-14) is
 // the same kind: it names the process that is not wired, and that is the fix.
+// A schema the live database refused AFTER the candidate passed
+// (`schema_apply_failed`) is the same kind: the reason is Postgres's own
+// sentence — a duplicate key, a NULL where NOT NULL was asked — and it names the
+// rows to fix.
 // `test_identities_unavailable` is gone — no server produces it any more.
 var readableRefusals = map[string]bool{
 	"tests_failed":              true,
@@ -426,6 +430,7 @@ var readableRefusals = map[string]bool{
 	"schema_incompatible":       true,
 	"candidate_failed":          true,
 	"test_database_unavailable": true,
+	"schema_apply_failed":       true,
 }
 
 func renderPushRefusal(w io.Writer, status int, body []byte) error {
