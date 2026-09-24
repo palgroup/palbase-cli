@@ -1492,6 +1492,7 @@ var deployGoldenCases = []struct {
 	{"V6 an empty list sends nothing", `{"palbase":{"deployTests":[]}}`, nil, true, goldenS3},
 	{"V7 a star stops at a slash", `{"palbase":{"deployTests":["tests/*.test.ts"]}}`, []string{"health.e2e.test.js", "health.test.js"}, false, goldenS1},
 	{"V8 palbase that is not an object", `{"palbase":"x"}`, []string{"health.e2e.test.js", "notes.e2e.test.js", "notes_notes.e2e.test.js"}, false, goldenD2},
+	{"V9 a byte-order mark", "\ufeff" + `{"palbase":{"deployTests":["tests/"]}}`, []string{"health.e2e.test.js", "health.test.js", "isolation.test.js"}, false, ""},
 }
 
 var deployGoldenRefusals = []struct{ name, pkg, says string }{
@@ -1504,6 +1505,10 @@ var deployGoldenRefusals = []struct{ name, pkg, says string }{
 	{"R7 brackets", `{"palbase":{"deployTests":["tests/[ab].test.ts"]}}`, `package.json: "palbase.deployTests"[0] ("tests/[ab].test.ts") uses "["`},
 	{"R8 braces", `{"palbase":{"deployTests":["{a,b}.e2e.test.ts"]}}`, `package.json: "palbase.deployTests"[0] ("{a,b}.e2e.test.ts") uses "{"`},
 	{"R9 a backslash", `{"palbase":{"deployTests":["tests\\health.test.ts"]}}`, `package.json: "palbase.deployTests"[0] ("tests\\health.test.ts") uses "\\"`},
+	{"R10 a dot segment", `{"palbase":{"deployTests":["./tests/"]}}`, `package.json: "palbase.deployTests"[0] ("./tests/") is not a plain path from the project root`},
+	{"R11 a leading slash", `{"palbase":{"deployTests":["/tests/"]}}`, `package.json: "palbase.deployTests"[0] ("/tests/") is not a plain path from the project root`},
+	{"R12 an empty segment", `{"palbase":{"deployTests":["tests//"]}}`, `package.json: "palbase.deployTests"[0] ("tests//") is not a plain path from the project root`},
+	{"R13 a pattern in a directory entry", `{"palbase":{"deployTests":["modules/*/"]}}`, `package.json: "palbase.deployTests"[0] ("modules/*/") ends with "/", so it names a directory as written`},
 }
 
 func writeDeployGolden(t *testing.T, pkg string) string {
@@ -1679,4 +1684,24 @@ func TestAPushBundlesTheDeclaredSelection(t *testing.T) {
 	require.Equal(t, []string{"unit.test.js"}, names, "the push did not bundle what package.json declared")
 	require.Contains(t, log.String(), "bundled 1 test suite(s)\n")
 	require.NotContains(t, log.String(), "note:")
+}
+
+// FR-018, J-15 — a name that differs from another only by a non-ASCII case is
+// ONE name to both bundlers. The collision key is lowered code point by code
+// point (Go's strings.ToLower); runtime/scripts/bundle-controllers.sh lowers the
+// same way — its JS maps "İ" to "i", which String.prototype.toLowerCase does
+// not ("i̇", two code points), so the plain JS call named these two apart.
+// Asserted with the same tree in v2/runtime/src/dev.test.ts.
+func TestSuiteNamesLowerNonASCIILikeTheOtherBundler(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "modules/a/İade.e2e.test.ts", oneTestSuite)
+	mustWrite(t, dir, "modules/b/iade.e2e.test.ts", oneTestSuite)
+	suites, err := planTestSuites(dir, deploySelection{})
+	require.NoError(t, err)
+	var names []string
+	for _, s := range suites {
+		names = append(names, s.Out)
+	}
+	sort.Strings(names)
+	require.Equal(t, []string{"b_iade.e2e.test.js", "İade.e2e.test.js"}, names)
 }

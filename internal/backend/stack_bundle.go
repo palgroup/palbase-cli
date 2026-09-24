@@ -575,8 +575,11 @@ func readDeploySelection(projectDir string) (deploySelection, error) {
 	if err != nil {
 		return deploySelection{}, fmt.Errorf(`package.json could not be read (%v) — the deploy's test selection, "palbase.deployTests", lives there`, err)
 	}
+	// A LEADING BYTE-ORDER MARK IS NOT A BROKEN FILE (J-15): npm and bun read
+	// such a package.json without a word, so refusing it would stop a push the
+	// rest of the toolchain runs. The stack's bundler drops it the same way.
 	var doc any
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(string(raw), "\ufeff")), &doc); err != nil {
 		return deploySelection{}, fmt.Errorf(`package.json could not be read as JSON (%v) — the deploy's test selection, "palbase.deployTests", lives there`, err)
 	}
 	obj, _ := doc.(map[string]any)
@@ -603,6 +606,20 @@ func readDeploySelection(projectDir string) (deploySelection, error) {
 			if strings.Contains(s, ch) {
 				return deploySelection{}, fmt.Errorf(`%s uses %s, which the deploy selection does not read: only "*" and "?" match, within one path segment`, at, jsonText(ch))
 			}
+		}
+		// AN ENTRY THAT CAN MATCH NOTHING IS REFUSED, NOT IGNORED (FR-003, J-15).
+		// Entries are compared with the project-relative paths the walk produces,
+		// which never carry a ".", ".." or empty segment — so "./tests/",
+		// "/tests/" and "tests//" would take nothing, and silently whenever
+		// another entry does match. A directory entry is taken as written, so a
+		// "*" or "?" in it matches nothing either.
+		for _, seg := range strings.Split(strings.TrimSuffix(s, "/"), "/") {
+			if seg == "" || seg == "." || seg == ".." {
+				return deploySelection{}, fmt.Errorf(`%s is not a plain path from the project root: no "./", "../", leading "/" or empty segment — write "tests/" or "modules/*/notes.e2e.test.ts"`, at)
+			}
+		}
+		if strings.HasSuffix(s, "/") && strings.ContainsAny(s, "*?") {
+			return deploySelection{}, fmt.Errorf(`%s ends with "/", so it names a directory as written and its "*" or "?" would match nothing — name the directory, or write a pattern for the files in it`, at)
 		}
 		items = append(items, s)
 	}
