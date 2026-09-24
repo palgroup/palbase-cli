@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -627,4 +628,16 @@ func TestRunStackPush_RefusesTheTableBeforeTheRuntimeMoves(t *testing.T) {
 	require.NotZero(t, pos["prepareStackRuntime"], "runStackPush does not call prepareStackRuntime")
 	require.Less(t, pos["stringsTableRefusal"], pos["prepareStackRuntime"])
 	require.Less(t, pos["prepareStackRuntime"], pos["stackReadsStringsDir"], "the target is asked AFTER the runtime is prepared (FR-057)")
+}
+
+// FR-007, D-12 — THE PUSH WAITS LONGER THAN THE STACK'S EDGE WAITS FOR IT. A
+// push answers only after the stack graded the release — the test budget alone
+// is 5 minutes, counted from when the tests start — and stackClient's own 5
+// minutes cut it first: the person read a client timeout instead of the
+// budget's "stopped after N of M suite(s)". The edge's push route waits 10
+// minutes (palbase v2/deploy/envoy/routes.yaml, platform_management_push).
+func TestAPushWaitsLongerThanTheEdgeWaitsForIt(t *testing.T) {
+	const edge = 10 * time.Minute
+	require.Greater(t, pushClient(Target{}).Timeout, edge)
+	require.Equal(t, 5*time.Minute, stackClient(Target{}).Timeout, "every other call keeps its ordinary bound")
 }

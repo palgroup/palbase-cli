@@ -356,7 +356,7 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	}
 	fmt.Fprintf(w, "sending %s (%d KB)\n", dir, len(tarball)/1024)
 
-	status, body, err := sendWaitingForReady(ctx, stackClient(target), func() (*http.Request, error) {
+	status, body, err := sendWaitingForReady(ctx, pushClient(target), func() (*http.Request, error) {
 		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(tarball))
 		if rerr != nil {
 			return nil, rerr
@@ -409,6 +409,26 @@ func runStackPush(ctx context.Context, target Target, cred Credentials, approve,
 	default:
 		return renderPushRefusal(w, status, body)
 	}
+}
+
+// pushTimeout is how long a push waits for the stack's answer (FR-007, D-12).
+//
+// A push answers only after the stack graded the release: the candidate's
+// tests alone may take the whole test budget (5 minutes by default, counted
+// from when they START), then the schema is applied, the release promoted and
+// waited on (up to 90 s). stackClient's 5 minutes cut that short, and the
+// person read a client timeout instead of the budget's "stopped after N of M
+// suite(s)". The stack's edge waits 10 minutes for this one path (palbase
+// v2/deploy/envoy/routes.yaml, platform_management_push); the push waits a
+// little longer, so a verdict the stack reaches is a verdict the person reads.
+const pushTimeout = 12 * time.Minute
+
+// pushClient is stackClient with the push's own deadline; every other call to
+// a project keeps the ordinary one.
+func pushClient(t Target) *http.Client {
+	c := stackClient(t)
+	c.Timeout = pushTimeout
+	return c
 }
 
 // readableRefusals are the ones whose whole value is the text they carry.
