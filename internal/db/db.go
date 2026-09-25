@@ -39,6 +39,7 @@ func Cmd() *cobra.Command {
   palbase db plan    What it would take to make the local database match db/public.ts
   palbase db apply   Do it
   palbase db query   Run one read-only statement and see the rows
+  palbase db verify  Check the database against the record every push plans on
 
 There are no migration files: db/ is the declaration — one file per schema,
 db/public.ts and any db/<name>.ts beside it. The plan is computed against the
@@ -65,7 +66,7 @@ not the thing you are resetting.`,
 		}
 		return fmt.Errorf("unknown command %q for %q\n\nRun 'palbase db --help' for the list", args[0], c.CommandPath())
 	}
-	cmd.AddCommand(planCmd(), applyCmd(), queryCmd())
+	cmd.AddCommand(planCmd(), applyCmd(), queryCmd(), verifyCmd())
 	return cmd
 }
 
@@ -117,6 +118,23 @@ func (l local) post(ctx context.Context, path, contentType string, body []byte) 
 	l.cred.Apply(req)
 	req.Header.Set("Content-Type", contentType)
 
+	res, err := l.client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reach %s: %w", l.target.URL, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	return res.StatusCode, raw, err
+}
+
+// get is post's GET twin, for the verbs that send nothing.
+func (l local) get(ctx context.Context, path string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(l.target.URL, "/")+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	l.cred.Apply(req)
 	res, err := l.client.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("reach %s: %w", l.target.URL, err)

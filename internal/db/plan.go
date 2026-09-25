@@ -21,6 +21,12 @@ type schemaPlan struct {
 	// Incompatible is what a push of this change would be refused for, with the
 	// way out named. Empty when the push would be accepted.
 	Incompatible []string `json:"incompatible"`
+	// OldSide says what the plan was computed against: the applied-schema
+	// record, or the live database and why (adoption). Pending is what the
+	// last recorded push still owes. Absent from a stack older than the record.
+	OldSide string        `json:"old_side"`
+	Adopted bool          `json:"adopted"`
+	Pending []pendingStep `json:"pending"`
 }
 
 type destructiveChange struct {
@@ -109,6 +115,12 @@ func computePlan(ctx context.Context, stack local, sources []backend.SchemaSourc
 // drops a column" is a shrug, "this drops a column with 41,908 values in it" is a
 // decision.
 func renderPlan(w io.Writer, plan schemaPlan) {
+	if plan.OldSide != "" {
+		fmt.Fprintf(w, "(%s)\n", plan.OldSide)
+	}
+	for _, p := range plan.Pending {
+		fmt.Fprintf(w, "  owed by the last push: %s %s.%s\n", p.Kind, p.Table, p.Name)
+	}
 	if plan.InSync && len(plan.Changes) == 0 {
 		fmt.Fprintln(w, "✓ the database matches db/public.ts")
 		return
