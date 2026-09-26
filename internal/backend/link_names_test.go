@@ -275,3 +275,70 @@ func TestLinkRefusesWhenTheEnvironmentItReadsFromIsNamedLocal(t *testing.T) {
 		"the stack `palbase start` runs on this machine")
 	require.NoDirExists(t, filepath.Join(RootDir(), envSubdir))
 }
+
+// blockEnvironmentDir puts a FILE where an environment's directory goes, so
+// nothing can be written for it — the way an unwritable name used to reach the
+// disk (`../../settings.gradle.kts` resolved to an existing file).
+func blockEnvironmentDir(t *testing.T, env string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(RootDir(), envSubdir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.FromSlash(EnvDir(env)), []byte("in the way\n"), 0o644))
+}
+
+// ONE ENVIRONMENT'S DISK DOES NOT DECIDE THE OTHERS' (FR-005). A write that
+// failed for an environment this link does not read from failed the whole
+// link — so one directory nobody could create stopped every teammate's link.
+func TestLinkGoesOnWhenAnotherEnvironmentCannotBeWritten(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	blockEnvironmentDir(t, "staging")
+	main := stackServing(t, linkKeyMain, nil)
+	staging := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.FileExists(t, ConfigPath("main", "android"))
+	require.FileExists(t, SpecPath("main"))
+	require.Contains(t, out.String(), "staging could not be written (mkdir palbase/environments/staging: not a directory) — "+
+		"skipped; run `palbase link` again once it can be")
+	blocker, err := os.ReadFile(filepath.FromSlash(EnvDir("staging")))
+	require.NoError(t, err)
+	require.Equal(t, "in the way\n", string(blocker), "the link wrote over what stood in staging's way")
+}
+
+// THE ENVIRONMENT THIS LINK READS FROM STILL FAILS IT: an app whose default has
+// no config does not build.
+func TestLinkFailsWhenTheEnvironmentItReadsFromCannotBeWritten(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	blockEnvironmentDir(t, "main")
+	main := stackServing(t, linkKeyMain, nil)
+	staging := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	err := runLink(context.Background(), o, &out)
+	require.Error(t, err, out.String())
+	require.Contains(t, err.Error(), "main could not be written: mkdir palbase/environments/main: not a directory")
+}

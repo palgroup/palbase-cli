@@ -1019,11 +1019,35 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 	}
 
+	// AN ENVIRONMENT THAT CANNOT BE WRITTEN IS SAID AND LEFT OUT (FR-005) —
+	// unless it is the one this link reads from, which is what the app builds
+	// against when nothing else is chosen. Once one write for it has failed,
+	// nothing further is written for it: no other platform's config, no
+	// contract.
+	unwritten := unwrittenEnvironments{}
+	unwritable := func(name string, err error) error {
+		if name == envs.Default {
+			return fmt.Errorf("%s could not be written: %w", name, err)
+		}
+		unwritten[name] = err
+		return nil
+	}
 	apple := false
 	web := false
 	for _, c := range configs {
+		for name := range unwritten {
+			delete(c.envs.Environments, name)
+		}
 		paths, err := writeEnvironmentConfigs([]string{c.platform}, c.envs)
-		if err != nil {
+		var failed unwrittenEnvironments
+		switch {
+		case errors.As(err, &failed):
+			for _, name := range failed.names() {
+				if err := unwritable(name, failed[name]); err != nil {
+					return err
+				}
+			}
+		case err != nil:
 			return err
 		}
 		if isApplePlatform(c.platform) {
@@ -1041,13 +1065,20 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	if writesPerEnvironmentArtifacts(platforms) {
 		for _, name := range envs.names() {
 			spec, ok := specs[name]
-			if !ok {
+			if _, failed := unwritten[name]; !ok || failed {
 				continue
 			}
 			if err := writeSpec(name, spec); err != nil {
-				return err
+				if err := unwritable(name, err); err != nil {
+					return err
+				}
 			}
 		}
+	}
+	for _, name := range unwritten.names() {
+		fmt.Fprintf(w, "%s could not be written (%v) — skipped; run `palbase link` again once it can be\n", name, unwritten[name])
+		delete(envs.Environments, name)
+		delete(specs, name)
 	}
 
 	if apple {

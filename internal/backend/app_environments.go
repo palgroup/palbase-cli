@@ -95,28 +95,63 @@ func (a appEnvironments) names() []string {
 // path — pointing an app at another environment meant OVERWRITING it. Every
 // environment now has its own directory, so the map has nothing left to do and
 // both platforms write the same flat shape.
+//
+// ONE ENVIRONMENT'S DISK DOES NOT DECIDE THE OTHERS' (FR-005). An environment
+// that cannot be written stops only itself: every other one is written, and
+// the error that comes back is an unwrittenEnvironments naming each one that
+// was not. It used to return at the first failure, so one directory nobody
+// could create failed every teammate's link.
 func writeEnvironmentConfigs(platforms []string, envs appEnvironments) ([]string, error) {
 	var written []string
+	unwritten := unwrittenEnvironments{}
 	for _, env := range envs.names() {
 		fields := envs.Environments[env]
 		for _, platform := range platforms {
 			dest := ConfigPath(env, platform)
-			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-				return nil, err
-			}
-			blob, err := json.MarshalIndent(mergeConfigWithExisting(dest, fields), "", "  ")
-			if err != nil {
-				return nil, err
-			}
-			// 0o600: it carries this environment\'s publishable key. Not a
-			// secret, but not something to widen either.
-			if err := os.WriteFile(dest, append(blob, '\n'), 0o600); err != nil {
-				return nil, err
+			if err := writeEnvironmentConfig(dest, fields); err != nil {
+				unwritten[env] = err
+				break
 			}
 			written = append(written, dest)
 		}
 	}
+	if len(unwritten) > 0 {
+		return written, unwritten
+	}
 	return written, nil
+}
+
+func writeEnvironmentConfig(dest string, fields appEnvironment) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	blob, err := json.MarshalIndent(mergeConfigWithExisting(dest, fields), "", "  ")
+	if err != nil {
+		return err
+	}
+	// 0o600: it carries this environment\'s publishable key. Not a
+	// secret, but not something to widen either.
+	return os.WriteFile(dest, append(blob, '\n'), 0o600)
+}
+
+// unwrittenEnvironments is why each environment it names could not be written.
+type unwrittenEnvironments map[string]error
+
+func (u unwrittenEnvironments) names() []string {
+	out := make([]string, 0, len(u))
+	for name := range u {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (u unwrittenEnvironments) Error() string {
+	parts := make([]string, 0, len(u))
+	for _, name := range u.names() {
+		parts = append(parts, fmt.Sprintf("%s: %v", name, u[name]))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // mergeConfigWithExisting keeps app metadata this link did not supply.
