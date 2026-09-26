@@ -38,8 +38,8 @@
 **Gerekçe:** D2 + N1: flavor'lı app'te bugünkü ret metni kullanıcıyı `stagingRelease`'i prod'a gönderen ayara yönlendiriyor.
 **Durum:** kullanıcı onayladı (2026-09-26).
 
-### D-005 · 2.4.0, 11 artifact birlikte, tam "DAVRANIŞ DEĞİŞİKLİĞİ" listesiyle
-**Karar:** Plugin, engine ve 8 runtime modülü 2.4.0; runtime kodu değişmez (yalnız `PALBASE_SDK_VERSION`).
+### D-005 · 2.5.0 (ilk karar 2.4.0), 11 artifact birlikte, tam "DAVRANIŞ DEĞİŞİKLİĞİ" listesiyle
+**Karar:** Plugin, engine ve 8 runtime modülü **2.5.0** (D-030: 2.4.0 upstream'de başka bir değişiklikle yayımlandı); bu koşunun runtime'a kendi kod değişikliği yok (yalnız `PALBASE_SDK_VERSION` ve bir bekçi testi).
 **Gerekçe:** `publish.sh` 11 artifact'ı tek sürümle çıkarıyor, plugin POM'u engine'i aynı sürüme pinliyor; ev geleneği (2.3.0 da kırıcı bir değişikliği minor'da "DAVRANIŞ DEĞİŞİKLİĞİ" başlığıyla çıkardı).
 **Durum:** kullanıcı onayladı (2026-09-26).
 
@@ -121,8 +121,8 @@
 **Durum:** lead kararı (2026-09-26); T019 buna göre daraltılır.
 
 ### D-026 · CLI iki dalgada çıkar
-**Karar:** Dalga 1 (T001–T018, T020–T022) hemen yayımlanır; Dalga 2 (T019, T023–T026) plugin 2.4.0 yayımlanmadan `main`'e girmez.
-**Gerekçe (ölçüldü):** Dalga 2, 2.4.0 koordinatlarını ve 2.4'e özgü `palbase.env.<build type>` anahtarlarını basıyor; 2.3 yalnız global `palbase.env`'i okuyor (v2.3.0 kaynağıyla doğrulandı). Önce çıkarsa kullanıcıya olmayan bir sürümü önerir. **T019 da Dalga 2'de** (D-025 doğrulayıcısı): reddi plugin 2.4'ün arama sırasına dayanır; yayındaki 2.3 blok yoksa yalnız modülün `palbase/environments`'ini okur (`v2.3.0` `PalbaseCodegenPlugin.kt:15`), yani Dalga 1'de bloksuz bir 2.3 app'inin tek çalışan link yerini reddederdi. Sıra değişikliği ölçüldü: T020–T022 T019'a bağlı değil, son ağaç aynı.
+**Karar:** Dalga 1 (T001–T018, T020–T022) hemen yayımlanır; Dalga 2 (T019, T023–T026) plugin 2.5.0 yayımlanmadan `main`'e girmez.
+**Gerekçe (ölçüldü):** Dalga 2, 2.5.0 koordinatlarını ve 2.5'e özgü `palbase.env.<build type>` anahtarlarını basıyor; 2.3 yalnız global `palbase.env`'i okuyor (v2.3.0 kaynağıyla doğrulandı). Önce çıkarsa kullanıcıya olmayan bir sürümü önerir. **T019 da Dalga 2'de** (D-025 doğrulayıcısı): reddi plugin 2.4'ün arama sırasına dayanır; yayındaki 2.3 blok yoksa yalnız modülün `palbase/environments`'ini okur (`v2.3.0` `PalbaseCodegenPlugin.kt:15`), yani Dalga 1'de bloksuz bir 2.3 app'inin tek çalışan link yerini reddederdi. Sıra değişikliği ölçüldü: T020–T022 T019'a bağlı değil, son ağaç aynı.
 
 ### D-027 · `local` için "sözleşme yok" çaresi `palbase start`, push değil (FR-210)
 **Karar (planlamada, plan-plugin A-1):** Sözleşmesi olmayan ortamda plugin, bulut ortamları için "`palbase push --env <env>`, then `palbase link` here" der; `local` için "run `palbase start` in the backend (its stack serves the contract of the code it runs; `palbase push` does not publish to it), then `palbase link` here".
@@ -136,6 +136,14 @@
 **Karar (planlamada, plan-plugin A-3):** `<rootDir>/../palbase/environments` adayı, kök proje `.git` ya da `palbase/project.json` taşıyorsa aranmaz (kök proje checkout'un kendisidir); işaretsiz bir kök proje (RN/Flutter'ın `android/`'ı) bir üstünü arar. Üst dizinin işaret taşıması istenmez.
 
 **Takip (plan-plugin A-6):** FR-212'nin alt sınırı (AGP 8.10.1 / Gradle 8.11.1) yalnız README'lerde yazılı; çalışma anında sürüm denetimi yok (çevrimdışı ölçülemedi; AGP 8.10.1 zaten Gradle 8.11.1 istiyor).
+
+### D-030 · Plugin tabanı `origin/main` + yerel dağıtım commit'i; sürüm 2.5.0
+**Olay (2026-09-27):** `palbackend-android-src` `origin/main` üç commit ilerledi (`233991d` sınıflandırılmış hata tipleri — codegen-engine `KotlinEmitter` ve palbe-core `ErrorEnvelope`'a dokunuyor; `6e97598` **"release: palbackend-android 2.4.0"**; `3588bc2` CI). Planın tabanı `e72f704` ("public distribution repo") ise yalnız yerel depoda — origin'de yok. Yayın deposunda (palbackend-android) yalnız 2.3.0 var.
+**Karar:** Plugin planı `origin/main` (`3588bc2`) + üstüne taşınmış `e72f704` tabanına alınır (upstream'in 2.4.0 CHANGELOG bölümü ve `Son etiket: v2.4.0` korunur); bu koşunun sürümü **2.5.0**. Plan, bu tabanda yeniden ölçülerek güncellenir (sandbox'ta yeniden oynatma + doğrulayıcı). Yerel `main`, yürütmeden önce aynı biçimde `origin/main`'e taşınır.
+**Etki:** plan-cli T023'ün `palbaseAndroidVersion` sabiti `"2.5.0"`; spec FR-212/FR-301 ve D-026 metinleri 2.5.0.
+
+### D-031 · Upstream ilerlemesi yürütme sırasında taşınır
+**Karar (2026-09-27):** `palbase-cli` yerel `main`'i (iki doküman commit'i + T001) `origin/main` `5dbc354`'ün üstüne taşındı (9 upstream commit; plan-cli dosyalarıyla çakışma yok; yeni taban ölçüldü: yalnız B16, 24 paket `ok`). `palbase-cloud` planı, `origin/main`'in `f92bc1e02` → `bb547a702` ilerlemesi (planın 11 dosyasına dokunuyor) nedeniyle sandbox'ta yeni tabana taşınıp yeniden ölçülüyor.
 
 ### D-020 · Prototip kurtarıldı; ham çıktı `/private/tmp`'de bırakılmaz
 **Olay:** macOS 2026-09-26'da `/private/tmp/claude-501`'i temizledi; prototip, yamalar ve sandbox'lar silindi.

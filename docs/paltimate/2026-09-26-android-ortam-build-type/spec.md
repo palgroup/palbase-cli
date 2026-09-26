@@ -16,10 +16,10 @@ Bugün bir Android uygulaması Palbase ortamını **tek bir global** Gradle öze
 
 | # | Repo | Plan | Neden bu sırada |
 |---|---|---|---|
-| 1 | `palbase-cli` (bu repo, `main`) | `plan-cli.md` | Ad güvenliği açığı **bugün** yayında; diğer işlere bağımlı değil. **İki dalga (D-026):** Dalga 1 (T001–T018, T020–T022) hemen; Dalga 2 (T019 ve T023–T026: 2.4'ün arama sırasına dayanan iç içe link reddi, 2.4'e özgü Gradle satırları ve doctor anahtarları) plugin 2.4.0 yayımlandıktan sonra. |
+| 1 | `palbase-cli` (bu repo, `main`) | `plan-cli.md` | Ad güvenliği açığı **bugün** yayında; diğer işlere bağımlı değil. **İki dalga (D-026):** Dalga 1 (T001–T018, T020–T022) hemen; Dalga 2 (T019 ve T023–T026: 2.5'in arama sırasına dayanan iç içe link reddi, 2.5'e özgü Gradle satırları ve doctor anahtarları) plugin 2.5.0 yayımlandıktan sonra. |
 | 2 | `palbase-cloud` (`origin/main`; yerel kopya 1685 commit geride) | `plan-cloud.md` | Benzersiz, değişmez slug olmadan "kişiye bir ortam" güvenli değil (iki `main`). |
-| 3 | `palbackend-android-src` (plugin + runtime 2.4.0) | `plan-plugin.md` | CLI'ın yazdığı düzene ve sunucunun adlarına dayanır. |
-| 4 | Tüketiciler (trial app, kullanıcının test app'i) | `plan-plugin.md` son görevleri | 2.4.0 yayınlandıktan sonra. |
+| 3 | `palbackend-android-src` (plugin + runtime 2.5.0) | `plan-plugin.md` | CLI'ın yazdığı düzene ve sunucunun adlarına dayanır. |
+| 4 | Tüketiciler (trial app, kullanıcının test app'i) | `plan-plugin.md` son görevleri | 2.5.0 yayınlandıktan sonra. |
 
 ## Fonksiyonel Gereksinimler
 
@@ -69,7 +69,7 @@ Bugün bir Android uygulaması Palbase ortamını **tek bir global** Gradle öze
 - **FR-106** Her uç (CLI projeler listesi, ortamlar, bindings, panel) aynı ortam için SHALL aynı `slug`'ı dönsün; CLI listesindeki `name` alanı **slug'ı** taşısın (eski CLI'lar da güvenli dizin adı alır), görünen ad `display_name`'de; `is_production` gerçek değer olsun. *(yeni: yüzeyler ada üç farklı şey diyor)*
 - **FR-107** Panel her ortamın slug'ını görünen adın yanında SHALL göstersin; oluşturma formu türetilen slug'ı düzenlenebilir göstersin.
 
-### G. Plugin `io.palbase.codegen` 2.4.0
+### G. Plugin `io.palbase.codegen` 2.5.0
 
 - **FR-201** Her variant V (build type B, flavor'lar F₁…Fₙ, birleşik flavor adı F) için ortam, ilk bulunanın kazandığı şu sırayla SHALL seçilsin:
   1. komut satırı `-Ppalbase.env.<V>`, sonra `-Ppalbase.env.<F…>` / `-Ppalbase.env.<B>`;
@@ -91,12 +91,12 @@ Bugün bir Android uygulaması Palbase ortamını **tek bir global** Gradle öze
 - **FR-209** Kotlin DSL'de import'suz `palbase { environment = … }` SHALL açık bir derleme hatası versin (`@Deprecated(level = ERROR)` tuzağı); Groovy'de aynı çağrı açık bir `GradleException` versin. *(C6)*
 - **FR-210** Hata metinleri: `local` varsayılanı yoksa "no local stack is linked here; set `palbase.env.debug=<one of …>`, or run `palbase start` in the backend and then `palbase link` here"; `android-config.json` var `openapi.json` yoksa "environment `<env>` has no contract yet — `palbase push --env <env>`, then `palbase link` here". *(B1, B6)*
 - **FR-211** Her üretim satırı seçilen ortamı, kaynağını ve kökü SHALL söylesin: `Palbase: <variant> → <env> (<origin>) [<root>]`.
-- **FR-212** Plugin, runtime ve engine — 11 artifact — **2.4.0** olarak birlikte çıkar; README/distribution README desteklenen aralığı SHALL söylesin: AGP 8.10.1+, Gradle 8.11.1+, JDK 17+; CHANGELOG'da tam bir "DAVRANIŞ DEĞİŞİKLİĞİ" listesi. *(E1, E3, E5, yeni: minor sürümde kırıcı değişiklik)*
+- **FR-212** Plugin, runtime ve engine — 11 artifact — **2.5.0** olarak birlikte çıkar; README/distribution README desteklenen aralığı SHALL söylesin: AGP 8.10.1+, Gradle 8.11.1+, JDK 17+; CHANGELOG'da tam bir "DAVRANIŞ DEĞİŞİKLİĞİ" listesi. *(E1, E3, E5, yeni: minor sürümde kırıcı değişiklik)*
 - **FR-213** SDK reposunun kendi release kapısı yeşil kalsın: kök `gradle.properties`'e `palbase.env.release=local`. *(E2)*
 
 ### H. Tüketiciler
 
-- **FR-301** `palbe-trial-android` 2.4.0'a geçer: sürüm pinleri, `palbase {}` bloğu silinir, `palbase.env=main` yerine `palbase.env.debug=main` + `palbase.env.release=main`, `palbase/.gitattributes` ve `roles.json` kaldırılır.
+- **FR-301** `palbe-trial-android` 2.5.0'a geçer: sürüm pinleri, `palbase {}` bloğu silinir, `palbase.env=main` yerine `palbase.env.debug=main` + `palbase.env.release=main`, `palbase/.gitattributes` ve `roles.json` kaldırılır.
 - **FR-302** Kullanıcının test app'i (`MyApplicationPalbaseAndroidSdkTest`) hedef son duruma geçer (aşağıda).
 
 ## Fonksiyonel olmayan gereksinimler
