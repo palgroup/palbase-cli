@@ -226,3 +226,52 @@ func TestAnAppleLinkKeepsTheFilesOfASkippedTwin(t *testing.T) {
 	require.FileExists(t, filepath.Join(twin, "PalbaseGenerated.swift"),
 		"the sweep deleted the committed files of an environment the project still lists")
 }
+
+// `local/` BELONGS TO THIS MACHINE (FR-004). A cloud environment named `Local`
+// used to be written there — and silently replaced by this machine's stack
+// whenever one was registered, or left beside the stack's config when it was
+// not. It is left out and said, whatever its case.
+func TestLinkSkipsACloudEnvironmentNamedLocal(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	main := stackServing(t, linkKeyMain, nil)
+	cloud := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "locref0000": cloud.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "Local", Ref: "locref0000", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.Equal(t, []string{"main"}, entriesIn(t, filepath.Join(RootDir(), envSubdir)))
+	require.Contains(t, out.String(), `skipped environment "Local" (locref0000): palbase/environments/local belongs to `+
+		"the stack `palbase start` runs on this machine, never to a cloud environment — rename it in the dashboard")
+}
+
+func TestLinkRefusesWhenTheEnvironmentItReadsFromIsNamedLocal(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	cloud := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"locref0000": cloud.URL})
+	o := linkOpts{
+		url:          cloud.URL,
+		platforms:    []string{"android"},
+		linkedEnv:    "local",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "local", Ref: "locref0000", Status: "Running"}},
+	}
+
+	var out strings.Builder
+	err := runLink(context.Background(), o, &out)
+	require.Error(t, err, out.String())
+	require.Contains(t, err.Error(), `environment "local" (locref0000) is the one this link reads from, and palbase/environments/local belongs to `+
+		"the stack `palbase start` runs on this machine")
+	require.NoDirExists(t, filepath.Join(RootDir(), envSubdir))
+}

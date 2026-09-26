@@ -24,9 +24,12 @@ import (
 // linkableEnvironments is the listing without the environments this link must
 // not write, with a line for each one it left out.
 //
-// Two rules, in this order:
+// Three rules, in this order:
 //
 //   - a name that is not one directory (envname.CheckDir) never becomes a path;
+//   - `local`, in any case, is the directory of the stack on THIS machine
+//     (FR-004): a cloud environment written there was silently replaced by
+//     that stack, or left beside its config when none was registered;
 //   - names that match when letter case and Unicode form are ignored
 //     (envname.SameDirectory) are ONE directory on APFS, so the second write
 //     landed in the first one's directory and the app built one environment's
@@ -40,12 +43,17 @@ func linkableEnvironments(envs []Environment, linkedEnv string, w io.Writer) ([]
 	envRoot := path.Dir(EnvDir("any"))
 	named := make([]Environment, 0, len(envs))
 	for _, e := range envs {
-		err := envname.CheckDir(e.Name)
-		if err == nil {
+		var reason string
+		switch err := envname.CheckDir(e.Name); {
+		case err != nil:
+			reason = fmt.Sprintf("the name %v, so it cannot be a directory under %s", err, envRoot)
+		case strings.EqualFold(e.Name, localEnvName):
+			reason = fmt.Sprintf("%s belongs to the stack `palbase start` runs on this machine, never to a cloud environment",
+				path.Join(envRoot, localEnvName))
+		default:
 			named = append(named, e)
 			continue
 		}
-		reason := fmt.Sprintf("the name %v, so it cannot be a directory under %s", err, envRoot)
 		if e.Name == linkedEnv {
 			return nil, fmt.Errorf("environment %q (%s) is the one this link reads from, and %s — "+
 				"rename it in the dashboard, or read from another environment with `palbase link --from-env <name>`",
