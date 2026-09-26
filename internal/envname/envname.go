@@ -19,6 +19,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // CheckDir says why name cannot be ONE directory under palbase/environments,
@@ -65,6 +67,15 @@ func CheckDir(name string) error {
 		return errors.New("is a device name on Windows")
 	}
 	return nil
+}
+
+// SameDirectory says whether a and b are one directory on a disk that ignores
+// letter case and Unicode normalisation — APFS, every Mac's. `Staging` and
+// `staging` are, and so are `café` written with one code point and with two:
+// two environments named so wrote into one directory, and the app built one
+// environment's address under the other's name (FR-003).
+func SameDirectory(a, b string) bool {
+	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
 }
 
 // windowsForbidden are the characters a Windows directory name cannot hold,

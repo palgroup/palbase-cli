@@ -103,3 +103,126 @@ func TestLinkRefusesWhenTheEnvironmentItReadsFromIsNotOneDirectory(t *testing.T)
 	require.NoDirExists(t, filepath.Join(RootDir(), envSubdir))
 	require.Empty(t, entriesIn(t, "gradle"), "the refused link still wrote into gradle/")
 }
+
+// TWO NAMES, ONE DIRECTORY (FR-003). On APFS `Staging` and `staging` are the
+// same directory, so the second write landed inside the first one's and the
+// app built one environment's address under the other's name. Neither is the
+// environment this link reads from, so both are left out, each by its ref.
+func TestLinkSkipsEnvironmentsWhoseNamesShareOneDirectory(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	main := stackServing(t, linkKeyMain, nil)
+	upper := stackServing(t, linkKeyStaging, nil)
+	lower := stackServing(t, linkKeyCanary, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagAref00": upper.URL, "stagBref00": lower.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "Staging", Ref: "stagAref00", Status: "Running"},
+			{Name: "staging", Ref: "stagBref00", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.Equal(t, []string{"main"}, entriesIn(t, filepath.Join(RootDir(), envSubdir)))
+	require.Contains(t, out.String(), `skipped environments "Staging" (stagAref00) and "staging" (stagBref00): `+
+		`their names match when letter case and Unicode form are ignored, so they would share one directory — `+
+		`rename one in the dashboard`)
+}
+
+// TWO SPELLINGS OF ONE NAME, ONE DIRECTORY. APFS ignores Unicode normalisation
+// as it ignores case, so `café` composed and `café` decomposed are the same
+// directory: the second write landed in the first one's, and the app built one
+// environment's address under the other's name — FR-003's failure by another
+// road. Measured: `wrote palbase/environments/café/android-config.json` twice.
+func TestLinkSkipsEnvironmentsWhoseNamesDifferOnlyInUnicodeNormalisation(t *testing.T) {
+	const composed, decomposed = "café", "café"
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	main := stackServing(t, linkKeyMain, nil)
+	nfc := stackServing(t, linkKeyStaging, nil)
+	nfd := stackServing(t, linkKeyCanary, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "nfcref0000": nfc.URL, "nfdref0000": nfd.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: composed, Ref: "nfcref0000", Status: "Running"},
+			{Name: decomposed, Ref: "nfdref0000", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.Equal(t, []string{"main"}, entriesIn(t, filepath.Join(RootDir(), envSubdir)), out.String())
+	require.Contains(t, out.String(), "skipped environments \""+composed+"\" (nfcref0000) and \""+decomposed+"\" (nfdref0000): "+
+		"their names match when letter case and Unicode form are ignored, so they would share one directory — rename one in the dashboard")
+}
+
+// AND WHEN ONE OF THEM IS THE ENVIRONMENT THIS LINK READS FROM, THE LINK STOPS
+// (D-012). Picking one silently is how `link` wrote environment B while `push
+// --env main` deployed to A — measured with two environments both listed as
+// `main`.
+func TestLinkRefusesWhenTheEnvironmentItReadsFromSharesItsDirectory(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	first := stackServing(t, linkKeyMain, nil)
+	second := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"aaaa1111": first.URL, "bbbb2222": second.URL})
+	o := linkOpts{
+		url:       first.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "aaaa1111", Status: "Running"},
+			{Name: "main", Ref: "bbbb2222", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	err := runLink(context.Background(), o, &out)
+	require.Error(t, err, out.String())
+	require.Contains(t, err.Error(), `environments "main" (aaaa1111) and "main" (bbbb2222) match when letter case and `+
+		`Unicode form are ignored, so they would share one directory, and "main" is the one this link reads from — `+
+		`rename one in the dashboard`)
+	require.NoDirExists(t, filepath.Join(RootDir(), envSubdir))
+}
+
+// SKIPPED IS NOT GONE. The Apple sweep deletes the directory of an environment
+// the project no longer lists; a twin is still listed, so its committed files
+// stay exactly where they are. The sweep is handed the listing as the cloud
+// sent it, not what this link could write.
+func TestAnAppleLinkKeepsTheFilesOfASkippedTwin(t *testing.T) {
+	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
+	root, err := os.Getwd()
+	require.NoError(t, err)
+	twin := seedGeneratedEnvironment(t, root, "Staging")
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"ios"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "Staging", Ref: "stagAref00", Status: "Running"},
+			{Name: "staging", Ref: "stagBref00", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.FileExists(t, filepath.Join(twin, "PalbaseGenerated.swift"),
+		"the sweep deleted the committed files of an environment the project still lists")
+}

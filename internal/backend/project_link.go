@@ -790,6 +790,10 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// AND WHICH LISTED NAMES CAN BE DIRECTORIES, also before any network: the
 	// name decides where a file lands, and a name that is not one directory
 	// wrote outside `palbase/environments` — outside the checkout, measured.
+	// `listed` keeps the listing as the cloud sent it: an environment left out
+	// here is not written, and it is not GONE either — the sweep below must not
+	// take its committed files.
+	listed := o.environments
 	linkable, err := linkableEnvironments(o.environments, o.linkedEnv, w)
 	if err != nil {
 		return err
@@ -1088,9 +1092,10 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// @palbase/web and reads the committed artifacts offline.
 	if apple {
 		// KEPT: every environment the project lists, whether or not this run
-		// could read it (FR-016) — plus `local` and what was just written (C-10).
+		// could read it (FR-016) or was allowed to write it (FR-003) — plus
+		// `local` and what was just written (C-10).
 		keep := envs.names()
-		for _, e := range o.environments {
+		for _, e := range listed {
 			keep = append(keep, e.Name)
 		}
 		keep = append(keep, localEnvName)
