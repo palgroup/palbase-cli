@@ -54,8 +54,9 @@
  * typed error: the runtime answers it as an internal error.
  *
  * LOUD, NEVER SILENT. A defineError whose code or status is not known at build
- * time, two codes that one endpoint would give the same case name, and any
- * failure of the analysis itself stop the build and name the site. A throw
+ * time, a code thrown with a status other than the one it carries, two codes
+ * that one endpoint would give the same case name, and any failure of the
+ * analysis itself stop the build and name the site. A throw
  * whose code is decided at RUNTIME — a proxy passing on an upstream refusal —
  * cannot be a typed case for anyone; it is left out of the contract and the
  * build prints a warning naming the site (warnings()). Nothing is dropped
@@ -183,6 +184,7 @@ function createThrowAnalysis(projectRoot) {
     concrete: null,
     summaries: new Map(),
     warnings: new Map(),
+    statusOf: null,
     round: 0,
     cyclic: false,
     grew: false,
@@ -1116,7 +1118,51 @@ function destination(p, env, origin, originAsync) {
   return env.root;
 }
 
+// knownStatuses: the one status each code carries, as far as the build can see
+// — the SDK's own codes, every defineError the program declares, and each throw
+// site as it is found.
+function knownStatuses(p) {
+  const tsapi = loadTS();
+  if (p.statusOf) return p.statusOf;
+  const statusOf = new Map();
+  for (const [name, e] of Object.entries(SDK_ERRORS)) statusOf.set(e.code, { status: e.status, site: `@palbase/backend ${name}` });
+  const visitNode = (n) => {
+    if (tsapi.isVariableDeclaration(n) && tsapi.isIdentifier(n.name)) {
+      const call = defineErrorCall(p, n);
+      const codes = call && literalsOf(p, call.arguments[0], 'string');
+      const statuses = call && literalsOf(p, call.arguments[1], 'number');
+      if (codes && statuses && codes.length === 1 && statuses.length === 1 && !statusOf.has(codes[0])) {
+        statusOf.set(codes[0], { status: statuses[0], site: siteOf(p, n) });
+      }
+    }
+    tsapi.forEachChild(n, visitNode);
+  };
+  for (const sf of p.program.getSourceFiles()) if (isProjectFile(p, sf.fileName)) visitNode(sf);
+  p.statusOf = statusOf;
+  return statusOf;
+}
+
+// claimStatus refuses a code thrown with a status other than the one it already
+// carries. A client matches an error by its code, and the runtime refuses to
+// describe such a contract — so the build refuses it first, naming both sites.
+function claimStatus(p, e) {
+  const statusOf = knownStatuses(p);
+  const prev = statusOf.get(e.code);
+  if (!prev) {
+    statusOf.set(e.code, { status: e.status, site: e.site });
+    return;
+  }
+  if (prev.status !== e.status) {
+    throw new ThrowAnalysisError(
+      `"${e.code}" is thrown with status ${e.status} (${e.site}) but the code carries status ${prev.status} ` +
+        `(${prev.site}) — a client matches an error by its code, so one code carries one status. Throw the ` +
+        `code's own class, or give the error its own code`,
+    );
+  }
+}
+
 function raise(p, env, origin, originAsync, errors) {
+  for (const e of errors) claimStatus(p, e);
   const sink = destination(p, env, origin, originAsync);
   if (!sink) return;
   for (const e of errors) if (!sink.has(e.code)) sink.set(e.code, e);
