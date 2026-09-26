@@ -787,6 +787,15 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		}
 	}
 
+	// AND WHICH LISTED NAMES CAN BE DIRECTORIES, also before any network: the
+	// name decides where a file lands, and a name that is not one directory
+	// wrote outside `palbase/environments` — outside the checkout, measured.
+	linkable, err := linkableEnvironments(o.environments, o.linkedEnv, w)
+	if err != nil {
+		return err
+	}
+	o.environments = linkable
+
 	// EVERY NO-TARGET CASE IS RESOLVED BEFORE THIS POINT (D-6). There used to be
 	// an address fill here, and it ran inside the link's STAGE: the machine
 	// record is keyed by the working directory, so it never saw the record
