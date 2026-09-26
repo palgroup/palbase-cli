@@ -57,6 +57,11 @@ const (
 func RootDir() string { return rootDir }
 
 // EnvDir is where ONE environment's committed artifacts live.
+//
+// IT TRUSTS ITS ARGUMENT. A name the control plane listed reaches it only
+// through whyNotWritable (link_names.go) — the link and `palbase spec` both
+// ask it first — because path.Join resolves `..` and a listed name is
+// somebody else's text.
 func EnvDir(env string) string { return path.Join(rootDir, envSubdir, env) }
 
 // SpecPath is that environment's contract.

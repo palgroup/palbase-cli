@@ -83,6 +83,24 @@ func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
 		return err
 	}
 	target := resolved.Acting()
+
+	// The environment this checkout is pointed at, by the name the app knows it
+	// by — so a refresh updates the contract for THAT configuration and leaves
+	// the others alone. Refreshing them all would mean reaching every
+	// environment on every push, including production from a laptop.
+	env := resolved.ArtifactEnv()
+	if target.Local {
+		env = localEnvName
+	}
+	// THE LINK'S GATE, BEFORE ANY NETWORK (FR-002). This writes in the real
+	// checkout, not a stage, so a name that is not one directory went straight
+	// where it pointed: `../../gradle` wrote gradle/openapi.json, `..` wrote the
+	// retired layout's marker and every later link refused the checkout.
+	if why := whyNotWritable(env, target.Local); why != "" {
+		return fmt.Errorf("environment %q (%s) cannot be written to this checkout: %s — rename it in the dashboard",
+			env, resolved.Ref, why)
+	}
+
 	// The resolver's refusal already names both ways in and which address it
 	// looked for. Flattening it into the sentinel replaced all of that with four
 	// words and left the person to guess.
@@ -94,15 +112,6 @@ func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
 	spec, err := fetchStackSpec(ctx, target, cred)
 	if err != nil {
 		return err
-	}
-
-	// The environment this checkout is pointed at, by the name the app knows it
-	// by — so a refresh updates the contract for THAT configuration and leaves
-	// the others alone. Refreshing them all would mean reaching every
-	// environment on every push, including production from a laptop.
-	env := resolved.ArtifactEnv()
-	if target.Local {
-		env = localEnvName
 	}
 	if err := writeSpec(env, spec); err != nil {
 		return err

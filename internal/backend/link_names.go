@@ -40,17 +40,10 @@ import (
 // environment this link READS FROM cannot be: it is what the app builds against
 // when nothing else is chosen, so the link refuses and names the fix (D-012).
 func linkableEnvironments(envs []Environment, linkedEnv string, w io.Writer) ([]Environment, error) {
-	envRoot := path.Dir(EnvDir("any"))
 	named := make([]Environment, 0, len(envs))
 	for _, e := range envs {
-		var reason string
-		switch err := envname.CheckDir(e.Name); {
-		case err != nil:
-			reason = fmt.Sprintf("the name %v, so it cannot be a directory under %s", err, envRoot)
-		case strings.EqualFold(e.Name, localEnvName):
-			reason = fmt.Sprintf("%s belongs to the stack `palbase start` runs on this machine, never to a cloud environment",
-				path.Join(envRoot, localEnvName))
-		default:
+		reason := whyNotWritable(e.Name, false)
+		if reason == "" {
 			named = append(named, e)
 			continue
 		}
@@ -98,4 +91,22 @@ func linkableEnvironments(envs []Environment, linkedEnv string, w io.Writer) ([]
 			"so they would share one directory — rename one in the dashboard\n", all)
 	}
 	return kept, nil
+}
+
+// whyNotWritable says why the environment called name must not get a directory
+// in this checkout, or "" when it may. The link and `palbase spec` ask it the
+// same way, so the two cannot disagree about which names are paths.
+//
+// thisMachine is true only when the environment IS the stack on this machine:
+// that one, and only that one, is written to `local/`.
+func whyNotWritable(name string, thisMachine bool) string {
+	envRoot := path.Dir(EnvDir("any"))
+	if err := envname.CheckDir(name); err != nil {
+		return fmt.Sprintf("the name %v, so it cannot be a directory under %s", err, envRoot)
+	}
+	if !thisMachine && strings.EqualFold(name, localEnvName) {
+		return fmt.Sprintf("%s belongs to the stack `palbase start` runs on this machine, never to a cloud environment",
+			path.Join(envRoot, localEnvName))
+	}
+	return ""
 }
