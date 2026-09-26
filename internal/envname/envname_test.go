@@ -70,19 +70,26 @@ func TestCheckDirRefusesWhatWindowsCannotKeepAsOneDirectory(t *testing.T) {
 // ONE DIRECTORY ON A MAC IS ONE NAME HERE. APFS ignores letter case and Unicode
 // normalisation alike, so `Staging` and `staging` — and `café` composed and
 // decomposed — are one directory, and two environments named so wrote into
-// one (FR-003).
+// one (FR-003). APFS also uses FULL case folding, not simple: `straße` and
+// `STRASSE` are one directory there (ß folds to "ss"), and so are `ﬁle`
+// and `file` (the ﬁ ligature folds to "fi") — measured on this Mac's APFS
+// (`mkdir a; test -d b`). `İzmir` and `izmir` stay DIFFERENT, which APFS
+// agrees with (İ folds to "i" plus a combining dot, not to plain "i").
 func TestSameDirectoryIsWhatAMacTakesForOneName(t *testing.T) {
-	const composed, decomposed = "café", "café"
+	const composed, decomposed = "caf\u00e9", "cafe\u0301"
 	for _, c := range []struct {
 		a, b string
 		same bool
 	}{
 		{"Staging", "staging", true},
 		{composed, decomposed, true},
-		{"CAFÉ", decomposed, true},
+		{"CAF\u00c9", decomposed, true},
 		{"main", "main", true},
 		{"main", "main2", false},
 		{"feature-x", "featurex", false},
+		{"stra\u00dfe", "STRASSE", true},
+		{"\uFB01le", "file", true},
+		{"\u0130zmir", "izmir", false},
 	} {
 		require.Equal(t, c.same, SameDirectory(c.a, c.b), "%q and %q", c.a, c.b)
 	}

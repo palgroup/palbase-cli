@@ -20,6 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -74,8 +75,22 @@ func CheckDir(name string) error {
 // `staging` are, and so are `café` written with one code point and with two:
 // two environments named so wrote into one directory, and the app built one
 // environment's address under the other's name (FR-003).
+//
+// THE FOLD IS FULL, NOT SIMPLE — measured on this Mac's APFS (`mkdir a; test
+// -d b`): `straße` and `STRASSE` are one directory there (ß folds to "ss"),
+// and so are `ﬁle` and `file` (the ﬁ ligature folds to "fi"). strings.EqualFold
+// only does simple case folding and gets both wrong. `İzmir` and `izmir` stay
+// different, which APFS agrees with — İ folds to "i" plus a combining dot, not
+// to plain "i".
 func SameDirectory(a, b string) bool {
-	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
+	return sameDirectoryKey(a) == sameDirectoryKey(b)
+}
+
+// sameDirectoryKey is APFS's own comparison key: decompose (NFD), fold every
+// letter's case in full, then recompose (NFC) so the encoding does not matter
+// either.
+func sameDirectoryKey(s string) string {
+	return norm.NFC.String(cases.Fold().String(norm.NFD.String(s)))
 }
 
 // windowsForbidden are the characters a Windows directory name cannot hold,

@@ -141,7 +141,7 @@ func TestLinkSkipsEnvironmentsWhoseNamesShareOneDirectory(t *testing.T) {
 // environment's address under the other's name — FR-003's failure by another
 // road. Measured: `wrote palbase/environments/café/android-config.json` twice.
 func TestLinkSkipsEnvironmentsWhoseNamesDifferOnlyInUnicodeNormalisation(t *testing.T) {
-	const composed, decomposed = "café", "café"
+	const composed, decomposed = "caf\u00e9", "cafe\u0301"
 	inScratchCheckout(t)
 	seedAndroidApp(t)
 	main := stackServing(t, linkKeyMain, nil)
