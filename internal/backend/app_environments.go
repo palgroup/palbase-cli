@@ -101,18 +101,37 @@ func (a appEnvironments) names() []string {
 // the error that comes back is an unwrittenEnvironments naming each one that
 // was not. It used to return at the first failure, so one directory nobody
 // could create failed every teammate's link.
+//
+// NO ENVIRONMENT IS LEFT HALF-WRITTEN EITHER. A platform earlier in the list
+// can write cleanly for an environment and a LATER one then fail for that same
+// environment — the earlier file is not evidence of anything once the
+// environment as a whole is unwritten, so it goes back to what was at its
+// path before this call, and `written` never names it.
 func writeEnvironmentConfigs(platforms []string, envs appEnvironments) ([]string, error) {
 	var written []string
 	unwritten := unwrittenEnvironments{}
 	for _, env := range envs.names() {
 		fields := envs.Environments[env]
+		var wrote []recordedWrite
+		var failure error
 		for _, platform := range platforms {
 			dest := ConfigPath(env, platform)
+			before := snapshotFile(dest)
 			if err := writeEnvironmentConfig(dest, fields); err != nil {
-				unwritten[env] = err
+				failure = err
 				break
 			}
-			written = append(written, dest)
+			wrote = append(wrote, recordedWrite{path: dest, before: before})
+		}
+		if failure != nil {
+			for _, rec := range wrote {
+				_ = rec.before.restore(rec.path)
+			}
+			unwritten[env] = failure
+			continue
+		}
+		for _, rec := range wrote {
+			written = append(written, rec.path)
 		}
 	}
 	if len(unwritten) > 0 {
@@ -132,6 +151,50 @@ func writeEnvironmentConfig(dest string, fields appEnvironment) error {
 	// 0o600: it carries this environment\'s publishable key. Not a
 	// secret, but not something to widen either.
 	return os.WriteFile(dest, append(blob, '\n'), 0o600)
+}
+
+// fileSnapshot is what sat at a path immediately before this run touched it —
+// its previous bytes and mode, or the fact that nothing was there — so a
+// write that turns out to be undone later (FR-005: the environment it belongs
+// to becomes unwritten) has something exact to go back to.
+type fileSnapshot struct {
+	existed bool
+	body    []byte
+	mode    os.FileMode
+}
+
+// snapshotFile reads a path's current state. A path this run has not touched
+// yet either has an old file — kept — or none, and "none" is itself the state
+// to restore.
+func snapshotFile(path string) fileSnapshot {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileSnapshot{}
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fileSnapshot{}
+	}
+	return fileSnapshot{existed: true, body: body, mode: info.Mode()}
+}
+
+// restore puts path back to exactly what this snapshot recorded.
+func (s fileSnapshot) restore(path string) error {
+	if !s.existed {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return os.WriteFile(path, s.body, s.mode)
+}
+
+// recordedWrite is one write this run made, kept only long enough to be put
+// back if the environment it belongs to turns out not to be written after
+// all (FR-005).
+type recordedWrite struct {
+	path   string
+	before fileSnapshot
 }
 
 // unwrittenEnvironments is why each environment it names could not be written.

@@ -1024,11 +1024,30 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// against when nothing else is chosen. Once one write for it has failed,
 	// nothing further is written for it: no other platform's config, no
 	// contract.
+	//
+	// AND NOTHING HALF-DONE IS PUBLISHED FOR IT EITHER. A config can write
+	// cleanly for one platform and only a LATER platform, or the contract
+	// itself, fail — that earlier write is not undone by returning an error,
+	// so without this the checkout would keep a config nobody meant to
+	// publish right beside the line saying it was skipped. `configWrites`
+	// keeps every config write of this run, per environment, with what sat at
+	// its path before this run; `unwritable` puts all of an environment's
+	// back the moment it turns out unwritten, and no "wrote" line for it is
+	// ever printed — `pendingLines` remembers where each survivor's line goes,
+	// in the order the writes happened, so filtering the unwritten ones out
+	// does not reorder the rest.
 	unwritten := unwrittenEnvironments{}
+	configWrites := map[string][]recordedWrite{}
+	type pendingLine struct{ env, path string }
+	var pendingLines []pendingLine
 	unwritable := func(name string, err error) error {
 		if name == envs.Default {
 			return fmt.Errorf("%s could not be written: %w", name, err)
 		}
+		for _, rec := range configWrites[name] {
+			_ = rec.before.restore(rec.path)
+		}
+		delete(configWrites, name)
 		unwritten[name] = err
 		return nil
 	}
@@ -1038,7 +1057,11 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		for name := range unwritten {
 			delete(c.envs.Environments, name)
 		}
-		paths, err := writeEnvironmentConfigs([]string{c.platform}, c.envs)
+		before := map[string]fileSnapshot{}
+		for _, name := range c.envs.names() {
+			before[name] = snapshotFile(ConfigPath(name, c.platform))
+		}
+		_, err := writeEnvironmentConfigs([]string{c.platform}, c.envs)
 		var failed unwrittenEnvironments
 		switch {
 		case errors.As(err, &failed):
@@ -1050,14 +1073,19 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		case err != nil:
 			return err
 		}
+		for _, name := range c.envs.names() {
+			if _, gone := failed[name]; gone {
+				continue
+			}
+			dest := ConfigPath(name, c.platform)
+			configWrites[name] = append(configWrites[name], recordedWrite{path: dest, before: before[name]})
+			pendingLines = append(pendingLines, pendingLine{env: name, path: dest})
+		}
 		if isApplePlatform(c.platform) {
 			apple = true
 		}
 		if c.platform == webPlatform {
 			web = true
-		}
-		for _, p := range paths {
-			fmt.Fprintf(w, "wrote %s\n", p)
 		}
 	}
 	// The contracts and role documents of the environments that survived, and
@@ -1074,6 +1102,12 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 				}
 			}
 		}
+	}
+	for _, line := range pendingLines {
+		if _, failed := unwritten[line.env]; failed {
+			continue
+		}
+		fmt.Fprintf(w, "wrote %s\n", line.path)
 	}
 	for _, name := range unwritten.names() {
 		fmt.Fprintf(w, "%s could not be written (%v) — skipped; run `palbase link` again once it can be\n", name, unwritten[name])

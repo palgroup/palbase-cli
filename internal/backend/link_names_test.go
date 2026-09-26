@@ -342,3 +342,50 @@ func TestLinkFailsWhenTheEnvironmentItReadsFromCannotBeWritten(t *testing.T) {
 	require.Error(t, err, out.String())
 	require.Contains(t, err.Error(), "main could not be written: mkdir palbase/environments/main: not a directory")
 }
+
+// blockSpecPath puts a DIRECTORY where an environment's contract file goes,
+// so its config can still write cleanly and only the contract fails — the way
+// the review measured this bug: `mkdir` for the config succeeds, `open …
+// openapi.json` does not, and the config it just wrote survived anyway.
+func blockSpecPath(t *testing.T, env string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.FromSlash(SpecPath(env)), 0o755))
+}
+
+// A CONFIG WRITTEN THIS RUN IS NOT PUBLISHED FOR AN ENVIRONMENT THAT ENDS UP
+// UNWRITTEN (FR-005 fix round 1). `writeEnvironmentConfigs` succeeds for
+// staging before ITS OWN contract fails to write — the config that write
+// produced is not evidence of anything once staging is unwritten, so it goes
+// back to what was there before this run, and no "wrote" line for it prints.
+func TestLinkRestoresAConfigWrittenBeforeItsOwnContractFailed(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	before := []byte(`{"app_id":"project","base_url":"https://old","api_key":"` + linkKeyStaging + `"}` + "\n")
+	require.NoError(t, os.MkdirAll(EnvDir("staging"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.FromSlash(ConfigPath("staging", "android")), before, 0o600))
+	blockSpecPath(t, "staging")
+	main := stackServing(t, linkKeyMain, nil)
+	staging := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{"android"},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	require.FileExists(t, ConfigPath("main", "android"))
+	after, err := os.ReadFile(filepath.FromSlash(ConfigPath("staging", "android")))
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "the link published a config for an environment it also reported as skipped")
+	require.NotContains(t, out.String(), "wrote "+ConfigPath("staging", "android"),
+		"a config the link put back was still announced as written")
+	require.Contains(t, out.String(), "staging could not be written (open "+SpecPath("staging")+": is a directory) — "+
+		"skipped; run `palbase link` again once it can be")
+}
