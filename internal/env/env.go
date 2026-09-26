@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/envname"
 	// Aliased: this package already calls one LISTING ROW a `project`, and the
 	// two names mean different things — the row is what the plane lists, the
 	// package is what `palbase project` is made of.
@@ -203,11 +204,18 @@ own keys. It runs on the project's plan envelope. The plan includes one
 environment's compute; every further environment is billed per hour at the
 plan's rate, so this command prints that consequence before it asks.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// THE NAME IS JUDGED BEFORE ANYBODY IS ASKED (FR-007). It becomes a
+			// directory in every teammate's checkout and a build type in their
+			// Gradle; a name the control plane would take and the checkout could
+			// not is found out here, not by the next `palbase link`.
+			name := strings.TrimSpace(args[0])
+			if err := envname.CheckSlug(name); err != nil {
+				return err
+			}
 			p, err := linkedProject(cmd, r)
 			if err != nil {
 				return err
 			}
-			name := strings.TrimSpace(args[0])
 			out := cmd.OutOrStdout()
 
 			// THE BILLING CONSEQUENCE IS PRINTED BEFORE THE QUESTION.

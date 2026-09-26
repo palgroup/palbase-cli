@@ -16,6 +16,7 @@ package envname
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -117,4 +118,41 @@ func windowsDevice(name string) bool {
 		return true
 	}
 	return false
+}
+
+// SlugPattern is the grammar a NEW environment's name must match (D-008): a
+// letter, then up to 38 letters, digits or hyphens.
+//
+// THE SAME TEXT AS THE CONTROL PLANE'S SCHEMA. One of the two changing alone is
+// a name the CLI accepts and the server refuses, or the reverse. camelCase is
+// allowed on purpose — it is Gradle's own convention for build types, so an
+// environment called `featureX` is `create("featureX")` with no mapping — and
+// there is no `/`, space or dot, so the name is safe as a directory, in Xcode
+// and in AGP alike.
+const SlugPattern = `^[A-Za-z][A-Za-z0-9-]{0,38}$`
+
+var slug = regexp.MustCompile(SlugPattern)
+
+// reserved are the names no person gives an environment, and why. Compared
+// regardless of case: the control plane keeps names unique that way, so `Main`
+// is `main`. `main` is reserved here because `palbase env create` never makes a
+// project's FIRST environment — that one is `main` by the control plane's
+// hand.
+var reserved = map[string]string{
+	"local": "it names the stack `palbase start` runs on this machine",
+	"main":  "it names a project's first environment",
+}
+
+// CheckSlug says why name cannot be a NEW environment's name, or nil. It is the
+// strict rule, for the one verb that makes a name (D-011); names the cloud
+// already lists answer to CheckDir.
+func CheckSlug(name string) error {
+	if !slug.MatchString(name) {
+		return fmt.Errorf("%q is not a valid environment name: use a letter, then up to 38 letters, digits or hyphens (%s) — "+
+			"featureX or feature-login, for example", name, SlugPattern)
+	}
+	if why, ok := reserved[strings.ToLower(name)]; ok {
+		return fmt.Errorf("%q is reserved: %s", name, why)
+	}
+	return nil
 }

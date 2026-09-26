@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -348,4 +349,52 @@ func TestAnUnlinkedCheckoutIsRefusedWithTheWayIn(t *testing.T) {
 	_, err := run(t, &stubREST{}, "", "list")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "palbase link")
+}
+
+// A NEW NAME FOLLOWS THE SLUG GRAMMAR (FR-007, D-008), and it is judged before
+// the CLI asks anybody anything: a name the control plane would store is a
+// directory in every teammate's checkout and a build type in their Gradle.
+// `Feature X` could not even be confirmed at the prompt — Fscanln stopped at
+// the space and the command answered "aborted".
+func TestCreateRefusesANameOutsideTheGrammarBeforeAnyRequest(t *testing.T) {
+	linkedCheckout(t)
+	for _, name := range []string{"Feature X", "feature/login", "..", "2fa", "feature_x", "Üretim", strings.Repeat("a", 40)} {
+		rest := &stubREST{projects: twoEnvironments()}
+		_, err := run(t, rest, "", "create", name, "--yes")
+		require.Error(t, err, "%q was accepted", name)
+		require.Equal(t, fmt.Sprintf("%q is not a valid environment name: use a letter, then up to 38 letters, digits or hyphens "+
+			"(^[A-Za-z][A-Za-z0-9-]{0,38}$) — featureX or feature-login, for example", name), err.Error())
+		require.Empty(t, rest.calls, "%q reached the control plane", name)
+	}
+}
+
+// `local` AND `main` ARE NOT NAMES A PERSON GIVES (D-008), in any case: the
+// control plane keeps names unique regardless of case, so `Main` is `main`.
+func TestCreateRefusesAReservedNameInAnyCase(t *testing.T) {
+	linkedCheckout(t)
+	for name, why := range map[string]string{
+		"local": "it names the stack `palbase start` runs on this machine",
+		"LOCAL": "it names the stack `palbase start` runs on this machine",
+		"main":  "it names a project's first environment",
+		"Main":  "it names a project's first environment",
+	} {
+		rest := &stubREST{projects: twoEnvironments()}
+		_, err := run(t, rest, "", "create", name, "--yes")
+		require.Error(t, err, "%q was accepted", name)
+		require.Equal(t, fmt.Sprintf("%q is reserved: %s", name, why), err.Error())
+		require.Empty(t, rest.calls, "%q reached the control plane", name)
+	}
+}
+
+// AND THE NAMES THE GRAMMAR IS FOR GO THROUGH UNCHANGED — camelCase is the
+// point: `featureX` is `create("featureX")` in Gradle with no mapping.
+func TestCreateAcceptsTheNamesTheGrammarIsFor(t *testing.T) {
+	linkedCheckout(t)
+	for _, name := range []string{"featureX", "feature-profile-update", "staging2", strings.Repeat("a", 39)} {
+		rest := &stubREST{projects: twoEnvironments()}
+		_, err := run(t, rest, "", "create", name, "--yes")
+		require.NoError(t, err, name)
+		sent, _ := rest.lastWrite().body.(map[string]any)
+		require.Equal(t, name, sent["name"])
+	}
 }
