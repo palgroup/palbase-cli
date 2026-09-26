@@ -1,0 +1,434 @@
+From f5685672429a51c06b8287260f7a9924d2591a57 Mon Sep 17 00:00:00 2001
+From: spike <spike@localhost>
+Date: Sat, 26 Sep 2026 14:13:42 +0300
+Subject: [PATCH 2/5] baseline docs (2.3.0 copy)
+
+---
+ CHANGELOG.md | 139 ++++++++++++++++++++++++++
+ README.md    | 268 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 407 insertions(+)
+ create mode 100644 CHANGELOG.md
+ create mode 100644 README.md
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..93a0d48
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,139 @@
++# Changelog
++
++Bu dosya `palbackend-android` SDK'sının **davranış** değişikliklerini taşır — bir
++sürümü yükselten uygulamanın çalışma anında farklı bir şey görebileceği
++değişiklikleri. Yeni uç noktalar ve iç düzenlemeler buraya girmez; git geçmişi
++onları zaten anlatıyor.
++
++**Bu depoda bir yayın iş akışı YOK.** Kod iner ve push edilir; artefakt üretimi
++elle yapılır. Bu dosya yine de yazılır: teslim eden, ne teslim ettiğini
++bilmelidir. Son etiket: `v2.3.0`.
++
++## Yayınlanmamış
++
++## 2.3.0 — 2026-09-22
++
++### YAYIN — codegen plugin'i bu kez runtime ile birlikte çıkıyor
++- 2.1.0 ve 2.2.0'da GitHub Packages'a yalnız kütüphane çıktı; `io.palbase.codegen`
++  plugin'i 2.0.1'de kaldı ve o plugin 2.2.0 runtime'ına karşı derlemiyor (roller
++  enum oldu, typed room ve stream üretimi eklendi). Plugin ayrı bir composite
++  build'de yaşadığı için kökten koşan publish ona ulaşmıyordu. `scripts/publish.sh`
++  ikisini tek koşuda yayınlıyor ve marker dahil her koordinatı GitHub Packages'ta
++  doğrulamadan bitmiyor. Tüketici için kural: plugin ve kütüphane AYNI sürüm.
++- Dağıtım artık iOS ile aynı modelde: public `palgroup/palbackend-android` deposu,
++  GitHub Pages'ten servis edilen bir Maven ağacı artı sürüm başına bir GitHub
++  Release. Tüketici `https://palgroup.github.io/palbackend-android/` adresini
++  ekliyor, credential yok. GitHub Packages ikinci hedef olarak kalıyor.
++
++### DAVRANIŞ DEĞİŞİKLİĞİ — her istek uygulamanın dilini taşıyor (`Accept-Language`)
++
++iOS v0.63.0'ın eşi. Yığın her isteğe kendi `Accept-Language`'ına göre cevap
++veriyor (kiracının `palbase/strings/` tablosu); SDK bu başlığı hiç
++göndermiyordu, yani Android'den giden her istek zincirin son halkasına, kaynak
++dile düşüyordu. Artık her istek `LocaleList.getAdjustedDefault()`'tan türeyen
++değeri taşır: ilk etiket ağırlıksız, sonraki en fazla beş etiket `;q=0.9` …
++`;q=0.5` ile (`tr-TR, en-US;q=0.9, de;q=0.8`). Ağırlıklar SABİT dizedir, sayı
++biçimlendiricisinden geçmez — Türkçe cihazda `0,9` yazan bir biçimlendiriciyi
++yığının regex'i reddedip bütün dilleri eşit sayardı.
++
++- Çağıranın verdiği `Accept-Language` (istek başına `headers`) her yazımıyla
++  (`accept-language` dahil) kazanır; SDK ikinci bir anahtar yazmaz, boş
++  bırakılan bir değeri de kendi yazımıyla siler. Aynı duyarsız kural artık
++  `augment`'in doldurduğu HER başlık için geçerli.
++- Yeni genel yüzey: `pb.setPreferredLanguages(listOf("en"))` — backend
++  cümlelerini ekranın dilinden ayırmak ya da süreç yerelini oynatmadan dil
++  değiştiren uygulamalar için; `null`/boş liste platform listesine döner.
++  Dil seçicisi olan uygulama zaten varsayılanla doğru çalışır (Android 13
++  uygulama-başına dil ve AppCompat `setApplicationLocales` aynı listeyi
++  oynatır).
++- iOS'taki süreç-başına önbellek Android'de YOK: `LocaleList` bellek içi bir
++  sabittir, her istekte okunur; uygulama-başına dil değişikliği bir sonraki
++  isteğe geri çağrısız ulaşır.
++- Yığın tarafında bilinen yan etki (iOS spec D-9): başlık gidince bayrak
++  hedefleme bağlamına `locale` girer, bağlam hash'i filo genelinde BİR KEZ
++  oynar ve her istemci bir tam re-snapshot öder; `locale` hedefleyen kurallar
++  Android için eşleşmeye başlar.
++
++### DAVRANIŞ DEĞİŞİKLİĞİ — üretilen istemcinin gövdeleri şemanın adlarıyla gidiyor
++
++Codegen'in ürettiği tipler her alanın tel adını `@SerialName` ile taşır
++(`appVersion`). kotlinx `JsonNamingStrategy.SnakeCase`'i bu açıklamanın da
++ÜSTÜNE uyguluyor: `POST /app/v1/init` `app_version` ile çıkıyor, 400
++"deviceId Required" dönüyordu; camelCase bir cevap (`forceUpdate`) da
++`force_update` diye aranıp çözülemiyordu. Üretilen yol (invoke, stream, SSE
++kareleri, `palbaseGeneratedJson`) artık isim stratejisi OLMAYAN codec'le
++kodlar ve çözer; elle yazılan `pb.call`/`pb.upload` snake_case kalır.
++`BackendError.Server.decodeData` önce şemanın adıyla, olmazsa snake_case ile
++çözer — iOS'un iki şekli de kabul etmesi gibi. iOS bu hatadan hiç etkilenmedi.
++
++### Gövdesiz POST artık yola çıkıyor (`/auth/anonymous`)
++
++OkHttp gövdesiz POST'u reddediyor ("method POST must have a request body");
++anonim mint'in gövdesi yok, dolayısıyla her realtime bağlantısı cihazda
++başarısız olan bir mint'te dönüyordu (beş dakikada 53 deneme). Gövdesiz
++POST/PUT/PATCH artık iOS'taki URLSession gibi boş gövdeyle
++(`Content-Length: 0`) gider.
++
++### DAVRANIŞ DEĞİŞİKLİĞİ — codegen rolleri sözleşmenin İÇİNDEN okuyor, `roles.json` artık okunmuyor
++
++iOS v0.62.1/v0.63'ün eşi. Rol tanımları artık sözleşmenin kendi içinde
++(`x-palbase-roles`) geliyor; Gradle plugin'i yalnız oradan okur, sözleşmenin
++yanındaki `roles.json` okuyucusu söküldü. Alanı taşımayan bir sözleşme
++(rolleri belgenin içine koymayan bir CLI'nin bıraktığı) artık SESSİZCE rolsüz
++istemci üretmez: build "önce `@palbase/backend`'i yükseltip projeyi push
++edin, sonra `palbase link`" diyerek durur. Alan var ama `roles` listesi yoksa
++kendi cümlesiyle durur; `{"roles": []}` bilinen-boş durumdur ve eskisi gibi
++hiçbir şey eklemez. Yükselten bir uygulama, rolleri sözleşmeye koyan bir
++backend'e geçip `palbase link` çalıştırana kadar derlenmez — bu bilinçli:
++adını kodun çağırdığı bir sabitin sessizce kaybolması, duran bir build'den
++kötüdür.
++
++### DAVRANIŞ DEĞİŞİKLİĞİ — mühür zorunluluğu sunucunun listesine indi
++
++`SealedKeyStore.REQUIRED_PREFIXES` ALTI önek taşıyordu:
++
++```
++/auth/  /v1/db  /v1/docs  /v1/user-flags  /v1/notifications  /v1/analytics
++```
++
++Bugünden itibaren **yalnız `/auth/`**.
++
++**Ne değişti.** `REQUIRED_PREFIXES`, "bu yolda mühürleyemiyorsam isteği HİÇ
++göndermem" politikasıdır. Mühürleme mümkün olmadığında (keyset çekilemiyor —
++ağ, soğuk açılış, kesinti) SDK bu beş yüzeyde `SealingUnavailableException`
++fırlatıyor ve istek cihazı TERK ETMİYORDU. Artık ediyor: `/v1/db`, `/v1/docs`,
++`/v1/user-flags`, `/v1/notifications` ve `/v1/analytics` çağrıları, mühür
++alınamadığında düz metin olarak gidiyor — sunucunun onları zaten kabul ettiği
++biçimde.
++
++**Ne DEĞİŞMEDİ.** `SEALABLE_PREFIXES` aynı: mühürleyebildiğimizde mühürlüyoruz.
++Değişen tek şey, mühürleyemediğimizde ne yaptığımız.
++
++**Neden.** Sunucu 2026-09-01'de zorunluluğu ölçerek `/auth/` öneğine daraltmıştı
++(v2 `6bf9bbe4`): kiracı runtime'ı `@palbase/backend` o beş öneğe 18 mühürsüz
++çağrı yapıyor ve o pakette hiç mühür kodu yok — zorunluluk açılsaydı kiracının
++KENDİ uygulaması kırılacaktı. Bu SDK'nın listesi o gün geride kaldı. Sunucudan
++katı bir istemci, sunucunun kabul ettiği bir isteği reddeder: yeniden
++denenebilir bir keyset çekimini toplam kesintiye çevirir.
++
++**Güvenlik etkisi açıkça:** bu bir GEVŞETMEDİR. Beş yüzeyde "mühürsüz gönderme"
++garantisi kalkıyor. Kaldırılan garanti, sunucunun hiçbir zaman dayatmadığı — ve
++dayatamadığı — bir garantiydi; bedeli ise kesintiydi. Zorunluluk sunucuda bir
++**cırcır**: yalnız büyür. `@palbase/backend` mühürlemeyi öğrendiği gün o önekler
++sunucuda açılır ve buraya geri gelir.
++
++**Yeni:** `SealedKeyStore.REQUIRED_PREFIX_EXEMPTIONS` — sunucunun zorunluluktan
++muaf tuttuğu dört sabit OAuth giriş yolu
++(`/auth/oauth/callback/{google,apple,microsoft,github}`). Sağlayıcı oraya
++sıradan bir GET/form ile geliyor ve hiçbir şey mühürleyemiyor; `mustSeal` artık
++bunu sunucuyla aynı sırada kontrol ediyor.
++
++### CI — `:palbe-core` birim testleri ilk kez koşuyor
++
++Bu deponun CI'ı yalnız `:codegen-gradle`'ı test ediyordu; SDK modülünün kendi
++süiti HİÇBİR makinede koşmuyordu. Yukarıdaki sapmanın on bir gün yaşamasının
++sebebi tam olarak budur: onu yakalayacak test vardı ve hiç çalıştırılmadı.
++Artık `:palbe-core:testDebugUnitTest` de koşuyor ve "süit gerçekten koştu"
++sayacı **modül başına** ölçüyor — tek bir toplam, `:palbe-core`'un sıfırını
++`:codegen-gradle`'ın sayısının altında gizlerdi (ölçüldü: eski şekil o durumda
++"tests executed: 25" deyip YEŞİL kalıyor).
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..7c1486d
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,268 @@
++# Palbase Android SDK
++
++Native Kotlin runtime and typed backend code generation for Palbase applications.
++The aggregate artifact is `io.palbase:palbe`; the Gradle plugin is
++`io.palbase.codegen`.
++
++- Android minSdk 26, compileSdk 36
++- Kotlin 2.2, coroutines, StateFlow, kotlinx.serialization
++- Cancellable OkHttp transport with GET, POST, PUT, PATCH, DELETE, and QUERY
++- Encrypted session persistence backed by AndroidKeyStore
++- OpenAPI-driven, deterministic `pb.<namespace>.<operation>` generation
++- Closed runtime AARs; codegen source and generated API documentation artifacts
++
++## Getting the artifacts
++
++The SDK is closed-source and ships as binaries from a public Maven repository,
++[palgroup/palbackend-android](https://github.com/palgroup/palbackend-android) —
++the Android twin of `palbackend-ios`. No account, no token. `settings.gradle.kts`
++declares it twice: once for the codegen plugin (its marker's group is
++`io.palbase.codegen`, not `io.palbase`, so the plugin side matches by prefix) and
++once for the libraries:
++
++```kotlin
++pluginManagement {
++    repositories {
++        google()
++        maven {
++            url = uri("https://palgroup.github.io/palbackend-android/")
++            content { includeGroupByRegex("io\\.palbase.*") }
++        }
++        mavenCentral()
++        gradlePluginPortal()
++    }
++}
++
++dependencyResolutionManagement {
++    repositories {
++        google()
++        mavenCentral()
++        maven {
++            url = uri("https://palgroup.github.io/palbackend-android/")
++            content { includeGroup("io.palbase") }
++        }
++    }
++}
++```
++
++The `content {}` filters keep Gradle from asking this repository about every
++other dependency. The same artifacts are also on GitHub Packages
++(`maven.pkg.github.com/palgroup/palbackend-android-src`), which needs a
++`read:packages` token even to read; the public repository is the documented path.
++
++What the SDK needs from the app:
++
++| Requirement | Value |
++|---|---|
++| `minSdk` | 26 |
++| `compileSdk` | 36 — the AARs are compiled against it |
++| Kotlin | 2.2.x — the SDK is built with 2.2.21, and 2.2.21 consumers are what is tested |
++| Plugin | `org.jetbrains.kotlin.plugin.serialization` on the module that hosts the generated client |
++| JVM target | 17 |
++| Firebase | the SDK pulls Firebase BOM 34 for push; Gradle picks that BOM, and 34 no longer ships the `-ktx` artifacts. Depend on `firebase-messaging`, `firebase-crashlytics`, `firebase-config`, not their `-ktx` twins |
++| Manifest | `palbe-notifications` declares `com.google.firebase.messaging.default_notification_channel_id` (`palbase_default`). An app that sets the same `<meta-data>` adds `tools:replace="android:value"` to its own, or the merger stops the build |
++
++The library and the plugin must be the SAME version: the plugin generates code
++against that version's runtime, and the two are released together (see
++[Release](#release)).
++
++## Consumer setup
++
++The CLI owns native app linkage and the generated config slots:
++
++```bash
++palbase link <target>
++# Subsequent config or backend updates:
++palbase link
++```
++
++Apply the plugin and aggregate SDK in the Android app:
++
++```kotlin
++plugins {
++    id("com.android.application")
++    id("org.jetbrains.kotlin.android")
++    id("org.jetbrains.kotlin.plugin.serialization")
++    id("io.palbase.codegen") version "<palbase-version>"
++}
++
++dependencies {
++    implementation("io.palbase:palbe:<palbase-version>")
++}
++```
++
++The plugin reads ONE environment out of `palbase/environments/<environment>/`,
++which is where `palbase link` writes that environment's `openapi.json` — which
++carries the role definitions inside itself, as `x-palbase-roles` — and its
++`android-config.json`. Which environment a build compiles is
++the `palbase.env` Gradle property, and `local` when it is unset:
++
++```
++./gradlew assembleDebug -Ppalbase.env=main
++```
++
++Set it in `gradle.properties` to change the default for a checkout, or pass it
++per build; a CI job passes the environment it releases. A selected environment
++with no directory FAILS the build naming itself — nothing is ever generated from
++an environment that was not asked for.
++
++The plugin generates Kotlin sources per Android variant and packages the runtime
++config into the APK as `palbase/palbase-config.json`; no generated Kotlin needs
++to be committed. The app config must contain nonempty `app_id`, `base_url`, and
++`api_key` values written by the CLI.
++
++Point the plugin somewhere else when `palbase/` lives beside the app module
++rather than inside it:
++
++```kotlin
++palbase {
++    environmentsDir.set(rootProject.layout.projectDirectory.dir("palbase/environments"))
++}
++```
++
++Initialize once in `Application.onCreate`:
++
++```kotlin
++class App : Application() {
++    override fun onCreate() {
++        super.onCreate()
++        Palbase.initialize(this)
++    }
++}
++```
++
++Use auth, generated contracts, or the untyped escape hatch through `pb`:
++
++```kotlin
++val signedIn = pb.auth.signIn("user@example.com", "password")
++pb.auth.state.collect { state -> /* SignedIn or SignedOut */ }
++
++val created: RoomsCreateResponse =
++    pb.rooms.create(RoomsCreateRequest(name = "Android"))
++
++@Serializable data class CreateTodo(val title: String)
++@Serializable data class Todo(val id: String, val title: String)
++val todo: Todo = pb.call("todos", CreateTodo("buy milk"))
++```
++
++## OAuth
++
++Configure clients per application, platform and variant in Studio or through
++`palbase auth providers config set`. `palbase link` picks one of those
++configurations and writes its public `oauth` snapshot into the environment's
++`android-config.json` — that snapshot is the ONLY thing the Gradle plugin reads
++about OAuth. Which configuration gets snapshotted is a `palbase link` question,
++answered by `oauth.android` in the CLI's own committed project file
++(`application_key` and `variant`, plus `client_keys` when several clients of a
++provider match); flavors and application ID suffixes require explicit selection.
++The plugin checks the snapshot against the final variant's application ID, and
++the runtime checks Google's signing certificate against the installed APK.
++
++```kotlin
++val result = pb.auth.signInWithGoogle(activity)
++when (result) {
++    is OAuthResult.SignedIn -> showHome(result.success.user)
++    is OAuthResult.MfaRequired -> showMfa(result.token, result.factors)
++    is OAuthResult.Linked -> showLinked(result.identity)
++}
++```
++
++Google Credential Manager receives the **Web application** `server_client_id`
++and the nonce returned by the backend transaction. The separate Android client
++ID belongs to the package and SHA-1 certificate; it is never substituted for the
++server ID. Apple on Android uses a browser client with its Services ID. Microsoft
++can use a native PKCE client with its configured directory and redirect URI;
++GitHub uses browser OAuth.
++
++```kotlin
++// Observe completion before opening the browser (for example in a lifecycle scope).
++pb.auth.linkResults.collect { event ->
++    when (event) {
++        is AuthLinkResult.OAuthCompleted -> handleOAuth(event.result)
++        is AuthLinkResult.Failed -> showError(event.error)
++        else -> Unit
++    }
++}
++// From the sign-in button's coroutine:
++pb.auth.openOAuth(activity, OAuthProvider.Apple)
++```
++
++The plugin emits the selected clients' exact callback intent filters. Keep the
++configured return URI unchanged. `beginOAuth` and `completeOAuth` allow custom
++presentation; `pendingOAuth`, `resumeOAuth(transactionId)` and `cancelOAuth`
++support recovery after recreation. Completion proof and payload are stored
++under Android Keystore before provider UI or completion HTTP. A transient failure
++retries the same payload; another result cannot replace it. There is no in-memory
++fallback if secure storage fails.
++
++Use `OAuthPurpose.Link` while already signed in to link an identity. Linking
++requires a recent verified sign-in, never matches accounts by email, and does
++not create another session. MFA also requires completion before there is a
++signed-in session. Cancellation is `AuthError.Cancelled`.
++
++## Verification
++
++Use Android Studio's bundled JDK 21 locally:
++
++```bash
++export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
++export ANDROID_HOME="$HOME/Library/Android/sdk"
++
++# Unit, ABI, lint, generated-source, and minified consumer gates
++./gradlew check lintRelease :consumer-release:assembleRelease \
++  --configuration-cache --no-daemon
++
++# Gradle TestKit plugin suite
++./gradlew -p codegen-gradle check --configuration-cache --no-daemon
++
++# Maven shape, source-leak, version alignment, and optional-ABI isolation
++./scripts/verify-publications.sh
++
++# AndroidKeyStore on a managed API 26 device; live test skips without credentials
++./gradlew :palbe-core:pixelApi26DebugAndroidTest --no-daemon
++
++# Real backend smoke on an attached device or running emulator
++./gradlew :palbe-core:connectedDebugAndroidTest \
++  -Pandroid.testInstrumentationRunnerArguments.palbaseApiKey=pb_<ref>_c... \
++  -Pandroid.testInstrumentationRunnerArguments.palbaseBaseUrl=https://<ref>.dev.palbase.studio \
++  -Pandroid.testInstrumentationRunnerArguments.palbaseEmail=<test-user> \
++  -Pandroid.testInstrumentationRunnerArguments.palbasePassword=<test-password>
++```
++
++The `palbe-core/api/palbe-core.api` golden file is checked by `check`. Update it
++with `./gradlew :palbe-core:apiDump` only after deliberately reviewing public API
++changes.
++
++## Debug tracing (opt-in)
++
++The transport logs every request and response to logcat under the tag
++`io.palbase.sdk`, with secrets redacted. It is **off by default** and cannot
++ship enabled: the switch is the device's own log property, set per run:
++
++```bash
++adb shell setprop log.tag.io.palbase.sdk DEBUG
++adb logcat -s io.palbase.sdk
++```
++
++Each request logs its method, URL, headers (credentials masked) and body; each
++response logs status, duration and the server's request id, plus the error body
++when the status is not 2xx. The in-app console (`pb.debug`) is a separate,
++always-on recorder with its own storage; this switch is the developer's own tap.
++
++## Release
++
++Artefacts are published by hand, and the codegen plugin lives in its own build
++under `codegen-gradle/`, so a publish run from the root never reaches it — which
++is how 2.1.0 and 2.2.0 shipped a runtime without a plugin that could compile
++against it. `scripts/publish.sh` publishes everything a consumer resolves in one
++run and refuses to finish until each coordinate, plugin marker included, lists
++the version on GitHub Packages:
++
++```bash
++git tag v2.3.0
++PALBE_VERSION=2.3.0 scripts/publish.sh
++git push origin main v2.3.0
++```
++
++It requires a clean tree, HEAD tagged with that version, JDK 21 in `JAVA_HOME`,
++and a credential with `write:packages`.
+-- 
+2.50.1 (Apple Git-155)
+

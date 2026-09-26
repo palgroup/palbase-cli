@@ -1,0 +1,344 @@
+From 393974c16c51b31a3bce40af9e8f977b58df757f Mon Sep 17 00:00:00 2001
+From: spike <spike@localhost>
+Date: Sat, 26 Sep 2026 14:13:42 +0300
+Subject: [PATCH 3/5] prototype: flavors/library tests, docs, measured CC
+ comments
+
+---
+ CHANGELOG.md                                  | 30 ++++++++
+ README.md                                     | 70 +++++++++++++++----
+ .../gradle/AndroidVariantIntegration.kt       | 10 +--
+ .../io/palbase/gradle/EnvironmentResolver.kt  |  5 +-
+ .../io/palbase/gradle/PalbaseBuildType.kt     |  9 +--
+ .../gradle/PalbaseCodegenPluginTest.kt        | 62 +++++++++++++---
+ 6 files changed, 153 insertions(+), 33 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 93a0d48..7b4cda1 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,6 +11,36 @@ bilmelidir. Son etiket: `v2.3.0`.
+ 
+ ## Yayınlanmamış
+ 
++### DAVRANIŞ DEĞİŞİKLİĞİ — ortamı build type seçiyor (`io.palbase.codegen` 2.4)
++
++2.3'te tek bir cevap vardı: global `palbase.env`, yoksa `local` — her variant
++için. `debug` ile `release` farklı yığınlara bakamıyordu ve bayrağı hiç
++görmeyen bir makinede derlenen release, sessizce `local`'i paketliyordu.
++
++- Variant V (build type B) için ilk isabet kazanır: `-Ppalbase.env.<V|B>` →
++  kökteki `local.properties` `palbase.env.<V|B>` → build type içinde
++  `palbase { environment = "…" }` → `gradle.properties` `palbase.env.<V|B>` →
++  `benchmark<X>`/`nonMinified<X>` `<x>` gibi çözülür → debug/release dışındaki
++  build type'ın KENDİ ADI → eski global `palbase.env` → `debug` = `local`,
++  `release` = HATA.
++- **Kırılan:** `palbase.env` ayarlamamış bir checkout'ta `release` artık
++  derlenmiyor — `assembleRelease`, `assemble`, `build`, `testReleaseUnitTest`
++  `generatePalbaseRelease`'te durur ve iki yolu da söyler
++  (`palbase.env.release=<env>` ya da `palbase { environment = "<env>" }`).
++  `assembleDebug` ve IDE sync etkilenmez; hata yapılandırmada değil, release
++  görevinin kendisinde.
++- `palbase.env=main` taşıyan 2.3 checkout'ları debug ve release için AYNI
++  sonucu alır; ama özel bir build type (`staging`) artık kendi adını derler.
++- Build type DSL'i ile `gradle.properties` aynı build type için farklı ortam
++  söylerse build durur: iki commit'li yer çelişiyor.
++- `palbase { environmentsDir }` bloğu artık gerekmiyor: `<modül>/palbase/environments`,
++  sonra `<kök>/palbase/environments` — görev ÇALIŞIRKEN hangisi varsa.
++- Ortam adı TEK dizin adı olmalı (`/`, `\`, `..`, baştaki `.` reddedilir) ve
++  dizin adıyla BİREBİR eşleşmeli: `Main`, macOS'ta da `main` değildir.
++- Her üretim tek satır basar: `Palbase: release → main (palbase.env.release in gradle.properties)`.
++- `GeneratePalbaseTask.environmentsDir` kaldırıldı; yerine `environmentRoots`
++  (sıralı aday listesi) ve `environmentOrigin`/`environmentRefusal`/`variantName`.
++
+ ## 2.3.0 — 2026-09-22
+ 
+ ### YAYIN — codegen plugin'i bu kez runtime ile birlikte çıkıyor
+diff --git a/README.md b/README.md
+index 7c1486d..ebc812a 100644
+--- a/README.md
++++ b/README.md
+@@ -91,32 +91,76 @@ dependencies {
+ }
+ ```
+ 
+-The plugin reads ONE environment out of `palbase/environments/<environment>/`,
+-which is where `palbase link` writes that environment's `openapi.json` — which
+-carries the role definitions inside itself, as `x-palbase-roles` — and its
+-`android-config.json`. Which environment a build compiles is
+-the `palbase.env` Gradle property, and `local` when it is unset:
++The plugin reads ONE environment per build variant out of
++`palbase/environments/<environment>/`, which is where `palbase link` writes that
++environment's `openapi.json` — which carries the role definitions inside itself,
++as `x-palbase-roles` — and its `android-config.json`. No `palbase { }` block is
++needed: the plugin reads the first of `<module>/palbase/environments` and
++`<checkout root>/palbase/environments` that exists.
++
++**The build type picks the environment.** Out of the box:
++
++| Build type | Compiles |
++|---|---|
++| `debug` | `local` |
++| `release` | nothing until you choose — the build FAILS and says how |
++| any other, e.g. `create("featureX")` | the environment of the same name, `palbase/environments/featureX/` |
++| `benchmarkRelease`, `nonMinifiedRelease` (baseline profiles) | whatever `release` compiles |
++
++Choose for a build type in ONE committed place — `gradle.properties`:
++
++```properties
++palbase.env.release=main
++```
++
++or the build type itself:
++
++```kotlin
++import io.palbase.gradle.palbase   // Kotlin DSL only; Groovy needs no import
++
++android {
++    buildTypes {
++        release { palbase { environment = "main" } }
++    }
++}
++```
++
++Without that import, a `palbase { }` inside a build type is the PROJECT's block
++and `environment` does not compile. `extensions.configure<io.palbase.gradle.PalbaseBuildType> { environment = "main" }`
++works with no import. If `gradle.properties` and the build type BOTH name an
++environment and they differ, the build fails rather than pick one.
++
++Aim your own build somewhere else without touching a committed file — in
++`local.properties`, or for one build on the command line (`<V>` is a variant
++such as `paidRelease`, `<B>` a build type; the variant key wins):
++
++```
++# local.properties
++palbase.env.debug=main
++```
+ 
+ ```
+-./gradlew assembleDebug -Ppalbase.env=main
++./gradlew assembleDebug -Ppalbase.env.debug=main
+ ```
+ 
+-Set it in `gradle.properties` to change the default for a checkout, or pass it
+-per build; a CI job passes the environment it releases. A selected environment
+-with no directory FAILS the build naming itself — nothing is ever generated from
+-an environment that was not asked for.
++The full order, first hit wins: command line, `local.properties`, the build
++type's `palbase { environment }`, `gradle.properties`, the defaults above, and
++last the 2.3 global `palbase.env` (still honoured for `debug` and `release`).
++Every generation prints what it chose — `Palbase: release → main (palbase.env.release in gradle.properties)`.
++A chosen environment with no directory FAILS the build naming itself and where
++the name came from — nothing is ever generated from an environment that was not
++asked for. `initWith(…)` does not copy `palbase { environment }`.
+ 
+ The plugin generates Kotlin sources per Android variant and packages the runtime
+ config into the APK as `palbase/palbase-config.json`; no generated Kotlin needs
+ to be committed. The app config must contain nonempty `app_id`, `base_url`, and
+ `api_key` values written by the CLI.
+ 
+-Point the plugin somewhere else when `palbase/` lives beside the app module
+-rather than inside it:
++Only a layout neither default reaches needs the block:
+ 
+ ```kotlin
+ palbase {
+-    environmentsDir.set(rootProject.layout.projectDirectory.dir("palbase/environments"))
++    environmentsDir.set(layout.projectDirectory.dir("../somewhere/palbase/environments"))
+ }
+ ```
+ 
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt
+index 455c7b4..8ad6127 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt
+@@ -39,9 +39,10 @@ internal object AndroidVariantIntegration {
+ 
+         // WHERE `palbase/` IS, WITHOUT A BLOCK. `palbase link` writes it at the
+         // checkout root; a module may carry its own. Both are handed to the task
+-        // IN ORDER and the task reads the first that exists when it RUNS — decided
+-        // here, a directory `palbase link` creates after this build was configured
+-        // (or after a configuration cache entry was stored) would never be seen.
++        // IN ORDER and the task reads the first that exists when it RUNS, so the
++        // directory appearing after a configuration cache entry was stored needs
++        // no re-configuration — and nothing here rests on Gradle noticing a
++        // directory checked at configuration time.
+         val environmentRoots = extension.environmentsDir.map { listOf(it) }.orElse(
+             listOf(project.layout.projectDirectory, rootDirectory)
+                 .distinctBy { it.asFile }
+@@ -110,7 +111,8 @@ internal object AndroidVariantIntegration {
+      *   start-parameter map is safe — and it is the only thing that tells a
+      *   command-line value apart from the same key in `gradle.properties`.
+      * - `local.properties`: `providers.fileContents`, so editing the file — or
+-     *   creating it — invalidates the entry. A `java.io.File` read would not.
++     *   creating it — invalidates the entry. (AGP 8.x happens to fingerprint the
++     *   same file for `sdk.dir`; this read does not lean on that.)
+      * - `gradle.properties` and `palbase.env`: `providers.gradleProperty`.
+      * - The build-type DSL is the build script itself.
+      */
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt
+index 52b2cbd..81b60f1 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt
+@@ -168,7 +168,10 @@ internal class EnvironmentSources(
+     val localProperties: (String) -> String?,
+     /** `palbase { environment }` by BUILD TYPE name. */
+     val buildTypeDsl: (String) -> String?,
+-    /** Gradle properties from everywhere but the command line — in practice `gradle.properties`. */
++    /**
++     * Gradle properties. Asked only after the command line had its turn for the
++     * same keys, so what it answers is, in practice, `gradle.properties`.
++     */
+     val gradleProperties: (String) -> String?,
+     /** `palbase.env`. */
+     val legacy: () -> String?,
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt
+index 7554188..ceabb63 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt
+@@ -35,10 +35,11 @@ abstract class PalbaseBuildType {
+  * Gradle generates accessors for project extensions, not for extensions that sit
+  * on a container ELEMENT such as `debug`. Without this import a `palbase { }`
+  * written inside `debug { }` does not reach the build type at all: it resolves to
+- * the PROJECT's `palbase { }` block, whose receiver has no `environment`, and the
+- * script stops compiling with `Unresolved reference: environment` — measured, see
+- * PalbaseCodegenPluginTest. The import is what makes the innermost receiver, the
+- * build type, win.
++ * the PROJECT's `palbase { }` block. `environment` does not exist there, so the
++ * script stops compiling (PalbaseCodegenPluginTest pins it) — but a project-level
++ * setting such as `packageName` written there WOULD compile, and apply to every
++ * variant. With the import, the innermost receiver — the build type — wins, and
++ * that mistake stops compiling too.
+  *
+  * `extensions.configure<PalbaseBuildType> { environment = "…" }` reaches the same
+  * object with no import at all.
+diff --git a/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt b/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
+index fd438c0..a74bf55 100644
+--- a/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
++++ b/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
+@@ -440,8 +440,8 @@ class PalbaseCodegenPluginTest {
+     }
+ 
+     // The root is found when the task RUNS. A checkout configured — and cached —
+-    // before `palbase link` ever ran must pick the directory up once it exists,
+-    // not keep the no-op it stored.
++    // before `palbase link` ever ran picks the directory up once it exists, from
++    // the SAME cache entry: nothing about the configuration changed.
+     @Test
+     fun `an environments root that appears after a cached configuration is read`() {
+         val project = fixture(module = "app")
+@@ -503,9 +503,9 @@ class PalbaseCodegenPluginTest {
+         assertCompiled(project, "release", "main")
+     }
+ 
+-    // local.properties is PERSONAL and outranks the committed choice. It is read
+-    // through the provider API, so editing it invalidates a cached configuration
+-    // instead of compiling the stack the cache remembered.
++    // local.properties is PERSONAL and outranks the committed choice — and
++    // editing it must invalidate a cached configuration instead of compiling the
++    // stack the cache remembered.
+     @Test
+     fun `local properties override gradle properties and are a configuration cache input`() {
+         val project = fixture()
+@@ -582,8 +582,8 @@ class PalbaseCodegenPluginTest {
+ 
+         val failure = project.buildAndFail("generatePalbaseRelease").output
+ 
+-        assertTrue(failure.contains("build.gradle.kts"), failure)
+-        assertTrue(failure.contains("environment"), failure)
++        assertTrue(failure.contains("Script compilation error"), failure)
++        assertTrue(failure.contains("environment("), failure)
+         assertFalse(project.hasGeneratedFile("palbase-config.json"))
+     }
+ 
+@@ -694,6 +694,42 @@ class PalbaseCodegenPluginTest {
+         assertTrue(result.output.contains("as `benchmarkRelease` builds as `release`"), result.output)
+     }
+ 
++    // A FLAVORED variant reads its own key before its build type's.
++    @Test
++    fun `a variant key selects for one flavor of a build type`() {
++        val project = fixture(
++            android = """
++                flavorDimensions += "tier"
++                productFlavors { create("free") { dimension = "tier" }; create("paid") { dimension = "tier" } }
++            """.trimIndent(),
++        )
++        project.environment("local")
++        project.environment("main")
++
++        val result = project.build("generatePalbaseFreeDebug", "generatePalbasePaidDebug", "-Ppalbase.env.paidDebug=main")
++
++        assertCompiled(project, "freeDebug", "local")
++        assertCompiled(project, "paidDebug", "main")
++        assertTrue(result.output.contains("Palbase: paidDebug → main (-Ppalbase.env.paidDebug on the command line)"), result.output)
++    }
++
++    // A LIBRARY module gets the same build-type DSL and the same rules.
++    @Test
++    fun `a library module selects per build type too`() {
++        val project = fixture(
++            library = true,
++            imports = "import io.palbase.gradle.palbase",
++            buildTypes = """release { palbase { environment = "main" } }""",
++        )
++        project.environment("local")
++        project.environment("main")
++
++        project.build("generatePalbaseDebug", "generatePalbaseRelease")
++
++        assertCompiled(project, "debug", "local")
++        assertCompiled(project, "release", "main")
++    }
++
+     @Test
+     fun `an environment that is not one directory name is refused`() {
+         val project = fixture()
+@@ -731,6 +767,8 @@ class PalbaseCodegenPluginTest {
+         buildTypes: String = "",
+         imports: String = "",
+         groovy: Boolean = false,
++        library: Boolean = false,
++        android: String = "",
+     ): Fixture {
+         val root = Files.createTempDirectory(tempDir, "fixture-")
+         root.resolve("settings.gradle.kts").write(
+@@ -747,7 +785,7 @@ class PalbaseCodegenPluginTest {
+         if (groovy) {
+             app.resolve("build.gradle").write(groovyBuildScript(buildTypes))
+         } else {
+-            app.resolve("build.gradle.kts").write(kotlinBuildScript(buildTypes, imports))
++            app.resolve("build.gradle.kts").write(kotlinBuildScript(buildTypes, imports, library, android))
+         }
+         app.resolve("src/main/AndroidManifest.xml").write("<manifest />")
+         app.resolve("src/main/kotlin/io/palbase/PalbaseClient.kt").write(PALBASE_STUB)
+@@ -769,9 +807,10 @@ class PalbaseCodegenPluginTest {
+         return fixture
+     }
+ 
+-    private fun kotlinBuildScript(buildTypes: String, imports: String) = imports + "\n" + """
++    private fun kotlinBuildScript(buildTypes: String, imports: String, library: Boolean, android: String) =
++        imports + "\n" + """
+         plugins {
+-            id("com.android.application")
++            id("${if (library) "com.android.library" else "com.android.application"}")
+             id("org.jetbrains.kotlin.android")
+             id("org.jetbrains.kotlin.plugin.serialization")
+             id("io.palbase.codegen")
+@@ -780,11 +819,12 @@ class PalbaseCodegenPluginTest {
+         android {
+             namespace = "test.fixture"
+             compileSdk = 36
+-            defaultConfig { applicationId = "test.fixture"; minSdk = 26 }
++            defaultConfig { ${if (library) "" else "applicationId = \"test.fixture\"; "}minSdk = 26 }
+             compileOptions {
+                 sourceCompatibility = JavaVersion.VERSION_17
+                 targetCompatibility = JavaVersion.VERSION_17
+             }
++        """.trimIndent() + "\n" + android + "\n" + """
+             buildTypes {
+         """.trimIndent() + "\n" + buildTypes + "\n" + """
+             }
+-- 
+2.50.1 (Apple Git-155)
+

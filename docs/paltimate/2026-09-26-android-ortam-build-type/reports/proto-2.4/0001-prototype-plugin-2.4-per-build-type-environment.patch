@@ -1,0 +1,1399 @@
+From 95f96c52a76a81447e2c0363fcb7bc573d92e821 Mon Sep 17 00:00:00 2001
+From: spike <spike@localhost>
+Date: Sat, 26 Sep 2026 14:13:42 +0300
+Subject: [PATCH 1/5] prototype: plugin 2.4 per-build-type environment
+
+---
+ .gitignore                                    |   3 +
+ .../gradle/AndroidVariantIntegration.kt       |  96 +++-
+ .../io/palbase/gradle/EnvironmentResolver.kt  | 175 +++++++
+ .../io/palbase/gradle/GeneratePalbaseTask.kt  |  80 ++-
+ .../io/palbase/gradle/PalbaseBuildType.kt     |  48 ++
+ .../io/palbase/gradle/PalbaseCodegenPlugin.kt |  31 +-
+ .../io/palbase/gradle/PalbaseExtension.kt     |  17 +-
+ .../palbase/gradle/EnvironmentResolverTest.kt | 240 +++++++++
+ .../gradle/PalbaseCodegenPluginTest.kt        | 481 ++++++++++++++++--
+ 9 files changed, 1062 insertions(+), 109 deletions(-)
+ create mode 100644 .gitignore
+ create mode 100644 codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt
+ create mode 100644 codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt
+ create mode 100644 codegen-gradle/src/test/kotlin/io/palbase/gradle/EnvironmentResolverTest.kt
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..5cc008e
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++build/
++.gradle/
++.kotlin/
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt
+index d91a4cd..455c7b4 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt
+@@ -1,30 +1,77 @@
+ package io.palbase.gradle
+ 
++import com.android.build.api.dsl.CommonExtension
+ import com.android.build.api.variant.AndroidComponentsExtension
+ import com.android.build.api.variant.ApplicationVariant
++import com.android.build.api.variant.DslExtension
++import com.android.build.api.variant.VariantExtension
++import java.io.StringReader
++import java.util.Properties
+ import org.gradle.api.Project
+-import org.gradle.api.provider.Provider
++import org.gradle.api.file.Directory
+ 
+ /** Kept out of the plugin entry class so AGP types load only after Android is applied. */
+ internal object AndroidVariantIntegration {
+-    fun configure(project: Project, extension: PalbaseExtension, environment: Provider<String>) {
++    fun configure(project: Project, extension: PalbaseExtension) {
+         @Suppress("UNCHECKED_CAST")
+         val androidComponents = project.extensions.getByType(AndroidComponentsExtension::class.java)
+             as AndroidComponentsExtension<*, *, *>
+ 
++        // `palbase { environment = "…" }` on every build type, the ones AGP made
++        // (debug, release) and every one a script or another plugin adds later.
++        // The variant half of this API has nothing to carry: the value is read
++        // from the finished DSL below, because a `benchmarkRelease` variant needs
++        // the RELEASE build type's value, which its own variant cannot see.
++        androidComponents.registerExtension(
++            DslExtension.Builder(DSL_NAME).extendBuildTypeWith(PalbaseBuildType::class.java).build(),
++        ) { NothingPerVariant }
++
++        val declared = mutableMapOf<String, String>()
++        androidComponents.finalizeDsl { dsl ->
++            (dsl as CommonExtension<*, *, *, *, *, *>).buildTypes.forEach { buildType ->
++                buildType.extensions.getByType(PalbaseBuildType::class.java).environment.orNull
++                    ?.let { declared[buildType.name] = it }
++            }
++        }
++
++        val rootDirectory = project.layout.projectDirectory.dir(project.rootDir.absolutePath)
++        val resolver = EnvironmentResolver(sources(project, rootDirectory, declared::get))
++
++        // WHERE `palbase/` IS, WITHOUT A BLOCK. `palbase link` writes it at the
++        // checkout root; a module may carry its own. Both are handed to the task
++        // IN ORDER and the task reads the first that exists when it RUNS — decided
++        // here, a directory `palbase link` creates after this build was configured
++        // (or after a configuration cache entry was stored) would never be seen.
++        val environmentRoots = extension.environmentsDir.map { listOf(it) }.orElse(
++            listOf(project.layout.projectDirectory, rootDirectory)
++                .distinctBy { it.asFile }
++                .map { it.dir(ENVIRONMENTS_PATH) },
++        )
++
+         androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+             val capitalized = variant.name.replaceFirstChar { it.uppercase() }
++            val resolution = resolver.resolve(variant.name, variant.buildType ?: variant.name)
+             val task = project.tasks.register(
+                 "generatePalbase$capitalized",
+                 GeneratePalbaseTask::class.java,
+             ) { generate ->
+                 generate.group = "palbase"
+                 generate.description = "Generates Palbase Kotlin APIs and config for ${variant.name}"
+-                generate.environment.set(environment)
+-                generate.environmentsDir.set(extension.environmentsDir)
++                generate.variantName.set(variant.name)
++                when (resolution) {
++                    is EnvironmentResolution.Selected -> {
++                        generate.environment.set(resolution.environment)
++                        generate.environmentOrigin.set(resolution.origin)
++                    }
++                    // Refused when the task RUNS, not here: a release nobody chose a
++                    // stack for must not take `assembleDebug` — or an IDE sync — down
++                    // with it.
++                    is EnvironmentResolution.Refused -> generate.environmentRefusal.set(resolution.reason)
++                }
++                generate.environmentRoots.set(environmentRoots)
+                 // EVERY environment, not just the selected one — see the property's
+                 // own note in GeneratePalbaseTask: the SET is part of the input.
+-                generate.environmentFiles.from(extension.environmentsDir)
++                generate.environmentFiles.from(environmentRoots)
+                 generate.packageName.set(extension.packageName)
+                 if (variant is ApplicationVariant) {
+                     generate.applicationId.set(variant.applicationId)
+@@ -53,4 +100,43 @@ internal object AndroidVariantIntegration {
+             variant.sources.manifests.addGeneratedManifestFile(task, GeneratePalbaseTask::manifestOutput)
+         }
+     }
++
++    /**
++     * Every place [EnvironmentResolver] reads, each through an API the
++     * configuration cache fingerprints:
++     *
++     * - `-P` values: Gradle keys a cache entry on the whole set of command-line
++     *   properties ("the set of Gradle properties has changed"), so the plain
++     *   start-parameter map is safe — and it is the only thing that tells a
++     *   command-line value apart from the same key in `gradle.properties`.
++     * - `local.properties`: `providers.fileContents`, so editing the file — or
++     *   creating it — invalidates the entry. A `java.io.File` read would not.
++     * - `gradle.properties` and `palbase.env`: `providers.gradleProperty`.
++     * - The build-type DSL is the build script itself.
++     */
++    private fun sources(
++        project: Project,
++        rootDirectory: Directory,
++        buildTypeDsl: (String) -> String?,
++    ): EnvironmentSources {
++        val commandLine = project.gradle.startParameter.projectProperties
++        val localProperties by lazy {
++            val text = project.providers.fileContents(rootDirectory.file(LOCAL_PROPERTIES)).asText.orNull
++            Properties().apply { if (text != null) load(StringReader(text)) }
++        }
++        return EnvironmentSources(
++            commandLine = { key -> commandLine[key] },
++            localProperties = { key -> localProperties.getProperty(key) },
++            buildTypeDsl = buildTypeDsl,
++            gradleProperties = { key -> project.providers.gradleProperty(key).orNull },
++            legacy = { project.providers.gradleProperty(EnvironmentResolver.LEGACY_PROPERTY).orNull },
++        )
++    }
++
++    /** `registerExtension` insists on a per-variant object; this plugin keeps nothing there. */
++    private object NothingPerVariant : VariantExtension
++
++    private const val DSL_NAME = "palbase"
++    private const val ENVIRONMENTS_PATH = "palbase/environments"
++    private const val LOCAL_PROPERTIES = "local.properties"
+ }
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt
+new file mode 100644
+index 0000000..52b2cbd
+--- /dev/null
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/EnvironmentResolver.kt
+@@ -0,0 +1,175 @@
++package io.palbase.gradle
++
++/**
++ * WHICH ENVIRONMENT ONE VARIANT COMPILES.
++ *
++ * 2.3 had one answer for the whole build — `palbase.env`, `local` when unset —
++ * so `debug` and `release` could not aim at different stacks, and a release
++ * built on a machine that never set the property compiled `local` without a
++ * word. The build TYPE is what an Android developer already uses to say "this
++ * build is for that audience", so the build type picks the stack.
++ *
++ * For variant V of build type B the first hit wins:
++ *
++ *  1. `-Ppalbase.env.<V>`, then `-Ppalbase.env.<B>`, on the command line.
++ *  2. `palbase.env.<V>`, then `palbase.env.<B>`, in the root `local.properties`.
++ *  3. `palbase { environment = "…" }` inside build type B.
++ *  4. `palbase.env.<V>`, then `palbase.env.<B>`, in `gradle.properties`. When 3
++ *     is set as well and the two differ, REFUSE: two committed places disagree,
++ *     and whichever one lost would be a lie the next reader believes.
++ *  5. `benchmark<X>` / `nonMinified<X>` — the baseline-profile plugin's build
++ *     types — resolve as `<x>`: they exist to measure THAT build, so they aim at
++ *     its stack instead of getting one of their own.
++ *  6. A build type other than `debug`/`release` is its own environment:
++ *     `featureX` compiles `palbase/environments/featureX/`.
++ *  7. `palbase.env`, the 2.3 global property.
++ *  8. `debug` compiles `local`. `release` REFUSES: nothing picks the stack a
++ *     release ships against by default.
++ *
++ * The personal places (1, 2) outrank the committed ones (3, 4), so a developer
++ * can aim their own build anywhere without touching a tracked file; the
++ * committed ones outrank every convention (5–8).
++ *
++ * The answer is a NAME. Whether `palbase/environments/<name>/` exists is decided
++ * when the task runs — `palbase link` writes it, possibly after this build was
++ * configured — and a missing one is refused there, never substituted.
++ */
++internal class EnvironmentResolver(private val sources: EnvironmentSources) {
++
++    fun resolve(variant: String, buildType: String): EnvironmentResolution =
++        when (val chosen = choose(variant, buildType)) {
++            is EnvironmentResolution.Refused -> chosen
++            is EnvironmentResolution.Selected -> requireOneSegment(chosen)
++        }
++
++    private fun choose(variant: String, buildType: String): EnvironmentResolution {
++        val keys = listOf(variant, buildType).distinct().map { PROPERTY_PREFIX + it }
++
++        keys.firstHit(sources.commandLine)?.let { (key, value) ->
++            return EnvironmentResolution.Selected(value, "-P$key on the command line")
++        }
++        keys.firstHit(sources.localProperties)?.let { (key, value) ->
++            return EnvironmentResolution.Selected(value, "$key in local.properties")
++        }
++
++        val declared = sources.buildTypeDsl(buildType)?.trim()
++        val committed = keys.firstHit(sources.gradleProperties)
++        if (declared != null) {
++            if (committed != null && committed.second != declared) {
++                return EnvironmentResolution.Refused(
++                    "Palbase: the `$buildType` build type names two environments in two committed places — " +
++                        "`palbase { environment = \"$declared\" }` in the build type and " +
++                        "`${committed.first}=${committed.second}` in gradle.properties. Keep ONE of them; " +
++                        "a build that picked either would leave the other one lying to the next reader.",
++                )
++            }
++            return EnvironmentResolution.Selected(declared, "palbase { environment } in the `$buildType` build type")
++        }
++        committed?.let { (key, value) ->
++            return EnvironmentResolution.Selected(value, "$key in gradle.properties")
++        }
++
++        measuredBuildType(buildType)?.let { measured ->
++            val because = "`$buildType` builds as `$measured`"
++            return when (val twin = choose(twinVariant(variant, buildType, measured), measured)) {
++                is EnvironmentResolution.Selected -> twin.copy(origin = "${twin.origin}, as $because")
++                is EnvironmentResolution.Refused -> EnvironmentResolution.Refused("${twin.reason} ($because.)")
++            }
++        }
++
++        if (buildType != DEBUG && buildType != RELEASE) {
++            return EnvironmentResolution.Selected(buildType, "from the build type name")
++        }
++        sources.legacy()?.trim()?.let {
++            return EnvironmentResolution.Selected(it, "$LEGACY_PROPERTY, the 2.3 global property")
++        }
++        if (buildType == DEBUG) {
++            return EnvironmentResolution.Selected(DEBUG_DEFAULT, "the default for debug")
++        }
++        val variantClause = if (variant == buildType) "" else " (variant `$variant`)"
++        return EnvironmentResolution.Refused(
++            "Palbase: `$RELEASE`$variantClause has no environment, and a release never gets one by default — " +
++                "it would ship a client aimed at a stack nobody chose. Commit the choice, in ONE of two ways: " +
++                "`$PROPERTY_PREFIX$RELEASE=<environment>` in gradle.properties, or " +
++                "`buildTypes { release { palbase { environment = \"<environment>\" } } }` in the build script " +
++                "(Kotlin DSL: `import io.palbase.gradle.palbase`).",
++        )
++    }
++
++    /**
++     * ONE DIRECTORY NAME, NOTHING ELSE. The name is joined onto
++     * `palbase/environments/`, so a separator or a `..` would read a contract
++     * from somewhere `palbase link` never wrote — and a leading `.` names a
++     * hidden directory no environment ever lives in.
++     */
++    private fun requireOneSegment(selected: EnvironmentResolution.Selected): EnvironmentResolution {
++        val name = selected.environment
++        val problem = when {
++            name.isEmpty() -> "is empty"
++            '/' in name || '\\' in name -> "contains a path separator"
++            ".." in name -> "contains `..`"
++            name.startsWith('.') -> "starts with `.`"
++            else -> return selected
++        }
++        return EnvironmentResolution.Refused(
++            "Palbase: environment `$name` (${selected.origin}) $problem. An environment is ONE directory name " +
++                "under palbase/environments/, exactly as `palbase link` wrote it.",
++        )
++    }
++
++    /** `benchmarkRelease` → `release`, `nonMinifiedRelease` → `release`; anything else → null. */
++    private fun measuredBuildType(buildType: String): String? = MEASURING_PREFIXES.firstNotNullOfOrNull { prefix ->
++        buildType.removePrefix(prefix)
++            .takeIf { buildType.startsWith(prefix) && it.firstOrNull()?.isUpperCase() == true }
++            ?.replaceFirstChar { it.lowercase() }
++    }
++
++    /** `freeBenchmarkRelease` measures `freeRelease`, so it reads `palbase.env.freeRelease` too. */
++    private fun twinVariant(variant: String, buildType: String, measured: String): String {
++        val suffix = buildType.replaceFirstChar { it.uppercase() }
++        return when {
++            variant.endsWith(suffix) && variant.length > suffix.length ->
++                variant.dropLast(suffix.length) + measured.replaceFirstChar { it.uppercase() }
++            else -> measured
++        }
++    }
++
++    private fun List<String>.firstHit(lookup: (String) -> String?): Pair<String, String>? =
++        firstNotNullOfOrNull { key -> lookup(key)?.let { key to it.trim() } }
++
++    internal companion object {
++        const val PROPERTY_PREFIX = "palbase.env."
++        const val LEGACY_PROPERTY = "palbase.env"
++        const val DEBUG = "debug"
++        const val RELEASE = "release"
++        const val DEBUG_DEFAULT = "local"
++        val MEASURING_PREFIXES = listOf("benchmark", "nonMinified")
++    }
++}
++
++/** What [EnvironmentResolver] decided for one variant. */
++internal sealed interface EnvironmentResolution {
++    /** [origin] says where [environment] came from, in words — it is printed. */
++    data class Selected(val environment: String, val origin: String) : EnvironmentResolution
++
++    /** The build must not choose; [reason] is the whole sentence the task refuses with. */
++    data class Refused(val reason: String) : EnvironmentResolution
++}
++
++/**
++ * Every place an environment can be named, each one a lookup that is consulted
++ * only when the resolution reaches it — a place never read is never a
++ * configuration-cache input, and cannot have changed the answer.
++ */
++internal class EnvironmentSources(
++    /** `-P` values exactly as they were typed on the command line. */
++    val commandLine: (String) -> String?,
++    /** The root project's `local.properties`. */
++    val localProperties: (String) -> String?,
++    /** `palbase { environment }` by BUILD TYPE name. */
++    val buildTypeDsl: (String) -> String?,
++    /** Gradle properties from everywhere but the command line — in practice `gradle.properties`. */
++    val gradleProperties: (String) -> String?,
++    /** `palbase.env`. */
++    val legacy: () -> String?,
++)
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt
+index 6a4bc11..fc11852 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt
+@@ -12,8 +12,10 @@ import kotlinx.serialization.json.JsonPrimitive
+ import org.gradle.api.DefaultTask
+ import org.gradle.api.GradleException
+ import org.gradle.api.file.ConfigurableFileCollection
++import org.gradle.api.file.Directory
+ import org.gradle.api.file.DirectoryProperty
+ import org.gradle.api.file.RegularFileProperty
++import org.gradle.api.provider.ListProperty
+ import org.gradle.api.provider.Property
+ import org.gradle.api.tasks.CacheableTask
+ import org.gradle.api.tasks.Input
+@@ -30,12 +32,30 @@ import org.gradle.api.tasks.TaskAction
+ @CacheableTask
+ abstract class GeneratePalbaseTask : DefaultTask() {
+     /**
+-     * The environment this build compiles: the `palbase.env` Gradle property, or
+-     * `local` when it is unset. An input, so switching stacks re-generates.
++     * The environment this variant compiles, as [EnvironmentResolver] chose it
++     * from the variant's build type. An input, so switching stacks re-generates.
++     * Absent exactly when [environmentRefusal] is set.
+      */
+     @get:Input
++    @get:Optional
+     abstract val environment: Property<String>
+ 
++    /** Where [environment] came from, in words: printed with it, and named when it is refused. */
++    @get:Internal
++    abstract val environmentOrigin: Property<String>
++
++    /**
++     * Why no environment could be chosen for this variant. The task refuses with
++     * it when it RUNS — once a checkout is linked — so an unresolvable `release`
++     * never fails `assembleDebug`, or an IDE sync.
++     */
++    @get:Input
++    @get:Optional
++    abstract val environmentRefusal: Property<String>
++
++    @get:Internal
++    abstract val variantName: Property<String>
++
+     /**
+      * EVERY environment in the checkout, declared as ONE input.
+      *
+@@ -52,9 +72,12 @@ abstract class GeneratePalbaseTask : DefaultTask() {
+     @get:PathSensitive(PathSensitivity.RELATIVE)
+     abstract val environmentFiles: ConfigurableFileCollection
+ 
+-    /** The root the selected environment's directory is resolved against. Tracked through `environmentFiles`. */
++    /**
++     * Where `palbase/environments` may sit, in priority order; the first that
++     * EXISTS when the task runs is read. Tracked through `environmentFiles`.
++     */
+     @get:Internal
+-    abstract val environmentsDir: DirectoryProperty
++    abstract val environmentRoots: ListProperty<Directory>
+ 
+     @get:Input
+     abstract val packageName: Property<String>
+@@ -91,31 +114,40 @@ abstract class GeneratePalbaseTask : DefaultTask() {
+         // set keeps that build alive. A `palbase/environments` that EXISTS
+         // without the selected environment in it is a different fact entirely,
+         // and it is handled below.
+-        val root = environmentsDir.get().asFile
+-        if (!root.isDirectory) return
++        val root = environmentRoots.get().map { it.asFile }.firstOrNull { it.isDirectory } ?: return
++        val known = root.listFiles()
++            ?.filter { it.isDirectory }
++            ?.map { it.name }
++            ?.sorted()
++            .orEmpty()
++        val carries = if (known.isEmpty()) {
++            "this checkout carries no environment at all"
++        } else {
++            "this checkout carries ${known.joinToString(", ")}"
++        }
+ 
+-        val selected = environment.get()
+-        val environmentDirectory = root.resolve(selected)
+-        if (!environmentDirectory.isDirectory) {
++        val selected = environment.orNull
++            ?: throw GradleException("${environmentRefusal.get()} ${carries.replaceFirstChar { it.uppercase() }}.")
++        val origin = environmentOrigin.get()
++        // THE NAME, EXACTLY. A case-insensitive file system (macOS, Windows)
++        // answers `isDirectory` for `Main` when only `main` exists, so a check
++        // that asked the file system would build here and refuse on a Linux CI
++        // — or compile a directory other than the one that was named.
++        val environmentDirectory = root.resolve(selected).takeIf { selected in known }
++        if (environmentDirectory == null) {
+             // NEVER FALL BACK. A build that asked for `staging` and quietly
+             // compiled `local` ships a client pointed at the wrong stack, with
+             // the wrong publishable key, and nothing anywhere says so.
+-            val known = root.listFiles()
+-                ?.filter { it.isDirectory }
+-                ?.map { it.name }
+-                ?.sorted()
+-                .orEmpty()
+-            val carries = if (known.isEmpty()) {
+-                "this checkout carries no environment at all"
+-            } else {
+-                "this checkout carries ${known.joinToString(", ")}"
+-            }
+             throw GradleException(
+-                "Palbase: environment `$selected` has no directory — $environmentDirectory does not exist, " +
+-                    "and $carries. Run `palbase link` to write it, or select an existing one with " +
+-                    "`-Ppalbase.env=<environment>`. Nothing is generated from an environment that was not asked for.",
++                "Palbase: environment `$selected` ($origin) has no directory — ${root.resolve(selected)} " +
++                    "does not exist, and $carries. Run `palbase link` to write it, or choose one this checkout " +
++                    "carries for `${variantName.get()}`: `-Ppalbase.env.${variantName.get()}=<environment>` for " +
++                    "one build, `palbase.env.<build type>=<environment>` in local.properties or gradle.properties, " +
++                    "or `palbase { environment = \"<environment>\" }` in the build type. Nothing is generated from " +
++                    "an environment that was not asked for.",
+             )
+         }
++        logger.lifecycle("Palbase: ${variantName.get()} → $selected ($origin)")
+ 
+         val openApiFile = environmentDirectory.resolve(SPEC_FILE).takeIf { it.isFile }
+         val configFile = environmentDirectory.resolve(CONFIG_FILE).takeIf { it.isFile }
+@@ -175,8 +207,8 @@ abstract class GeneratePalbaseTask : DefaultTask() {
+      * This used to accept `{default_environment, environments{…}}` and pick an
+      * entry out of the map, which put the choice of stack in a committed file
+      * rather than in the build. The directory carries the environment now, the
+-     * document carries one environment's slot, and `palbase.env` chooses which
+-     * directory is read.
++     * document carries one environment's slot, and the variant's build type
++     * chooses which directory is read.
+      */
+     private fun validateConfig(source: java.io.File): AuthTarget {
+         val fields: JsonObject = try {
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt
+new file mode 100644
+index 0000000..7554188
+--- /dev/null
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseBuildType.kt
+@@ -0,0 +1,48 @@
++package io.palbase.gradle
++
++import com.android.build.api.dsl.BuildType
++import org.gradle.api.Action
++import org.gradle.api.provider.Property
++
++/**
++ * The environment ONE build type compiles, committed beside the build type it
++ * belongs to:
++ *
++ * ```kotlin
++ * import io.palbase.gradle.palbase
++ *
++ * android {
++ *     buildTypes {
++ *         release { palbase { environment = "main" } }
++ *         create("staging") { initWith(getByName("debug")); palbase { environment = "qa" } }
++ *     }
++ * }
++ * ```
++ *
++ * Groovy needs no import: `release { palbase { environment = 'main' } }`.
++ *
++ * It is one of several places a variant's environment can come from, and not the
++ * strongest — see [EnvironmentResolver] for the order.
++ */
++abstract class PalbaseBuildType {
++    /** A directory name under `palbase/environments/`, exactly as `palbase link` wrote it. */
++    abstract val environment: Property<String>
++}
++
++/**
++ * `palbase { }` INSIDE a build type, for the Kotlin DSL.
++ *
++ * Gradle generates accessors for project extensions, not for extensions that sit
++ * on a container ELEMENT such as `debug`. Without this import a `palbase { }`
++ * written inside `debug { }` does not reach the build type at all: it resolves to
++ * the PROJECT's `palbase { }` block, whose receiver has no `environment`, and the
++ * script stops compiling with `Unresolved reference: environment` — measured, see
++ * PalbaseCodegenPluginTest. The import is what makes the innermost receiver, the
++ * build type, win.
++ *
++ * `extensions.configure<PalbaseBuildType> { environment = "…" }` reaches the same
++ * object with no import at all.
++ */
++fun BuildType.palbase(configure: Action<in PalbaseBuildType>) {
++    configure.execute(extensions.getByType(PalbaseBuildType::class.java))
++}
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt
+index 3ea6401..c81f3b0 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt
+@@ -7,37 +7,24 @@ import org.gradle.api.Project
+ /** Android variant integration for generated Kotlin and packaged runtime config. */
+ class PalbaseCodegenPlugin : Plugin<Project> {
+     override fun apply(project: Project) {
++        // ONE PLACE PER ENVIRONMENT. `palbase link` writes every environment it
++        // resolved under `palbase/environments/<env>/` — that environment's
++        // contract, its roles and this platform's config, together — and
++        // everything under `palbase/` is committed.
++        //
++        // WHICH ONE a variant compiles is decided per BUILD TYPE — see
++        // EnvironmentResolver — and WHERE `palbase/` sits is found, not configured:
++        // the block below is optional, and most builds never write it.
+         val extension = project.extensions.create("palbase", PalbaseExtension::class.java).apply {
+-            // ONE PLACE PER ENVIRONMENT. `palbase link` writes every environment it
+-            // resolved under `palbase/environments/<env>/` — that environment's
+-            // contract, its roles and this platform's config, together — and
+-            // everything under `palbase/` is committed.
+-            environmentsDir.convention(project.layout.projectDirectory.dir("palbase/environments"))
+             packageName.convention("io.palbase.generated")
+         }
+-        // THE ENVIRONMENT IS ONE KEY THE CONSUMER OWNS.
+-        //
+-        // Which environment a build compiles is decided by the BUILD — the
+-        // `palbase.env` Gradle property — not by a `default_environment` field
+-        // that whoever linked last wrote into the config. `local` is the default
+-        // because it is the environment every checkout gets for free.
+-        //
+-        // Read through `providers` rather than `project.findProperty`: the value
+-        // becomes a declared task input, so `-Ppalbase.env=main` re-runs
+-        // generation and does not poison a configuration cache entry.
+-        val environment = project.providers.gradleProperty(ENVIRONMENT_PROPERTY).orElse(DEFAULT_ENVIRONMENT)
+         val configured = AtomicBoolean(false)
+         val configure = {
+             if (configured.compareAndSet(false, true)) {
+-                AndroidVariantIntegration.configure(project, extension, environment)
++                AndroidVariantIntegration.configure(project, extension)
+             }
+         }
+         project.pluginManager.withPlugin("com.android.application") { configure() }
+         project.pluginManager.withPlugin("com.android.library") { configure() }
+     }
+-
+-    internal companion object {
+-        const val ENVIRONMENT_PROPERTY = "palbase.env"
+-        const val DEFAULT_ENVIRONMENT = "local"
+-    }
+ }
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt
+index 58a9abb..3ff18b5 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt
+@@ -3,17 +3,18 @@ package io.palbase.gradle
+ import org.gradle.api.file.DirectoryProperty
+ import org.gradle.api.provider.Property
+ 
+-/** Inputs written by `palbase link`. */
++/** Inputs written by `palbase link`. Nothing here is required. */
+ abstract class PalbaseExtension {
+     /**
+-     * The root the per-environment directories sit in — `palbase/environments` in
+-     * the module that carries them.
++     * The root the per-environment directories sit in.
+      *
+-     * Configurable for the one shape the convention cannot reach: a checkout that
+-     * keeps `palbase/` beside the app module rather than inside it. The
+-     * environment WITHIN that root is never configured here — it is the
+-     * `palbase.env` Gradle property, so that selecting a stack is a build-time
+-     * decision rather than a committed one.
++     * UNSET, it is FOUND: the first of `<module>/palbase/environments` and
++     * `<root project>/palbase/environments` that exists when generation runs —
++     * which covers the module that carries its own `palbase/` and the checkout
++     * `palbase link` wrote at its root. Set it only for a layout neither reaches.
++     *
++     * The environment WITHIN that root is never configured here — each build type
++     * picks its own; see [PalbaseBuildType].
+      */
+     abstract val environmentsDir: DirectoryProperty
+ 
+diff --git a/codegen-gradle/src/test/kotlin/io/palbase/gradle/EnvironmentResolverTest.kt b/codegen-gradle/src/test/kotlin/io/palbase/gradle/EnvironmentResolverTest.kt
+new file mode 100644
+index 0000000..f2fa456
+--- /dev/null
++++ b/codegen-gradle/src/test/kotlin/io/palbase/gradle/EnvironmentResolverTest.kt
+@@ -0,0 +1,240 @@
++package io.palbase.gradle
++
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++
++/**
++ * The resolution ORDER, rule by rule, without a Gradle build in the way. The
++ * TestKit suite (PalbaseCodegenPluginTest) proves each place is actually READ
++ * from where it lives; this one proves which place wins.
++ */
++class EnvironmentResolverTest {
++
++    // 8. `debug` gets `local` for free — the environment every checkout has.
++    @Test
++    fun `debug with nothing set compiles local`() {
++        assertSelected("local", "the default for debug", places().resolve("debug", "debug"))
++    }
++
++    // 8. A release nobody chose a stack for is REFUSED, and the refusal names both
++    // committed ways out.
++    @Test
++    fun `release with nothing set is refused naming both ways to set it`() {
++        val reason = assertRefused(places().resolve("release", "release"))
++        assertTrue(reason.contains("palbase.env.release=<environment>"), reason)
++        assertTrue(reason.contains("palbase { environment = \"<environment>\" }"), reason)
++        assertTrue(reason.contains("import io.palbase.gradle.palbase"), reason)
++    }
++
++    @Test
++    fun `a flavored release refusal names the variant too`() {
++        val reason = assertRefused(places().resolve("freeRelease", "release"))
++        assertTrue(reason.contains("variant `freeRelease`"), reason)
++    }
++
++    // 1 beats 2 beats 3 beats 4 — each pair measured on its own.
++    @Test
++    fun `the command line beats local properties`() {
++        val resolver = places(
++            commandLine = mapOf("palbase.env.debug" to "main"),
++            local = mapOf("palbase.env.debug" to "local"),
++        )
++        assertSelected("main", "-Ppalbase.env.debug on the command line", resolver.resolve("debug", "debug"))
++    }
++
++    @Test
++    fun `local properties beat the build type dsl`() {
++        val resolver = places(
++            local = mapOf("palbase.env.release" to "staging"),
++            dsl = mapOf("release" to "main"),
++        )
++        assertSelected("staging", "palbase.env.release in local.properties", resolver.resolve("release", "release"))
++    }
++
++    @Test
++    fun `the build type dsl beats gradle properties of another build type`() {
++        val resolver = places(dsl = mapOf("release" to "main"), gradle = mapOf("palbase.env.debug" to "local"))
++        assertSelected("main", "palbase { environment } in the `release` build type", resolver.resolve("release", "release"))
++    }
++
++    @Test
++    fun `gradle properties select when nothing personal and no dsl is set`() {
++        val resolver = places(gradle = mapOf("palbase.env.release" to "main"))
++        assertSelected("main", "palbase.env.release in gradle.properties", resolver.resolve("release", "release"))
++    }
++
++    // Within one place, the VARIANT key beats the BUILD TYPE key.
++    @Test
++    fun `the variant key beats the build type key in the same place`() {
++        val resolver = places(
++            commandLine = mapOf("palbase.env.release" to "main", "palbase.env.paidRelease" to "paid"),
++        )
++        assertSelected("paid", "-Ppalbase.env.paidRelease on the command line", resolver.resolve("paidRelease", "release"))
++        assertSelected("main", "-Ppalbase.env.release on the command line", resolver.resolve("freeRelease", "release"))
++    }
++
++    // 4. Two COMMITTED places that disagree: refused, both named.
++    @Test
++    fun `dsl and gradle properties that disagree are refused`() {
++        val resolver = places(dsl = mapOf("release" to "main"), gradle = mapOf("palbase.env.release" to "prod"))
++        val reason = assertRefused(resolver.resolve("release", "release"))
++        assertTrue(reason.contains("palbase { environment = \"main\" }"), reason)
++        assertTrue(reason.contains("palbase.env.release=prod"), reason)
++    }
++
++    @Test
++    fun `dsl and gradle properties that agree are not a conflict`() {
++        val resolver = places(dsl = mapOf("release" to "main"), gradle = mapOf("palbase.env.release" to "main"))
++        assertSelected("main", "palbase { environment } in the `release` build type", resolver.resolve("release", "release"))
++    }
++
++    // A committed VARIANT key the dsl would silently shadow is the same conflict.
++    @Test
++    fun `a variant key in gradle properties that the dsl would shadow is refused`() {
++        val resolver = places(dsl = mapOf("release" to "main"), gradle = mapOf("palbase.env.paidRelease" to "paid"))
++        val reason = assertRefused(resolver.resolve("paidRelease", "release"))
++        assertTrue(reason.contains("palbase.env.paidRelease=paid"), reason)
++    }
++
++    // A PERSONAL override of a conflicting pair is not refused: it was asked for.
++    @Test
++    fun `a personal value outranks a committed conflict`() {
++        val resolver = places(
++            local = mapOf("palbase.env.release" to "staging"),
++            dsl = mapOf("release" to "main"),
++            gradle = mapOf("palbase.env.release" to "prod"),
++        )
++        assertSelected("staging", "palbase.env.release in local.properties", resolver.resolve("release", "release"))
++    }
++
++    // 5. The baseline-profile plugin's build types measure THEIR build's stack.
++    @Test
++    fun `benchmark and nonMinified build types resolve as the build they measure`() {
++        val resolver = places(gradle = mapOf("palbase.env.release" to "main"))
++        assertSelected(
++            "main",
++            "palbase.env.release in gradle.properties, as `benchmarkRelease` builds as `release`",
++            resolver.resolve("benchmarkRelease", "benchmarkRelease"),
++        )
++        assertSelected(
++            "main",
++            "palbase.env.release in gradle.properties, as `nonMinifiedRelease` builds as `release`",
++            resolver.resolve("nonMinifiedRelease", "nonMinifiedRelease"),
++        )
++    }
++
++    @Test
++    fun `a flavored benchmark variant reads its twin variant key`() {
++        val resolver = places(dsl = mapOf("release" to "main"), local = mapOf("palbase.env.freeRelease" to "free"))
++        assertSelected(
++            "free",
++            "palbase.env.freeRelease in local.properties, as `benchmarkRelease` builds as `release`",
++            resolver.resolve("freeBenchmarkRelease", "benchmarkRelease"),
++        )
++    }
++
++    @Test
++    fun `a benchmark build type can still be set on its own`() {
++        val resolver = places(gradle = mapOf("palbase.env.release" to "main", "palbase.env.benchmarkRelease" to "perf"))
++        assertSelected(
++            "perf",
++            "palbase.env.benchmarkRelease in gradle.properties",
++            resolver.resolve("benchmarkRelease", "benchmarkRelease"),
++        )
++    }
++
++    @Test
++    fun `a benchmark of an unset release is refused like release`() {
++        val reason = assertRefused(places().resolve("benchmarkRelease", "benchmarkRelease"))
++        assertTrue(reason.contains("palbase.env.release=<environment>"), reason)
++        assertTrue(reason.contains("`benchmarkRelease` builds as `release`"), reason)
++    }
++
++    @Test
++    fun `a name that merely starts with benchmark is its own build type`() {
++        assertSelected("benchmarking", "from the build type name", places().resolve("benchmarking", "benchmarking"))
++        assertSelected("benchmark", "from the build type name", places().resolve("benchmark", "benchmark"))
++    }
++
++    // 6. Any other build type is its own environment.
++    @Test
++    fun `a custom build type compiles the environment of its own name`() {
++        assertSelected("featureX", "from the build type name", places().resolve("featureX", "featureX"))
++        assertSelected("featureX", "from the build type name", places().resolve("freeFeatureX", "featureX"))
++    }
++
++    // 6 before 7: the legacy global does NOT reach a custom build type…
++    @Test
++    fun `the legacy global does not override a build type name`() {
++        val resolver = places(legacy = "main")
++        assertSelected("featureX", "from the build type name", resolver.resolve("featureX", "featureX"))
++    }
++
++    // 7. …but it keeps a 2.3 checkout building exactly as it did: debug AND release.
++    @Test
++    fun `the legacy global still selects for debug and release`() {
++        val resolver = places(legacy = "main")
++        assertSelected("main", "palbase.env, the 2.3 global property", resolver.resolve("debug", "debug"))
++        assertSelected("main", "palbase.env, the 2.3 global property", resolver.resolve("release", "release"))
++    }
++
++    @Test
++    fun `values are trimmed`() {
++        val resolver = places(local = mapOf("palbase.env.debug" to "  main  "))
++        assertSelected("main", "palbase.env.debug in local.properties", resolver.resolve("debug", "debug"))
++    }
++
++    // The name is joined onto palbase/environments/: ONE segment, or refused.
++    @Test
++    fun `an environment that is not one directory name is refused`() {
++        for (bad in listOf("../main", "a/b", "a\\b", "..", ".hidden", "a..b", "", "   ")) {
++            val reason = assertRefused(places(gradle = mapOf("palbase.env.release" to bad)).resolve("release", "release"))
++            assertTrue(reason.contains("palbase.env.release in gradle.properties"), "origin missing for `$bad`: $reason")
++        }
++    }
++
++    // Only the places the answer depended on are read — each lookup is a
++    // configuration-cache input, so a read that cannot change the answer is a
++    // cache miss for nothing.
++    @Test
++    fun `places after the first hit are never read`() {
++        val read = mutableListOf<String>()
++        val resolver = EnvironmentResolver(
++            EnvironmentSources(
++                commandLine = { read += "cli:$it"; null },
++                localProperties = { read += "local:$it"; if (it == "palbase.env.debug") "main" else null },
++                buildTypeDsl = { read += "dsl:$it"; null },
++                gradleProperties = { read += "gradle:$it"; null },
++                legacy = { read += "legacy"; null },
++            ),
++        )
++        resolver.resolve("debug", "debug")
++        assertEquals(listOf("cli:palbase.env.debug", "local:palbase.env.debug"), read)
++    }
++
++    private fun places(
++        commandLine: Map<String, String> = emptyMap(),
++        local: Map<String, String> = emptyMap(),
++        dsl: Map<String, String> = emptyMap(),
++        gradle: Map<String, String> = emptyMap(),
++        legacy: String? = null,
++    ) = EnvironmentResolver(
++        EnvironmentSources(
++            commandLine = commandLine::get,
++            localProperties = local::get,
++            buildTypeDsl = dsl::get,
++            gradleProperties = gradle::get,
++            legacy = { legacy },
++        ),
++    )
++
++    private fun assertSelected(environment: String, origin: String, actual: EnvironmentResolution) {
++        assertEquals(EnvironmentResolution.Selected(environment, origin), actual)
++    }
++
++    private fun assertRefused(actual: EnvironmentResolution): String {
++        assertTrue(actual is EnvironmentResolution.Refused, "expected a refusal, got $actual")
++        return (actual as EnvironmentResolution.Refused).reason
++    }
++}
+diff --git a/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt b/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
+index 950dca7..fd438c0 100644
+--- a/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
++++ b/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
+@@ -405,6 +405,306 @@ class PalbaseCodegenPluginTest {
+         assertTrue(!project.generatedFile("PalbaseGenerated.kt").readText().contains("PalbaseRole"))
+     }
+ 
++    // ---- 2.4: THE BUILD TYPE SELECTS THE ENVIRONMENT ------------------------
++    //
++    // The ORDER of the places is pinned in EnvironmentResolverTest, without a
++    // build. These prove each place is READ from where it actually lives, that
++    // the DSL binds to the BUILD TYPE, and that the answer survives the
++    // configuration cache.
++
++    // `palbase link` writes `palbase/` at the checkout root; the app is a module
++    // below it. 2.3 needed a `palbase { environmentsDir.set(…) }` block for
++    // exactly this layout — the most common one there is.
++    @Test
++    fun `the checkout root environments are found with no palbase block`() {
++        val project = fixture(module = "app")
++        project.environment("local", base = project.root)
++
++        val result = project.build("generatePalbaseDebug")
++
++        assertCompiled(project, "debug", "local")
++        assertTrue(result.output.contains("Palbase: debug → local (the default for debug)"), result.output)
++    }
++
++    // A module that carries its OWN `palbase/` keeps it, whatever sits at the root.
++    @Test
++    fun `a module's own environments win over the checkout root`() {
++        val project = fixture(module = "app")
++        project.environment("local", base = project.root)
++        project.app.resolve("palbase/environments/local/openapi.json").write(OPEN_API)
++        project.app.resolve("palbase/environments/local/android-config.json").write(configFor("module1234m"))
++
++        project.build("generatePalbaseDebug")
++
++        assertTrue(project.asset("debug").contains("module1234m"), project.asset("debug"))
++    }
++
++    // The root is found when the task RUNS. A checkout configured — and cached —
++    // before `palbase link` ever ran must pick the directory up once it exists,
++    // not keep the no-op it stored.
++    @Test
++    fun `an environments root that appears after a cached configuration is read`() {
++        val project = fixture(module = "app")
++        val first = project.build("generatePalbaseDebug", "--configuration-cache")
++        assertEquals(TaskOutcome.SUCCESS, first.task(":app:generatePalbaseDebug")?.outcome)
++        assertTrue(first.output.contains("Configuration cache entry stored"), first.output)
++        assertFalse(project.hasGeneratedFile("palbase-config.json"))
++
++        project.environment("local", base = project.root)
++        val second = project.build("generatePalbaseDebug", "--configuration-cache")
++
++        assertTrue(second.output.contains("Configuration cache entry reused"), second.output)
++        assertCompiled(project, "debug", "local")
++    }
++
++    // Nothing picks a release stack by default — and a release nobody configured
++    // must not take `debug` down with it: the refusal belongs to the release
++    // task, at execution, not to configuration.
++    @Test
++    fun `an unset release refuses its own generation and leaves debug building`() {
++        val project = fixture()
++        project.environment("local")
++        project.environment("main")
++
++        assertEquals(TaskOutcome.SUCCESS, project.build("generatePalbaseDebug").task(":generatePalbaseDebug")?.outcome)
++        val failure = project.buildAndFail("generatePalbaseRelease").output
++
++        assertTrue(failure.contains("palbase.env.release=<environment>"), failure)
++        assertTrue(failure.contains("palbase { environment = \"<environment>\" }"), failure)
++        assertTrue(failure.contains("This checkout carries local, main"), failure)
++    }
++
++    @Test
++    fun `gradle properties select per build type`() {
++        val project = fixture()
++        project.environment("local")
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env.release=main\n")
++
++        val result = project.build("generatePalbaseDebug", "generatePalbaseRelease")
++
++        assertCompiled(project, "debug", "local")
++        assertCompiled(project, "release", "main")
++        assertTrue(result.output.contains("Palbase: release → main (palbase.env.release in gradle.properties)"), result.output)
++    }
++
++    // A 2.3 checkout — `palbase.env=main` in gradle.properties — builds BOTH
++    // variants exactly as it did.
++    @Test
++    fun `the 2_3 global property still selects for debug and release`() {
++        val project = fixture()
++        project.environment("local")
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env=main\n")
++
++        project.build("generatePalbaseDebug", "generatePalbaseRelease")
++
++        assertCompiled(project, "debug", "main")
++        assertCompiled(project, "release", "main")
++    }
++
++    // local.properties is PERSONAL and outranks the committed choice. It is read
++    // through the provider API, so editing it invalidates a cached configuration
++    // instead of compiling the stack the cache remembered.
++    @Test
++    fun `local properties override gradle properties and are a configuration cache input`() {
++        val project = fixture()
++        project.environment("local")
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env.debug=main\n")
++
++        val first = project.build("generatePalbaseDebug", "--configuration-cache")
++        assertTrue(first.output.contains("Configuration cache entry stored"), first.output)
++        assertCompiled(project, "debug", "main")
++
++        project.root.resolve("local.properties").write("palbase.env.debug=local\n")
++        val second = project.build("generatePalbaseDebug", "--configuration-cache")
++
++        assertFalse(second.output.contains("Configuration cache entry reused"), second.output)
++        assertCompiled(project, "debug", "local")
++        assertTrue(second.output.contains("(palbase.env.debug in local.properties)"), second.output)
++    }
++
++    // The command line outranks local.properties — and dropping the flag must NOT
++    // reuse the entry stored with it, even when the flag named the very value
++    // gradle.properties carries (the value alone cannot tell the two apart).
++    @Test
++    fun `the command line outranks local properties and dropping it reconfigures`() {
++        val project = fixture()
++        project.environment("local")
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env.debug=main\n")
++        project.root.resolve("local.properties").write("palbase.env.debug=local\n")
++
++        val first = project.build("generatePalbaseDebug", "--configuration-cache", "-Ppalbase.env.debug=main")
++        assertTrue(first.output.contains("Configuration cache entry stored"), first.output)
++        assertCompiled(project, "debug", "main")
++
++        val second = project.build("generatePalbaseDebug", "--configuration-cache")
++        assertFalse(second.output.contains("Configuration cache entry reused"), second.output)
++        assertCompiled(project, "debug", "local")
++    }
++
++    // THE DSL, KOTLIN, WITH THE IMPORT: binds to the BUILD TYPE — in `debug { }`
++    // and in a `create(…) { }` alike — and the project-level block still works.
++    @Test
++    fun `the Kotlin build type dsl selects per build type`() {
++        val project = fixture(
++            imports = "import io.palbase.gradle.palbase",
++            buildTypes = """
++                debug { palbase { environment = "main" } }
++                release { palbase { environment = "main" } }
++                create("qa") { initWith(getByName("debug")); palbase { environment = "local" } }
++            """.trimIndent(),
++        )
++        project.environment("local")
++        project.environment("main")
++
++        val result = project.build("generatePalbaseDebug", "generatePalbaseRelease", "generatePalbaseQa")
++
++        assertCompiled(project, "debug", "main")
++        assertCompiled(project, "release", "main")
++        assertCompiled(project, "qa", "local")
++        assertTrue(
++            result.output.contains("Palbase: debug → main (palbase { environment } in the `debug` build type)"),
++            result.output,
++        )
++    }
++
++    // WITHOUT the import, a `palbase { }` inside a build type is the PROJECT's
++    // block — Gradle generates no accessor for an extension on a container
++    // element. `environment` does not exist there, so the script does not
++    // compile: the line can never silently configure something else.
++    @Test
++    fun `the Kotlin build type dsl without the import does not compile`() {
++        val project = fixture(buildTypes = """release { palbase { environment = "main" } }""")
++        project.environment("main")
++
++        val failure = project.buildAndFail("generatePalbaseRelease").output
++
++        assertTrue(failure.contains("build.gradle.kts"), failure)
++        assertTrue(failure.contains("environment"), failure)
++        assertFalse(project.hasGeneratedFile("palbase-config.json"))
++    }
++
++    // The import-free spelling reaches the same object.
++    @Test
++    fun `the Kotlin build type extension is reachable without an import`() {
++        val project = fixture(
++            buildTypes = """
++                release { extensions.configure<io.palbase.gradle.PalbaseBuildType> { environment = "main" } }
++                create("qa") { extensions.configure<io.palbase.gradle.PalbaseBuildType> { environment = "main" } }
++            """.trimIndent(),
++        )
++        project.environment("main")
++
++        project.build("generatePalbaseRelease", "generatePalbaseQa")
++
++        assertCompiled(project, "release", "main")
++        assertCompiled(project, "qa", "main")
++    }
++
++    // Groovy resolves `palbase` against the build type first — no import.
++    @Test
++    fun `the Groovy build type dsl selects per build type`() {
++        val project = fixture(
++            groovy = true,
++            buildTypes = """
++                debug { palbase { environment = 'main' } }
++                release { palbase { environment = 'main' } }
++                qa { initWith debug; palbase { environment = 'local' } }
++            """.trimIndent(),
++        )
++        project.environment("local")
++        project.environment("main")
++
++        project.build("generatePalbaseDebug", "generatePalbaseRelease", "generatePalbaseQa")
++
++        assertCompiled(project, "debug", "main")
++        assertCompiled(project, "release", "main")
++        assertCompiled(project, "qa", "local")
++    }
++
++    // Two COMMITTED places that disagree: refused, both named.
++    @Test
++    fun `a build type dsl that disagrees with gradle properties is refused`() {
++        val project = fixture(
++            imports = "import io.palbase.gradle.palbase",
++            buildTypes = """release { palbase { environment = "main" } }""",
++        )
++        project.environment("main")
++        project.environment("prod")
++        project.root.resolve("gradle.properties").write("palbase.env.release=prod\n")
++
++        val failure = project.buildAndFail("generatePalbaseRelease").output
++
++        assertTrue(failure.contains("palbase { environment = \"main\" }"), failure)
++        assertTrue(failure.contains("palbase.env.release=prod"), failure)
++    }
++
++    // A build type is its own environment — and a missing one is REFUSED, saying
++    // where the name came from, never substituted.
++    @Test
++    fun `a custom build type compiles its namesake and refuses a missing one`() {
++        val project = fixture(
++            buildTypes = """
++                create("featureX") { initWith(getByName("debug")) }
++                create("qa") { initWith(getByName("debug")) }
++            """.trimIndent(),
++        )
++        project.environment("local")
++        project.environment("featureX")
++
++        val built = project.build("generatePalbaseFeatureX")
++        assertCompiled(project, "featureX", "featureX")
++        assertTrue(built.output.contains("Palbase: featureX → featureX (from the build type name)"), built.output)
++
++        val failure = project.buildAndFail("generatePalbaseQa").output
++        assertTrue(failure.contains("environment `qa` (from the build type name) has no directory"), failure)
++        assertTrue(failure.contains("palbase/environments/qa"), failure)
++        assertTrue(failure.contains("featureX, local"), failure)
++    }
++
++    // THE NAME, EXACTLY: `Main` is not `main`, even on a file system that says it is.
++    @Test
++    fun `an environment is matched by its exact name`() {
++        val project = fixture()
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env.release=Main\n")
++
++        val failure = project.buildAndFail("generatePalbaseRelease").output
++
++        assertTrue(failure.contains("environment `Main`"), failure)
++        assertFalse(project.hasGeneratedFile("palbase-config.json"))
++    }
++
++    // The baseline-profile plugin's build type measures RELEASE, so it compiles
++    // release's stack instead of a `benchmarkRelease` environment nobody has.
++    @Test
++    fun `a benchmark build type compiles the environment of the build it measures`() {
++        val project = fixture(
++            buildTypes = """create("benchmarkRelease") { initWith(getByName("release")) }""",
++        )
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env.release=main\n")
++
++        val result = project.build("generatePalbaseBenchmarkRelease")
++
++        assertCompiled(project, "benchmarkRelease", "main")
++        assertTrue(result.output.contains("as `benchmarkRelease` builds as `release`"), result.output)
++    }
++
++    @Test
++    fun `an environment that is not one directory name is refused`() {
++        val project = fixture()
++        project.environment("main")
++        project.root.resolve("gradle.properties").write("palbase.env.release=../main\n")
++
++        val failure = project.buildAndFail("generatePalbaseRelease").output
++
++        assertTrue(failure.contains("environment `../main` (palbase.env.release in gradle.properties)"), failure)
++    }
++
+     /** Two environments that differ in BOTH artifacts, so the selection is measurable from either one. */
+     private fun twoEnvironments(): Fixture {
+         val project = fixture()
+@@ -415,7 +715,23 @@ class PalbaseCodegenPluginTest {
+         return project
+     }
+ 
+-    private fun fixture(openApi: Boolean = false, config: Boolean = false, roles: Boolean = false): Fixture {
++    /**
++     * @param module null puts the app in the ROOT project; a name puts it in that
++     *   subproject, with the checkout root one level up — the layout `palbase link`
++     *   writes into.
++     * @param buildTypes Kotlin DSL placed inside `android { buildTypes { … } }`.
++     * @param imports lines placed above `plugins { }`.
++     * @param groovy writes `build.gradle` instead, with [buildTypes] in Groovy.
++     */
++    private fun fixture(
++        openApi: Boolean = false,
++        config: Boolean = false,
++        roles: Boolean = false,
++        module: String? = null,
++        buildTypes: String = "",
++        imports: String = "",
++        groovy: Boolean = false,
++    ): Fixture {
+         val root = Files.createTempDirectory(tempDir, "fixture-")
+         root.resolve("settings.gradle.kts").write(
+             """
+@@ -425,46 +741,20 @@ class PalbaseCodegenPluginTest {
+                 repositories { google(); mavenCentral() }
+             }
+             rootProject.name = "codegen-fixture"
+-            """.trimIndent(),
+-        )
+-        root.resolve("build.gradle.kts").write(
+-            """
+-            plugins {
+-                id("com.android.application")
+-                id("org.jetbrains.kotlin.android")
+-                id("org.jetbrains.kotlin.plugin.serialization")
+-                id("io.palbase.codegen")
+-            }
+-
+-            android {
+-                namespace = "test.fixture"
+-                compileSdk = 36
+-                defaultConfig { applicationId = "test.fixture"; minSdk = 26 }
+-                compileOptions {
+-                    sourceCompatibility = JavaVersion.VERSION_17
+-                    targetCompatibility = JavaVersion.VERSION_17
+-                }
+-            }
+-
+-            kotlin {
+-                compilerOptions {
+-                    jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+-                }
+-            }
+-
+-            palbase { packageName.set("io.palbase.generated") }
+-
+-            dependencies {
+-                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+-            }
+-            """.trimIndent(),
++            """.trimIndent() + module?.let { "\ninclude(\":$it\")" }.orEmpty(),
+         )
+-        root.resolve("src/main/AndroidManifest.xml").write("<manifest />")
+-        root.resolve("src/main/kotlin/io/palbase/PalbaseClient.kt").write(PALBASE_STUB)
+-        root.resolve("src/main/kotlin/io/palbase/backend/GeneratedStubs.kt").write(BACKEND_STUB)
+-        val fixture = Fixture(root)
++        val app = module?.let(root::resolve) ?: root
++        if (groovy) {
++            app.resolve("build.gradle").write(groovyBuildScript(buildTypes))
++        } else {
++            app.resolve("build.gradle.kts").write(kotlinBuildScript(buildTypes, imports))
++        }
++        app.resolve("src/main/AndroidManifest.xml").write("<manifest />")
++        app.resolve("src/main/kotlin/io/palbase/PalbaseClient.kt").write(PALBASE_STUB)
++        app.resolve("src/main/kotlin/io/palbase/backend/GeneratedStubs.kt").write(BACKEND_STUB)
++        val fixture = Fixture(root, app)
+         if (openApi && config) {
+-            root.resolve("src/main/kotlin/test/fixture/GeneratedUsage.kt").write(GENERATED_USAGE)
++            app.resolve("src/main/kotlin/test/fixture/GeneratedUsage.kt").write(GENERATED_USAGE)
+         }
+         if (openApi) {
+             fixture.environmentFile("local", "openapi.json")
+@@ -474,28 +764,111 @@ class PalbaseCodegenPluginTest {
+         if (roles) {
+             // Compiled, never run: the generated enums have to be usable from
+             // app code, or the whole point — a typo is a compile error — is lost.
+-            root.resolve("src/main/kotlin/test/fixture/RolesUsage.kt").write(ROLES_USAGE)
++            app.resolve("src/main/kotlin/test/fixture/RolesUsage.kt").write(ROLES_USAGE)
+         }
+         return fixture
+     }
+ 
+-    private data class Fixture(val root: Path) {
++    private fun kotlinBuildScript(buildTypes: String, imports: String) = imports + "\n" + """
++        plugins {
++            id("com.android.application")
++            id("org.jetbrains.kotlin.android")
++            id("org.jetbrains.kotlin.plugin.serialization")
++            id("io.palbase.codegen")
++        }
++
++        android {
++            namespace = "test.fixture"
++            compileSdk = 36
++            defaultConfig { applicationId = "test.fixture"; minSdk = 26 }
++            compileOptions {
++                sourceCompatibility = JavaVersion.VERSION_17
++                targetCompatibility = JavaVersion.VERSION_17
++            }
++            buildTypes {
++        """.trimIndent() + "\n" + buildTypes + "\n" + """
++            }
++        }
++
++        kotlin {
++            compilerOptions {
++                jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
++            }
++        }
++
++        palbase { packageName.set("io.palbase.generated") }
++
++        dependencies {
++            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
++        }
++        """.trimIndent()
++
++    private fun groovyBuildScript(buildTypes: String) = """
++        plugins {
++            id 'com.android.application'
++            id 'org.jetbrains.kotlin.android'
++            id 'org.jetbrains.kotlin.plugin.serialization'
++            id 'io.palbase.codegen'
++        }
++
++        android {
++            namespace 'test.fixture'
++            compileSdk 36
++            defaultConfig { applicationId 'test.fixture'; minSdk 26 }
++            compileOptions {
++                sourceCompatibility JavaVersion.VERSION_17
++                targetCompatibility JavaVersion.VERSION_17
++            }
++            buildTypes {
++        """.trimIndent() + "\n" + buildTypes + "\n" + """
++            }
++        }
++
++        kotlin {
++            compilerOptions {
++                jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
++            }
++        }
++
++        dependencies {
++            implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3'
++        }
++        """.trimIndent()
++
++    /** [root] is the checkout (where the build runs); [app] is the module carrying the Android app. */
++    private data class Fixture(val root: Path, val app: Path = root) {
+         fun build(vararg arguments: String) = runner(*arguments).build()
+         fun buildAndFail(vararg arguments: String) = runner(*arguments).buildAndFail()
+ 
+-        /** `palbase/environments/<env>/<name>` — the one place an environment's artifacts live. */
++        /** `palbase/environments/<env>/<name>` in the APP MODULE — the one place an environment's artifacts live. */
+         fun environmentFile(environment: String, name: String): Path =
+-            root.resolve("palbase/environments/$environment/$name")
++            app.resolve("palbase/environments/$environment/$name")
++
++        /**
++         * One complete environment under `<base>/palbase/environments/<name>/`, its
++         * config naming a stack of its own — `<name>1234m.dev.palbase.studio` — so
++         * which environment a variant compiled is readable from its asset.
++         */
++        fun environment(name: String, base: Path = app, openApi: String = OPEN_API) {
++            base.resolve("palbase/environments/$name/openapi.json").write(openApi)
++            base.resolve("palbase/environments/$name/android-config.json").write(configFor(stackOf(name)))
++        }
++
++        /** The packed runtime config of ONE variant. */
++        fun asset(variant: String): String {
++            val task = "generatePalbase" + variant.replaceFirstChar { it.uppercase() }
++            return app.resolve("build/generated/assets/$task/palbase/palbase-config.json").toFile().readText()
++        }
+ 
+         fun hasGeneratedFile(name: String): Boolean {
+-            val generated = root.resolve("build/generated")
++            val generated = app.resolve("build/generated")
+             if (!Files.isDirectory(generated)) return false
+             return Files.walk(generated).use { files ->
+                 files.anyMatch { it.fileName.toString() == name && it.toFile().isFile }
+             }
+         }
+ 
+-        fun generatedFile(name: String) = Files.walk(root.resolve("build/generated")).use { files ->
++        fun generatedFile(name: String) = Files.walk(app.resolve("build/generated")).use { files ->
+             files.filter { it.fileName.toString() == name && it.toFile().isFile }
+                 .findFirst()
+                 .orElseThrow()
+@@ -508,12 +881,20 @@ class PalbaseCodegenPluginTest {
+             .withPluginClasspath()
+     }
+ 
+-    private fun Path.write(content: String) {
+-        parent?.let(Files::createDirectories)
+-        Files.writeString(this, content)
+-    }
+-
+     private companion object {
++        fun Path.write(content: String) {
++            parent?.let(Files::createDirectories)
++            Files.writeString(this, content)
++        }
++
++        /** The stack an environment's config names: `main` → `main1234m`. */
++        fun stackOf(environment: String) = environment.lowercase().filter { it.isLetterOrDigit() } + "1234m"
++
++        fun assertCompiled(project: Fixture, variant: String, environment: String) {
++            val asset = project.asset(variant)
++            assertTrue(asset.contains("${stackOf(environment)}.dev.palbase.studio"), "$variant compiled $asset")
++        }
++
+         /** One environment's config, differing only in the stack it names. */
+         fun configFor(reference: String): String = """
+             {
+-- 
+2.50.1 (Apple Git-155)
+

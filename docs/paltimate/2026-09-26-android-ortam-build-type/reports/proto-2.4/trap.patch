@@ -1,0 +1,63 @@
+diff --git a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt
+index 3ff18b5..fb0d584 100644
+--- a/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt
++++ b/codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt
+@@ -1,5 +1,6 @@
+ package io.palbase.gradle
+ 
++import org.gradle.api.GradleException
+ import org.gradle.api.file.DirectoryProperty
+ import org.gradle.api.provider.Property
+ 
+@@ -19,4 +20,22 @@ abstract class PalbaseExtension {
+     abstract val environmentsDir: DirectoryProperty
+ 
+     abstract val packageName: Property<String>
++
++    /**
++     * A TRAP, NOT A SETTING. In the Kotlin DSL a `palbase { }` written inside a
++     * build type WITHOUT `import io.palbase.gradle.palbase` binds to THIS
++     * (project-level) block. Declaring `environment` here turns that mistake into
++     * a compile error that names the fix; Groovy, which ignores Kotlin
++     * deprecation, hits the throwing setter instead.
++     */
++    @Deprecated(ENVIRONMENT_TRAP, level = DeprecationLevel.ERROR)
++    var environment: String?
++        get() = throw GradleException(ENVIRONMENT_TRAP)
++        set(@Suppress("UNUSED_PARAMETER") value) = throw GradleException(ENVIRONMENT_TRAP)
+ }
++
++internal const val ENVIRONMENT_TRAP =
++    "Palbase: the environment is chosen PER BUILD TYPE, not in the project-level `palbase { }` block. " +
++        "Write `palbase { environment = \"<env>\" }` INSIDE the build type and, in a .kts script, add " +
++        "`import io.palbase.gradle.palbase` at the top of the file (without it, `palbase { }` inside a build " +
++        "type is this project-level block) — or set `palbase.env.<buildType>=<env>` in gradle.properties."
+diff --git a/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt b/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
+index bebb846..3b48d3f 100644
+--- a/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
++++ b/codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt
+@@ -583,10 +583,23 @@ class PalbaseCodegenPluginTest {
+         val failure = project.buildAndFail("generatePalbaseRelease").output
+ 
+         assertTrue(failure.contains("Script compilation error"), failure)
+-        assertTrue(failure.contains("environment("), failure)
++        assertTrue(failure.contains("import io.palbase.gradle.palbase"), failure)
+         assertFalse(project.hasGeneratedFile("palbase-config.json"))
+     }
+ 
++    // TRAP, Groovy: the project-level block has no real `environment`; setting it
++    // there fails with the same guidance instead of "unknown property".
++    @Test
++    fun `the Groovy project level environment is refused with guidance`() {
++        val project = fixture(groovy = true, buildTypes = "")
++        project.app.resolve("build.gradle").append("\npalbase { environment = 'main' }\n")
++        project.environment("main")
++
++        val failure = project.buildAndFail("generatePalbaseDebug").output
++
++        assertTrue(failure.contains("chosen PER BUILD TYPE"), failure)
++    }
++
+     // The import-free spelling reaches the same object.
+     @Test
+     fun `the Kotlin build type extension is reachable without an import`() {
