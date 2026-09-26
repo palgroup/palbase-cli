@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **Depo ve taban:** `palbase-cli` `main`, taban `20e5d7e`; tek modül `github.com/palgroup/palbase-cli`. Scratch zinciri görev başına bir commit, T001 `e6b2fbf` … T026 `5a8310b`; taslak zinciri `draft-cli-8714d30` etiketinde.
+- **Depo ve taban:** `palbase-cli` `main`, taban `20e5d7e`; tek modül `github.com/palgroup/palbase-cli`. Scratch zinciri görev başına bir commit, T001 `e6b2fbf` … T026 `327a941` (D-025 sonrası; `reports/bundles/cli-plan.bundle`); taslak zinciri `draft-cli-8714d30` etiketinde.
 - **Go:** `go.mod` `go 1.26.6`; bu makinede Go 1.27.1 (`/opt/homebrew/bin/go`), derleme ve test için yeterli.
 - **Lint:** golangci-lint v2.12.2 kurulu değil; `GOTOOLCHAIN=go1.26.6 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...` → `0 issues.` (Dalga 1 sonunda ve son kapıda ölçüldü).
 - **CI kapıları** (`.github/workflows/ci.yml`; ubuntu-latest, Go 1.26.6, bun 1.3.9): `go build ./...` · `gofmt -l .` boş · `go vet ./...` · `go vet -tags e2e ./tests/e2e/` · golangci-lint v2.12.2 · `go test -race`.
@@ -25,7 +25,7 @@
 - **Android sabitleri (T023):** `palbaseAndroidVersion = "2.4.0"`, `palbaseAndroidRepository = "https://palgroup.github.io/palbackend-android/"`. Plugin'in desteklediği aralık AGP 8.10.1+, Gradle 8.11.1+, JDK 17+ (FR-212, plan-plugin). Bu planda Android build'i yok; `JAVA_HOME`/`ANDROID_HOME` gerekmez.
 - **Dilbilgisi (D-008, onaylı):** `envname.SlugPattern = ^[A-Za-z][A-Za-z0-9-]{0,38}$` CLI'daki tek yer; sunucudaki `ENVIRONMENT_SLUG_PATTERN` aynı metni taşır.
 - **Ad kuralları tek pakette (`internal/envname`, yaprak):** `CheckDir` (gevşek; link/spec), `CheckSlug` (sıkı; `env create`), `SameDirectory` (APFS'in tek dizin saydığı adlar), `Label` (terminal).
-- **Kararlar:** D-008, D-014, D-023 kararlaştırıldı; KOŞULLU görev yok. Önerilen yeni kararlar D-024, D-025 ve D-026 (Fidelity Audit) lead onayı bekliyor.
+- **Kararlar:** D-008, D-014, D-023 kararlaştırıldı; KOŞULLU görev yok. D-024, D-025 ve D-026 `decisions.md`'ye kaydedildi (D-025 ile T019 daraldı; D-026 ile T019 Dalga 2'de).
 - **Diskler:** testler macOS'un varsayılan APFS'inde koşar; bu disk harf büyüklüğüne ve Unicode biçimine duyarsızdır. Duyarlı disk ölçümü üç adımda yapılır: `hdiutil create -size 300m -fs "Case-sensitive APFS" -volname revcs -type SPARSE cs.sparseimage`, ardından `hdiutil attach -nobrowse -mountpoint <dir> cs.sparseimage`, ardından `TMPDIR=<dir>/tmp go test …`. İş bitince `hdiutil detach <dir>`.
 - **Test dosyası adları:** `_android_test.go` ya da `_windows_test.go` ile biten bir dosya yalnız o GOOS için derlenir, kullanılmaz (T001, T020, T022).
 - **Yasaklar:** bulut çağrısı yok, `palbase login` yok, yayın yok; `gradle --stop` yok; Java, Gradle ve Docker süreçleri durdurulmaz.
