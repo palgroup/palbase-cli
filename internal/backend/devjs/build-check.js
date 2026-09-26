@@ -199,9 +199,9 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
   const inferencePath = path.join(RUNTIME_MODULES, '@palbase/backend/stager/inferred_returns.js');
   const inferReturn = fs.existsSync(inferencePath)
     ? require(inferencePath).createReturnInference(PROJECT_ROOT) : undefined;
-  // The graph an `abstract class` port resolves against — the same modules the
-  // container builds from (palbase-ts#62). Walked once, not per controller.
-  const modules = moduleFiles(PROJECT_ROOT);
+  // One analysis over the whole project: it reads the module graph itself, so
+  // no driver can hand it a partial one.
+  const throws = throwAnalysis.createThrowAnalysis(srcDir);
   for (const file of walk(srcDir)) {
     const rel = path.relative(srcDir, file);
     const dest = path.join(stageDir, rel);
@@ -213,18 +213,9 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
       const src = fs.readFileSync(file, 'utf8');
       let out = returnTypes.injectReturnBindings(src, file, inferReturn);
       // Throw inference runs AFTER return bindings, against the controller's
-      // REAL path so `../services` / `../models` imports resolve in the real
-      // project tree (mirrors the deploy stager). Only the defineError
-      // non-literal violation can throw (surfaced loudly like a return-type
-      // violation).
-      out = throwAnalysis.injectThrowBindings(out, file, {
-        readFile: (p) => {
-          try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
-        },
-        fileExists: (p) => fs.existsSync(p),
-        projectRoot: PROJECT_ROOT,
-        moduleFiles: modules,
-      });
+      // REAL path (mirrors the deploy stager). A violation it cannot type
+      // stops the build like a return-type violation.
+      out = throwAnalysis.injectThrowBindings(out, file, throws);
       // THE APPLICATION RING OF THE CASCADE HAS TO BE EVALUATED TO EXIST.
       //
       // `defineDefaultAuth` is a call at module scope, and nothing in a project
@@ -244,6 +235,9 @@ function stageControllersWithReturnBindings(srcDir, stageDir) {
       fs.copyFileSync(file, dest);
     }
   }
+  // A throw whose code is decided at runtime cannot be typed for any client;
+  // the analysis leaves it out and says where, the same as a push would.
+  for (const w of throws.warnings()) log(`warning: ${w}`);
   return stageDir;
 }
 
@@ -597,34 +591,6 @@ function deriveControllerName(Ctrl) {
 }
 
 
-/**
- * Every `*.module.ts` in the tree — the same walk `moduleSources` does in Go,
- * and for the same reason: a module lives beside the domain it owns, not in a
- * directory this tool names.
- */
-function moduleFiles(root) {
-  const out = [];
-  const skip = new Set(['node_modules', 'dist', '.git']);
-  const walk = (dir) => {
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (e.isDirectory()) {
-        if (skip.has(e.name) || e.name.startsWith('.palbase')) continue;
-        walk(path.join(dir, e.name));
-      } else if (e.name.endsWith('.module.ts')) {
-        out.push(path.join(dir, e.name));
-      }
-    }
-  };
-  walk(root);
-  return out;
-}
-
 // registerControllers stages, bundles and loads every controller, filling the
 // route table. Returns { sawControllerFiles, staleSDKSignature, routeCount,
 // skipped[], buildError? } — a skipped controller or a buildError is a deploy
@@ -683,7 +649,8 @@ function registerControllers() {
     // A bundle error (syntax error, unresolved import) OR a return-type
     // violation must be LOUD — otherwise the dir scan below finds nothing and
     // silently registers 0 routes.
-    const msg = err instanceof returnTypes.ReturnTypeError ? err.message : esbuildErr(err);
+    const msg = err instanceof returnTypes.ReturnTypeError || err instanceof throwAnalysis.ThrowAnalysisError
+      ? err.message : esbuildErr(err);
     log(`module bundle failed — ${msg}`);
     return { sawControllerFiles: false, staleSDKSignature: false, routeCount: 0, skipped, buildError: msg };
   }

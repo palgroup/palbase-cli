@@ -1598,6 +1598,10 @@ function walk(dir) {
   return out;
 }
 
+// One analysis over the whole project: it reads the module graph itself — this
+// driver used to hand it none, and every error behind a port fell out of the
+// deployed contract.
+const throws = throwAnalysis.createThrowAnalysis(projectRoot);
 let injected = 0;
 for (const file of walk(srcDir)) {
   const rel = path.relative(srcDir, file);
@@ -1605,17 +1609,14 @@ for (const file of walk(srcDir)) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   if (/\.controller\.(c?ts|tsx)$/i.test(path.basename(file))) {
     let out = returnTypes.injectReturnBindings(fs.readFileSync(file, 'utf8'), file, inferReturn);
-    out = throwAnalysis.injectThrowBindings(out, file, {
-      readFile: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
-      fileExists: (p) => fs.existsSync(p),
-      projectRoot,
-    });
+    out = throwAnalysis.injectThrowBindings(out, file, throws);
     fs.writeFileSync(dest, out);
     injected += 1;
   } else {
     fs.copyFileSync(file, dest);
   }
 }
+for (const w of throws.warnings()) console.log('warning: ' + w);
 console.log('typed ' + injected + ' controller file(s) from their return types');
 `
 

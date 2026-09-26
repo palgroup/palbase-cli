@@ -238,7 +238,6 @@ test('parser guard: a TypeScript 7 surface produces an actionable error, not a T
 
 test('parser guard: a missing typescript produces the same actionable error', () => {
   const returnTypes = require('./return_types.js');
-  const throwAnalysis = require('./throw_analysis.js');
   withFakeTypescript(
     () => {
       const e = new Error("Cannot find module 'typescript'");
@@ -254,15 +253,12 @@ test('parser guard: a missing typescript produces the same actionable error', ()
           return true;
         },
       );
-      // The throw analyzer is best-effort at the inject level (a parser problem
-      // must not fail the stage on its own — return_types already did, loudly),
-      // but its own loadTS carries the same actionable message.
+      // The throw analysis needs the compiler too, and says so the same way. A
+      // fresh copy: an earlier test in this process already loaded the real one.
+      delete require.cache[require.resolve('./throw_analysis.js')];
+      const freshThrowAnalysis = require('./throw_analysis.js');
       assert.throws(
-        () => throwAnalysis.analyzeThrows(CtrlSrc, '/tmp/todos.controller.ts', {
-          readFile: () => null,
-          fileExists: () => false,
-          projectRoot: '/tmp',
-        }),
+        () => freshThrowAnalysis.createThrowAnalysis(os.tmpdir()),
         /TypeScript 5 compiler API/,
       );
     },

@@ -187,20 +187,8 @@ async function main() {
       );
     }
 
-    // SDK error registry (typed backend errors): defineError(...) calls in the
-    // just-required bundle registered into the SDK's project-global registry
-    // (@palbase/backend is EXTERNAL in the bundle, so registration landed on
-    // the shared instance NODE_PATH resolves). Reading it through
-    // getErrorRegistry() also pre-seeds the built-ins (NotFound/Conflict/…).
-    //
-    // INTEGRATION SEAM (Phase A): getErrorRegistry ships with the defineError
-    // SDK release. Until the pod's vendored SDK carries it, the registry is
-    // empty here and route.throws simply doesn't lower into `errors` — clients
-    // degrade to `.other`, extraction never breaks.
-    const errorRegistry = loadErrorRegistry();
-
     try {
-      return writeResult(extractControllerMeta(Ctrl, zodToJSON, errorRegistry));
+      return writeResult(extractControllerMeta(Ctrl, zodToJSON));
     } catch (e) {
       if (e instanceof ExtractError) return writeError(e.message);
       throw e;
@@ -208,47 +196,6 @@ async function main() {
   } catch (err) {
     writeError('Failed to extract metadata: ' + err.message);
   }
-}
-
-// loadErrorRegistry resolves the SDK's project-global error registry
-// (Map<code, {code, status, className, dataSchema?, builtin}>) via
-// require("@palbase/backend").getErrorRegistry(). Returns an EMPTY Map when
-// the SDK (or the export) is unavailable — see the seam note in main().
-function loadErrorRegistry() {
-  try {
-    const sdk = require('@palbase/backend');
-    if (sdk && typeof sdk.getErrorRegistry === 'function') {
-      const reg = sdk.getErrorRegistry();
-      if (reg && typeof reg.get === 'function') return reg;
-    }
-  } catch {
-    // SDK not resolvable from this process — registry stays empty.
-  }
-  return new Map();
-}
-
-// lowerRouteErrors joins a route's inferred throw descriptors ({name, code} —
-// stamped by the staged recordThrows IIFEs) against the error registry by
-// code, lowering each into the sidecar shape
-// { name, code, status, hasData, dataJsonSchema? }. Codes the registry doesn't
-// know are SKIPPED silently (the runtime guard surfaces them at first
-// occurrence); the data schema uses the SAME zodToJSON as response schemas.
-function lowerRouteErrors(throwsList, registry, zodToJSON) {
-  if (!Array.isArray(throwsList)) return [];
-  const out = [];
-  for (const t of throwsList) {
-    if (!t || typeof t.name !== 'string' || typeof t.code !== 'string') continue;
-    const entry = registry.get(t.code);
-    if (!entry || typeof entry.status !== 'number') continue;
-    const hasData = Boolean(entry.dataSchema);
-    const lowered = { name: t.name, code: t.code, status: entry.status, hasData };
-    if (hasData) {
-      const dataJsonSchema = zodToJSON(entry.dataSchema);
-      if (dataJsonSchema) lowered.dataJsonSchema = dataJsonSchema;
-    }
-    out.push(lowered);
-  }
-  return out;
 }
 
 // normalizeAuth resolves the effective auth value (the controller→route cascade
@@ -417,7 +364,7 @@ function deriveControllerName(Ctrl) {
 }
 
 // extractControllerMeta lowers a @Controller class into the sidecar contract.
-function extractControllerMeta(Ctrl, zodToJSON, errorRegistry) {
+function extractControllerMeta(Ctrl, zodToJSON) {
   const controllerMeta = Ctrl[CONTROLLER_META_SYMBOL] || {};
   const basePath = typeof controllerMeta.basePath === 'string' ? controllerMeta.basePath : '';
   const controllerName = deriveControllerName(Ctrl);
@@ -497,10 +444,6 @@ function extractControllerMeta(Ctrl, zodToJSON, errorRegistry) {
     const paramsSchema = synthParamsSchema(params);
     const outputSchema = route.returnSchema ? zodToJSON(route.returnSchema) : null;
 
-    // Inferred errors (typed backend errors): route.throws joined against the
-    // registry; omitted entirely when nothing resolved.
-    const errors = lowerRouteErrors(route.throws, errorRegistry || new Map(), zodToJSON);
-
     routes.push({
       mapKey: fnName,
       method,
@@ -512,7 +455,6 @@ function extractControllerMeta(Ctrl, zodToJSON, errorRegistry) {
       paramsSchema,
       headersSchema,
       outputSchema,
-      ...(errors.length > 0 ? { errors } : {}),
       // Direct-storage upload config (@Upload). Present ONLY on upload routes;
       // omitted entirely otherwise so a normal route's sidecar is unchanged.
       ...((u) => (u ? { upload: u } : {}))(extractUploadConfig(options.uploadConfig)),
