@@ -92,6 +92,9 @@ type Tenant struct {
 	Ref   string  `json:"ref"`
 	Name  *string `json:"name"`
 	Phase string  `json:"phase"`
+	// ProductID is the panel's project (`proj_…`) — plan, cost and invoices are
+	// asked with it. The control plane returns it when the project is created.
+	ProductID string `json:"productId,omitempty"`
 }
 
 func (t Tenant) displayName() string {
@@ -128,7 +131,7 @@ func Cmd(r Resolvers) *cobra.Command {
 }
 
 func createCmd(r Resolvers) *cobra.Command {
-	var tier string
+	var tier, externalID string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "create <name>",
@@ -137,16 +140,30 @@ func createCmd(r Resolvers) *cobra.Command {
 		Long: `Create a project on the Palbase cloud.
 
 Provisioning is synchronous: the command returns once the first environment
-answers, and the command it prints last links a checkout to the project.`,
+answers, and the command it prints last links a checkout to the project.
+
+The plan belongs to the project: free, pro (€25/month) or scale (€599/month).
+A paid plan needs a payment method on the organization and is charged when the
+project is created; the base includes one environment's compute, further
+environments and usage above the project's quota are billed at period end.
+
+The organization is not chosen here: a token bound to an organization creates
+the project in it, any other session in your personal organization.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var p Tenant
 			body := map[string]any{"name": args[0], "tier": tier}
+			if externalID != "" {
+				body["externalId"] = externalID
+			}
 			if err := r.REST().Do(cmd.Context(), http.MethodPost, "/v1/cloud/projects", body, &p); err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
 			if !jsonOut {
 				fmt.Fprintf(out, "Created %s — %s (%s)\n", p.displayName(), p.Ref, p.Phase)
+				if p.ProductID != "" {
+					fmt.Fprintf(out, "Project id: %s\n", p.ProductID)
+				}
 			}
 			if err := WaitUntilReachable(cmd.Context(), r.REST(), p.Ref, cmd.ErrOrStderr()); err != nil {
 				return err
@@ -158,7 +175,8 @@ answers, and the command it prints last links a checkout to the project.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "free", "capacity tier for the new project")
+	cmd.Flags().StringVar(&tier, "tier", "free", "the project's plan: free, pro or scale")
+	cmd.Flags().StringVar(&externalID, "external-id", "", "your own customer id for this project, unique in the organization")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON")
 	return cmd
 }

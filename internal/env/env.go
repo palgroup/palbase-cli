@@ -199,8 +199,9 @@ func createCmd(r Resolvers) *cobra.Command {
 		Long: `Add an environment to the project this checkout is linked to.
 
 An environment is a tenant of its own: its own microVM, its own database, its
-own keys. It bills for what it uses out of the organisation's pooled quota, so
-this command prints that consequence before it asks.`,
+own keys. It runs on the project's plan envelope. The plan includes one
+environment's compute; every further environment is billed per hour at the
+plan's rate, so this command prints that consequence before it asks.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := linkedProject(cmd, r)
 			if err != nil {
@@ -217,18 +218,17 @@ this command prints that consequence before it asks.`,
 			// consequence would drop exactly the thing that justified leaving
 			// it out.
 			fmt.Fprintf(out, "This creates a new environment %q under %s.\n", name, p.Name)
-			// THE ENVELOPE IS NOT THIS COMMAND'S DECISION when nobody names one.
-			// The control plane owns the plan catalogue and picks the smallest
-			// envelope the organisation's plan allows; a constant here would be
-			// a policy this side does not own, and it would silently detach the
-			// day that catalogue's order changes.
-			envelope := "your plan's smallest allowed (chosen by the control plane)"
+			// THE ENVELOPE IS THE PROJECT'S PLAN, not this command's decision.
+			// The plan belongs to the project (c2): every environment runs on
+			// the plan's envelope and the control plane refuses any other. A
+			// constant here would be a policy this side does not own.
+			envelope := "the project's plan"
 			if tier != "" {
-				envelope = tier
+				envelope = tier + " (must be the project's plan)"
 			}
 			fmt.Fprintf(out, "  compute envelope   %s\n", envelope)
-			fmt.Fprintln(out, "  billing            its own microVM and disk; it draws on your")
-			fmt.Fprintln(out, "                     organisation's pooled quota from the moment it runs")
+			fmt.Fprintln(out, "  billing            the plan includes one environment's compute; this")
+			fmt.Fprintln(out, "                     one is billed per hour at the plan's rate while it runs")
 			if !yes {
 				fmt.Fprint(out, "Type the name to confirm: ")
 				var typed string
@@ -270,7 +270,7 @@ this command prints that consequence before it asks.`,
 		},
 	}
 	cmd.Flags().StringVar(&tier, "tier", "",
-		"compute envelope for the new environment (default: the smallest your plan allows)")
+		"compute envelope for the new environment; must be the project's plan (default: the plan's)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
 }

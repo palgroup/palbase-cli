@@ -228,7 +228,11 @@ func TestCreateNamesTheCostAndAsksFirst(t *testing.T) {
 	require.Contains(t, out, "staging2")
 	require.Contains(t, strings.ToLower(out), "billing",
 		"the billing consequence was not printed before the question")
-	require.Contains(t, strings.ToLower(out), "quota")
+	// c2: the plan is the project's and includes ONE environment's compute; a
+	// further environment costs its hours at the plan's rate. That is the
+	// consequence a person must read before typing the name.
+	require.Contains(t, strings.ToLower(out), "per hour",
+		"the extra environment's hourly billing was not named before the question")
 	// THE ENVELOPE LINE MUST SAY SOMETHING. Printing the label with an empty
 	// value is worse than not printing it: the line exists so a person sees
 	// what they will be billed for, and a blank reads as "nothing".

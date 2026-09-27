@@ -575,3 +575,42 @@ func TestStatusSaysWhetherTheEnvironmentAnswers(t *testing.T) {
 		}
 	}
 }
+
+// THE PLAN AND THE CUSTOMER ID TRAVEL — a reseller creates its customer's
+// project on a plan, under its own customer id, and needs the project id back
+// to ask for that project's cost. The organization is the token's, never a flag.
+func TestCreateCarriesThePlanAndTheExternalId(t *testing.T) {
+	rest := &routeREST{
+		created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running", ProductID: "proj_shop"},
+		rows:    []Project{{ID: "proj_shop", Name: "shop"}},
+	}
+	out, err := run(t, routed(rest), "", "create", "shop", "--tier", "pro", "--external-id", "cust-42")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sent, _ := rest.sent.(map[string]any)
+	if sent["tier"] != "pro" || sent["externalId"] != "cust-42" {
+		t.Fatalf("body did not carry the plan and external id: %#v", rest.sent)
+	}
+	if _, ok := sent["organizationId"]; ok {
+		t.Fatalf("the CLI named an organization — the server resolves it from the token: %#v", sent)
+	}
+	if !strings.Contains(out, "Project id: proj_shop\n") {
+		t.Fatalf("create did not print the project id:\n%s", out)
+	}
+}
+
+// Without the flag the body stays what the published CLI always sent.
+func TestCreateSendsNoExternalIdWhenNoneIsNamed(t *testing.T) {
+	rest := &routeREST{created: Tenant{Ref: "abc123xyz", Name: named("shop"), Phase: "Running"}}
+	if _, err := run(t, routed(rest), "", "create", "shop"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sent, _ := rest.sent.(map[string]any)
+	if _, ok := sent["organizationId"]; ok {
+		t.Fatalf("an unnamed organization was sent: %#v", sent)
+	}
+	if _, ok := sent["externalId"]; ok {
+		t.Fatalf("an empty external id was sent: %#v", sent)
+	}
+}
