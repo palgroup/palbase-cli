@@ -68,6 +68,12 @@ func TestATargetKnowsWhetherItIsOnThisMachine(t *testing.T) {
 		"https://127.0.0.1",
 		"http://[::1]:8080",
 		"https://127.0.0.1:8443/",
+		// THE SAME RULE AS `link`'s (isLoopbackAddress): the whole loopback
+		// range, and a host name in any case — a stack `link` names `local` is
+		// one `palbase logs` reads here.
+		"http://127.0.0.2:54321",
+		"http://LOCALHOST:54321",
+		"http://localhost.:54321",
 	}
 	for _, u := range local {
 		if !(Target{URL: u}).OnThisMachine() {

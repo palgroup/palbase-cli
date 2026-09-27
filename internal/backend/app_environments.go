@@ -151,7 +151,7 @@ func writeEnvironmentConfig(dest string, fields appEnvironment) error {
 	if err != nil {
 		return err
 	}
-	// 0o600: it carries this environment\'s publishable key. Not a
+	// 0o600: it carries this environment's publishable key. Not a
 	// secret, but not something to widen either.
 	return os.WriteFile(dest, append(blob, '\n'), 0o600)
 }
@@ -257,6 +257,11 @@ func mergeConfigWithExisting(dest string, next appEnvironment) appEnvironment {
 const (
 	xcodeLeftover    = `Xcode compiles everything under palbase/environments, so move it aside if the build reports "Multiple commands produce"`
 	selectedLeftover = "a build that selects it still builds an environment this project no longer has, so move it aside"
+	// oldSpellingLeftover is selectedLeftover for an old spelling of an
+	// environment the project still has — the directory's name, then the one
+	// the project gives it now. The project did not lose it; a build that still
+	// selects the old spelling reads the wrong files.
+	oldSpellingLeftover = "a build that still selects %s reads these files, not %s's, so move it aside"
 )
 
 // removeStaleEnvironmentDirs deletes the directory of an environment the project
@@ -363,6 +368,7 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		// environment, so the second is left and said.
 		lost := true
 		reason := "the project no longer has that environment"
+		tail := leftover
 		switch spelled := foldedOnly(e.Name(), wanted, nil); {
 		case len(spelled) > 1:
 			continue
@@ -382,6 +388,9 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		case len(spelled) == 1:
 			lost = false
 			reason = "the project spells that environment " + envname.Label(spelled[0]) + " now"
+			if leftover == selectedLeftover {
+				tail = fmt.Sprintf(oldSpellingLeftover, envname.Label(e.Name()), envname.Label(spelled[0]))
+			}
 		}
 		// Beside `local/` itself — only a case-sensitive disk holds both —
 		// the other spelling is left: it is what a Mac clone takes for local/.
@@ -415,7 +424,7 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 				fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase "+
 					"did not write — %s\n", shownEnvDir(e.Name()), leftover)
 			} else {
-				fmt.Fprintf(w, "%s holds files Palbase did not write (%s) — %s\n", shownEnvDir(e.Name()), reason, leftover)
+				fmt.Fprintf(w, "%s holds files Palbase did not write (%s) — %s\n", shownEnvDir(e.Name()), reason, tail)
 			}
 			continue
 		}
@@ -1146,6 +1155,19 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 	return generateForEnvironmentsAt(ctx, envs, w, "")
 }
 
+// generateForEnvironmentsAt emits each environment's Swift client and plist
+// into the working directory — the checkout for `palbase spec` and `push`, the
+// stage for `link` — from the contract and Apple configs already on disk there.
+// An environment with no contract yet is passed over.
+//
+// IT SWEEPS NOTHING. Each caller sweeps first with the list it knows:
+// generateForEnvironments with the directories on disk, `link` with the
+// project's listing (runLinkPrepared).
+//
+// toolRoot is the project the SDK's generator is found from, "" meaning the
+// working directory. `link` passes the checkout: a local package's relative
+// path, `.build` and the DerivedData folder named after the project all
+// resolve from there, not from the stage.
 func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.Writer, toolRoot string) error {
 	root, err := os.Getwd()
 	if err != nil {

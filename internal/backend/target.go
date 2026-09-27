@@ -94,19 +94,13 @@ type Target struct {
 //
 // The host is PARSED, not searched for. `https://localhost.example.com` contains
 // "localhost" and is somebody else's machine.
+//
+// ONE RULE FOR "IS THIS MACHINE" (isLoopbackAddress), the one `link` and
+// `spec` name `local` by (stackEnvName). This matched three literal hosts, so
+// `http://127.0.0.2` or `http://LOCALHOST` was `local` to `link` and somebody
+// else's machine to `palbase logs`.
 func (t Target) OnThisMachine() bool {
-	if t.Local {
-		return true
-	}
-	u, err := url.Parse(t.URL)
-	if err != nil {
-		return false
-	}
-	switch u.Hostname() {
-	case "localhost", "127.0.0.1", "::1":
-		return true
-	}
-	return false
+	return t.Local || isLoopbackAddress(t.URL)
 }
 
 // Describe is what every verb prints before it acts.

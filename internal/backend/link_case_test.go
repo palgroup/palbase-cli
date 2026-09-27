@@ -430,8 +430,12 @@ func TestTheSweepSaysAnOldSpellingHoldingSomebodysFileIsOne(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "mine", string(raw))
 	require.NotContains(t, out.String(), "belongs to no environment")
+	// AND THE TAIL IS TRUE TOO (final review, Minor #10): it said a build that
+	// selects the directory "still builds an environment this project no longer
+	// has" right after saying the project has it.
 	require.Equal(t, "palbase/environments/Staging holds files Palbase did not write (the project spells that "+
-		"environment staging now) — "+selectedLeftover+"\n", out.String())
+		"environment staging now) — a build that still selects Staging reads these files, not staging's, "+
+		"so move it aside\n", out.String())
 }
 
 // A RENAME NEVER LANDS ON A SECOND DIRECTORY (T016 review) — the publish's own
