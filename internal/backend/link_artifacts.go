@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 type artifactFile struct {
@@ -462,7 +464,103 @@ func collectArtifacts(root string, mutable map[string]bool, result map[string]ar
 	})
 }
 
+// publishArtifacts makes the checkout hold what the stage holds.
+//
+// A DIRECTORY RENAMED BY LETTER CASE ALONE GOES FIRST (FR-012). Publishing is
+// file by file, and a case-only rename is not a file: on a case-insensitive
+// disk `staging/openapi.json` is a path `Staging/openapi.json` already answers
+// to, so the new path read as a file that appeared during the link and the
+// whole publish was refused — measured on APFS. The directory is renamed, the
+// files it held are carried to their new paths, and publishing goes on as for
+// any other change; a publish that is refused takes the rename back.
 func publishArtifacts(root string, before, after map[string]artifactFile) error {
+	moved, undo, err := followCaseRenames(root, before, after)
+	if err != nil {
+		return err
+	}
+	if err := publishFiles(root, moved, after); err != nil {
+		if undoErr := undo(); undoErr != nil {
+			return fmt.Errorf("%w; and the directories renamed for it could not be named back: %v", err, undoErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// followCaseRenames renames each environment directory of the checkout whose
+// name the stage changed by letter case alone, and returns `before` as it reads
+// after that, with the way back.
+//
+// ONE OLD SPELLING FOR ONE NEW ONE. Two directories that fold to one name can
+// both exist only on a case-sensitive disk, and there their files publish as
+// they always did: as removals and creations.
+func followCaseRenames(root string, before, after map[string]artifactFile) (map[string]artifactFile, func() error, error) {
+	base := filepath.Join(RootDir(), envSubdir)
+	was, is := envDirsOf(base, before), envDirsOf(base, after)
+	renames := map[string]string{}
+	for old := range was {
+		if is[old] {
+			continue
+		}
+		if news := foldedOnly(old, is, was); len(news) == 1 && len(foldedOnly(news[0], was, is)) == 1 {
+			renames[old] = news[0]
+		}
+	}
+	var done []string
+	undo := func() error {
+		var errs []error
+		for _, old := range done {
+			errs = append(errs, os.Rename(filepath.Join(root, base, renames[old]), filepath.Join(root, base, old)))
+		}
+		return errors.Join(errs...)
+	}
+	for old, next := range renames {
+		// ONE STEP IS ENOUGH: os.Rename lets a name through to itself in another
+		// case when the disk says both are the same file (measured on APFS).
+		if err := os.Rename(filepath.Join(root, base, old), filepath.Join(root, base, next)); err != nil {
+			return nil, nil, errors.Join(err, undo())
+		}
+		done = append(done, old)
+	}
+	moved := make(map[string]artifactFile, len(before))
+	for path, file := range before {
+		if rest, ok := strings.CutPrefix(path, base+string(filepath.Separator)); ok {
+			if env, inside, nested := strings.Cut(rest, string(filepath.Separator)); nested && renames[env] != "" {
+				path = filepath.Join(base, renames[env], inside)
+			}
+		}
+		moved[path] = file
+	}
+	return moved, undo, nil
+}
+
+// envDirsOf names every environment directory a set of files lives in.
+func envDirsOf(base string, files map[string]artifactFile) map[string]bool {
+	dirs := map[string]bool{}
+	for path := range files {
+		if rest, ok := strings.CutPrefix(path, base+string(filepath.Separator)); ok {
+			if env, _, nested := strings.Cut(rest, string(filepath.Separator)); nested {
+				dirs[env] = true
+			}
+		}
+	}
+	return dirs
+}
+
+// foldedOnly names the entries of `in` that are `name` spelled in another
+// letter case — or another Unicode form, which APFS ignores the same way
+// (envname.SameDirectory) — and are not entries of `notIn`.
+func foldedOnly(name string, in, notIn map[string]bool) []string {
+	var out []string
+	for other := range in {
+		if other != name && !notIn[other] && envname.SameDirectory(other, name) {
+			out = append(out, other)
+		}
+	}
+	return out
+}
+
+func publishFiles(root string, before, after map[string]artifactFile) error {
 	changed := map[string]bool{}
 	for path, next := range after {
 		old, exists := before[path]
