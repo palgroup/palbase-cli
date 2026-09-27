@@ -895,10 +895,13 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// somebody asking.
 	linkedEnv := o.linkedEnv
 	if linkedEnv == "" {
-		// A stack somebody runs has ONE environment and the app knows it as
-		// `main` — see Resolved.ArtifactEnv for why that constant survives only
-		// here and not for cloud checkouts.
-		linkedEnv = soleEnvName
+		// A stack with no project has ONE environment, and it takes the name
+		// `palbase spec` gives it (stackEnvName, FR-010): `local` when it is on
+		// this machine, `main` when somebody hosts it. The start record is asked
+		// as writeLinkRecord asks it, because `palbase start --lan` records an
+		// address that is not loopback and is still this machine.
+		running, started := startRecordAt(o.checkoutRoot)
+		linkedEnv = stackEnvName(Target{URL: base, Local: started && sameStack(running.URL, base)})
 	}
 	// EVERY environment, not the one being linked. An app that holds only the
 	// environment somebody linked last is an app whose address depends on when

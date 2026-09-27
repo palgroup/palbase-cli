@@ -164,3 +164,74 @@ func TestALocalStackWithNoContractGetsNoLocalFiles(t *testing.T) {
 	assert.Contains(t, out.String(), "local: "+local.URL+" gave its key but not its contract (no contract yet: "+
 		local.URL+" has nothing to describe yet — push a backend to it first (palbase push)) "+fillLocalAdvice)
 }
+
+// ONE NAME FOR THE STACK ON THIS MACHINE, WHICHEVER VERB WRITES IT (FR-010).
+//
+// Measured on 0.71.2 in one checkout with a start record: `palbase link` wrote
+// main/android-config.json, `palbase spec` wrote local/openapi.json — the build
+// found half of each. And main/ carried a loopback address, so mapping release
+// to main shipped a release that talks to 127.0.0.1 in cleartext.
+func TestTheStackStartedHereIsLocalToLinkAndSpecAlike(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	stack, _, _ := startStackHere(t)
+
+	o := linkOpts{}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	cfg := readEnvConfig(t, localEnvName, "android")
+	assert.Equal(t, stack.URL, cfg.BaseURL)
+	assert.Equal(t, linkKeyMain, cfg.APIKey)
+	assert.NoDirExists(t, EnvDir("main"), "a stack on this machine was written as main/")
+
+	var spec strings.Builder
+	require.NoError(t, RefreshSpec(context.Background(), &spec), spec.String())
+	assert.Contains(t, spec.String(), "✓ wrote palbase/environments/local/openapi.json (")
+	assert.NoDirExists(t, EnvDir("main"))
+}
+
+// A LOOPBACK ADDRESS IS THIS MACHINE TOO, however the stack got there: linked
+// by hand (`palbase link http://localhost:54321`, the documented flow) it was
+// main/ to link and to spec alike — the same loopback main/.
+func TestALoopbackAddressIsLocalToLinkAndSpecAlike(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	t.Setenv("PALBASE_ENV", "")
+	stack := stackServing(t, linkKeyMain, nil)
+	linkedAs(t, stack.URL, "a-credential")
+
+	o := linkOpts{url: stack.URL}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	assert.Equal(t, stack.URL, readEnvConfig(t, localEnvName, "android").BaseURL)
+	assert.NoDirExists(t, EnvDir("main"), "a loopback address was written as main/")
+
+	var spec strings.Builder
+	require.NoError(t, RefreshSpec(context.Background(), &spec), spec.String())
+	assert.Contains(t, spec.String(), "✓ wrote palbase/environments/local/openapi.json (")
+	assert.NoDirExists(t, EnvDir("main"))
+}
+
+// AND NOTHING ELSE IS: a stack somebody hosts keeps `main`, a project's
+// environment keeps its own name, and a start record is this machine whatever
+// address it announces (`palbase start --lan` records the LAN one).
+func TestOnlyAStackOnThisMachineIsNamedLocal(t *testing.T) {
+	for _, c := range []struct {
+		resolved Resolved
+		want     string
+	}{
+		{Resolved{URL: "https://stack.example.com"}, "main"},
+		{Resolved{URL: "http://192.168.1.20:54321"}, "main"},
+		{Resolved{URL: "http://localhost:54321"}, localEnvName},
+		{Resolved{URL: "http://127.0.0.1:54321"}, localEnvName},
+		{Resolved{URL: "http://[::1]:54321"}, localEnvName},
+		{Resolved{Target: Target{Local: true}, URL: "http://192.168.1.20:54321"}, localEnvName},
+		{Resolved{Env: "staging", URL: "http://127.0.0.1:54321"}, "staging"},
+	} {
+		assert.Equal(t, c.want, c.resolved.ArtifactEnv(), "%+v", c.resolved)
+	}
+}

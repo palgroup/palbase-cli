@@ -93,10 +93,27 @@ func (r Resolved) Describe() string {
 // EVERYTHING — `defaultEnvName` returned "main" for every cloud checkout too,
 // so two environments shared one directory and the last link overwrote the
 // first. It survives only where it is actually true: one installation, one
-// identity, one environment.
+// identity, one environment — and that installation is not on this machine.
 func (r Resolved) ArtifactEnv() string {
 	if r.Env != "" {
 		return r.Env
+	}
+	return stackEnvName(r.Acting())
+}
+
+// stackEnvName is the directory the one environment of a stack with no project
+// takes: `local` for a stack on THIS machine — one `palbase start` runs here,
+// or any loopback address — and `main` for one somebody hosts.
+//
+// ONE ANSWER FOR EVERY VERB THAT WRITES IT (FR-010). `link` named a started
+// stack `main` while `spec` named it `local` (measured on 0.71.2: the build
+// found a config in one directory and the contract in the other), and a
+// loopback address was `main` to both — so `main/` carried 127.0.0.1, and a
+// release mapped to `main` shipped a cleartext address that exists on one
+// laptop. `link` asks this too, with the same target.
+func stackEnvName(t Target) string {
+	if t.Local || isLoopbackAddress(t.URL) {
+		return localEnvName
 	}
 	return soleEnvName
 }

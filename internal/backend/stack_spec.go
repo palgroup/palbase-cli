@@ -90,15 +90,16 @@ func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
 	// by — so a refresh updates the contract for THAT configuration and leaves
 	// the others alone. Refreshing them all would mean reaching every
 	// environment on every push, including production from a laptop.
+	// A stack on this machine is `local` here exactly as it is to `link`
+	// (stackEnvName, FR-010).
 	env := resolved.ArtifactEnv()
-	if target.Local {
-		env = localEnvName
-	}
 	// THE LINK'S GATE, BEFORE ANY NETWORK (FR-002). This writes in the real
 	// checkout, not a stage, so a name that is not one directory went straight
 	// where it pointed: `../../gradle` wrote gradle/openapi.json, `..` wrote the
 	// retired layout's marker and every later link refused the checkout.
-	if why := whyNotWritable(env, target.Local); why != "" {
+	// `local` is refused only when a PROJECT names it: an environment no project
+	// names is the stack itself, and stackEnvName put it there.
+	if why := whyNotWritable(env, resolved.Env == ""); why != "" {
 		return fmt.Errorf("environment %q (%s) cannot be written to this checkout: %s — rename it in the dashboard",
 			env, resolved.Ref, why)
 	}

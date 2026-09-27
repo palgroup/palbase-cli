@@ -144,11 +144,16 @@ func TestANoTargetLinkFollowsALoopbackInstallBeforeTheProjectRecord(t *testing.T
 	o := linkOpts{platforms: []string{"web"}}
 	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
 	assert.Equal(t, installed.URL, o.url, "a no-target link bound the project while this checkout acts on the install linked here")
+	mainBefore, err := os.ReadFile(ConfigPath("main", webPlatform)) // installStubCodegen's
+	require.NoError(t, err)
 	var out strings.Builder
 	require.NoError(t, runLink(context.Background(), o, &out), out.String())
-	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
+	raw, err := os.ReadFile(ConfigPath(localEnvName, webPlatform))
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), installed.URL)
+	mainAfter, err := os.ReadFile(ConfigPath("main", webPlatform))
+	require.NoError(t, err)
+	assert.Equal(t, string(mainBefore), string(mainAfter), "the install linked here was written as the project's main")
 	assert.NoFileExists(t, ConfigPath("staging", webPlatform))
 }
 
@@ -157,13 +162,15 @@ func TestAnAuthRefreshFollowsALoopbackInstallBeforeTheProjectRecord(t *testing.T
 	seedWebCheckout(t)
 	installStubCodegen(t, "// gen") // no npm install: the generator is the stub
 	installed := loopbackInstallOverAProject(t)
-	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
-	require.NoError(t, os.WriteFile(ConfigPath("main", webPlatform),
-		[]byte(`{"app_id":"project","base_url":"`+installed.URL+`","api_key":"`+linkKeyCanary+`"}`+"\n"), 0o600))
+	// What an earlier link of the install left: the refresh must rewrite it
+	// FROM the install, so its address starts out as some other one.
+	require.NoError(t, os.MkdirAll(EnvDir(localEnvName), 0o755))
+	require.NoError(t, os.WriteFile(ConfigPath(localEnvName, webPlatform),
+		[]byte(`{"app_id":"project","base_url":"https://stale.example","api_key":"`+linkKeyCanary+`"}`+"\n"), 0o600))
 
 	var out strings.Builder
 	require.NoError(t, RefreshLinkedClients(context.Background(), &out), out.String())
-	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
+	raw, err := os.ReadFile(ConfigPath(localEnvName, webPlatform))
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), installed.URL, "the refresh re-pointed the app at the cloud while every verb acts on the install")
 	assert.NoFileExists(t, ConfigPath("staging", webPlatform))
@@ -341,12 +348,17 @@ func TestANoTargetLinkFollowsTheStartStack(t *testing.T) {
 	o := linkOpts{platforms: []string{"web"}}
 	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
 	assert.Equal(t, stack.URL, o.url)
+	mainBefore, err := os.ReadFile(ConfigPath("main", webPlatform)) // installStubCodegen's
+	require.NoError(t, err)
 	var out strings.Builder
 	require.NoError(t, runLink(context.Background(), o, &out), out.String())
 
-	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
+	raw, err := os.ReadFile(ConfigPath(localEnvName, webPlatform))
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), stack.URL)
+	mainAfter, err := os.ReadFile(ConfigPath("main", webPlatform))
+	require.NoError(t, err)
+	assert.Equal(t, string(mainBefore), string(mainAfter), "the stack palbase start runs here was written as main/")
 	after, err := os.ReadFile(local)
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after))

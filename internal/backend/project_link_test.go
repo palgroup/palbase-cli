@@ -183,7 +183,7 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 		t.Fatalf("link: %v", err)
 	}
 
-	entry := readEnvConfig(t, "main", "ios")
+	entry := readEnvConfig(t, localEnvName, "ios")
 	// THE assertion. This file is committed and ships inside the app, so the key
 	// in it must be the one that is safe to ship.
 	if entry.APIKey != "pb_project_cPUBLISHABLE" {
@@ -200,7 +200,7 @@ func TestTheAppConfigCarriesThePUBLISHABLEKey(t *testing.T) {
 	// in the field, "project" inside the key — so the web generator refused the
 	// config outright and the iOS realtime client joined a channel nobody
 	// published to. The key is the identity; a copy is only a way to be wrong.
-	onDisk, err := os.ReadFile(ConfigPath("main", "ios"))
+	onDisk, err := os.ReadFile(ConfigPath(localEnvName, "ios"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestLinkingWithoutACredentialWritesNOTHING(t *testing.T) {
 	if err == nil {
 		t.Fatal("linking succeeded with no credential")
 	}
-	if _, statErr := os.Stat(ConfigPath("main", "ios")); statErr == nil {
+	if _, statErr := os.Stat(ConfigPath(localEnvName, "ios")); statErr == nil {
 		t.Error("a half-linked checkout was written")
 	}
 	// And the refusal names both ways to fix it.
@@ -319,12 +319,21 @@ func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// …and the project this checkout is being linked to.
+	// …and the project this checkout is being linked to. A PROJECT, not an
+	// address: a loopback address linked by hand is this machine's stack
+	// itself (FR-010), and would be the `local` this test registers above.
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
-	linkedAs(t, srv.URL, "a-credential")
+	routeEnvironments(t, map[string]string{"mainref000": srv.URL})
+	o := linkOpts{
+		url:          srv.URL,
+		platforms:    []string{"ios"},
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
 
 	var out strings.Builder
-	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
+	if err := runLink(context.Background(), o, &out); err != nil {
 		t.Fatalf("link: %v\n%s", err, out.String())
 	}
 
@@ -507,7 +516,7 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	}
 	dir, _ := os.Getwd()
 
-	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
+	raw, err := os.ReadFile(ConfigPath(localEnvName, webPlatform))
 	if err != nil {
 		t.Fatalf("no web config: %v", err)
 	}
@@ -527,7 +536,7 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	if got, _ := cfg["app_id"].(string); got == "" {
 		t.Error("app_id is empty — palbe-gen refuses the file")
 	}
-	if _, err := os.Stat(SpecPath("main")); err != nil {
+	if _, err := os.Stat(SpecPath(localEnvName)); err != nil {
 		t.Errorf("palbe-gen's contract input is missing: %v", err)
 	}
 	// NOTHING OF THE RETIRED LAYOUT, measured by content — `palbase` and
@@ -538,10 +547,10 @@ func TestLinkingForWebWritesTheWebGeneratorsInputs(t *testing.T) {
 	// AND NO APPLE PRODUCTS. The environment directory is REQUIRED now — it is
 	// where the web client is generated — so the thing to check is that this
 	// link produced no Swift client and no bundled plist for it.
-	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(GeneratedPath("main", "ios")))); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(GeneratedPath(localEnvName, "ios")))); err == nil {
 		t.Error("a web link produced the Swift client")
 	}
-	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(PlistPath("main")))); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(PlistPath(localEnvName)))); err == nil {
 		t.Error("a web link produced the Apple bundle plist")
 	}
 	// …and it DID produce the one line the application imports.
@@ -578,10 +587,10 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 
 	// A config from the cloud path, carrying both a field this path cannot
 	// produce and the removed one.
-	if err := os.MkdirAll(EnvDir("main"), 0o755); err != nil {
+	if err := os.MkdirAll(EnvDir(localEnvName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(ConfigPath("main", webPlatform), []byte(
+	if err := os.WriteFile(ConfigPath(localEnvName, webPlatform), []byte(
 		`{"app_id":"app_real","base_url":"https://old.example","api_key":"pb_old_c01234567890123456789",`+
 			`"environment_ref":"deadenv","kind":"production"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -592,7 +601,7 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 		t.Fatalf("link: %v\n%s", err, out.String())
 	}
 
-	raw, err := os.ReadFile(ConfigPath("main", webPlatform))
+	raw, err := os.ReadFile(ConfigPath(localEnvName, webPlatform))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +671,7 @@ func TestTheAppConfigCarriesTheStacksSealingRoot(t *testing.T) {
 	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
 		t.Fatalf("link: %v", err)
 	}
-	entry := readEnvConfig(t, "main", "ios")
+	entry := readEnvConfig(t, localEnvName, "ios")
 	if entry.SealedRoot != root {
 		t.Errorf("the app's config carries sealed_root %q; the stack said %q", entry.SealedRoot, root)
 	}
@@ -684,7 +693,7 @@ func TestAStackWithNoSealingRootStillLinks(t *testing.T) {
 	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &strings.Builder{}); err != nil {
 		t.Fatalf("kok bildirmeyen bir yigin link'i basarisiz yapti: %v", err)
 	}
-	if got := readEnvConfig(t, "main", "ios").SealedRoot; got != "" {
+	if got := readEnvConfig(t, localEnvName, "ios").SealedRoot; got != "" {
 		t.Errorf("kok bildirmeyen yigin icin sealed_root yazildi: %q", got)
 	}
 }
@@ -912,8 +921,8 @@ func TestAnUnsupportedPlatformIsRefusedBeforeAnythingIsWritten(t *testing.T) {
 	// NOTHING ON DISK. These are what the write path produces, in order; any of
 	// them existing means the refusal came too late.
 	for _, left := range []string{
-		ConfigPath("main", webPlatform),
-		SpecPath("main"),
+		ConfigPath(localEnvName, webPlatform),
+		SpecPath(localEnvName),
 		filepath.Join(dir, ".palbase", "project.json"),
 		filepath.Join(dir, ".gitignore"),
 	} {

@@ -753,7 +753,11 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 	}
 
 	// The stack on this machine, when there is one and it is not already the
-	// target.
+	// target. A target this link names `local` IS that stack (FR-010): another
+	// one found by group would overwrite the address the person linked.
+	if defaultEnv == localEnvName {
+		return envs, specs, nil
+	}
 	localURL, looked := findLocalStack(primary)
 	if localURL == "" {
 		// A MACHINE THAT RUNS STACKS, NONE OF THEM THIS CHECKOUT'S: said, because

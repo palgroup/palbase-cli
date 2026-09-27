@@ -104,7 +104,7 @@ func TestFirstLinkCannotSucceedWithoutWebGenerator(t *testing.T) {
 	linkedAs(t, srv.URL, "operator")
 	require.ErrorContains(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, io.Discard), "generator is unavailable")
 	require.NoFileExists(t, "palbe.gen.ts")
-	require.NoFileExists(t, ConfigPath("main", webPlatform))
+	require.NoFileExists(t, ConfigPath(localEnvName, webPlatform))
 	raw, err := os.ReadFile("package.json")
 	require.NoError(t, err)
 	require.Equal(t, minimalPkgJSON(), string(raw))
@@ -161,7 +161,7 @@ func TestLinkPublishesInstalledWebDependencies(t *testing.T) {
 		require.NoError(t, os.WriteFile(palbeGenBin, []byte(palbeGen10Script("// generated")), 0755))
 	}
 	require.NoError(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, io.Discard))
-	require.FileExists(t, filepath.FromSlash(GeneratedPath("main", webPlatform)))
+	require.FileExists(t, filepath.FromSlash(GeneratedPath(localEnvName, webPlatform)))
 	require.FileExists(t, filepath.FromSlash(ClientBarrelPath()))
 	require.FileExists(t, palbeGenBin, "the installed SDK must survive removal of the staging directory")
 }
