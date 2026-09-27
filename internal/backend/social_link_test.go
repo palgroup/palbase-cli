@@ -105,6 +105,10 @@ func TestFirstLinkCannotSucceedWithoutWebGenerator(t *testing.T) {
 	require.ErrorContains(t, runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"web"}}, io.Discard), "generator is unavailable")
 	require.NoFileExists(t, "palbe.gen.ts")
 	require.NoFileExists(t, ConfigPath(localEnvName, webPlatform))
+	// NOR ANYTHING ELSE UNDER THE ENVIRONMENTS ROOT (T011 review round 1, MINOR
+	// #3): checking `local/` alone would miss a regression that wrote `main/`
+	// when the generator failed instead.
+	require.NoDirExists(t, filepath.Dir(EnvDir("any")))
 	raw, err := os.ReadFile("package.json")
 	require.NoError(t, err)
 	require.Equal(t, minimalPkgJSON(), string(raw))

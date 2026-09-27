@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path"
@@ -657,14 +658,46 @@ func WriteSelfHostTarget(t Target) error {
 // isLoopbackAddress parses the host rather than searching the string:
 // `https://localhost.example.com` contains "localhost" and is somebody else's
 // machine.
+//
+// THE HOST IS NORMALISED FIRST (T011 review): `url.Hostname()` already strips
+// brackets and a port, but it does not fold case or a trailing dot, and
+// `LOCALHOST`/`localhost.` are both this machine as far as any resolver is
+// concerned. And a bare string match ("127.0.0.1") only ever named the one
+// address a test happened to bind: `net.ParseIP(host).IsLoopback()` covers the
+// whole loopback block (127.0.0.0/8, not just .1), `::1`, and a v4-mapped
+// address like `::ffff:127.0.0.1` — any of which `palbase start` or a person's
+// own `curl` can produce depending on how the stack bound its listener.
 func isLoopbackAddress(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false
 	}
-	switch u.Hostname() {
-	case "localhost", "127.0.0.1", "::1":
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" {
 		return true
 	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
 	return false
+}
+
+// normalizeAddressHost lowercases a URL's host and leaves everything else —
+// scheme, port, path, query — exactly as given.
+//
+// A HOST NAME IS NOT CASE-SENSITIVE (RFC 3986 §3.2.2), and `link` already
+// compares one case-insensitively everywhere it decides "is this loopback" or
+// "is this the stack `palbase start` runs here" (isLoopbackAddress, sameStack).
+// The address `link` then WRITES — to project.json, to this machine's start
+// record, into every printed line — was the one place that comparison was not
+// applied: two links four characters apart (`http://localhost:1` and
+// `http://LOCALHOST:1`) named the same stack to every check and two different
+// committed addresses on disk.
+func normalizeAddressHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.Host = strings.ToLower(u.Host)
+	return u.String()
 }

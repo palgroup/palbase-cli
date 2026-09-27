@@ -217,8 +217,12 @@ func runningLocalStack() (Target, bool) {
 func resolveLinked(ctx context.Context, local Target, localErr error) (Resolved, error) {
 	// A LOOPBACK LINK IS ONE INSTALLATION, just stored on this machine instead of
 	// in the committed file. It answers exactly as a committed self-host address
-	// does — including refusing `--env` by name — and is never "local": that
-	// word means a stack `palbase start` brought up here.
+	// does — including refusing `--env` by name. What it is NOT is a START
+	// RECORD (T011 review, MINOR #4): `Source` here is "url" and `Target.Local`
+	// stays false, because `Local`/`Source: "local"` name a stack `palbase
+	// start` brought up here — a different fact from the DIRECTORY a loopback
+	// link's config takes, which is `local/` too (FR-010's `stackEnvName`,
+	// asked through ArtifactEnv).
 	if localErr == nil && local.SelfHost {
 		return selfHostResolved(local)
 	}

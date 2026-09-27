@@ -642,6 +642,23 @@ func sameStack(a, b string) bool {
 	return strings.EqualFold(ua.Hostname(), ub.Hostname())
 }
 
+// projectlessLinkedEnv is the environment name a projectless link's own
+// environment takes (FR-010, stackEnvName): `local` for the stack on THIS
+// machine — `base` either IS this checkout's own `palbase start` record (asked
+// the same way writeLinkRecord asks it, because `palbase start --lan` records
+// an address that is not loopback and is still this machine) or is loopback by
+// itself — and `main` for one somebody else hosts.
+//
+// PULLED OUT ON ITS OWN so this decision can be tested without a live HTTP
+// round trip: it reads only this machine's start record and does string work,
+// so a LAN start record (`--lan` binds every interface and announces the LAN
+// address, not a loopback one) is a table-test case rather than a listener
+// this test would have to bind on a real network interface.
+func projectlessLinkedEnv(checkoutRoot, base string) string {
+	running, started := startRecordAt(checkoutRoot)
+	return stackEnvName(Target{URL: base, Local: started && sameStack(running.URL, base)})
+}
+
 // startRecordAt answers the machine-local record for a checkout only when
 // `palbase start` wrote it.
 //
@@ -807,7 +824,11 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// `palbase start` writes, and it only worked for a committed self-hosted
 	// address because the stage copies `palbase/`. `resolveLinkTarget` names
 	// every one of those cases now, in the real checkout.
-	base := strings.TrimRight(strings.TrimSpace(o.url), "/")
+	// THE HOST IS NORMALISED HERE, ONCE, so every later comparison of `base`
+	// against a stored address (sameStack, isLoopbackAddress, both already
+	// case-insensitive) agrees with what gets WRITTEN — project.json, the start
+	// record, every printed line (T011 review, MINOR #1).
+	base := normalizeAddressHost(strings.TrimRight(strings.TrimSpace(o.url), "/"))
 	if base == "" {
 		return errors.New("--url is required: the address the stack serves on")
 	}
@@ -895,13 +916,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// somebody asking.
 	linkedEnv := o.linkedEnv
 	if linkedEnv == "" {
-		// A stack with no project has ONE environment, and it takes the name
-		// `palbase spec` gives it (stackEnvName, FR-010): `local` when it is on
-		// this machine, `main` when somebody hosts it. The start record is asked
-		// as writeLinkRecord asks it, because `palbase start --lan` records an
-		// address that is not loopback and is still this machine.
-		running, started := startRecordAt(o.checkoutRoot)
-		linkedEnv = stackEnvName(Target{URL: base, Local: started && sameStack(running.URL, base)})
+		linkedEnv = projectlessLinkedEnv(o.checkoutRoot, base)
 	}
 	// EVERY environment, not the one being linked. An app that holds only the
 	// environment somebody linked last is an app whose address depends on when
@@ -1174,6 +1189,19 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 			keep = append(keep, e.Name)
 		}
 		keep = append(keep, localEnvName)
+		// A PROJECTLESS LINK NAMES NO PROJECT, SO AN EMPTY `listed` HERE IS NOT
+		// "the project dropped every other environment" (D-024, T011 review,
+		// IMPORTANT #1) — there is no project, and `main` is not this sweep's to
+		// take. Measured by the reviewer: seed `main/ios-config.json` with a real
+		// cloud address, then link a loopback stack with no target — `keep` held
+		// only `local`, and the general sweep removed `main/` as an orphan,
+		// deleting a cloud environment's committed config along with it. Removing
+		// a `main/` that is a stale copy of THIS machine's own old loopback link
+		// is a narrower rule than "no project named it" — that one is
+		// removeThisMachinesOldMain's (T014), not this general sweep's.
+		if len(listed) == 0 {
+			keep = append(keep, soleEnvName)
+		}
 		if err := generateForEnvironmentsAt(ctx, envs, keep, w, o.checkoutRoot); err != nil {
 			return err
 		}

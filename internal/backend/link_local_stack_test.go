@@ -235,3 +235,68 @@ func TestOnlyAStackOnThisMachineIsNamedLocal(t *testing.T) {
 		assert.Equal(t, c.want, c.resolved.ArtifactEnv(), "%+v", c.resolved)
 	}
 }
+
+// A LAN START RECORD IS THIS MACHINE TOO, for a PROJECTLESS LINK exactly as it
+// is for `ArtifactEnv` (T011 review round 1, MINOR #2a).
+//
+// `stackEnvName`'s `Local` field, for the projectless branch of a link, comes
+// only from `sameStack(running.URL, base)` — and every test that exercised
+// that branch linked a stack on loopback, so replacing
+// `Local: started && sameStack(running.URL, base)` with a bare
+// `Target{URL: base}` (dropping the start record from the decision entirely)
+// still passed every one of them. `palbase start --lan` records the LAN
+// address it bound, not a loopback one, and linking to THAT exact address —
+// this checkout's own start record — must still write `local/`, not `main/`.
+func TestProjectlessLinkedEnvFollowsALANStartRecord(t *testing.T) {
+	inScratchCheckout(t)
+	const lan = "http://192.168.1.20:54321"
+	require.NoError(t, WriteLocalTarget(Target{URL: lan}))
+
+	assert.Equal(t, localEnvName, projectlessLinkedEnv("", lan),
+		"a LAN address this checkout's own start record announced was not named local")
+
+	// AND NOTHING ELSE IS: an address that is not this checkout's start
+	// record, and not loopback, is still somebody else's main — a start
+	// record does not make every LAN address this machine's.
+	assert.Equal(t, soleEnvName, projectlessLinkedEnv("", "http://192.168.1.99:54321"),
+		"an address no start record announced was named local")
+}
+
+// A LOOPBACK LINK KEEPS ITS OWN ADDRESS OVER A DIFFERENT REGISTERED STACK
+// (T011 review round 1, MINOR #2b).
+//
+// `gatherEnvironments`'s early return for `defaultEnv == localEnvName` guards
+// exactly this: without it, removing that return still passed every existing
+// test, because none of them registers a DIFFERENT stack by group while
+// linking a loopback address by hand. Here one is — the way `palbase start`
+// would leave a monorepo's backend checkout — and the address actually linked
+// is a SEPARATE loopback stack. Without the early return, `findLocalStack`
+// would look the registered stack up by group, find it, and overwrite
+// `local/` with ITS address and key even though a different one was just
+// linked.
+func TestALoopbackLinkKeepsItsOwnAddressOverARegisteredStack(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	t.Setenv("PALBASE_ENV", "")
+
+	// A stack registered under this checkout's own directory name — what
+	// `palbase start` would leave behind in an unlinked checkout.
+	other := stackServing(t, linkKeyLocal, nil)
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, registerStack(sanitiseGroup(filepath.Base(dir)), other.URL, "palbase-other", "/elsewhere/backend"))
+	require.NoError(t, StoreCredential(other.URL, Credentials{Value: "other-key", Kind: KindKey}))
+
+	// The address actually linked, by hand: a separate loopback stack.
+	linked := stackServing(t, linkKeyMain, nil)
+	linkedAs(t, linked.URL, "a-credential")
+
+	o := linkOpts{url: linked.URL}
+	require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	cfg := readEnvConfig(t, localEnvName, "android")
+	assert.Equal(t, linked.URL, cfg.BaseURL, "a registered stack overwrote the address just linked by hand")
+	assert.Equal(t, linkKeyMain, cfg.APIKey, "a registered stack's key overwrote the one just linked by hand")
+}

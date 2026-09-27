@@ -797,3 +797,43 @@ func TestARefusalNamesTheCommittedFileNotTheTemporaryOne(t *testing.T) {
 		t.Errorf("the refusal names this process's temporary file: %v", err)
 	}
 }
+
+// isLoopbackAddress RECOGNISES A HOST, NOT FOUR LITERAL STRINGS (T011 review,
+// MINOR #1).
+//
+// It used to switch on the exact strings "localhost", "127.0.0.1" and "::1" —
+// so `LOCALHOST` (case folds differently machine to machine), a trailing dot
+// (a fully-qualified name, still this machine), `127.0.0.2` (loopback, just
+// not the one address a test happened to bind), and a v4-mapped IPv6 form like
+// `::ffff:127.0.0.1` (what some stacks report when they bind every interface)
+// all came back "not loopback" — and FR-010 names the directory by this
+// check, so a stack that answered on any of them was written to `main/`
+// carrying its own address, exactly the defect FR-010 exists to close.
+func TestIsLoopbackAddressRecognisesEveryLoopbackForm(t *testing.T) {
+	for _, raw := range []string{
+		"http://LOCALHOST:54321",
+		"http://Localhost:54321",
+		"http://localhost.:54321",
+		"http://127.0.0.2:54321",
+		"http://[::ffff:127.0.0.1]:54321",
+		"http://[::1]:54321",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if !isLoopbackAddress(raw) {
+				t.Errorf("isLoopbackAddress(%q) = false, want true", raw)
+			}
+		})
+	}
+	for _, raw := range []string{
+		"http://192.168.1.20:54321",
+		"http://10.0.0.5:54321",
+		"http://172.16.0.1:54321",
+		"https://example.com",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if isLoopbackAddress(raw) {
+				t.Errorf("isLoopbackAddress(%q) = true, want false", raw)
+			}
+		})
+	}
+}

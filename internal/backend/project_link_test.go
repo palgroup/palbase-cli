@@ -16,6 +16,7 @@ import (
 
 	"github.com/palgroup/palbase-cli/internal/config"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -227,6 +228,11 @@ func TestLinkingWithoutACredentialWritesNOTHING(t *testing.T) {
 	if _, statErr := os.Stat(ConfigPath(localEnvName, "ios")); statErr == nil {
 		t.Error("a half-linked checkout was written")
 	}
+	// NOTHING UNDER THE ENVIRONMENTS ROOT AT ALL (T011 review round 1, MINOR
+	// #3) — checking `local/` alone would miss a regression that wrote `main/`
+	// instead, which is exactly the directory this run must never touch with
+	// no credential to write anything true into either one.
+	assert.NoDirExists(t, filepath.Dir(EnvDir("any")))
 	// And the refusal names both ways to fix it.
 	for _, want := range []string{"palbase start", "palbase login"} {
 		if !strings.Contains(err.Error(), want) {
@@ -398,6 +404,43 @@ func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
 	if !strings.Contains(out.String(), "EXCLUDED_SOURCE_FILE_NAMES") {
 		t.Errorf("link did not print the selection snippet:\n%s", out.String())
 	}
+}
+
+// A PROJECTLESS LINK NEVER SWEEPS A CLOUD main/ (D-024, T011 review round 1,
+// IMPORTANT #1).
+//
+// Measured by the reviewer: seed `main/ios-config.json` with a real cloud
+// address, then link a loopback stack with no target. The projectless
+// branch's `envs.names()` holds only `local` — this link's own environment —
+// so if `keep` (the Apple sweep's allow-list) were built from that alone, the
+// sweep would see `main/` as an environment the project no longer has and
+// remove it: `removed …/palbase/environments/main (the project no longer has
+// that environment)`, taking a real cloud environment's committed config with
+// it. D-024 permits removing a `main/` only when it is a stale copy of THIS
+// machine's OWN old loopback link — every config inside it loopback, nothing
+// this CLI did not write — and that narrower rule is T014's
+// removeThisMachinesOldMain, not this general sweep. A projectless link
+// simply names no project, which is not the same fact as "the project dropped
+// every other environment".
+func TestAProjectlessLinkNeverSweepsACloudMain(t *testing.T) {
+	inScratchCheckout(t)
+	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
+	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
+	const cloudConfig = `{"app_id":"app_real","base_url":"https://abcd1234.cloud.example","api_key":"pb_project_cCLOUDKEY"}` + "\n"
+	require.NoError(t, os.WriteFile(ConfigPath("main", "ios"), []byte(cloudConfig), 0o600))
+
+	local := stackServing(t, linkKeyLocal, nil)
+	linkedAs(t, local.URL, "a-credential")
+	o := linkOpts{url: local.URL, platforms: []string{"ios"}}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	raw, err := os.ReadFile(ConfigPath("main", "ios"))
+	require.NoError(t, err)
+	assert.Equal(t, cloudConfig, string(raw), "a projectless link rewrote or removed a cloud main/")
+	assert.FileExists(t, ConfigPath(localEnvName, "ios"), "the loopback link's own environment was not written")
+	assert.NotContains(t, out.String(), "removed ", "a projectless link swept a directory it does not own:\n"+out.String())
 }
 
 // RETIRED: TestAStoppedLocalStackStillGetsAnEntry.
@@ -585,8 +628,11 @@ func TestTheWebConfigDoesNotResurrectARemovedField(t *testing.T) {
 	srv := stackServing(t, anon, nil)
 	linkedAs(t, srv.URL, "a-credential")
 
-	// A config from the cloud path, carrying both a field this path cannot
-	// produce and the removed one.
+	// A config already on disk in the directory this link will write —
+	// `local/`, since `srv.URL` is a loopback address (FR-010's stackEnvName;
+	// stale comment fixed, T011 review round 1, MINOR #4) — carrying both a
+	// field the merge writer below cannot produce (`kind`) and the field this
+	// contract removed (`environment_ref`).
 	if err := os.MkdirAll(EnvDir(localEnvName), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -930,6 +976,10 @@ func TestAnUnsupportedPlatformIsRefusedBeforeAnythingIsWritten(t *testing.T) {
 			t.Errorf("%s was written before the refusal — the link is half done", left)
 		}
 	}
+	// NOR ANYTHING ELSE UNDER THE ENVIRONMENTS ROOT (T011 review round 1, MINOR
+	// #3): checking `local/` alone would miss a regression that wrote `main/`
+	// before the refusal instead.
+	assert.NoDirExists(t, filepath.Dir(EnvDir("any")))
 }
 
 // TestLinkHelpNamesTheRealPaths: `palbase link --help` is what a person reads
