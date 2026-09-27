@@ -19,11 +19,14 @@ import (
 )
 
 // localIgnoreLine is the one rule `link` adds, and the sentence it says when it
-// does.
+// does. localIgnoreKept is what it says instead when a negation already made
+// the opposite choice (review-T012).
 const (
 	localIgnoreLine  = "palbase/environments/local/"
 	localIgnoreAdded = "added palbase/environments/local/ to .gitignore — it holds this machine's stack address and key, " +
 		"which no teammate's build should use\n"
+	localIgnoreKept = ".gitignore keeps palbase/environments/local/ in git (!palbase/environments/local/) — it holds this machine's stack; " +
+		"remove that line to keep it out\n"
 )
 
 // androidLinkHere links an Android checkout to a stack on this machine and
@@ -76,6 +79,60 @@ func TestAnAppLinkLeavesALocalRuleThatIsAlreadyThere(t *testing.T) {
 			assert.NotContains(t, out, "to .gitignore")
 		})
 	}
+}
+
+// A NEGATION IS A CHOICE, NOT AN OVERSIGHT (review-T012). When the LAST line
+// naming local/ is `!palbase/environments/local/` — even after a broader
+// `palbase/` exclude, since git takes the last matching line — somebody wants
+// this checkout's stack tracked. `link` leaves the file exactly as it is and
+// only reports the choice back.
+func TestAnAppLinkLeavesANegatedLocalRuleAlone(t *testing.T) {
+	inScratchCheckout(t)
+	before := "palbase/\n!palbase/environments/local/\n"
+	require.NoError(t, os.WriteFile(".gitignore", []byte(before), 0o644))
+
+	out := androidLinkHere(t)
+
+	got, err := os.ReadFile(".gitignore")
+	require.NoError(t, err)
+	assert.Equal(t, before, string(got))
+	assert.Contains(t, out, localIgnoreKept)
+}
+
+// AND THE LAST LINE DECIDES, THE WAY GIT DOES. A negation undone by a later
+// positive rule is undone: the rule is already there, so `link` neither
+// writes nor says anything.
+func TestAnAppLinkLeavesALaterPositiveRuleAlone(t *testing.T) {
+	inScratchCheckout(t)
+	before := "!palbase/environments/local/\npalbase/environments/local/\n"
+	require.NoError(t, os.WriteFile(".gitignore", []byte(before), 0o644))
+
+	out := androidLinkHere(t)
+
+	got, err := os.ReadFile(".gitignore")
+	require.NoError(t, err)
+	assert.Equal(t, before, string(got))
+	assert.NotContains(t, out, "to .gitignore")
+	assert.NotContains(t, out, "keeps")
+}
+
+// A REPEAT LINK SAYS IT AGAIN — the file still makes the same choice, so
+// saying so again is fine — but says it exactly ONCE PER RUN, never twice
+// within the one link that found the negation.
+func TestAnAppLinkRepeatsTheNegationNoticeOncePerRun(t *testing.T) {
+	inScratchCheckout(t)
+	before := "palbase/\n!palbase/environments/local/\n"
+	require.NoError(t, os.WriteFile(".gitignore", []byte(before), 0o644))
+
+	first := androidLinkHere(t)
+	assert.Equal(t, 1, strings.Count(first, localIgnoreKept), "the notice printed more than once in one run")
+
+	second := androidLinkHere(t)
+	assert.Equal(t, 1, strings.Count(second, localIgnoreKept), "the notice printed more than once in one run")
+
+	got, err := os.ReadFile(".gitignore")
+	require.NoError(t, err)
+	assert.Equal(t, before, string(got))
 }
 
 // A CHECKOUT WITH NO CLIENT GETS NO `local/`, so it gets no rule for one.

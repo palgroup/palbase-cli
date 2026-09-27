@@ -966,14 +966,21 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	// AND THIS MACHINE'S STACK STAYS OUT OF GIT (FR-020) — wherever a link writes
 	// per-environment files at all; a checkout with no client gets no local/.
+	// UNLESS A NEGATION SAYS OTHERWISE (review-T012): somebody's own
+	// `!palbase/environments/local/` is their choice to keep it in git, and
+	// link only reports that choice back, never overrides it.
 	if writesPerEnvironmentArtifacts(platforms) {
-		added, err := ignoreThisMachinesStack(".gitignore")
+		added, negation, err := ignoreThisMachinesStack(".gitignore")
 		if err != nil {
 			return fmt.Errorf("update .gitignore: %w", err)
 		}
-		if added {
+		switch {
+		case added:
 			fmt.Fprintf(w, "added %s/ to .gitignore — it holds this machine's stack address and key, "+
 				"which no teammate's build should use\n", EnvDir(localEnvName))
+		case negation != "":
+			fmt.Fprintf(w, ".gitignore keeps %s/ in git (%s) — it holds this machine's stack; remove that line to keep it out\n",
+				EnvDir(localEnvName), negation)
 		}
 	}
 
@@ -1624,7 +1631,8 @@ func gitIgnoresNodeModules(dir string) bool {
 
 // ignoreThisMachinesStack makes sure the ignore file at path keeps
 // `palbase/environments/local/` out of git, and reports whether it had to add
-// the rule (FR-020, D-014).
+// the rule (FR-020, D-014) — and, when the file's own last word on the path is
+// a negation, that line itself, so the caller can say what stayed and why.
 //
 // THE ONE RULE THIS CLI ADDS TO A FILE SOMEBODY WROTE — the exception to
 // FR-012, because of whose directory it is. Everything else under `palbase/`
@@ -1634,17 +1642,44 @@ func gitIgnoresNodeModules(dir string) bool {
 // against the laptop of whoever linked last. A rule already there, in any
 // spelling git reads the same, leaves the file exactly as it is; a new one
 // follows the file's own line ending.
-func ignoreThisMachinesStack(path string) (bool, error) {
+//
+// A NEGATION IS A CHOICE, NOT AN OVERSIGHT (review-T012). Git resolves several
+// lines naming the same path by taking the LAST one, so
+// `!palbase/environments/local/` after a broader exclude un-ignores local/ on
+// purpose — somebody wants this checkout's stack tracked. Appending the
+// positive rule after that negation would silently win the last-match race
+// back on the next `link`, undoing a choice this CLI never asked about. So
+// this walks every line, keeps only the LAST one that names the path in
+// either spelling, and acts on that one alone: a positive last line is left
+// exactly as it is (already there); a negation last line is also left exactly
+// as it is, and reported.
+func ignoreThisMachinesStack(path string) (bool, string, error) {
 	dir := EnvDir(localEnvName)
 	content, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("read %s: %w", path, err)
+		return false, "", fmt.Errorf("read %s: %w", path, err)
 	}
 	body := string(content)
+	found, negation := false, ""
 	for _, line := range strings.Split(body, "\n") {
-		if strings.Trim(strings.TrimSpace(line), "/") == dir {
-			return false, nil
+		trimmed := strings.TrimSpace(line)
+		bare := trimmed
+		negated := strings.HasPrefix(bare, "!")
+		if negated {
+			bare = strings.TrimSpace(strings.TrimPrefix(bare, "!"))
 		}
+		if strings.Trim(bare, "/") != dir {
+			continue
+		}
+		found = true
+		if negated {
+			negation = trimmed
+		} else {
+			negation = ""
+		}
+	}
+	if found {
+		return false, negation, nil
 	}
 	eol := "\n"
 	if strings.Contains(body, "\r\n") {
@@ -1658,7 +1693,7 @@ func ignoreThisMachinesStack(path string) (bool, error) {
 	if info, statErr := os.Stat(path); statErr == nil {
 		mode = info.Mode().Perm()
 	}
-	return true, os.WriteFile(path, []byte(body), mode)
+	return true, "", os.WriteFile(path, []byte(body), mode)
 }
 
 // refuseUnsupportedPlatforms rejects a NAMED platform this directory has no way
