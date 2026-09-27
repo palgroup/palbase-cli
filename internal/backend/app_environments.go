@@ -828,7 +828,13 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		switch spec, err := fetchStackSpec(ctx, primary, cred); {
 		case errors.Is(err, ErrNoContractYet):
 			fmt.Fprintf(w, "%v\n", err)
-			fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
+			// ONE CURE PER MISSING CONTRACT. A checkout that gets files hears
+			// what ends this beside them (missingContractLine, FR-014); saying
+			// "`palbase spec` fills it in" here as well was two different
+			// next steps for one gap.
+			if !writeArtifacts {
+				fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
+			}
 		case err != nil:
 			return appEnvironments{}, nil, err
 		default:
@@ -1022,6 +1028,36 @@ func localStackGroups(target Target) []string {
 		add(filepath.Base(root))
 	}
 	return groups
+}
+
+// missingContractLine is what a link says about an environment it wrote a
+// config for and no contract (FR-014) — `earlier` when a contract an earlier
+// link wrote is still on disk, which is then what a build reads.
+//
+// WHAT ENDS IT DEPENDS ON WHERE THE CONTRACT COMES FROM. A project's environment
+// serves what was last pushed to it, and --env names it. A stack somebody hosts,
+// linked by address, has no project to name one in. The stack `palbase start`
+// runs serves the directory it mounted, and `palbase push` refuses to publish to
+// it (stack_push.go) — for `local` the cure is a start. Each ends with a link:
+// that is what brings the contract into this checkout.
+//
+// THE NAME INSIDE THE COMMAND IS A SHELL WORD, not a label: it is text a person
+// pastes, and Label's %q is not shell quoting (T007/T008).
+func missingContractLine(name string, project, earlier bool) string {
+	cure := "`palbase push`, then `palbase link` here"
+	switch {
+	case name == localEnvName:
+		cure = "`palbase start` in the backend, then `palbase link` here"
+	case project:
+		cure = fmt.Sprintf("`palbase push --env %s`, then `palbase link` here", envname.ShellWord(name))
+	}
+	spec := shownEnvDir(name) + "/openapi.json"
+	if earlier {
+		return fmt.Sprintf("%s gave no contract this time, so %s is the one an earlier link wrote — %s\n",
+			envname.Label(name), spec, cure)
+	}
+	return fmt.Sprintf("%s has no contract yet, so %s is not written and no client is generated for it — %s\n",
+		envname.Label(name), spec, cure)
 }
 
 func writeSpec(env string, spec []byte) error {

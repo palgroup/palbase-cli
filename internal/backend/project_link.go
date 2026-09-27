@@ -1143,7 +1143,13 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 				if err := unwritable(name, err); err != nil {
 					return err
 				}
+				continue
 			}
+			// SAID LIKE THE CONFIGS (FR-014): a build needs both files, and a
+			// link that listed only the config looked the same whether the
+			// contract came with it or not. Queued behind them, so it prints
+			// only once its environment is fully written and kept.
+			pendingLines = append(pendingLines, pendingLine{env: name, path: SpecPath(name)})
 		}
 	}
 	for _, line := range pendingLines {
@@ -1157,6 +1163,16 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 			envname.Label(name), unwritten[name])
 		delete(envs.Environments, name)
 		delete(specs, name)
+	}
+	// AND EVERY ENVIRONMENT THAT GOT NO CONTRACT, beside the files (FR-014). The
+	// reading above already said why in the project's own words; this is what
+	// the checkout now holds for it, and what ends that.
+	if writesPerEnvironmentArtifacts(platforms) {
+		for _, name := range envs.names() {
+			if _, ok := specs[name]; !ok {
+				fmt.Fprint(w, missingContractLine(name, o.product.ID != "", isRegularFile(SpecPath(name))))
+			}
+		}
 	}
 
 	// AN ENVIRONMENT THE PROJECT NO LONGER HAS LEAVES THE CHECKOUT, whichever
