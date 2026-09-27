@@ -144,10 +144,17 @@ func TestTheSweepLeavesADirectoryTwoListedNamesShare(t *testing.T) {
 	require.Empty(t, out.String())
 }
 
-// `local/` IS NEVER MADE OUT OF SOMETHING ELSE. `Local/` is what a cloud
-// environment of that name left behind; when this machine's stack was not
-// written this run, nothing says the directory holds it — so it is swept like
-// any environment the project no longer has, never renamed into local/.
+// `local/` IS NEVER MADE OUT OF SOMETHING ELSE: when this machine's stack was
+// not written this run, nothing says `Local/` holds it, so it is not renamed
+// into local/.
+//
+// NOR IS IT SWEPT (final review, Minor #7). It used to go like any environment
+// the project no longer has — but on a Mac's disk `Local/` IS `local/`: the
+// directory `palbase/client.ts` re-exports this machine's client from and a
+// `local` build type reads. A link while the stack is down took whatever an
+// older link had written there. Whatever spelling it has, the directory a Mac
+// takes for local/ belongs to this machine, and a stopped stack is not an
+// environment the project lost.
 func TestTheSweepNeverRenamesALeftoverIntoLocal(t *testing.T) {
 	root := t.TempDir()
 	seedUnder(t, root, "Local", "android-config.json", `{"base_url":"https://cloud.example"}`)
@@ -155,8 +162,56 @@ func TestTheSweepNeverRenamesALeftoverIntoLocal(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, selectedLeftover, &out))
 
-	require.Empty(t, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
-	require.Equal(t, "removed palbase/environments/Local (the project no longer has that environment)\n", out.String())
+	require.Equal(t, []string{"Local"}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	require.Empty(t, out.String())
+}
+
+// AND local/ IS NEVER RESPELLED AS A LISTED NAME. A cloud environment called
+// `Local` is refused a directory (FR-004) but stays in the listing the sweep
+// keeps, so this machine's `local/` read as its old spelling.
+func TestTheSweepNeverRenamesLocalIntoAListedSpelling(t *testing.T) {
+	root := t.TempDir()
+	seedUnder(t, root, localEnvName, "android-config.json", `{"base_url":"http://127.0.0.1:54321"}`)
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main", "Local"}, selectedLeftover, &out))
+
+	require.Equal(t, []string{localEnvName}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	require.Empty(t, out.String())
+}
+
+// WHEN THIS RUN WROTE local, ANOTHER SPELLING OF IT IS RENAMED, as any
+// case-only rename is: on a Mac the link has just written local's files into
+// `Local/`, and a build that finds its environment by the exact name finds
+// `local`.
+func TestTheSweepRenamesAnotherSpellingOfLocalThisRunWroteInto(t *testing.T) {
+	root := t.TempDir()
+	seedUnder(t, root, "Local", "android-config.json", `{"base_url":"http://127.0.0.1:54321"}`)
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main", localEnvName}, selectedLeftover, &out))
+
+	require.Equal(t, []string{localEnvName}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	require.Equal(t, "renamed palbase/environments/Local to local — the project spells that environment local now, "+
+		"and a build finds its directory by the exact name\n", out.String())
+}
+
+// AND BESIDE local/ ITSELF, WHERE ONLY A CASE-SENSITIVE DISK HOLDS BOTH, the
+// other spelling is left too: it is the directory a Mac clone takes for
+// local/, and nothing in this run wrote it.
+func TestTheSweepLeavesAnotherSpellingOfLocalBesideLocal(t *testing.T) {
+	root := t.TempDir()
+	if caseInsensitiveDisk(t, root) {
+		t.Skip("this disk takes Local and local for one name — there is no second directory")
+	}
+	seedUnder(t, root, "Local", "android-config.json", `{"base_url":"http://127.0.0.1:54321"}`)
+	seedUnder(t, root, localEnvName, "android-config.json", `{"base_url":"http://127.0.0.1:54321"}`)
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main", localEnvName}, selectedLeftover, &out))
+
+	require.Equal(t, []string{"Local", localEnvName}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	require.Empty(t, out.String())
 }
 
 // ON A CASE-SENSITIVE DISK BOTH SPELLINGS CAN EXIST — a Linux CI's, after a

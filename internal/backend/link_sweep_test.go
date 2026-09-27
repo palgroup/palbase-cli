@@ -375,3 +375,53 @@ func TestAListedEnvironmentWhoseWriteWasPutBackSurvivesTheSweep(t *testing.T) {
 	assert.NotContains(t, out.String(), "removed palbase/environments/staging")
 	assert.NotContains(t, out.String(), "palbase/environments/staging belongs to no environment")
 }
+
+// fileBrowserNoise is what Finder and Explorer leave in any directory a person
+// opens in them.
+var fileBrowserNoise = []string{".DS_Store", "Thumbs.db"}
+
+// A FILE BROWSER'S LEFTOVER PROTECTS NOTHING (final review, Minor #4). A Mac
+// developer who once opened `featurex/` in Finder left a `.DS_Store` in it, and
+// every link from then on printed "holds files Palbase did not write — move it
+// aside" and kept the directory for ever. It goes with the directory, from the
+// checkout too.
+func TestALinkRemovesAStaleEnvironmentAFileBrowserLeftItsFileIn(t *testing.T) {
+	for _, noise := range fileBrowserNoise {
+		t.Run(noise, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedAndroidApp(t)
+			seedEnvironment(t, "featurex", "android")
+			require.NoError(t, os.WriteFile(filepath.Join(EnvDir("featurex"), noise), []byte("noise"), 0o644))
+			main := stackServing(t, linkKeyMain, nil)
+			routeEnvironments(t, map[string]string{"mainref000": main.URL})
+			o := linkOpts{url: main.URL, platforms: []string{"android"}, linkedEnv: "main",
+				product:      Product{ID: "prd_a", Name: "todoapp"},
+				environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}}}
+
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+			assert.NoDirExists(t, EnvDir("featurex"), out.String())
+			assert.Contains(t, out.String(), "removed palbase/environments/featurex (the project no longer has that environment)\n")
+			assert.NotContains(t, out.String(), "Palbase did not write")
+		})
+	}
+}
+
+// AND THE OLD LOOPBACK main/ THE SAME WAY: a file browser's leftover is not a
+// file somebody wrote.
+func TestAnOldLoopbackMainAFileBrowserLeftItsFileInIsRemoved(t *testing.T) {
+	for _, noise := range fileBrowserNoise {
+		t.Run(noise, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedLoopbackMain(t, "android", "http://127.0.0.1:54321")
+			require.NoError(t, os.WriteFile(filepath.Join(EnvDir("main"), noise), []byte("noise"), 0o644))
+
+			var out strings.Builder
+			require.NoError(t, removeThisMachinesOldMain(".", &out))
+
+			assert.NoDirExists(t, EnvDir("main"))
+			assert.Equal(t, "removed palbase/environments/main (it held the stack on this machine, which is local/ now)\n", out.String())
+		})
+	}
+}

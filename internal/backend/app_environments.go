@@ -311,7 +311,17 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		//
 		// A lingering `local/` is harmless to the build: the selection pattern
 		// compiles the chosen environment only.
-		if e.Name() == localEnvName {
+		//
+		// IN EVERY SPELLING A MAC TAKES FOR IT (final review, Minor #7). The
+		// exemption compared the name exactly, so `Local/` was swept like an
+		// environment the project lost — while on a Mac's disk it IS
+		// `local/`, the directory client.ts re-exports this machine's client
+		// from and a `local` build type reads. So another spelling is never
+		// swept and never respelled as anything but `local`: renamed into it
+		// below only when this run wrote local, which on a Mac it did into
+		// that very directory.
+		atLocal := envname.SameDirectory(e.Name(), localEnvName)
+		if atLocal && !wanted[localEnvName] {
 			continue
 		}
 		dir := filepath.Join(base, e.Name())
@@ -373,8 +383,18 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 			lost = false
 			reason = "the project spells that environment " + envname.Label(spelled[0]) + " now"
 		}
+		// Beside `local/` itself — only a case-sensitive disk holds both —
+		// the other spelling is left: it is what a Mac clone takes for local/.
+		if atLocal {
+			continue
+		}
 		ours := true
 		for _, f := range inside {
+			// A FILE BROWSER'S LEFTOVER PROTECTS NOTHING (final review, Minor
+			// #4): it goes with the directory.
+			if f.Type().IsRegular() && isFileBrowserNoise(f.Name()) {
+				continue
+			}
 			// ONLY A REGULAR FILE CAN BE OURS (T014 review): this CLI writes
 			// files here, never a directory or a link. A directory named
 			// `openapi.json/` passed on its name, and RemoveAll took the files
@@ -457,6 +477,9 @@ func removeThisMachinesOldMain(root string, w io.Writer) error {
 	loopback, foreign := false, false
 	for _, e := range entries {
 		switch {
+		// A file browser's leftover goes with the directory, as in
+		// removeStaleEnvironmentDirs.
+		case e.Type().IsRegular() && isFileBrowserNoise(e.Name()):
 		// Only a regular file can be ours: a directory named like one of our
 		// files is somebody's (see removeStaleEnvironmentDirs).
 		case !e.Type().IsRegular() || !isGeneratedEnvironmentFile(e.Name()):
@@ -483,6 +506,19 @@ func removeThisMachinesOldMain(root string, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "removed %s (it held the stack on this machine, which is %s/ now)\n", shownEnvDir(soleEnvName), localEnvName)
 	return nil
+}
+
+// isFileBrowserNoise reports whether a file by that name is what a desktop
+// file browser leaves in any directory a person opens in it: Finder's
+// `.DS_Store`, Explorer's `Thumbs.db`.
+//
+// NOBODY'S DATA, AND NOT OURS EITHER. Counted as somebody's file, it kept a
+// stale environment directory for ever — "holds files Palbase did not write —
+// move it aside" on every link, for a Mac developer who once looked inside it
+// in Finder. So it neither protects a directory nor makes one ours: it goes
+// with a directory the sweep removes, and nothing else.
+func isFileBrowserNoise(name string) bool {
+	return name == ".DS_Store" || name == "Thumbs.db"
 }
 
 // isGeneratedEnvironmentFile reports whether this CLI wrote a file by that name
