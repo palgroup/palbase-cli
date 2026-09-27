@@ -311,9 +311,20 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		if err != nil {
 			return err
 		}
+		// AN EMPTY DIRECTORY IS LEFT, AND NOTHING IS SAID ABOUT IT (T014
+		// review). The link sweeps its stage, and publishing carries file
+		// changes only: the stage lost the directory, the checkout kept it, and
+		// every link said "removed" again. An empty directory builds nothing.
+		if len(inside) == 0 {
+			continue
+		}
 		ours := true
 		for _, f := range inside {
-			if !isGeneratedEnvironmentFile(f.Name()) {
+			// ONLY A REGULAR FILE CAN BE OURS (T014 review): this CLI writes
+			// files here, never a directory or a link. A directory named
+			// `openapi.json/` passed on its name, and RemoveAll took the files
+			// somebody kept inside it.
+			if !f.Type().IsRegular() || !isGeneratedEnvironmentFile(f.Name()) {
 				ours = false
 				break
 			}
@@ -358,17 +369,29 @@ func shownEnvDir(name string) string {
 // one that holds a file Palbase never writes is said and left to its owner.
 func removeThisMachinesOldMain(root string, w io.Writer) error {
 	dir := filepath.Join(root, filepath.FromSlash(EnvDir(soleEnvName)))
-	entries, err := os.ReadDir(dir)
+	// ONLY A DIRECTORY IS AN OLD main/ (T014 review). A file by that name
+	// failed the link with "not a directory", and a symlink would be read — and
+	// judged — through wherever it points. Neither is this function's to touch.
+	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	if !info.IsDir() {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
 	loopback, foreign := false, false
 	for _, e := range entries {
 		switch {
-		case !isGeneratedEnvironmentFile(e.Name()):
+		// Only a regular file can be ours: a directory named like one of our
+		// files is somebody's (see removeStaleEnvironmentDirs).
+		case !e.Type().IsRegular() || !isGeneratedEnvironmentFile(e.Name()):
 			foreign = true
 		case strings.HasSuffix(e.Name(), "-config.json"):
 			var config appEnvironment

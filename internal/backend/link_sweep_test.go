@@ -173,3 +173,205 @@ func TestAnOldLoopbackMainHoldingSomebodysFileIsSaidAndLeft(t *testing.T) {
 	assert.Contains(t, out.String(), "palbase/environments/main holds the stack on this machine under the name an older link "+
 		"gave it, and files Palbase did not write — move them aside, then delete it\n")
 }
+
+// namedLikeOurs are entry names the CLI writes as FILES; as a directory, each
+// is somebody else's.
+var namedLikeOurs = []string{"openapi.json", "x.ts"}
+
+// A DIRECTORY NAMED LIKE ONE OF OUR FILES IS NOT OURS (T014 review). The
+// ownership test read names only, so `featurex/openapi.json/` passed as the
+// contract and the sweep deleted the files somebody kept inside it. Anything
+// that is not a regular file makes the directory foreign: said, and left.
+func TestASweepLeavesAnEnvironmentHoldingADirectoryNamedLikeOurs(t *testing.T) {
+	for _, c := range sweepCheckouts {
+		for _, name := range namedLikeOurs {
+			t.Run(c.platform+"/"+name, func(t *testing.T) {
+				inScratchCheckout(t)
+				c.seed(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(EnvDir("featurex"), name), 0o755))
+				theirs := filepath.Join(EnvDir("featurex"), name, "user.txt")
+				require.NoError(t, os.WriteFile(theirs, []byte("mine\n"), 0o644))
+				require.NoError(t, os.WriteFile(ConfigPath("featurex", c.platform), []byte(`{"base_url":"https://old.example"}`+"\n"), 0o600))
+				main := stackServing(t, linkKeyMain, nil)
+				routeEnvironments(t, map[string]string{"mainref000": main.URL})
+				o := linkOpts{url: main.URL, platforms: []string{c.platform}, linkedEnv: "main",
+					product:      Product{ID: "prd_a", Name: "todoapp"},
+					environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}}}
+
+				var out strings.Builder
+				require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+				assert.FileExists(t, theirs, "the sweep deleted a file somebody kept in a directory named like ours")
+				assert.Contains(t, out.String(), "palbase/environments/featurex belongs to no environment in this project and holds "+
+					"files Palbase did not write — "+c.leftover+"\n")
+				assert.NotContains(t, out.String(), "removed palbase/environments/featurex")
+			})
+		}
+	}
+}
+
+// AND THE SAME FOR THE OLD LOOPBACK main/: a directory in it named like one of
+// our files is somebody's, whatever address the config beside it carries.
+func TestAnOldLoopbackMainHoldingADirectoryNamedLikeOursIsSaidAndLeft(t *testing.T) {
+	for _, name := range namedLikeOurs {
+		t.Run(name, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedAndroidApp(t)
+			stack := stackServing(t, linkKeyMain, nil)
+			linkedAs(t, stack.URL, "a-credential")
+			seedLoopbackMain(t, "android", stack.URL)
+			require.NoError(t, os.Remove(SpecPath("main")))
+			require.NoError(t, os.MkdirAll(filepath.Join(EnvDir("main"), name), 0o755))
+			theirs := filepath.Join(EnvDir("main"), name, "user.txt")
+			require.NoError(t, os.WriteFile(theirs, []byte("mine\n"), 0o644))
+
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), linkOpts{url: stack.URL, platforms: []string{"android"}}, &out), out.String())
+
+			assert.FileExists(t, theirs, "the old main/ went with a file somebody kept in it")
+			assert.Contains(t, out.String(), "palbase/environments/main holds the stack on this machine under the name an older link "+
+				"gave it, and files Palbase did not write — move them aside, then delete it\n")
+			assert.NotContains(t, out.String(), "removed palbase/environments/main")
+		})
+	}
+}
+
+// A FILE NAMED main IS NOT AN OLD main/ (T014 review). Reading it as a
+// directory failed with "not a directory", and the link to this machine's
+// stack failed with it — over a file the link has no business with.
+func TestAFileNamedMainDoesNotStopALinkToThisMachinesStack(t *testing.T) {
+	for _, c := range sweepCheckouts {
+		t.Run(c.platform, func(t *testing.T) {
+			inScratchCheckout(t)
+			c.seed(t)
+			stack := stackServing(t, linkKeyMain, nil)
+			linkedAs(t, stack.URL, "a-credential")
+			// The web seed leaves a main/ of its own; here the name is a file's.
+			require.NoError(t, os.RemoveAll(EnvDir("main")))
+			require.NoError(t, os.MkdirAll(filepath.Join(RootDir(), envSubdir), 0o755))
+			require.NoError(t, os.WriteFile(filepath.FromSlash(EnvDir("main")), []byte("mine\n"), 0o644))
+
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), linkOpts{url: stack.URL, platforms: []string{c.platform}}, &out), out.String())
+
+			assert.FileExists(t, ConfigPath(localEnvName, c.platform))
+			raw, err := os.ReadFile(filepath.FromSlash(EnvDir("main")))
+			require.NoError(t, err)
+			assert.Equal(t, "mine\n", string(raw), "the link touched a file named main")
+		})
+	}
+}
+
+// NOR IS A SYMLINK NAMED main: the old main/ is read through no link. The
+// link's stage refuses a symlink under palbase/ before this function runs, so
+// this pins the function's own guard, on its own.
+func TestTheOldMainIsNeverReadThroughASymlink(t *testing.T) {
+	root, elsewhere := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(elsewhere, "android-config.json"),
+		[]byte(`{"app_id":"project","base_url":"http://127.0.0.1:54321","api_key":"`+linkKeyMain+`"}`+"\n"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, RootDir(), envSubdir), 0o755))
+	link := filepath.Join(root, filepath.FromSlash(EnvDir("main")))
+	require.NoError(t, os.Symlink(elsewhere, link))
+
+	var out strings.Builder
+	require.NoError(t, removeThisMachinesOldMain(root, &out))
+
+	info, err := os.Lstat(link)
+	require.NoError(t, err, "the symlink named main was removed")
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+	assert.FileExists(t, filepath.Join(elsewhere, "android-config.json"))
+	assert.Empty(t, out.String())
+}
+
+// AN EMPTY DIRECTORY IS LEFT, AND NOTHING IS SAID ABOUT IT (T014 review). The
+// link's stage removed it and said so, but publishing carries file changes
+// only: the real directory stayed, and every link said "removed" again.
+func TestASweepSaysNothingAboutAnEmptyDirectoryAndLeavesIt(t *testing.T) {
+	for _, c := range sweepCheckouts {
+		t.Run(c.platform, func(t *testing.T) {
+			inScratchCheckout(t)
+			c.seed(t)
+			require.NoError(t, os.MkdirAll(EnvDir("featurex"), 0o755))
+			main := stackServing(t, linkKeyMain, nil)
+			routeEnvironments(t, map[string]string{"mainref000": main.URL})
+			o := linkOpts{url: main.URL, platforms: []string{c.platform}, linkedEnv: "main",
+				product:      Product{ID: "prd_a", Name: "todoapp"},
+				environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}}}
+
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+			assert.DirExists(t, EnvDir("featurex"))
+			assert.NotContains(t, out.String(), "palbase/environments/featurex")
+		})
+	}
+}
+
+// THE OLD main/ GOES ONLY WHEN EVERY CONFIG IN IT IS THIS MACHINE'S. One
+// loopback config beside one that points at the cloud, says nothing, says it
+// in a shape no parser reads, or is not JSON at all, is not this machine's
+// stack: the whole directory stays, untouched and unmentioned. The loopback
+// config sorts first, so each case measures a veto that comes after a match.
+func TestAnOldMainStaysUnlessEveryConfigInItIsThisMachines(t *testing.T) {
+	for _, c := range []struct{ name, config string }{
+		{"a cloud address", `{"app_id":"app_real","base_url":"https://abcd1234.cloud.example","api_key":"pb_project_cCLOUDKEY"}` + "\n"},
+		{"no base_url", `{"app_id":"project","api_key":"` + linkKeyMain + `"}` + "\n"},
+		{"a base_url no parser reads", `{"app_id":"project","base_url":"http://127.0.0.1:%zz","api_key":"` + linkKeyMain + `"}` + "\n"},
+		{"not JSON", "base_url = http://127.0.0.1\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedAndroidApp(t)
+			stack := stackServing(t, linkKeyMain, nil)
+			linkedAs(t, stack.URL, "a-credential")
+			seedLoopbackMain(t, "android", stack.URL)
+			require.NoError(t, os.WriteFile(ConfigPath("main", webPlatform), []byte(c.config), 0o600))
+			loopback, err := os.ReadFile(ConfigPath("main", "android"))
+			require.NoError(t, err)
+
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), linkOpts{url: stack.URL, platforms: []string{"android"}}, &out), out.String())
+
+			for path, want := range map[string]string{ConfigPath("main", "android"): string(loopback), ConfigPath("main", webPlatform): c.config} {
+				raw, err := os.ReadFile(path)
+				require.NoError(t, err, "%s is gone:\n%s", path, out.String())
+				assert.Equal(t, want, string(raw), path)
+			}
+			assert.NotContains(t, out.String(), "removed palbase/environments/main")
+			assert.NotContains(t, out.String(), "palbase/environments/main holds")
+		})
+	}
+}
+
+// A LISTED ENVIRONMENT WHOSE WRITE WAS PUT BACK IS STILL THE PROJECT'S (FR-005
+// × FR-011). `staging`'s contract cannot be written, so its config goes back
+// to what it was (T004) — and the sweep that runs after the writes must not
+// read "not written this run" as "no longer the project's". Its `openapi.json/`
+// is a directory, so a sweep that forgot the listing would name it foreign.
+func TestAListedEnvironmentWhoseWriteWasPutBackSurvivesTheSweep(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	before := []byte(`{"app_id":"project","base_url":"https://old","api_key":"` + linkKeyStaging + `"}` + "\n")
+	require.NoError(t, os.MkdirAll(EnvDir("staging"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.FromSlash(ConfigPath("staging", "android")), before, 0o600))
+	blockSpecPath(t, "staging")
+	main := stackServing(t, linkKeyMain, nil)
+	staging := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	o := linkOpts{url: main.URL, platforms: []string{"android"}, linkedEnv: "main",
+		product: Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		}}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	require.Contains(t, out.String(), "staging could not be written", "the write did not fail — this test measures nothing")
+	after, err := os.ReadFile(filepath.FromSlash(ConfigPath("staging", "android")))
+	require.NoError(t, err, "the sweep took a listed environment whose write was put back:\n%s", out.String())
+	assert.Equal(t, string(before), string(after))
+	assert.NotContains(t, out.String(), "removed palbase/environments/staging")
+	assert.NotContains(t, out.String(), "palbase/environments/staging belongs to no environment")
+}
