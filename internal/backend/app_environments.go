@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -416,6 +417,12 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 // not check (FR-006).
 func shownEnvDir(name string) string {
 	return path.Join(rootDir, envSubdir) + "/" + envname.Label(name)
+}
+
+// shownConfigPath is how a line names one platform's config in one
+// environment's directory: shownEnvDir, then the file ConfigPath declares.
+func shownConfigPath(name, platform string) string {
+	return shownEnvDir(name) + "/" + path.Base(ConfigPath(name, platform))
 }
 
 // removeThisMachinesOldMain takes away the `main/` an older link wrote for the
@@ -1194,12 +1201,20 @@ func readAppEnvironments(platform string) (appEnvironments, error) {
 		if os.IsNotExist(readErr) {
 			continue
 		}
+		// THE NAME IS SHOWN, NEVER PRINTED RAW (FR-006). The directory is on
+		// disk as an older CLI made it from a listing, and three verbs print
+		// this error — `status`, `spec`, the web wiring. The system's error
+		// carries the raw path, so only its reason is kept.
 		if readErr != nil {
-			return appEnvironments{}, readErr
+			var pathErr *fs.PathError
+			if errors.As(readErr, &pathErr) {
+				readErr = pathErr.Err
+			}
+			return appEnvironments{}, fmt.Errorf("read %s: %w", shownConfigPath(e.Name(), platform), readErr)
 		}
 		var env appEnvironment
 		if err := json.Unmarshal(raw, &env); err != nil {
-			return appEnvironments{}, fmt.Errorf("read %s: %w", ConfigPath(e.Name(), platform), err)
+			return appEnvironments{}, fmt.Errorf("read %s: %w", shownConfigPath(e.Name(), platform), err)
 		}
 		out.Environments[e.Name()] = env
 	}

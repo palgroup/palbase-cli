@@ -108,9 +108,26 @@ func TestKeyDriftNamesAPlatformWhoseConfigCannotBeRead(t *testing.T) {
 
 	out := runStatus(t, false)
 	assert.Contains(t, out, "app key:      unchecked (android) — a config here could not be read (read "+
-		ConfigPath("local", "android")+": invalid character")
+		"palbase/environments/local/android-config.json: invalid character 'o' in literal null (expecting 'u'))\n")
 	assert.Contains(t, out, "app key:      current (ios)\n")
 	assert.Equal(t, "unchecked", appKeyOf(t), "a platform whose config could not be read is not current")
+}
+
+// NOTHING FROM DISK REACHES THE TERMINAL RAW (FR-006). The read error carried
+// the path of the file it failed on, and that path holds the directory's name
+// as an older CLI made it from a listing: an escape byte there rewrote the line
+// it was printed on. The name is shown the way every other line shows it, and
+// the system's reason follows without the path.
+func TestKeyDriftPrintsNoControlCharacterFromAnEnvironmentDirectory(t *testing.T) {
+	inScratchCheckout(t)
+	url := stackRunningHere(t, "pb_project_cLOCALNOW")
+	seedKeys(t, "ios", url, map[string]string{"local": "pb_project_cLOCALNOW"})
+	require.NoError(t, os.MkdirAll(ConfigPath("evil\x1b[2J", "android"), 0o755))
+
+	out := runStatus(t, false)
+	assert.Contains(t, out, "app key:      unchecked (android) — a config here could not be read (read "+
+		`palbase/environments/"evil\x1b[2J"/android-config.json: is a directory)`+"\n")
+	assert.NotContains(t, out, "\x1b")
 }
 
 // ONE READ ERROR IS SAID ONCE: when the environments directory itself cannot be

@@ -76,3 +76,19 @@ func TestSpecRefusesACloudEnvironmentNamedLocal(t *testing.T) {
 		"palbase/environments/local belongs to the stack `palbase start` runs on this machine, never to a cloud environment")
 	require.NoDirExists(t, filepath.Join(RootDir(), envSubdir))
 }
+
+// AND `palbase spec` SAYS THE SAME READ ERROR WITHOUT THE RAW NAME (FR-006):
+// an Apple checkout regenerates every environment's client from the configs on
+// disk, and a config it cannot read ends the command with that error.
+func TestSpecPrintsNoControlCharacterFromAnEnvironmentDirectory(t *testing.T) {
+	specRigFor(t, []Environment{{Ref: "mainref000", Name: "main", Status: "Running"}}, "main")
+	require.NoError(t, os.MkdirAll("App.xcodeproj", 0o755))
+	require.NoError(t, os.MkdirAll(EnvDir("main"), 0o755))
+	require.NoError(t, os.WriteFile(ConfigPath("main", "ios"), []byte(`{"base_url":"https://main.example"}`), 0o600))
+	require.NoError(t, os.MkdirAll(ConfigPath("evil\x1b[2J", "ios"), 0o755))
+
+	var out bytes.Buffer
+	err := RefreshSpec(context.Background(), &out)
+	require.EqualError(t, err, `read palbase/environments/"evil\x1b[2J"/ios-config.json: is a directory`, out.String())
+	require.NotContains(t, out.String(), "\x1b")
+}
