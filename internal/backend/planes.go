@@ -339,6 +339,13 @@ var androidBuildFiles = []string{
 }
 
 func detectAndroidApplicationID(root string) (string, error) {
+	_, id, err := androidApplicationFile(root)
+	return id, err
+}
+
+// androidApplicationFile is the first of androidBuildFiles under root that
+// declares an applicationId, and the id it declares.
+func androidApplicationFile(root string) (file, id string, err error) {
 	for _, name := range androidBuildFiles {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 		if err != nil {
@@ -346,8 +353,8 @@ func detectAndroidApplicationID(root string) (string, error) {
 		}
 		match := androidApplicationIDPattern.FindSubmatch(contents)
 		if len(match) == 2 {
-			return string(match[1]), nil
+			return name, string(match[1]), nil
 		}
 	}
-	return "", fmt.Errorf("applicationId not found in the Android Gradle files; pass --package-name")
+	return "", "", fmt.Errorf("applicationId not found in the Android Gradle files; pass --package-name")
 }

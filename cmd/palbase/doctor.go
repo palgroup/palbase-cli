@@ -215,6 +215,27 @@ func doctorCmd() *cobra.Command {
 					bad(l.label, l.detail)
 				}
 			}
+
+			// LAST, UNDER ITS OWN HEADING: what a Gradle build of this checkout
+			// reads, which none of the lines above looks at (FR-019).
+			if wd, err := os.Getwd(); err == nil {
+				if file := backend.AndroidCheckout(wd); file != "" {
+					// A PROJECT, NOT ANY LINK: a record bound to an address reads
+					// back without an error too, and a stack linked by address has
+					// no environment to name in `push --env` — the same test
+					// `palbase link` makes (FR-014).
+					linked, notLinked := backend.ReadLinkedProject()
+					project := notLinked == nil && linked.Project != ""
+					fmt.Fprintf(out, "android (%s)\n", file)
+					for _, l := range backend.AndroidDoctor(wd, project) {
+						if l.OK {
+							ok(l.Label, l.Detail)
+						} else {
+							bad(l.Label, l.Detail)
+						}
+					}
+				}
+			}
 			return nil
 		},
 	}

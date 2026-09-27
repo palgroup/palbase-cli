@@ -1053,13 +1053,7 @@ func localStackGroups(target Target) []string {
 // THE NAME INSIDE THE COMMAND IS A SHELL WORD, not a label: it is text a person
 // pastes, and Label's %q is not shell quoting (T007/T008).
 func missingContractLine(name string, project, earlier bool) string {
-	cure := "`palbase push`, then `palbase link` here"
-	switch {
-	case name == localEnvName:
-		cure = "`palbase start` in the backend, then `palbase link` here"
-	case project:
-		cure = fmt.Sprintf("`palbase push --env %s`, then `palbase link` here", envname.ShellWord(name))
-	}
+	cure := contractCure(name, project)
 	spec := shownEnvDir(name) + "/openapi.json"
 	if earlier {
 		return fmt.Sprintf("%s gave no contract this time, so %s is the one an earlier link wrote — %s\n",
@@ -1067,6 +1061,22 @@ func missingContractLine(name string, project, earlier bool) string {
 	}
 	return fmt.Sprintf("%s has no contract yet, so %s is not written and no client is generated for it — %s\n",
 		envname.Label(name), spec, cure)
+}
+
+// contractCure is what brings name's contract into this checkout — the cure
+// missingContractLine and doctor's Android section both name.
+//
+// The name inside the command is a shell word, not a label (see
+// missingContractLine): it is text a person pastes.
+func contractCure(name string, project bool) string {
+	switch {
+	case name == localEnvName:
+		return "`palbase start` in the backend, then `palbase link` here"
+	case project:
+		return fmt.Sprintf("`palbase push --env %s`, then `palbase link` here", envname.ShellWord(name))
+	default:
+		return "`palbase push`, then `palbase link` here"
+	}
 }
 
 func writeSpec(env string, spec []byte) error {
