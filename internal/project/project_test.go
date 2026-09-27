@@ -614,3 +614,24 @@ func TestCreateSendsNoExternalIdWhenNoneIsNamed(t *testing.T) {
 		t.Fatalf("an empty external id was sent: %#v", sent)
 	}
 }
+
+// AN ENVIRONMENT'S NAME IS SOMEBODY ELSE'S TEXT (FR-006): any member can name
+// one with escape bytes, and printed raw it rewrote the reader's terminal.
+func TestListPrintsAnEnvironmentNameEscaped(t *testing.T) {
+	rest := &stubREST{reply: []Project{
+		{ID: "prd_a", Name: "todoapp", Environments: []Environment{
+			{Ref: "aaa", Name: "main", Status: "Running"},
+			{Ref: "evilref001", Name: "evil\x1b]0;owned\a", Status: "Running"},
+		}},
+	}}
+	out, err := run(t, resolvers(rest, stubCloud{}), "", "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("an environment name reached the terminal raw:\n%q", out)
+	}
+	if !strings.Contains(out, `"evil\x1b]0;owned\a"  evilref001`) {
+		t.Fatalf("the name is not printed escaped:\n%s", out)
+	}
+}

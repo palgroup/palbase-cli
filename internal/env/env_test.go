@@ -398,3 +398,57 @@ func TestCreateAcceptsTheNamesTheGrammarIsFor(t *testing.T) {
 		require.Equal(t, name, sent["name"])
 	}
 }
+
+// hostileName is an environment name the control plane accepts today: an OSC
+// sequence that retitles the terminal, then a bell.
+const (
+	hostileName   = "evil\x1b]0;owned\a"
+	hostileQuoted = `"evil\x1b]0;owned\a"`
+)
+
+func withAHostileName() []map[string]any {
+	return []map[string]any{{
+		"id": "prd_a", "name": "todoapp",
+		"environments": []map[string]any{
+			{"ref": "j06bwtuum", "name": "main", "status": "Running"},
+			{"ref": "evilref001", "name": hostileName, "status": "Running"},
+		},
+	}}
+}
+
+// EVERY LINE OF `palbase env` THAT PRINTS A NAME PRINTS IT ESCAPED (FR-006):
+// the name is somebody else's text, and raw it rewrote a teammate's terminal.
+func TestEnvPrintsANameEscapedEverywhere(t *testing.T) {
+	linkedCheckout(t)
+	for _, c := range []struct {
+		stdin string
+		args  []string
+		want  string
+	}{
+		{"", []string{"list"}, hostileQuoted + "  evilref001"},
+		{"", []string{"use", "evilref001"}, "▸ todoapp/" + hostileQuoted},
+		{"", []string{"use", "nope"}, "  " + hostileQuoted + "   evilref001"},
+		{"wrong\n", []string{"delete", "evilref001"}, "This deletes todoapp/" + hostileQuoted + " (evilref001)"},
+		{"", []string{"delete", "evilref001", "--yes"}, "Deleted " + hostileQuoted + " (evilref001)"},
+	} {
+		out, err := run(t, &stubREST{projects: withAHostileName()}, c.stdin, c.args...)
+		if err != nil {
+			out += err.Error()
+		}
+		require.NotContains(t, out, "\x1b", "`env %s` printed a name raw", strings.Join(c.args, " "))
+		require.Contains(t, out, c.want, "env %s", strings.Join(c.args, " "))
+	}
+}
+
+// AND THE NAME THE CONTROL PLANE ANSWERS A CREATE WITH IS ITS TEXT TOO — the
+// CLI checked the name it SENT, not the one that came back.
+func TestCreatePrintsTheNameItWasAnsweredWithEscaped(t *testing.T) {
+	linkedCheckout(t)
+	rest := &stubREST{projects: twoEnvironments(), created: map[string]any{"ref": "evilref002", "name": hostileName, "phase": "Creating"}}
+
+	out, err := run(t, rest, "", "create", "featureX", "--yes")
+	require.NoError(t, err)
+	require.NotContains(t, out, "\x1b", "`env create` printed a name raw")
+	require.Contains(t, out, "Created "+hostileQuoted+" — evilref002 (Creating)")
+	require.Contains(t, out, "palbase env use "+hostileQuoted)
+}

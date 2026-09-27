@@ -130,7 +130,7 @@ func listCmd(r Resolvers) *cobra.Command {
 					// on" is the question a person opens this command with.
 					mark = "*"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", mark, e.Name, e.Ref, e.Status)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", mark, envname.Label(e.Name), e.Ref, e.Status)
 			}
 			return tw.Flush()
 		},
@@ -166,7 +166,7 @@ they pull your branch.`,
 				}); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", p.Name, e.Name)
+				fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", p.Name, envname.Label(e.Name))
 				return nil
 			}
 			return fmt.Errorf("%q is not an environment of %s.\n%s", named, p.Name, listing(p.Environments))
@@ -176,16 +176,17 @@ they pull your branch.`,
 
 func listing(envs []environment) string {
 	// Same shape as the resolver's refusal (internal/backend): the refs line up,
-	// because this list is a menu somebody is about to type from.
+	// because this list is a menu somebody is about to type from — and each
+	// name is the control plane's text, printed as envname.Label has it.
 	widest := 0
 	for _, e := range envs {
-		if n := len([]rune(e.Name)); n > widest {
+		if n := len([]rune(envname.Label(e.Name))); n > widest {
 			widest = n
 		}
 	}
 	rows := make([]string, 0, len(envs))
 	for _, e := range envs {
-		rows = append(rows, fmt.Sprintf("  %-*s   %s", widest, e.Name, e.Ref))
+		rows = append(rows, fmt.Sprintf("  %-*s   %s", widest, envname.Label(e.Name), e.Ref))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -265,7 +266,9 @@ plan's rate, so this command prints that consequence before it asks.`,
 				"/v1/cloud/projects/"+url.PathEscape(p.ID)+"/environments", body, &created); err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "Created %s — %s (%s)\n", created.Name, created.Ref, created.Phase)
+			// THE NAME THAT CAME BACK IS THE CONTROL PLANE'S, not the one checked
+			// above — printed as every other listed name is.
+			fmt.Fprintf(out, "Created %s — %s (%s)\n", envname.Label(created.Name), created.Ref, created.Phase)
 			// THE WAY TO USE IT IS PRINTED ONCE IT CAN BE USED. `Running` is
 			// placement, not readiness: measured on 0.67.1 the new environment
 			// refused connections for two minutes after this line, and the
@@ -273,7 +276,7 @@ plan's rate, so this command prints that consequence before it asks.`,
 			if err := cloudproject.WaitUntilReachable(cmd.Context(), r.REST(), created.Ref, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "\n  palbase env use %s\n", created.Name)
+			fmt.Fprintf(out, "\n  palbase env use %s\n", envname.Label(created.Name))
 			return nil
 		},
 	}
@@ -315,7 +318,7 @@ grace period, which is why it asks for the ref rather than a yes.`,
 				// A CONFIRMATION NOBODY CAN SATISFY BY ACCIDENT: typing the ref
 				// means having read which environment this is.
 				fmt.Fprintf(out, "This deletes %s/%s (%s) and its data permanently.\nType the ref to confirm: ",
-					p.Name, found.Name, found.Ref)
+					p.Name, envname.Label(found.Name), found.Ref)
 				var typed string
 				if _, scanErr := fmt.Fscanln(cmd.InOrStdin(), &typed); scanErr != nil {
 					return fmt.Errorf("aborted")
@@ -328,7 +331,7 @@ grace period, which is why it asks for the ref rather than a yes.`,
 				"/v1/cloud/projects/"+url.PathEscape(found.Ref), nil, nil); err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "Deleted %s (%s)\n", found.Name, found.Ref)
+			fmt.Fprintf(out, "Deleted %s (%s)\n", envname.Label(found.Name), found.Ref)
 			return nil
 		},
 	}

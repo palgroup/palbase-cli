@@ -35,6 +35,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 // REST is the control-plane transport subset these commands use.
@@ -275,7 +277,8 @@ func listCmd(r Resolvers) *cobra.Command {
 						// to it. Repeating the name would read as two projects.
 						name = ""
 					}
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, e.Name, e.Ref, e.Status)
+					// The environment's name is any member's text (FR-006).
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, envname.Label(e.Name), e.Ref, e.Status)
 				}
 			}
 			return tw.Flush()
