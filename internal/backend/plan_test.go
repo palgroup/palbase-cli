@@ -607,3 +607,110 @@ func newRuntimePlanServer(t *testing.T, runningSDK string) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// --detailed-exitcode (palgroup/palbase#18). Without it the cloud plan had no
+// signal but its text: a foreign-key change or a pending backfill could not be
+// seen before a push by anything that reads a status.
+
+// The schema half's verdict, from each answer the project can give.
+func TestPlanSchemaVerdictNeedsThePlanToSayInSync(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    schemaPlanResult
+		want bool
+	}{
+		{"in sync", schemaPlanResult{Body: []byte(`{"in_sync":true,"changes":[]}`), Declared: true, Measured: true}, false},
+		{"a foreign key to add", schemaPlanResult{Body: []byte(`{"in_sync":false,"changes":["add foreign key child_parent_fk on child → parent(tenant_id, id)"]}`), Declared: true, Measured: true}, true},
+		// A retained history table is listed while the schema is in sync: it is
+		// not a change, exactly as `db plan --detailed-exitcode` counts it.
+		{"in sync with a remnant listed", schemaPlanResult{Body: []byte(`{"in_sync":true,"changes":["history t — retained"]}`), Declared: true, Measured: true}, false},
+		{"no tables declared", schemaPlanResult{Body: []byte("{}")}, false},
+		{"the project did not answer", schemaPlanResult{Body: SchemaUnmeasured, Declared: true}, true},
+		{"an unreadable answer", schemaPlanResult{Body: []byte("<html>"), Declared: true, Measured: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := schemaPlanChanges(tc.r); got != tc.want {
+				t.Fatalf("schemaPlanChanges = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The image half's verdict is the condition each writer prints on — a status
+// that disagreed with the text would be two answers to one question.
+func TestPlanImageVerdictIsWhatThePlanPrints(t *testing.T) {
+	for _, tc := range []struct{ current, target string }{
+		{"33.0.1", "33.0.2"}, {"33.0.2", "33.0.2"}, {"", "33.0.2"},
+	} {
+		var buf bytes.Buffer
+		writeImagePlan(&buf, tc.current, tc.target)
+		if printed := buf.Len() > 0; printed != imageLineChanges(tc.current, tc.target) {
+			t.Errorf("%q → %q: printed=%v, verdict=%v", tc.current, tc.target, printed, !printed)
+		}
+	}
+	for _, section := range []string{`{"running":"36.0.2","target":"36.0.3","changed":true}`, `{"running":"36.0.3","target":"36.0.3","changed":false}`} {
+		var buf bytes.Buffer
+		writeRuntimePlan(&buf, json.RawMessage(section))
+		if printed := buf.Len() > 0; printed != runtimeSectionChanges(json.RawMessage(section)) {
+			t.Errorf("%s: printed=%v, verdict=%v", section, printed, !printed)
+		}
+	}
+}
+
+// The flag exists, and the status it returns is one main.go exits with rather
+// than prints: 2, a status somebody chose.
+func TestPlanDetailedExitCodeIsADeliberateTwo(t *testing.T) {
+	if newPlanCmd().Flags().Lookup("detailed-exitcode") == nil {
+		t.Fatal("palbase plan has no --detailed-exitcode")
+	}
+	var err error = planChangesExit{}
+	coded, ok := err.(interface {
+		ExitCode() int
+		DeliberateExitStatus()
+	})
+	if !ok || coded.ExitCode() != 2 || err.Error() != "" {
+		t.Fatalf("planChangesExit is not a silent deliberate 2: %#v", err)
+	}
+	if (planOutcome{}).changes() || !(planOutcome{Schema: true}).changes() || !(planOutcome{Image: true}).changes() {
+		t.Fatal("planOutcome.changes() is not the OR of its halves")
+	}
+}
+
+// End to end through the same function the verb runs: a real build, a project
+// that answers "in sync" and one that answers with a change.
+func TestPlanOutcomeFollowsTheProjectsAnswer(t *testing.T) {
+	requiresRealToolchain(t)
+	inScratchCheckout(t)
+	dir, _ := os.Getwd()
+	buildableBackend(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "db", "public.ts"), []byte(realSchema("public")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"in_sync":true,"changes":[],"destructive":[]}`, false},
+		{`{"in_sync":false,"changes":["run backfill orders_totals_v1 on orders"],"destructive":[]}`, true},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/management/schema/plan" {
+				_, _ = w.Write([]byte(tc.body))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		var out strings.Builder
+		outcome, err := planPush(context.Background(), dir, Target{URL: srv.URL}, Credentials{Value: "k", Kind: KindKey}, &out)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("plan: %v\n%s", err, out.String())
+		}
+		if outcome.changes() != tc.want || outcome.Image {
+			t.Errorf("%s → %+v, want changes=%v\n%s", tc.body, outcome, tc.want, out.String())
+		}
+	}
+}

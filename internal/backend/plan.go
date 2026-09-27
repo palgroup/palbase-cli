@@ -31,7 +31,8 @@ import (
 )
 
 func newPlanCmd() *cobra.Command {
-	return &cobra.Command{
+	var detailedExitCode bool
+	cmd := &cobra.Command{
 		Use:   "plan",
 		Args:  cobra.NoArgs,
 		Short: "Show what `palbase push` would change",
@@ -42,7 +43,12 @@ help promised them for one release after they stopped being printed, which is
 the shape of stale text this CLI exists not to ship.
 
 Nothing is written to the target: the schema half is computed by the project
-itself, which is the same computation the push runs, stopped before it writes.`,
+itself, which is the same computation the push runs, stopped before it writes.
+
+With --detailed-exitcode this exits 0 when the push would change neither the
+schema nor the runtime image, 2 when it would change either, and 1 when it
+could not plan — the contract of ` + "`palbase db plan --detailed-exitcode`" + `. The code
+is not compared: every push carries it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// THE SWEEP FIRST (FR-009, FR-010) — ahead of every refusal below.
 			sweepCheckout(cmd.ErrOrStderr())
@@ -62,9 +68,77 @@ itself, which is the same computation the push runs, stopped before it writes.`,
 			if err := RequireBackendPlane(dir); err != nil {
 				return err
 			}
-			return runPlan(cmd.Context(), dir, target, cred, cmd.OutOrStdout())
+			outcome, err := planPush(cmd.Context(), dir, target, cred, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			if detailedExitCode && outcome.changes() {
+				return planChangesExit{}
+			}
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&detailedExitCode, "detailed-exitcode", false,
+		"exit 0 when the push would change neither the schema nor the runtime image, 2 when it would")
+	return cmd
+}
+
+// planOutcome is what a plan found, as --detailed-exitcode reports it.
+//
+// Without that flag the only signal was the text: a CI job could not tell a
+// push that changes the database from one that does not, and a foreign-key
+// change or a pending backfill reached a push unseen (palgroup/palbase#18).
+type planOutcome struct {
+	// Image: the push replaces the runtime image — the plan printed an image
+	// or a runtime section.
+	Image bool
+	// Schema: the project's schema plan is not in sync — or could not be read
+	// or measured, which is not evidence that it is.
+	Schema bool
+}
+
+func (o planOutcome) changes() bool { return o.Image || o.Schema }
+
+// planChangesExit is --detailed-exitcode's "there are changes": 2, the status
+// `palbase db plan --detailed-exitcode` and CI planners already use.
+type planChangesExit struct{}
+
+func (planChangesExit) Error() string { return "" }
+func (planChangesExit) ExitCode() int { return 2 }
+
+// DeliberateExitStatus: a status chosen, not a failed subprocess's (main.go).
+func (planChangesExit) DeliberateExitStatus() {}
+
+// schemaPlanChanges reads the schema half's answer. A project that declares no
+// tables changes none; one that could not be asked, or answered with a body
+// this CLI cannot read, may change anything — "in sync" needs the plan to say so.
+func schemaPlanChanges(r schemaPlanResult) bool {
+	switch {
+	case !r.Declared:
+		return false
+	case !r.Measured:
+		return true
+	}
+	var plan schemaPlanWire
+	if err := json.Unmarshal(r.Body, &plan); err != nil {
+		return true
+	}
+	return !plan.InSync
+}
+
+// imageLineChanges is writeImagePlan's condition: a running version that is
+// known and differs from the one this checkout requires.
+func imageLineChanges(current, target string) bool {
+	return current != "" && current != target
+}
+
+// runtimeSectionChanges is writeRuntimePlan's condition: the platform says the
+// version changes.
+func runtimeSectionChanges(section json.RawMessage) bool {
+	var rp struct {
+		Changed bool `json:"changed"`
+	}
+	return json.Unmarshal(section, &rp) == nil && rp.Changed
 }
 
 // sweepCheckout runs the sweep for a verb that works in the current directory,
@@ -88,7 +162,15 @@ func sweepCheckout(w io.Writer) {
 	}
 }
 
+// runPlan is `palbase plan` without its exit status.
 func runPlan(ctx context.Context, dir string, target Target, cred Credentials, out io.Writer) error {
+	_, err := planPush(ctx, dir, target, cred, out)
+	return err
+}
+
+// planPush prints the plan, writes the plan file, and says what it found.
+func planPush(ctx context.Context, dir string, target Target, cred Credentials, out io.Writer) (planOutcome, error) {
+	var outcome planOutcome
 	// CODE. Building is how "would this even deploy" gets answered here rather
 	// than on the target, and it is THE SAME BUILD the push runs — the same
 	// function, not merely a build of the same sources.
@@ -106,12 +188,12 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// parmak izidir. Müşterinin checkout'una yazmak için bir sebep yok.
 	bundleRoot, err := os.MkdirTemp("", "palbase-bundle-*")
 	if err != nil {
-		return err
+		return outcome, err
 	}
 	defer func() { _ = os.RemoveAll(bundleRoot) }()
 	uses, _, err := buildStackArtifact(ctx, dir, bundleRoot, indent(out))
 	if err != nil {
-		return err
+		return outcome, err
 	}
 	// An @Upload naming a bucket the stack does not have is a push that will be
 	// refused, so a plan that stayed quiet about it would be a plan that missed
@@ -119,10 +201,10 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	if len(uses) > 0 {
 		have, bucketErr := stackBuckets(ctx, target)
 		if bucketErr != nil {
-			return bucketErr
+			return outcome, bucketErr
 		}
 		if bucketErr := unknownUploadBuckets(uses, bucketNames(have)); bucketErr != nil {
-			return bucketErr
+			return outcome, bucketErr
 		}
 		fmt.Fprintf(indent(out), "%d @Upload route(s), every bucket exists\n", len(uses))
 	}
@@ -170,16 +252,19 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	switch {
 	case running == installed || CloudRuntimePlanner == nil:
 		writeImagePlan(out, running, installed)
+		outcome.Image = imageLineChanges(running, installed)
 	default:
 		section, err := CloudRuntimePlanner(ctx, target.URL, installed)
 		switch {
 		case errors.Is(err, ErrNotACloudProject):
 			writeImagePlan(out, running, installed)
+			outcome.Image = imageLineChanges(running, installed)
 		case err != nil:
-			return fmt.Errorf("runtime plan: %w", err)
+			return outcome, fmt.Errorf("runtime plan: %w", err)
 		default:
 			runtimeSection = section
 			writeRuntimePlan(out, section)
+			outcome.Image = runtimeSectionChanges(section)
 		}
 	}
 
@@ -195,8 +280,9 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// parmak izi kaymasın.
 	schema, err := schemaPlanFromProject(ctx, dir, target, cred, answering)
 	if err != nil {
-		return err
+		return outcome, err
 	}
+	outcome.Schema = schemaPlanChanges(schema)
 	var unmeasured []string
 	switch {
 	case !schema.Declared:
@@ -226,7 +312,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// ne işi var".
 	bundle, err := BundleDigest(bundleRoot)
 	if err != nil {
-		return err
+		return outcome, err
 	}
 	schemaSum := sha256.Sum256(schemaBody)
 	p := PlanFile{
@@ -243,7 +329,7 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	}
 	p.Fingerprint = Fingerprint(p.BundleDigest, p.SDK.Running, p.SDK.Target, p.SchemaPlanDigest)
 	if err := WritePlanFile(dir, p); err != nil {
-		return err
+		return outcome, err
 	}
 	// THE PATH IS ASKED FOR, NOT SPELLED. This line said `.palbase/plan.json`
 	// after the plan had moved to this machine's own directory — so the one
@@ -251,10 +337,10 @@ func runPlan(ctx context.Context, dir string, target Target, cred Credentials, o
 	// no longer writes, and `ls` there would have found nothing.
 	planPath, err := planFilePath(dir)
 	if err != nil {
-		return err
+		return outcome, err
 	}
 	fmt.Fprintf(out, "plan written: %s (%s)\n", planPath, p.Fingerprint[:12])
-	return nil
+	return outcome, nil
 }
 
 // refOfURL, hedef adresinin ilk host etiketi — bulut projelerinde ref budur.
@@ -294,7 +380,7 @@ func destructiveOf(body []byte) []string {
 // cannot promise a migration. Schema compatibility can stop the push, and the
 // platform can independently refuse an unknown or unpullable image.
 func writeImagePlan(w io.Writer, current, target string) {
-	if current == "" || current == target {
+	if !imageLineChanges(current, target) {
 		return
 	}
 	fmt.Fprintf(w, "image\n  running %s; required by this checkout: %s\n  this plan changes nothing; the platform must complete and verify the image migration\n",
