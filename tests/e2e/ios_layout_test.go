@@ -77,10 +77,10 @@ func specWithoutPalbase(spec string) string {
 
 // e2eCheckout makes a checkout whose directory NAME is the local stack's group.
 //
-// `groupOf` falls back to the base name when a target carries no project field
-// and `LookupLocalStack` reads the machine-wide registry by that group (D-009),
-// so an app checkout carries a `local` environment only when it shares the name
-// of the checkout that started one.
+// `localStackGroups` tries the linked project's name first and the checkout's
+// directory name second, and `LookupLocalStack` reads the machine-wide registry
+// by each (D-009, FR-008) — so naming the checkout after the group finds the
+// stack whatever the real project is called.
 func e2eCheckout(t *testing.T) string {
 	t.Helper()
 	group := strings.TrimSpace(os.Getenv("PALBASE_E2E_LOCAL_GROUP"))

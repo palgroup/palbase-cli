@@ -849,7 +849,12 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// It used to ride on the public document, which meant anyone who knew the
 	// address was handed a working client credential; now linking is something
 	// you do as somebody.
-	target := Target{URL: base, Insecure: o.insecure, checkoutRoot: o.checkoutRoot}
+	//
+	// THE PROJECT RIDES ALONG (FR-008): it is the name `palbase start` registers
+	// its stack under, and a target without it could look the local stack up by
+	// this checkout's directory name alone.
+	target := Target{URL: base, Insecure: o.insecure, checkoutRoot: o.checkoutRoot,
+		Project: o.product.ID, Name: o.product.Name}
 	if previous, err := readLinkedProject(); err == nil {
 		target.OAuth = previous.OAuth
 	} else if _, statErr := os.Stat(projectPath()); !errors.Is(statErr, os.ErrNotExist) {

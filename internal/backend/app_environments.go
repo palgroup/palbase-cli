@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -753,8 +754,21 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 
 	// The stack on this machine, when there is one and it is not already the
 	// target.
-	localURL := LookupLocalStack(groupOf(primary))
-	if localURL == "" || localURL == primary.URL {
+	localURL, looked := findLocalStack(primary)
+	if localURL == "" {
+		// A MACHINE THAT RUNS STACKS, NONE OF THEM THIS CHECKOUT'S: said, because
+		// the person who started one expects local/ and silence reads as "link
+		// forgot it". A machine that runs none is a cloud-only setup — nothing
+		// to say.
+		if running := registeredStackGroups(); len(running) > 0 {
+			fmt.Fprintf(w, "local: no stack on this machine is registered as %s (registered: %s) — local/ is not written; "+
+				"`palbase start` registers a stack under the name of the project its checkout is linked to, "+
+				"or under its directory's name when that checkout is not linked\n",
+				strings.Join(looked, " or "), strings.Join(running, ", "))
+		}
+		return envs, specs, nil
+	}
+	if localURL == primary.URL {
 		return envs, specs, nil
 	}
 
@@ -788,29 +802,58 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 	return envs, specs, nil
 }
 
-// groupOf is the project group a target belongs to, for finding its local stack
-// in the machine register.
-func groupOf(target Target) string {
+// findLocalStack is the address of the stack `palbase start` registered for this
+// target's project, or "" — and every group it looked under, in order.
+func findLocalStack(target Target) (url string, looked []string) {
+	looked = localStackGroups(target)
+	for _, group := range looked {
+		if url := LookupLocalStack(group); url != "" {
+			return url, looked
+		}
+	}
+	return "", looked
+}
+
+// localStackGroups are the groups a target's local stack may be registered
+// under, in the order they are tried (FR-008).
+//
+// THE PROJECT'S NAME FIRST, because it is `start`'s own rule (start.go
+// groupName): a backend checkout linked to a project registers its stack under
+// that project's name. This used to be the APP checkout's directory name, so an
+// app in `MyApp/` never found the stack a backend linked to `todoapp` had
+// started — measured on 0.71.2: link wrote main/ and no local/ at all. The
+// directory name stays as the second try: it is what `start` registers in a
+// checkout that is not linked, and what a monorepo's app and backend share.
+func localStackGroups(target Target) []string {
+	var groups []string
+	add := func(name string) {
+		if name == "" {
+			return // sanitiseGroup answers "project" for it: a group nobody chose
+		}
+		if group := sanitiseGroup(name); !slices.Contains(groups, group) {
+			groups = append(groups, group)
+		}
+	}
 	// THE NAME, NOT THE IDENTITY. `Target.Project` used to be what a person
 	// called their project; it is the product ID now (`prd_9f21c7`), and that
 	// value would become the docker compose project name — every local
-	// container renamed to an opaque string nobody typed. When a model's
-	// direction is inverted, the code that read the old meaning stays behind
-	// and keeps compiling; this is that code.
+	// container renamed to an opaque string nobody typed. `start` falls back to
+	// the ID only when the record carries no name, and so does this.
 	if target.Name != "" {
-		return target.Name
+		add(target.Name)
+	} else {
+		add(target.Project)
 	}
-	if target.Project != "" {
-		return target.Project
+	// The REAL checkout's name, not the working directory's: `link` runs in a
+	// stage, whose directory is a temporary name nobody registered.
+	root := target.checkoutRoot
+	if root == "" {
+		root, _ = os.Getwd()
 	}
-	if target.checkoutRoot != "" {
-		return filepath.Base(target.checkoutRoot)
+	if root != "" {
+		add(filepath.Base(root))
 	}
-	root, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	return filepath.Base(root)
+	return groups
 }
 
 func writeSpec(env string, spec []byte) error {

@@ -38,6 +38,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1053,19 +1054,39 @@ func deregisterStack(group string) error {
 // LookupLocalStack answers where a group's local stack is, or "" when none is
 // running. Exported for `link`, which writes a `local` entry for app checkouts.
 func LookupLocalStack(group string) string {
+	return readStackRegistry().Stacks[sanitiseGroup(group)].URL
+}
+
+// registeredStackGroups names every group this machine's register holds a stack
+// for, sorted — what `link` lists when none of them is the checkout's own
+// (FR-008), so a person who started a stack is not answered with silence.
+func registeredStackGroups() []string {
+	reg := readStackRegistry()
+	groups := make([]string, 0, len(reg.Stacks))
+	for group := range reg.Stacks {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+	return groups
+}
+
+// readStackRegistry is the register as it stands, or an empty one when there is
+// none or it cannot be read: every reader treats those alike, as "no stack runs
+// here".
+func readStackRegistry() stackRegistry {
 	path, err := registryPath()
 	if err != nil {
-		return ""
+		return stackRegistry{}
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return stackRegistry{}
 	}
 	var reg stackRegistry
 	if json.Unmarshal(raw, &reg) != nil {
-		return ""
+		return stackRegistry{}
 	}
-	return reg.Stacks[sanitiseGroup(group)].URL
+	return reg
 }
 
 // updateRegistry does the read-modify-write under the same lock the credential
@@ -1108,19 +1129,7 @@ func updateRegistry(change func(*stackRegistry)) error {
 // the backend checkout that started it, and the address is the one thing they
 // both hold.
 func groupOfLocalStack(url string) (string, bool) {
-	path, err := registryPath()
-	if err != nil {
-		return "", false
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	var reg stackRegistry
-	if json.Unmarshal(raw, &reg) != nil {
-		return "", false
-	}
-	for group, stack := range reg.Stacks {
+	for group, stack := range readStackRegistry().Stacks {
 		if stack.URL == url {
 			return group, true
 		}
