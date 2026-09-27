@@ -772,20 +772,30 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		return envs, specs, nil
 	}
 
+	// BOTH FILES OR NEITHER (FR-009). A stack that could not give its key used to
+	// get a keyless entry ("a missing entry would be a build configuration that
+	// vanishes"), and one that gave a key but no contract got a config with no
+	// contract beside it. Both are inputs a generator refuses — the Android
+	// plugin as "inputs are incomplete", on every teammate's debug build once the
+	// half was committed — and the advice to fill it in with `palbase spec` could
+	// not: spec writes a contract, never a config. What this run could not read
+	// is said, and nothing is written for it.
+	skipLocal := func(why string) (appEnvironments, map[string][]byte, error) {
+		fmt.Fprintf(w, "local: %s %s — nothing is written for local; `palbase start`, then `palbase link` here\n", localURL, why)
+		return envs, specs, nil
+	}
 	localTarget := Target{URL: localURL, Local: true}
 	localCred, _, credErr := Credential(localURL)
 	if credErr != nil {
-		envs.Environments[localEnvName] = appEnvironment{AppID: projectAppID, BaseURL: localURL}
-		fmt.Fprintf(w, "local: %s is registered but this machine holds no credential for it — `palbase start`\n", localURL)
-		return envs, specs, nil
+		return skipLocal("is registered but this machine holds no credential for it")
 	}
 	localKey, keyErr := projectPublishableKey(ctx, localTarget)
 	if keyErr != nil {
-		// FR-057: the entry is written keyless, and the sequence that fills it
-		// is named. A missing entry would be a build configuration that vanishes.
-		envs.Environments[localEnvName] = appEnvironment{AppID: projectAppID, BaseURL: localURL}
-		fmt.Fprintf(w, "local: %s did not answer — run `palbase start`, then `palbase spec` to fill it in\n", localURL)
-		return envs, specs, nil
+		return skipLocal(fmt.Sprintf("did not give its key (%v)", keyErr))
+	}
+	localSpec, specErr := fetchStackSpec(ctx, localTarget, localCred)
+	if specErr != nil {
+		return skipLocal(fmt.Sprintf("gave its key but not its contract (%v)", specErr))
 	}
 	localEnv := appEnvironment{
 		AppID:   projectAppID,
@@ -796,9 +806,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		localEnv.SealedRoot = root
 	}
 	envs.Environments[localEnvName] = localEnv
-	if localSpec, err := fetchStackSpec(ctx, localTarget, localCred); err == nil {
-		specs[localEnvName] = localSpec
-	}
+	specs[localEnvName] = localSpec
 	return envs, specs, nil
 }
 

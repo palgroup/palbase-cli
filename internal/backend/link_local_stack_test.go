@@ -107,3 +107,60 @@ func TestALinkOnAMachineThatRunsNoStackSaysNothingAboutLocal(t *testing.T) {
 	assert.NoDirExists(t, EnvDir(localEnvName))
 	assert.NotContains(t, out.String(), "local:")
 }
+
+// fillLocalAdvice ends every line that leaves local/ unwritten (FR-009): the
+// stack is brought up where it lives, and THIS checkout is linked again — the
+// only verb that writes a config. `palbase spec` writes a contract alone.
+const fillLocalAdvice = "— nothing is written for local; `palbase start`, then `palbase link` here"
+
+// LOCAL IS BOTH FILES OR NEITHER (FR-009). A stack that is registered but does
+// not answer used to get a keyless android-config.json and no contract: a
+// committed file that fails every teammate's debug build, and a "fill it in
+// with `palbase spec`" that could not fill a config in.
+func TestAStoppedLocalStackGetsNoLocalFiles(t *testing.T) {
+	inScratchCheckout(t)
+	const stopped = "http://127.0.0.1:1"
+	require.NoError(t, registerStack("todoapp", stopped, "palbase-todoapp", "/elsewhere/backend"))
+	require.NoError(t, StoreCredential(stopped, Credentials{Value: "local-key", Kind: KindKey}))
+	o := productLink(t, "todoapp")
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	assert.FileExists(t, ConfigPath("main", "android"))
+	assert.NoDirExists(t, EnvDir(localEnvName))
+	assert.Contains(t, out.String(), "local: "+stopped+" did not give its key (")
+	assert.Contains(t, out.String(), fillLocalAdvice)
+}
+
+// A STACK THIS MACHINE HOLDS NO CREDENTIAL FOR gives no key: the same neither.
+func TestALocalStackWithNoCredentialGetsNoLocalFiles(t *testing.T) {
+	inScratchCheckout(t)
+	local := stackServing(t, linkKeyLocal, nil)
+	require.NoError(t, registerStack("todoapp", local.URL, "palbase-todoapp", "/elsewhere/backend"))
+	o := productLink(t, "todoapp")
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	assert.NoDirExists(t, EnvDir(localEnvName))
+	assert.Contains(t, out.String(), "local: "+local.URL+
+		" is registered but this machine holds no credential for it "+fillLocalAdvice)
+}
+
+// A KEY WITHOUT A CONTRACT IS HALF OF LOCAL, and half is what the plugin refuses
+// ("inputs are incomplete"): neither file is written.
+func TestALocalStackWithNoContractGetsNoLocalFiles(t *testing.T) {
+	inScratchCheckout(t)
+	local, _ := envServer(t, linkKeyLocal, envServerOpts{noContract: true, socialAuth: true})
+	require.NoError(t, registerStack("todoapp", local.URL, "palbase-todoapp", "/elsewhere/backend"))
+	require.NoError(t, StoreCredential(local.URL, Credentials{Value: "local-key", Kind: KindKey}))
+	o := productLink(t, "todoapp")
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	assert.NoDirExists(t, EnvDir(localEnvName))
+	assert.Contains(t, out.String(), "local: "+local.URL+" gave its key but not its contract (no contract yet: "+
+		local.URL+" has nothing to describe yet — push a backend to it first (palbase push)) "+fillLocalAdvice)
+}

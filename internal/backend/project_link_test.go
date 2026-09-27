@@ -391,40 +391,17 @@ func TestTheSlotCarriesEveryEnvironment(t *testing.T) {
 	}
 }
 
-func TestAStoppedLocalStackStillGetsAnEntry(t *testing.T) {
-	inScratchCheckout(t)
-	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
-	t.Setenv("HOME", t.TempDir())
-
-	dir, _ := os.Getwd()
-	group := sanitiseGroup(filepath.Base(dir))
-	// Registered, but nothing is listening there.
-	if err := registerStack(group, "http://127.0.0.1:1", "palbase-"+group, dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := StoreCredential("http://127.0.0.1:1", Credentials{Value: "k", Kind: KindKey}); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
-	linkedAs(t, srv.URL, "a-credential")
-
-	var out strings.Builder
-	if err := runLink(context.Background(), linkOpts{url: srv.URL, platforms: []string{"ios"}}, &out); err != nil {
-		t.Fatalf("link: %v\n%s", err, out.String())
-	}
-
-	// THE LOCAL ENVIRONMENT HAS ITS OWN DIRECTORY, and it must exist even when
-	// the stack is down — an app whose Local configuration disappears with a
-	// stopped container stops compiling for a reason nobody connects to it.
-	entry := readEnvConfig(t, localEnvName, "ios")
-	if entry.APIKey != "" {
-		t.Errorf("a key was invented for a stack that did not answer: %q", entry.APIKey)
-	}
-	if !strings.Contains(out.String(), "palbase start") {
-		t.Errorf("the output does not say how to fill it in:\n%s", out.String())
-	}
-}
+// RETIRED: TestAStoppedLocalStackStillGetsAnEntry.
+//
+// It measured a registered stack that did not answer getting a keyless
+// `local` entry ("an app whose Local configuration disappears does not
+// compile for a reason nobody connects to it"). FR-009 deliberately reversed
+// this: a half-written `local/` committed to source control failed every
+// teammate's debug build, and the advice it gave — `palbase spec` — could
+// never fill a config in. The same scenario now lives in
+// `TestAStoppedLocalStackGetsNoLocalFiles` (link_local_stack_test.go): no
+// file is written for `local/` at all, and the advice is "`palbase start`,
+// then `palbase link` here".
 
 // BİR REF, BU BULUTUN BİLDİĞİ BİR ADRESTİR — ve yardım metni bunu hep vaat etti.
 //
