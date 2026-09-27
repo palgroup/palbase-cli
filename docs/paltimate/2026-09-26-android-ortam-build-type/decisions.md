@@ -68,6 +68,7 @@
 ### D-011 · CLI ad kapısı: listede gevşek, `env create`'te sıkı
 **Karar:** Link/spec'te yalnız "tek temiz yol parçası" (FR-001) — bugün kullanılan `Production`, `featureX`, `feature-profile-update` gibi adlar kırılmasın. `env create`'te D-008.
 **Gerekçe:** Sunucu göçü (FR-105) gelene kadar mevcut adlar geçerli kalmalı; güvenlik sınırı yol parçası kuralıdır.
+**Not (yürütme, Fidelity Audit A-1/A-2):** "Gevşek kural" = her takım arkadaşının işletim sisteminde TEK dizin: ad tek yol parçasıdır, yazdırılamayan karakter taşımaz (`unicode.IsPrint`, T001'de genişletildi) ve harf büyüklüğü/Unicode biçimiyle başka bir listelenen adla aynı dizine düşmez (`envname.SameDirectory`, APFS gibi tam katlama — FR-003).
 
 ### D-012 · Ad çakışmasında varsayılan dahilse link durur
 **Karar:** FR-003. Varsayılan olmayan çakışanlar atlanır; varsayılan çakışıyorsa hata.
@@ -160,3 +161,10 @@
 ### D-034 · Studio slug metni CLI slug'ları okuyana kadar yalnız bugün doğru olanı söyler (FR-107 × FR-106 sırası)
 **Olay (yürütme, plan-cloud final review I-2):** T010/T011'in yardım metni slug'ı "her checkout'taki klasörü, Android build type'ı ve `--env` adı" diye anlatıyordu; oysa CLI listesi T014–T016'ya kadar dizin adını `legacyName(görünen ad)`'dan veriyor. Bu pencerede metin yanlış vaat ediyordu.
 **Karar:** Pencere boyunca metin slug'ı ortamın değişmeyen kalıcı adı olarak anlatır (`main` cümlesi kalır); tam metin T016 ile geri gelir. palbase-cloud deploy'u kullanıcının kararıdır; T012–T016 üretim geri doldurmasını bekliyor.
+
+### D-035 · Plugin'in kod son incelemesi dokümanlardan önce; sürüm kesiminden önce AGP 9 kanıtı
+**Karar (yürütme):** Plugin'in T001–T026 kodu T027–T029 dokümanlarından önce bütün-dal incelemesinden geçer ve düzeltmeleri gelir — T029 CHANGELOG'u plugin'in bastığı her ret metnini alıntılıyor. T030, T031'den (yayın) önce T007 tarzı `includeBuild` tüketici kanıtını AGP 9.1.1 / Gradle 9.3.1'de son ağaçta koşar.
+**Dokümanlara giren zorunlu cümleler** (son inceleme): 2.3 döneminin `~/.gradle/gradle.properties`'teki `palbase.env=`'i artık bir override'dır (komut satırı sırasında); flavor'lı app'te `gradle.properties`'teki flavor anahtarı FR-013'ün basılan satırlarıyla çelişirse o flavor'ın her variant'ı reddedilir — variant anahtarını kullanın (`palbase.env.stagingRelease`); `android.profilingMode=profileable` variant'ı debuggable olmaktan çıkarır; modüller arası denetim build type'ın `isDebuggable`'ını ve `android.profilingMode`'u okur, `beforeVariants { debuggable = … }` override'ını görmez; library başka bir build'deyse (`includeBuild`) denetlenemez; `GeneratePalbaseTask.environmentsDir` kaldırıldı; plugin sınıfı `abstract` + `@Inject` (`BuildFeatures`, `@Incubating`).
+
+### D-036 · CLI: farklı yazılmış `palbase/` kökü reddedilir
+**Karar (yürütme, CLI son inceleme):** Checkout'ta kök dizin `palbase`'ten farklı yazılmışsa (ör. `Palbase/`) link stage'e girmeden reddeder ve yeniden adlandırmayı söyler — stage bu dizini kopyalamıyor, sembolik bağlıyordu; yazım, süpürme ve başarısız link'in geri alınması doğrudan checkout'ta oluyordu (ölçüldü).
