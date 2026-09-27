@@ -250,6 +250,14 @@ func mergeConfigWithExisting(dest string, next appEnvironment) appEnvironment {
 	return next
 }
 
+// What the line about a directory the sweep must leave behind tells the reader,
+// by the build that reads palbase/environments: Xcode compiles every directory
+// under it, Gradle and the web generator only the one a build selects.
+const (
+	xcodeLeftover    = `Xcode compiles everything under palbase/environments, so move it aside if the build reports "Multiple commands produce"`
+	selectedLeftover = "a build that selects it still builds an environment this project no longer has, so move it aside"
+)
+
 // removeStaleEnvironmentDirs deletes the directory of an environment the project
 // no longer has.
 //
@@ -259,7 +267,13 @@ func mergeConfigWithExisting(dest string, next appEnvironment) appEnvironment {
 // PalbaseGenerated.stringsdata". Measured on a real customer app (07.09.2026,
 // centauri): `centauri` had outlived a rename to `main` and the build failed
 // until that folder was moved aside.
-func removeStaleEnvironmentDirs(root string, keep []string, w io.Writer) error {
+//
+// AND GRADLE BUILDS WHAT A BUILD TYPE NAMES (FR-011). An Android build selects
+// its environment by name, so a deleted environment's directory is not inert
+// there either: measured (verification of 2026-09-25, B4), `featurex/` outlived
+// its tenant and the featureX build type went on compiling a dead address, with
+// nothing failing.
+func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w io.Writer) error {
 	wanted := make(map[string]bool, len(keep))
 	for _, env := range keep {
 		wanted[env] = true
@@ -281,12 +295,11 @@ func removeStaleEnvironmentDirs(root string, keep []string, w io.Writer) error {
 		// `local` IS NEVER AN ENVIRONMENT THE PROJECT LOST. It belongs to this
 		// MACHINE, and it drops out of the caller's set the moment the stack is
 		// down — `palbase stop` is enough. Sweeping on that would delete a
-		// directory holding committed products: this runs on the Apple branch
-		// only, and `isGeneratedEnvironmentFile` counts the WEB client and its
-		// config as ours, so an `ios` link in a checkout that is also a web one
-		// would take `local/palbe.gen.ts` and `local/web-config.json` with it —
-		// while `palbase/client.ts` went on re-exporting the file that had just
-		// been deleted.
+		// directory holding committed products: `isGeneratedEnvironmentFile`
+		// counts every platform's files as ours, so an `ios` link in a
+		// checkout that is also a web one would take `local/palbe.gen.ts` and
+		// `local/web-config.json` with it — while `palbase/client.ts` went on
+		// re-exporting the file that had just been deleted.
 		//
 		// A lingering `local/` is harmless to the build: the selection pattern
 		// compiles the chosen environment only.
@@ -310,15 +323,74 @@ func removeStaleEnvironmentDirs(root string, keep []string, w io.Writer) error {
 			// gets the path and the reason; the build error they would otherwise
 			// chase is spelled out for them.
 			fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase "+
-				"did not write — Xcode compiles everything under palbase/environments, so move it "+
-				"aside if the build reports \"Multiple commands produce\"\n", dir)
+				"did not write — %s\n", shownEnvDir(e.Name()), leftover)
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "removed %s (the project no longer has that environment)\n", dir)
+		fmt.Fprintf(w, "removed %s (the project no longer has that environment)\n", shownEnvDir(e.Name()))
 	}
+	return nil
+}
+
+// shownEnvDir is how a line names one directory under palbase/environments.
+//
+// RELATIVE TO THE CHECKOUT, because the sweep runs inside the link's stage: an
+// absolute path there is the stage's, and swapping the stage back for the
+// checkout left `/private/private/var/…` on a Mac (measured — the stage is
+// named under /var, the working directory reports /private/var). And a name
+// that is not a plain word is quoted: it came from a listing an older CLI did
+// not check (FR-006).
+func shownEnvDir(name string) string {
+	return path.Join(rootDir, envSubdir) + "/" + envname.Label(name)
+}
+
+// removeThisMachinesOldMain takes away the `main/` an older link wrote for the
+// stack on THIS machine (FR-010).
+//
+// Before that stack was named `local`, a link to it — a `palbase start`
+// record, or a loopback address linked by hand — wrote `main/` with 127.0.0.1
+// in it, and a release mapped to main shipped an address that exists on one
+// laptop. A link now writes that stack to `local/`, so a `main/` whose every
+// config points at this machine is the same stack under its old name, and it
+// goes. One whose config points anywhere else is somebody's main and stays;
+// one that holds a file Palbase never writes is said and left to its owner.
+func removeThisMachinesOldMain(root string, w io.Writer) error {
+	dir := filepath.Join(root, filepath.FromSlash(EnvDir(soleEnvName)))
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	loopback, foreign := false, false
+	for _, e := range entries {
+		switch {
+		case !isGeneratedEnvironmentFile(e.Name()):
+			foreign = true
+		case strings.HasSuffix(e.Name(), "-config.json"):
+			var config appEnvironment
+			raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil || json.Unmarshal(raw, &config) != nil || !isLoopbackAddress(config.BaseURL) {
+				return nil
+			}
+			loopback = true
+		}
+	}
+	switch {
+	case !loopback:
+		return nil
+	case foreign:
+		fmt.Fprintf(w, "%s holds the stack on this machine under the name an older link gave it, and files Palbase "+
+			"did not write — move them aside, then delete it\n", shownEnvDir(soleEnvName))
+		return nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "removed %s (it held the stack on this machine, which is %s/ now)\n", shownEnvDir(soleEnvName), localEnvName)
 	return nil
 }
 
@@ -877,22 +949,24 @@ func writeSpec(env string, spec []byte) error {
 }
 
 // generateForEnvironments emits one client per environment, and one plist for
-// all of them.
+// all of them — `palbase spec` and `push`'s path, which knows the environments
+// only from the disk. `link` knows the project's listing and sweeps with it
+// before it generates (runLinkPrepared).
 func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Writer) error {
-	return generateForEnvironmentsAt(ctx, envs, envs.names(), w, "")
-}
-
-// keep is every environment whose directory the sweep must leave alone. It is
-// a parameter, not envs.names(): one link describes every environment of a
-// project, and one it could not read this run is still the project's — its
-// directory is kept even though the map carries no entry for it.
-func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, keep []string, w io.Writer, toolRoot string) error {
 	root, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	// A LEFT-BEHIND ENVIRONMENT BREAKS THE BUILD, so it goes first.
-	if err := removeStaleEnvironmentDirs(root, keep, w); err != nil {
+	if err := removeStaleEnvironmentDirs(root, envs.names(), xcodeLeftover, w); err != nil {
+		return err
+	}
+	return generateForEnvironmentsAt(ctx, envs, w, "")
+}
+
+func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.Writer, toolRoot string) error {
+	root, err := os.Getwd()
+	if err != nil {
 		return err
 	}
 

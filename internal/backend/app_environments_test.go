@@ -34,7 +34,7 @@ func TestOrphanedEnvironmentFolderIsRemovedButForeignFilesAreNot(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := removeStaleEnvironmentDirs(root, []string{"main"}, &out); err != nil {
+	if err := removeStaleEnvironmentDirs(root, []string{"main"}, xcodeLeftover, &out); err != nil {
 		t.Fatalf("removeStaleEnvironmentDirs: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestAnAppleSweepKeepsTheLocalEnvironmentsWebClient(t *testing.T) {
 
 	// The caller's set after `palbase stop`: the cloud environment only.
 	var out strings.Builder
-	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, xcodeLeftover, &out))
 
 	require.FileExists(t, filepath.Join(local, "palbe.gen.ts"),
 		"an iOS link deleted the web client of an environment it simply could not see")
@@ -140,7 +140,7 @@ func TestAnAppleSweepKeepsTheLocalEnvironmentsWebClient(t *testing.T) {
 	gone := filepath.Join(root, filepath.FromSlash(EnvDir("retired-env")))
 	require.NoError(t, os.MkdirAll(gone, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(gone, "openapi.json"), []byte("x"), 0o644))
-	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, xcodeLeftover, &out))
 	require.NoDirExists(t, gone, "an environment the project no longer has survived")
 }
 
@@ -159,7 +159,7 @@ func TestASweepRemovesAnEnvironmentWithACustomClientName(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(stale, "api.gen.ts"), []byte("export {}"), 0o644))
 
 	var out strings.Builder
-	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, xcodeLeftover, &out))
 	require.NoDirExists(t, stale, "a stale environment survived because its client had a custom name")
 
 	// NEGATIVE CONTROL: something that is NOT ours still protects the directory —
@@ -167,6 +167,6 @@ func TestASweepRemovesAnEnvironmentWithACustomClientName(t *testing.T) {
 	theirs := filepath.Join(root, filepath.FromSlash(EnvDir("mine")))
 	require.NoError(t, os.MkdirAll(theirs, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(theirs, "NOTES.md"), []byte("mine"), 0o644))
-	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, &out))
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main"}, xcodeLeftover, &out))
 	require.DirExists(t, theirs, "a directory holding somebody's own file was deleted")
 }
