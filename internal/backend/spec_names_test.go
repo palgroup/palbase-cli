@@ -92,3 +92,26 @@ func TestSpecPrintsNoControlCharacterFromAnEnvironmentDirectory(t *testing.T) {
 	require.EqualError(t, err, `read palbase/environments/"evil\x1b[2J"/ios-config.json: is a directory`, out.String())
 	require.NotContains(t, out.String(), "\x1b")
 }
+
+// TWO LISTED NAMES THAT ARE ONE DIRECTORY ON A MAC (FR-003) ARE REFUSED BY
+// `palbase spec` AS BY `link` (final review, Minor #6). Link refused the pair;
+// spec asked only whether the one name was a directory, so with `Main` and
+// `main` both listed, `spec --env Main` wrote `Main/openapi.json` — which on a
+// Mac is `main/openapi.json`, and main built against Main's contract.
+func TestSpecRefusesAnEnvironmentThatSharesItsDirectoryWithAnother(t *testing.T) {
+	for _, named := range []string{"Main", "mainref001"} {
+		t.Run(named, func(t *testing.T) {
+			specRigFor(t, []Environment{
+				{Ref: "mainref001", Name: "Main", Status: "Running"},
+				{Ref: "mainref000", Name: "main", Status: "Running"},
+			}, named)
+
+			var out bytes.Buffer
+			err := RefreshSpec(context.Background(), &out)
+			require.EqualError(t, err, `environments "Main" (mainref001) and "main" (mainref000) match when letter case `+
+				`and Unicode form are ignored, so they would share one directory, and "Main" is the one this refresh `+
+				`writes — rename one in the dashboard`, out.String())
+			require.NoDirExists(t, filepath.Join(RootDir(), envSubdir))
+		})
+	}
+}

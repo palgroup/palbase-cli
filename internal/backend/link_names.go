@@ -76,21 +76,36 @@ func linkableEnvironments(envs []Environment, linkedEnv string, w io.Writer) ([]
 			kept = append(kept, group[0])
 			continue
 		}
-		labels := make([]string, 0, len(group))
 		readsFromIt := false
 		for _, e := range group {
-			labels = append(labels, fmt.Sprintf("%q (%s)", e.Name, e.Ref))
 			readsFromIt = readsFromIt || e.Name == linkedEnv
 		}
-		all := strings.Join(labels[:len(labels)-1], ", ") + " and " + labels[len(labels)-1]
 		if readsFromIt {
-			return nil, fmt.Errorf("environments %s match when letter case and Unicode form are ignored, so they would "+
-				"share one directory, and %q is the one this link reads from — rename one in the dashboard", all, linkedEnv)
+			return nil, sharedDirectoryRefusal(group, linkedEnv, "this link reads from")
 		}
 		fmt.Fprintf(w, "skipped environments %s: their names match when letter case and Unicode form are ignored, "+
-			"so they would share one directory — rename one in the dashboard\n", all)
+			"so they would share one directory — rename one in the dashboard\n", twinLabels(group))
 	}
 	return kept, nil
+}
+
+// twinLabels names each environment of a group sharing one directory, by name
+// and ref: "a" (ref1), "b" (ref2) and "c" (ref3).
+func twinLabels(group []Environment) string {
+	labels := make([]string, 0, len(group))
+	for _, e := range group {
+		labels = append(labels, fmt.Sprintf("%q (%s)", e.Name, e.Ref))
+	}
+	return strings.Join(labels[:len(labels)-1], ", ") + " and " + labels[len(labels)-1]
+}
+
+// sharedDirectoryRefusal refuses to act on named, one of a group of
+// environments that would share one directory (FR-003). `link` and `palbase
+// spec` say it in one sentence, so the two verbs cannot drift apart on it;
+// role completes "… and named is the one …".
+func sharedDirectoryRefusal(group []Environment, named, role string) error {
+	return fmt.Errorf("environments %s match when letter case and Unicode form are ignored, so they would "+
+		"share one directory, and %q is the one %s — rename one in the dashboard", twinLabels(group), named, role)
 }
 
 // whyNotWritable says why the environment called name must not get a directory

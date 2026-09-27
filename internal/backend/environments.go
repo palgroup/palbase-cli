@@ -73,6 +73,12 @@ type Resolved struct {
 	// Source names which rule answered, so a banner and an error can both say
 	// why this environment and not another.
 	Source string
+	// Twins are the listed environments whose names are one directory with
+	// Env's on a Mac (envname.SameDirectory, FR-003), Env's own included, in
+	// the listing's order — nil when there are none, or when no listing was
+	// read to resolve Env. A verb that writes Env's directory refuses them the
+	// way `link` does.
+	Twins []Environment
 }
 
 // Describe is what every verb prints before it acts.
@@ -382,11 +388,28 @@ func resolveNamed(ctx context.Context, target Target, named string) (Resolved, e
 			if addrErr != nil {
 				return Resolved{}, addrErr
 			}
-			return Resolved{Target: target, Env: e.Name, Ref: e.Ref, URL: url, Source: "flag"}, nil
+			return Resolved{Target: target, Env: e.Name, Ref: e.Ref, URL: url, Source: "flag",
+				Twins: sharingADirectoryWith(e.Name, envs)}, nil
 		}
 	}
 	return Resolved{}, fmt.Errorf("%q is not an environment of %s.\n%s",
 		named, projectLabel(target), listing(envs))
+}
+
+// sharingADirectoryWith is every listed environment whose name is one
+// directory with name on a Mac, name's own included, in the listing's order —
+// or nil when name has no twin.
+func sharingADirectoryWith(name string, envs []Environment) []Environment {
+	var group []Environment
+	for _, e := range envs {
+		if envname.SameDirectory(e.Name, name) {
+			group = append(group, e)
+		}
+	}
+	if len(group) < 2 {
+		return nil
+	}
+	return group
 }
 
 func listing(envs []Environment) string {

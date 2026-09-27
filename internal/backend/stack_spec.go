@@ -103,6 +103,14 @@ func refreshSpec(ctx context.Context, w io.Writer, asked bool) error {
 		return fmt.Errorf("environment %q (%s) cannot be written to this checkout: %s — rename it in the dashboard",
 			env, resolved.Ref, why)
 	}
+	// AND THE LINK'S TWIN RULE (FR-003; final review, Minor #6). With `Main`
+	// and `main` both listed, the link refuses the pair, while this wrote
+	// `Main/openapi.json` — which on a Mac is `main/openapi.json`, so main
+	// built against Main's contract. The resolver read the listing to find
+	// the name, and says which listed names share its directory.
+	if len(resolved.Twins) > 1 {
+		return sharedDirectoryRefusal(resolved.Twins, env, "this refresh writes")
+	}
 
 	// The resolver's refusal already names both ways in and which address it
 	// looked for. Flattening it into the sentinel replaced all of that with four
