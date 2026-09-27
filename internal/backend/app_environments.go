@@ -288,6 +288,10 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		}
 		return err
 	}
+	onDisk := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		onDisk[e.Name()] = true
+	}
 	for _, e := range entries {
 		if !e.IsDir() || wanted[e.Name()] {
 			continue
@@ -307,6 +311,33 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 			continue
 		}
 		dir := filepath.Join(base, e.Name())
+		// AN ENVIRONMENT IN ANOTHER LETTER CASE IS NOT A LOST ONE (FR-012).
+		// Names were compared exactly, so once the project spelled `Staging`
+		// as `staging`, `Staging/` read as gone — and on a Mac it was the very
+		// directory this link had just written staging's files into, because
+		// the disk takes both spellings for one name. Measured for Apple: the
+		// link deleted what it had written. It is renamed instead, whatever it
+		// holds: nothing is lost by a rename.
+		//
+		// NOT WHEN TWO LISTED NAMES SHARE IT (FR-003): both were skipped, and
+		// nothing says which spelling it should have. NOR WHEN THE EXACT
+		// SPELLING IS ON DISK TOO — only a case-sensitive disk holds both, and
+		// there the exact one is what this run wrote; the other is swept.
+		reason := "the project no longer has that environment"
+		switch spelled := foldedOnly(e.Name(), wanted, nil); {
+		case len(spelled) > 1:
+			continue
+		case len(spelled) == 1 && !onDisk[spelled[0]]:
+			if err := os.Rename(dir, filepath.Join(base, spelled[0])); err != nil {
+				return err
+			}
+			onDisk[e.Name()], onDisk[spelled[0]] = false, true
+			fmt.Fprintf(w, "renamed %s to %s — the project spells that environment %s now, and a build finds "+
+				"its directory by the exact name\n", shownEnvDir(e.Name()), envname.Label(spelled[0]), envname.Label(spelled[0]))
+			continue
+		case len(spelled) == 1:
+			reason = "the project spells that environment " + envname.Label(spelled[0]) + " now"
+		}
 		inside, err := os.ReadDir(dir)
 		if err != nil {
 			return err
@@ -340,7 +371,7 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		if err := os.RemoveAll(dir); err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "removed %s (the project no longer has that environment)\n", shownEnvDir(e.Name()))
+		fmt.Fprintf(w, "removed %s (%s)\n", shownEnvDir(e.Name()), reason)
 	}
 	return nil
 }
