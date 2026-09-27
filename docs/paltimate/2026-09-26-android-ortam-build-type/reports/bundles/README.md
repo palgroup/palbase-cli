@@ -10,6 +10,8 @@ Planların her görevi, planlama sırasında bir scratch klonunda kırmızı →
 
 Kullanım: `git fetch <bundle> HEAD:refs/heads/plan-ref` (yalnız okumak için; `main`'e cherry-pick etmeden önce plan sırasına bakın).
 
-Bundle'daki commit sırası iki yerde plan sırasından farklıdır. Yamalar her iki sırada da çakışmadan uygulanır (ölçüldü):
+Bundle'daki commit sırası iki yerde plan sırasından farklıdır. Plan sırasıyla düz `git cherry-pick` her yerde temiz değildir: cloud'da T017'nin ilk commit'i iş akışı dosyasında (`.github/workflows/cloud-server-typecheck.yml`) çakışır ve plan çıpasıyla çözülür (doğrulayıcı ölçtü):
 - **CLI:** bundle'da T019, T018'in hemen ardından gelir. Planda T019 Dalga 2'dedir, yani T022'den sonra (D-025, D-026).
 - **Cloud:** bundle'da T017 en sondadır, iki commit hâlinde (uygulayıcı `4ffc14f39`, doğrulayıcının ret kodu `326172c4c`); T005'in revizyonu `4b0fe8e6f`. Planda T017, T006'dan sonra ve T007'den önce koşar (D-021).
+
+**Cloud, yeni taban (2026-09-27):** `cloud-plan-bb547a702.bundle` — `origin/main` `bb547a702` üstünde plan sırasıyla (T001…T006, T017, T007…T011, T013…T016) yeniden oynatılmış zincir; plan metninden bağımsız yeniden oynatma aynı ağacı verdi (`af2d112…`). Yürütmede esas budur.

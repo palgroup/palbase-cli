@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **Hedef:** `palbase-cloud` `origin/main` `f92bc1e02`. Yerel `main` (`6bbfcdf54`) 1685 commit geride ve ileri sarılabilir. İlk iş `git pull --ff-only` (D-013, T001 Adım 0).
+- **Hedef:** `palbase-cloud` `origin/main` `bb547a702`. Yerel `main` (`6bbfcdf54`) 1705 commit geride ve ileri sarılabilir (2026-09-27'de salt okunur ölçüldü; çalışma ağacı temiz). İlk iş `git pull --ff-only` (D-013, T001 Adım 0). Plan önce `f92bc1e02` üzerinde kanıtlandı, sonra `bb547a702`'ye (20 commit) bir kazıma kopyasında plan sırasıyla (T001…T006, T017, T007…T011, T013…T016) yeniden oynatıldı.
 - **Sunucu testleri:** `(cd cloud/platform/server && npm test -- <dosyalar>)`. Zincir `npm test` → `scripts/test.sh` → `bun test`. Ölçümler yerel bun 1.4.2 ile yapıldı; CI bun 1.3.9 (`oven-sh/setup-bun`) ve node 24 kullanıyor.
 - **Sunucu tip kapısı:** `(cd cloud/platform/server && npm run typecheck)`, yani `tsc --noEmit`, exit 0.
 - **Studio kapıları:** `(cd cloud/platform/studio && npx vitest run <yol>)`, `npx tsc --noEmit` exit 0, `npx eslint <dosyalar>` çıktısız, `npm run lint:design` → `Studio workspace: color and geometry token checks passed.`
@@ -23,20 +23,23 @@
   - Bu planın ölçümleri `@embedded-postgres/darwin-arm64@16.14.0-beta.17` (PostgreSQL 16.14) ile `postgresql://postgres@localhost:55471/flags_audit_test` üzerinde yapıldı. Tarif T001 Adım 0b'de.
   - CI'da `postgres:16-alpine` servisi ve `postgresql://postgres:postgres@localhost:5432/flags_audit_test` kullanılır.
 - **CI yalnız listeleri koşar:** `.github/workflows/cloud-server-typecheck.yml`, `typecheck` ve `flag-publication-postgres` işlerindeki `suites=(…)` dizilerini koşar. Her yeni test dosyası bir listeye eklenir; listede olmayan test CI'da hiç koşmaz.
-- **Taban (`f92bc1e02`, PG değişkeniyle):**
-  - Sunucu: `2223 pass` / `10 fail` / `6 errors`, `Ran 2233 tests across 170 files.` Kırıkların tümü Docker isteyen 8 dosya: `cli.projects.pg`, `panel.project-settings.pg`, `panel.deployment-activity.pg`, `panel.sdk-pins.pg`, `usage/compute|ingest|realtime|stock`.
+- **Taban (`bb547a702`, PG değişkeniyle):**
+  - Sunucu: `2233 pass` / `10 fail` / `6 errors`, `Ran 2243 tests across 171 files.` Kırıkların tümü Docker isteyen 8 dosya: `cli.projects.pg`, `panel.project-settings.pg`, `panel.deployment-activity.pg`, `panel.sdk-pins.pg`, `usage/compute|ingest|realtime|stock`.
   - Studio: `Test Files  5 failed | 386 passed | 2 skipped (393)`, `Tests  6 failed | 3747 passed | 11 skipped (3764)`. Kırıkların tümü `src/content/docs/` altında ve `sdk/cli` / sdk şablon checkout'u ister: `controller-examples`, `link-model`, `retired-commands`, `retired-surfaces`, `template-sync`.
-- **Son durum (`plan-r2` `2ce2c3cbb`):**
-  - Sunucu: `2292 pass` / `10 fail` / `6 errors`, `Ran 2302 tests across 179 files.` Kırıklar tabandaki aynı 8 Docker dosyası.
-  - Studio: `Tests  6 failed | 3753 passed | 11 skipped (3770)`. Kırıklar tabandaki aynı 5 dosya.
-  - CI listeleri: `typecheck` işi `835 pass` / `Ran 835 tests across 51 files.`; `flag-publication-postgres` işi `355 pass` / `Ran 355 tests across 26 files.`
+  - CI listeleri: `typecheck` işi `779 pass` / `Ran 779 tests across 45 files.` (PG değişkeni olmadan); `flag-publication-postgres` işi `339 pass` / `Ran 339 tests across 22 files.` Listedeki her dosya mevcut.
+  - İki tsc de exit 0; `lint:design` temiz.
+- **Son durum (plan sırasıyla T016'dan sonra, kazıma kopyasında `ca259c9b0`):**
+  - Sunucu: `2314 pass` / `10 fail` / `6 errors`, `Ran 2324 tests across 182 files.` Kırıklar tabandaki aynı 8 Docker dosyası.
+  - Studio: `Test Files  5 failed | 386 passed | 2 skipped (393)`, `Tests  6 failed | 3754 passed | 11 skipped (3771)`. Kırıklar tabandaki aynı 5 dosya.
+  - CI listeleri: `typecheck` işi `844 pass` / `Ran 844 tests across 52 files.`; `flag-publication-postgres` işi `361 pass` / `Ran 361 tests across 27 files.` Listedeki her dosya mevcut.
+  - İki tsc de exit 0; `lint:design` temiz.
 - **Göç dosyası yok.** `db/public.ts` deploy'da canlı veritabanına diff'lenip uygulanır (`AGENTS.md`). NOT NULL yalnız genişlet → doldur → daralt sırasıyla gelir: T002 → T007/T012 → T013.
-- **`palbase/palbase-env.d.ts`:** elle, üreticinin biçiminde düzenlenir. `palbase build` (palbase 0.71.2) slug kolonunu ve rapor tablosunu birebir aynı üretir. Tek fark ilgisiz `cage_toured_at` kaymasıdır; `git checkout --` ile geri alınır.
+- **`palbase/palbase-env.d.ts`:** elle, üreticinin biçiminde düzenlenir. `palbase build` (palbase 0.71.2) T016'dan sonraki ağaçta `✓ palbase/palbase-env.d.ts (unchanged)` basar ve `git status` temiz kalır: slug kolonu ve rapor tablosu üreticinin çıktısıyla birebir. `f92bc1e02`'deki `cage_toured_at` kayması `bb547a702`'de kapandı; geri alınacak bir şey yok.
 - **Dilbilgisi:** `ENVIRONMENT_SLUG_PATTERN = "^[A-Za-z][A-Za-z0-9-]{0,38}$"`, `db/public.ts`'te (D-008, kullanıcı 2026-09-26'da onayladı). Test-kilitli iki kopyası var: Studio'da (T009) ve CLI'da (FR-007, plan-cli).
 - **Dil:** kullanıcıya basılan her dize, kod ve kod yorumları İngilizce (NFR-003). Plan düzyazısı ve commit mesajları Türkçe. Yalnız mevcut Türkçe yorum metinlerindeki eskimiş başvurular silindi.
 - **Yazıcı ve commit kuralları:** tek yazıcı, `main`'de; worktree ve yan branch yok (NFR-004). Commit'ler pathspec ile: `git add <yollar> && git commit`. Her commit `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>` ile biter.
 - **Deploy sırası:**
-  1. Sunucu T001–T007.
+  1. Sunucu T001–T007, commit sırasıyla (T001…T006, T017, T007). T005 ile T017'nin sunucu kısmı aynı deploy'a girer.
   2. T012: operatör fiili, ve üretimde `SELECT count(*)::int AS n FROM cloud_projects WHERE slug IS NULL` = 0.
   3. Studio T008–T011. T010 yalnız T005 canlıyken; T008 geri doldurulmamış satırda ref gösterirdi.
   4. T013 (sözleşme).
@@ -113,7 +116,7 @@ Türetme bilinçli olarak basit tutuldu:
 - Geri kalan ad aksansızlaştırılır, her geçersiz karakter dizisi tek bir tire olur.
 - Büyük/küçük harf korunur.
 
-- [ ] **Adım 0: Güncel main** — Yerel `palbase-cloud` kopyası `origin/main`'in 1685 commit gerisinde ve eski `v2-cloud/` düzeninde (D-013). Ölçüm: HEAD `6bbfcdf54`, `git rev-list --count HEAD..origin/main` → `1685`, `git merge-base --is-ancestor HEAD origin/main` → ileri sarılabilir. Run: `git pull --ff-only` · Beklenen: HEAD `f92bc1e02` ya da ötesi, ve `cloud/platform/server/` dizini var. Bu plan `f92bc1e02` üzerinde koşturuldu.
+- [ ] **Adım 0: Güncel main** — Yerel `palbase-cloud` kopyası `origin/main`'in 1705 commit gerisinde ve eski `v2-cloud/` düzeninde (D-013). Ölçüm (2026-09-27, salt okunur): HEAD `6bbfcdf54`, `origin/main` `bb547a702`, `git rev-list --count HEAD..origin/main` → `1705`, `git merge-base --is-ancestor HEAD origin/main` → ileri sarılabilir, çalışma ağacı temiz. Run: `git pull --ff-only` · Beklenen: HEAD `bb547a702` ya da ötesi, ve `cloud/platform/server/` dizini var. Bu plan önce `f92bc1e02` üzerinde koşturuldu, sonra `bb547a702` üzerinde plan sırasıyla (T001…T006, T017, T007…T016) yeniden oynatıldı.
 - [ ] **Adım 0b: Tek kullanımlık Postgres** — `*.pg.test.ts` dosyaları gerçek bir PostgreSQL 16 ister. Fikstür yalnız `flags_audit_test` adlı bir veritabanına yazar (kendi kilidi). Bu planın ölçümleri `@embedded-postgres/darwin-arm64@16.14.0-beta.17` ikilileriyle yapıldı (PostgreSQL 16.14):
 ```bash
 npm i --prefix "$PGDIR" @embedded-postgres/darwin-arm64@16.14.0-beta.17
@@ -539,9 +542,9 @@ Aynı tabloda `checks: [{ name: "cloud_projects_phase", expr: phaseCheck }],` sa
   - `createEnvironment` de aynısını yapar. Panel bu yoldan geçer: önce ürünü, sonra bu çağrıyı yapar — `studio/src/app/(studio)/projects/new/page.tsx`, ad "Production".
   - `provisionDeps(ctx)` artık `ctx.slug` alır ve onu `cloud_projects` satırına yazar.
 
-Bugün `main` okuma anında çıkarılıyor: ortamın adı ürününkine eşitse `main` sayılıyor (`cli.controller.ts:487-490`). Bu yüzden panelden açılan bir projenin ilk ortamı CLI'da `Production/` oluyor. Kural artık yaratılışta YAZILIR (D-015). Görünen ad serbest kalır.
+Bugün `main` okuma anında çıkarılıyor: ortamın adı ürününkine eşitse `main` sayılıyor (`cli.controller.ts:489-492`). Bu yüzden panelden açılan bir projenin ilk ortamı CLI'da `Production/` oluyor. Kural artık yaratılışta YAZILIR (D-015). Görünen ad serbest kalır.
 
-T005 bu kuralı genişletir. "İlk ortam", `main`'i dolduran ortam olur; `existing === 0` yerine `held()` kullanılır.
+T005 bu kuralı genişletir: ilk ortam yine `existing === 0` ile belirlenir (D-021); sonraki ortamlar istekteki slug'ı ya da addan türetileni alır ve `held()`'e karşı yargılanır.
 
 - [ ] **Adım 1: Kırmızı testi yaz** — `cloud/platform/server/modules/environments/cloud-lifecycle.test.ts`: `import { ProvisionService } from "./provision.ts";` satırını `import { type CreateProjectDeps, ProvisionService } from "./provision.ts";` yap ve dosyanın SONUNA ekle:
 ```ts
@@ -1360,7 +1363,7 @@ describe("the slugs a project holds, read by the create path on a real PostgreSQ
   - `(fail) the environment body and its contract carry the slug (FR-103) > the body takes an optional slug and refuses one that breaks the grammar`
   - `(fail) … the OpenAPI contract documents the slug with the same pattern, and the 409`
   - `(fail) the environment slug race, through SagaService.runSaga > the loser gets the 409 …`, ve `Received: "SagaCompensationFailed: step 'write-canonical-record' failed: Unique constraint violated; the compensation for 'write-canonical-record' failed too (current transaction is aborted, commands ignored until end of transaction block) — A HALF-CREATED RESOURCE EXISTS, manual intervention required"`
-  - `36 pass` / `5 fail` / `2 errors` / `Ran 41 tests across 4 files.`
+  - `37 pass` / `5 fail` / `2 errors` / `Ran 42 tests across 4 files.` (`bb547a702`'de `cloud-environments.controller.test.ts` bir test fazla taşır: `0c824b4ca`'nın bilet testi; geçer.)
 - [ ] **Adım 3: Uygula** — (a) `cloud/platform/server/modules/environments/cloud-lifecycle.ts` import'ları:
   - İlk `@palbase/backend` satırını şu iki satırla değiştir:
 ```ts
@@ -1403,7 +1406,7 @@ function slugTaken(slug: string): string {
   return `this project already has an environment with slug ${JSON.stringify(slug)} (slugs are unique regardless of case)`;
 }
 ```
-(c) Kurucunun son parametresi `private readonly cloudOperationsService: CloudOperationsService,` satırının ALTINA `private readonly environmentSlugService: EnvironmentSlugService,` ekle.
+(c) Kurucunun son parametresi `private readonly cloudOperationsService: CloudOperationsService,` satırının ALTINA `private readonly environmentSlugService: EnvironmentSlugService,` ekle. (`bb547a702` kurucunun ortasına `archiveRetentionService`'i ekledi; son parametre yine `cloudOperationsService`.)
 (d) `createEnvironment` içinde üç değişiklik:
   - T003'ün `const slug = existing === 0 ? FIRST_ENVIRONMENT_SLUG : null;` satırını şununla değiştir:
 ```ts
@@ -1518,14 +1521,14 @@ Aynı işlemin `"400": { description: Plan's environment count reached, or envel
             # ve tek istek transaction'ı. Aynı gerekçe: CI'da koşmayan kapı testi kapı değildir.
             modules/environments/cloud-lifecycle.race.test.ts
 ```
-- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/server && npm test -- modules/environments/cloud-lifecycle.test.ts modules/environments/cloud-lifecycle.race.test.ts modules/environments/cloud-environments.controller.test.ts modules/shared/environment-slug.pg.test.ts && npm run typecheck)` · Beklenen: `92 pass` / `0 fail` / `Ran 92 tests across 4 files.`, ve typecheck exit 0.
+- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/server && npm test -- modules/environments/cloud-lifecycle.test.ts modules/environments/cloud-lifecycle.race.test.ts modules/environments/cloud-environments.controller.test.ts modules/shared/environment-slug.pg.test.ts && npm run typecheck)` · Beklenen: `93 pass` / `0 fail` / `Ran 93 tests across 4 files.`, ve typecheck exit 0.
 
   Yeni testlerin ısırdığı ölçüldü; her değişiklik ölçümden sonra geri alındı:
-  - Reddedilen seçenek, çağrıda `existing === 0` → `!this.environmentSlugService.held(environments).has(FIRST_ENVIRONMENT_SLUG)` → "an environment that is not the project's first is never handed `main`" testi düştü (`46 pass` / `1 fail`, 1 dosya). Aynı kural bu testlere karşı ilk koşturulduğunda fark `-   "slug": "Production",` / `+   "slug": "main",` idi (`91 pass` / `1 fail` / `Ran 92 tests across 4 files.`).
+  - Reddedilen seçenek, çağrıda `existing === 0` → `!this.environmentSlugService.held(environments).has(FIRST_ENVIRONMENT_SLUG)` → "an environment that is not the project's first is never handed `main`" testi düştü (`46 pass` / `1 fail`, 1 dosya). Aynı kural bu testlere karşı ilk koşturulduğunda fark `-   "slug": "Production",` / `+   "slug": "main",` idi (`92 pass` / `1 fail` / `Ran 93 tests across 4 files.`).
   - `existing === 0` → `false` → üç test düştü: "the panel's first environment, displayed as Production, is written with slug main", "the first environment cannot be given a slug other than main", "a project whose environments were all deleted gets `main` on its next environment" (`44 pass` / `3 fail`, 1 dosya).
   - `held()`'den `planBackfill` satırı çıkarılınca → "before the backfill, a new environment cannot take the slug an older one will get — nor `main`" ve PG testi "before the backfill, the slugs it WILL give" düştü (`51 pass` / `2 fail`, 2 dosya). "before the backfill, the product's own name is free" artık bu mutasyonda düşmüyor: "ilk" kararı `held()`'e bağlı değil.
 
-  Tam süit bu görevden sonra `2265 pass` / `10 fail` / `6 errors` verdi (`Ran 2275 tests across 174 files.`). Taban `10 fail` / `6 errors` ile aynıdır; tümü Docker'lı testler.
+  Tam süit bu görevden sonra `2275 pass` / `10 fail` / `6 errors` verdi (`Ran 2285 tests across 175 files.`). Taban `10 fail` / `6 errors` ile aynıdır; tümü Docker'lı testler.
 - [ ] **Adım 5: Commit** — `git add .github/workflows/cloud-server-typecheck.yml cloud/platform/api/cloud.openapi.yaml cloud/platform/server/modules/environments/cloud-lifecycle.ts cloud/platform/server/modules/environments/cloud-lifecycle.test.ts cloud/platform/server/modules/environments/cloud-lifecycle.race.test.ts cloud/platform/server/modules/environments/cloud-environments.controller.test.ts cloud/platform/server/modules/shared/environment-slug.ts cloud/platform/server/modules/shared/environment-slug.pg.test.ts && git commit -m "feat(environments): ortam yaratma slug alır ya da addan türetir; geçersiz/ayrılmış 400, çakışan 409 — yarışta da; ilk ortam = ortamsız projenin ortamı (FR-103, D-021)"`
 
 ### T006: Yeniden adlandırma yalnız görünen adı değiştirir; panel saklanan slug'ı döner
@@ -1535,7 +1538,7 @@ Aynı işlemin `"400": { description: Plan's environment count reached, or envel
 - Consumes: `cloud_projects.slug` (T002); iş akışı çıpası T004'ün satırı
 - Produces: `PanelController.listEnvironments` / `environmentByRef` / `renameEnvironment` `slug` alanında SAKLANAN slug'ı döner. `renameEnvironment`'ın rotası `PATCH /v1/panel/environments/{ref}`; gövdesi `PanelRenameBody` (panel.ts:243), yalnız `name` taşır. Geri doldurulmamış bir satır eskisi gibi ref döner; bu yedeği T013 kaldırır.
 
-Yeniden adlandırmanın SQL'i zaten yalnız `name` yazıyor: `UPDATE cloud_projects SET name = $2 WHERE ref = $1` (panel.controller.ts:610). Eksik olan başkaydı: panel slug diye REF gösteriyordu (`slug: ref`, :283).
+Yeniden adlandırmanın SQL'i zaten yalnız `name` yazıyor: `UPDATE cloud_projects SET name = $2 WHERE ref = $1` (panel.controller.ts:609). Eksik olan başkaydı: panel slug diye REF gösteriyordu (`slug: ref`, :283).
 
 Test, bir SELECT'e yalnız metninin adlandırdığı kolonları döndüren bir sahteyle koşar. `p.slug`'ı unutan bir sorgu slug alamaz, tıpkı Postgres'te olduğu gibi.
 
@@ -1653,12 +1656,13 @@ describe("renaming an environment (FR-104)", () => {
 
 D-021 (kullanıcı onayladı, 2026-09-26): projede başka bir ortam varken `main`'i silme isteği hangi yoldan gelirse gelsin sunucuda reddedilir; `main` ancak projenin son ortamıysa silinir; ortamsız kalan projenin bir sonraki ortamı `main` olur (T005).
 
-**Silme yolları (kazıma kopyasında sayıldı).** Bir ortam satırını silen tek canlı yol `DELETE /v1/cloud/projects/{ref}` (`cloud-environments.controller.ts:282`) → `CloudLifecycleService.remove` → teardown sagasının `delete-canonical-record` adımıdır (`cloud-lifecycle.ts` `DELETE FROM cloud_projects WHERE ref = $1`). Bu rotaya inenler:
+**Silme yolları (kazıma kopyasında sayıldı).** Bir ortam satırını silen tek canlı yol `DELETE /v1/cloud/projects/{ref}` (`cloud-environments.controller.ts:299`) → `CloudLifecycleService.remove` → teardown sagasının `delete-canonical-record` adımıdır (`cloud-lifecycle.ts` `DELETE FROM cloud_projects WHERE ref = $1`). Bu rotaya inenler:
 - CLI `palbase env delete <ad>` ve `palbase project delete <ref>` (`palbase-cli` `internal/env/env.go:319`, `internal/project/project.go:331`).
-- Panelin tehlike bölgesi: `settings/danger/page.tsx` → `trpc.environments.delete` → `pb.cloudEnvironments.remove` (`src/lib/panel/routes/lifecycle.ts:34`).
+- Panelin tehlike bölgesi: `settings/danger/page.tsx` → `trpc.environments.delete` → `pb.cloudEnvironments.remove` (`src/lib/panel/routes/lifecycle.ts:30`).
 - palcore (makine kimliği, rotanın belgesi) ve `cloud/platform/deploy/verify-plane.py` (doğrulama projesi ve `reap`).
+- `bb547a702`'den beri `cloud/platform/deploy/restore-drill.py` (`f261318f8`, haftalık kiracı geri sarma provası): prova projesini `POST /v1/cloud/projects` ile açar ve her durumda bu rotayla siler.
 
-Kalan iki `DELETE` yaratma sagasının telafisidir (`provisionDeps.deleteCanonicalRecord`). Yalnız aynı isteğin az önce yazdığı ortam satırını ve mint ettiği ürünü siler; var olan bir `main`'e ulaşamaz, bu yüzden bilinçli olarak serbest. Ürünü (`cloud_products`), organizasyonu ya da hesabı silen bir fiil yok; `db/public.ts`'te FK/cascade yok. Studio'nun eski `/api/v2/projects/…` DELETE rotaları Temporal iş akışı başlatır ve `cloud_projects`'e dokunmaz. "Projeyi silmek" bu düzlemde ortamları tek tek silmektir: `main` en son serbesttir, proje boş kalır ve bir sonraki ortam `main` olur.
+Kalan iki `DELETE` yaratma sagasının telafisidir (`provisionDeps.deleteCanonicalRecord`). Yalnız aynı isteğin az önce yazdığı ortam satırını ve mint ettiği ürünü siler; var olan bir `main`'e ulaşamaz, bu yüzden bilinçli olarak serbest. Ürünü (`cloud_products`), organizasyonu ya da hesabı silen bir fiil yok; `db/public.ts`'te FK/cascade yok. Studio'nun eski `/api/v2/projects/…` DELETE rotaları Temporal iş akışı başlatır ve `cloud_projects`'e dokunmaz. `bb547a702`'nin kilitli arşiv karantinası (`6ea5310ff`) bu listeyi değiştirmez: `TeardownDeps`'e `holdArchive` / `isArchiveHeld` ekler (arşivi kilitte kalan ref havuza dönmez), ve yeni `POST /v1/internal/archives/finish-retention` yalnız `cloud_archive_retention` satırlarını siler, ref'i serbest bırakır; `cloud_projects`'e dokunmaz. Saganın telafileri hâlâ boş. "Projeyi silmek" bu düzlemde ortamları tek tek silmektir: `main` en son serbesttir, proje boş kalır ve bir sonraki ortam `main` olur.
 
 Dört tasarım kararı var:
 
@@ -1671,14 +1675,15 @@ Dört tasarım kararı var:
    - Bilinen sınır: son ortam `main`'in silinmesi `delete_incomplete` (503) ile yarıda kalır ve tekrarından ÖNCE aynı projede yeni bir ortam açılırsa, tekrar `main_deleted_last` alır; kiracısı yarı sökülmüş `main` o ortam silinene kadar defterde kalır. Yarıda kalan silme defterde iz bırakmaz (iş satırı isteğin transaction'ıyla geri sarılır), yani sunucu bu `main`'i sağlam olandan ayıramaz. Çıkış yolu cümlenin kendisi: önce ötekiler.
 4. **Ret kendi koduyla döner: `main_deleted_last`, `conflict` değil.** Bu rotada `conflict` zaten "bu ortamın silmesi sürüyor — bekle ve tekrar dene" demek: `DeleteInProgress` → `Conflict` (`remove()`), `teardown.ts`'in belgesi ("çağıran bekleyip yeniden dener") ve `verify-plane.py` `reap` (409'u 10 sn × 12 tekrar dener). Bir projeyi koddan silen çağıran — palcore, krediyi biten kullanıcının projesini siler (`cloud-environments.controller.ts` rota belgesi) — "bekle" ile "önce ötekileri sil, `main` en son"u ancak koddan ayırabilir; aynı kodla, hiçbir beklemenin kaldırmayacağı bir reddi bekleyip tekrar denerdi. CLI'ın kendi kuralı da bu: "ADA bakılır, statüye değil" (`palbase-cli` `internal/transport/rest.go`). Durum 409 kalır; emsal `cutover_refused` (409, `internal.controller.ts`). CLI ve `@palbase/web` kodu olduğu gibi taşır (aşağıda).
 
-**Panel ve CLI.** Tehlike bölgesi `err.message`'ı toast'a basar. 409 zarfından `@palbase/web`'in ürettiği `BackendError`'ın mesajı `error_description`'dır (`fromEnvelope`); eşlenmemiş bir kod (`main_deleted_last`) olduğu gibi fırlatılır. Yani cümle kişiye aynen ulaşır; Studio testi bunu gerçek `BackendError` sınıfıyla kilitler. Sil düğmesini `main`'de saklamak bu yürütme sırasında test-kilitli bir `main` sabiti ister: Studio kopyası T009'da doğar, `is_production` T016'da yalnız `main` olur. Bu yüzden burada yapılmadı; T016'dan sonra küçük bir takip işidir. CLI değişmez: `palbase env delete main` ve `palbase project delete <ref>` taşıma katmanının hatasını `fmt.Fprintln(os.Stderr, err)` ile aynen basar (`cmd/palbase/main.go`). `internal/transport` `Client.Do`'nun bu zarftan ürettiği hata atılabilir bir kopyada `httptest` ile ölçüldü: `main_deleted_last (409) [request_id req_probe]: main is this project's default environment and cannot be deleted while other environments exist — delete the others first`. Sunucuya tek istek gider: DELETE otomatik tekrarlanmaz (`IsNamedTransient` → `false`). `verify-plane.py` `reap` 409'u durumuna bakarak tekrar dener; hesabındaki projeler `POST /v1/cloud/projects` ile doğar, yani tek ortamlıdır ve bugün etkilenmez.
+**Panel ve CLI.** Tehlike bölgesi `err.message`'ı toast'a basar. 409 zarfından `@palbase/web`'in ürettiği `BackendError`'ın mesajı `error_description`'dır (`fromEnvelope`); eşlenmemiş bir kod (`main_deleted_last`) olduğu gibi fırlatılır. Yani cümle kişiye aynen ulaşır; Studio testi bunu gerçek `BackendError` sınıfıyla kilitler. Sil düğmesini `main`'de saklamak bu yürütme sırasında test-kilitli bir `main` sabiti ister: Studio kopyası T009'da doğar, `is_production` T016'da yalnız `main` olur. Bu yüzden burada yapılmadı; T016'dan sonra küçük bir takip işidir. CLI değişmez: `palbase env delete main` ve `palbase project delete <ref>` taşıma katmanının hatasını `fmt.Fprintln(os.Stderr, err)` ile aynen basar (`cmd/palbase/main.go`). `internal/transport` `Client.Do`'nun bu zarftan ürettiği hata atılabilir bir kopyada `httptest` ile ölçüldü: `main_deleted_last (409) [request_id req_probe]: main is this project's default environment and cannot be deleted while other environments exist — delete the others first`. Sunucuya tek istek gider: DELETE otomatik tekrarlanmaz (`IsNamedTransient` → `false`). `verify-plane.py` `reap` 409'u durumuna bakarak tekrar dener; hesabındaki projeler `POST /v1/cloud/projects` ile doğar, yani tek ortamlıdır ve bugün etkilenmez. `restore-drill.py`'nin `delete`'i de aynı biçimde 409'u ve 503'ü durumuna bakarak 10 sn × 12 tekrar dener (`vp.REAP_RETRIES`); prova projesi de `POST /v1/cloud/projects` ile doğan tek ortamlı bir projedir, `main` son ortamdır ve silinir — etkilenmez.
 
-- [ ] **Adım 1: Kırmızı testleri yaz** — (a) `cloud/platform/server/modules/environments/teardown.test.ts`, `teardown.jobs.test.ts` ve `teardown.object.test.ts`: her birinin fikstüründe `    lockProjectRow: jest.fn(async () => {}),` satırının ALTINA ekle:
+- [ ] **Adım 1: Kırmızı testleri yaz** — (a) `cloud/platform/server/modules/environments/teardown.test.ts`, `teardown.jobs.test.ts` ve `teardown.object.test.ts`: her birinin fikstüründe `    lockProjectRow: jest.fn(async () => {}),` satırının ALTINA ekle (fikstürler `bb547a702`'den beri `holdArchive` / `isArchiveHeld` da taşır; çıpa değişmez):
 ```ts
     assertDeletable: jest.fn(async () => {}),
 ```
 (b) `cloud/platform/server/modules/environments/teardown.test.ts` dosyasının SONUNA ekle:
 ```ts
+
 /**
  * A REFUSED DELETE STOPS BEFORE ANYTHING IS DESTROYED (D-021).
  *
@@ -1848,6 +1853,7 @@ describe("deleting main (D-021)", () => {
   - `import { CloudLifecycleService, ENVIRONMENT_SLUGS_OF_PROJECT_SQL } from "./cloud-lifecycle.ts";` → `import { CloudLifecycleService, ENVIRONMENT_SLUGS_OF_PROJECT_SQL, PRODUCT_FOR_CREATE_SQL } from "./cloud-lifecycle.ts";`
   - T005'in "the project's environments are read with the statement `environment-slug.pg.test.ts` runs on Postgres" testinin ALTINA, bloğun içine ekle:
 ```ts
+
   it("the project is read first, with the shared lock `main-delete-lock.pg.test.ts` measures — a delete of main waits for this create (D-021)", async () => {
     existingProject([MAIN]);
     const seen: Array<{ sql: string; params: unknown[] }> = [];
@@ -1977,6 +1983,7 @@ describe("the project lock pair (D-021)", () => {
 ```
 (f) `cloud/platform/studio/src/app/(studio)/projects/[projectId]/environments/[environmentRef]/settings/danger/page.test.tsx`: `import userEvent from "@testing-library/user-event";` satırının ALTINA `import { BackendError } from "@palbase/web";` ekle, ve "maintainer: surfaces a toast.error and stays put when delete fails" testinin ALTINA, `describe`'ın içine ekle:
 ```tsx
+
   // THE SERVER'S SENTENCE IS THE ANSWER (D-021). `pb.cloudEnvironments.remove`
   // rejects with a `BackendError` whose message is the envelope's
   // `error_description`; the rule and the way out must reach the person as
@@ -2003,7 +2010,7 @@ describe("the project lock pair (D-021)", () => {
 - [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run: `(cd cloud/platform/server && npm test -- modules/environments/cloud-lifecycle.delete-main.test.ts modules/environments/main-delete-lock.pg.test.ts modules/environments/cloud-lifecycle.test.ts modules/environments/teardown.test.ts modules/environments/teardown.jobs.test.ts modules/environments/teardown.object.test.ts)` · Beklenen: **FAIL**. Çıktıda şunlar görünür:
   - `SyntaxError: Export named 'PRODUCT_FOR_CREATE_SQL' not found in module '…/modules/environments/cloud-lifecycle.ts'.` (`cloud-lifecycle.test.ts`), ve iki dosyada `SyntaxError: Export named 'MAIN_DELETE_LOCK_SQL' not found in module '…/modules/environments/cloud-lifecycle.ts'.`
   - `(fail) a refused delete stops before anything is destroyed (D-021) > row lock, then the deletable check, then the saga — and a refusal starts no step`; farkta `-   "deletable:abc12345m",`.
-  - `25 pass` / `4 fail` / `3 errors` / `Ran 29 tests across 6 files.`
+  - `27 pass` / `4 fail` / `3 errors` / `Ran 31 tests across 6 files.` (`teardown.test.ts`, `bb547a702`'nin iki kilitli-arşiv testini taşır; ikisi de geçer.)
 
   Studio: `(cd cloud/platform/studio && npx vitest run 'src/app/(studio)/projects/[projectId]/environments/[environmentRef]/settings/danger/page.test.tsx')` → `Tests  6 passed (6)`. Bu test bugünkü davranışı KİLİTLER, kırmızı olmaz; ısırdığı Adım 4'te ölçüldü.
 - [ ] **Adım 3: Uygula** — (a) `cloud/platform/server/modules/environments/teardown.ts`:
@@ -2023,6 +2030,7 @@ describe("the project lock pair (D-021)", () => {
 ```
   - `deleteProject` içinde `    await deps.lockProjectRow(ref);` satırının ALTINA ekle:
 ```ts
+
     // A REFUSAL COMES BEFORE THE FIRST DESTRUCTIVE STEP (D-021) — after the row
     // lock, so the lock order above holds for the project lock it may take.
     await deps.assertDeletable(ref);
@@ -2108,6 +2116,7 @@ const MAIN_KEPT =
     const locked = await project();
     if (locked.main && locked.environments > 1) throw new HttpError(409, "main_deleted_last", MAIN_KEPT);
   }
+
 ```
 (c) `cloud/platform/api/cloud.openapi.yaml`: `/v1/cloud/projects/{ref}` → `delete` altında `"204": { description: Hücredeki ve global katmandaki her iz kaldırıldı }` satırının ALTINA ekle:
 ```yaml
@@ -2125,12 +2134,12 @@ const MAIN_KEPT =
             # D-021 kilit çifti gerçek PostgreSQL'de: yaratma FOR KEY SHARE, main silme FOR UPDATE birbirini bekler.
             modules/environments/main-delete-lock.pg.test.ts
 ```
-- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/server && npm test -- modules/environments/cloud-lifecycle.delete-main.test.ts modules/environments/main-delete-lock.pg.test.ts modules/environments/cloud-lifecycle.test.ts modules/environments/teardown.test.ts modules/environments/teardown.jobs.test.ts modules/environments/teardown.object.test.ts && npm run typecheck)` · Beklenen: `83 pass` / `0 fail` / `Ran 83 tests across 6 files.`, ve typecheck exit 0. Studio: aynı vitest komutu → `Tests  6 passed (6)`; `(cd cloud/platform/studio && npx tsc --noEmit)` exit 0; `npx eslint '<page.test.tsx>'` çıktısız; `npm run lint:design` → `Studio workspace: color and geometry token checks passed.`
+- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/server && npm test -- modules/environments/cloud-lifecycle.delete-main.test.ts modules/environments/main-delete-lock.pg.test.ts modules/environments/cloud-lifecycle.test.ts modules/environments/teardown.test.ts modules/environments/teardown.jobs.test.ts modules/environments/teardown.object.test.ts && npm run typecheck)` · Beklenen: `85 pass` / `0 fail` / `Ran 85 tests across 6 files.`, ve typecheck exit 0. Studio: aynı vitest komutu → `Tests  6 passed (6)`; `(cd cloud/platform/studio && npx tsc --noEmit)` exit 0; `npx eslint '<page.test.tsx>'` çıktısız; `npm run lint:design` → `Studio workspace: color and geometry token checks passed.`
 
-  Komşu süitler aynı noktada değişmedi: `cloud-lifecycle.race.test.ts`, `cloud-environments.controller.test.ts`, `environment-slug.pg.test.ts`, `panel.environment-slug.test.ts`, `saga.test.ts` → `58 pass` / `0 fail` / `Ran 58 tests across 5 files.`
+  Komşu süitler aynı noktada değişmedi: `cloud-lifecycle.race.test.ts`, `cloud-environments.controller.test.ts`, `environment-slug.pg.test.ts`, `panel.environment-slug.test.ts`, `saga.test.ts` → `59 pass` / `0 fail` / `Ran 59 tests across 5 files.`
 
   Testlerin ısırdığı ölçüldü; her değişiklik ölçümden sonra geri alındı:
-  - Teardown `assertDeletable`'ı çağırmıyor → sıra testi düştü (`14 pass` / `1 fail`, `teardown.test.ts`).
+  - Teardown `assertDeletable`'ı çağırmıyor → sıra testi düştü, farkta `-   "deletable:abc12345m",` (`16 pass` / `1 fail`, `teardown.test.ts`).
   - `remove()` kuralı bağlamıyor (`assertDeletable: async () => {},`) → üç ret testi düştü, her biri `Received promise that resolved: Promise { <resolved> }` (`3 pass` / `3 fail`, `cloud-lifecycle.delete-main.test.ts`). Adım 2'nin kırmızısı dışa aktarım `SyntaxError`'ı olduğu için davranışın ısırdığını asıl bu gösterir.
   - Ret kodu `conflict`'e döndü (`throw new Conflict(MAIN_KEPT)`) → "while another environment exists is a 409 …" düştü; fark `-   "error": "main_deleted_last",` / `+ [Conflict: main is this project's default environment …]` (`5 pass` / `1 fail`).
   - Kardeşler kilitten ÖNCE sayılıyor (kilitten sonra yeniden okuma yok) → "a create that committed while the delete waited for the project lock is counted" düştü (`5 pass` / `1 fail`).
@@ -2141,7 +2150,7 @@ const MAIN_KEPT =
   - `createEnvironment` kilitsiz ilk sorguyu gönderiyor → "the project is read first, with the shared lock …" düştü (`47 pass` / `1 fail`).
   - Studio: sayfa bir `BackendError`'ın cümlesini "Failed to delete environment" ile değiştiriyor → yalnız yeni test düştü (`Tests  1 failed | 5 passed (6)`). Düz `Error` kullanan eski test bunu göremiyordu.
 
-  Tam süit bu görevden sonra `2279 pass` / `10 fail` / `6 errors` verdi (`Ran 2289 tests across 177 files.`). Kırıklar tabandaki aynı 8 Docker dosyası.
+  Tam süit bu görevden sonra `2289 pass` / `10 fail` / `6 errors` verdi (`Ran 2299 tests across 178 files.`). Kırıklar tabandaki aynı 8 Docker dosyası.
 - [ ] **Adım 5: Commit** — `git add cloud/platform/server/modules/environments/teardown.ts cloud/platform/server/modules/environments/teardown.test.ts cloud/platform/server/modules/environments/teardown.jobs.test.ts cloud/platform/server/modules/environments/teardown.object.test.ts cloud/platform/server/modules/environments/cloud-lifecycle.ts cloud/platform/server/modules/environments/cloud-lifecycle.test.ts cloud/platform/server/modules/environments/cloud-lifecycle.delete-main.test.ts cloud/platform/server/modules/environments/main-delete-lock.pg.test.ts cloud/platform/api/cloud.openapi.yaml .github/workflows/cloud-server-typecheck.yml 'cloud/platform/studio/src/app/(studio)/projects/[projectId]/environments/[environmentRef]/settings/danger/page.test.tsx' && git commit -m "feat(environments): başka ortamlar varken main silinmez — ret sunucuda, her yoldan, yıkımdan önce; yaratma ile main silme proje kilidiyle sıralanır (D-021)"`
 
 ### T007: Geri doldurma operatör fiili — slug ve göç raporu tek ifadede yazılır, `remaining` defterden sayılır; slug'ın tek yazıcısı kapısı
@@ -2665,7 +2674,7 @@ ve `<dl className="grid gap-(--layout-field-gap)"><dt className="text-(--color-t
 ```tsx
 <dl className="grid gap-(--layout-field-gap)"><dt className="text-(--color-text-muted)">Slug</dt><dd className="font-mono break-all">{env.slug}</dd><dt className="text-(--color-text-muted)">Environment reference</dt>
 ```
-- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/studio && npx vitest run "src/app/(studio)/projects/[projectId]/environments/" && npx tsc --noEmit)` · Beklenen: `Test Files  77 passed (77)` ve `Tests  636 passed (636)`; tsc exit 0.
+- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/studio && npx vitest run "src/app/(studio)/projects/[projectId]/environments/" && npx tsc --noEmit)` · Beklenen: `Test Files  77 passed (77)` ve `Tests  637 passed (637)`; tsc exit 0. Sayıya T017'nin tehlike bölgesi testi dahil: `[environmentRef]/settings/danger/page.test.tsx` bu dizinin altında ve plan sırasında T017, T008'den önce koşar.
 - [ ] **Adım 5: Commit** — `git add "cloud/platform/studio/src/app/(studio)/projects/[projectId]/environments/env-card.tsx" "cloud/platform/studio/src/app/(studio)/projects/[projectId]/environments/page.test.tsx" && git commit -m "feat(studio): ortam kartı slug'ı görünen adın yanında gösterir (FR-107)"`
 
 ---
@@ -3109,7 +3118,7 @@ beforeAll(async () => {
         slug: r.slug as string,
 ```
 `cloud-lifecycle.ts`'e dokunulmaz.
-- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/server && npm test -- db/schema.test.ts modules/shared/environment-slug.pg.test.ts modules/fleet/slug-backfill.pg.test.ts modules/panel/panel.environment-slug.test.ts modules/environments/cloud-lifecycle.test.ts modules/environments/cloud-lifecycle.race.test.ts && npm run typecheck)` · Beklenen: `65 pass` / `0 fail` / `Ran 65 tests across 6 files.`, ve typecheck exit 0.
+- [ ] **Adım 4: Yeşil** — Run: `(cd cloud/platform/server && npm test -- db/schema.test.ts modules/shared/environment-slug.pg.test.ts modules/fleet/slug-backfill.pg.test.ts modules/panel/panel.environment-slug.test.ts modules/environments/cloud-lifecycle.test.ts modules/environments/cloud-lifecycle.race.test.ts && npm run typecheck)` · Beklenen: `67 pass` / `0 fail` / `Ran 67 tests across 6 files.`, ve typecheck exit 0. `cloud-lifecycle.test.ts` bu noktada 48 test taşır: T005'in D-021 testi ve T017'nin kilit testi dahil.
 
   Docker'lı altı fikstür dosyası burada koşturulamadı, çünkü Docker yoktu. Değiştirilmiş INSERT metinleri sözleşme biçimli `cloud_projects` tablosunda tek tek koşturuldu. Tablo NOT NULL slug + CHECK + tekil indeks içeriyordu, `toSchemaJSON`'dan `flagPostgres` ile basıldı, PostgreSQL 16.14'te.
   - Koşturulanlar: `cli.projects` dosyasının dört farklı metni (#3 ile #4 birebir aynı), `panel.sdk-pins`, ve `usage/compute|ingest|realtime|stock`. Dokuzu da `accepted`.
@@ -3453,7 +3462,7 @@ describe("the production environment (FR-106, D-015)", () => {
 ```
   2. `cloud/platform/server/modules/cli/cli.service.ts`:
      - Sınıf yorumunda eskimiş başvuruyu sil. Eski iki satır: ` * taşıyordu. İfadeler, hata cümleleri ve yorumlar AYNEN; ad kuralı (\`environmentSlug\`)` + ` * ve HTTP şekli controller'da kalır.`. Yeni tek satır: ` * taşıyordu. İfadeler, hata cümleleri ve yorumlar AYNEN; HTTP şekli controller'da kalır.`
-     - `environmentsWithPlacement`'ta üç yerde `name: string | null;`'dan sonra `slug: string;` ekle. SELECT'e `slug` ekle: `SELECT ref, name, slug, phase, cell_id, created_at`.
+     - `environmentsWithPlacement`'ın iki tip satırında (dönüş tipi ve `as unknown as` cast'i) `name: string | null;`'dan sonra `slug: string;` ekle. SELECT'e `slug` ekle: `SELECT ref, name, slug, phase, cell_id, created_at`.
      - `environmentsOf`'u, yorumuyla birlikte, şununla değiştir:
 ```ts
   /**
@@ -3508,7 +3517,7 @@ describe("the production environment (FR-106, D-015)", () => {
 ```
      - Dosyanın sonundaki `ORTAMIN ADI — CLI'da bir DİZİN…` belge yorumunu ve `private environmentSlug(...) { … legacyName(...) }` metodunu bütünüyle sil. Sınıf `apikey()`'le biter.
   5. `cloud/platform/server/modules/cli/cli.controller.test.ts`:
-     - `type SlugFn = …` satırını ve `slugOf` köprüsünü, üstündeki iki satırlık yorumla birlikte, sil.
+     - `type SlugFn = …` satırını altındaki boş satırla, `slugOf` köprüsünü de üstündeki iki satırlık yorumla birlikte sil.
      - "config artifact" testindeki `environmentsOf: async () => [{ ref: "envb", name: null }],` → `environmentsOf: async () => [{ ref: "envb", slug: "main" }],`.
      - `describe("ortam adı kuralı", …)` bloğunu, üstündeki `ORTAM ADI KURALI (FR-053)` yorumuyla birlikte, sil. İddialarını `cloud/platform/server/modules/shared/environment-slug.test.ts` sonuna taşı:
 ```ts
@@ -3794,8 +3803,8 @@ export class DeploymentActivityService {
   7. `.github/workflows/cloud-server-typecheck.yml`: `flag-publication-postgres` listesinde `modules/cli/cli.environment-slug.pg.test.ts` satırından sonra `            modules/panel/panel.environment-slug.pg.test.ts` ekle.
 - [ ] **Adım 4: Yeşil** — Beş koşu:
   - Run: `(cd cloud/platform/server && npm run typecheck && npm test -- modules/panel/panel.environment-slug.pg.test.ts modules/panel/panel.environment-slug.test.ts modules/panel/panel.controller.test.ts modules/panel/panel.sql-columns.test.ts)` · Beklenen: tsc exit 0; `90 pass` / `0 fail` / `Ran 90 tests across 4 files.`
-  - Run: `(cd cloud/platform/server && palbase build 2>&1 | tail -1)` · Beklenen: `build OK — 153 route(s) across the controllers would deploy cleanly, plus 1 webhook(s)`. Ölçüm palbase 0.71.2 ile yapıldı. `palbase build` `palbase/palbase-env.d.ts`'i yeniden üretir. Tek fark, bu planla ilgisiz ve tabanda da var olan `cage_toured_at` satırlarıdır. Slug kolonu ve `cloud_environment_slug_backfills` tablosu elle yazılanla BİREBİR çıktı. Pathspec'li commit bu dosyayı almaz; geri almak için `git checkout -- cloud/platform/server/palbase/palbase-env.d.ts`.
-  - Docker'lı `panel.deployment-activity.pg.test.ts` burada koşamadı. Yerine, fikstürünün yeni DDL+INSERT'i ve yeni `DEPLOYMENT_ACTIVITY_SQL`, PostgreSQL 16.14'te `PREPARE … EXECUTE('owner')` ile koşturuldu. Dönen satır: `"environment_name":"Production","environment_slug":"main"`. Kontrol olarak eski DDL denendi: `ERROR:  column p.slug does not exist`.
+  - Run: `(cd cloud/platform/server && palbase build 2>&1 | tail -1)` · Beklenen: `build OK — 154 route(s) across the controllers would deploy cleanly, plus 1 webhook(s)`. Ölçüm palbase 0.71.2 ile yapıldı. Taban `bb547a702` tek başına `153 route(s)` verir: `f92bc1e02`'nin 152 rotası + `6ea5310ff`'in `POST /v1/internal/archives/finish-retention` rotası. Bu plan yalnız T007'nin rotasını katar, yani 154. Komut Palbase'e çağrı yapmaz, çünkü bu dizin bir yığına bağlı değil. `db/` şemasını `npx --yes esbuild` ile paketler; esbuild npm önbelleğinde yoksa npm kayıt defterine gider. Dışa giden ağ kapalıyken (`sandbox-exec`, yalnız localhost açık) `npm_config_offline=true palbase build` aynı çıktıyı verdi. `palbase build` `palbase/palbase-env.d.ts`'i yeniden üretir ve `✓ palbase/palbase-env.d.ts (unchanged)` basar; ardından `git status --short` boştur. Yani slug kolonu ve `cloud_environment_slug_backfills` tablosu elle yazılanla BİREBİR. Tabandaki `cage_toured_at` kayması `bb547a702`'de kapandı (`6ea5310ff` o satırları dosyaya yazdı); geri alınacak bir şey yok.
+  - Docker'lı `panel.deployment-activity.pg.test.ts` burada koşamadı. Yerine, fikstürünün yeni DDL+INSERT'i ve yeni `DEPLOYMENT_ACTIVITY_SQL`, PostgreSQL 16.14'te `PREPARE … EXECUTE('owner')` ile koşturuldu. Dönen satır: `"environment_name":"Production","environment_slug":"main"`. Kontrol olarak eski DDL denendi: `ERROR:  column p.slug does not exist`. `bb547a702` üzerinde tek kullanımlık bir veritabanında yeniden koşturuldu; iki sonuç da aynı.
   - Belge testleri `sdk/cli` checkout'u ister. Kazıma kopyasında `sdk/cli`, `/Users/erkutbas/Github_Pallasite/palbase-cli`'ye geçici bir symlink'le verildi; yalnız okundu, sonra silindi. Run: `(cd cloud/platform/studio && npx vitest run src/content/docs/)` · Gözlenen: `Test Files  3 failed | 7 passed (10)`, `Tests  2 failed | 60 passed (62)`. `retired-commands` ve `link-model` bu paragrafla geçti. Kalan üç dosya (`controller-examples`, `retired-surfaces`, `template-sync`) başka sdk parçaları istiyor ve tabanda da düşüyor.
 - [ ] **Adım 5: Commit** — `git add .github/workflows/cloud-server-typecheck.yml cloud/platform/server/modules/panel/panel.controller.ts cloud/platform/server/modules/panel/panel.module.ts cloud/platform/server/modules/panel/panel.environment-slug.pg.test.ts cloud/platform/server/modules/environments/deployment-activity.sql.ts cloud/platform/server/modules/environments/deployment-activity.ts cloud/platform/server/modules/panel/panel.deployment-activity.pg.test.ts cloud/platform/studio/src/content/docs/getting-started/introduction.md && git commit -m "feat(panel): is_production yalnız main, adsız ortam slug'ıyla görünür — panel, filo ve dağıtım akışı dahil her yüzey aynı cevabı verir (FR-106)"`
 
@@ -3975,3 +3984,157 @@ Postgres was my own embedded PostgreSQL 16.14 on `localhost:55493/flags_audit_te
 - Real `palbase-cli`: read only, status unchanged (only the pre-existing untracked `docs/paltimate/2026-09-26-android-ortam-build-type/`).
 - Scratch clone: clean at `326172c4c`.
 - Nothing was pushed and there were no cloud calls.
+
+#### Yeni tabana taşıma (2026-09-27, `bb547a702`)
+
+Upstream f92bc1e02..bb547a702 = 20 commits (fast-forward). 11 files overlap the plan. What each changed and what the plan had to absorb:
+
+1. cloud/platform/server/db/public.ts — 6ea5310ff adds table `cloud_archive_retention` (after `cloud_tenant_archives`) and `cloud_archive_retention,` in `defineSchema` (after `cloud_pitr_health`). None of the plan's anchors moved (`const phaseCheck = …`, `name: text().nullable(),`, the `checks:` line, `const cloud_products = defineTable(…)`, `cloud_products,`). T001, T002, T004, T007, T009 and T013 auto-merged. No text change.
+
+2. modules/cli/cli.controller.ts — 605e4f0d2: the 502 from the spec fetch now uses `spec_failed`, and two comment lines were added near line 425. Only effect: T003's reference `cli.controller.ts:487-490` becomes `:489-492` (T003 revised). T004, T014 and T015 auto-merged. T015's `:226-227` / `:291` are still correct.
+
+3. modules/cli/cli.controller.test.ts — 605e4f0d2 changes one assertion (`spec_unavailable` → `spec_failed`); the line count is the same. T004, T014 and T015 auto-merged; their counts (52, 70, 73) are unchanged.
+
+4. modules/environments/cloud-environments.controller.test.ts — 0c824b4ca adds one test ("bilet KENDİ projesinin planını ve çalışma zamanını ister …") and passes `req` to runtimePlan/prepareRuntime. Effects:
+   - T005: red 36→37 pass (41→42 tests), green 92→93, the 4-file count for the rejected-option mutation 91/1 (92) → 92/1 (93).
+   - T017: the neighbouring-suite run goes 58→59.
+   - CI typecheck list: +1.
+
+5. modules/environments/cloud-environments.controller.ts — not in the plan's file list, but T017 cites it. 0c824b4ca moved `@Delete("/projects/{ref}")` from line 282 to 299 (T017 revised).
+
+6. modules/environments/cloud-lifecycle.ts — 6ea5310ff adds three things:
+   - the `ArchiveRetentionService` import;
+   - a constructor param after `archiveStoreService` (mid-list);
+   - `holdArchive` / `isArchiveHeld` in `remove()`'s teardown deps, below the `lockProjectRow` entry where T017 inserts `assertDeletable`.
+
+   T003, T005 and T017 auto-merged. T005's anchor ("the last constructor param is `cloudOperationsService`") still holds; the T005 text gained a clarifying parenthetical.
+
+7. modules/environments/teardown.ts — 6ea5310ff:
+   - adds `TeardownDeps.holdArchive(ref, until, blobs)` and `isArchiveHeld(ref)`;
+   - the purge step now catches `ArchiveRetained` and holds the ref;
+   - `release-identity` skips `releaseRef` while the ref is held.
+
+   T017's two insertion points (after `lockProjectRow` in the type and in `deleteProject`) are untouched. The refusal still runs before the first saga step, and all five compensations are still `async () => {}`.
+
+   Delete paths re-checked by grep: production code still has only two `DELETE FROM cloud_projects` statements (cloud-lifecycle.ts:414 for the create compensation, :905 for the teardown). The new `POST /v1/internal/archives/finish-retention` deletes only `cloud_archive_retention` rows. T017's "Silme yolları" gained a sentence saying this.
+
+8. teardown.test.ts, teardown.jobs.test.ts, teardown.object.test.ts — 6ea5310ff:
+   - fixtures gain `holdArchive` and `isArchiveHeld` after `purgeTenantArchive`, so T017's `assertDeletable` line below `lockProjectRow` merges cleanly;
+   - teardown.test.ts gains 2 tests and an `ArchiveRetained` import.
+
+   Effects on T017: red 25→27 pass (29→31 tests), green 83→85, mutation "teardown does not call assertDeletable" 14/1 → 16/1. CI pg list: +2.
+
+9. modules/shared/route-contract.golden:
+   - 10262b8f0 flips the auth of `GET …/runtime/plan` and `POST …/runtime` to false;
+   - 6ea5310ff adds `POST /v1/internal/archives/finish-retention false {}`.
+
+   T007's line (below `POST /v1/classify/publish false {}`) auto-merged, and route-contract.test is green (T007: 30/30).
+
+10. palbase/palbase-env.d.ts:
+    - 6ea5310ff adds the `cage_toured_at` row and insert lines, plus the `cloud_archive_retention` block;
+    - 12bfbc64d re-adds the `Secrets` interface (net zero against f92bc1e02).
+
+    T002, T007 and T013 auto-merged. Effect: the "cage_toured_at drift" in the Global Constraints and in T016 Step 4 is gone. After T016, `palbase build` prints `✓ palbase/palbase-env.d.ts (unchanged)` and `build OK — 154 route(s)` (153 plus finish-retention), and `git status` stays clean. The Global Constraints and T016 are revised.
+
+11. Upstream changes that are not in the overlapping files but move the baselines:
+    - Server: +10 tests and +1 file (archive-retention.test.ts has 4; the rest are in the controller, runtime, teardown and clickhouse tests). Server baseline is 2233/10/6 (2243 tests, 171 files), against 2223/10/6 (2233, 170) before.
+    - The workflow file is unchanged upstream. The CI lists at the new base are typecheck 779/45 and pg 339/22.
+    - Studio: only docs/backend/migrations.md changed; the Studio numbers match f92bc1e02 exactly.
+
+Plan-order effects (not caused by upstream; found while replaying in plan order):
+
+a. Cherry-picking the bundle commits in plan order conflicts in `.github/workflows/cloud-server-typecheck.yml` at T017, T007, T014 and T016. The bundle-order context contains list lines from later tasks, which contradicts the bundle README's "Yamalar her iki sırada da çakışmadan uygulanır". Each conflict was resolved by the plan text's literal anchor.
+   - The final pg-list order differs from plan-old: `main-delete-lock` sits after `panel.environment-slug.pg` rather than before `slug-backfill`.
+   - Apart from that, plan-new's final tree is byte-identical to `git merge-tree --write-tree upstream plan-old`.
+
+b. T008 goes 636→637 because T017's danger-zone test now precedes it.
+
+c. T013 goes 65→67 because the T005 revision's test and T017's lock test now precede it.
+
+d. T017's `lifecycle.ts:34` becomes `:30`, because T010 has not run yet at that point.
+
+e. T003 had a sentence left over from before the D-021 revision of T005 ("`existing === 0` yerine `held()`"); it was corrected.
+
+Pre-existing inaccuracies left unrevised (identical at both bases): T004 `cli.controller.test.ts:486-510` is really 484-508; T006 `panel.controller.ts:610` is really 609.
+
+#### Verdict: the rebase holds. Four task texts needed small fixes; no upstream change breaks anything a task relies on.
+
+I replayed the plan text (original tasks with the rebaser's revisions substituted), not the rebaser's commits. This was in a fresh clone at bb547a702, plan order T001…T006, T017, T007…T011, T013…T016. Each task's edits were built from its own code blocks and literal anchors by small scripts. An anchor that was missing or matched more than once would have stopped the replay. Each commit used the task's own Step 5 command (Step 6 for T010), and the working tree was clean after every one.
+
+**Final tree.** It matches the rebaser's `plan-new` HEAD exactly: tree `af2d112428380d65a48931d745c93f622b95660d` on both sides, and `git diff HEAD rebaser` is empty. Every task's commit also matched the rebaser's commit for that task, but only after two fixes to the text:
+- **T017:** five code blocks were missing a blank line.
+- **T015:** deleting `type SlugFn` must also delete the blank line below it.
+
+With the rebaser's text taken literally, the tree differs by 6 blank lines across 6 files.
+
+#### Red / green as written (all measured)
+
+| Task | Red | Green |
+|---|---|---|
+| T001 | `Cannot find module './environment-slug.ts'`, 0/1/1 error | 9/0 |
+| T002 | 4/6 of 10, `column "slug" … does not exist` | 10 |
+| T003 | 33/2 of 35 | 35 |
+| T004 | 45/7 of 52, `planBackfill is not a function` ×6 | 52 |
+| T005 | 37/5/2 errors of 42, incl. the `SagaCompensationFailed … A HALF-CREATED RESOURCE EXISTS` message | 93 |
+| T006 | 1/2 of 3 | 3 |
+| T017 | 27/4/3 errors of 31, diff `-   "deletable:abc12345m",`; Studio 6 passed | 85 |
+| T007 | 9/5/1 error of 14 | 30 (own three files: 27) |
+| T008 | `Unable to find … Slug`, 1 failed / 6 passed | 77 files, 637 tests |
+| T009 | 0/1/1 error | 18 |
+| T010 | 4 failed / 25 passed | 29 |
+| T011 | Studio 1 failed / 17 passed; server 3/1 (`Received: undefined`) | Studio 18; server 4 |
+| T013 | 16/2 of 18 | 67 (`cloud-lifecycle.test.ts` carries 48) |
+| T014 | 0/3 and 9/2 | 70 |
+| T015 | 14/3 of 17 | 73; grep exit 1 |
+| T016 | 1/3 of 4 | 90 |
+
+Other checks, all as the text states:
+- **Typecheck:** every server and Studio `tsc` exited 0; eslint was silent and `lint:design` passed where the text asks for them.
+- **T005 mutations:** 46/1; 92/1 of 93; 44/3; 51/2 of 53.
+- **T005 full suite:** 2275/10/6, 2285 tests / 175 files.
+- **T017 mutations:** all ten bite as stated, e.g. 16/1, 3/3 with 3× `Received promise that resolved`, 1/2 with `Received: "granted"`, 47/1, Studio `1 failed | 5 passed`.
+- **T017 neighbour suites and full suite:** neighbours 59; full suite 2289/10/6, 2299 / 178.
+- **Other mutations:** T007 `remaining` gives 12/3 with `Expected: 1 / Received: 0`; the T009 lock bite gives 2/1 and 3 once reverted.
+- **T010 generator probe, network denied:** `17 operations`, three-field interface.
+- **T013 fixtures (Docker-free check):** on a contract-shaped `cloud_projects`, all nine distinct INSERT texts give `accepted`. The old slugless INSERT gives the NOT NULL error. `slug` is_nullable=NO.
+- **T016 SQL probe:** `"environment_name":"Production","environment_slug":"main"`; with the old DDL, `column p.slug does not exist`.
+- **T016 docs tests:** 3 failed / 7 passed files, 2 failed / 60 passed tests.
+
+**Baseline at bb547a702 and final state** match the rebaser's Global Constraints exactly:
+
+| | Server | CI `typecheck` list | CI `flag-publication-postgres` list | Studio |
+|---|---|---|---|---|
+| Baseline | 2233/10/6, 2243 / 171 | 779 / 45 | 339 / 22 | 386 passed + 5 failed + 2 skipped files, 3764 tests |
+| Final | 2314/10/6, 2324 / 182 | 844 / 52 | 361 / 27 | 3771 tests |
+
+The same 8 Docker files and the same 5 docs files fail in both states. T012 was not run: it is an operator step and cloud calls are forbidden.
+
+#### Did upstream change anything a task relies on?
+- **teardown.ts:** order is still readProject → claimJob → lockProjectRow → (assertDeletable) → saga, and all five compensations are still empty. `holdArchive` / `isArchiveHeld` sit inside the purge and release steps, so a refusal never reaches them.
+- **cli.controller.ts:** the listing shape is unchanged. The only upstream change is the `spec_failed` code.
+- **public.ts:** the `cloud_projects` definition is unchanged. The only addition is a new `cloud_archive_retention` table.
+- **route-contract golden:** T007's line lands where the text says; the runtime-route auth flips do not affect it, and route-contract is green.
+- **No new writers or deleters:** upstream adds no new place that inserts into or deletes from `cloud_projects`; the same insert sites exist at both bases. finish-retention and archive-retention touch only `cloud_archive_retention` and claims.
+- **Upstream-caused gap (fixed in T017):** `restore-drill.py`, added by f261318f8, is a new caller of `DELETE /v1/cloud/projects/{ref}` that retries 409 and 503. It is not affected today: its project has a single environment.
+
+#### Fixed tasks (full texts returned)
+- **T017:** blank lines added to five code blocks; `restore-drill.py` added to the delete paths and the 409-retry paragraph.
+- **T015:** 'üç yerde' corrected to the two type lines; the SlugFn blank line.
+- **T016:** route count corrected — f92bc1e02 has 152 routes, bb547a702 has 153, the plan's final tree has 154 (all measured). Also added that `palbase build` makes no Palbase call and works offline via `npm_config_offline=true`; I verified this with outbound network denied, output `✓ palbase/palbase-env.d.ts (unchanged)`, clean `git status`.
+- **T006:** `:610` → `:609`.
+
+Every other task text applies as the rebaser left it. Two corrections to the rebaser's report:
+- The note on T004 `486-510` is wrong: the text cites the file after its own edits.
+- The bundle README's 'no conflicts in either order' claim is false even on f92bc1e02: plan-order cherry-pick conflicts at 4ffc14f39 in the workflow file.
+
+One more thing: T017's refusal test does not check the new `holdArchive` step, but `unpublishPlacement` not being called already proves the saga never started, so no change is needed.
+
+#### Rules and locations
+Nothing was pushed, no Palbase cloud calls were made, and nothing was written under `/Users/erkutbas/Github_Pallasite/`. palbase-cloud is still `6bbfcdf54` with a clean working tree. The palbase-cli repo was only read, through a temporary symlink; the two modified files in it were already there before and after. My embedded Postgres on port 55472 is stopped.
+
+Everything is in `/private/tmp/claude-501/-Users-erkutbas-Github-Pallasite-palbase-cli/b6cc7adb-70af-442f-a35e-941e6ac5eaa1/scratchpad/cloud-rebase/verify/`:
+- `cloud/` — the scratch clone, branch `replay`
+- `verify-replay.bundle` — the replayed chain
+- `plan/final/{T006,T015,T016,T017}.md` — the fixed texts, also returned inline above
+- `plan/T0xx.py` — the replay scripts
+- `logs/` — test logs

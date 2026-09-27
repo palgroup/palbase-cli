@@ -1,4 +1,4 @@
-# Plugin `io.palbase.codegen` 2.4.0 — build type ortamı seçer — Uygulama Planı
+# Plugin `io.palbase.codegen` 2.5.0 — build type ortamı seçer — Uygulama Planı
 
 > **Ajan çalışanlar için:** Görev görev yürüt (superpowers:subagent-driven-development ya da superpowers:executing-plans). Adımlar `- [ ]` checkbox. Görev başlıkları makine-okur meta veri taşır (`deps | files | satisfies`). **T031 (yayın) ve T034 (birlikte deneme) KULLANICIYLA yürütülür; T033 kullanıcının onayı ve yedekle başlar.**
 
@@ -14,24 +14,27 @@
 
 ## Global Constraints
 
-- **Hedef depo:** `palbackend-android-src`, `main`, taban `e72f704` (`release: public distribution repo — palgroup/palbackend-android, …`). Bir submodule değil: parent işaretçisi yok.
+- **Hedef depo:** `palbackend-android-src`, `main`. Taban: `origin/main` `3588bc2` (`ci: setup-android var olmayan 'tools' paketini istemiyor — …`) + üstüne taşınmış `e72f704` (`release: public distribution repo — palgroup/palbackend-android, …`; yalnız yerel depoda, origin'de yok) — D-030. Yerel `main` T001'den önce taşınır: `git fetch origin && git rebase origin/main`. `e72f704` çakışmasız uygulanır (ölçüldü: `Auto-merging CHANGELOG.md`, 4 dosya; upstream'in `## 2.4.0 — 2026-09-26` bölümü ve ``Son etiket: `v2.4.0` `` olduğu gibi kalır; scratch'te taşınmış commit `c164ce4`). Bir submodule değil: parent işaretçisi yok.
+- **Upstream'in 2.4.0'ı (D-030):** `233991d` (beyan edilen 401/429/doğrulama kodu kendi tipli vakasına — `KotlinEmitter`'ın ürettiği `from()` artık `backend.envelope` üzerinden eşler; palbe-core `BackendError.envelope`, `palbe-core.api`), `6e97598` (`release: palbackend-android 2.4.0`, etiket `v2.4.0`), `3588bc2` (CI). CI artık `./gradlew :codegen-engine:test :codegen-gradle:test :palbe-core:testDebugUnitTest` koşar. Bu planın dosyalarıyla örtüşen tek dosya `CHANGELOG.md` (T029/T030). `codegen-gradle/`, `README.md`, `distribution/README.md`, `scripts/publish.sh`, `gradle.properties`, `sample/`, `consumer-release/` ve `palbe-core/src/test/kotlin/io/palbase/core/GeneratedConfigLoaderTest.kt` eski (`e72f704`) ve yeni tabanda byte byte aynı: görev metinlerindeki `@e72f704` satır atıfları yeni tabanda aynı satırları gösterir (`codegen-gradle` için `v2.4.0`'da da). T001–T028'in commit'leri yeni tabanda çakışmasız uygulanır; T029 ve T030 CHANGELOG'da çakışır, çözüm o görevlerin metnidir. 2.4.0 public dağıtım ağacında yayımlanmadı (`palgroup/palbackend-android` yalnız `v2.3.0`). Tüketici provalarının sözleşmesi (trial ve kullanıcının test app'i — aynı `openapi.json`) `x-palbase-errors` beyan etmiyor, yani 2.4.0'ın `envelope` yolunu üretmez; o yol T032 Adım 4'te bir kopyada ayrıca ölçüldü (palbe 2.5.0 ile derlenir, 2.3.0 ile `Unresolved reference 'envelope'`).
 - **Yazıcı ve commit kuralları (NFR-004):** tek yazıcı, `main`'de; worktree ve yan branch yok. Commit'ler pathspec ile (`git add <yollar> && git commit -m …`, Adım 5'teki gibi). Her commit `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>` ile biter. Görev sırası commit sırasıdır.
 - **Araçlar:** `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` (JetBrains JDK 21.0.9), `ANDROID_HOME=/Users/erkutbas/Library/Android/sdk`. Her Gradle komutu `--offline`. `gradle --stop` yok, Java/Gradle süreci öldürmek yok.
 - **Sürümler:** depo wrapper'ı Gradle 8.11.1. TestKit fikstürleri AGP 8.10.1 ve KGP 2.2.21 ile bu Gradle'da koşar. Tüketici provaları: trial AGP 8.11.1 / Gradle 8.13, kullanıcının test app'i AGP 9.1.1 / Gradle 9.3.1. Desteklenen aralık AGP 8.10.1+, Gradle 8.11.1+, JDK 17+ (FR-212); plugin sınıf dosyası major 61.
 - **Test komutu:** `cd codegen-gradle && ../gradlew :test --offline`. `:test` şart: iki nokta olmadan `--tests` filtresi `:codegen-engine:test`'e de gider ve `No tests found for given includes` ile düşer.
-- **TestKit koşucusu:** T023'ten itibaren `--stacktrace --no-watch-fs` ile koşar (`Fixture.runner()`).
-- **Taban (`e72f704`):** `PalbaseCodegenPluginTest` `tests="27"`; codegen-engine 8 sınıf, 46 test. Hepsi `failures="0"`; tabanda kırık test yok.
-- **Son durum (revize zincir, T030):**
-  - `EnvironmentResolverTest` 52, `LibraryFallbackCheckTest` 11, `PalbaseCodegenPluginTest` 88, codegen-engine 46; hepsi `failures="0" errors="0"`.
-  - `./gradlew -p codegen-gradle check` (`:validatePlugins` dahil) ve README kapısı yeşil (T030 Adım 4).
+- **Build cache:** kök `gradle.properties` `org.gradle.caching=true` taşır. Bir `generatePalbase*` görevi `FROM-CACHE` gelirse `Palbase:` satırı basılmaz; satırı bekleyen kök komutlar görevi `--rerun` ile koşar (T003 Adım 4, T030 Adım 4.3). Önceki provalar aynı girdileri makinenin build cache'ine yazmış olabilir.
+- **TestKit koşucusu:** T023'ten itibaren `--stacktrace --no-watch-fs` ile koşar (`Fixture.runner()`). Yeni tabandaki yeniden oynatmada T014'ün tam `:test`'i bir kez başka bir kırılganlıkla düştü: `flavor blocks outrank the build type keys in gradle properties` fikstürünün script'i `Cannot access implicit script receiver class 'org.gradle.api.Project'` ile derlenmedi (T011'in testi; T011–T013'te yeşildi); aynı ağaçta tek başına ve tam koşu yeşil. Kök nedeni kanıtlanmadı; bir tam koşu düşerse bir kez tekrarlanır ve ikisi de kaydedilir.
+- **Taban (`3588bc2` + `e72f704`):** `PalbaseCodegenPluginTest` `tests="27"`; codegen-engine 9 sınıf, 47 test (upstream'in `ClassifiedErrorsEmitTest`'i dahil; eski tabanda 8 sınıf, 46); palbe-core `GeneratedConfigLoaderTest` `tests="13"` (`:palbe-core:testDebugUnitTest` 89 sınıf, 602 test). Hepsi `failures="0"`; tabanda kırık test yok.
+- **Son durum (T030):**
+  - `EnvironmentResolverTest` 52, `LibraryFallbackCheckTest` 11, `PalbaseCodegenPluginTest` 88, codegen-engine 47 (9 sınıf), palbe-core `GeneratedConfigLoaderTest` 14; hepsi `failures="0" errors="0"`.
+  - `./gradlew -p codegen-gradle check` (`:validatePlugins` dahil) ve README kapısı yeşil (T030 Adım 4); CI'ın komutu `./gradlew :codegen-engine:test :codegen-gradle:test :palbe-core:testDebugUnitTest --offline` de yeşil.
 - **Kapılar (NFR-002):** `./gradlew -p codegen-gradle check --configuration-cache` ve README kapısı `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache`. Configuration cache her yeni davranışta yeniden kullanılan girişte de ölçülür (T002, T007, T009, T018, T023).
 - **Dil (NFR-003):** kullanıcıya basılan her dize, kod ve kod yorumları İngilizce. Plan düzyazısı ve commit mesajları Türkçe. Tüketici deposunun (trial) commit mesajı kendi git log'u gibi İngilizce.
-- **Yayın (D-005):** 11 artefakt birlikte `2.4.0`; sürüm `PALBE_VERSION`'dan gelir. Runtime kodu değişmez; tek runtime değişikliği palbe-core'daki bir test (T022).
+- **Yayın (D-005, D-030):** 11 artefakt birlikte **`2.5.0`**; sürüm `PALBE_VERSION`'dan gelir. `2.4.0` upstream'in yayımlanmış sürümüdür ve CHANGELOG'da tarih olarak kalır. Runtime ve engine kodu 2.4.0 ile aynı; tek runtime değişikliği palbe-core'daki bir test (T022).
+- **Sürüm adları:** plan düzyazısında, kod yorumlarında ve dokümanlarda BU yayını adlandıran "2.4" → "2.5" (T002, T007, T022, T027–T034). Değişmeyenler: `reports/proto-2.4/` yolu ve raporlardan yapılan alıntılar (planlama dönemindeki adlar); plugin'in bastığı `palbase.env, the 2.3 global property` ve eski davranışı anlatan "2.3" cümleleri (2.4.0 ortam seçimini değiştirmedi, cümleler doğru kalır). Upgrade notları 2.4.0'ı da kapsar: `README.md` "Upgrading from 2.3 or 2.4" (T027); public README'nin "Upgrading from 2.3" listesi ve CHANGELOG'un YAYIN bölümü, public ağacın atladığı 2.4.0'ın değişikliğini birer maddeyle söyler (T028, T029).
 - **Ajan koşturmaz:** yayın (T031), bulut çağrısı, `palbase login` / `project create` / `env create` (FATURALI) / `push` / `link` (T033, T034). Bunlar kullanıcınındır.
 - **Ajan koşturabilir:** `publish…ToTestRepository` ve `scripts/verify-publications.sh`. Yalnız reponun `build/` dizinlerine yazarlar (T030).
 - **Kullanıcının test app'i git'te değil:** T033 Adım 0 (yedek + kullanıcının açık onayı) atlanmaz. Artıklar silinmez, yedeğe taşınır.
-- **Plan araçları:** `docs/paltimate/2026-09-26-android-ortam-build-type/tools/` palbase-cli'de henüz YOK. İçeriği: `changelog-check.sh`, `release-notes.sh`, `release-dry-run-check.sh`, `post-publish-check.sh`, `verify-trial.sh`, `verify-myapp.sh`, `proof-init.gradle.kts`, `released-init.gradle.kts`. Lead onları T029–T033'ün gösterdiği metinle yaratır (kaynak: scratch `revise-plugin/tools/`) ve `plan-plugin.md` ile birlikte palbase-cli'ye pathspec'le commit eder. Plugin reposuna girmezler.
-- **Sıra:** plan-cli → plan-cloud → bu plan (T001–T030) → T031 yayın (kullanıcı) → T032–T034 tüketiciler.
+- **Plan araçları:** `docs/paltimate/2026-09-26-android-ortam-build-type/tools/` palbase-cli'de (`06291bb`): `changelog-check.sh`, `release-notes.sh`, `release-dry-run-check.sh`, `post-publish-check.sh`, `verify-trial.sh`, `verify-myapp.sh`, `proof-init.gradle.kts`, `released-init.gradle.kts`. 2.5.0 revizyonu yalnız sürüm dizelerini değiştirir: `changelog-check.sh`, `release-notes.sh`, `proof-init.gradle.kts`, `verify-trial.sh`, `verify-myapp.sh` (içerikleri T029, T030, T032, T033'ün gösterdiği metin); diğer üçü aynı. Lead onları `plan-plugin.md` ile birlikte palbase-cli'ye pathspec'le commit eder. Plugin reposuna girmezler.
+- **Sıra:** plan-cli → plan-cloud → bu plan (T001–T030) → T031 yayın (kullanıcı) → T032–T034 tüketiciler. plan-cli Dalga 2'nin bastığı Android koordinatları da 2.5.0 olmalı (`palbaseAndroidVersion`, D-026).
 - **D-008 / D-014:** decisions.md ikisini de "kullanıcı onayladı" diye işaretliyor. Plugin ikisini de kullanmıyor (D-011'in gevşek kapısı + FR-204'ün tek parça kuralı); bu planda KOŞULLU görev yok.
 
 ## Review Focus
@@ -615,7 +618,7 @@ Bu görevden sonra SDK reposunun kendi release kapısı kırmızıdır (`:consum
 
   (a) `a known-empty role field means no role enums` testinin kapanışından sonra, `/** Two environments that differ in BOTH artifacts, … */` KDoc'undan önce ekle:
 ```kotlin
-    // ---- 2.4: THE BUILD TYPE SELECTS THE ENVIRONMENT ------------------------
+    // ---- 2.5: THE BUILD TYPE SELECTS THE ENVIRONMENT ------------------------
     //
     // The ORDER of the places is pinned in EnvironmentResolverTest, without a
     // build. These prove each place is READ from where it actually lives, per
@@ -1293,7 +1296,7 @@ T002'den sonra bu reponun README kapısı (`./gradlew check lintRelease :consume
 # no longer picks a release environment by default, so the choice is written here.
 palbase.env.release=local
 ```
-- [ ] **Adım 4: Yeşil** — Run: `./gradlew :consumer-release:generatePalbaseRelease --offline` · Beklenen: `Palbase: release → local (palbase.env.release in gradle.properties)` ve `BUILD SUCCESSFUL`. (Dilimin sonunda, T007'den sonra tam README kapısı ölçüldü: `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache --offline` → `BUILD SUCCESSFUL in 28s`, `872 actionable tasks: 324 executed, 216 from cache, 332 up-to-date`.)
+- [ ] **Adım 4: Yeşil** — Run: `./gradlew :consumer-release:generatePalbaseRelease --rerun --offline` · Beklenen: `Palbase: release → local (palbase.env.release in gradle.properties)` ve `BUILD SUCCESSFUL`. `--rerun` şart: repo build cache'i açık (`gradle.properties`: `org.gradle.caching=true`) ve aynı girdiler daha önce üretildiyse görev `FROM-CACHE` gelir, satır basılmaz (ölçüldü: `--rerun`'suz `> Task :consumer-release:generatePalbaseRelease FROM-CACHE`, `7 actionable tasks: 1 from cache, 6 up-to-date`, `Palbase:` satırı yok; `--rerun` ile `7 actionable tasks: 1 executed, 6 up-to-date` ve satır). (Dilimin sonunda, T007'den sonra tam README kapısı ölçüldü: `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache --offline` → `BUILD SUCCESSFUL in 28s`, `872 actionable tasks: 324 executed, 216 from cache, 332 up-to-date`.)
 - [ ] **Adım 5: Commit** — `git add gradle.properties && git commit -m "build: SDK reposunun kendi release kapısı ortamını açıkça seçer — palbase.env.release=local"`
 
 ---
@@ -1974,7 +1977,7 @@ Intake #2 ("`palbase {}` bloğu olmasın"). `palbase link` `palbase/`'u checkout
 
 - [ ] **Adım 1: Kırmızı testi yaz** — `codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt`:
 
-  (a) `// ---- 2.4: THE BUILD TYPE SELECTS THE ENVIRONMENT` başlık yorumunun (5 satır) hemen altına, `// Nothing picks a release stack by default` yorumundan önce ekle:
+  (a) `// ---- 2.5: THE BUILD TYPE SELECTS THE ENVIRONMENT` başlık yorumunun (5 satır) hemen altına, `// Nothing picks a release stack by default` yorumundan önce ekle:
 ```kotlin
     // `palbase link` writes `palbase/` at the checkout root; the app is a module
     // below it. 2.3 needed a `palbase { environmentsDir.set(…) }` block for
@@ -2340,7 +2343,7 @@ internal const val ENVIRONMENT_TRAP =
         "`import io.palbase.gradle.palbase` at the top of the file (without it, `palbase { }` inside a build " +
         "type is this project-level block) — or set `palbase.env.<buildType>=<env>` in gradle.properties."
 ```
-- [ ] **Adım 4: Yeşil** — Run: `cd codegen-gradle && ../gradlew test check --offline --rerun-tasks` · Beklenen: `BUILD SUCCESSFUL` (`:validatePlugins` dahil); `EnvironmentResolverTest` `tests="26"`, `PalbaseCodegenPluginTest` `tests="53"`, codegen-engine 8 sınıf toplam 46 — hepsi `failures="0" errors="0"`. Repo kökünde README kapısı: `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache --offline` → `BUILD SUCCESSFUL in 28s`.
+- [ ] **Adım 4: Yeşil** — Run: `cd codegen-gradle && ../gradlew test check --offline --rerun-tasks` · Beklenen: `BUILD SUCCESSFUL` (`:validatePlugins` dahil); `EnvironmentResolverTest` `tests="26"`, `PalbaseCodegenPluginTest` `tests="53"`, codegen-engine 9 sınıf toplam 47 (upstream'in `ClassifiedErrorsEmitTest`'i dahil) — hepsi `failures="0" errors="0"`. Repo kökünde README kapısı: `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache --offline` → `BUILD SUCCESSFUL in 1m 4s`, `872 actionable tasks`.
 - [ ] **Adım 5: Tüketici kanıtı (repo dışında; hedef son durum)** — Spec'in "Hedef son durum"unu küçük bir app'te APK içeriğiyle ölç. Scratch'te bir dizin (`target-end-state/`, içinde `git init` — checkout kökü), Gradle 8.13 wrapper'ı (trial app'inkinin kopyası), `palbase/project.json` ve `palbase/environments/{main, featureX, feature-profile-update}/` — her birinde trial app'in `openapi.json`'u ve kendi yığınını adlandıran bir config (`main` → `https://8bbwb2pbm.palbase.studio`, `featureX` → `https://featurexref.palbase.studio`, `feature-profile-update` → `https://fpuref.palbase.studio`); örnek, `featureX`:
 ```json
 {
@@ -2349,7 +2352,7 @@ internal const val ENVIRONMENT_TRAP =
   "api_key": "pb_project_c0123456789abcdefghijKLMN"
 }
 ```
-  `settings.gradle.kts` (eklenti çalışma ağacından, palbe 2.3.0 dosya maven reposundan — runtime 2.4'te değişmiyor, D-005):
+  `settings.gradle.kts` (eklenti çalışma ağacından, palbe 2.3.0 dosya maven reposundan — runtime 2.4.0'da değişti (upstream, `BackendError.envelope`), ama bu sözleşme `x-palbase-errors` beyan etmiyor: üretilen istemci 2.4.0'ın eklediği hiçbir şeye dokunmaz; plugin ile kütüphanenin AYNI sürüm kuralı yalnız bu provada esnetilir):
 ```kotlin
 pluginManagement {
     // The plugin under test, straight from the scratch clone's working tree.
@@ -2362,7 +2365,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // palbe 2.3.0 — the runtime does not change in 2.4 (D-005).
+        // palbe 2.3.0 — this contract declares no x-palbase-errors, so the client needs nothing 2.4.0 added.
         maven {
             url = uri("file:///Users/erkutbas/Github_Pallasite/palbackend-android")
             content { includeGroup("io.palbase") }
@@ -2467,13 +2470,13 @@ class ProofApp : Application() {
   - `Palbase: release → main (palbase.env.release in gradle.properties)` · `app-release-unsigned.apk: https://8bbwb2pbm.palbase.studio`
   - `Palbase: featureX → featureX (from the build type name)` · `app-featureX.apk: https://featurexref.palbase.studio`
   - ``Palbase: featureProfileUpdate → feature-profile-update (palbase { environment } in the `featureProfileUpdate` build type)`` · `app-featureProfileUpdate.apk: https://fpuref.palbase.studio`
-  - `BUILD SUCCESSFUL in 32s`, `Configuration cache entry stored.`
+  - `BUILD SUCCESSFUL in 29s`, `Configuration cache entry stored.`
 
   Sonra `local.properties`'e `palbase.env.debug=featureX` yaz, `./gradlew assembleDebug --offline --configuration-cache` · Beklenen: `Palbase: debug → featureX (palbase.env.debug in local.properties)`, `app-debug.apk: https://featurexref.palbase.studio`. Dosyayı sil, aynı komut · Beklenen: `Calculating task graph as configuration cache cannot be reused because properties file …/target-end-state/local.properties has changed.`, `Palbase: debug → main (palbase.env.debug in gradle.properties)`, `app-debug.apk: https://8bbwb2pbm.palbase.studio`.
 
-  Aynı app AGP 9.1.1/Gradle 9.3.1'de (kök `com.android.application` 9.1.1 + serialization 2.2.10, `org.jetbrains.kotlin.android` ve `kotlin {}` bloğu yok — AGP 9'un gömülü Kotlin'i; wrapper kullanıcının test app'inden): aynı dört satır ve aynı dört `base_url`, `BUILD SUCCESSFUL in 49s`. `import io.palbase.gradle.palbase` silinince: `e: …/app/build.gradle.kts:27:23: 'var environment: String?' is deprecated. Palbase: the environment is chosen PER BUILD TYPE, …` + `BUILD FAILED`.
+  Aynı app AGP 9.1.1/Gradle 9.3.1'de (kök `com.android.application` 9.1.1 + serialization 2.2.10, `org.jetbrains.kotlin.android` ve `kotlin {}` bloğu yok — AGP 9'un gömülü Kotlin'i; wrapper kullanıcının test app'inden): aynı dört satır ve aynı dört `base_url`, `BUILD SUCCESSFUL in 28s`. `import io.palbase.gradle.palbase` silinince: `e: …/app/build.gradle.kts:28:23: 'var environment: String?' is deprecated. Palbase: the environment is chosen PER BUILD TYPE, …` + `BUILD FAILED` (satır numarası dosyanın düzenine bağlı: import satırının altındaki boş satır kalınca 28).
 
-  Karşılaştırma — aynı checkout yayımlanmış **2.3.0** eklentisiyle (dosya maven reposu, kökte `id("io.palbase.codegen") version "2.3.0" apply false`): `e: …/app/build.gradle.kts:1:26: Unresolved reference: palbase`, `BUILD FAILED`; import ve DSL satırı silinince `BUILD SUCCESSFUL` ama dört APK'nın dördünde de `assets/palbase/palbase-config.json` YOK (blok olmadan 2.3 `app/palbase/environments`'e bakıyor, bulamıyor, sessizce boş üretiyor).
+  Karşılaştırma (yayımlanmış 2.3.0'a karşı, tabandan bağımsız; 2.5.0 tabanında yeniden koşulmadı) — aynı checkout yayımlanmış **2.3.0** eklentisiyle (dosya maven reposu, kökte `id("io.palbase.codegen") version "2.3.0" apply false`): `e: …/app/build.gradle.kts:1:26: Unresolved reference: palbase`, `BUILD FAILED`; import ve DSL satırı silinince `BUILD SUCCESSFUL` ama dört APK'nın dördünde de `assets/palbase/palbase-config.json` YOK (blok olmadan 2.3 `app/palbase/environments`'e bakıyor, bulamıyor, sessizce boş üretiyor).
 - [ ] **Adım 6: Commit** — `git add codegen-gradle/src/main/kotlin/io/palbase/gradle/AndroidVariantIntegration.kt codegen-gradle/src/main/kotlin/io/palbase/gradle/GeneratePalbaseTask.kt codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseCodegenPlugin.kt codegen-gradle/src/main/kotlin/io/palbase/gradle/PalbaseExtension.kt codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt && git commit -m "feat(codegen): palbase/ bloksuz bulunur — modülün kendisi, sonra checkout kökü; görev çalışırken okunur"`
 
 ---
@@ -6059,9 +6062,9 @@ FR-207, C5 ve D-017. Üretim satırı görev UP-TO-DATE ya da FROM-CACHE olduğu
 
     /**
      * The Gradle plugin names the environment a build was compiled from in the
-     * packed config (`palbase_environment`, plugin 2.4). The runtime reads
+     * packed config (`palbase_environment`, plugin 2.5). The runtime reads
      * nothing from it, and a key it does not know never refuses the config —
-     * an app built with the 2.4 plugin starts on this runtime unchanged.
+     * an app built with the 2.5 plugin starts on this runtime unchanged.
      */
     @Test
     fun `the environment name the plugin packs is ignored`() {
@@ -7263,9 +7266,9 @@ abstract class PalbaseCodegenPlugin @Inject constructor(
 ### T027: README ortamı build type'ın seçtiğini anlatır — örneğini test derler; desteklenen aralık yazılı
 <!-- deps: [T004, T008, T009, T010, T011, T017, T022, T026] | files: [README.md, codegen-gradle/build.gradle.kts, codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt] | satisfies: [FR-212] -->
 
-FR-212'nin README yarısı. `README.md:94-121` hâlâ 2.3'ü anlatıyor: "Which environment a build compiles is the `palbase.env` Gradle property, and `local` when it is unset", `-Ppalbase.env=main` ve `palbase/` için `environmentsDir` bloğu (`reports/verification-2026-09-25.md` E3). Gereksinim tablosu (`README.md:55-63`) AGP/Gradle/JDK söylemiyor; 2.4 ise Gradle 8.5'in `BuildFeatures`'ını ve 8.11'in `ProjectDependency.getPath`'ini kullanıyor (E5, YENİ "Gradle floor"). Prototipin README'si sırayı "command line first" diye anlatıp `-Ppalbase.env`'i yanlış tarif etmişti (C-YENİ) — bu yüzden README'nin örneği artık İDDİA değil, TEST: işaretli blokları (`<!-- palbase-example: <ad> -->`, GitHub'da görünmez) TestKit'te aynen derlenir ve README'nin alıntıladığı her `Palbase: …` satırı ile her variant'ın paketlediği `palbase_environment` tutulur.
+FR-212'nin README yarısı. `README.md:94-121` hâlâ 2.3'ü anlatıyor: "Which environment a build compiles is the `palbase.env` Gradle property, and `local` when it is unset", `-Ppalbase.env=main` ve `palbase/` için `environmentsDir` bloğu (`reports/verification-2026-09-25.md` E3). Gereksinim tablosu (`README.md:55-63`) AGP/Gradle/JDK söylemiyor; 2.5 ise Gradle 8.5'in `BuildFeatures`'ını ve 8.11'in `ProjectDependency.getPath`'ini kullanıyor (E5, YENİ "Gradle floor"). Prototipin README'si sırayı "command line first" diye anlatıp `-Ppalbase.env`'i yanlış tarif etmişti (C-YENİ) — bu yüzden README'nin örneği artık İDDİA değil, TEST: işaretli blokları (`<!-- palbase-example: <ad> -->`, GitHub'da görünmez) TestKit'te aynen derlenir ve README'nin alıntıladığı her `Palbase: …` satırı ile her variant'ın paketlediği `palbase_environment` tutulur.
 
-Örnek şartnamenin "Hedef son durum"udur: kök `gradle.properties`'te `palbase.env.debug=main` / `palbase.env.release=main`, `create("featureX")` adıyla `featureX`'i, `create("featureProfileUpdate")` DSL'le `feature-profile-update`'i derler; kişisel `local.properties` satırı `debug`'ı `featureX`'e çevirir. Metin sonraki sıra (9 adım), aynı yerde variant > flavor kombinasyonu > flavor, flavor↔build type reddi, bir blok ile AYNI build'lerin dosya anahtarı arasındaki ret (başka build'leri de kapsayan anahtarı blok geçer — T010/T011), modül `gradle.properties` reddi, bilinmeyen anahtar uyarısı, birebir ad, loopback reddi, library fallback (`pre<Variant>Build`) ve Isolated Projects'i anlatır; blok yalnız üç yerin ulaşmadığı düzen için kalır.
+Örnek şartnamenin "Hedef son durum"udur: kök `gradle.properties`'te `palbase.env.debug=main` / `palbase.env.release=main`, `create("featureX")` adıyla `featureX`'i, `create("featureProfileUpdate")` DSL'le `feature-profile-update`'i derler; kişisel `local.properties` satırı `debug`'ı `featureX`'e çevirir. Metin sonraki sıra (9 adım), aynı yerde variant > flavor kombinasyonu > flavor, flavor↔build type reddi, bir blok ile AYNI build'lerin dosya anahtarı arasındaki ret (başka build'leri de kapsayan anahtarı blok geçer — T010/T011), modül `gradle.properties` reddi, bilinmeyen anahtar uyarısı, birebir ad, loopback reddi, library fallback (`pre<Variant>Build`) ve Isolated Projects'i anlatır; blok yalnız üç yerin ulaşmadığı düzen için kalır. Yükseltme cümlesi "Upgrading from 2.3 or 2.4" der: upstream'in 2.4.0'ı (D-030) ortam seçimini değiştirmedi, 2.4'ten yükselten de aynı değişiklikleri görür.
 
 `tasks.test` README'yi girdi olarak bildirir: aksi hâlde yalnız README değişince görev UP-TO-DATE kalır ve kayma görülmez. Ölçüldü (Adım 4'te): yeşilden sonra aynı koşu `> Task :test UP-TO-DATE`; README'de tek satır değişince (`(from the build type name)` → `(the build type name)`) `> Task :test FAILED`, mesaj ``../README.md quotes `Palbase: featureX → featureX (the build type name) [palbase/environments]`; the build printed: …`` (README geri alındı). Ayrıca `PalbaseCodegenPluginTest`'teki 2.3 yorumu ("THE ENVIRONMENT IS ONE KEY THE USER OWNS … Unset means `local`", E3) bugünkü davranışa çevrilir; test kodu değişmez.
 
@@ -7313,7 +7316,7 @@ FR-212'nin README yarısı. `README.md:94-121` hâlâ 2.3'ü anlatıyor: "Which 
     // what to commit and what every variant then prints; this builds exactly
     // the blocks it marks and holds it to each line it quotes and to the
     // environment each variant packs. A README that describes an order the
-    // plugin does not follow — 2.4's first draft put the command line first —
+    // plugin does not follow — 2.5's first draft put the command line first —
     // fails here, not in a reader's build.
     @Test
     fun `the README example compiles what the README says`() {
@@ -7576,7 +7579,7 @@ palbase {
 }
 ```
 
-Upgrading from 2.3 changes what some builds compile; [CHANGELOG.md](CHANGELOG.md)
+Upgrading from 2.3 or 2.4 changes what some builds compile; [CHANGELOG.md](CHANGELOG.md)
 lists every change.
 
 The plugin generates Kotlin sources per Android variant and packages the runtime
@@ -7603,17 +7606,17 @@ Initialize once in `Application.onCreate`:
 
 ---
 
-### T028: Public README (distribution/README.md) 2.4.0 — aynı denetlenen örnek, 2.3'ten yükseltme notu, desteklenen aralık
+### T028: Public README (distribution/README.md) 2.5.0 — aynı denetlenen örnek, 2.3'ten yükseltme notu, desteklenen aralık
 <!-- deps: [T027] | files: [distribution/README.md, codegen-gradle/build.gradle.kts, codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt] | satisfies: [FR-212] -->
 
-Tüketicinin okuduğu sayfa bu: `scripts/publish.sh:123` `distribution/README.md`'yi `palgroup/palbackend-android`'e kopyalıyor (E3(d); public kopya src'dekiyle birebir, yalnız src düzenlenir). Değişenler: sürüm pinleri `2.3.0` → `2.4.0` (`:54`, `:66`), gereksinim tablosuna AGP/Gradle/JDK satırları, `:89` "Tried on Android Gradle Plugin 8.11 and 9.1, Gradle 8.13 and 9.3." yerine ÖLÇÜLEN çiftler (TestKit AGP 8.10.1/Gradle 8.11.1; tüketici AGP 8.11.1/Gradle 8.13 — T032'deki trial kopyası — ve AGP 9.1.1/Gradle 9.3.1 — T033'teki kullanıcı app'i ve slice 3'ün `s3-lib-agp9`'u), "Configure" bölümü (`:105-119`, `palbase.env` / `local when unset` / blok) build type anlatımıyla ve T027'nin AYNI işaretli örneğiyle, sıranın altında aynı-yer ve blok↔dosya reddi (README ile aynı kural), yeni "Upgrading from 2.3" alt bölümü (legacy `palbase.env` korunur, release reddi ve AGP 8'de `test`/`check`, özel build type'ın adı, `-Ppalbase.env`'in yeri, loopback reddi, iki kök reddi, modülün kendi `gradle.properties`'indeki satırın reddi, library fallback'inin `pre<Variant>Build` reddi — her biri build'in bastığı cümlenin ilk kelimeleriyle —, alt sınır). `local.properties`, flavor↔build type ve blok↔dosya reddi yükseltme listesine GİRMEZ: 2.3 `local.properties`'i, build type anahtarlarını ve bloğu hiç okumuyordu (`providers.gradleProperty("palbase.env")`, e72f704 `PalbaseCodegenPlugin.kt:28`) — bir 2.3 checkout'u bunlara yükseltmede takılamaz; "Configure" bölümü anlatır. ve "Versions" örneği `v2.4.0`. Aynı yardımcı bu dosyayı da derler; `tasks.test` girdisi iki README'yi de kapsar.
+Tüketicinin okuduğu sayfa bu: `scripts/publish.sh:123` `distribution/README.md`'yi `palgroup/palbackend-android`'e kopyalıyor (E3(d); public kopya src'dekiyle birebir, yalnız src düzenlenir). Değişenler: sürüm pinleri `2.3.0` → `2.5.0` (`:54`, `:66`), gereksinim tablosuna AGP/Gradle/JDK satırları, `:89` "Tried on Android Gradle Plugin 8.11 and 9.1, Gradle 8.13 and 9.3." yerine ÖLÇÜLEN çiftler (TestKit AGP 8.10.1/Gradle 8.11.1; tüketici AGP 8.11.1/Gradle 8.13 — T032'deki trial kopyası — ve AGP 9.1.1/Gradle 9.3.1 — T033'teki kullanıcı app'i ve slice 3'ün `s3-lib-agp9`'u), "Configure" bölümü (`:105-119`, `palbase.env` / `local when unset` / blok) build type anlatımıyla ve T027'nin AYNI işaretli örneğiyle, sıranın altında aynı-yer ve blok↔dosya reddi (README ile aynı kural), yeni "Upgrading from 2.3" alt bölümü (legacy `palbase.env` korunur, release reddi ve AGP 8'de `test`/`check`, özel build type'ın adı, `-Ppalbase.env`'in yeri, loopback reddi, iki kök reddi, modülün kendi `gradle.properties`'indeki satırın reddi, library fallback'inin `pre<Variant>Build` reddi — her biri build'in bastığı cümlenin ilk kelimeleriyle —, alt sınır, ve public ağacın atladığı 2.4.0'ın değişikliği: 2.4.0 orada yayımlanmadı (`palgroup/palbackend-android` yalnız `v2.3.0` taşıyor), oradan yükselten onu da bu sürümle alır — beyan edilen 401/429/doğrulama kodu kendi tipli vakasına ulaşır, o sınıfları kuran ve eski palbe-core'a karşı derlenmiş bir kütüphane yeniden derlenmeli; kaynağı upstream CHANGELOG'unun `## 2.4.0` bölümü). `local.properties`, flavor↔build type ve blok↔dosya reddi yükseltme listesine GİRMEZ: 2.3 `local.properties`'i, build type anahtarlarını ve bloğu hiç okumuyordu (`providers.gradleProperty("palbase.env")`, e72f704 `PalbaseCodegenPlugin.kt:28`) — bir 2.3 checkout'u bunlara yükseltmede takılamaz; "Configure" bölümü anlatır. ve "Versions" örneği `v2.5.0`. Aynı yardımcı bu dosyayı da derler; `tasks.test` girdisi iki README'yi de kapsar.
 
 **Interfaces:**
 - Consumes: `assertExampleHolds(readme: Path)` (T027); T027'nin örnek blokları
 - Produces:
   - `PalbaseCodegenPluginTest`: `the public README example compiles what it says`
   - `tasks.test` girdisi `readmes` (`../README.md`, `../distribution/README.md`)
-  - `distribution/README.md`: pinler `2.4.0`, `### Upgrading from 2.3`
+  - `distribution/README.md`: pinler `2.5.0`, `### Upgrading from 2.3` (2.4.0'ın değişikliği dahil)
 
 - [ ] **Adım 1: Kırmızı testi yaz** —
 
@@ -7643,7 +7646,7 @@ Tüketicinin okuduğu sayfa bu: `scripts/publish.sh:123` `distribution/README.md
 ```
   şununla değiştir:
 ```markdown
-    id("io.palbase.codegen") version "2.4.0" apply false
+    id("io.palbase.codegen") version "2.5.0" apply false
 ```
   (2/6) şu bloğu:
 ```markdown
@@ -7651,7 +7654,7 @@ Tüketicinin okuduğu sayfa bu: `scripts/publish.sh:123` `distribution/README.md
 ```
   şununla değiştir:
 ```markdown
-    implementation("io.palbase:palbe:2.4.0")
+    implementation("io.palbase:palbe:2.5.0")
 ```
   (3/6) şu bloğu:
 ```markdown
@@ -7821,7 +7824,7 @@ naming the two steps: upgrade and push the backend, then `palbase link`.
 
 ### Upgrading from 2.3
 
-Bump the plugin and the library together, to 2.4.0. Then:
+Bump the plugin and the library together, to 2.5.0. Then:
 
 - `palbase.env=main` in `gradle.properties` still compiles `main` for every build
   type, and the `palbase { environmentsDir.set(…) }` block still works. To choose
@@ -7853,6 +7856,11 @@ Bump the plugin and the library together, to 2.4.0. Then:
   set `palbase.env.featureX=<env>` in the root `gradle.properties` to say the
   stand-in is intended.
 - Gradle 8.11.1 and Android Gradle Plugin 8.10.1 are the minimum.
+- 2.4.0 was not published here, and its change comes with this version too:
+  an error an endpoint declares for a 401, a 429 or a validation refusal now
+  reaches its own typed case instead of `Other`. A library compiled against an
+  older `palbe-core` that constructs `BackendError.Validation`, `RateLimited`
+  or `Unauthorized` must be recompiled.
 ```
   (6/6) şu bloğu:
 ```markdown
@@ -7860,7 +7868,7 @@ Every release of the SDK is a tag here (`v2.3.0`) with notes, and a version in
 ```
   şununla değiştir:
 ```markdown
-Every release of the SDK is a tag here (`v2.4.0`) with notes, and a version in
+Every release of the SDK is a tag here (`v2.5.0`) with notes, and a version in
 ```
 
   `codegen-gradle/build.gradle.kts`:
@@ -7879,27 +7887,29 @@ Every release of the SDK is a tag here (`v2.4.0`) with notes, and a version in
         .withPathSensitivity(PathSensitivity.RELATIVE)
 ```
 - [ ] **Adım 4: Yeşil** — Run: `cd codegen-gradle && ../gradlew :test --offline --tests '*PalbaseCodegenPluginTest.the public README*'`, sonra `cd codegen-gradle && ../gradlew :test --offline` · Beklenen: filtreli koşu `BUILD SUCCESSFUL in 5s` (PalbaseCodegenPluginTest `tests="1"`, `failures="0"`); tam `cd codegen-gradle && ../gradlew :test --offline` → `BUILD SUCCESSFUL in 1m 3s`, `EnvironmentResolverTest` `tests="52"`, `LibraryFallbackCheckTest` `tests="11"`, `PalbaseCodegenPluginTest` `tests="88"` — hepsi `failures="0" errors="0"`.
-- [ ] **Adım 5: Commit** — `git add distribution/README.md codegen-gradle/build.gradle.kts codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt && git commit -m "docs(dist): public README 2.4.0 — ortamı build type seçer, örneği test derliyor; 2.3'ten yükseltme notu ve desteklenen aralık"`
+- [ ] **Adım 5: Commit** — `git add distribution/README.md codegen-gradle/build.gradle.kts codegen-gradle/src/test/kotlin/io/palbase/gradle/PalbaseCodegenPluginTest.kt && git commit -m "docs(dist): public README 2.5.0 — ortamı build type seçer, örneği test derliyor; 2.3'ten yükseltme notu ve desteklenen aralık"`
 
 ---
 
-### T029: CHANGELOG — 2.4'ün tam "DAVRANIŞ DEĞİŞİKLİĞİ" listesi; alıntılanan her ret metni plugin'in bastığı
+### T029: CHANGELOG — 2.5'in tam "DAVRANIŞ DEĞİŞİKLİĞİ" listesi; alıntılanan her ret metni plugin'in bastığı
 <!-- deps: [T026] | files: [CHANGELOG.md] | satisfies: [FR-212] -->
 
-FR-212'nin CHANGELOG yarısı ve D-005. 2.4 minor numaralı ama kırıcı; ev geleneği bunu "DAVRANIŞ DEĞİŞİKLİĞİ" başlığıyla yazmak (`CHANGELOG.md:77-89`, 2.3.0). Prototipin CHANGELOG'u iki kırılmayı atlamıştı: `-Ppalbase.env`'in yeri ve Gradle alt sınırı (`reports/verification-2026-09-25.md` "YENİ — 2.4 is a breaking release under a minor number"). Liste tam olmalı, o yüzden kırmızı/yeşil bir denetim betiğiyle ölçülür: `Yayınlanmamış` bölümünde her davranış değişikliğinin bir izi aranır ve kullanıcıya basılan bir cümle alıntılanıyorsa aynı cümlenin plugin kaynağında TEK SATIRDA geçtiği de denetlenir — build'de bir hatayla karşılaşan, onun ilk kelimeleriyle CHANGELOG'da arayıp bulabilsin. Betik plugin reposuna girmez; planın yanındaki `tools/`'ta durur.
+FR-212'nin CHANGELOG yarısı ve D-005. 2.5 minor numaralı ama kırıcı; ev geleneği bunu "DAVRANIŞ DEĞİŞİKLİĞİ" başlığıyla yazmak (`CHANGELOG.md:100-112`, 2.3.0; upstream'in 2.4.0'ı da öyle, `:16`). Prototipin CHANGELOG'u iki kırılmayı atlamıştı: `-Ppalbase.env`'in yeri ve Gradle alt sınırı (`reports/verification-2026-09-25.md` "YENİ — 2.4 is a breaking release under a minor number"). Liste tam olmalı, o yüzden kırmızı/yeşil bir denetim betiğiyle ölçülür: `Yayınlanmamış` bölümünde her davranış değişikliğinin bir izi aranır ve kullanıcıya basılan bir cümle alıntılanıyorsa aynı cümlenin plugin kaynağında TEK SATIRDA geçtiği de denetlenir — build'de bir hatayla karşılaşan, onun ilk kelimeleriyle CHANGELOG'da arayıp bulabilsin. Betik plugin reposuna girmez; planın yanındaki `tools/`'ta durur.
 
-Blok↔dosya reddinin cümlesi T010/T011'in kuralını söyler: AYNI build'lerin anahtarı çelişirse ret, başka build'leri de kapsayan anahtarı blok geçer. Listenin iki iddiası planlama koşusunda ölçüldü: AGP 8.11.1 / Gradle 8.13'te `palbase.env.release` yokken `./gradlew :app:test` → `> Task :app:generatePalbaseRelease FAILED` (``Palbase: `release` has no environment, and a release never gets one by default — …``); `:app:test :app:check -m` AGP 9.1.1'de yalnız `:app:generatePalbaseDebug SKIPPED`, AGP 8.11.1'de `:app:generatePalbaseDebug SKIPPED` ve `:app:generatePalbaseRelease SKIPPED` listeler. Runtime'ın değişmediği: `git diff --stat e72f704..HEAD -- codegen-engine shared palbe palbe-core palbe-call palbe-debug-ui palbe-integrity palbe-messaging palbe-notifications palbe-purchases` yalnız `palbe-core/src/test/.../GeneratedConfigLoaderTest.kt | 19 +` (T022'nin testi).
+Tabanda `## Yayınlanmamış` boş ve hemen altında upstream'in yayımlanmış `## 2.4.0 — 2026-09-26` bölümü var (D-030). Yeni bölümler `## Yayınlanmamış`'ın altına, o bölümün ÜSTÜNE girer; `## 2.4.0` ve ``Son etiket: `v2.4.0` `` olduğu gibi kalır. Eski tabandan gelen commit burada CHANGELOG'da çakışır (ölçüldü: `CONFLICT (content): Merge conflict in CHANGELOG.md`); çözüm bu adımın metnidir — ekleme yeri aynı satır, `## Yayınlanmamış`. İki değer yeni tabana göre yazıldı: "Runtime ve engine kodu **2.4.0** ile aynı" (2.3.0 değil: 2.4.0 engine'i ve palbe-core'u değiştirdi) ve YAYIN'daki public ağaç maddesi — `palgroup/palbackend-android` yalnız `v2.3.0` taşıyor, oradan yükselten 2.4.0'ın değişikliğini de bu sürümle alır ve GitHub Release notu yalnız bu bölümdür (`publish.sh`'ın awk satırı). Madde "davranış değişikliği"ni küçük harfle yazar: `release-notes.sh` büyük harfli başlığı satır satır sayar.
+
+Blok↔dosya reddinin cümlesi T010/T011'in kuralını söyler: AYNI build'lerin anahtarı çelişirse ret, başka build'leri de kapsayan anahtarı blok geçer. Listenin iki iddiası planlama koşusunda ölçüldü: AGP 8.11.1 / Gradle 8.13'te `palbase.env.release` yokken `./gradlew :app:test` → `> Task :app:generatePalbaseRelease FAILED` (``Palbase: `release` has no environment, and a release never gets one by default — …``); `:app:test :app:check -m` AGP 9.1.1'de yalnız `:app:generatePalbaseDebug SKIPPED`, AGP 8.11.1'de `:app:generatePalbaseDebug SKIPPED` ve `:app:generatePalbaseRelease SKIPPED` listeler. Runtime'ın ve engine'in 2.4.0'a göre değişmediği: `git diff --stat v2.4.0..HEAD -- codegen-engine shared palbe palbe-core palbe-call palbe-debug-ui palbe-integrity palbe-messaging palbe-notifications palbe-purchases` yalnız `palbe-core/src/test/kotlin/io/palbase/core/GeneratedConfigLoaderTest.kt | 19 +` (T022'nin testi; `1 file changed, 19 insertions(+)`, T028'in ağacında ölçüldü).
 
 **Interfaces:**
 - Consumes: T001–T026'nın davranışları ve ret metinleri (`EnvironmentResolver.kt`, `GeneratePalbaseTask.kt`, `AndroidVariantIntegration.kt`)
 - Produces:
-  - `CHANGELOG.md` `## Yayınlanmamış` altında: `### YAYIN — 11 artefakt birlikte 2.4.0; …` ve ``### DAVRANIŞ DEĞİŞİKLİĞİ — ortamı variant'ın build type'ı seçiyor (`io.palbase.codegen` 2.4.0)``
-  - Plan aracı `tools/changelog-check.sh [başlık]` — T030 onu `## 2.4.0` başlığıyla yeniden koşar
+  - `CHANGELOG.md` `## Yayınlanmamış` altında, upstream'in `## 2.4.0` bölümünün üstünde: `### YAYIN — 11 artefakt birlikte 2.5.0; …` ve ``### DAVRANIŞ DEĞİŞİKLİĞİ — ortamı variant'ın build type'ı seçiyor (`io.palbase.codegen` 2.5.0)``
+  - Plan aracı `tools/changelog-check.sh [başlık]` — T030 onu `## 2.5.0` başlığıyla yeniden koşar
 
 - [ ] **Adım 1: Kırmızı testi yaz** — plan aracı `tools/changelog-check.sh` (planın dizininde — lead bu dosyayı `plan-plugin.md` ile birlikte palbase-cli'ye pathspec'le commit eder; plugin reposuna commit edilmez, plugin reposunun kökünde koşar):
 ```bash
 #!/usr/bin/env bash
-# Every 2.4 behaviour change is named in the CHANGELOG section that is being
+# Every 2.5 behaviour change is named in the CHANGELOG section that is being
 # released — and every message it quotes is one the plugin really prints.
 # usage (repo root): changelog-check.sh [heading]   (default: "## Yayınlanmamış")
 heading="${1:-## Yayınlanmamış}"
@@ -7933,7 +7943,7 @@ need "JDK floor"                         "JDK 17"
 need "packaged environment name"         "palbase_environment"
 need "generation line"                   "Palbase: <variant> → <ortam> (<köken>) [<kök>]"
 if (( missing )); then echo "$missing missing"; exit 1; fi
-echo "the section names every 2.4 behaviour change"
+echo "the section names every 2.5 behaviour change"
 ```
 - [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run (plugin repo kökünde): `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/changelog-check.sh"` · Beklenen: **FAIL** (exit 1), ilk satır ``missing: release is refused — `a release never gets one by default` ``, son satır `22 missing`; `not in …` satırı yok (alıntılanacak her cümle kaynakta tek satırda duruyor).
 - [ ] **Adım 3: Uygula** —
@@ -7946,17 +7956,23 @@ echo "the section names every 2.4 behaviour change"
   şunu ekle:
 ```markdown
 
-### YAYIN — 11 artefakt birlikte 2.4.0; runtime ve engine kodu değişmedi
+### YAYIN — 11 artefakt birlikte 2.5.0; runtime ve engine kodu değişmedi
 
 - Plugin, `palbase-codegen-engine` ve 8 runtime modülü tek sürümle çıkıyor;
-  plugin POM'u engine'i aynı sürüme pinliyor. Runtime ve engine kodu 2.3.0 ile
+  plugin POM'u engine'i aynı sürüme pinliyor. Runtime ve engine kodu 2.4.0 ile
   aynı; runtime'da değişen tek değer palbe-core'un `PALBASE_SDK_VERSION`'ı. Tüketici için
   kural aynı: plugin ve kütüphane AYNI sürüm.
 - Desteklenen aralık ilk kez yazılı: **AGP 8.10.1+, Gradle 8.11.1+, JDK 17+**
   (README'ler). Denenen: TestKit'te AGP 8.10.1 / Gradle 8.11.1; tüketicide AGP
   8.11.1 / Gradle 8.13 ve AGP 9.1.1 / Gradle 9.3.1.
+- Public dağıtım ağacı (`palgroup/palbackend-android`) 2.3.0'dan doğrudan
+  2.5.0'a geçiyor: 2.4.0 orada yayımlanmadı. Oradan yükselten, bu dosyadaki
+  `## 2.4.0` bölümünün davranış değişikliğini de alır — endpoint'in beyan
+  ettiği 401/429/doğrulama kodu kendi tipli vakasına ulaşır; `Validation`,
+  `RateLimited` ya da `Unauthorized` kuran ve palbe-core'un eski sürümüne
+  karşı derlenmiş bir kütüphane yeniden derlenmeli.
 
-### DAVRANIŞ DEĞİŞİKLİĞİ — ortamı variant'ın build type'ı seçiyor (`io.palbase.codegen` 2.4.0)
+### DAVRANIŞ DEĞİŞİKLİĞİ — ortamı variant'ın build type'ı seçiyor (`io.palbase.codegen` 2.5.0)
 
 2.3'te tek bir cevap vardı: global `palbase.env`, yoksa `local` — her variant
 için. `debug` ile `release` farklı yığınlara bakamıyordu ve bayrağı hiç görmeyen
@@ -7997,7 +8013,7 @@ Yükselten bir uygulamanın görebileceği değişiklikler:
   ret yapılandırmada değil, görevin kendisinde. 2.3 bu durumda `local`'i
   paketliyordu.
 - **`palbase.env` yoksa özel bir build type kendi adını derler.** 2.3'te
-  `create("staging")` `local`'i derliyordu; 2.4'te `palbase/environments/staging/`'i
+  `create("staging")` `local`'i derliyordu; 2.5'te `palbase/environments/staging/`'i
   derler (`staging → staging (from the build type name)`), dizin yoksa durur.
   `palbase.env=main` taşıyan checkout'ta değişen yok: eski global ad kuralından
   ÖNCE sorulur (`palbase.env, the 2.3 global property`) — aynı adlı bir dizin
@@ -8021,7 +8037,7 @@ Yükselten bir uygulamanın görebileceği değişiklikler:
   yalnız debuggable variant'a yazılır.
 - **Ortam adı birebir.** Ad TEK bir dizin adıdır (boş, `/`, `\`, baştaki `.`
   ve kontrol karakteri reddedilir) ve dizinle harf büyüklüğü dahil aynı olmalı:
-  macOS'ta `palbase.env.release=Main` 2.3'te `main/`'i derliyordu; 2.4 ikizi ve
+  macOS'ta `palbase.env.release=Main` 2.3'te `main/`'i derliyordu; 2.5 ikizi ve
   eşleme satırını söyleyip durur (``… `main` differs from it only in letter
   case …``).
 - **`palbase/` bloksuz bulunur.** Aranan yerler: `<modül>/palbase/environments`,
@@ -8029,7 +8045,7 @@ Yükselten bir uygulamanın görebileceği değişiklikler:
   (`.git` da `palbase/project.json` da yok — React Native, Flutter)
   `<kök proje>/../palbase/environments`. 2.3 yalnız modüle bakıyordu: kökte
   `palbase/` olup bloğu olmayan bir checkout hiçbir şey üretmeden yeşil
-  geçiyordu; 2.4 onu derler. Birden fazlası varsa durur:
+  geçiyordu; 2.5 onu derler. Birden fazlası varsa durur:
   ``Palbase: `<V>` has more than one palbase/environments in reach — …``.
   Hiçbiri yoksa hiçbir şey üretilmez ve bu bir hata değildir; bir satır aranan
   her yeri sayar:
@@ -8037,7 +8053,7 @@ Yükselten bir uygulamanın görebileceği değişiklikler:
   `palbase { environmentsDir.set(…) }`
   çalışmaya devam eder; o zaman tek aranan yer odur.
 - **Modülün kendi `gradle.properties`'indeki `palbase.env*` satırı reddedilir.**
-  2.3 onu sessizce yok sayıyordu; 2.4 o modülün her üretimini kök dosyayı
+  2.3 onu sessizce yok sayıyordu; 2.5 o modülün her üretimini kök dosyayı
   adlandırarak durdurur (``… and a module's own gradle.properties never chooses
   an environment …``). Hiçbir variant'ı, flavor'ı ya da build type'ı
   adlandırmayan `palbase.env.*` anahtarı uyarılır.
@@ -8062,7 +8078,7 @@ Yükselten bir uygulamanın görebileceği değişiklikler:
   ile uygulayanı etkilemez. Görev girdileri değiştiği için yükseltmeden sonraki
   ilk build'de build cache ıskalar.
 - **Alt sınır: Gradle 8.11.1, AGP 8.10.1, JDK 17.** 2.3 bir sınır yazmıyordu.
-  2.4 Gradle 8.5'te gelen `BuildFeatures`'ı ve 8.11'de gelen
+  2.5 Gradle 8.5'te gelen `BuildFeatures`'ı ve 8.11'de gelen
   `ProjectDependency.getPath`'i kullanır; AGP 8.10.1'in kendisi de Gradle
   8.11.1 ister. AGP'nin `DslExtension` API'si 8.11'in altında `@Incubating`.
 
@@ -8090,24 +8106,26 @@ type başına seçmek için satırı `palbase.env.debug=main` +
 bloğunu silin. `palbase.env`'i olmayan checkout release için
 `palbase.env.release=<ortam>` ekler.
 ```
-- [ ] **Adım 4: Yeşil** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/changelog-check.sh"` · Beklenen: `the section names every 2.4 behaviour change`, exit 0.
-- [ ] **Adım 5: Commit** — `git add CHANGELOG.md && git commit -m "docs: CHANGELOG 2.4.0 — ortamı build type seçiyor; tam DAVRANIŞ DEĞİŞİKLİĞİ listesi, alıntılanan her ret metni plugin'in bastığı"`
+- [ ] **Adım 4: Yeşil** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/changelog-check.sh"` · Beklenen: `the section names every 2.5 behaviour change`, exit 0.
+- [ ] **Adım 5: Commit** — `git add CHANGELOG.md && git commit -m "docs: CHANGELOG 2.5.0 — ortamı build type seçiyor; tam DAVRANIŞ DEĞİŞİKLİĞİ listesi, alıntılanan her ret metni plugin'in bastığı"`
 
 ---
 
-### T030: 2.4.0 sürüm kesimi ve yerel prova — CHANGELOG başlığı, README yayın örneği; README kapısı, 11 artefakt, POM zinciri
+### T030: 2.5.0 sürüm kesimi ve yerel prova — CHANGELOG başlığı, README yayın örneği; README kapısı, 11 artefakt, POM zinciri
 <!-- deps: [T003, T027, T028, T029] | files: [CHANGELOG.md, README.md] | satisfies: [FR-212, FR-213] -->
 
-D-005/E1: plugin, engine ve 8 runtime modülü birlikte 2.4.0 — `publish.sh` 11'den az dizinle bitmez (`publish.sh:119-120`), plugin POM'u engine'i aynı sürüme pinler; plugin-only yol yok ve açılmaz. Sürüm kodda yazılı değil, `PALBE_VERSION` ortam değişkeninden gelir (`codegen-gradle/build.gradle.kts:54-59`); bu görev yalnız yayın commit'ini yapar (2.3.0'ın `8b74104`'ü gibi: `## Yayınlanmamış`'ın altına `## 2.4.0 — <gün>`, "Son etiket" `v2.4.0`, README'nin yayın örneği) ve yayını YEREL olarak prova eder. Kırmızı/yeşil, `publish.sh`'ın GitHub Release'e koyduğu notun kendisidir: onun awk satırıyla `## 2.4.0` bölümü çıkarılır; başlık yokken not boştur.
+D-005/E1: plugin, engine ve 8 runtime modülü birlikte 2.5.0 — `publish.sh` 11'den az dizinle bitmez (`publish.sh:119-120`), plugin POM'u engine'i aynı sürüme pinler; plugin-only yol yok ve açılmaz. Sürüm kodda yazılı değil, `PALBE_VERSION` ortam değişkeninden gelir (`codegen-gradle/build.gradle.kts:54-59`); bu görev yalnız yayın commit'ini yapar (2.3.0'ın `8b74104`'ü gibi: `## Yayınlanmamış`'ın altına `## 2.5.0 — <gün>`, "Son etiket" `v2.5.0`, README'nin yayın örneği) ve yayını YEREL olarak prova eder. Kırmızı/yeşil, `publish.sh`'ın GitHub Release'e koyduğu notun kendisidir: onun awk satırıyla `## 2.5.0` bölümü çıkarılır; başlık yokken not boştur.
 
-FR-213 T003'te uygulandı (kök `gradle.properties`'te `palbase.env.release=local`); burada son HEAD'de README kapısı yeniden ölçülür. Prova yalnız reponun kendi yerel adımlarıdır: `scripts/verify-publications.sh` ve `publish.sh`'ın 2. adımı (`build/test-repository` ve `codegen-gradle/build/test-repository`'ye, ikisi de `build/` altında) — GitHub'a, GitHub Pages'e ya da `~/.m2`'ye hiçbir şey gitmez. Tarih yayın günüdür (`date +%F`); bu provada `2026-09-26`.
+Tabanda "Son etiket" ``v2.4.0``'dır (upstream'in yayımlanmış 2.4.0'ı, D-030) ve `## Yayınlanmamış`'ın altında önce T029'un iki bölümü, sonra upstream'in `## 2.4.0 — 2026-09-26` bölümü durur. Yeni başlık `## Yayınlanmamış` ile T029'un `### YAYIN`'ı arasına girer; `## 2.4.0` bölümüne dokunulmaz, "Son etiket" `v2.4.0` → `v2.5.0` olur. Eski tabandan gelen commit burada CHANGELOG'da çakışır (ölçüldü: `CONFLICT (content): Merge conflict in CHANGELOG.md`; README otomatik birleşir ama eski sürümü yazar); çözüm bu adımın metnidir.
+
+FR-213 T003'te uygulandı (kök `gradle.properties`'te `palbase.env.release=local`); burada son HEAD'de README kapısı yeniden ölçülür. Prova yalnız reponun kendi yerel adımlarıdır: `scripts/verify-publications.sh` ve `publish.sh`'ın 2. adımı (`build/test-repository` ve `codegen-gradle/build/test-repository`'ye, ikisi de `build/` altında) — GitHub'a, GitHub Pages'e ya da `~/.m2`'ye hiçbir şey gitmez. Tarih yayın günüdür (`date +%F`); bu provada `2026-09-27`.
 
 **Interfaces:**
 - Consumes: T029'un `CHANGELOG.md` bölümü ve `tools/changelog-check.sh`; T003'ün `palbase.env.release=local`'i
 - Produces:
-  - Yayın commit'i: `CHANGELOG.md` `## 2.4.0 — <gün>`, ``Son etiket: `v2.4.0` ``; `README.md` yayın örneği `v2.4.0`
+  - Yayın commit'i: `CHANGELOG.md` `## 2.5.0 — <gün>`, ``Son etiket: `v2.5.0` ``; `README.md` yayın örneği `v2.5.0`
   - Plan araçları `tools/release-notes.sh <sürüm>`, `tools/release-dry-run-check.sh <sürüm>`
-  - `build/test-repository` + `codegen-gradle/build/test-repository`'de 11 koordinat 2.4.0 — T032/T033 yayından ÖNCE bunlarla kopyada prova edebilir
+  - `build/test-repository` + `codegen-gradle/build/test-repository`'de 11 koordinat 2.5.0 — T032/T033 yayından ÖNCE bunlarla kopyada prova edebilir
 
 - [ ] **Adım 1: Kırmızı testi yaz** — plan araçları, planın `tools/` dizininde (lead commit eder, T029 gibi):
 
@@ -8115,11 +8133,11 @@ FR-213 T003'te uygulandı (kök `gradle.properties`'te `palbase.env.release=loca
 ```bash
 #!/usr/bin/env bash
 # The notes scripts/publish.sh attaches to the GitHub Release of $1 — its own
-# awk line — and whether they carry the whole 2.4 list.
+# awk line — and whether they carry the whole 2.5 list.
 version="$1"
 notes="$(awk -v h="## $version" 'index($0,h)==1{p=1;next} p&&/^## /{exit} p' CHANGELOG.md)"
 echo "notes for $version: $(wc -l <<<"$notes" | tr -d ' ') lines, $(grep -c 'DAVRANIŞ DEĞİŞİKLİĞİ' <<<"$notes") DAVRANIŞ DEĞİŞİKLİĞİ heading(s)"
-grep -q 'DAVRANIŞ DEĞİŞİKLİĞİ' <<<"$notes" || { echo "publish.sh would attach no 2.4 notes for $version"; exit 1; }
+grep -q 'DAVRANIŞ DEĞİŞİKLİĞİ' <<<"$notes" || { echo "publish.sh would attach no 2.5 notes for $version"; exit 1; }
 "$(dirname "$0")/changelog-check.sh" "## $version"
 ```
 
@@ -8147,27 +8165,27 @@ major="$(unzip -p "$repo/codegen-gradle/$v/codegen-gradle-$v.jar" io/palbase/gra
 echo "plugin class file major version $major (61 = Java 17)"
 [[ "$n" == 11 ]]
 ```
-- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run (plugin repo kökünde): `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/release-notes.sh" 2.4.0` · Beklenen: **FAIL** (exit 1), `notes for 2.4.0: 1 lines, 0 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)` ve `publish.sh would attach no 2.4 notes for 2.4.0`.
-- [ ] **Adım 3: Uygula** — (`2026-09-26` yerine yayın günü, `date +%F`)
+- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run (plugin repo kökünde): `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/release-notes.sh" 2.5.0` · Beklenen: **FAIL** (exit 1), `notes for 2.5.0: 1 lines, 0 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)` ve `publish.sh would attach no 2.5 notes for 2.5.0`.
+- [ ] **Adım 3: Uygula** — (`2026-09-27` yerine yayın günü, `date +%F`)
 
   `CHANGELOG.md`:
   şu bloğu:
-```markdown
-bilmelidir. Son etiket: `v2.3.0`.
-
-## Yayınlanmamış
-
-### YAYIN — 11 artefakt birlikte 2.4.0; runtime ve engine kodu değişmedi
-```
-  şununla değiştir:
 ```markdown
 bilmelidir. Son etiket: `v2.4.0`.
 
 ## Yayınlanmamış
 
-## 2.4.0 — 2026-09-26
+### YAYIN — 11 artefakt birlikte 2.5.0; runtime ve engine kodu değişmedi
+```
+  şununla değiştir:
+```markdown
+bilmelidir. Son etiket: `v2.5.0`.
 
-### YAYIN — 11 artefakt birlikte 2.4.0; runtime ve engine kodu değişmedi
+## Yayınlanmamış
+
+## 2.5.0 — 2026-09-27
+
+### YAYIN — 11 artefakt birlikte 2.5.0; runtime ve engine kodu değişmedi
 ```
 
   `README.md`:
@@ -8179,33 +8197,33 @@ git push origin main v2.3.0
 ```
   şununla değiştir:
 ```markdown
-git tag v2.4.0
-PALBE_VERSION=2.4.0 scripts/publish.sh
-git push origin main v2.4.0
+git tag v2.5.0
+PALBE_VERSION=2.5.0 scripts/publish.sh
+git push origin main v2.5.0
 ```
 - [ ] **Adım 4: Yeşil + yerel prova** — hepsi plugin repo kökünde, `JAVA_HOME` = Android Studio JBR, `ANDROID_HOME` ayarlı. `publish…ToTestRepository` ve `verify-publications.sh` yalnız reponun kendi `build/` dizinlerine yazar (`build/test-repository`, `codegen-gradle/build/test-repository`, `build/verify-publications-*`): GitHub'a, Pages'e, `~/.m2`'ye hiçbir şey gitmez — yürüten ajan koşturabilir.
-1. `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/release-notes.sh" 2.4.0` · Beklenen: `notes for 2.4.0: 144 lines, 1 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)` ve `the section names every 2.4 behaviour change`.
-  2. README kapısı (FR-213, NFR-002): `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache --no-daemon --offline` · Beklenen: girdiyi ilk kez kaydeden koşu `BUILD SUCCESSFUL in 13s`, `872 actionable tasks: 36 executed, 17 from cache, 819 up-to-date`, `Configuration cache entry stored.`; aynı komut yeniden `BUILD SUCCESSFUL in 3s`, `866 actionable tasks: 29 executed, 837 up-to-date`, `Configuration cache entry reused.`
+1. `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/release-notes.sh" 2.5.0` · Beklenen: `notes for 2.5.0: 150 lines, 1 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)` ve `the section names every 2.5 behaviour change`.
+  2. README kapısı (FR-213, NFR-002): `./gradlew check lintRelease :consumer-release:assembleRelease --configuration-cache --no-daemon --offline` · Beklenen: girdiyi ilk kez kaydeden koşu `BUILD SUCCESSFUL in 21s`, `872 actionable tasks: 43 executed, 1 from cache, 828 up-to-date`, `Configuration cache entry stored.`; aynı komut yeniden `BUILD SUCCESSFUL in 3s`, `866 actionable tasks: 29 executed, 837 up-to-date`, `Configuration cache entry reused.`
   3. SDK'nın kendi release'lerinin seçimi görünür olsun: `./gradlew :sample:generatePalbaseRelease --rerun :consumer-release:generatePalbaseRelease --rerun --offline` · Beklenen: iki kez `Palbase: release → local (palbase.env.release in gradle.properties) [sample/palbase/environments]`, `BUILD SUCCESSFUL in 1s`.
-  4. Plugin kapısı: `./gradlew -p codegen-gradle check --configuration-cache --no-daemon --offline` · Beklenen: `BUILD SUCCESSFUL in 1m 7s` (`:validatePlugins` koştu), `Configuration cache entry reused.`; `EnvironmentResolverTest` `tests="52"`, `LibraryFallbackCheckTest` `tests="11"`, `PalbaseCodegenPluginTest` `tests="88"`, codegen-engine 8 sınıf 46 test — hepsi `failures="0" errors="0"`; ikinci koşu `BUILD SUCCESSFUL in 2s`.
-  5. `PALBE_VERSION=2.4.0 ./scripts/verify-publications.sh` · Beklenen: son satır `Publication verification passed for 2.4.0` (palbe-core release `BuildConfig`: `PALBASE_SDK_VERSION = "2.4.0";`).
-  6. `publish.sh`'ın 2. adımı, yerel: `PALBE_VERSION=2.4.0 ./gradlew publishReleasePublicationToTestRepository :codegen-engine:publishMavenPublicationToTestRepository --no-daemon --offline` ve `PALBE_VERSION=2.4.0 ./gradlew -p codegen-gradle :publishAllPublicationsToTestRepository --no-daemon --offline` · Beklenen: ikisi de `BUILD SUCCESSFUL` (`in 7s`, `in 3s`).
-  7. `"$TOOLS/release-dry-run-check.sh" 2.4.0` · Beklenen: `artifact directories for 2.4.0: 11` ve altında `io/palbase/codegen-gradle/2.4.0`, `io/palbase/codegen/io.palbase.codegen.gradle.plugin/2.4.0`, `io/palbase/palbase-codegen-engine/2.4.0`, `io/palbase/palbe-call/2.4.0`, `io/palbase/palbe-core/2.4.0`, `io/palbase/palbe-debug-ui/2.4.0`, `io/palbase/palbe-integrity/2.4.0`, `io/palbase/palbe-messaging/2.4.0`, `io/palbase/palbe-notifications/2.4.0`, `io/palbase/palbe-purchases/2.4.0`, `io/palbase/palbe/2.4.0`; sonra `plugin POM pins palbase-codegen-engine 2.4.0`, `marker io.palbase.codegen 2.4.0 → io.palbase:codegen-gradle 2.4.0`, `plugin class file major version 61 (61 = Java 17)`; exit 0.
-- [ ] **Adım 5: Commit** — `git add CHANGELOG.md README.md && git commit -m "release: 2.4.0 — ortamı build type seçiyor; plugin, engine ve runtime birlikte, runtime kodu değişmedi"` (etiket T031'de, yayından hemen önce).
+  4. Plugin kapısı: `./gradlew -p codegen-gradle check --configuration-cache --no-daemon --offline` · Beklenen: `BUILD SUCCESSFUL in 1m 4s` (`:validatePlugins` ve `:codegen-engine:test` koştu), `Configuration cache entry stored.` (bu klonda komutun ilk koşusu; önceden koşulduysa `reused`); `EnvironmentResolverTest` `tests="52"`, `LibraryFallbackCheckTest` `tests="11"`, `PalbaseCodegenPluginTest` `tests="88"`, codegen-engine 9 sınıf 47 test — hepsi `failures="0" errors="0"`; ikinci koşu `BUILD SUCCESSFUL in 2s`, `Configuration cache entry reused.`
+  5. `PALBE_VERSION=2.5.0 ./scripts/verify-publications.sh` · Beklenen: son satır `Publication verification passed for 2.5.0` (palbe-core release `BuildConfig`: `PALBASE_SDK_VERSION = "2.5.0";`).
+  6. `publish.sh`'ın 2. adımı, yerel: `PALBE_VERSION=2.5.0 ./gradlew publishReleasePublicationToTestRepository :codegen-engine:publishMavenPublicationToTestRepository --no-daemon --offline` ve `PALBE_VERSION=2.5.0 ./gradlew -p codegen-gradle :publishAllPublicationsToTestRepository --no-daemon --offline` · Beklenen: ikisi de `BUILD SUCCESSFUL` (`in 6s`, `in 3s`).
+  7. `"$TOOLS/release-dry-run-check.sh" 2.5.0` · Beklenen: `artifact directories for 2.5.0: 11` ve altında `io/palbase/codegen-gradle/2.5.0`, `io/palbase/codegen/io.palbase.codegen.gradle.plugin/2.5.0`, `io/palbase/palbase-codegen-engine/2.5.0`, `io/palbase/palbe-call/2.5.0`, `io/palbase/palbe-core/2.5.0`, `io/palbase/palbe-debug-ui/2.5.0`, `io/palbase/palbe-integrity/2.5.0`, `io/palbase/palbe-messaging/2.5.0`, `io/palbase/palbe-notifications/2.5.0`, `io/palbase/palbe-purchases/2.5.0`, `io/palbase/palbe/2.5.0`; sonra `plugin POM pins palbase-codegen-engine 2.5.0`, `marker io.palbase.codegen 2.5.0 → io.palbase:codegen-gradle 2.5.0`, `plugin class file major version 61 (61 = Java 17)`; exit 0.
+- [ ] **Adım 5: Commit** — `git add CHANGELOG.md README.md && git commit -m "release: 2.5.0 — ortamı build type seçiyor; plugin, engine ve runtime birlikte, runtime kodu değişmedi"` (etiket T031'de, yayından hemen önce).
 
 ---
 
-### T031: 2.4.0'ı yayınla — KULLANICI koşturur (bu planda koşturulmadı): etiket, `publish.sh`, push, yayın sonrası denetim
+### T031: 2.5.0'ı yayınla — KULLANICI koşturur (bu planda koşturulmadı): etiket, `publish.sh`, push, yayın sonrası denetim
 <!-- deps: [T030] | files: [] | satisfies: [FR-212] -->
 
-Yayın geri alınamaz ve kimlik ister: `publish.sh` temiz ağaç, `v2.4.0` etiketli HEAD, oturum açmış `gh`, `write:packages` credential'ı (`GITHUB_TOKEN` ya da `~/.gradle/gradle.properties`'te `gpr.key`) ve `../palbackend-android`'de temiz bir `palgroup/palbackend-android` checkout'u ister (`publish.sh:31-67`); public Maven ağacına push eder, GitHub Release açar, GitHub Packages'a yayınlar. Bu yüzden ajan KOŞTURMAZ — adımlar kullanıcınındır; lead yanında durur. Şartnamenin sırası: önce `plan-cli.md`, sonra `plan-cloud.md`, sonra bu yayın; tüketici görevleri (T032–T034) bundan sonra. Yayın sonrası denetim betiği bu planda yalnız YEREL olarak prova edildi: T030'un iki Test deposu `publish.sh`'ın 3. adımı gibi tek ağaçta birleştirilip `BASE=file://…` ile.
+`v2.4.0` etiketi upstream'indir (`6e97598`, D-030) ve yerinde kalır; bu görev `v2.5.0`'ı açar. Public ağaçta 2.4.0 yok: `publish.sh`'ın metadata birleştirmesi oradaki sürümleri (`2.3.0`) korur ve `2.5.0`'ı ekler. Yayın geri alınamaz ve kimlik ister: `publish.sh` temiz ağaç, `v2.5.0` etiketli HEAD, oturum açmış `gh`, `write:packages` credential'ı (`GITHUB_TOKEN` ya da `~/.gradle/gradle.properties`'te `gpr.key`) ve `../palbackend-android`'de temiz bir `palgroup/palbackend-android` checkout'u ister (`publish.sh:31-67`); public Maven ağacına push eder, GitHub Release açar, GitHub Packages'a yayınlar. Bu yüzden ajan KOŞTURMAZ — adımlar kullanıcınındır; lead yanında durur. Şartnamenin sırası: önce `plan-cli.md`, sonra `plan-cloud.md`, sonra bu yayın; tüketici görevleri (T032–T034) bundan sonra. Yayın sonrası denetim betiği bu planda yalnız YEREL olarak prova edildi: T030'un iki Test deposu `publish.sh`'ın 3. adımı gibi tek ağaçta birleştirilip `BASE=file://…` ile.
 
-Reponun kendisinde commit yok: `publish.sh` dağıtım reposunda kendi commit'ini atar (`release: Palbe v2.4.0 (binaries + docs)`) ve GitHub Release'in notu T030'un `## 2.4.0` bölümüdür. `palbackend-android-src` bir submodule değil (`git rev-parse --show-superproject-working-tree` boş) — işaretçi güncellemesi yok.
+Reponun kendisinde commit yok: `publish.sh` dağıtım reposunda kendi commit'ini atar (`release: Palbe v2.5.0 (binaries + docs)`) ve GitHub Release'in notu T030'un `## 2.5.0` bölümüdür. `palbackend-android-src` bir submodule değil (`git rev-parse --show-superproject-working-tree` boş) — işaretçi güncellemesi yok.
 
 **Interfaces:**
 - Consumes: T030'un yayın commit'i ve kapıları
 - Produces:
-  - `v2.4.0` etiketi; `https://palgroup.github.io/palbackend-android/` altında 11 koordinat 2.4.0; `palgroup/palbackend-android` GitHub Release `v2.4.0`
+  - `v2.5.0` etiketi; `https://palgroup.github.io/palbackend-android/` altında 11 koordinat 2.5.0; `palgroup/palbackend-android` GitHub Release `v2.5.0`
   - Plan aracı `tools/post-publish-check.sh <sürüm>` (`BASE` ile başka bir ağaca yöneltilebilir)
 
 - [ ] **Adım 1: Kırmızı testi yaz** — plan aracı `tools/post-publish-check.sh`:
@@ -8229,36 +8247,36 @@ for coordinate in palbe palbe-core palbe-integrity palbe-notifications palbe-mes
 done
 exit "$fail"
 ```
-- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/post-publish-check.sh" 2.4.0` (yayından ÖNCE, public ağaca karşı) · Beklenen: **FAIL** — bu planda koşturulmadı (ağa çıkmak yok). Aynı betiğin yerel provası ölçüldü: T030'un iki Test deposu tek ağaçta birleştirildi (`rsync -a build/test-repository/ codegen-gradle/build/test-repository/ <ağaç>/`); `BASE=file://<ağaç> post-publish-check.sh 2.5.0` (hiç üretilmemiş sürüm) → 11 `FAIL` satırı, ilki `FAIL  palbe 2.5.0 — file://<ağaç>/io/palbase/palbe/2.5.0/palbe-2.5.0.pom`, exit 1.
+- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/post-publish-check.sh" 2.5.0` (yayından ÖNCE, public ağaca karşı) · Beklenen: **FAIL** — bu planda koşturulmadı (ağa çıkmak yok). Aynı betiğin yerel provası ölçüldü: T030'un iki Test deposu tek ağaçta birleştirildi (`rsync -a build/test-repository/ codegen-gradle/build/test-repository/ <ağaç>/`); `BASE=file://<ağaç> post-publish-check.sh 2.6.0` (hiç üretilmemiş sürüm) → 11 `FAIL` satırı, ilki `FAIL  palbe 2.6.0 — file://<ağaç>/io/palbase/palbe/2.6.0/palbe-2.6.0.pom`, exit 1.
 - [ ] **Adım 3: Uygula (KULLANICI)** — `palbackend-android-src` kökünde, `main`'de, T030'un commit'i HEAD'deyken:
 ```bash
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 git status --porcelain                       # boş olmalı
-git log -1 --format=%s                       # release: 2.4.0 — …
+git log -1 --format=%s                       # release: 2.5.0 — …
 gh auth status                               # signed in
 git -C ../palbackend-android status --porcelain   # boş olmalı; main'de
-git tag v2.4.0
-PALBE_VERSION=2.4.0 scripts/publish.sh
-git push origin main v2.4.0
+git tag v2.5.0
+PALBE_VERSION=2.5.0 scripts/publish.sh
+git push origin main v2.5.0
 ```
-  `publish.sh`'ın başarı satırları (kaynaktan; koşturulmadı): `copied 11 artifact directories for 2.4.0 into …`, `public distribution serves 2.4.0`, 11 kez `  ok   io.palbase.… 2.4.0`, son satır `published 2.4.0 — now push the tag: git push origin main v2.4.0`.
-- [ ] **Adım 4: Yeşil (KULLANICI)** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/post-publish-check.sh" 2.4.0` ve `gh release view v2.4.0 --repo palgroup/palbackend-android --json body --jq .body | grep -c "DAVRANIŞ DEĞİŞİKLİĞİ"` · Beklenen: koşturulmadı. Yerel prova: `BASE=file://<ağaç> post-publish-check.sh 2.4.0` → 11 satır `ok    palbe 2.4.0` … `ok    codegen/io.palbase.codegen.gradle.plugin 2.4.0`, exit 0; notun kaynağı olan bölüm için T030 Adım 4.1 (`1 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)`).
+  `publish.sh`'ın başarı satırları (kaynaktan; koşturulmadı): `copied 11 artifact directories for 2.5.0 into …`, `public distribution serves 2.5.0`, 11 kez `  ok   io.palbase.… 2.5.0`, son satır `published 2.5.0 — now push the tag: git push origin main v2.5.0`.
+- [ ] **Adım 4: Yeşil (KULLANICI)** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/post-publish-check.sh" 2.5.0` ve `gh release view v2.5.0 --repo palgroup/palbackend-android --json body --jq .body | grep -c "DAVRANIŞ DEĞİŞİKLİĞİ"` · Beklenen: koşturulmadı. Yerel prova: `BASE=file://<ağaç> post-publish-check.sh 2.5.0` → 11 satır `ok    palbe 2.5.0` … `ok    codegen/io.palbase.codegen.gradle.plugin 2.5.0`, exit 0; notun kaynağı olan bölüm için T030 Adım 4.1 (`1 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)`).
 - [ ] **Adım 5: Commit** — plugin reposunda commit yok (etiket + push Adım 3'te); dağıtım reposundaki commit'i `publish.sh` atar.
 
 ---
 
-### T032: palbe-trial-android 2.4.0'a geçer — build type anahtarları, blok yok, emekli `roles.json` ve `.gitattributes` yok
+### T032: palbe-trial-android 2.5.0'a geçer — build type anahtarları, blok yok, emekli `roles.json` ve `.gitattributes` yok
 <!-- deps: [T031] | files: [build.gradle.kts, app/build.gradle.kts, gradle.properties, palbase/.gitattributes, palbase/environments/main/roles.json] | satisfies: [FR-301] -->
 
-FR-301, `palbe-trial-android` reposunda (`acedb85`). Bu app 2.4'te DEĞİŞMEDEN de çalışır — eski global `palbase.env=main` ad kuralından önce sorulur (D-006) ve blok açık bir kök verir — ama seçimin yolu 2.3'ünkü kalır: `Palbase: debug → main (palbase.env, the 2.3 global property) [palbase/environments]`. Geçiş: iki sürüm pini (`build.gradle.kts:5`, `app/build.gradle.kts:38`), blok silinir (`app/build.gradle.kts:32-35` — `palbase/` kökte, kök `.git` taşıyor, bloksuz bulunur), `palbase.env=main` yerine `palbase.env.debug=main` + `palbase.env.release=main`, ve CLI'ın artık yazmadığı `palbase/.gitattributes` ile `palbase/environments/main/roles.json` (roller sözleşmenin içinde, `x-palbase-roles` — `openapi.json`'da var) `git rm` ile. Kabul bir betiktir: dosyaları, build satırlarını ve iki APK'nın `palbase_environment`'ını ölçer; argümanları Gradle'a geçer. Build'den önce `app/build/outputs/apk`'ı siler — önceki bir build'in APK'sı bu build'in yerine cevap vermesin (planlama koşusunda başarısız bir build'in yanında eski APK'lar `ok` verdi).
+FR-301, `palbe-trial-android` reposunda (`acedb85`). Bu app 2.5'te DEĞİŞMEDEN de çalışır — eski global `palbase.env=main` ad kuralından önce sorulur (D-006) ve blok açık bir kök verir — ama seçimin yolu 2.3'ünkü kalır: `Palbase: debug → main (palbase.env, the 2.3 global property) [palbase/environments]`. Geçiş: iki sürüm pini (`build.gradle.kts:5`, `app/build.gradle.kts:38`), blok silinir (`app/build.gradle.kts:32-35` — `palbase/` kökte, kök `.git` taşıyor, bloksuz bulunur), `palbase.env=main` yerine `palbase.env.debug=main` + `palbase.env.release=main`, ve CLI'ın artık yazmadığı `palbase/.gitattributes` ile `palbase/environments/main/roles.json` (roller sözleşmenin içinde, `x-palbase-roles` — `openapi.json`'da var) `git rm` ile. Kabul bir betiktir: dosyaları, build satırlarını ve iki APK'nın `palbase_environment`'ını ölçer; argümanları Gradle'a geçer. Build'den önce `app/build/outputs/apk`'ı siler — önceki bir build'in APK'sı bu build'in yerine cevap vermesin (planlama koşusunda başarısız bir build'in yanında eski APK'lar `ok` verdi).
 
-Gerçek depoda T031'den SONRA, argümansız koşar (sürümler public ağaçtan). Bu planda bir kopyada ölçüldü, iki yoldan: plugin scratch klonundan `includeBuild` ile (`-I proof-init.gradle.kts`) ve — yayının kendisini de sınayarak — plugin marker'ı, plugin, engine ve palbe 2.4.0 T030'un Test depolarından, `includeBuild` OLMADAN (`-I released-init.gradle.kts`). Yürüten ajan aynı provayı yayından önce yapabilir (init betikleri aşağıda; gerçek depoya girmezler). AGP 8.11.1 / Gradle 8.13. Commit mesajı reponun kendi git log'u gibi İngilizce.
+Gerçek depoda T031'den SONRA, argümansız koşar (sürümler public ağaçtan). Bu planda bir kopyada ölçüldü, iki yoldan: plugin scratch klonundan `includeBuild` ile (`-I proof-init.gradle.kts`) ve — yayının kendisini de sınayarak — plugin marker'ı, plugin, engine ve palbe 2.5.0 T030'un Test depolarından, `includeBuild` OLMADAN (`-I released-init.gradle.kts`). Yürüten ajan aynı provayı yayından önce yapabilir (init betikleri aşağıda; gerçek depoya girmezler). AGP 8.11.1 / Gradle 8.13. Commit mesajı reponun kendi git log'u gibi İngilizce.
 
 **Interfaces:**
 - Consumes: T031'in yayını (gerçek depo) — ya da T030'un Test depoları (prova)
 - Produces:
-  - `palbe-trial-android`: `id("io.palbase.codegen") version "2.4.0"`, `io.palbase:palbe:2.4.0`, `palbase.env.debug=main`, `palbase.env.release=main`
+  - `palbe-trial-android`: `id("io.palbase.codegen") version "2.5.0"`, `io.palbase:palbe:2.5.0`, `palbase.env.debug=main`, `palbase.env.release=main`
   - Plan araçları `tools/verify-trial.sh [gradle argümanları]`, `tools/proof-init.gradle.kts`, `tools/released-init.gradle.kts`
 
 - [ ] **Adım 1: Kırmızı testi yaz** — plan aracı `tools/verify-trial.sh`:
@@ -8269,8 +8287,8 @@ Gerçek depoda T031'den SONRA, argümansız koşar (sürümler public ağaçtan)
 set -u
 fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
-check "the plugin is pinned at 2.4.0"   'grep -qF "id(\"io.palbase.codegen\") version \"2.4.0\"" build.gradle.kts'
-check "palbe is pinned at 2.4.0"        'grep -qF "io.palbase:palbe:2.4.0" app/build.gradle.kts'
+check "the plugin is pinned at 2.5.0"   'grep -qF "id(\"io.palbase.codegen\") version \"2.5.0\"" build.gradle.kts'
+check "palbe is pinned at 2.5.0"        'grep -qF "io.palbase:palbe:2.5.0" app/build.gradle.kts'
 check "no palbase { } block"            '! grep -q "^palbase {" app/build.gradle.kts'
 check "no global palbase.env"           '! grep -q "^palbase.env=" gradle.properties'
 check "no palbase/.gitattributes"       '! test -e palbase/.gitattributes'
@@ -8292,7 +8310,7 @@ exit "$fail"
 ```kotlin
 // PROOF HARNESS ONLY — never part of a migrated checkout. The plugin comes from
 // the scratch clone (includeBuild), io.palbase libraries from local file
-// repositories: 2.4.0 from the scratch Test repository (T030's dry run), 2.3.0
+// repositories: 2.5.0 from the scratch Test repository (T030's dry run), 2.3.0
 // from the local copy of the public distribution repo.
 beforeSettings {
     pluginManagement {
@@ -8341,7 +8359,7 @@ beforeSettings {
     }
 }
 ```
-- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run (trial repo kökünde): `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/verify-trial.sh"` (prova: `"$TOOLS/verify-trial.sh" -I "$TOOLS/proof-init.gradle.kts" --offline`) · Beklenen: **FAIL** (exit 1) — `FAIL  the plugin is pinned at 2.4.0`, `FAIL  palbe is pinned at 2.4.0`, `FAIL  no palbase { } block`, `FAIL  no global palbase.env`, `FAIL  no palbase/.gitattributes`, `FAIL  no roles.json`, `ok    debug and release build`, `FAIL  debug → main, from its own key`, `FAIL  release → main, from its own key`, iki APK `ok … packs main`; basılan satırlar `Palbase: debug → main (palbase.env, the 2.3 global property) [palbase/environments]` ve `Palbase: release → main (palbase.env, the 2.3 global property) [palbase/environments]`.
+- [ ] **Adım 2: Kırmızı olduğunu GÖR** — Run (trial repo kökünde): `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/verify-trial.sh"` (prova: `"$TOOLS/verify-trial.sh" -I "$TOOLS/proof-init.gradle.kts" --offline`) · Beklenen: **FAIL** (exit 1) — `FAIL  the plugin is pinned at 2.5.0`, `FAIL  palbe is pinned at 2.5.0`, `FAIL  no palbase { } block`, `FAIL  no global palbase.env`, `FAIL  no palbase/.gitattributes`, `FAIL  no roles.json`, `ok    debug and release build`, `FAIL  debug → main, from its own key`, `FAIL  release → main, from its own key`, iki APK `ok … packs main`; basılan satırlar `Palbase: debug → main (palbase.env, the 2.3 global property) [palbase/environments]` ve `Palbase: release → main (palbase.env, the 2.3 global property) [palbase/environments]`.
 - [ ] **Adım 3: Uygula** —
 
   `build.gradle.kts`:
@@ -8351,7 +8369,7 @@ beforeSettings {
 ```
   şununla değiştir:
 ```kotlin
-    id("io.palbase.codegen") version "2.4.0" apply false
+    id("io.palbase.codegen") version "2.5.0" apply false
 ```
 
   `app/build.gradle.kts`:
@@ -8368,7 +8386,7 @@ dependencies {
   şununla değiştir:
 ```kotlin
 dependencies {
-    implementation("io.palbase:palbe:2.4.0")
+    implementation("io.palbase:palbe:2.5.0")
 ```
 
   `gradle.properties`:
@@ -8385,15 +8403,17 @@ palbase.env.release=main
 ```
 
   ve: `git rm palbase/.gitattributes palbase/environments/main/roles.json`
-- [ ] **Adım 4: Yeşil** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/verify-trial.sh"` · Beklenen: (prova, `-I "$TOOLS/proof-init.gradle.kts" --offline`): 11 satırın hepsi `ok`, basılan satırlar `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]` ve `Palbase: release → main (palbase.env.release in gradle.properties) [palbase/environments]`, exit 0. Yayının kendisiyle (`-I "$TOOLS/released-init.gradle.kts" --offline`, `includeBuild` yok): aynı 11 `ok`, exit 0; `./gradlew --offline -I "$TOOLS/released-init.gradle.kts" buildEnvironment` → `io.palbase.codegen:io.palbase.codegen.gradle.plugin:2.4.0` → `io.palbase:codegen-gradle:2.4.0` → `io.palbase:palbase-codegen-engine:2.4.0`.
-- [ ] **Adım 5: Commit** — `git add build.gradle.kts app/build.gradle.kts gradle.properties && git commit -m "trial: Palbase 2.4.0 — each build type picks its environment; the palbase {} block, the global palbase.env and the retired roles.json/.gitattributes go"` (Adım 3'ün `git rm`'i aynı commit'e girer), sonra `git push`.
+- [ ] **Adım 4: Yeşil** — Run: `TOOLS=/Users/erkutbas/Github_Pallasite/palbase-cli/docs/paltimate/2026-09-26-android-ortam-build-type/tools; "$TOOLS/verify-trial.sh"` · Beklenen: (prova, `-I "$TOOLS/proof-init.gradle.kts" --offline`): 11 satırın hepsi `ok`, basılan satırlar `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]` ve `Palbase: release → main (palbase.env.release in gradle.properties) [palbase/environments]`, exit 0. Yayının kendisiyle (`-I "$TOOLS/released-init.gradle.kts" --offline`, `includeBuild` yok): aynı 11 `ok`, exit 0; `./gradlew --offline -I "$TOOLS/released-init.gradle.kts" buildEnvironment` → `io.palbase.codegen:io.palbase.codegen.gradle.plugin:2.5.0` → `io.palbase:codegen-gradle:2.5.0` → `io.palbase:palbase-codegen-engine:2.5.0`.
+
+  Upstream 2.4.0'ın üretilen koda getirdiği tek değişiklik (`from()` → `backend.envelope`) yalnız `x-palbase-errors` beyan eden bir uç için üretilir; trial'ın sözleşmesi (kullanıcının app'ininki de — aynı dosya) hiç beyan etmiyor, yani yukarıdaki kabul o yolu derlemez. Yol ayrıca ölçüldü (prova, geçişten sonraki trial'ın bir KOPYASINDA; gerçek depoya girmez): `palbase/environments/main/openapi.json`'un `paths`'ine upstream'in `codegen-engine/src/test/resources/Golden/classified_errors_spec.json`'undaki `/classified/act` yolu eklendi → üretilen `ClassifiedActError.from` `val response = backend.envelope ?: return Other(backend)` taşır; `./gradlew --offline -I "$TOOLS/released-init.gradle.kts" :app:assembleDebug :app:assembleRelease` → `BUILD SUCCESSFUL` (palbe 2.5.0). Aynı kopya `io.palbase:palbe:2.3.0`'a pinlenip `-I "$TOOLS/proof-init.gradle.kts"` ile `:app:compileDebugKotlin` → `e: …/PalbaseGenerated.kt:386:36 Unresolved reference 'envelope'.`, `BUILD FAILED` — plugin ile kütüphanenin AYNI sürüm kuralının nedeni.
+- [ ] **Adım 5: Commit** — `git add build.gradle.kts app/build.gradle.kts gradle.properties && git commit -m "trial: Palbase 2.5.0 — each build type picks its environment; the palbase {} block, the global palbase.env and the retired roles.json/.gitattributes go"` (Adım 3'ün `git rm`'i aynı commit'e girer), sonra `git push`.
 
 ---
 
 ### T033: Kullanıcının test app'i hedef son duruma geçer — `featureX` APK'sı `featureX`'i taşır
 <!-- deps: [T031] | files: [app/build.gradle.kts, gradle.properties, gradle/libs.versions.toml, app/src/main/android-config.json, app/src/main/openapi.json, app/src/debug/android-config.json, app/src/debug/openapi.json, app/src/featureX/android-config.json, app/src/featureX/openapi.json, palbase/environments/featureX, palbase/environments/featureY, palbase/environments/feature-profile-update, local.properties] | satisfies: [FR-302] -->
 
-FR-302, `~/AndroidStudioProjects/MyApplicationPalbaseAndroidSdkTest` (bir git deposu değil: `git rev-parse` → `fatal: not a git repository`; AGP 9.1.1, Gradle 9.3.1, Compose). Bugün derlenmiyor bile: `.kts`'te çıplak `featureX {` / `featureY {` (`app/build.gradle.kts:43`, `:50`) — `Unresolved reference 'featureX'` (E3(c)). Hedef şartnamenin "Hedef son durum"u: kök `gradle.properties` `palbase.env.debug=main` + `palbase.env.release=main` (global satır silinir), build type'lar `create(…) { initWith(getByName("debug")); matchingFallbacks += listOf("debug") }` (D-019: `debug { }` yukarıda kalır), `featureProfileUpdate` DSL'le `feature-profile-update`'e (bu yüzden dosyanın başında `import io.palbase.gradle.palbase`), proje düzeyi `palbase { }` bloğu YOK, sürümler 2.4.0. `app/src/{main,debug,featureX}/{android-config.json,openapi.json}` D-001'de reddedilen denemenin artıkları: hiçbir şey okumaz ve APK'ya girmez (ölçüldü, aşağıda) — silinir.
+FR-302, `~/AndroidStudioProjects/MyApplicationPalbaseAndroidSdkTest` (bir git deposu değil: `git rev-parse` → `fatal: not a git repository`; AGP 9.1.1, Gradle 9.3.1, Compose). Bugün derlenmiyor bile: `.kts`'te çıplak `featureX {` / `featureY {` (`app/build.gradle.kts:43`, `:50`) — `Unresolved reference 'featureX'` (E3(c)). Hedef şartnamenin "Hedef son durum"u: kök `gradle.properties` `palbase.env.debug=main` + `palbase.env.release=main` (global satır silinir), build type'lar `create(…) { initWith(getByName("debug")); matchingFallbacks += listOf("debug") }` (D-019: `debug { }` yukarıda kalır), `featureProfileUpdate` DSL'le `feature-profile-update`'e (bu yüzden dosyanın başında `import io.palbase.gradle.palbase`), proje düzeyi `palbase { }` bloğu YOK, sürümler 2.5.0. `app/src/{main,debug,featureX}/{android-config.json,openapi.json}` D-001'de reddedilen denemenin artıkları: hiçbir şey okumaz ve APK'ya girmez (ölçüldü, aşağıda) — silinir.
 
 Tablodaki `featureX`/`featureY`/`feature-profile-update` ortamları bulutta YOK (checkout yalnız `main` taşıyor); onları `palbase env create` açar — her biri FATURALI bir tenant; komut bunu sormadan önce söyler — ve `palbase link` yazar: KULLANICI onaylar ve koşturur. O zamana kadar `featureX` build'i yüksek sesle düşer (ölçüldü), `debug`/`release` derlenir. Bu planda ortamlar kopyada elle yazıldı (`main`'in sözleşmesi, sahte `base_url`/anahtar) — gerçek depoya girmez.
 
@@ -8412,7 +8432,7 @@ rsync -aR app/build.gradle.kts gradle.properties gradle/libs.versions.toml local
 # geri dönüş, gerekirse — Adım 3'ün taşıdığı artıklar dahil her şeyi yerine koyar:
 # rsync -a --exclude=/moved/ "$B/" ./
 ```
-  Beklenen (projenin bir kopyasında ölçüldü, `HOME` kopyanın yanına yöneltilerek): `40` dosya, exit 0; Adım 3'ün düzenlemeleri ve taşıması uygulanıp geri dönüş satırı koşunca `diff -r <özgün kopya> .` hiçbir fark basmadı. Yedek, kullanıcı build'lerden memnun kalana kadar silinmez.
+  Beklenen (projenin bir kopyasında ölçüldü, `HOME` kopyanın yanına yöneltilerek): `40` dosya, exit 0; Adım 3'ün düzenlemeleri ve taşıması uygulanıp geri dönüş satırı koşunca `diff -r <özgün kopya> .` hiçbir fark basmadı. Geri dönüş yalnız yedeklenenleri geri koyar, eklenenleri silmez: `palbase link`'in yazdığı ortam dizinleri kalır (kopyada, sahte ortamlar yazıldıktan sonra geri dönülünce `diff -rq` → `Only in ./palbase/environments: feature-profile-update`, `… featureX`, `… featureY`); tam geri dönüş için onları da elle sil. Yedek, kullanıcı build'lerden memnun kalana kadar silinmez.
 - [ ] **Adım 1: Kırmızı testi yaz** — plan aracı `tools/verify-myapp.sh`:
 ```bash
 #!/usr/bin/env bash
@@ -8434,8 +8454,8 @@ if [[ "${PERSONAL:-}" == 1 ]]; then
   grep -E "^Palbase: |FAILED$|^e: |What went wrong" <<<"$out" | head -8 | sed 's/^/  | /'
   exit "$fail"
 fi
-check "the plugin is pinned at 2.4.0"       'grep -qF "id(\"io.palbase.codegen\") version \"2.4.0\"" app/build.gradle.kts'
-check "palbe is pinned at 2.4.0"            'grep -qx "palbe = \"2.4.0\"" gradle/libs.versions.toml'
+check "the plugin is pinned at 2.5.0"       'grep -qF "id(\"io.palbase.codegen\") version \"2.5.0\"" app/build.gradle.kts'
+check "palbe is pinned at 2.5.0"            'grep -qx "palbe = \"2.5.0\"" gradle/libs.versions.toml'
 check "no project-level palbase { } block"  '! grep -q "^palbase {" app/build.gradle.kts'
 check "the build type DSL is imported"      'grep -qx "import io.palbase.gradle.palbase" app/build.gradle.kts'
 check "no global palbase.env"               '! grep -q "^palbase.env=" gradle.properties'
@@ -8476,7 +8496,7 @@ plugins {
     // Must match the `kotlin` version in gradle/libs.versions.toml.
     id("org.jetbrains.kotlin.plugin.serialization") version "2.2.10"
     // Palbase codegen: builds the typed `pb` client from palbase/environments/<env>/openapi.json.
-    id("io.palbase.codegen") version "2.4.0"
+    id("io.palbase.codegen") version "2.5.0"
 }
 
 android {
@@ -8582,7 +8602,7 @@ palbe = "2.3.0"
 ```
   şununla değiştir:
 ```toml
-palbe = "2.4.0"
+palbe = "2.5.0"
 ```
 
   Ara ölçüm (yalnız `main` bağlıyken, artıklar henüz yerindeyken): `./gradlew :app:assembleDebug` → `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]`; `unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -cE '(^|/)(android-config|openapi)\.json$'` → `0` (artıklar APK'da yok). `./gradlew :app:assembleFeatureX` → `> Task :app:generatePalbaseFeatureX FAILED`, ``Palbase: environment `featureX` (from the build type name) has no directory — …/palbase/environments/featureX does not exist, and this checkout carries main. Run `palbase link` to write it, …``.
@@ -8596,8 +8616,8 @@ palbe = "2.4.0"
   `Palbase: featureX → featureX (from the build type name) [palbase/environments]`,
   `Palbase: featureY → featureY (from the build type name) [palbase/environments]`,
   ``Palbase: featureProfileUpdate → feature-profile-update (palbase { environment } in the `featureProfileUpdate` build type) [palbase/environments]``.
-  `featureX` APK'sı: `unzip -p app/build/outputs/apk/featureX/app-featureX.apk assets/palbase/palbase-config.json` → `{"app_id":"project","base_url":"https://featurexproof.palbase.studio","api_key":"pb_project_c0123456789abcdefghijKLMN","palbase_environment":"featureX"}` (provanın sahte ortamı); `aapt dump xmltree … AndroidManifest.xml | grep debuggable` → `A: android:debuggable(0x0101000f)=(type 0x12)0xffffffff`; `apksigner verify --print-certs` → `Signer #1 certificate DN: C=US, O=Android, CN=Android Debug`. `includeBuild` olmadan, yayının kendisiyle (`-I "$TOOLS/released-init.gradle.kts" --offline -x lintVitalRelease`): yine 22 `ok`, exit 0; `:app:buildEnvironment` → `io.palbase.codegen:io.palbase.codegen.gradle.plugin:2.4.0` → `io.palbase:codegen-gradle:2.4.0` → `io.palbase:palbase-codegen-engine:2.4.0`.
-  Kişisel satır: `PERSONAL=1 "$TOOLS/verify-myapp.sh"` önce **FAIL** (`FAIL  local.properties aims debug at featureX`, `FAIL  debug → featureX, from local.properties`, `FAIL  app-debug.apk packs featureX`; basılan `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]`); `local.properties`'e `palbase.env.debug=featureX` eklenince 5 `ok`, `Palbase: debug → featureX (palbase.env.debug in local.properties) [palbase/environments]`, exit 0. Satır kişiseldir: kullanıcı isterse bırakır.
+  `featureX` APK'sı: `unzip -p app/build/outputs/apk/featureX/app-featureX.apk assets/palbase/palbase-config.json` → `{"app_id":"project","base_url":"https://featurexproof.palbase.studio","api_key":"pb_project_c0123456789abcdefghijKLMN","palbase_environment":"featureX"}` (provanın sahte ortamı); `aapt dump xmltree … AndroidManifest.xml | grep debuggable` → `A: android:debuggable(0x0101000f)=(type 0x12)0xffffffff`; `apksigner verify --print-certs` → `Signer #1 certificate DN: C=US, O=Android, CN=Android Debug`. `includeBuild` olmadan, yayının kendisiyle (`-I "$TOOLS/released-init.gradle.kts" --offline -x lintVitalRelease`): yine 22 `ok`, exit 0; `:app:buildEnvironment` → `io.palbase.codegen:io.palbase.codegen.gradle.plugin:2.5.0` → `io.palbase:codegen-gradle:2.5.0` → `io.palbase:palbase-codegen-engine:2.5.0`.
+  Kişisel satır: `PERSONAL=1 "$TOOLS/verify-myapp.sh"` önce **FAIL** (`FAIL  local.properties aims debug at featureX`, `FAIL  debug → featureX, from local.properties`, `FAIL  app-debug.apk packs featureX`; basılan `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]`); `local.properties`'e `palbase.env.debug=featureX` KENDİ satırında eklenince 5 `ok`, `Palbase: debug → featureX (palbase.env.debug in local.properties) [palbase/environments]`, exit 0. Satır kişiseldir: kullanıcı isterse bırakır. Dikkat: bu projenin `local.properties`'i satır sonuyla bitmiyor (son satır `sdk.dir=…`); `echo 'palbase.env.debug=featureX' >> local.properties` satırı `sdk.dir`'in sonuna yapıştırır ve kontrol 3 `FAIL` ile kalır (kopyada ölçüldü). Satırı ayrı ekleyin: `printf '\npalbase.env.debug=featureX\n' >> local.properties`.
 - [ ] **Adım 5: Commit** — commit yok: proje bir git deposu değil. Yedek (`$B`) kullanıcı build'lerden memnun kalana kadar durur; geri dönüş Adım 0'ın son satırı. (Kopyada `git init` ile ölçülen iki commit: geçiş, ve ayrı tutulan `PROOF ONLY` sahte ortamlar.)
 
 ---
@@ -8605,7 +8625,7 @@ palbe = "2.4.0"
 ### T034: Sıfırdan bir projede birlikte deneme — KULLANICI ve lead birlikte; Android yarısı provada ölçüldü
 <!-- deps: [T031, T033] | files: [] | satisfies: [FR-212, FR-301, FR-302] -->
 
-Intake 5 ("Sonra birlikte sıfırdan bir projede denensin"). Bu bir yürütme görevi değil, birlikte yapılacak bir oturumun senaryosu: bulut adımları (giriş, proje ve ortam açma — FATURALI —, push, link, ortam silme) kullanıcınındır ve bu planda KOŞTURULMADI; beklenen izleri olarak yalnız dosya ve satır şekilleri yazıldı. Android adımlarının beklenenleri provada ÖLÇÜLDÜ: Android Studio sihirbazının ürettiği şekildeki (AGP 9.1.1, Gradle 9.3.1, Compose, Kotlin DSL) T033 kopyası, plugin ve palbe 2.4.0'ı T030'un Test depolarından `includeBuild` OLMADAN çözerek — gerçek bir tüketicinin yayından sonra yaptığı gibi. Önkoşul: `plan-cli.md` (link'in Gradle satırlarını basması FR-013, `.gitignore`'a `palbase/environments/local/` FR-020, silinen ortamın temizliği FR-011) ve `plan-cloud.md` (slug, FR-101/102) yayında; T031'in denetimi yeşil.
+Intake 5 ("Sonra birlikte sıfırdan bir projede denensin"). Bu bir yürütme görevi değil, birlikte yapılacak bir oturumun senaryosu: bulut adımları (giriş, proje ve ortam açma — FATURALI —, push, link, ortam silme) kullanıcınındır ve bu planda KOŞTURULMADI; beklenen izleri olarak yalnız dosya ve satır şekilleri yazıldı. Android adımlarının beklenenleri provada ÖLÇÜLDÜ: Android Studio sihirbazının ürettiği şekildeki (AGP 9.1.1, Gradle 9.3.1, Compose, Kotlin DSL) T033 kopyası, plugin ve palbe 2.5.0'ı T030'un Test depolarından `includeBuild` OLMADAN çözerek — gerçek bir tüketicinin yayından sonra yaptığı gibi. Önkoşul: `plan-cli.md` (link'in Gradle satırlarını basması FR-013, `.gitignore`'a `palbase/environments/local/` FR-020, silinen ortamın temizliği FR-011) ve `plan-cloud.md` (slug, FR-101/102) yayında; T031'in denetimi yeşil.
 
 Bir not, oturumda söylensin: ortamlar aynı uygulamanın farklı derlemeleridir ama sözleşmeleri farklı olabilir. `featureX`'e push edilmiş yeni bir uç için yazılan app kodu (`pb.<yeni>`), o uç `main`'e gelene kadar `debug`/`release` variant'larını DERLETMEZ — üretilen istemci variant'ın ortamının sözleşmesinden gelir.
 
@@ -8620,15 +8640,15 @@ Bir not, oturumda söylensin: ortamlar aynı uygulamanın farklı derlemeleridir
   1. `palbase login`.
   2. Backend (FATURALI): boş bir dizinde `palbase init`, sonra `palbase project create palbase-zero` (ilk ortamı açar; slug `main` — FR-102) ve komutun son satırda bastığı `palbase link …`; `palbase push`. Sonra `palbase env create featureX` (faturayı söyleyip sorar) ve `palbase push --env featureX`.
   3. Android Studio → New Project → Empty Activity; Minimum SDK API 26; Build configuration language Kotlin DSL. Proje kökünde `git init`.
-  4. Public README'nin (T028) kurulumu: `settings.gradle.kts`'e iki `maven { url = uri("https://palgroup.github.io/palbackend-android/") … }` bloğu; `app/build.gradle.kts`'e `id("org.jetbrains.kotlin.plugin.serialization") version "2.2.10"` (`gradle/libs.versions.toml`'daki `kotlin` ile aynı olmalı; kullanıcının sihirbaz projesinde 2.2.10), `id("io.palbase.codegen") version "2.4.0"`, `implementation("io.palbase:palbe:2.4.0")`; `Palbase.initialize(this)` çağıran bir `Application` ve manifest'te `android:name`.
+  4. Public README'nin (T028) kurulumu: `settings.gradle.kts`'e iki `maven { url = uri("https://palgroup.github.io/palbackend-android/") … }` bloğu; `app/build.gradle.kts`'e `id("org.jetbrains.kotlin.plugin.serialization") version "2.2.10"` (`gradle/libs.versions.toml`'daki `kotlin` ile aynı olmalı; kullanıcının sihirbaz projesinde 2.2.10), `id("io.palbase.codegen") version "2.5.0"`, `implementation("io.palbase:palbe:2.5.0")`; `Palbase.initialize(this)` çağıran bir `Application` ve manifest'te `android:name`.
   5. Proje kökünde `palbase link palbase-zero` → `palbase/project.json`, `palbase/environments/main/` ve `palbase/environments/featureX/` (her birinde `android-config.json` + `openapi.json`); link Gradle satırlarını basar (FR-013) ve `.gitignore`'a `palbase/environments/local/` ekler (FR-020). Koşturulmadı.
   6. Kök `gradle.properties`'e `palbase.env.debug=main` ve `palbase.env.release=main`; `app/build.gradle.kts`'te `buildTypes { create("featureX") { initWith(getByName("debug")); matchingFallbacks += listOf("debug") } }`.
   7. Sync → Build Variants → `app` → `featureX` → Run.
 - [ ] **Adım 4: Yeşil (birlikte bakılacak)** —
-  - Build çıktısında `Palbase: featureX → featureX (from the build type name) [palbase/environments]`, `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]`, `Palbase: release → main (palbase.env.release in gradle.properties) [palbase/environments]` — satırlar provada birebir bu biçimde ölçüldü (T033 Adım 4, yayından çözülen 2.4.0 ile 22 `ok`).
+  - Build çıktısında `Palbase: featureX → featureX (from the build type name) [palbase/environments]`, `Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]`, `Palbase: release → main (palbase.env.release in gradle.properties) [palbase/environments]` — satırlar provada birebir bu biçimde ölçüldü (T033 Adım 4, yayından çözülen 2.5.0 ile 22 `ok`).
   - `unzip -p app/build/outputs/apk/featureX/app-featureX.apk assets/palbase/palbase-config.json` → `"palbase_environment":"featureX"` ve `featureX` ortamının `base_url`'i; APK debuggable ve `CN=Android Debug` imzalı (T033'te ölçüldü). Cihazda uygulamanın `featureX` yığınına gittiği birlikte görülecek (koşturulmadı).
-  - Kişisel: `local.properties`'e `palbase.env.debug=featureX` → `debug` variant'ı `featureX`'i derler (T033'te ölçüldü: `Palbase: debug → featureX (palbase.env.debug in local.properties) [palbase/environments]`).
-  - Silinen ortam: panelde `featureX`'i sil, `palbase link` → `palbase/environments/featureX/` temizlenir (FR-011; koşturulmadı). Sonra `./gradlew :app:assembleFeatureX` · Beklenen (provada, dizin kaldırılarak ölçüldü): `> Task :app:generatePalbaseFeatureX FAILED` ve ``Palbase: environment `featureX` (from the build type name) has no directory — …/palbase/environments/featureX does not exist, and this checkout carries …. Run `palbase link` to write it, …``; `./gradlew :app:assembleDebug` aynı checkout'ta `BUILD SUCCESSFUL`.
+  - Kişisel: `local.properties`'e `palbase.env.debug=featureX` → `debug` variant'ı `featureX`'i derler (T033'te ölçüldü: `Palbase: debug → featureX (palbase.env.debug in local.properties) [palbase/environments]`); sonra satırı sil — aşağıdaki silinen ortam adımı `debug`'ın dosyadaki `main`'i derlediğini varsayar.
+  - Silinen ortam: panelde `featureX`'i sil, `palbase link` → `palbase/environments/featureX/` temizlenir (FR-011; koşturulmadı). Sonra `./gradlew :app:assembleFeatureX` · Beklenen (provada, dizin kaldırılarak ölçüldü): `> Task :app:generatePalbaseFeatureX FAILED` ve ``Palbase: environment `featureX` (from the build type name) has no directory — …/palbase/environments/featureX does not exist, and this checkout carries …. Run `palbase link` to write it, …``; `./gradlew :app:assembleDebug` aynı checkout'ta, kişisel satır silinmişken, `BUILD SUCCESSFUL` (`Palbase: debug → main (palbase.env.debug in gradle.properties) [palbase/environments]`). Satır `local.properties`'te kalmışsa debug da düşer: `> Task :app:generatePalbaseDebug FAILED`, ``Palbase: environment `featureX` (palbase.env.debug in local.properties) has no directory — …`` (T033 kopyasında ölçüldü).
   - Temizlik: deneme projesini panelde sil (faturalı).
 - [ ] **Adım 5: Commit** — commit yok (deneme projesi); bulgular varsa bu planın `decisions.md`'sine lead yazar.
 
@@ -8723,3 +8743,178 @@ Test app'in sahte ortamları ayrı bir `PROOF ONLY` commit'inde.
 **Üreticide yakalanan bir hata:** ilk yazımda `task()` taslağın gözlem dizelerini `setdefault` ile koruyordu, yani T009–T026 taslağın sayılarını taşıyacaktı. Düzeltildi. Bütün Beklenen'ler bu koşunun `obs/` dosyalarından geliyor; T008 aynı commit olduğu için taslağın ölçümünü taşır.
 
 **Tam liste:** `revise-plugin/plan-plugin.COMPLETE-tasks.md`, sha256 `b7a8865b94edbb8ac092c35ac502f4dde5526965ff680b547de308a9a7e2ed95`, 34 görev.
+
+#### Yeni tabana taşıma ve 2.5.0 (2026-09-27)
+
+**Upstream commits since c9d9866 and their effect on the plan**
+- **233991d (classified errors).** Changes codegen-engine `KotlinEmitter`: the generated `from()` now reads `backend.envelope` instead of `backend !is BackendError.Http`. It also updates the goldens, adds `ClassifiedErrorsEmitTest`, and changes palbe-core `BackendTypes`/`ErrorEnvelope`, `palbe-core.api` and tests.
+  - **No overlap with plan code.** Upstream did not touch codegen-gradle, so T001–T028 cherry-pick clean. Each task's codegen-gradle/README/distribution tree equals the old chain except for the one `2.5:` comment line (checked per task for T001–T015 and at the head).
+  - **Counts.** Engine tests go from 46 to 47 and from 8 to 9 classes; Global Constraints and T007/T030 are updated.
+  - **Consumer impact.** A contract that declares `x-palbase-errors` now generates code that needs palbe >= 2.4.0. The plugin/library same-version rule covers this.
+  - **T007 proof.** The consumer proof still uses palbe 2.3.0 from the public tree. It compiles because the trial contract declares no `x-palbase-errors`; I measured this on AGP 8.11.1 and 9.1.1. The text now says so rather than claiming the runtime is unchanged.
+- **6e97598 (release 2.4.0).** Puts `## 2.4.0 — 2026-09-26` directly under `## Yayınlanmamış` and sets `Son etiket: v2.4.0`; tag v2.4.0 points at 6e97598.
+  - The old T029 and T030 commits CONFLICT in CHANGELOG.md. The revised T029/T030 texts are the resolution.
+  - Our sections go above the upstream section, which is left untouched. `Son etiket` goes from v2.4.0 to v2.5.0 at T030.
+  - "Runtime ve engine kodu 2.3.0 ile aynı" was now false and became "2.4.0 ile aynı". I checked it with `git diff --stat v2.4.0..HEAD` on runtime/engine: only GeneratedConfigLoaderTest changes.
+- **3588bc2 (CI).** No overlap. CI now runs `:codegen-engine:test :codegen-gradle:test :palbe-core:testDebugUnitTest`; I ran that exact command at the chain head (green).
+- **e72f704 onto 3588bc2.** Applies clean. The lead still has to rebase the real local main the same way before T001.
+
+**Additions that need a lead decision** (all flagged and easy to drop)
+- The public tree was checked with `git ls-remote` of palgroup/palbackend-android: main is d840817 and the only tag is v2.3.0. Upstream 2.4.0 was never published there, so public consumers jump from 2.3.0 to 2.5.0, and the v2.5.0 GitHub Release notes are only the `## 2.5.0` section.
+  - I added one YAYIN bullet in the 2.5.0 CHANGELOG section (T029).
+  - I added one bullet to the public README's `### Upgrading from 2.3` (T028).
+  - Both carry 2.4.0's typed-error change and the palbe-core binary-signature recompile note. The CHANGELOG bullet writes "davranış değişikliği" in lower case so release-notes.sh still counts exactly 1 heading.
+  - If 2.4.0 gets published to the public tree before T031, drop both bullets.
+- README.md: "Upgrading from 2.3 changes what some builds compile" became "Upgrading from 2.3 or 2.4 …". 2.4.0 did not change environment selection, and 2.4.0 may exist on GitHub Packages.
+- I left the "2.3" wording that describes old behaviour unchanged, including the plugin-printed `palbase.env, the 2.3 global property`. It stays true, and changing it would ripple through code, tests and changelog-check.
+
+**Plan text outside the returned fields**
+- **Header lines to bump.** I applied these in the scratch full copy (see below):
+  - Title `# Plugin \`io.palbase.codegen\` 2.4.0 — …` becomes 2.5.0.
+  - Goal "…runtime 2.4.0 olarak birlikte çıkar;" becomes "…runtime 2.5.0 olarak birlikte çıkar (2.4.0 upstream'in, D-030);".
+  - Architecture "Üretilen kod 2.3 ile byte byte aynı" becomes "Üretilen kod 2.4.0 ile byte byte aynı". The 2.3 claim is now false because 2.4.0 changed the emitter.
+- **Kanıt section.** It still describes the old e72f704/ee1ee36 chain. Replace or append the evidence from this run.
+- **Full revised copy of plan-plugin.md.** It has the header, Global Constraints and all revised tasks applied: …/plugin-rebase/plan-plugin.revised-2.5.md (8742 lines). The only remaining `2.4.0` mentions are intentional upstream references plus the old Kanıt section.
+
+**Sibling documents (not changed; they need the same bump)**
+- **plan-cli.md Dalga 2.** It still says 2.4.0 in `palbaseAndroidVersion = "2.4.0"`, the printed `io.palbase.codegen`/`io.palbase:palbe` coordinates, the heading "Dalga 2 — plugin 2.4.0 yayımlandıktan sonra", and the T023/T019 prose (26 lines mention 2.4).
+- **decisions.md.** D-005, D-026 and D-030 already say 2.5.0, but D-026 still reads "reddi plugin 2.4'ün arama sırasına dayanır".
+
+**Other observations**
+- **TestKit flake, once, in T014's full run.** T011's test failed with `Cannot access implicit script receiver class 'org.gradle.api.Project'`. It was green alone and in a full rerun on the same tree. This is a different symptom from the one `--no-watch-fs` targets. It is recorded in Global Constraints.
+- **verify-publications.sh** calls ./gradlew without `--offline`; its commands are internal to the script. I ran it as the plan does: `Publication verification passed for 2.5.0`, nothing went outside `build/`.
+- **Trailing newline in the user's test app.** ~/AndroidStudioProjects/MyApplicationPalbaseAndroidSdkTest/local.properties has no trailing newline. `echo >>` glues the personal key onto `sdk.dir`; I found this on a scratch copy and T033 now warns about it.
+
+**Scratch artifacts**
+- Bundles (the prerequisite is 3588bc2, which origin already has):
+  - `…/plugin-rebase/plugin-plan-2.5.bundle`: branches base-new c164ce4 and plan-new 54dec1c.
+  - `…/plugin-rebase/trial-t032.bundle`: acedb85..ae6f549.
+- Per-task texts: …/revise/new/*.md
+- Tools: …/tools-new/
+- Logs and JUnit XML: …/logs/
+- Assembled result: …/out/result.json
+
+No real repo was written, and nothing was pushed or published.
+
+#### Verdict: the rebase and the 2.5.0 retarget hold; 6 minor findings
+
+I replayed the plan text independently. The resulting final tree is byte-identical to the rebaser's `plan-new` 54dec1c. Every red and green I re-ran matched the revised texts. I found no blocker and no major issue. The five tool revisions are correct as returned, so `fixed_tools` is empty. Of the 6 minor findings:
+- **Fixed in the returned texts:** T003, T032, T033, T034 and Global Constraints.
+- **Fixed only in the assembled plan copy:** the doubled `---` after T034.
+- **Not applied:** the Kanıt section is still stale, and the T029 heading wording is editorial.
+
+Nothing was written to any real repo, and nothing was pushed or published. The only network use was Gradle's own resolution inside `scripts/verify-publications.sh`, which calls `./gradlew` without `--offline`.
+
+#### How I verified it
+
+Everything ran under `…/plugin-rebase/verify/`.
+
+**Base.**
+- I made a fresh `git clone --no-local` of palbackend-android-src and fetched the local repo's `refs/remotes/origin/main` (3588bc2) and its tags.
+- `git cherry-pick e72f704` was clean: 4 files changed, 343 insertions(+), 68 deletions(-). My base 5619e9b is tree-identical to the rebaser's c164ce4.
+- These byte-identity claims hold, checked with `git diff --stat e72f704 base-new` (empty): codegen-gradle/, README.md, distribution/README.md, scripts/publish.sh, gradle.properties, sample/, consumer-release/ and GeneratedConfigLoaderTest.
+- `git diff --stat v2.4.0 base-new` touches only ci.yml, CHANGELOG.md, README.md, distribution/README.md and scripts/publish.sh.
+
+**Replay.**
+- **Replayed from the revised text:** T002, T003, T007, T022, T027, T028, T029 and T030, plus T032 in a fresh trial clone. My own block applier parsed the fenced blocks and applied the text's `şu bloğu/şununla değiştir`, `şu satırlardan sonra/şunu ekle`, `dosyasının tamamı` and prose-anchor instructions. It did not use the rebaser's commits.
+- **Cherry-picked from the original proven chain** (`plugin-plan.bundle` ee1ee36), all clean: T001, T004–T006, T008–T021 and T023–T026.
+- **Diff of each text task against its original commit:**
+  - Code tasks show only the `2.5:` test comment, the `2.5's first draft` comment and the GeneratedConfigLoaderTest KDoc.
+  - T027 changes one README line (`Upgrading from 2.3 or 2.4`).
+  - T028 changes the pins to 2.5.0 and adds the 2.4.0 upgrade bullet.
+- After T029 my tree equals the rebaser's 027a01e. After T030 `git diff --quiet HEAD 54dec1c` is empty.
+- The old T029 and T030 commits really conflict on the new base (`CONFLICT (content): Merge conflict in CHANGELOG.md`, re-checked).
+
+#### Reds and greens I observed
+
+| Task | Red | Green |
+|---|---|---|
+| T002 | `39 tests completed, 11 failed`; `release compiled {…local1234m…}`; ``Palbase: environment `local` has no directory``; benchmark `UnexpectedBuildFailure` | ERT 26, PCPT 39 |
+| T003 | `:consumer-release:generatePalbaseRelease FAILED`, `has no environment…` | see finding 1 (FROM-CACHE); with `--rerun` the line prints |
+| T007 | `3 tests completed, 2 failed` (`NoSuchFileException …/app/build/generated/assets/generatePalbaseDebug/…`), explicit-dir guard passes | `test check --rerun-tasks` BUILD SUCCESSFUL in 50s, :validatePlugins ran, ERT 26, PCPT 53, engine 9 classes / 47 tests; README gate `872 actionable tasks`, CC stored |
+| T022 | `2 tests completed, 2 failed`; runtime guard `--rerun` tests=14 passes before the change | ERT 52, PCPT 80 |
+| T027 | ``../README.md shows no `<!-- palbase-example: app/build.gradle.kts -->` block`` | filtered 1/0; full ERT 52, LFCT 11, PCPT 87 |
+| T028 | same message for `../distribution/README.md` | filtered 1/0; full PCPT 88 |
+| T029 | exit 1, first line `missing: release is refused — …`, `22 missing`, 0 `not in` lines | `the section names every 2.5 behaviour change` |
+| T030 | `notes for 2.5.0: 1 lines, 0 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)`, `publish.sh would attach no 2.5 notes for 2.5.0` | `notes for 2.5.0: 150 lines, 1 DAVRANIŞ DEĞİŞİKLİĞİ heading(s)` |
+
+T029's runtime-unchanged claim holds: `git diff --stat v2.4.0..HEAD -- codegen-engine shared palbe palbe-core …` shows only `GeneratedConfigLoaderTest.kt | 19 +`.
+
+**T030's local release steps (Adım 4), all on the chain head:**
+- **4.2 README gate:** 872 tasks with CC stored, then `866 actionable tasks: 29 executed, 837 up-to-date` with CC reused.
+- **4.3:** two `Palbase: release → local (palbase.env.release in gradle.properties) [sample/palbase/environments]` lines.
+- **4.4 plugin gate:** `-p codegen-gradle check`, BUILD SUCCESSFUL in 59s. :validatePlugins, :codegen-engine:test and :test all ran: 151 plugin tests, engine 9 classes / 47 tests. The second run took 2s with CC reused.
+- **4.5:** `Publication verification passed for 2.5.0`.
+- **4.6:** Test-repository publishes, BUILD SUCCESSFUL in 6s and 3s.
+- **4.7:** `artifact directories for 2.5.0: 11`, `plugin POM pins palbase-codegen-engine 2.5.0`, `marker io.palbase.codegen 2.5.0 → io.palbase:codegen-gradle 2.5.0`, `plugin class file major version 61`.
+- **Upstream CI command:** `:codegen-engine:test :codegen-gradle:test :palbe-core:testDebugUnitTest --rerun-tasks` gave BUILD SUCCESSFUL in 59s; palbe-core 89 classes / 603 tests, GeneratedConfigLoaderTest 14.
+
+#### Consumer proofs I re-ran
+
+**T007 target end state** (built from the text's blocks).
+- On AGP 8.11.1 / Gradle 8.13 I got the 4 planned `Palbase:` lines and all 4 `base_url`s, BUILD SUCCESSFUL in 19s, CC stored.
+- The local.properties toggle behaved as planned, including `…/target-end-state/local.properties has changed.`
+- On AGP 9.1.1 / Gradle 9.3.1 the same 4 lines appeared, in 18s. With the import removed: `…/app/build.gradle.kts:28:23: 'var environment: String?' is deprecated. Palbase: …`, BUILD FAILED.
+
+**T031 local dry run.** I rsynced both Test repositories into one tree. For 2.6.0 the check prints 11 `FAIL` lines, exit 1. For 2.5.0 it prints 11 `ok` lines, exit 0.
+
+**T032** (trial clone, with scratch copies of the init scripts pointing at the verify clone).
+- Red: 8 FAIL / 3 ok, with the `(palbase.env, the 2.3 global property)` lines.
+- Green: 11/11 with proof-init and 11/11 with released-init.
+- buildEnvironment resolves `…gradle.plugin:2.5.0` → `codegen-gradle:2.5.0` → `palbase-codegen-engine:2.5.0`.
+- My trial tree is identical to the rebaser's ae6f549.
+
+**T033** (a copy of the user app; the real app was only read).
+- Red: 1 ok / 21 FAIL, with `:43:9` featureX and `:50:9` featureY.
+- Adım 0 backup: 40 files.
+- Intermediate checks: 0 artefacts in the APK, and featureX refused.
+- Green: 22/22 with proof-init and 22/22 with released-init, using `-x lintVitalRelease`.
+  - The lint-vital task alone offline really fails: `No cached version of androidx.compose.material3:material3-desktop:1.3.0`.
+  - The featureX APK has the expected config, `debuggable 0xffffffff` and `CN=Android Debug`.
+- PERSONAL check:
+  - Red: 3 FAIL.
+  - With `echo >>`: 3 FAIL. The real local.properties has no trailing newline, so the line is glued onto `sdk.dir` (confirmed read-only).
+  - With `printf` on its own line: 5 ok.
+
+**T034 Android halves.** The Adım 2 `nothing generated … (searched app/palbase/environments, palbase/environments)` line is exact. The deleted-environment refusal is exact.
+
+**Upstream classified errors (the envelope path).** None of the consumer proofs exercise it, because both contracts declare 0 `x-palbase-errors`. I measured it separately (finding 3):
+- It compiles against palbe 2.5.0.
+- It fails against palbe 2.3.0 with `Unresolved reference 'envelope'`.
+
+#### Search for leftover 2.4 references
+
+**Final tree.** The only additions mentioning 2.4 relative to the base are:
+- the CHANGELOG line `Runtime ve engine kodu 2.4.0 ile aynı`;
+- the public-tree YAYIN bullet;
+- `Upgrading from 2.3 or 2.4`;
+- the public README bullet `2.4.0 was not published here`.
+
+Upstream's `## 2.4.0 — 2026-09-26` section and the `v2.4.0` tag are intact, and `Son etiket` goes to `v2.5.0` only at T030.
+
+**Revised texts, GC and tools.** Every remaining `2.4` is one of:
+- upstream's 2.4.0;
+- the `proto-2.4/` path;
+- the quoted report title `YENİ — 2.4 is a breaking release…`.
+
+The unchanged tasks mention only `proto-2.4/`. Tools extracted from the texts are identical to the rebaser's tools-new, and the diff against the current plan tools is only 2.4 → 2.5 strings.
+
+**Line references re-checked:** CHANGELOG.md:100-112 and :16, Codec.kt:23-24, README.md:212, publish.sh.
+
+**Public tree.** The local distribution clone has main d840817 and only tag v2.3.0. The real repo's local Test repository metadata lists only 2.3.0, so publish.sh's metadata merge will not advertise a 2.4.0.
+
+#### Still open for the lead (confirmed, not changed)
+
+- The `## Kanıt` section of the plan still describes the old chain.
+- plan-cli.md still says `palbaseAndroidVersion = "2.4.0"`, and "Dalga 2 — plugin 2.4.0" at line 5357, among its 26 `2.4` lines.
+- decisions.md D-026 still carries a 2.4 reference.
+- The two public-tree bullets (T028/T029) assume 2.4.0 is never published to palgroup/palbackend-android before T031.
+
+#### Scratch files
+
+- **Verified full plan** with T003/T032/T033/T034/GC and the separator fix: `…/plugin-rebase/verify/plan-plugin.verified-2.5.md`.
+- **Fixed texts:** `…/verify/fixed/`.
+- **Tools as extracted from the texts:** `…/verify/plantools/`.
+- **Replay chain:** branch `plan-verify` in `…/verify/plugin`, tree identical to 54dec1c.
+- **Logs and JUnit XML:** `…/verify/logs/`.
+- **Proof projects:** `…/verify/t007`, `…/verify/trial`, `…/verify/t033`, `…/verify/classified`.

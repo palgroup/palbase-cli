@@ -4,8 +4,8 @@
 set -u
 fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
-check "the plugin is pinned at 2.4.0"   'grep -qF "id(\"io.palbase.codegen\") version \"2.4.0\"" build.gradle.kts'
-check "palbe is pinned at 2.4.0"        'grep -qF "io.palbase:palbe:2.4.0" app/build.gradle.kts'
+check "the plugin is pinned at 2.5.0"   'grep -qF "id(\"io.palbase.codegen\") version \"2.5.0\"" build.gradle.kts'
+check "palbe is pinned at 2.5.0"        'grep -qF "io.palbase:palbe:2.5.0" app/build.gradle.kts'
 check "no palbase { } block"            '! grep -q "^palbase {" app/build.gradle.kts'
 check "no global palbase.env"           '! grep -q "^palbase.env=" gradle.properties'
 check "no palbase/.gitattributes"       '! test -e palbase/.gitattributes'

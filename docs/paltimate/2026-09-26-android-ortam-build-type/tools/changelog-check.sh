@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every 2.4 behaviour change is named in the CHANGELOG section that is being
+# Every 2.5 behaviour change is named in the CHANGELOG section that is being
 # released — and every message it quotes is one the plugin really prints.
 # usage (repo root): changelog-check.sh [heading]   (default: "## Yayınlanmamış")
 heading="${1:-## Yayınlanmamış}"
@@ -33,4 +33,4 @@ need "JDK floor"                         "JDK 17"
 need "packaged environment name"         "palbase_environment"
 need "generation line"                   "Palbase: <variant> → <ortam> (<köken>) [<kök>]"
 if (( missing )); then echo "$missing missing"; exit 1; fi
-echo "the section names every 2.4 behaviour change"
+echo "the section names every 2.5 behaviour change"

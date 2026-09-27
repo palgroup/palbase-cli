@@ -17,8 +17,8 @@ if [[ "${PERSONAL:-}" == 1 ]]; then
   grep -E "^Palbase: |FAILED$|^e: |What went wrong" <<<"$out" | head -8 | sed 's/^/  | /'
   exit "$fail"
 fi
-check "the plugin is pinned at 2.4.0"       'grep -qF "id(\"io.palbase.codegen\") version \"2.4.0\"" app/build.gradle.kts'
-check "palbe is pinned at 2.4.0"            'grep -qx "palbe = \"2.4.0\"" gradle/libs.versions.toml'
+check "the plugin is pinned at 2.5.0"       'grep -qF "id(\"io.palbase.codegen\") version \"2.5.0\"" app/build.gradle.kts'
+check "palbe is pinned at 2.5.0"            'grep -qx "palbe = \"2.5.0\"" gradle/libs.versions.toml'
 check "no project-level palbase { } block"  '! grep -q "^palbase {" app/build.gradle.kts'
 check "the build type DSL is imported"      'grep -qx "import io.palbase.gradle.palbase" app/build.gradle.kts'
 check "no global palbase.env"               '! grep -q "^palbase.env=" gradle.properties'

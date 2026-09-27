@@ -1,6 +1,6 @@
 // PROOF HARNESS ONLY — never part of a migrated checkout. The plugin comes from
 // the scratch clone (includeBuild), io.palbase libraries from local file
-// repositories: 2.4.0 from the scratch Test repository (T030's dry run), 2.3.0
+// repositories: 2.5.0 from the scratch Test repository (T030's dry run), 2.3.0
 // from the local copy of the public distribution repo.
 beforeSettings {
     pluginManagement {
