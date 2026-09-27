@@ -164,6 +164,76 @@ func TestAWebLinkWithNoContractNamesOneCure(t *testing.T) {
 	}
 }
 
+// THE READING NAMES NO CURE OF ITS OWN EITHER (FR-014, D-027; T018 fix round
+// 2). The stack's answer used to reach the output whole — "push a backend to it
+// first (palbase push)", or "so this ends with `palbase push`" — right above
+// missingContractLine's cure: two steps for one gap, and for the stack on this
+// machine a step `palbase push` refuses. The reading keeps the stack's own
+// words, the diagnosis a person needs; the step is said once.
+func TestTheReadingOfAMissingContractNamesNoCureOfItsOwn(t *testing.T) {
+	const reason = "the runtime could not build a document: z.lazy schema at /todos"
+	for _, c := range []struct {
+		name      string
+		linkedEnv string
+		sentence  string
+		want      string
+		cure      string // the one cure, said once
+		never     string
+	}{
+		{"the stack on this machine, in its own words", "", reason,
+			"local has no contract yet, so palbase/environments/local/openapi.json is not written and no client " +
+				"is generated for it — `palbase start` in the backend, then `palbase link` here\n",
+			"`palbase start`", "palbase push"},
+		{"the stack on this machine, nothing deployed", "", "",
+			"local has no contract yet, so palbase/environments/local/openapi.json is not written and no client " +
+				"is generated for it — `palbase start` in the backend, then `palbase link` here\n",
+			"`palbase start`", "palbase push"},
+		{"a stack somebody hosts, in its own words", "main", reason,
+			"main has no contract yet, so palbase/environments/main/openapi.json is not written and no client " +
+				"is generated for it — `palbase push`, then `palbase link` here\n",
+			"palbase push", "palbase start"},
+		{"a stack somebody hosts, nothing deployed", "main", "",
+			"main has no contract yet, so palbase/environments/main/openapi.json is not written and no client " +
+				"is generated for it — `palbase push`, then `palbase link` here\n",
+			"palbase push", "palbase start"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedAndroidApp(t)
+			stack, _ := envServer(t, linkKeyMain, envServerOpts{socialAuth: true, noContract: true, contractSentence: c.sentence})
+			linkedAs(t, stack.URL, "operator")
+
+			var out strings.Builder
+			o := linkOpts{url: stack.URL, platforms: []string{"android"}, linkedEnv: c.linkedEnv}
+			require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+			reading := "no contract yet: " + stack.URL + " has nothing to describe yet\n"
+			if c.sentence != "" {
+				reading = "no contract yet: " + stack.URL + " cannot describe itself: " + c.sentence + "\n"
+			}
+			assert.Contains(t, out.String(), reading, "the stack's own words, and nothing after them")
+			assert.Contains(t, out.String(), c.want)
+			assert.Equal(t, 1, strings.Count(out.String(), c.cure), "two cures for one missing contract:\n%s", out.String())
+			assert.NotContains(t, out.String(), c.never)
+		})
+	}
+}
+
+// A PROJECT'S READING KEEPS ITS SENTENCE AND ITS OWN `--env` STEP — the one the
+// brief pinned — but not the stack's `palbase push` inside it: with no --env,
+// that one names whichever environment this checkout resolves, not staging.
+func TestAProjectsReadingCarriesNoSecondCure(t *testing.T) {
+	inScratchCheckout(t)
+	o := pushedAndNot(t)
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	assert.Contains(t, out.String(), " has nothing to describe yet) — `palbase push --env staging`\n")
+	assert.NotContains(t, out.String(), "(palbase push)")
+	assert.NotContains(t, out.String(), "palbase start")
+}
+
 // A CHECKOUT WITH NO CLIENT gets no files, so no line about them: it keeps the
 // sentence it always had — the link is recorded, and `palbase spec` fills the
 // contract in.

@@ -299,9 +299,15 @@ func TestNothingDeployedYetIsAStateNotAFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("an empty stack was treated as a contract")
 	}
+	if !errors.Is(err, ErrNoContractYet) {
+		t.Errorf("an empty stack was not reported as having no contract yet: %v", err)
+	}
 	// A stack that is up with nothing pushed to it is the normal first state, so
-	// the message says what to do next rather than what went wrong.
-	if !strings.Contains(err.Error(), "push a backend") {
+	// the message says what to do next rather than what went wrong. A test
+	// server is a loopback address — the stack on this machine — so the step is
+	// a start, not a push it refuses (D-027); a hosted stack's "push a backend"
+	// is pinned word for word in TestTheStepThatEndsAMissingContractFitsTheStack.
+	if !strings.Contains(err.Error(), "run `palbase start` in the backend") {
 		t.Errorf("the message does not say what to do: %v", err)
 	}
 }

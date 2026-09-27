@@ -161,8 +161,12 @@ func TestALocalStackWithNoContractGetsNoLocalFiles(t *testing.T) {
 	require.NoError(t, runLink(context.Background(), o, &out), out.String())
 
 	assert.NoDirExists(t, EnvDir(localEnvName))
+	// THE STACK'S WORDS, AND ONE CURE AFTER THEM (FR-014, D-027): its own step
+	// used to ride inside the parentheses — "(palbase push)", which that stack
+	// refuses — ahead of fillLocalAdvice's `palbase start`.
 	assert.Contains(t, out.String(), "local: "+local.URL+" gave its key but not its contract (no contract yet: "+
-		local.URL+" has nothing to describe yet — push a backend to it first (palbase push)) "+fillLocalAdvice)
+		local.URL+" has nothing to describe yet) "+fillLocalAdvice)
+	assert.NotContains(t, out.String(), "(palbase push)")
 }
 
 // ONE NAME FOR THE STACK ON THIS MACHINE, WHICHEVER VERB WRITES IT (FR-010).
@@ -214,6 +218,45 @@ func TestALoopbackAddressIsLocalToLinkAndSpecAlike(t *testing.T) {
 	require.NoError(t, RefreshSpec(context.Background(), &spec), spec.String())
 	assert.Contains(t, spec.String(), "✓ wrote palbase/environments/local/openapi.json (")
 	assert.NoDirExists(t, EnvDir("main"))
+}
+
+// `palbase spec` ON THE STACK ON THIS MACHINE, WITH NOTHING TO DESCRIBE, NAMES A
+// START (D-027, T018 fix round 2). It said "push a backend to it first (palbase
+// push)" — and `palbase push` refuses that stack (stack_push.go): it serves the
+// directory `palbase start` mounted, so a start is what gives it a contract.
+// Whether the stack is `start`'s record or a loopback address linked by hand,
+// it is `local` to every verb (stackEnvName), and so is its cure.
+func TestSpecOnTheStackOnThisMachineWithNoContractNamesAStart(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		bind func(t *testing.T, url string)
+	}{
+		{"the stack palbase start runs", func(t *testing.T, url string) {
+			require.NoError(t, WriteLocalTarget(Target{URL: url}))
+		}},
+		{"a loopback address linked by hand", func(t *testing.T, url string) {
+			o := linkOpts{url: url}
+			require.NoError(t, resolveLinkTarget(context.Background(), Resolvers{}, &o))
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), o, &out), out.String())
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedAndroidApp(t)
+			t.Setenv("PALBASE_ENV", "")
+			stack, _ := envServer(t, linkKeyMain, envServerOpts{noContract: true, socialAuth: true})
+			linkedAs(t, stack.URL, "a-credential")
+			c.bind(t, stack.URL)
+
+			var spec strings.Builder
+			err := RefreshSpec(context.Background(), &spec)
+			require.ErrorIs(t, err, ErrNoContractYet, spec.String())
+			assert.Equal(t, "no contract yet: "+stack.URL+" has nothing to describe yet — run `palbase start` in the "+
+				"backend (its stack serves the contract of the code it runs), then `palbase spec` here", err.Error())
+			assert.NotContains(t, err.Error()+spec.String(), "palbase push")
+		})
+	}
 }
 
 // AND NOTHING ELSE IS: a stack somebody hosts keeps `main`, a project's

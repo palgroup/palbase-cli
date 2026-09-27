@@ -827,12 +827,17 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		// next `link`, once something answers.
 		switch spec, err := fetchStackSpec(ctx, primary, cred); {
 		case errors.Is(err, ErrNoContractYet):
-			fmt.Fprintf(w, "%v\n", err)
 			// ONE CURE PER MISSING CONTRACT. A checkout that gets files hears
-			// what ends this beside them (missingContractLine, FR-014); saying
-			// "`palbase spec` fills it in" here as well was two different
-			// next steps for one gap.
-			if !writeArtifacts {
+			// what ends this beside them (missingContractLine, FR-014), so here
+			// it hears the fact alone — the project's own sentence when it gave
+			// one, the diagnosis nothing else carries. The stack's own step, or
+			// "`palbase spec` fills it in", as well was two different next
+			// steps for one gap (and for the stack on this machine, a push it
+			// refuses).
+			if writeArtifacts {
+				fmt.Fprintf(w, "%s\n", noContractFact(err))
+			} else {
+				fmt.Fprintf(w, "%v\n", err)
 				fmt.Fprintf(w, "  the link is recorded; `palbase spec` fills the contract in once something answers\n")
 			}
 		case err != nil:
@@ -906,8 +911,10 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 				// THE PROJECT'S OWN SENTENCE IS KEPT. "Nothing deployed" and "deployed,
 				// but the runtime could not build a document" arrive as the same error,
 				// and telling the second one to push again is how a diagnosis took hours.
-				fmt.Fprintf(w, "%s has no contract to give (%v) — `palbase push --env %s`\n",
-					envname.Label(name), d.noContract, envname.ShellWord(name))
+				// Its sentence, not its step: the stack's `palbase push` names no
+				// environment, and this line names the one it means (FR-014).
+				fmt.Fprintf(w, "%s has no contract to give (%s) — `palbase push --env %s`\n",
+					envname.Label(name), noContractFact(d.noContract), envname.ShellWord(name))
 			} else {
 				specs[name] = d.spec
 			}
@@ -961,7 +968,9 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 	}
 	localSpec, specErr := fetchStackSpec(ctx, localTarget, localCred)
 	if specErr != nil {
-		return skipLocal(fmt.Sprintf("gave its key but not its contract (%v)", specErr))
+		// The stack's words, not its step: skipLocal names the one cure, and
+		// the stack's `palbase spec` would not write local's config (FR-014).
+		return skipLocal(fmt.Sprintf("gave its key but not its contract (%s)", noContractFact(specErr)))
 	}
 	localEnv := appEnvironment{
 		AppID:   projectAppID,

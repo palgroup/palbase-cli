@@ -198,6 +198,70 @@ func reportStaleContracts(refreshed string, envs appEnvironments, w io.Writer) {
 // what ends it.
 var ErrNoContractYet = errors.New("no contract yet")
 
+// noContractYet is ErrNoContractYet with its two halves kept apart: what the
+// stack said about itself, and the step that ends it.
+//
+// ONE CURE PER MISSING CONTRACT (FR-014). A link that writes files names the
+// step itself, beside the files it did not write (missingContractLine), and
+// one that leaves local/ unwritten names its own (FR-009); a project's reading
+// names its --env. Those print the fact alone (noContractFact), so the
+// project's own diagnosis stays and the step is said once. `palbase spec`, and
+// a link with no client, print the whole error: nothing else there says what
+// ends it.
+type noContractYet struct {
+	fact string // "<url> has nothing to describe yet", or "<url> cannot describe itself: <the project's reason>"
+	cure string // what ends it, for this kind of stack
+}
+
+func (e noContractYet) Error() string {
+	return fmt.Sprintf("%v: %s — %s", ErrNoContractYet, e.fact, e.cure)
+}
+
+func (e noContractYet) Unwrap() error { return ErrNoContractYet }
+
+// noContractFact is what err says without the step that ends it — err whole
+// when it is not a missing contract.
+func noContractFact(err error) string {
+	var missing noContractYet
+	if errors.As(err, &missing) {
+		return fmt.Sprintf("%v: %s", ErrNoContractYet, missing.fact)
+	}
+	return err.Error()
+}
+
+// noContractFor is what a stack with no contract to give means, and what ends
+// it; description is the project's own reason, or "" when it gave none.
+//
+// THE STACK ON THIS MACHINE IS NOT PUSHED TO (D-027). It serves the directory
+// `palbase start` mounted, and `palbase push` refuses to publish to it
+// (stack_push.go) — so for it the step is a start, and then `palbase spec`
+// fetches what it serves. Which stack that is, is stackEnvName's answer: the
+// one rule every verb names `local` by, a start record or a loopback address.
+func noContractFor(target Target, description string) error {
+	local := stackEnvName(target) == localEnvName
+	if description != "" {
+		// THE PROJECT'S SENTENCE, AND THEN WHAT TO DO ABOUT IT.
+		//
+		// The branch below — the one with LESS information — names the cure;
+		// this one, which knows more, used to name none, so the better
+		// diagnosis produced the worse message. Every reason a runtime cannot
+		// build a spec ends the same way: the code is fixed and it runs again.
+		// Saying so does not displace the project's own sentence, which is
+		// still what a person reads first.
+		cure := "a backend is what makes a contract, so this ends with `palbase push`"
+		if local {
+			cure = "a backend is what makes a contract, and this machine's stack serves the one `palbase start` runs, " +
+				"so this ends with `palbase start` in the backend, then `palbase spec` here"
+		}
+		return noContractYet{fact: fmt.Sprintf("%s cannot describe itself: %s", target.URL, description), cure: cure}
+	}
+	cure := "push a backend to it first (palbase push)"
+	if local {
+		cure = "run `palbase start` in the backend (its stack serves the contract of the code it runs), then `palbase spec` here"
+	}
+	return noContractYet{fact: fmt.Sprintf("%s has nothing to describe yet", target.URL), cure: cure}
+}
+
 // fetchStackSpec asks the management surface what the stack is serving.
 func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -240,23 +304,11 @@ func fetchStackSpec(ctx context.Context, target Target, cred Credentials) ([]byt
 		var envelope struct {
 			Description string `json:"error_description"`
 		}
-		if json.Unmarshal(body, &envelope) == nil &&
-			strings.TrimSpace(envelope.Description) != "" {
-			// THE PROJECT'S SENTENCE, AND THEN WHAT TO DO ABOUT IT.
-			//
-			// The branch below — the one with LESS information — names the cure;
-			// this one, which knows more, used to name none, so the better
-			// diagnosis produced the worse message. Every reason a runtime
-			// cannot build a spec ends the same way: the code is fixed and
-			// pushed. Saying so does not displace the project's own sentence,
-			// which is still what a person reads first.
-			return nil, fmt.Errorf("%w: %s cannot describe itself: %s — a backend is what "+
-				"makes a contract, so this ends with `palbase push`",
-				ErrNoContractYet, target.URL, strings.TrimSpace(envelope.Description))
+		description := ""
+		if json.Unmarshal(body, &envelope) == nil {
+			description = strings.TrimSpace(envelope.Description)
 		}
-		return nil, fmt.Errorf(
-			"%w: %s has nothing to describe yet — push a backend to it first (palbase push)",
-			ErrNoContractYet, target.URL)
+		return nil, noContractFor(target, description)
 	case http.StatusServiceUnavailable:
 		// ROLLER BİLİNEMEDİ — VE BU "SÖZLEŞME YOK" DEĞİLDİR.
 		//

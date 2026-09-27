@@ -5,6 +5,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,5 +66,44 @@ func TestAnHTMLErrorPageIsNotTreatedAsAReason(t *testing.T) {
 	_, err := fetchStackSpec(context.Background(), Target{URL: srv.URL}, Credentials{Value: "k", Kind: KindKey})
 	if err == nil || !strings.Contains(err.Error(), "nothing to describe yet") {
 		t.Errorf("an HTML page became the message: %v", err)
+	}
+}
+
+// WHAT ENDS A MISSING CONTRACT DEPENDS ON THE STACK (D-027, T018 fix round 2),
+// and a stack somebody hosts keeps the sentence it always had, word for word:
+// every test server is a loopback address, so no network test reaches this
+// text any more. The stack on this machine — a start record, whatever address
+// it announces, or any loopback address — is started, not pushed to.
+func TestTheStepThatEndsAMissingContractFitsTheStack(t *testing.T) {
+	const reason = "controllers/PalaiController.ts cannot be described: Unknown zod object type"
+	for _, c := range []struct {
+		target      Target
+		description string
+		want        string
+	}{
+		{Target{URL: "https://stack.example.com"}, "",
+			"no contract yet: https://stack.example.com has nothing to describe yet — push a backend to it first (palbase push)"},
+		{Target{URL: "https://stack.example.com"}, reason,
+			"no contract yet: https://stack.example.com cannot describe itself: " + reason +
+				" — a backend is what makes a contract, so this ends with `palbase push`"},
+		{Target{URL: "http://127.0.0.1:54321"}, "",
+			"no contract yet: http://127.0.0.1:54321 has nothing to describe yet — run `palbase start` in the backend " +
+				"(its stack serves the contract of the code it runs), then `palbase spec` here"},
+		{Target{URL: "http://192.168.1.20:54321", Local: true}, reason,
+			"no contract yet: http://192.168.1.20:54321 cannot describe itself: " + reason +
+				" — a backend is what makes a contract, and this machine's stack serves the one `palbase start` runs, " +
+				"so this ends with `palbase start` in the backend, then `palbase spec` here"},
+	} {
+		err := noContractFor(c.target, c.description)
+		if !errors.Is(err, ErrNoContractYet) {
+			t.Errorf("%+v: not a missing contract: %v", c.target, err)
+		}
+		if err.Error() != c.want {
+			t.Errorf("%+v:\n got %s\nwant %s", c.target, err, c.want)
+		}
+		fact := strings.SplitN(c.want, " — ", 2)[0]
+		if got := noContractFact(err); got != fact {
+			t.Errorf("%+v: the fact alone:\n got %s\nwant %s", c.target, got, fact)
+		}
 	}
 }
