@@ -177,8 +177,34 @@ func linkedOAuth(ctx context.Context, target Target, platform, publishableKey, s
 				selection = match
 			}
 		} else {
-			return nil, selection, fmt.Errorf("social sign-in for %s needs application_key and variant in %s oauth.%s; "+
+			refusal := fmt.Sprintf("social sign-in for %s needs application_key and variant in %s oauth.%s; "+
 				"the checkout does not identify one configured target", platform, projectPath(), platform)
+			if platform == "android" {
+				// WHY, AND WHAT TO COMMIT (FR-017). The refusal is right — a
+				// flavored or suffixed build installs under an id no file spells
+				// — but it named neither the reason nor the values, and the
+				// clients just read carry them.
+				if _, why := androidIdentifiers(); why != "" {
+					refusal += " — " + why + ", so the applicationId it declares is not the one every build installs as."
+				}
+				choices := make([]string, 0, len(available))
+				for _, c := range available {
+					key, _ := json.Marshal(c.ApplicationKey)
+					variant, _ := json.Marshal(c.Variant)
+					choice := fmt.Sprintf("  application_key %q, variant %q, package %q:\n"+
+						`    "oauth": {"android": {"application_key": %s, "variant": %s}}`,
+						c.ApplicationKey, c.Variant, c.PackageName, key, variant)
+					if !slices.Contains(choices, choice) {
+						choices = append(choices, choice)
+					}
+				}
+				if len(choices) > 0 {
+					slices.Sort(choices)
+					refusal += "\n  One selection applies to every build type; commit the one this app signs in as in " +
+						projectPath() + " —\n" + strings.Join(choices, "\n")
+				}
+			}
+			return nil, selection, errors.New(refusal)
 		}
 	}
 	query := url.Values{"application_key": {selection.ApplicationKey}, "platform": {platform}, "variant": {selection.Variant}}
@@ -234,29 +260,36 @@ func linkedOAuth(ctx context.Context, target Target, platform, publishableKey, s
 var appleIdentifier = regexp.MustCompile(`PRODUCT_BUNDLE_IDENTIFIER\s*=\s*"?([A-Za-z0-9.-]+)`)
 var androidVariantConfiguration = regexp.MustCompile(`\b(?:applicationIdSuffix|productFlavors)\b`)
 
+// androidIdentifiers is the one applicationId this checkout's Gradle files
+// declare, or none — and, when a file mentions flavors or a suffix, why: then
+// the literal id is not the one every build installs as.
+func androidIdentifiers() (identifiers []string, why string) {
+	root, _ := os.Getwd()
+	for _, path := range androidBuildFiles {
+		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil {
+			continue
+		}
+		// A literal defaultConfig ID does not identify the final application
+		// when Gradle applies flavors or build-type suffixes. Require the
+		// explicit OAuth selection; the Gradle plugin checks the final ID.
+		if found := androidVariantConfiguration.Find(raw); found != nil {
+			return nil, path + " mentions " + string(found)
+		}
+		for _, match := range androidApplicationIDPattern.FindAllSubmatch(raw, -1) {
+			identifiers = append(identifiers, string(match[1]))
+		}
+	}
+	if len(identifiers) == 1 && !strings.Contains(identifiers[0], "$") {
+		return identifiers, ""
+	}
+	return nil, ""
+}
+
 func nativeIdentifiers(platform string) []string {
 	if platform == "android" {
-		root, _ := os.Getwd()
-		var identifiers []string
-		for _, path := range androidBuildFiles {
-			raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
-			if err != nil {
-				continue
-			}
-			// A literal defaultConfig ID does not identify the final application
-			// when Gradle applies flavors or build-type suffixes. Require the
-			// explicit OAuth selection; the Gradle plugin checks the final ID.
-			if androidVariantConfiguration.Match(raw) {
-				return nil
-			}
-			for _, match := range androidApplicationIDPattern.FindAllSubmatch(raw, -1) {
-				identifiers = append(identifiers, string(match[1]))
-			}
-		}
-		if len(identifiers) == 1 && !strings.Contains(identifiers[0], "$") {
-			return identifiers
-		}
-		return nil
+		identifiers, _ := androidIdentifiers()
+		return identifiers
 	}
 	if !isApplePlatform(platform) {
 		return nil
