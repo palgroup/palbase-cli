@@ -40,10 +40,16 @@ type deliveriesResponse struct {
 	WindowSeconds int        `json:"window_seconds"`
 }
 
-func deliveriesPath(ref string, windowSec, limit int) string {
+// deliveriesPath asks for one environment's window; a message id narrows it to
+// that message ON THE PLANE — filtering here would only search the newest
+// `limit` rows and call an older message missing.
+func deliveriesPath(ref string, windowSec, limit int, messageID string) string {
 	q := url.Values{}
 	q.Set("window_seconds", strconv.Itoa(windowSec))
 	q.Set("limit", strconv.Itoa(limit))
+	if messageID != "" {
+		q.Set("message_id", messageID)
+	}
 	return "/v1/panel/environments/" + url.PathEscape(ref) + "/messages/deliveries?" + q.Encode()
 }
 
@@ -107,15 +113,12 @@ its own provider reads delivery in that provider's console.`,
 			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s\n", resolved.Describe())
 
 			var resp deliveriesResponse
-			if err := r.Panel().Do(cmd.Context(), http.MethodGet, deliveriesPath(ref, windowSec, limit), nil, &resp); err != nil {
+			if err := r.Panel().Do(cmd.Context(), http.MethodGet, deliveriesPath(ref, windowSec, limit, messageID), nil, &resp); err != nil {
 				return err
 			}
 			rows := resp.Deliveries
-			if messageID != "" {
-				rows = filterByID(rows, messageID)
-				if len(rows) == 0 {
-					return fmt.Errorf("no message %s in the last %s — widen --since, or check the id", messageID, humanWindow(windowSec))
-				}
+			if messageID != "" && len(rows) == 0 {
+				return fmt.Errorf("no message %s in the last %s — widen --since, or check the id", messageID, humanWindow(windowSec))
 			}
 			out := cmd.OutOrStdout()
 			if jsonOut {
@@ -136,16 +139,6 @@ its own provider reads delivery in that provider's console.`,
 	c.Flags().StringVar(&messageID, "message-id", "", "show only this message")
 	c.Flags().BoolVar(&jsonOut, "json", false, "emit JSON")
 	return c
-}
-
-func filterByID(rows []delivery, id string) []delivery {
-	var out []delivery
-	for _, d := range rows {
-		if d.MessageID == id {
-			out = append(out, d)
-		}
-	}
-	return out
 }
 
 func printDeliveries(w interface{ Write([]byte) (int, error) }, rows []delivery) {

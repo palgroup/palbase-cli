@@ -9,10 +9,15 @@ import (
 func strp(s string) *string { return &s }
 
 func TestDeliveriesPathAsksThePlaneForOneEnvironmentsWindow(t *testing.T) {
-	got := deliveriesPath("na1m7lt2m", 7200, 50)
+	got := deliveriesPath("na1m7lt2m", 7200, 50, "")
 	want := "/v1/panel/environments/na1m7lt2m/messages/deliveries?limit=50&window_seconds=7200"
 	if got != want {
 		t.Fatalf("path = %q, want %q", got, want)
+	}
+	// One message is narrowed on the plane, not among the newest rows here.
+	one := deliveriesPath("na1m7lt2m", 7200, 50, "f1fd91fb")
+	if !strings.Contains(one, "message_id=f1fd91fb") {
+		t.Fatalf("path = %q, want the message id as a query parameter", one)
 	}
 }
 
@@ -34,12 +39,5 @@ func TestPrintDeliveriesShowsTheProvidersWordAndItsSMTPAnswer(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %q:\n%s", want, text)
 		}
-	}
-}
-
-func TestFilterByIDKeepsOnlyThatMessage(t *testing.T) {
-	rows := filterByID([]delivery{{MessageID: "a"}, {MessageID: "b"}}, "b")
-	if len(rows) != 1 || rows[0].MessageID != "b" {
-		t.Fatalf("rows = %+v", rows)
 	}
 }
