@@ -22,6 +22,12 @@ import (
 // Resolvers carries the linked project's transport.
 type Resolvers struct {
 	REST func(*cobra.Command) (REST, error)
+	// Panel reaches the plane's panel surface; CloudRef reads a cloud
+	// environment's ref from its address. Delivery reports live on the plane,
+	// not on the stack — `deliveries` reads them the way `palbase logs` reads
+	// lines. Nil means no plane to ask.
+	Panel    func() PanelREST
+	CloudRef func(url string) (string, bool)
 }
 
 // providerEntry holds a sender's non-secret fields for validation.
@@ -85,12 +91,13 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase notifications remove <provider>         Stop delivering through one.
   palbase notifications templates list            Show the templates this stack holds.
   palbase notifications templates set --file F    Apply a template document.
+  palbase notifications deliveries                What the mail provider said about each message.
 
 Configuration is stored on the linked backend and used by subsequent sends.
 Provider credentials are encrypted; listing shows configuration status without
 returning secrets. Message content is managed separately through templates.`,
 	}
-	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r), templatesCmd(r), statusCmd(r))
+	cmd.AddCommand(providersCmd(r), addCmd(r), removeCmd(r), templatesCmd(r), statusCmd(r), deliveriesCmd(r))
 	return cmd
 }
 

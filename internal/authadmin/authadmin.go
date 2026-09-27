@@ -57,21 +57,30 @@ const base = "/v1/management/auth"
 // useful one. And a refusal EXITS NON-ZERO — a script that read a 400 as a
 // change is how somebody believes a setting landed when it did not.
 func call(r Resolvers, cmd *cobra.Command, method, path string, body []byte) error {
-	rest, err := r.REST(cmd)
+	raw, err := do(r, cmd, method, path, body)
 	if err != nil {
 		return err
+	}
+	return emit(cmd, raw)
+}
+
+// do performs one verb and returns the answer unprinted; a refusal is an error.
+func do(r Resolvers, cmd *cobra.Command, method, path string, body []byte) ([]byte, error) {
+	rest, err := r.REST(cmd)
+	if err != nil {
+		return nil, err
 	}
 	status, raw, err := rest.Do(cmd.Context(), method, path, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if status >= 400 {
 		if apiErr := transport.EnvelopeError(raw, status); apiErr != nil {
-			return apiErr
+			return nil, apiErr
 		}
-		return fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("the stack answered %d: %s", status, strings.TrimSpace(string(raw)))
 	}
-	return emit(cmd, raw)
+	return raw, nil
 }
 
 // emit prints the module's answer as JSON a script can read.
@@ -142,7 +151,7 @@ func Cmd(r Resolvers) *cobra.Command {
   palbase auth sessions revoke-all USER_ID
   palbase auth audit
   palbase auth templates list|get KEY|set KEY --json '{...}'
-  palbase auth templates send-test KEY --json '{"to":"you@example.com"}'
+  palbase auth templates send-test KEY --json '{"to_email":"you@example.com"}'
   palbase auth mfa get USER_ID
   palbase auth mfa reset USER_ID
 
@@ -463,16 +472,36 @@ func templatesCmd(r Resolvers) *cobra.Command {
 		// The only way to know a template renders and a provider delivers is to
 		// send it. Finding that out here beats finding it out from the first
 		// person who signs up.
+		//
+		// It goes down the same rail a user's mail takes, and the answer names
+		// the message — the id the provider's delivery report is filed under.
+		// "Sent" only says the stack handed it over; whether the recipient's
+		// server took it is the report's to say, so the command points at it.
 		Use: "send-test KEY", Short: "Send one template to a real address, once", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			b, err := readBody(cmd, testBody)
 			if err != nil {
 				return err
 			}
-			return call(r, cmd, http.MethodPost, base+"/templates/"+url.PathEscape(args[0])+"/send-test", b)
+			raw, err := do(r, cmd, http.MethodPost, base+"/templates/"+url.PathEscape(args[0])+"/send-test", b)
+			if err != nil {
+				return err
+			}
+			if err := emit(cmd, raw); err != nil {
+				return err
+			}
+			var sent struct {
+				MessageID string `json:"message_id"`
+			}
+			if json.Unmarshal(raw, &sent) == nil && sent.MessageID != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"what the provider says about it: palbase notifications deliveries --message-id %s\n", sent.MessageID)
+			}
+			return nil
 		},
 	}
-	send.Flags().StringVar(&testBody, "json", "", `where to send it, e.g. {"to":"you@example.com"}`)
+	send.Flags().StringVar(&testBody, "json", "",
+		`where to send it, e.g. {"to_email":"you@example.com"} (optional "locale":"tr")`)
 	c.AddCommand(set, send)
 	return c
 }

@@ -128,13 +128,13 @@ func TestParseWindow(t *testing.T) {
 		{"1h30m", 5400},
 		{"7d", 604800}, // Go's ParseDuration refuses `d`; people write it anyway.
 	} {
-		got, err := parseWindow(tc.in)
+		got, err := ParseWindow(tc.in)
 		require.NoErrorf(t, err, "--since %q", tc.in)
 		require.Equalf(t, tc.want, got, "--since %q", tc.in)
 	}
 
 	for _, bad := range []string{"soon", "0", "-5m", "0d", "d", "15"} {
-		_, err := parseWindow(bad)
+		_, err := ParseWindow(bad)
 		require.Errorf(t, err, "--since %q was accepted", bad)
 		require.Contains(t, err.Error(), "15m, 2h or 7d")
 	}

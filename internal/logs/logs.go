@@ -78,12 +78,12 @@ func logsPath(ref string) string {
 // too, so the two screens answer the same question by default.
 const defaultWindow = time.Hour
 
-// parseWindow turns `--since 15m` into seconds.
+// ParseWindow turns `--since 15m` into seconds.
 //
 // `d` is accepted on top of Go's units because people write `--since 2d` and
 // time.ParseDuration refuses it — a refusal that reads as "logs are broken"
 // rather than "that unit is not supported".
-func parseWindow(since string) (int, error) {
+func ParseWindow(since string) (int, error) {
 	since = strings.TrimSpace(since)
 	if since == "" {
 		return int(defaultWindow.Seconds()), nil
@@ -130,7 +130,7 @@ type showCloudOpts struct {
 func showCloud(cmd *cobra.Command, r Resolvers, ref string, o showCloudOpts) error {
 	source, levels, since, query := o.source, o.levels, o.since, o.query
 	limit, follow, jsonOut := o.limit, o.follow, o.jsonOut
-	windowSec, err := parseWindow(since)
+	windowSec, err := ParseWindow(since)
 	if err != nil {
 		return err
 	}

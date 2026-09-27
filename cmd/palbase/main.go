@@ -604,7 +604,12 @@ func newRootCmd() *cobra.Command {
 		authadmin.Cmd(authadmin.Resolvers{REST: openStackManagement, RefreshClientConfig: func(cmd *cobra.Command) error { return backend.RefreshLinkedClients(cmd.Context(), cmd.ErrOrStderr()) }}),
 		egress.Cmd(egress.Resolvers{REST: openStackEgress}),
 		notifications.Cmd(notifications.Resolvers{
-			REST: func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
+			REST:  func(cmd *cobra.Command) (notifications.REST, error) { return openStackManagement(cmd) },
+			Panel: func() notifications.PanelREST { return managementREST() },
+			// The same address → ref reading `palbase logs` uses.
+			CloudRef: func(url string) (string, bool) {
+				return tenantRefOf(url, resolved.Endpoints.PublicHost)
+			},
 		}),
 		testuser.Cmd(),
 		roles.Cmd(),
