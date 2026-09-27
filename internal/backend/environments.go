@@ -168,6 +168,34 @@ func Resolve(ctx context.Context) (Resolved, error) {
 	if envNamed() == "" && localErr == nil && local.Local {
 		return Resolved{Target: local, URL: local.URL, Source: "local"}, nil
 	}
+	return resolveLinked(ctx, local, localErr)
+}
+
+// resolveLink is Resolve without its first rule: where this checkout's LINK
+// points, whatever stack `palbase start` has running here right now.
+//
+// ONE ORDER, TWO QUESTIONS. Every verb that ACTS asks Resolve, and a running
+// local stack is where it acts. `palbase build` asks something else — which
+// stack's names the generated types carry — and the SDK's answer is "the
+// linked environment's stack" (`@palbase/backend/stack`). Answering that from
+// Resolve typed a cloud project against a laptop's empty vault
+// (palgroup/palbase#19). The rules below are Resolve's own, not a copy, so the
+// two answers cannot drift.
+func resolveLink(ctx context.Context) (Resolved, error) {
+	local, localErr := ReadTarget()
+	return resolveLinked(ctx, local, localErr)
+}
+
+// runningLocalStack is Resolve's FIRST rule asked on its own: the stack
+// `palbase start` has running for this checkout, when there is one.
+func runningLocalStack() (Target, bool) {
+	local, err := ReadTarget()
+	return local, err == nil && local.Local
+}
+
+// resolveLinked is resolveLink with the machine's record already read — the
+// shape Resolve needs, having read it for its own first rule.
+func resolveLinked(ctx context.Context, local Target, localErr error) (Resolved, error) {
 	// A LOOPBACK LINK IS ONE INSTALLATION, just stored on this machine instead of
 	// in the committed file. It answers exactly as a committed self-host address
 	// does — including refusing `--env` by name — and is never "local": that

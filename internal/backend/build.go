@@ -406,16 +406,93 @@ func runBuildWith(ctx context.Context, cwd string, out io.Writer, opts buildOpti
 // heard when the stack cannot be asked, FR-003); when this checkout is not
 // linked to any stack at all, there is nothing to ask and nothing to fall back
 // to, and that is said by name rather than silently swallowed.
+//
+// THE LINKED ENVIRONMENT, NOT THE STACK A VERB WOULD ACT ON (palgroup/palbase#19).
+// The generated file is committed and every clone compiles against it, so its
+// names are the ones the deploy target holds — `@palbase/backend/stack` says so.
+// Reading them from wherever Resolve pointed let `palbase start` decide them:
+// the local stack holds none of the cloud's secrets, the build rewrote the file
+// with empty `Secrets`, `Flags` and `Buckets`, and `tsc` failed on every
+// `Secrets.get()` in the project. The local stack is the source only for a
+// checkout that is linked to nothing else.
 func namesForBuild(ctx context.Context, cwd string, out io.Writer) checkoutStackNames {
-	resolved, err := Resolve(ctx)
+	resolved, err := namesSourceForBuild(ctx)
 	if err != nil {
-		return checkoutStackNames{Source: namesUnavailable, Why: errors.New("this checkout is not linked to a stack")}
+		return checkoutStackNames{Source: namesUnavailable, Why: err}
 	}
+	from := resolved.Describe()
 	names := stackNamesForCheckout(ctx, cwd, resolved.Acting())
+	switch names.Source {
+	case namesFromStack:
+		fmt.Fprintf(out, "  stack names from %s\n", from)
+	case namesFromCache:
+		fmt.Fprintf(out, "  stack names from this machine's last read of %s — it could not be asked now (%s)\n",
+			from, whyNoStackNames(names.Why))
+	}
 	if names.CacheErr != nil {
 		fmt.Fprintf(out, "  the stack's names were not remembered on this machine — %v\n", names.CacheErr)
 	}
+	if names.Source != namesUnavailable {
+		reportLocalOnlySecrets(ctx, resolved, names.Names.Secrets, out)
+	}
 	return names
+}
+
+// namesSourceForBuild is WHERE the names come from: the link when the checkout
+// has one — its project's environment (the selection, `--env`, or the only one)
+// or its address — and Resolve's answer (a running local stack, a loopback link)
+// only when it has none.
+//
+// A LINKED CHECKOUT WHOSE ENVIRONMENT CANNOT BE NAMED — two of them and none
+// selected, a listing the control plane did not answer — answers with the
+// resolver's own sentence, and the file keeps the names it already carries.
+// It never falls back to the local stack: that is the answer this replaced.
+func namesSourceForBuild(ctx context.Context) (Resolved, error) {
+	if !exists(projectPath()) {
+		resolved, err := Resolve(ctx)
+		if err != nil {
+			return Resolved{}, errors.New("this checkout is not linked to a stack")
+		}
+		return resolved, nil
+	}
+	return resolveLink(ctx)
+}
+
+// reportLocalOnlySecrets names every secret the running local stack holds and
+// the linked environment does not.
+//
+// The types come from the linked environment, so `Secrets.get("X")` for such a
+// name does NOT compile — and that is right: the deploy would read a secret
+// nobody set. What the compiler cannot say is where the name went, so the build
+// says it here, with the command that puts it where the types are read from.
+// Best effort: a local stack that cannot be asked adds no line.
+func reportLocalOnlySecrets(ctx context.Context, linked Resolved, linkedSecrets []string, out io.Writer) {
+	local, running := runningLocalStack()
+	if !running || linked.Target.Local {
+		return
+	}
+	cred, _, err := credentialFn(local.URL)
+	if err != nil {
+		return
+	}
+	localNames, err := secretNames(ctx, local, cred)
+	if err != nil {
+		return
+	}
+	for _, name := range localNames {
+		if slices.Contains(linkedSecrets, name) {
+			continue
+		}
+		// `--env` is what reaches past the running local stack; a checkout
+		// linked by address has no environment to name, and while the local
+		// stack runs `palbase secret` acts on it — so that case says where, not how.
+		fix := "set it on that stack"
+		if linked.Env != "" {
+			fix = fmt.Sprintf("set it there: palbase secret set %s --stdin --env %s", name, linked.Env)
+		}
+		fmt.Fprintf(out, "! %s is set on the local stack only — the types come from %s, so Secrets.get(%q) "+
+			"does not compile; %s\n", name, linked.Describe(), name, fix)
+	}
 }
 
 // namesOrNil is what the RENDERER is handed: nil when nothing was read at all,
