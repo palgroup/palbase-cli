@@ -140,6 +140,9 @@ func TestDoctorNamesEnvironmentDirectoriesThatDifferOnlyInCase(t *testing.T) {
 // ONE DIRECTORY ON A MAC IS DECIDED BY THE LINK'S RULE (envname.SameDirectory,
 // FR-003): a full case fold, which strings.EqualFold is not — `straße` and
 // `STRASSE` are one directory on APFS, and a simple fold calls them two.
+//
+// AND ONLY ON A MAC (final review, Minor #5): Windows folds case one letter at
+// a time, and keeps `straße` and `STRASSE` apart.
 func TestDoctorNamesEnvironmentDirectoriesOnlyAFullCaseFoldMakesOne(t *testing.T) {
 	dir := t.TempDir()
 	if caseInsensitive(t, dir) {
@@ -150,8 +153,60 @@ func TestDoctorNamesEnvironmentDirectoriesOnlyAFullCaseFoldMakesOne(t *testing.T
 	androidEnvironmentIn(t, dir, "STRASSE", androidConfig("https://main.example", "pb_main_cK"), withRoles)
 
 	require.Contains(t, runDoctorIn(t, dir),
-		"  ✗ STRASSE    differs only in case from palbase/environments/\"straße\" — a disk that ignores case (macOS, Windows) holds one of the two; rename one in the dashboard\n"+
-			"  ✗ \"straße\"   differs only in case from palbase/environments/STRASSE — a disk that ignores case (macOS, Windows) holds one of the two; rename one in the dashboard\n")
+		"  ✗ STRASSE    differs only in case from palbase/environments/\"straße\" — a disk that ignores case (macOS) holds one of the two; rename one in the dashboard\n"+
+			"  ✗ \"straße\"   differs only in case from palbase/environments/STRASSE — a disk that ignores case (macOS) holds one of the two; rename one in the dashboard\n")
+}
+
+// TWO UNICODE FORMS OF ONE NAME ARE ONE DIRECTORY ON A MAC (final review, Minor
+// #5): `café` with one code point and with two print alike, and the line says
+// what differs. Every APFS volume ignores Unicode form, case-sensitive ones
+// too, so only a disk that does not — Linux CI's — can hold the pair.
+func TestDoctorNamesEnvironmentDirectoriesInTwoUnicodeForms(t *testing.T) {
+	const composed, decomposed = "caf\u00e9", "cafe\u0301"
+	dir := t.TempDir()
+	if !holdsBoth(t, dir, composed, decomposed) {
+		t.Skip("this disk ignores Unicode form, so it cannot hold two directories whose names differ only in it")
+	}
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, composed, androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	androidEnvironmentIn(t, dir, decomposed, androidConfig("https://main.example", "pb_main_cK"), withRoles)
+
+	out := runDoctorIn(t, dir)
+	for name, other := range map[string]string{composed: decomposed, decomposed: composed} {
+		require.Contains(t, out, "\""+name+"\"", out)
+		require.Contains(t, out, " is palbase/environments/\""+other+"\" in another Unicode form — a disk that ignores "+
+			"Unicode form (macOS) holds one of the two; rename one in the dashboard\n", out)
+	}
+	require.NotContains(t, out, "differs only in case")
+}
+
+// A DIRECTORY HOLDING NO PALBASE FILE IS NOT AN ENVIRONMENT (final review,
+// Minor #8). It was reported as one missing both files, with `palbase link`
+// as the cure — and a link leaves it exactly as it is, because it holds
+// somebody's files.
+func TestDoctorSaysADirectoryWithNoPalbaseFileIsNotAnEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "palbase/environments/mine/NOTES.md", "mine\n")
+	writeFileIn(t, dir, "palbase/environments/mine/.DS_Store", "noise")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out, "android (app/build.gradle.kts)\n"+
+		"  ✓ main       android-config.json with an api_key, openapi.json with x-palbase-roles\n"+
+		"  ✗ mine       holds no Palbase files — not an environment; move it aside\n")
+	require.NotContains(t, out, "✗ mine       no android-config.json")
+}
+
+// AND ONE HOLDING NOTHING BUT A FILE BROWSER'S LEFTOVER IS AN ENVIRONMENT
+// WITHOUT ITS FILES: `.DS_Store` is nobody's, so the cure is still the link.
+func TestDoctorTakesADirectoryHoldingOnlyAFileBrowsersLeftoverForAnEmptyOne(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	writeFileIn(t, dir, "palbase/environments/staging/.DS_Store", "noise")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ staging    no android-config.json — `palbase link` here; no openapi.json — `palbase push`, then `palbase link` here\n")
 }
 
 // A DIRECTORY THAT CANNOT BE READ IS NOT AN EMPTY ONE: "nothing under it" would
@@ -195,6 +250,17 @@ func TestDoctorPrintsNoControlCharacterFromAnEnvironmentDirectory(t *testing.T) 
 	require.Contains(t, out,
 		"  ✗ \"evil\\x1b[2J\" android-config.json cannot be read (is a directory) — `palbase link` here\n")
 	require.NotContains(t, out, "\x1b")
+}
+
+// holdsBoth reports whether the disk under dir keeps directories named a and b
+// apart.
+func holdsBoth(t *testing.T, dir, a, b string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "formprobe")
+	require.NoError(t, os.Mkdir(probe, 0o755))
+	defer func() { require.NoError(t, os.RemoveAll(probe)) }()
+	require.NoError(t, os.Mkdir(filepath.Join(probe, a), 0o755))
+	return os.Mkdir(filepath.Join(probe, b), 0o755) == nil
 }
 
 // caseInsensitive reports whether the disk under dir ignores letter case.

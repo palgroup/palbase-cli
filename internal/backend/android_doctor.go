@@ -106,8 +106,37 @@ func twinProblem(name, other string) string {
 		return fmt.Sprintf("is %s in another Unicode form — a disk that ignores Unicode form (macOS) "+
 			"holds one of the two; rename one in the dashboard", shownEnvDir(other))
 	}
+	// WINDOWS FOLDS CASE ONE LETTER AT A TIME, which is what strings.EqualFold
+	// does: `Main` and `main` are one directory there too. A pair only the full
+	// fold joins — `straße` and `STRASSE` — is one on a Mac alone.
+	disks := "macOS"
+	if strings.EqualFold(name, other) {
+		disks = "macOS, Windows"
+	}
 	return fmt.Sprintf("differs only in case from %s — a disk that ignores case "+
-		"(macOS, Windows) holds one of the two; rename one in the dashboard", shownEnvDir(other))
+		"(%s) holds one of the two; rename one in the dashboard", shownEnvDir(other), disks)
+}
+
+// holdsNoPalbaseFile reports whether an environment directory holds
+// something, and nothing this CLI writes there — somebody's directory, not an
+// environment missing its files: `palbase link` leaves it exactly as it is.
+// A file browser's leftover is nobody's, and counts for neither.
+func holdsNoPalbaseFile(dir, name string) bool {
+	entries, err := os.ReadDir(filepath.Join(dir, filepath.FromSlash(EnvDir(name))))
+	if err != nil {
+		return false
+	}
+	somebodys := false
+	for _, e := range entries {
+		switch {
+		case e.Type().IsRegular() && isFileBrowserNoise(e.Name()):
+		case e.Type().IsRegular() && isGeneratedEnvironmentFile(e.Name()):
+			return false
+		default:
+			somebodys = true
+		}
+	}
+	return somebodys
 }
 
 // environmentDirsIn is the environment directories under dir, by their exact
@@ -133,6 +162,11 @@ func environmentDirsIn(dir string) ([]string, error) {
 // environmentProblems is what the Gradle plugin would refuse in name's
 // directory: the config it packages, and the contract it generates from.
 func environmentProblems(dir, name string, project bool) []string {
+	// NOT AN ENVIRONMENT AT ALL (final review, Minor #8): naming the two files
+	// it lacks would send the reader to a link that cannot change it.
+	if holdsNoPalbaseFile(dir, name) {
+		return []string{"holds no Palbase files — not an environment; move it aside"}
+	}
 	// `local/` comes from the stack `palbase start` runs here, and from nothing
 	// else: a link alone cannot fill it.
 	configCure := "`palbase link` here"
