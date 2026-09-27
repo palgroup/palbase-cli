@@ -27,6 +27,11 @@ type schemaPlan struct {
 	OldSide string        `json:"old_side"`
 	Adopted bool          `json:"adopted"`
 	Pending []pendingStep `json:"pending"`
+	// Unmanaged are objects in the database that db/ does not declare and the
+	// deploy never declared as managed — it leaves them alone. NOT changes:
+	// printed under their own heading, never counted. Absent from a stack older
+	// than object ownership.
+	Unmanaged []string `json:"unmanaged"`
 }
 
 type destructiveChange struct {
@@ -123,8 +128,10 @@ func renderPlan(w io.Writer, plan schemaPlan) {
 	}
 	if plan.InSync && len(plan.Changes) == 0 {
 		fmt.Fprintln(w, "✓ the database matches db/public.ts")
+		renderUnmanaged(w, plan.Unmanaged)
 		return
 	}
+	defer renderUnmanaged(w, plan.Unmanaged)
 	for _, change := range plan.Changes {
 		fmt.Fprintf(w, "  %s\n", change)
 	}
@@ -159,4 +166,16 @@ func describeDrop(d destructiveChange) string {
 		return fmt.Sprintf("drop %s.%s — %d row(s)", d.Table, d.Column, d.Rows)
 	}
 	return fmt.Sprintf("drop table %s — %d row(s)", d.Table, d.Rows)
+}
+
+// renderUnmanaged prints the objects the deploy leaves alone, after everything
+// else: they are an answer to "why was this not dropped?", not a thing to do.
+func renderUnmanaged(w io.Writer, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	for _, l := range lines {
+		fmt.Fprintln(w, l)
+	}
 }

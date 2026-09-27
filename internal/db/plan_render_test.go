@@ -55,3 +55,26 @@ func TestRenderPlanSaysNothingAboutRefusalsWhenThereAreNone(t *testing.T) {
 		}
 	}
 }
+
+// Ş-2: what the deploy leaves alone is printed, in sync or not — it is the answer
+// to "why was my hand-made table not dropped?" — and never as a change.
+func TestRenderPlanShowsWhatTheDeployLeavesAlone(t *testing.T) {
+	unmanaged := []string{
+		"unmanaged — in the database, not declared in db/; the rail leaves these alone (declare one to manage it, then remove it from db/ to drop it):",
+		"  unmanaged table  handmade",
+	}
+	for _, plan := range []schemaPlan{
+		{InSync: true, Unmanaged: unmanaged},
+		{Changes: []string{"add column todos.done"}, Unmanaged: unmanaged},
+	} {
+		var out bytes.Buffer
+		renderPlan(&out, plan)
+		got := out.String()
+		if !strings.Contains(got, "unmanaged table  handmade") {
+			t.Errorf("the plan does not say what the deploy leaves alone:\n%s", got)
+		}
+		if plan.InSync && !strings.Contains(got, "✓ the database matches") {
+			t.Errorf("an in-sync plan with unmanaged objects stopped saying it matches:\n%s", got)
+		}
+	}
+}
