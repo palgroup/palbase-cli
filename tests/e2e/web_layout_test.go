@@ -76,12 +76,11 @@ func TestWebLayoutSelectsOneEnvironment(t *testing.T) {
 	}
 	bin := palbaseBinary(t)
 
-	// THE CHECKOUT'S DIRECTORY NAME IS ITS GROUP (D-009). `groupOf` falls back
-	// to the base name when a target carries no project field, and
-	// `LookupLocalStack` reads the machine-wide registry by that group — so an
-	// app checkout only sees the local stack when it shares the name of the
-	// checkout that started one. The gate accepts the product's rule rather
-	// than pretending otherwise.
+	// THE CHECKOUT'S DIRECTORY NAME IS A GROUP IT IS LOOKED UP BY (D-009,
+	// FR-008). `localStackGroups` tries the linked project's name first and the
+	// checkout's directory name second, and `LookupLocalStack` reads the
+	// machine-wide registry by each — so naming the checkout after the group
+	// finds the stack whatever the real project is called.
 	group := strings.TrimSpace(os.Getenv("PALBASE_E2E_LOCAL_GROUP"))
 	if group == "" {
 		t.Fatal("PALBASE_E2E_LOCAL_GROUP is required: name the checkout whose `palbase start` " +
