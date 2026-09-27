@@ -65,7 +65,8 @@ func TestGitignoreIsScaffoldedOnlyWhereThereIsNone(t *testing.T) {
 	t.Run("init", func(t *testing.T) {
 		dir := t.TempDir()
 
-		require.NoError(t, writeGitignore(dir))
+		_, ignoreErr := writeGitignore(dir)
+		require.NoError(t, ignoreErr)
 
 		body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 		require.NoError(t, err, "`init` created no .gitignore in a directory that had none")
@@ -97,7 +98,8 @@ func TestGitignoreAnExistingFileGainsNoRule(t *testing.T) {
 				path := filepath.Join(dir, ".gitignore")
 				require.NoError(t, os.WriteFile(path, []byte(tc.body), 0o644))
 
-				require.NoError(t, writeGitignore(dir))
+				_, ignoreErr := writeGitignore(dir)
+				require.NoError(t, ignoreErr)
 
 				got, err := os.ReadFile(path)
 				require.NoError(t, err)
@@ -135,7 +137,8 @@ func TestGitignoreTakesBackOnlyItsRetiredRules(t *testing.T) {
 		path := filepath.Join(dir, ".gitignore")
 		require.NoError(t, os.WriteFile(path, []byte(before), 0o644))
 
-		require.NoError(t, writeGitignore(dir))
+		_, ignoreErr := writeGitignore(dir)
+		require.NoError(t, ignoreErr)
 
 		got, err := os.ReadFile(path)
 		require.NoError(t, err)

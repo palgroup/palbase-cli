@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,6 +104,145 @@ func TestAGeneratorRefusalReachesTheLinksError(t *testing.T) {
 	var out strings.Builder
 	err := runLink(context.Background(), o, &out)
 	require.ErrorContains(t, err, "error: the generator explains itself")
+}
+
+// inGitRepoApp makes the current directory a Next app at apps/web of a git
+// repository — the monorepo shape palgroup/palbase#20 was measured in — and
+// commits it. rootIgnore is the repository's own ignore file ("" for none).
+func inGitRepoApp(t *testing.T, rootIgnore string, files map[string]string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed — this measures what a link leaves in a repository")
+	}
+	inScratchCheckout(t)
+	repo, err := os.Getwd()
+	require.NoError(t, err)
+	gitIn(t, repo, "init", "-q")
+	if rootIgnore != "" {
+		require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(rootIgnore), 0o644))
+	}
+	app := filepath.Join(repo, "apps", "web")
+	for rel, body := range files {
+		p := filepath.Join(app, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "app")
+	require.NoError(t, os.Chdir(app))
+}
+
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), out)
+	return string(out)
+}
+
+// changedOutside lists what `git status --porcelain` reports in the repository
+// outside prefix, a path relative to the current directory.
+func changedOutside(t *testing.T, prefix string) []string {
+	t.Helper()
+	// Porcelain paths are relative to the repository root, wherever it runs.
+	here := strings.TrimSpace(gitIn(t, ".", "rev-parse", "--show-prefix"))
+	var outside []string
+	for _, line := range strings.Split(strings.TrimRight(gitIn(t, ".", "status", "--porcelain", "-uall"), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(strings.TrimSpace(line[2:]), here+prefix) {
+			outside = append(outside, line)
+		}
+	}
+	return outside
+}
+
+// webLinkOpts is a relink of the app's `main` environment on the stack at url.
+func webLinkOpts(url string) linkOpts {
+	return linkOpts{
+		url:          url,
+		platforms:    []string{"web"},
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
+}
+
+// A RELINK LEAVES AN APP THAT IS ALREADY WIRED AS IT IS (palgroup/palbase#20).
+//
+// The app is the customer's: a `[locale]` App Router whose OWN provider,
+// `src/lib/providers.tsx`, imports `palbase/client` (through `baseUrl`) and
+// calls setupPalbeNext() next to its other providers, in a monorepo whose root
+// ignore file covers `node_modules/`. Every link used to splice the barrel into
+// the root layout, create a second `providers.tsx` and drop an app-level
+// `.gitignore` — none of it printed. Linked twice, and the second time against
+// a stack whose key changed (the relink the issue was doing), the only changes
+// git sees are the environment's own files.
+func TestARelinkLeavesAnAlreadyWiredNextAppAlone(t *testing.T) {
+	inGitRepoApp(t, "node_modules/\n", map[string]string{
+		// Linked before: the hooks an earlier link added are committed.
+		"package.json":  `{"name":"web","private":true,"scripts":{"predev":"` + webTypesCmd + `","prebuild":"` + webTypesCmd + `"}}`,
+		"tsconfig.json": `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./src/*"]},"jsx":"preserve"}}`,
+		"src/app/layout.tsx": "import type { ReactNode } from 'react';\nimport { ApolloClient } from '@apollo/client';\n\n" +
+			"export default function RootLayout({ children }: { children: ReactNode }) {\n  return children;\n}\n",
+		"src/app/[locale]/layout.tsx": "import type { ReactNode } from 'react';\nimport { Providers } from '@/lib/providers';\n\n" +
+			"export default function LocaleLayout({ children }: { children: ReactNode }) {\n  return <Providers>{children}</Providers>;\n}\n",
+		"src/lib/providers.tsx": "\"use client\";\nimport \"palbase/client\";\nimport { setupPalbeNext } from \"@palbase/web/next/client\";\n\n" +
+			"setupPalbeNext();\n\nexport function Providers({ children }: { children: React.ReactNode }) {\n  return children;\n}\n",
+		"src/proxy.ts": "export function proxy() {}\n",
+	})
+	installStubCodegen(t, "// gen")
+	first := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": first.URL})
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), webLinkOpts(first.URL), &out), out.String())
+	require.Empty(t, changedOutside(t, "palbase/"), "the first link changed the app's own files:\n%s", out.String())
+	require.Contains(t, out.String(),
+		"NOTE: palbase/client.ts is already wired in src/lib/providers.tsx — Palbase left layout and providers untouched.")
+	require.NotContains(t, out.String(), "✓ wrote .gitignore", "an ignore file was written into a repository that has one")
+	gitIn(t, ".", "add", "-A")
+	gitIn(t, ".", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "link")
+
+	rotated := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": rotated.URL})
+	for i := 0; i < 2; i++ {
+		out.Reset()
+		require.NoError(t, runLink(context.Background(), webLinkOpts(rotated.URL), &out), out.String())
+	}
+	require.Empty(t, changedOutside(t, "palbase/environments/main/"),
+		"a relink changed something besides the environment's files:\n%s", out.String())
+	require.NotEmpty(t, gitIn(t, ".", "status", "--porcelain", "--", "palbase/environments/main/"),
+		"the relink changed nothing at all — this test measures nothing")
+}
+
+// …AND A FRESH APP STILL GETS ALL THREE, each of them said: the barrel import in
+// its root layout, the providers file, and — in a repository that ignores
+// nothing — the ignore file that keeps its installed packages out of git.
+func TestALinkWiresAFreshNextAppAndSaysSo(t *testing.T) {
+	inGitRepoApp(t, "", map[string]string{
+		"package.json": `{"name":"web","private":true}`,
+		"src/app/layout.tsx": "import type { ReactNode } from 'react';\nimport { ApolloClient } from '@apollo/client';\n\n" +
+			"export default function RootLayout({ children }: { children: ReactNode }) {\n  return children;\n}\n",
+	})
+	installStubCodegen(t, "// gen")
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), webLinkOpts(main.URL), &out), out.String())
+	layout, err := os.ReadFile(filepath.Join("src", "app", "layout.tsx"))
+	require.NoError(t, err)
+	require.Contains(t, string(layout), "import '../../palbase/client';",
+		"`@apollo/client` was taken for the generated client and the layout was left unwired")
+	require.FileExists(t, filepath.Join("src", "app", "providers.tsx"))
+	require.FileExists(t, ".gitignore")
+	for _, said := range []string{"~ modified src/app/layout.tsx", "✓ wrote src/app/providers.tsx", "✓ wrote .gitignore"} {
+		require.Contains(t, out.String(), said)
+	}
+	require.NotContains(t, out.String(), "already wired")
 }
 
 // A LINK THAT FAILS AFTER BINDING THE PROJECT RELEASES THE STACK, AND SAYS SO.

@@ -499,7 +499,7 @@ func TestTheProjectDeclaresWhatTheTEMPLATEDeclares(t *testing.T) {
 // nothing it has retired may appear. Both halves move with the code.
 func TestTheScaffoldIgnoresEveryPathTheCLIGenerates(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeGitignore(dir); err != nil {
+	if _, err := writeGitignore(dir); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))

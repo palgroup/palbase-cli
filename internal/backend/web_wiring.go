@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -511,11 +512,9 @@ var autoEntryPaths = []string{
 }
 
 // wireEntryImport inserts `import '<rel>';` into the detected (or explicit)
-// entry file. Idempotent on EXACT module-specifier match (a path ending in
-// /<stem>), directive-prologue aware, and multiline-import aware.
+// entry file. Idempotent on an import that RESOLVES to outFile (see
+// lineImportsBarrel), directive-prologue aware, and multiline-import aware.
 func wireEntryImport(entryFlag, outFile string, w io.Writer) error {
-	stem := strings.TrimSuffix(filepath.Base(outFile), ".ts") // e.g. "palbe.gen"
-
 	entryPath := entryFlag
 	if entryPath == "" {
 		for _, candidate := range autoEntryPaths {
@@ -551,11 +550,12 @@ func wireEntryImport(entryFlag, outFile string, w io.Writer) error {
 	}
 	lines := strings.Split(string(body), "\n")
 
-	// Idempotency: skip only on an EXACT specifier match — a quoted path that
-	// IS the gen module ('./palbe.gen', '../palbe.gen'), not any substring
-	// (e.g. './palbe.gen.extra' must NOT suppress the insert).
+	// Idempotency: skip only on an import that names THIS file — a specifier
+	// that resolves to it, not one that merely ends like it
+	// ('./palbase/client.extra', '@apollo/client' must NOT suppress the insert).
+	resolver := newImportResolver()
 	for _, line := range lines {
-		if lineImportsGen(line, stem) {
+		if lineImportsBarrel(line, entryPath, outFile, resolver) {
 			return nil
 		}
 	}
@@ -645,16 +645,342 @@ func isDirectiveLine(t string) bool {
 	return false
 }
 
-// lineImportsGen reports whether the line imports the generated module: an
-// import-ish line whose quoted specifier equals, or path-ends with, the gen
-// stem. Exact match only — './palbe.gen.extra' does not count.
-func lineImportsGen(line, stem string) bool {
+// lineImportsBarrel reports whether the line, sitting in fromFile, imports
+// barrel: an import-ish line with a quoted specifier that RESOLVES to that file.
+//
+// RESOLVED, NOT MATCHED ON ITS TAIL. This compared the specifier's last segment
+// with the barrel's stem, and the barrel is `palbase/client` — so
+// `'@apollo/client'` and `'@palbase/web/next/client'` both counted as the
+// generated client, and a layout importing either was never wired. The other
+// direction failed as well: an app that reaches the barrel through tsconfig
+// (`'palbase/client'` under `baseUrl`, `'@/…'` under `paths`) was judged by
+// spelling rather than by what the compiler would load.
+func lineImportsBarrel(line, fromFile, barrel string, r importResolver) bool {
 	t := strings.TrimSpace(line)
 	if !strings.HasPrefix(t, "import") && !strings.Contains(t, "from ") {
 		return false
 	}
 	for _, q := range quotedStrings(t) {
-		if q == stem || q == "./"+stem || strings.HasSuffix(q, "/"+stem) {
+		if r.resolvesTo(fromFile, q, barrel) {
+			return true
+		}
+	}
+	return false
+}
+
+// ── resolving an import the way the app's compiler does ──────────────────────
+
+// importResolver answers which file of THIS app an import specifier loads:
+// relative to the importing file, through tsconfig `paths`, or under `baseUrl`
+// — the three ways a TypeScript app (and Next, which reads the same file)
+// reaches its own sources. Anything else is a package, and never the barrel.
+type importResolver struct {
+	// baseURL is the directory `baseUrl` names, "" when no config sets one.
+	baseURL string
+	// aliases are the `paths` entries, their targets joined to the directory
+	// they resolve against.
+	aliases []pathAlias
+}
+
+type pathAlias struct {
+	pattern string
+	targets []string
+}
+
+// newImportResolver reads the app's tsconfig.json (jsconfig.json for a plain-JS
+// app) in the current directory, following `extends`. A config that cannot be
+// read resolves relative specifiers only — which is what every app has.
+func newImportResolver() importResolver {
+	config := "tsconfig.json"
+	if !isRegularFile(config) {
+		config = "jsconfig.json"
+	}
+	cfg := readTSPaths(config, map[string]bool{})
+	r := importResolver{baseURL: cfg.baseURL}
+	base := cfg.pathsDir
+	if cfg.baseURL != "" {
+		base = cfg.baseURL
+	}
+	for pattern, targets := range cfg.paths {
+		joined := make([]string, 0, len(targets))
+		for _, target := range targets {
+			joined = append(joined, filepath.Join(base, filepath.FromSlash(target)))
+		}
+		r.aliases = append(r.aliases, pathAlias{pattern: pattern, targets: joined})
+	}
+	return r
+}
+
+// tsPaths is the part of a tsconfig module resolution reads.
+type tsPaths struct {
+	baseURL  string
+	paths    map[string][]string
+	pathsDir string // where `paths` targets resolve when there is no baseUrl
+}
+
+// readTSPaths reads baseUrl and paths from path and what it extends. TypeScript
+// applies an `extends` array in order and the file's own options last, so a
+// later value wins; each is resolved against the file that WROTE it.
+func readTSPaths(path string, seen map[string]bool) tsPaths {
+	if seen[path] {
+		return tsPaths{}
+	}
+	seen[path] = true
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return tsPaths{}
+	}
+	var cfg struct {
+		Extends         json.RawMessage `json:"extends"`
+		CompilerOptions struct {
+			BaseURL *string             `json:"baseUrl"`
+			Paths   map[string][]string `json:"paths"`
+		} `json:"compilerOptions"`
+	}
+	if json.Unmarshal(stripJSONComments(raw), &cfg) != nil {
+		return tsPaths{}
+	}
+	var out tsPaths
+	var bases []string
+	var one string
+	if json.Unmarshal(cfg.Extends, &one) == nil && one != "" {
+		bases = []string{one}
+	} else {
+		_ = json.Unmarshal(cfg.Extends, &bases)
+	}
+	dir := filepath.Dir(path)
+	for _, b := range bases {
+		basePath := resolveTSConfigExtends(dir, b)
+		if basePath == "" {
+			continue
+		}
+		inherited := readTSPaths(basePath, seen)
+		if inherited.baseURL != "" {
+			out.baseURL = inherited.baseURL
+		}
+		if inherited.paths != nil {
+			out.paths, out.pathsDir = inherited.paths, inherited.pathsDir
+		}
+	}
+	if cfg.CompilerOptions.BaseURL != nil {
+		out.baseURL = filepath.Join(dir, filepath.FromSlash(*cfg.CompilerOptions.BaseURL))
+	}
+	if cfg.CompilerOptions.Paths != nil {
+		out.paths, out.pathsDir = cfg.CompilerOptions.Paths, dir
+	}
+	return out
+}
+
+// resolvesTo reports whether spec, imported from fromFile, loads target.
+func (r importResolver) resolvesTo(fromFile, spec, target string) bool {
+	got := r.resolve(fromFile, spec)
+	if got == "" {
+		return false
+	}
+	a, errA := filepath.Abs(got)
+	b, errB := filepath.Abs(target)
+	return errA == nil && errB == nil && a == b
+}
+
+// resolve answers the file spec loads from fromFile, or "" when it is not one of
+// this app's files. The order is the compiler's: a relative specifier from the
+// importing file; otherwise `paths` (an exact key, else the pattern with the
+// longest prefix), then `baseUrl`.
+func (r importResolver) resolve(fromFile, spec string) string {
+	if spec == "" {
+		return ""
+	}
+	if spec == "." || spec == ".." || strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") {
+		return moduleFileAt(filepath.Join(filepath.Dir(fromFile), filepath.FromSlash(spec)))
+	}
+	if filepath.IsAbs(spec) {
+		return moduleFileAt(spec)
+	}
+	if alias, capture, ok := r.aliasFor(spec); ok {
+		for _, target := range alias.targets {
+			if got := moduleFileAt(strings.Replace(target, "*", capture, 1)); got != "" {
+				return got
+			}
+		}
+	}
+	if r.baseURL != "" {
+		return moduleFileAt(filepath.Join(r.baseURL, filepath.FromSlash(spec)))
+	}
+	return ""
+}
+
+// aliasFor picks the `paths` entry spec matches, as TypeScript does.
+func (r importResolver) aliasFor(spec string) (pathAlias, string, bool) {
+	best, capture, found := pathAlias{}, "", false
+	longest := -1
+	for _, a := range r.aliases {
+		star := strings.IndexByte(a.pattern, '*')
+		if star < 0 {
+			if a.pattern == spec {
+				return a, "", true
+			}
+			continue
+		}
+		prefix, suffix := a.pattern[:star], a.pattern[star+1:]
+		if len(spec) < len(prefix)+len(suffix) || !strings.HasPrefix(spec, prefix) || !strings.HasSuffix(spec, suffix) {
+			continue
+		}
+		if len(prefix) > longest {
+			best, capture, found, longest = a, spec[len(prefix):len(spec)-len(suffix)], true, len(prefix)
+		}
+	}
+	return best, capture, found
+}
+
+// moduleFileAt is the file an extensionless (or `.js`-spelled) module path
+// loads: itself, with a source extension, or its directory's index.
+func moduleFileAt(p string) string {
+	candidates := []string{p}
+	for _, ext := range []string{".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs"} {
+		candidates = append(candidates, p+ext)
+	}
+	// An ESM import names the OUTPUT (`./client.js`) of a `.ts` source.
+	if ext := filepath.Ext(p); ext == ".js" || ext == ".jsx" || ext == ".mjs" {
+		stem := strings.TrimSuffix(p, ext)
+		candidates = append(candidates, stem+".ts", stem+".tsx")
+	}
+	for _, index := range []string{"index.ts", "index.tsx", "index.js", "index.jsx"} {
+		candidates = append(candidates, filepath.Join(p, index))
+	}
+	for _, c := range candidates {
+		if isRegularFile(c) {
+			return filepath.Clean(c)
+		}
+	}
+	return ""
+}
+
+// ── is the client already wired? ─────────────────────────────────────────────
+
+// appSourceRoots are where a web app keeps its own code.
+var appSourceRoots = []string{"src", "app"}
+
+// appSourceSkipDirs are never somebody's application source.
+var appSourceSkipDirs = map[string]bool{
+	"node_modules": true, ".next": true, ".git": true, "dist": true, "build": true,
+	"out": true, "coverage": true, "__tests__": true, "__mocks__": true,
+}
+
+// isAppSourceFile says whether name is a source module worth reading — not a
+// declaration file and not a test.
+func isAppSourceFile(name string) bool {
+	ext := filepath.Ext(name)
+	switch ext {
+	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
+	default:
+		return false
+	}
+	stem := strings.TrimSuffix(name, ext)
+	return !strings.HasSuffix(stem, ".d") && !strings.HasSuffix(stem, ".test") && !strings.HasSuffix(stem, ".spec")
+}
+
+// clientWiredIn answers the file where this app ALREADY configures the
+// generated client in its browser bundle, or "" when it does not.
+//
+// Wired means both halves the layout and the providers file exist to provide:
+// some module of the app imports the client barrel (resolved, not spelled), and
+// a 'use client' module calls setupPalbeNext(). An app that did this in its own
+// provider — `src/lib/providers.tsx`, next to React Query and i18n — was wired a
+// SECOND time on every link: an import spliced into the root layout and a new
+// `providers.tsx` configuring the client again (palgroup/palbase#20). The file
+// named is the one that calls setupPalbeNext(), preferring one that also
+// imports the barrel.
+func clientWiredIn(barrel string) string {
+	r := newImportResolver()
+	importsBarrel := false
+	var both, setupOnly []string
+	for _, root := range appSourceRoots {
+		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if appSourceSkipDirs[d.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !isAppSourceFile(d.Name()) {
+				return nil
+			}
+			body, readErr := os.ReadFile(p)
+			if readErr != nil {
+				return nil
+			}
+			lines := strings.Split(string(body), "\n")
+			imports := false
+			for _, line := range lines {
+				if lineImportsBarrel(line, p, barrel, r) {
+					imports = true
+					break
+				}
+			}
+			importsBarrel = importsBarrel || imports
+			if isUseClientModule(lines) && callsSetupPalbeNext(lines) {
+				if imports {
+					both = append(both, filepath.ToSlash(p))
+				} else {
+					setupOnly = append(setupOnly, filepath.ToSlash(p))
+				}
+			}
+			return nil
+		})
+	}
+	if !importsBarrel {
+		return ""
+	}
+	if len(both) > 0 {
+		return both[0]
+	}
+	if len(setupOnly) > 0 {
+		return setupOnly[0]
+	}
+	return ""
+}
+
+// isUseClientModule reports whether the file's directive prologue — what comes
+// before its first statement, comments aside — carries 'use client'.
+func isUseClientModule(lines []string) bool {
+	inBlock := false
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if inBlock {
+			if strings.Contains(t, "*/") {
+				inBlock = false
+			}
+			continue
+		}
+		switch {
+		case t == "" || strings.HasPrefix(t, "//"):
+			continue
+		case strings.HasPrefix(t, "/*"):
+			inBlock = !strings.Contains(t, "*/")
+			continue
+		case isDirectiveLine(t):
+			if strings.Contains(t, "use client") {
+				return true
+			}
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// callsSetupPalbeNext reports whether a line of code — not a comment — calls
+// setupPalbeNext().
+func callsSetupPalbeNext(lines []string) bool {
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "//") || strings.HasPrefix(t, "*") || strings.HasPrefix(t, "/*") {
+			continue
+		}
+		if strings.Contains(t, "setupPalbeNext(") {
 			return true
 		}
 	}
@@ -801,7 +1127,6 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 
 	appDir := filepath.Dir(entryPath) // "app" or "src/app"
 	providersPath, typescript := providersFileFor(appDir, entryPath)
-	genStem := strings.TrimSuffix(filepath.Base(outFile), ".ts") // e.g. "palbe.gen"
 
 	// Compute the relative import path from appDir to the gen file.
 	rel, err := filepath.Rel(appDir, outFile)
@@ -818,8 +1143,9 @@ func wireNextProviders(entryFlag, outFile string, w io.Writer) error {
 	if readErr == nil {
 		// The file already exists — NEVER overwrite it.
 		lines := strings.Split(string(existing), "\n")
+		resolver := newImportResolver()
 		for _, line := range lines {
-			if lineImportsGen(line, genStem) {
+			if lineImportsBarrel(line, providersPath, outFile, resolver) {
 				return nil // already wired, idempotent
 			}
 		}
@@ -1109,15 +1435,25 @@ func wireWebProject(ctx context.Context, entryFlag, outFlag, env string, w io.Wr
 		return fmt.Errorf("palbe-gen did not produce %s", outFile)
 	}
 
-	if err := wireEntryImport(entryFlag, outFile, w); err != nil {
-		return fmt.Errorf("wire entry import: %w", err)
-	}
-	// The server layout and the browser bundle are separate module graphs: the
-	// layout's import configures Server Components only, and without a "use
-	// client" provider every pb call in the browser throws "Palbe is not
-	// configured".
-	if err := wireNextProviders(entryFlag, outFile, w); err != nil {
-		return fmt.Errorf("wire providers.tsx: %w", err)
+	// AN APP THAT ALREADY WIRES THE CLIENT IS LEFT AS IT IS, and told so — the
+	// courtesy the proxy below has always had (palgroup/palbase#20). The two
+	// steps after this exist to put the barrel import and setupPalbeNext() into
+	// an app; an app whose own provider does both got them a second time on
+	// every relink, silently.
+	if wiredIn := clientWiredIn(outFile); wiredIn != "" {
+		fmt.Fprintf(w, "\nNOTE: %s is already wired in %s — Palbase left layout and providers untouched.\n\n",
+			ClientBarrelPath(), wiredIn)
+	} else {
+		if err := wireEntryImport(entryFlag, outFile, w); err != nil {
+			return fmt.Errorf("wire entry import: %w", err)
+		}
+		// The server layout and the browser bundle are separate module graphs:
+		// the layout's import configures Server Components only, and without a
+		// "use client" provider every pb call in the browser throws "Palbe is
+		// not configured".
+		if err := wireNextProviders(entryFlag, outFile, w); err != nil {
+			return fmt.Errorf("wire providers.tsx: %w", err)
+		}
 	}
 	// And the session cookie has to refresh BEFORE the RSC tree renders: Server
 	// Components cannot write cookies, so two refreshes from the same stale

@@ -31,7 +31,7 @@ func TestAnOlderCLIsLinkStageIsReapedNotIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGitignore(dir); err != nil {
+	if _, err := writeGitignore(dir); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {

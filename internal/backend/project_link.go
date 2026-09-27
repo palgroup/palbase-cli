@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -916,8 +917,15 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// calling it: so `link` printed "commit palbase/" while a file inside it
 	// stayed invisible to git. Retiring a producer is two acts, and this is the
 	// second one for everybody who did not start from a fresh `init`.
-	if err := takeBackRetiredIgnoreRules(".gitignore"); err != nil {
+	ignoreChange, err := takeBackRetiredIgnoreRules(".gitignore", o.checkoutRoot)
+	if err != nil {
 		return fmt.Errorf("update .gitignore: %w", err)
+	}
+	switch ignoreChange {
+	case ignoreFileCreated:
+		fmt.Fprintln(w, "✓ wrote .gitignore")
+	case ignoreFileRewritten:
+		announceModified(w, ".gitignore")
 	}
 
 	// NOTHING MARKS GENERATED CODE ANY MORE, and that is the retirement, not an
@@ -1381,7 +1389,12 @@ func insecureTransport() http.RoundTripper {
 // The directory-wide `.palbase` rule is DROPPED rather than narrowed. It used to
 // become `.palbase/local.json`, because exactly one file in there really was
 // per-machine; none is now.
-func takeBackRetiredIgnoreRules(path string) error {
+//
+// checkoutDir is the checkout the file belongs to, and the one git is asked
+// about. It is not always path's directory: `link` works on a copy of the
+// checkout in the OS temp directory and publishes afterwards, and git asked
+// there answers for no repository at all. "" is the current directory.
+func takeBackRetiredIgnoreRules(path, checkoutDir string) (ignoreFileChange, error) {
 	content, err := os.ReadFile(path)
 
 	// NO FILE AT ALL IS THE ONE CASE THAT GETS WRITTEN (FR-012a). A checkout
@@ -1389,15 +1402,31 @@ func takeBackRetiredIgnoreRules(path string) error {
 	// lacked `node_modules/` is how a `git add -A` staged 500 installed files on
 	// a fresh web checkout (08.09.2026).
 	//
+	// UNLESS THE REPOSITORY ALREADY CURATED IT (palgroup/palbase#20). An app in
+	// a monorepo has no ignore file of its own because the ROOT one covers it,
+	// and every relink dropped a second `node_modules/` + `*.log` file into the
+	// app directory. What the scaffold exists for is the one question asked
+	// here — would git stage the installed packages — and git answers it. With
+	// no git to ask, the scaffold is still the safe answer.
+	//
 	// AN EMPTY FILE IS NOT THAT CASE. Somebody made it, and what it says is
 	// "nothing is ignored in this repository". The question used to be asked as
 	// `TrimSpace(content) == ""`, which made the two the same and wrote this
 	// CLI's answer over a person's — the one thing FR-012 forbids.
 	if os.IsNotExist(err) {
-		return os.WriteFile(path, []byte(gitignoreScaffold()), 0o644)
+		if checkoutDir == "" {
+			checkoutDir = "."
+		}
+		if gitIgnoresNodeModules(checkoutDir) {
+			return ignoreFileUnchanged, nil
+		}
+		if err := os.WriteFile(path, []byte(gitignoreScaffold()), 0o644); err != nil {
+			return ignoreFileUnchanged, err
+		}
+		return ignoreFileCreated, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return ignoreFileUnchanged, fmt.Errorf("read %s: %w", path, err)
 	}
 
 	// TAKE BACK WHAT WE RETIRED, AND TOUCH NOTHING ELSE. The directory-wide
@@ -1428,16 +1457,40 @@ func takeBackRetiredIgnoreRules(path string) error {
 	// inert step is one more thing a reader has to prove does nothing.
 	updated := strings.Join(kept, "\n")
 	if updated == string(content) {
-		return nil
+		return ignoreFileUnchanged, nil
 	}
 
 	mode := os.FileMode(0o644)
 	if info, statErr := os.Stat(path); statErr == nil {
 		mode = info.Mode().Perm()
 	} else if !os.IsNotExist(statErr) {
-		return fmt.Errorf("stat %s: %w", path, statErr)
+		return ignoreFileUnchanged, fmt.Errorf("stat %s: %w", path, statErr)
 	}
-	return os.WriteFile(path, []byte(updated), mode)
+	if err := os.WriteFile(path, []byte(updated), mode); err != nil {
+		return ignoreFileUnchanged, err
+	}
+	return ignoreFileRewritten, nil
+}
+
+// ignoreFileChange is what takeBackRetiredIgnoreRules did to the file, so each
+// verb can say it in its own voice — a file this CLI writes into somebody's
+// checkout is never written in silence.
+type ignoreFileChange int
+
+const (
+	ignoreFileUnchanged ignoreFileChange = iota
+	ignoreFileCreated
+	ignoreFileRewritten
+)
+
+// gitIgnoresNodeModules asks git whether dir's installed packages are already
+// ignored — by any ignore file of the repository, at any depth. The trailing
+// slash asks about the DIRECTORY, so a `node_modules/` rule answers even before
+// an install created one. Not a repository, or no git: false.
+func gitIgnoresNodeModules(dir string) bool {
+	cmd := exec.Command("git", "check-ignore", "-q", "node_modules/")
+	cmd.Dir = dir
+	return cmd.Run() == nil
 }
 
 // refuseUnsupportedPlatforms rejects a NAMED platform this directory has no way

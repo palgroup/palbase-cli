@@ -1289,7 +1289,8 @@ func installStubCodegen(t *testing.T, content string) {
 // every test built on it into a test of its own fixture.
 func runWebLinkWithGitignore(t *testing.T, args ...string) string {
 	t.Helper()
-	require.NoError(t, takeBackRetiredIgnoreRules(".gitignore"))
+	_, ignoreErr := takeBackRetiredIgnoreRules(".gitignore", ".")
+	require.NoError(t, ignoreErr)
 	return runWebLink(t, args...)
 }
 
