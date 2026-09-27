@@ -64,7 +64,7 @@ func TestALinkRefusesAPalbaseDirectorySpelledAnotherWay(t *testing.T) {
 
 	out, err := linkOneEnvironment(t)
 
-	require.EqualError(t, err, "this checkout spells the palbase directory `Palbase`; "+
+	require.EqualError(t, err, "this checkout spells the palbase/ directory `Palbase`; "+
 		"rename it to `palbase` and run `palbase link` again", out)
 	assert.Empty(t, out)
 	raw, readErr := os.ReadFile(contract)
@@ -84,7 +84,7 @@ func TestALinkNamesAnUnusualSpellingOfThePalbaseDirectoryQuoted(t *testing.T) {
 
 	_, err := linkOneEnvironment(t)
 
-	require.EqualError(t, err, "this checkout spells the palbase directory `\"palbaſe\"`; "+
+	require.EqualError(t, err, "this checkout spells the palbase/ directory `\"palbaſe\"`; "+
 		"rename it to `palbase` and run `palbase link` again")
 }
 

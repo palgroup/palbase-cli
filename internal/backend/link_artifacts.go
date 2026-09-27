@@ -342,7 +342,7 @@ func refuseAnotherSpellingOfTheRoot(root string) error {
 		return fmt.Errorf("this checkout holds both `%s` and `%s`, which are one directory on a Mac; "+
 			"move `%s` aside and run `palbase link` again", envname.Label(other), RootDir(), envname.Label(other))
 	}
-	return fmt.Errorf("this checkout spells the palbase directory `%s`; rename it to `%s` and run `palbase link` again",
+	return fmt.Errorf("this checkout spells the palbase/ directory `%s`; rename it to `%s` and run `palbase link` again",
 		envname.Label(other), RootDir())
 }
 
