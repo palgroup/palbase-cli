@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/palgroup/palbase-cli/internal/backend"
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 // call is one control-plane request these commands made.
@@ -450,5 +451,8 @@ func TestCreatePrintsTheNameItWasAnsweredWithEscaped(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, out, "\x1b", "`env create` printed a name raw")
 	require.Contains(t, out, "Created "+hostileQuoted+" — evilref002 (Creating)")
-	require.Contains(t, out, "palbase env use "+hostileQuoted)
+	// THE HINT IS A COMMAND TO PASTE, not just text to read (T008 review): it
+	// must survive BOTH the shell it might run in and the terminal it is
+	// printed to right now, so it goes through ShellWord, not Label.
+	require.Contains(t, out, "palbase env use "+envname.ShellWord(hostileName))
 }

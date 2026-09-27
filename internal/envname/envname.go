@@ -176,8 +176,9 @@ func Label(name string) string {
 }
 
 // ShellWord is how a person reads an environment name INSIDE A COMMAND THIS
-// CLI SUGGESTS THEY RUN — `palbase push --env <name>` and the like — quoted
-// so a shell treats it as one argument and nothing more.
+// CLI SUGGESTS THEY RUN — `palbase push --env <name>` and the like — safe for
+// BOTH the shell that might run the pasted command AND the terminal this line
+// is printed to right now.
 //
 // Label's %q IS NOT SHELL QUOTING (fix round 1, security-relevant). CheckDir
 // admits $, `, (, ), and ;, and %q leaves every one of them exactly as they
@@ -185,11 +186,50 @@ func Label(name string) string {
 // sh/zsh that runs `id` before naming an environment. POSIX single-quoting
 // has exactly one escape — close the quote, an escaped quote, reopen it — and
 // that is the whole rule: nothing else is special inside single quotes.
+//
+// SINGLE-QUOTING ALONE IS NOT ENOUGH (T008 review, security-relevant): it
+// protects the shell a pasted command runs in, but does nothing for the
+// TERMINAL this line is printed to before anyone pastes anything. An OSC
+// sequence or a bell inside a name rewrites the terminal or rings it the
+// moment the line is shown, quotes or no quotes — the same attack Label
+// exists to close. So every rune that fails unicode.IsPrint is written out as
+// its own visible Go-style escape (\xXX below 0x80, \uXXXX or \UXXXXXXXX
+// above), placed INSIDE the quotes as ordinary literal text — a backslash
+// means nothing special inside single quotes, so the shell never treats it as
+// one. The result no longer round-trips to the exact bytes the name was, but
+// CheckDir already refuses such a name as a directory, so nothing that still
+// needs the exact bytes back ever reads this line.
 func ShellWord(name string) string {
 	if plainWord.MatchString(name) {
 		return name
 	}
-	return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'"
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range name {
+		switch {
+		case r == '\'':
+			b.WriteString(`'\''`)
+		case !unicode.IsPrint(r):
+			b.WriteString(escapedRune(r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
+
+// escapedRune is the visible Go-style escape ShellWord prints, as literal
+// text, for one rune it refuses to let reach the terminal raw.
+func escapedRune(r rune) string {
+	switch {
+	case r < 0x80:
+		return fmt.Sprintf(`\x%02x`, r)
+	case r <= 0xFFFF:
+		return fmt.Sprintf(`\u%04x`, r)
+	default:
+		return fmt.Sprintf(`\U%08x`, r)
+	}
 }
 
 var plainWord = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)

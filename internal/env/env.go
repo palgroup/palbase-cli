@@ -276,7 +276,10 @@ plan's rate, so this command prints that consequence before it asks.`,
 			if err := cloudproject.WaitUntilReachable(cmd.Context(), r.REST(), created.Ref, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "\n  palbase env use %s\n", envname.Label(created.Name))
+			// A COMMAND TO PASTE, not just text to read — ShellWord, not Label
+			// (T008 review): safe for the shell this line might run in AND for
+			// the terminal it is printed to right now.
+			fmt.Fprintf(out, "\n  palbase env use %s\n", envname.ShellWord(created.Name))
 			return nil
 		},
 	}

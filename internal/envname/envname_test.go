@@ -132,3 +132,19 @@ func TestShellWordQuotesEveryNameThatIsNotOnePlainWord(t *testing.T) {
 		require.Equal(t, want, ShellWord(name), "%q", name)
 	}
 }
+
+// A CONTROL BYTE MUST NOT SURVIVE SHELLWORD EITHER, NOT JUST THE SHELL'S
+// METACHARACTERS (T008 review, security-relevant). Single-quoting protects
+// the SHELL a pasted command might run in; it does nothing for the TERMINAL
+// this line is printed to right now — an OSC sequence or a bell inside a name
+// rewrites the terminal or rings it the instant the line is shown, quotes or
+// no quotes. So every rune that fails unicode.IsPrint must come out as its
+// own visible Go-style escape, as literal text inside the quotes.
+func TestShellWordEscapesEveryNonPrintingRuneEvenInsideTheQuotes(t *testing.T) {
+	got := ShellWord("evil\x1b]0;owned\a")
+	require.NotContains(t, got, "\x1b", "a raw ESC byte survived: %q", got)
+	require.NotContains(t, got, "\a", "a raw BEL byte survived: %q", got)
+	require.True(t, len(got) >= 2 && got[0] == '\'' && got[len(got)-1] == '\'',
+		"does not start and end with a quote: %q", got)
+	require.Contains(t, got, `\x1b`, "the escape byte is not shown as text: %q", got)
+}
