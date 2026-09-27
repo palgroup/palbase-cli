@@ -235,6 +235,26 @@ func TestAnEnvironmentWithNoContractKeepsTheProjectsOwnSentence(t *testing.T) {
 	assert.Contains(t, out.String(), "palbase push --env staging")
 }
 
+// THE SUGGESTED COMMAND MUST BE SAFE TO PASTE, NOT JUST SAFE TO READ (fix
+// round 1, Finding 2, security-relevant). Label's %q leaves $, `, ( and )
+// alone, so a name typed as `x$(id)` used to reach this line as `"x$(id)"` —
+// which a shell runs `id` on. ShellWord single-quotes it instead.
+func TestThePushSuggestionQuotesAHostileNameForTheShell(t *testing.T) {
+	inScratchCheckout(t)
+	const shellHostileName = "x$(id)"
+	main, _ := envServer(t, "pb_main_cK", envServerOpts{noContract: true})
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	project := []Environment{
+		{Name: shellHostileName, Ref: "mainref000", Status: "Running"},
+	}
+
+	var out bytes.Buffer
+	_, _, err := gatherEnvironments(context.Background(), Target{URL: main.URL}, shellHostileName, "pb_main_cK", project, true, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "palbase push --env 'x$(id)'")
+	assert.NotContains(t, out.String(), `--env "x$(id)"`, "the suggested command is not shell-safe")
+}
+
 // THE ROLE ROUND IS GONE, AND SO IS THE TEST THAT GUARDED ITS FAILURE.
 //
 // `TestAnEnvironmentWhoseRolesCannotBeReadIsStillDescribed` measured that a

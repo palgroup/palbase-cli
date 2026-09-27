@@ -539,7 +539,7 @@ func migrateLegacyAddress(ctx context.Context, w io.Writer, target Target) bool 
 	}
 	fmt.Fprintf(w, "▸ %s now records the project %q rather than one environment's address; "+
 		"this machine keeps acting on %s (`palbase env use <name>` or `--env <name>` to change it)",
-		projectPath(), product.Name, kept)
+		projectPath(), product.Name, envname.Label(kept))
 	// THE ADDRESS DECIDED. A retired `env` beside it chose nothing, and the line
 	// says what it named so nobody takes it for the environment kept above.
 	if env := target.retired.env; env != nil {

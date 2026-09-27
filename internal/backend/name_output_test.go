@@ -147,3 +147,22 @@ func TestTheStaleContractsLinePrintsANameEscaped(t *testing.T) {
 	require.Contains(t, out.String(), "only main was refreshed. The others still describe what they last served:\n  "+
 		hostileQuoted+" (never fetched)\n")
 }
+
+// AND THE MIGRATION LINE, which names the environment this machine keeps
+// acting on after an old address-based checkout is rewritten to a project
+// identity. It comes straight off the listing (environmentsOf / sel.Env), with
+// nothing between it and this line before the fix (fix round 1, Finding 1).
+func TestTheMigrationLinePrintsAHostileEnvironmentNameEscaped(t *testing.T) {
+	linkedTo(t, Target{URL: "https://mu0028.palbase.studio"})
+	resolverRig(t, []Environment{
+		{Ref: "j06bwtuum", Name: "main", Status: "Running"},
+		{Ref: "mu0028", Name: hostileName, Status: "Running"},
+	})
+	cloudAddresses(t, true)
+
+	var out bytes.Buffer
+	MigrateLegacyTarget(context.Background(), &out)
+
+	require.NotContains(t, out.String(), "\x1b", "a listed name reached the terminal raw")
+	require.Contains(t, out.String(), "this machine keeps acting on "+hostileQuoted)
+}

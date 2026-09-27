@@ -1147,7 +1147,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		// written, the line is said, and the client waits for a push (FR-012).
 		if !isRegularFile(specPath(envs.Default)) {
 			fmt.Fprintf(w, "the web client is not generated yet: %s has no contract — `palbase push --env %s`, then `palbase link`\n",
-				envname.Label(envs.Default), envname.Label(envs.Default))
+				envname.Label(envs.Default), envname.ShellWord(envs.Default))
 		} else if err := wireWebProject(ctx, o.entry, o.out, envs.Default, w); err != nil {
 			return err
 		}

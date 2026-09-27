@@ -112,3 +112,23 @@ func TestLabelQuotesEveryNameThatIsNotOnePlainWord(t *testing.T) {
 		require.Equal(t, want, Label(name), "%q", name)
 	}
 }
+
+// A NAME INSIDE A SUGGESTED COMMAND MUST BE SAFE FOR THE SHELL, NOT JUST FOR
+// THE EYE (fix round 1, security-relevant). Label's %q is Go's quoting, not a
+// shell's: CheckDir admits $, `, (, ), and ; and %q leaves every one of them
+// alone, so `palbase push --env "x$(id)"` pasted into sh/zsh RUNS `id`. POSIX
+// single-quoting has exactly one escape — close the quote, an escaped quote,
+// reopen it — and that is enough on its own: nothing else is special inside
+// single quotes.
+func TestShellWordQuotesEveryNameThatIsNotOnePlainWord(t *testing.T) {
+	for name, want := range map[string]string{
+		"main":                   "main",
+		"feature-profile-update": "feature-profile-update",
+		"staging_2":              "staging_2",
+		"x$(id)":                 `'x$(id)'`,
+		"it's":                   `'it'\''s'`,
+		"Feature X":              `'Feature X'`,
+	} {
+		require.Equal(t, want, ShellWord(name), "%q", name)
+	}
+}

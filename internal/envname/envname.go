@@ -158,18 +158,38 @@ func CheckSlug(name string) error {
 	return nil
 }
 
-// Label is how a person reads an environment name the control plane sent.
+// Label is how a person READS an environment name the control plane sent —
+// display only. A name about to enter a command a person might paste is
+// ShellWord's job, not this one: %q is Go's quoting, not a shell's, and does
+// nothing to keep a name from running as a second command once pasted.
 //
 // ONE PLAIN WORD PRINTS AS IT IS — every slug is one — and anything else
 // prints quoted and escaped (%q), the way git quotes an unusual path. Printed
 // raw, a name carrying escape bytes rewrote a teammate's terminal line, set
 // its title or hid the text after it (FR-006); a name with a space read as two
-// words in a sentence and as two arguments in a suggested command.
+// words in a sentence.
 func Label(name string) string {
 	if plainWord.MatchString(name) {
 		return name
 	}
 	return strconv.Quote(name)
+}
+
+// ShellWord is how a person reads an environment name INSIDE A COMMAND THIS
+// CLI SUGGESTS THEY RUN — `palbase push --env <name>` and the like — quoted
+// so a shell treats it as one argument and nothing more.
+//
+// Label's %q IS NOT SHELL QUOTING (fix round 1, security-relevant). CheckDir
+// admits $, `, (, ), and ;, and %q leaves every one of them exactly as they
+// are: a name typed as `x$(id)` printed as `"x$(id)"`, and pasted into
+// sh/zsh that runs `id` before naming an environment. POSIX single-quoting
+// has exactly one escape — close the quote, an escaped quote, reopen it — and
+// that is the whole rule: nothing else is special inside single quotes.
+func ShellWord(name string) string {
+	if plainWord.MatchString(name) {
+		return name
+	}
+	return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'"
 }
 
 var plainWord = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)

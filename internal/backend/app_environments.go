@@ -744,7 +744,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 				// but the runtime could not build a document" arrive as the same error,
 				// and telling the second one to push again is how a diagnosis took hours.
 				fmt.Fprintf(w, "%s has no contract to give (%v) — `palbase push --env %s`\n",
-					envname.Label(name), d.noContract, envname.Label(name))
+					envname.Label(name), d.noContract, envname.ShellWord(name))
 			} else {
 				specs[name] = d.spec
 			}
