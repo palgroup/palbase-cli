@@ -325,15 +325,22 @@ func detectPlatforms(dir string) []string {
 
 var androidApplicationIDPattern = regexp.MustCompile(`(?m)applicationId\s*(?:=\s*)?["']([^"']+)["']`)
 
+// androidBuildFiles are the Gradle files an Android app may declare its
+// applicationId in, relative to the checkout, in the order they are read.
+//
+// ANDROID/ TOO (FR-015). React Native and Flutter keep the whole Gradle build in
+// `android/`, beside `ios/` — the cross-platform layout applePlatforms already
+// reads — so `palbase link` at such a root found Apple and never Android
+// (verification N2). Detection and the OAuth identifier read this ONE list: two
+// lists are two answers to "which app is this".
+var androidBuildFiles = []string{
+	"app/build.gradle.kts", "app/build.gradle", "build.gradle.kts", "build.gradle",
+	"android/app/build.gradle.kts", "android/app/build.gradle", "android/build.gradle.kts", "android/build.gradle",
+}
+
 func detectAndroidApplicationID(root string) (string, error) {
-	candidates := []string{
-		filepath.Join(root, "app", "build.gradle.kts"),
-		filepath.Join(root, "app", "build.gradle"),
-		filepath.Join(root, "build.gradle.kts"),
-		filepath.Join(root, "build.gradle"),
-	}
-	for _, candidate := range candidates {
-		contents, err := os.ReadFile(candidate)
+	for _, name := range androidBuildFiles {
+		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 		if err != nil {
 			continue
 		}

@@ -238,8 +238,8 @@ func nativeIdentifiers(platform string) []string {
 	if platform == "android" {
 		root, _ := os.Getwd()
 		var identifiers []string
-		for _, path := range []string{"app/build.gradle.kts", "app/build.gradle", "build.gradle.kts", "build.gradle"} {
-			raw, err := os.ReadFile(filepath.Join(root, path))
+		for _, path := range androidBuildFiles {
+			raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 			if err != nil {
 				continue
 			}
