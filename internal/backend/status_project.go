@@ -21,9 +21,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 type deploymentState struct {
@@ -232,44 +235,142 @@ func credentialKindWord(kind Kind) string {
 // every installed build authenticating with something the project no longer
 // accepts, and the app reports it as a sign-in failure. Nothing else in this CLI
 // would notice, because the committed slot is a file and files do not expire.
+//
+// EVERY PLATFORM THIS CHECKOUT SHIPS, EACH NAMED (FR-018). It read the iOS
+// configs alone, so an Android or web checkout got no line at all — and a
+// checkout with both got "current" for iOS while its Android key was stale.
 func reportKeyDrift(ctx context.Context, target Target, env string, cred Credentials, out io.Writer) {
-	envs, err := readAppEnvironments("ios")
-	if err != nil || len(envs.Environments) == 0 {
-		return
+	d := measureAppKeys(ctx, target, env)
+	if len(d.stale) > 0 {
+		// The keys themselves are not printed — a publishable key is not a secret,
+		// but printing two nearly-identical strings invites reading them for the
+		// difference instead of running the command that fixes it.
+		fmt.Fprintf(out, "app key:      STALE (%s) — %s ships a key this project no longer hands out.\n",
+			strings.Join(d.stale, ", "), envname.Label(d.env))
+		fmt.Fprintln(out, "              Run `palbase link` to refresh it, then rebuild the app.")
 	}
-	// EVERY ENVIRONMENT IS ON DISK after a link, so the key to compare is the
-	// one of the environment this command resolved; with none, the one a build
-	// without a choice uses.
-	if env == "" {
-		env = envs.Default
-	}
-	entry, ok := envs.Environments[env]
-	if !ok {
-		// Silence would read as "the key is fine" here too: other environments
-		// are on disk, the one this command acts on is not.
-		fmt.Fprintf(out, "app key:      unchecked — %s has no committed config here; `palbase link` writes it\n", env)
-		return
-	}
-	if entry.APIKey == "" {
-		return
-	}
-
-	current, err := projectPublishableKey(ctx, target)
-	if err != nil {
+	if d.err != nil {
 		// Cannot check is not the same as checked. Silence here would read as
 		// "the key is fine".
-		fmt.Fprintf(out, "app key:      could not be checked (%v)\n", err)
-		return
+		fmt.Fprintf(out, "app key:      could not be checked (%v)\n", d.err)
 	}
-	if current == entry.APIKey {
-		fmt.Fprintf(out, "app key:      current\n")
-		return
+	for _, u := range d.unreadable {
+		// A config that cannot be read is not a config that is fine either: the
+		// platform is named with the read error, which names the file to fix.
+		fmt.Fprintf(out, "app key:      unchecked (%s) — a config here could not be read (%v)\n",
+			strings.Join(u.platforms, ", "), u.err)
 	}
-	// The keys themselves are not printed — a publishable key is not a secret,
-	// but printing two nearly-identical strings invites reading them for the
-	// difference instead of running the command that fixes it.
-	fmt.Fprintf(out, "app key:      STALE — %s ships a key this project no longer hands out.\n", env)
-	fmt.Fprintln(out, "              Run `palbase link` to refresh it, then rebuild the app.")
+	if len(d.missing) > 0 {
+		// Silence would read as "the key is fine" here too: other environments
+		// are on disk, the one this command acts on is not.
+		fmt.Fprintf(out, "app key:      unchecked (%s) — %s has no committed config here; `palbase link` writes it\n",
+			strings.Join(d.missing, ", "), envname.Label(d.env))
+	}
+	if len(d.keyless) > 0 {
+		// And a config that carries no key — what an older CLI wrote for a
+		// stack that was down — ships nothing to compare.
+		fmt.Fprintf(out, "app key:      unchecked (%s) — %s ships no key here; `palbase link` writes it\n",
+			strings.Join(d.keyless, ", "), envname.Label(d.env))
+	}
+	if len(d.current) > 0 {
+		fmt.Fprintf(out, "app key:      current (%s)\n", strings.Join(d.current, ", "))
+	}
+}
+
+// appKeyDrift is what the keys this checkout ships say about one environment,
+// platform by platform.
+type appKeyDrift struct {
+	env        string              // the environment compared
+	current    []string            // platforms whose key is the one the project hands out
+	stale      []string            // platforms whose key the project no longer hands out
+	missing    []string            // platforms with configs here, none of them for env
+	keyless    []string            // platforms whose config for env carries no key
+	unreadable []unreadableConfigs // platforms whose configs could not be read
+	err        error               // the project could not be asked
+}
+
+// unreadableConfigs is the platforms whose configs failed to read with one
+// error — every platform at once when the environments directory itself cannot
+// be listed, so the reason is said once rather than once per platform.
+type unreadableConfigs struct {
+	platforms []string
+	err       error
+}
+
+// measureAppKeys compares env's key on every platform with a config on disk,
+// in knownPlatforms' order, and asks the project once.
+//
+// EVERY ENVIRONMENT IS ON DISK after a link, so the key to compare is the one
+// of the environment this command resolved; with none, the one a build without
+// a choice uses — decided over every platform's environments together, so one
+// report speaks of one environment.
+//
+// A PLATFORM WHOSE CONFIG CANNOT BE READ IS KEPT, with the read error: skipping
+// it would let the platforms that did read answer "current" for a checkout
+// whose other build nobody compared.
+func measureAppKeys(ctx context.Context, target Target, env string) appKeyDrift {
+	d := appKeyDrift{env: env}
+	onDisk := map[string]appEnvironments{}
+	var platforms, names []string
+	for _, platform := range knownPlatforms {
+		envs, err := readAppEnvironments(platform)
+		if err != nil {
+			d.unreadableAt(platform, err)
+			continue
+		}
+		if len(envs.Environments) == 0 {
+			continue
+		}
+		onDisk[platform] = envs
+		platforms = append(platforms, platform)
+		names = append(names, envs.names()...)
+	}
+	if len(platforms) == 0 {
+		return d
+	}
+	if d.env == "" {
+		d.env = diskDefault(names)
+	}
+	var keyed []string
+	for _, platform := range platforms {
+		entry, ok := onDisk[platform].Environments[d.env]
+		switch {
+		case !ok:
+			d.missing = append(d.missing, platform)
+		case entry.APIKey == "":
+			d.keyless = append(d.keyless, platform)
+		default:
+			keyed = append(keyed, platform)
+		}
+	}
+	if len(keyed) == 0 {
+		return d
+	}
+	current, err := projectPublishableKey(ctx, target)
+	if err != nil {
+		d.err = err
+		return d
+	}
+	for _, platform := range keyed {
+		if onDisk[platform].Environments[d.env].APIKey == current {
+			d.current = append(d.current, platform)
+		} else {
+			d.stale = append(d.stale, platform)
+		}
+	}
+	return d
+}
+
+// unreadableAt records that platform's configs could not be read, beside any
+// platform that failed with the same error.
+func (d *appKeyDrift) unreadableAt(platform string, err error) {
+	for i := range d.unreadable {
+		if d.unreadable[i].err.Error() == err.Error() {
+			d.unreadable[i].platforms = append(d.unreadable[i].platforms, platform)
+			return
+		}
+	}
+	d.unreadable = append(d.unreadable, unreadableConfigs{platforms: []string{platform}, err: err})
 }
 
 // statusAsJSON answers the same questions the text output does, without the
@@ -315,25 +416,18 @@ func statusAsJSON(ctx context.Context, cmd *cobra.Command, target Target, keyEnv
 //
 // "unchecked" covers both "this checkout ships no key" and "the project could
 // not be asked" — a script that must not run against a stale key treats them the
-// same, and calling either of them "current" is the failure this reports.
+// same, and calling either of them "current" is the failure this reports. So
+// one stale platform makes the answer "stale", and "current" needs every
+// platform on disk compared and current — a platform whose config could not be
+// read was not compared.
 func appKeyState(ctx context.Context, target Target, env string) string {
-	envs, err := readAppEnvironments("ios")
-	if err != nil || len(envs.Environments) == 0 {
-		return "unchecked"
-	}
-	if env == "" {
-		env = envs.Default
-	}
-	entry, ok := envs.Environments[env]
-	if !ok || entry.APIKey == "" {
-		return "unchecked"
-	}
-	current, err := projectPublishableKey(ctx, target)
-	if err != nil {
-		return "unchecked"
-	}
-	if current == entry.APIKey {
+	d := measureAppKeys(ctx, target, env)
+	switch {
+	case len(d.stale) > 0:
+		return "stale"
+	case len(d.current) > 0 && len(d.missing) == 0 && len(d.keyless) == 0 && len(d.unreadable) == 0:
 		return "current"
+	default:
+		return "unchecked"
 	}
-	return "stale"
 }

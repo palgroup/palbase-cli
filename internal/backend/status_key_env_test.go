@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -14,12 +13,7 @@ import (
 
 func seedIOSKeys(t *testing.T, url string, keys map[string]string) {
 	t.Helper()
-	for env, key := range keys {
-		require.NoError(t, os.MkdirAll(EnvDir(env), 0o755))
-		blob, err := json.MarshalIndent(appEnvironment{AppID: projectAppID, BaseURL: url, APIKey: key}, "", "  ")
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(ConfigPath(env, "ios"), blob, 0o644))
-	}
+	seedKeys(t, "ios", url, keys)
 }
 
 // runStatus runs `palbase status`, as text or as --json, the way the command does.
@@ -76,7 +70,9 @@ func TestKeyDriftSaysWhenTheResolvedEnvironmentHasNoConfig(t *testing.T) {
 	var out bytes.Buffer
 	reportKeyDrift(context.Background(), Target{URL: srv.URL}, "staging",
 		Credentials{Value: "a-credential", Kind: KindPerson}, &out)
-	assert.Contains(t, out.String(), "app key:      unchecked — staging has no committed config")
+	// The line names the platform whose configs were read (FR-018): another
+	// platform may carry staging, and "unchecked" is only this one's answer.
+	assert.Contains(t, out.String(), "app key:      unchecked (ios) — staging has no committed config")
 	assert.Equal(t, "unchecked", appKeyState(context.Background(), Target{URL: srv.URL}, "staging"))
 }
 

@@ -1193,15 +1193,25 @@ func readAppEnvironments(platform string) (appEnvironments, error) {
 		}
 		out.Environments[e.Name()] = env
 	}
-	// `local` is not the default while any other environment is here: a build
-	// that forgot to say which environment it wanted must not silently talk to a
-	// developer's laptop. A checkout that carries only `local` has nothing else the
-	// default could be.
-	out.Default = defaultEnvironment(out.names())
-	if out.Default == "" && len(out.Environments) > 0 {
-		out.Default = out.names()[0]
-	}
+	out.Default = diskDefault(out.names())
 	return out, nil
+}
+
+// diskDefault is the environment a checkout carrying these names acts on when
+// nothing chose one.
+//
+// `local` is not the default while any other environment is here: a build
+// that forgot to say which environment it wanted must not silently talk to a
+// developer's laptop. A checkout that carries only `local` has nothing else the
+// default could be.
+func diskDefault(names []string) string {
+	if d := defaultEnvironment(names); d != "" {
+		return d
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return slices.Min(names)
 }
 
 // unavailableEnvironment is D-7's filter: an environment in these phases
