@@ -897,13 +897,13 @@ func TestLinkWiresAWebCheckoutEndToEnd(t *testing.T) {
 		t.Errorf("the project's own script did not survive the patch:\n%s", pkg)
 	}
 
-	// AND NO IGNORE FILE IS INVENTED. A curated checkout keeps its own rules;
-	// one that has none is left alone, because this CLI has nothing to ignore:
-	// everything it writes here is committed. `link` only writes a `.gitignore`
-	// where it also scaffolds the project.
+	// AND THE IGNORE FILE NAMES ONE PALBASE PATH AT MOST: everything this CLI
+	// writes here is committed except this machine's stack, `local/` (FR-020).
 	if ignore, err := os.ReadFile(".gitignore"); err == nil {
-		if strings.Contains(strings.ToLower(string(ignore)), "palbase") {
-			t.Errorf(".gitignore still ignores a palbase path:\n%s", ignore)
+		for _, line := range strings.Split(string(ignore), "\n") {
+			if strings.Contains(strings.ToLower(line), "palbase") && line != localIgnoreLine {
+				t.Errorf(".gitignore ignores a palbase path other than this machine's stack: %q\n%s", line, ignore)
+			}
 		}
 	}
 }

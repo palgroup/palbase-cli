@@ -964,6 +964,18 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	case ignoreFileRewritten:
 		announceModified(w, ".gitignore")
 	}
+	// AND THIS MACHINE'S STACK STAYS OUT OF GIT (FR-020) — wherever a link writes
+	// per-environment files at all; a checkout with no client gets no local/.
+	if writesPerEnvironmentArtifacts(platforms) {
+		added, err := ignoreThisMachinesStack(".gitignore")
+		if err != nil {
+			return fmt.Errorf("update .gitignore: %w", err)
+		}
+		if added {
+			fmt.Fprintf(w, "added %s/ to .gitignore — it holds this machine's stack address and key, "+
+				"which no teammate's build should use\n", EnvDir(localEnvName))
+		}
+	}
 
 	// NOTHING MARKS GENERATED CODE ANY MORE, and that is the retirement, not an
 	// omission: `palbase/.gitattributes` was a second, hidden file this tool kept
@@ -1608,6 +1620,45 @@ func gitIgnoresNodeModules(dir string) bool {
 	cmd := exec.Command("git", "check-ignore", "-q", "node_modules/")
 	cmd.Dir = dir
 	return cmd.Run() == nil
+}
+
+// ignoreThisMachinesStack makes sure the ignore file at path keeps
+// `palbase/environments/local/` out of git, and reports whether it had to add
+// the rule (FR-020, D-014).
+//
+// THE ONE RULE THIS CLI ADDS TO A FILE SOMEBODY WROTE — the exception to
+// FR-012, because of whose directory it is. Everything else under `palbase/`
+// is the project's and is committed; `local/` is this machine's: the port its
+// stack listens on and that stack's key. Committed, it became every teammate's
+// debug build, whose default environment is `local` (D-003) — a clone built
+// against the laptop of whoever linked last. A rule already there, in any
+// spelling git reads the same, leaves the file exactly as it is; a new one
+// follows the file's own line ending.
+func ignoreThisMachinesStack(path string) (bool, error) {
+	dir := EnvDir(localEnvName)
+	content, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	body := string(content)
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Trim(strings.TrimSpace(line), "/") == dir {
+			return false, nil
+		}
+	}
+	eol := "\n"
+	if strings.Contains(body, "\r\n") {
+		eol = "\r\n"
+	}
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += eol
+	}
+	body += dir + "/" + eol
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	return true, os.WriteFile(path, []byte(body), mode)
 }
 
 // refuseUnsupportedPlatforms rejects a NAMED platform this directory has no way

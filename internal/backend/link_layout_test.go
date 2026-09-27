@@ -129,10 +129,11 @@ func TestLinkLayoutPrintsTheSelectionPattern(t *testing.T) {
 
 // AND `link` NO LONGER REPAIRS AN IGNORE FILE.
 //
-// It has nothing to ignore: everything it writes is committed. Leaving the call
-// in would keep editing somebody's `.gitignore` to add rules for files that no
-// longer exist.
-func TestLinkLayoutWritesNoIgnoreRules(t *testing.T) {
+// It has almost nothing to ignore: everything it writes is committed except
+// `palbase/environments/local/`, this machine's stack (FR-020, D-014). Leaving
+// the old repair in would keep editing somebody's `.gitignore` to add rules for
+// files that no longer exist; that one rule is the whole edit.
+func TestLinkLayoutWritesOnlyTheLocalIgnoreRule(t *testing.T) {
 	inScratchCheckout(t)
 	useStub(t, stubSwiftgen(t, filepath.Join(t.TempDir(), "argv")), nil)
 	srv := stackServing(t, "pb_project_cPUBLISHABLE", nil)
@@ -144,7 +145,7 @@ func TestLinkLayoutWritesNoIgnoreRules(t *testing.T) {
 
 	body, err := os.ReadFile(".gitignore")
 	require.NoError(t, err)
-	require.Equal(t, mine, string(body), "`link` edited the checkout's ignore file")
+	require.Equal(t, mine+localIgnoreLine+"\n", string(body), "`link` edited the checkout's ignore file beyond the local rule")
 }
 
 // treeOf lists a directory tree, relative and sorted, for before/after equality.

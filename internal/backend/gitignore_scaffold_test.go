@@ -14,6 +14,10 @@ package backend
 // AN EMPTY FILE IS NOT "NO FILE". Somebody created it, and what it says is
 // "nothing is ignored in this repository" — an answer this tool does not get to
 // overwrite.
+//
+// ONE RULE IS THE EXCEPTION, and only `link` in an app checkout adds it:
+// `palbase/environments/local/`, this machine's stack (FR-020, D-014). The link
+// subtests below carry it; link_local_ignore_test.go pins the rule itself.
 
 import (
 	"context"
@@ -59,7 +63,9 @@ func TestGitignoreIsScaffoldedOnlyWhereThereIsNone(t *testing.T) {
 
 		body, err := os.ReadFile(".gitignore")
 		require.NoError(t, err, "`link` created no .gitignore in a checkout that had none")
-		requireEcosystemScaffold(t, string(body))
+		// The ecosystem's rules, and — this is an app checkout — the one rule
+		// for this machine's stack (FR-020). Nothing else of this CLI's.
+		require.Equal(t, gitignoreScaffold()+localIgnoreLine+"\n", string(body))
 	})
 
 	t.Run("init", func(t *testing.T) {
@@ -74,7 +80,9 @@ func TestGitignoreIsScaffoldedOnlyWhereThereIsNone(t *testing.T) {
 	})
 }
 
-// FR-012: VAR OLAN BİR DOSYAYA TEK SATIR EKLENMEZ — BOŞ OLANA DA.
+// FR-012: NO SINGLE LINE IS ADDED TO AN EXISTING FILE — NOT EVEN AN EMPTY ONE.
+// The one exception is FR-020: in an app checkout, `link` adds the rule for
+// this machine's stack (D-014), and adds no other line.
 func TestGitignoreAnExistingFileGainsNoRule(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"boş dosya", ""},
@@ -90,7 +98,8 @@ func TestGitignoreAnExistingFileGainsNoRule(t *testing.T) {
 
 				got, err := os.ReadFile(".gitignore")
 				require.NoError(t, err)
-				require.Equal(t, tc.body, string(got), "`link` wrote into a .gitignore the checkout already had")
+				require.Equal(t, tc.body+localIgnoreLine+"\n", string(got),
+					"`link` wrote into a .gitignore the checkout already had — more than this machine's stack rule")
 			})
 
 			t.Run("init", func(t *testing.T) {
@@ -129,7 +138,8 @@ func TestGitignoreTakesBackOnlyItsRetiredRules(t *testing.T) {
 
 		got, err := os.ReadFile(".gitignore")
 		require.NoError(t, err)
-		require.Equal(t, want, string(got))
+		// …and this machine's stack rule (FR-020), in the file's own line ending.
+		require.Equal(t, want+localIgnoreLine+"\r\n", string(got))
 	})
 
 	t.Run("init", func(t *testing.T) {

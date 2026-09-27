@@ -38,6 +38,10 @@ import (
 // `*.log` are the ecosystem's, not this CLI's, and no current entry is ours.
 // The distinction is DECLARED rather than derived from the string: a rule whose
 // subject is guessed is a rule that measures something else (review-T015).
+//
+// `palbase/environments/local/` is not here, on purpose: it is this machine's,
+// not a generated path every checkout ignores, and only `link` in an app
+// checkout adds its rule (ignoreThisMachinesStack, FR-020).
 var generatedProjectPaths = []struct {
 	path, why string
 	ours      bool

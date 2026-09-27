@@ -11,6 +11,8 @@ package backend
 // The property this pins is NFR-001: every file under `palbase/` is trackable.
 // An ignore rule here would silently keep a customer's generated client, or
 // their environment's contract, out of the history that is supposed to carry it.
+// `palbase/environments/local/` is the one directory that is this MACHINE's —
+// `link` ignores it in an app checkout (FR-020), never through the scaffold.
 
 import (
 	"context"
