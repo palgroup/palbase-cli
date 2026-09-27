@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -59,4 +60,25 @@ func TestSchemaPlanInSyncDoesNotHideARefusal(t *testing.T) {
 	renderSchemaPlan(&out, []byte(`{"in_sync":true,"incompatible":["the running release cannot serve this shape"]}`))
 	require.Contains(t, out.String(), "the running release cannot serve this shape")
 	require.NotContains(t, out.String(), "in sync")
+}
+
+// Ş-2: the cloud plan says what the deploy leaves alone, in sync or not — and
+// never as a change.
+func TestRenderSchemaPlanShowsWhatTheDeployLeavesAlone(t *testing.T) {
+	for _, body := range []string{
+		`{"in_sync":true,"changes":[],"destructive":[],"unmanaged":["unmanaged — in the database, not declared in db/; the rail leaves these alone:","  unmanaged table  handmade"]}`,
+		`{"in_sync":false,"changes":["add column todos.done"],"destructive":[],"unmanaged":["  unmanaged table  handmade"]}`,
+	} {
+		var out bytes.Buffer
+		renderSchemaPlan(&out, []byte(body))
+		got := out.String()
+		if !strings.Contains(got, "unmanaged table  handmade") {
+			t.Errorf("the cloud plan does not say what the deploy leaves alone:\n%s", got)
+		}
+	}
+	var out bytes.Buffer
+	renderSchemaPlan(&out, []byte(`{"in_sync":true,"changes":[],"destructive":[],"unmanaged":["  unmanaged table  handmade"]}`))
+	if !strings.Contains(out.String(), "in sync") {
+		t.Errorf("an in-sync plan with unmanaged objects stopped saying it is in sync:\n%s", out.String())
+	}
 }

@@ -400,6 +400,9 @@ type schemaPlanWire struct {
 	} `json:"destructive"`
 	Unsupported  []string `json:"unsupported"`
 	Incompatible []string `json:"incompatible"`
+	// Unmanaged: objects the deploy leaves alone (Ş-2) — not changes, never
+	// counted; printed after everything else, in sync or not.
+	Unmanaged []string `json:"unmanaged"`
 }
 
 func renderSchemaPlan(out io.Writer, body []byte) {
@@ -408,6 +411,11 @@ func renderSchemaPlan(out io.Writer, body []byte) {
 		fmt.Fprintf(out, "  (unreadable plan: %s)\n", trimBody(body))
 		return
 	}
+	defer func() {
+		for _, l := range plan.Unmanaged {
+			fmt.Fprintf(out, "  %s\n", l)
+		}
+	}()
 	if plan.InSync && len(plan.Changes) == 0 && len(plan.Destructive) == 0 &&
 		len(plan.Unsupported) == 0 && len(plan.Incompatible) == 0 {
 		fmt.Fprintln(out, "  in sync")
