@@ -174,6 +174,11 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 			"and two clients, and no way to tell which one a build read",
 			strings.Join(found, ", "))
 	}
+	// AND THE NEW LAYOUT IS SPELLED `palbase`, EXACTLY — before the stage is
+	// made, because the stage is what another spelling gets around.
+	if err := refuseAnotherSpellingOfTheRoot(root); err != nil {
+		return err
+	}
 	if err := validatePlatforms(o.platforms); err != nil {
 		return err
 	}
@@ -285,6 +290,60 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 		return err
 	}
 	return releaseForProject(o, root, w)
+}
+
+// refuseAnotherSpellingOfTheRoot refuses a checkout whose root holds a
+// directory, or a link, that a disk ignoring letter case and Unicode form takes
+// for RootDir() without its being spelled so — `Palbase/`, say.
+//
+// THE STAGE KNOWS ITS DIRECTORIES BY THE EXACT NAME. runLink keys `mutable` by
+// RootDir(), so `Palbase/` was not copied into the stage but symlinked there,
+// like every directory a link never writes; and on the disk the stage lives on
+// — every Mac's — the stage's `palbase/` then IS that symlink. Measured in the
+// final review of wave 1: the link wrote environments and swept them straight
+// in the real checkout, and a link that failed left a half-written environment
+// there while it said "previous client artifacts were preserved".
+//
+// DECIDED BY THE NAME, ON EVERY DISK. What resolves the stage's `palbase/` is
+// the stage's disk, not the checkout's: measured with the checkout on a
+// case-sensitive volume and the stage in the default temp directory, the link
+// wrote into `Palbase/` all the same and then said to commit a `palbase/` that
+// did not exist.
+//
+// NOT BY ADDING THE SPELLING TO `mutable`: collectArtifacts reads the stage by
+// the on-disk name and skips every top-level directory `mutable` does not
+// hold, so `after` would come back without a single file of `before`, and the
+// publish would delete them all.
+//
+// Only a directory or a link counts — exactly what the stage symlinks. A plain
+// file by that name is copied, and the link fails on it by itself.
+func refuseAnotherSpellingOfTheRoot(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	exact, other := false, ""
+	for _, e := range entries {
+		name := e.Name()
+		if name == RootDir() {
+			exact = true
+			continue
+		}
+		if other == "" && (e.IsDir() || e.Type()&os.ModeSymlink != 0) && envname.SameDirectory(name, RootDir()) {
+			other = name
+		}
+	}
+	switch {
+	case other == "":
+		return nil
+	case exact:
+		// Only a case-sensitive disk holds both; renaming onto the real one
+		// would collide.
+		return fmt.Errorf("this checkout holds both `%s` and `%s`, which are one directory on a Mac; "+
+			"move `%s` aside and run `palbase link` again", envname.Label(other), RootDir(), envname.Label(other))
+	}
+	return fmt.Errorf("this checkout spells the palbase directory `%s`; rename it to `%s` and run `palbase link` again",
+		envname.Label(other), RootDir())
 }
 
 // publishProjectContract copies the linked project's identity out of a stage a
