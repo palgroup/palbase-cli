@@ -497,14 +497,39 @@ func publishArtifacts(root string, before, after map[string]artifactFile) error 
 func followCaseRenames(root string, before, after map[string]artifactFile) (map[string]artifactFile, func() error, error) {
 	base := filepath.Join(RootDir(), envSubdir)
 	was, is := envDirsOf(base, before), envDirsOf(base, after)
+	// EVERY DIRECTORY THE CHECKOUT HOLDS, NOT ONLY THOSE WITH FILES IN IT (T016
+	// review). `before` names files, so an empty `Staging/` was no directory at
+	// all here: on a Mac the link wrote staging's files into it and the stage
+	// renamed it, while the checkout kept the old spelling under a line saying
+	// it was renamed — until the next link.
+	entries, err := os.ReadDir(filepath.Join(root, base))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			was[e.Name()] = true
+		}
+	}
 	renames := map[string]string{}
 	for old := range was {
 		if is[old] {
 			continue
 		}
-		if news := foldedOnly(old, is, was); len(news) == 1 && len(foldedOnly(news[0], was, is)) == 1 {
-			renames[old] = news[0]
+		news := foldedOnly(old, is, was)
+		if len(news) != 1 || len(foldedOnly(news[0], was, is)) != 1 {
+			continue
 		}
+		// TWO DIRECTORIES ARE NOT ONE RENAMED (T016 review). A rename is for one
+		// directory under two spellings; where the new name is another
+		// directory — a case-sensitive disk can hold an empty `staging/` beside
+		// `Staging/` — it failed with "file exists", on every link. Those
+		// publish as they did before a rename was ever made: as removals and
+		// creations.
+		if !oneDirectoryOrNone(filepath.Join(root, base, old), filepath.Join(root, base, news[0])) {
+			continue
+		}
+		renames[old] = news[0]
 	}
 	var done []string
 	undo := func() error {
@@ -532,6 +557,21 @@ func followCaseRenames(root string, before, after map[string]artifactFile) (map[
 		moved[path] = file
 	}
 	return moved, undo, nil
+}
+
+// oneDirectoryOrNone reports whether `from` is a directory that can take the
+// name `to`: nothing is there yet, or the disk says both names are one file —
+// a spelling it does not tell apart.
+func oneDirectoryOrNone(from, to string) bool {
+	source, err := os.Lstat(from)
+	if err != nil || !source.IsDir() {
+		return false
+	}
+	target, err := os.Lstat(to)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	return err == nil && os.SameFile(source, target)
 }
 
 // envDirsOf names every environment directory a set of files lives in.

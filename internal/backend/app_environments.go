@@ -292,6 +292,9 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 	for _, e := range entries {
 		onDisk[e.Name()] = true
 	}
+	// renamedInto is every listed spelling this sweep made by renaming an old
+	// one. It is on disk now, but this run did not write it.
+	renamedInto := map[string]bool{}
 	for _, e := range entries {
 		if !e.IsDir() || wanted[e.Name()] {
 			continue
@@ -311,6 +314,22 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 			continue
 		}
 		dir := filepath.Join(base, e.Name())
+		inside, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		// AN EMPTY DIRECTORY IS LEFT, AND NOTHING IS SAID ABOUT IT (T014
+		// review). The link sweeps its stage, and publishing carries file
+		// changes only: the stage lost the directory, the checkout kept it, and
+		// every link said "removed" again. An empty directory builds nothing.
+		//
+		// THAT INCLUDES AN EMPTY OLD SPELLING (T016 review). Renamed in the
+		// stage, it held no file for the publish to carry, so the checkout
+		// kept the old spelling under a line saying it was renamed — on every
+		// link. One this run wrote into is not empty here, and is renamed.
+		if len(inside) == 0 {
+			continue
+		}
 		// AN ENVIRONMENT IN ANOTHER LETTER CASE IS NOT A LOST ONE (FR-012).
 		// Names were compared exactly, so once the project spelled `Staging`
 		// as `staging`, `Staging/` read as gone — and on a Mac it was the very
@@ -323,31 +342,35 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 		// nothing says which spelling it should have. NOR WHEN THE EXACT
 		// SPELLING IS ON DISK TOO — only a case-sensitive disk holds both, and
 		// there the exact one is what this run wrote; the other is swept.
+		//
+		// UNLESS THIS SWEEP PUT THE EXACT SPELLING THERE (T016 review). A
+		// case-sensitive disk can hold two old spellings, `STAGING/` and
+		// `Staging/`. The first was renamed to `staging`, and the second then
+		// read as an old spelling beside the one this run wrote, and went —
+		// measured: the newer of the two copies was deleted and the older kept.
+		// Neither is this run's, and nothing says which one is the
+		// environment, so the second is left and said.
+		lost := true
 		reason := "the project no longer has that environment"
 		switch spelled := foldedOnly(e.Name(), wanted, nil); {
 		case len(spelled) > 1:
+			continue
+		case len(spelled) == 1 && renamedInto[spelled[0]]:
+			fmt.Fprintf(w, "left %s — the project spells that environment %s now, and %s already holds it; "+
+				"move one aside\n", shownEnvDir(e.Name()), envname.Label(spelled[0]), shownEnvDir(spelled[0]))
 			continue
 		case len(spelled) == 1 && !onDisk[spelled[0]]:
 			if err := os.Rename(dir, filepath.Join(base, spelled[0])); err != nil {
 				return err
 			}
 			onDisk[e.Name()], onDisk[spelled[0]] = false, true
+			renamedInto[spelled[0]] = true
 			fmt.Fprintf(w, "renamed %s to %s — the project spells that environment %s now, and a build finds "+
 				"its directory by the exact name\n", shownEnvDir(e.Name()), envname.Label(spelled[0]), envname.Label(spelled[0]))
 			continue
 		case len(spelled) == 1:
+			lost = false
 			reason = "the project spells that environment " + envname.Label(spelled[0]) + " now"
-		}
-		inside, err := os.ReadDir(dir)
-		if err != nil {
-			return err
-		}
-		// AN EMPTY DIRECTORY IS LEFT, AND NOTHING IS SAID ABOUT IT (T014
-		// review). The link sweeps its stage, and publishing carries file
-		// changes only: the stage lost the directory, the checkout kept it, and
-		// every link said "removed" again. An empty directory builds nothing.
-		if len(inside) == 0 {
-			continue
 		}
 		ours := true
 		for _, f := range inside {
@@ -364,8 +387,15 @@ func removeStaleEnvironmentDirs(root string, keep []string, leftover string, w i
 			// A WRITER MUST NOT DELETE WHAT IT CANNOT REPRODUCE. The developer
 			// gets the path and the reason; the build error they would otherwise
 			// chase is spelled out for them.
-			fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase "+
-				"did not write — %s\n", shownEnvDir(e.Name()), leftover)
+			//
+			// AND THE REASON IS THE TRUE ONE (T016 review): an old spelling
+			// belongs to an environment the project still has.
+			if lost {
+				fmt.Fprintf(w, "%s belongs to no environment in this project and holds files Palbase "+
+					"did not write — %s\n", shownEnvDir(e.Name()), leftover)
+			} else {
+				fmt.Fprintf(w, "%s holds files Palbase did not write (%s) — %s\n", shownEnvDir(e.Name()), reason, leftover)
+			}
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {

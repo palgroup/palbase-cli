@@ -239,3 +239,163 @@ func TestALinkKeepsAnEnvironmentRenamedByCaseAlone(t *testing.T) {
 		})
 	}
 }
+
+// linkListingMainAndStaging runs one link of a project that lists `main` and
+// `staging`, both readable, and returns what it printed and staging's address.
+func linkListingMainAndStaging(t *testing.T, platform string) (string, string) {
+	t.Helper()
+	main := stackServing(t, linkKeyMain, nil)
+	staging := stackServing(t, linkKeyStaging, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL, "stagref000": staging.URL})
+	o := linkOpts{
+		url:       main.URL,
+		platforms: []string{platform},
+		linkedEnv: "main",
+		product:   Product{ID: "prd_a", Name: "todoapp"},
+		environments: []Environment{
+			{Name: "main", Ref: "mainref000", Status: "Running"},
+			{Name: "staging", Ref: "stagref000", Status: "Running"},
+		},
+	}
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+	return out.String(), staging.URL
+}
+
+// A SECOND OLD SPELLING IS NEVER SWEPT AS THE FIRST ONE'S LEFTOVER (T016
+// review). Only a case-sensitive disk holds `STAGING/` and `Staging/` at once.
+// The first was renamed to `staging`, the second then read as an old spelling
+// beside the exact one this run wrote, and it went — measured: the newer of
+// the two copies was deleted and the older kept. Neither is this run's, and
+// nothing says which one is the environment, so the second is left and said.
+func TestTheSweepNeverRemovesASecondOldSpelling(t *testing.T) {
+	root := t.TempDir()
+	if caseInsensitiveDisk(t, root) {
+		t.Skip("this disk takes STAGING and Staging for one name — there is no second old spelling")
+	}
+	seedUnder(t, root, "STAGING", "openapi.json", "ancient")
+	seedUnder(t, root, "Staging", "openapi.json", "recent")
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main", "staging"}, selectedLeftover, &out))
+
+	require.Equal(t, []string{"Staging", "staging"}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	for env, body := range map[string]string{"staging": "ancient", "Staging": "recent"} {
+		raw, err := os.ReadFile(filepath.Join(root, underEnvironments(env, "openapi.json")))
+		require.NoError(t, err)
+		require.Equal(t, body, string(raw), env)
+	}
+	require.NotContains(t, out.String(), "removed ")
+	require.Equal(t, "renamed palbase/environments/STAGING to staging — the project spells that environment staging now, "+
+		"and a build finds its directory by the exact name\n"+
+		"left palbase/environments/Staging — the project spells that environment staging now, and "+
+		"palbase/environments/staging already holds it; move one aside\n", out.String())
+}
+
+// AN EMPTY OLD SPELLING IS CARRIED IN ONE LINK (T016 review). The publish knew
+// the checkout's directories only by the files in them, so an empty `Staging/`
+// — the directory a Mac had just written staging's files into — was not
+// renamed in the checkout: it kept the old spelling under a line saying it was
+// renamed, and only the next link carried it.
+func TestALinkCarriesAnEmptyOldSpellingInOneRun(t *testing.T) {
+	for _, c := range sweepCheckouts {
+		t.Run(c.platform, func(t *testing.T) {
+			inScratchCheckout(t)
+			c.seed(t)
+			require.NoError(t, os.MkdirAll(EnvDir("Staging"), 0o755))
+
+			out, stagingURL := linkListingMainAndStaging(t, c.platform)
+
+			assert.Equal(t, []string{"main", "staging"}, entriesIn(t, filepath.Join(RootDir(), envSubdir)), out)
+			assert.Equal(t, stagingURL, readEnvConfig(t, "staging", c.platform).BaseURL)
+		})
+	}
+}
+
+// AND AN EMPTY OLD SPELLING NOTHING WAS WRITTEN INTO IS LEFT, AND NOTHING IS
+// SAID ABOUT IT — T014's rule for any empty directory. Renamed in the stage,
+// it held no file for the publish to carry, so the checkout kept the old
+// spelling under a line saying it was renamed, on every link.
+func TestTheSweepSaysNothingAboutAnEmptyOldSpelling(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, RootDir(), envSubdir, "Staging"), 0o755))
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main", "staging"}, selectedLeftover, &out))
+
+	require.Equal(t, []string{"Staging"}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	require.Empty(t, out.String())
+}
+
+// TWO DIRECTORIES ARE NOT ONE RENAMED (T016 review). On a case-sensitive disk
+// an empty `staging/` can sit beside the `Staging/` that holds the files, and
+// renaming one onto the other failed with "file exists" — on every link. They
+// publish as they did before a rename was ever made: the old spelling's files
+// go, and the listed spelling holds what this run wrote.
+func TestALinkBesideAnEmptyNewSpellingSucceeds(t *testing.T) {
+	for _, c := range sweepCheckouts {
+		t.Run(c.platform, func(t *testing.T) {
+			inScratchCheckout(t)
+			if caseInsensitiveDisk(t, t.TempDir()) {
+				t.Skip("this disk takes Staging and staging for one name — there is no second directory")
+			}
+			c.seed(t)
+			seedEnvironment(t, "Staging", c.platform)
+			require.NoError(t, os.MkdirAll(EnvDir("staging"), 0o755))
+
+			out, stagingURL := linkListingMainAndStaging(t, c.platform)
+
+			assert.Equal(t, []string{"main", "staging"}, entriesIn(t, filepath.Join(RootDir(), envSubdir)), out)
+			assert.Equal(t, stagingURL, readEnvConfig(t, "staging", c.platform).BaseURL)
+			contract, err := os.ReadFile(SpecPath("staging"))
+			require.NoError(t, err, out)
+			assert.Contains(t, string(contract), `"3.2.0"`, out)
+			assert.Contains(t, out, "removed palbase/environments/Staging (the project spells that environment staging now)\n")
+		})
+	}
+}
+
+// AN OLD SPELLING HOLDING SOMEBODY'S FILE IS SAID TO BE ONE (T016 review). The
+// line said it "belongs to no environment in this project", and the project
+// has that environment — spelled another way now.
+func TestTheSweepSaysAnOldSpellingHoldingSomebodysFileIsOne(t *testing.T) {
+	root := t.TempDir()
+	if caseInsensitiveDisk(t, root) {
+		t.Skip("this disk takes Staging and staging for one name — there is no second directory to sweep")
+	}
+	seedUnder(t, root, "Staging", "openapi.json", "old")
+	seedUnder(t, root, "Staging", "NOTES.md", "mine")
+	seedUnder(t, root, "staging", "openapi.json", "written this run")
+
+	var out strings.Builder
+	require.NoError(t, removeStaleEnvironmentDirs(root, []string{"main", "staging"}, selectedLeftover, &out))
+
+	require.Equal(t, []string{"Staging", "staging"}, entriesIn(t, filepath.Join(root, RootDir(), envSubdir)))
+	raw, err := os.ReadFile(filepath.Join(root, underEnvironments("Staging", "NOTES.md")))
+	require.NoError(t, err)
+	require.Equal(t, "mine", string(raw))
+	require.NotContains(t, out.String(), "belongs to no environment")
+	require.Equal(t, "palbase/environments/Staging holds files Palbase did not write (the project spells that "+
+		"environment staging now) — "+selectedLeftover+"\n", out.String())
+}
+
+// A RENAME NEVER LANDS ON A SECOND DIRECTORY (T016 review) — the publish's own
+// check, measured apart from the directory listing that usually keeps such a
+// pair out of its way. A directory is renamed onto nothing, or onto itself in
+// a spelling the disk does not tell apart; never onto another directory, and
+// nothing but a directory is renamed.
+func TestARenameNeverLandsOnASecondDirectory(t *testing.T) {
+	root := t.TempDir()
+	old := filepath.Join(root, "Staging")
+	require.NoError(t, os.Mkdir(old, 0o755))
+	require.True(t, oneDirectoryOrNone(old, filepath.Join(root, "fresh")))
+	require.False(t, oneDirectoryOrNone(filepath.Join(root, "gone"), filepath.Join(root, "fresh")))
+	require.NoError(t, os.Symlink(old, filepath.Join(root, "Linked")))
+	require.False(t, oneDirectoryOrNone(filepath.Join(root, "Linked"), filepath.Join(root, "fresh")))
+	if caseInsensitiveDisk(t, root) {
+		require.True(t, oneDirectoryOrNone(old, filepath.Join(root, "staging")))
+		return
+	}
+	require.NoError(t, os.Mkdir(filepath.Join(root, "staging"), 0o755))
+	require.False(t, oneDirectoryOrNone(old, filepath.Join(root, "staging")))
+}
