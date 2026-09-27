@@ -148,3 +148,15 @@
 ### D-020 · Prototip kurtarıldı; ham çıktı `/private/tmp`'de bırakılmaz
 **Olay:** macOS 2026-09-26'da `/private/tmp/claude-501`'i temizledi; prototip, yamalar ve sandbox'lar silindi.
 **Kurtarma:** ajan transkriptlerindeki Write/Edit/Bash çağrıları sırayla yeniden oynatıldı; sonuç birebir (13 dosya, +1982/−110; 23+8+47 test yeşil); iki yama da orijinal uzunlukta (83/63 satır). Hepsi `reports/proto-2.4/`'te.
+
+### D-032 · Projesiz link `main/`'i genel süpürmeyle silmez — `main/`'i yalnız loopback testi kaldırır (FR-010 × D-024)
+**Olay (yürütme, plan-cli T011 review, 2026-09-27):** T011 bu makinenin yığınını `local` adlandırınca projesiz link'te `listed` boş, `keep = {local}` oldu; Apple'ın genel süpürmesi (`removeStaleEnvironmentDirs`) CLI dosyası taşıyan HER `main/`'i — bulut adresli olanı dahil — sildi (ölçüldü: `removed …/main (the project no longer has that environment)`). D-024 yalnız her config'i loopback olan `main/`'in kaldırılmasına izin veriyor.
+**Karar:** `len(listed) == 0` iken `soleEnvName` (`main`) `keep`'e girer; `main/`'i yalnız T014'ün `removeThisMachinesOldMain`'i (loopback testi) kaldırır. T014 süpürmeyi `runLinkPrepared`'a taşırken aynı kuralı korur. `isLoopbackAddress` genişletildi: büyük harf, sondaki nokta, 127.0.0.0/8, `::1`, v4-mapped (`net.ParseIP(...).IsLoopback()`); LAN adresleri `main` kalır.
+
+### D-033 · Geri doldurma, yarışta `main`'i başkasında bulan ilk satırı sıradan satır gibi planlar (FR-105 × D-015)
+**Olay (yürütme, plan-cloud final review I-1):** Kayan deploy sırasında eski örnek boş bir ürüne `slug NULL`, yeni örnek aynı ürüne `main` yazabilir; eski örneğin işlemi önce başladıysa sıra-0 satırı slugsuz, `main` sonraki satırda. `planBackfill`'in reddi `held()` üzerinden o ürünün yaratma VE silme isteklerini 500'e, filo çapındaki geri doldurmayı reddine götürüyordu (ürün hiçbir fiille onarılamaz).
+**Karar:** Böyle bir sıra-0 satırı sıradan bekleyen satır gibi planlanır (kept/derived/suffixed); saklanan `main` yetkilidir ve yerinden oynamaz. D-015/FR-102 YARATMAYI yönetir (ilk ortam `main`); yarışı kaybetmiş bir satırı değil. T012'nin runbook'u raporda böyle satırlara bakar.
+
+### D-034 · Studio slug metni CLI slug'ları okuyana kadar yalnız bugün doğru olanı söyler (FR-107 × FR-106 sırası)
+**Olay (yürütme, plan-cloud final review I-2):** T010/T011'in yardım metni slug'ı "her checkout'taki klasörü, Android build type'ı ve `--env` adı" diye anlatıyordu; oysa CLI listesi T014–T016'ya kadar dizin adını `legacyName(görünen ad)`'dan veriyor. Bu pencerede metin yanlış vaat ediyordu.
+**Karar:** Pencere boyunca metin slug'ı ortamın değişmeyen kalıcı adı olarak anlatır (`main` cümlesi kalır); tam metin T016 ile geri gelir. palbase-cloud deploy'u kullanıcının kararıdır; T012–T016 üretim geri doldurmasını bekliyor.

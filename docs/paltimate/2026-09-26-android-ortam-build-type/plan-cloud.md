@@ -2988,6 +2988,8 @@ export const FIRST_ENVIRONMENT_SLUG = "main";
 ### T012: KAPI — geri doldurma canlıda bitti (operatör adımı; kod yok)
 <!-- deps: [T007] | files: [] | satisfies: [FR-105, FR-101] -->
 
+> **Yürütme notu (D-033):** kayan deploy yarışında sıra-0 satırı slugsuz ve `main` sonraki bir satırdaysa geri doldurma o satırı sıradan satır gibi planlar (kept/derived/suffixed) — reddetmez. Operatör raporda sıra-0'da `main` almamış satırları arar; saklanan `main` yetkilidir. Böyle bir üründe saklanan `main` satırının dizini FR-106 (T014–T016) ile görünen adından `main/`'e taşınır ve raporda satırı yoktur — takım arkadaşlarının `palbase.env.release=main`'i başka bir ortama döner; operatör bu ürünlerin sahiplerine haber verir.
+
 **Interfaces:**
 - Consumes: `POST /v1/cloud/environments/slugs/backfill` ve `ENVIRONMENTS_WITHOUT_SLUG_SQL` (T007)
 - Produces: T013'ün tek önkoşulu — üretimde `n = 0`.
@@ -3567,6 +3569,8 @@ describe("the name the CLI listing gave an environment before slugs", () => {
 
 ### T016: Panel, filo görünümü ve dağıtım akışı aynı cevabı verir — adsız ortam slug'ıyla görünür, `is_production` yalnız `main`
 <!-- deps: [T015] | files: [cloud/platform/server/modules/panel/panel.controller.ts, cloud/platform/server/modules/panel/panel.module.ts, cloud/platform/server/modules/panel/panel.environment-slug.pg.test.ts, cloud/platform/server/modules/environments/deployment-activity.sql.ts, cloud/platform/server/modules/environments/deployment-activity.ts, cloud/platform/server/modules/panel/panel.deployment-activity.pg.test.ts, cloud/platform/studio/src/content/docs/getting-started/introduction.md, .github/workflows/cloud-server-typecheck.yml] | satisfies: [FR-106, FR-104] -->
+
+> **Yürütme notu (D-034):** T010/T011'in Studio yardım metni pencere boyunca slug'ı yalnız 'değişmeyen kalıcı ad' olarak anlatır; bu görevle CLI slug'ları okuduğunda tam metin (checkout klasörü, Android build type, `--env` adı) geri getirilir.
 
 **Interfaces:**
 - Consumes: `EnvironmentSlugService.displayName`, `.isProduction` (T014, T015) · `SharedModule` (dışa verir) · `CliController` yüzeyleri (T014, T015).
