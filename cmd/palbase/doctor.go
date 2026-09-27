@@ -191,6 +191,11 @@ func doctorCmd() *cobra.Command {
 					bad(l.label, l.detail)
 				}
 			}
+			if wd, err := os.Getwd(); err == nil {
+				for _, l := range localStackProbes(wd, backend.CommittedLocalEnvironment) {
+					bad(l.label, l.detail)
+				}
+			}
 
 			// Docker prerequisites, before Node: `palbase start` needs these and
 			// used to discover each one by failing with docker's own raw error.
@@ -236,6 +241,22 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// localStackProbes names a `palbase/environments/local/` git tracks in the
+// checkout at dir (FR-020), and says nothing otherwise: on disk and ignored is
+// how `link` leaves it. `link` keeps the directory out of git from now on, but
+// an ignore rule does not untrack what a repository already holds — every clone
+// would go on building its debug variant against the laptop that committed it.
+func localStackProbes(dir string, committed func(dir string) bool) []probeLine {
+	if !committed(dir) {
+		return nil
+	}
+	return []probeLine{{
+		label: "local",
+		detail: "palbase/environments/local/ is committed — it holds one machine's stack address and key, " +
+			"which every teammate's debug build would use; `git rm -r --cached palbase/environments/local`, then commit",
+	}}
 }
 
 // linkProbes is what doctor says about the binding: which project — or which

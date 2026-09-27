@@ -303,21 +303,58 @@ func SweepRetiredArtifacts(dir string) []string { return reapRetiredArtifacts(di
 // Windows: a case-sensitive pathspec misses a tracked `.Palbase/project.json`
 // that `os.RemoveAll(".palbase")` deletes. On a case-sensitive filesystem the
 // wider match can only KEEP something, never delete it.
+//
+// The git call itself is gitLsFiles, shared with CommittedLocalEnvironment —
+// the two ask the identical question and differ only in what "could not ask"
+// means for their caller.
 func gitTracks(dir, rel string) bool {
 	if !insideAGitCheckout(dir) {
 		return false
 	}
-	git, err := exec.LookPath("git")
-	if err != nil {
-		return true
-	}
-	cmd := exec.Command(git, "-C", dir, "ls-files", "-z", "--", ":(icase)"+rel)
-	cmd.Env = withoutGitLocation(os.Environ())
-	out, err := cmd.Output()
-	if err != nil {
+	out, asked := gitLsFiles(dir, rel)
+	if !asked {
 		return true
 	}
 	return len(out) > 0
+}
+
+// CommittedLocalEnvironment reports whether git tracks a file under
+// `palbase/environments/local/` in the checkout at dir: the directory `link`
+// keeps out of git because it is this machine's (FR-020), and which an ignore
+// rule cannot untrack once a repository holds it. Exported for `palbase doctor`.
+//
+// THE OPPOSITE DEFAULT TO gitTracks. That one answers "tracked" when git cannot
+// be asked, because it guards a deletion; this one answers "no", because it
+// raises a warning, and a warning without evidence is noise.
+func CommittedLocalEnvironment(dir string) bool {
+	if !insideAGitCheckout(dir) {
+		return false
+	}
+	out, asked := gitLsFiles(dir, EnvDir(localEnvName))
+	if !asked {
+		return false
+	}
+	return len(out) > 0
+}
+
+// gitLsFiles runs `git -C dir ls-files -z -- :(icase)<rel>` with the
+// repository-locating environment variables removed (see gitTracks for why),
+// and reports whether git could be found and answered cleanly, and what it
+// printed if so. `asked` false covers both git missing from PATH and the
+// command itself failing — the two callers turn "could not ask" into opposite
+// answers, so neither one is decided here.
+func gitLsFiles(dir, rel string) (out []byte, asked bool) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return nil, false
+	}
+	cmd := exec.Command(git, "-C", dir, "ls-files", "-z", "--", ":(icase)"+rel)
+	cmd.Env = withoutGitLocation(os.Environ())
+	out, err = cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // insideAGitCheckout reports whether dir, or any directory above it, carries a
