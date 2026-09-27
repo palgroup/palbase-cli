@@ -107,6 +107,63 @@ func TestTheMissingContractLineNamesWhatEndsIt(t *testing.T) {
 	}
 }
 
+// A WEB CHECKOUT HEARS ONE CURE TOO (FR-014, T018 fix round 1). The web client
+// waits for a contract, and its line used to name a cure of its own — `palbase
+// push --env <default>` — beside missingContractLine's for the same gap. On a
+// project link that was the same step twice; on a projectless one it was a
+// second, WRONG step: `--env` resolves in no projectless checkout, and `palbase
+// push` refuses the stack on this machine outright (stack_push.go). The web line
+// now states only what it has not done; the cure is missingContractLine's, once.
+func TestAWebLinkWithNoContractNamesOneCure(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		project   bool
+		linkedEnv string
+		env       string
+		want      string
+		wrong     string
+	}{
+		{"a project's environment", true, "main", "main",
+			"main has no contract yet, so palbase/environments/main/openapi.json is not written and no client " +
+				"is generated for it — `palbase push --env main`, then `palbase link` here\n",
+			"`palbase push`, then"},
+		{"a stack somebody hosts", false, "main", "main",
+			"main has no contract yet, so palbase/environments/main/openapi.json is not written and no client " +
+				"is generated for it — `palbase push`, then `palbase link` here\n",
+			"push --env main"},
+		{"the stack on this machine", false, "", "local",
+			"local has no contract yet, so palbase/environments/local/openapi.json is not written and no client " +
+				"is generated for it — `palbase start` in the backend, then `palbase link` here\n",
+			"push --env local"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inScratchCheckout(t)
+			seedWebCheckout(t)
+			installStubCodegen(t, "// gen")
+			require.NoError(t, os.RemoveAll(EnvDir("main")), "the stub's seed is a deployed main")
+			stack, _ := envServer(t, linkKeyMain, envServerOpts{socialAuth: true, noContract: true})
+			o := linkOpts{url: stack.URL, platforms: []string{"web"}, linkedEnv: c.linkedEnv}
+			if c.project {
+				routeEnvironments(t, map[string]string{"mainref000": stack.URL})
+				o.product = Product{ID: "prd_a", Name: "todoapp"}
+				o.environments = []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}}
+			} else {
+				linkedAs(t, stack.URL, "operator")
+			}
+
+			var out strings.Builder
+			require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+			assert.Contains(t, out.String(), "the web client is not generated yet: "+c.env+" has no contract\n",
+				"the web line names a cure of its own")
+			assert.Contains(t, out.String(), c.want)
+			assert.Equal(t, 1, strings.Count(out.String(), "then `palbase link`"), "two cures for one missing contract:\n%s", out.String())
+			assert.NotContains(t, out.String(), c.wrong)
+			assert.NoFileExists(t, filepath.Join("palbase", "client.ts"), "a client was generated with no contract to generate it from")
+		})
+	}
+}
+
 // A CHECKOUT WITH NO CLIENT gets no files, so no line about them: it keeps the
 // sentence it always had — the link is recorded, and `palbase spec` fills the
 // contract in.

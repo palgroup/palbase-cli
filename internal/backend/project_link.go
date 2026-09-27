@@ -1167,10 +1167,12 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	// AND EVERY ENVIRONMENT THAT GOT NO CONTRACT, beside the files (FR-014). The
 	// reading above already said why in the project's own words; this is what
 	// the checkout now holds for it, and what ends that.
+	toldMissing := map[string]bool{}
 	if writesPerEnvironmentArtifacts(platforms) {
 		for _, name := range envs.names() {
 			if _, ok := specs[name]; !ok {
 				fmt.Fprint(w, missingContractLine(name, o.product.ID != "", isRegularFile(SpecPath(name))))
+				toldMissing[name] = true
 			}
 		}
 	}
@@ -1259,10 +1261,20 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		// contract and the generator refuses without one: the link failed there,
 		// and the stage took every config and the "nothing deployed" line down
 		// with it — a new project's first link wrote nothing. The configs are
-		// written, the line is said, and the client waits for a push (FR-012).
+		// written, the line is said, and the client waits for a contract (FR-012).
+		//
+		// THE FACT, NOT A CURE OF ITS OWN (FR-014). This line used to end with
+		// `palbase push --env <default>` — beside missingContractLine's cure for
+		// the same gap, and on a projectless link a wrong one: `--env` resolves in
+		// no projectless checkout, and `palbase push` refuses the stack on this
+		// machine. The default is never dropped or left unwritten without failing
+		// the link, so missingContractLine has said its cure by now; should that
+		// ever stop holding, the cure comes from the same function, not a copy.
 		if !isRegularFile(specPath(envs.Default)) {
-			fmt.Fprintf(w, "the web client is not generated yet: %s has no contract — `palbase push --env %s`, then `palbase link`\n",
-				envname.Label(envs.Default), envname.ShellWord(envs.Default))
+			fmt.Fprintf(w, "the web client is not generated yet: %s has no contract\n", envname.Label(envs.Default))
+			if !toldMissing[envs.Default] {
+				fmt.Fprint(w, missingContractLine(envs.Default, o.product.ID != "", false))
+			}
 		} else if err := wireWebProject(ctx, o.entry, o.out, envs.Default, w); err != nil {
 			return err
 		}
