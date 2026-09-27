@@ -55,8 +55,11 @@ func PlaneOf(dir string) Plane {
 	// `modules/<name>/` with "this is not a backend checkout", after `build`
 	// had already validated 85 routes in it. Measured 2026-09-02.
 	backend := hasModuleFile(dir) && HasSchemaDeclaration(dir)
-	app := len(applePlatforms(dir)) > 0 || exists(filepath.Join(dir, "build.gradle")) ||
-		exists(filepath.Join(dir, "build.gradle.kts")) || hasWeb(dir)
+	// AN ANDROID APP IS THE ONE `palbase link` DETECTS (AndroidCheckout reads
+	// androidBuildFiles). This tested the root's build.gradle(.kts) by name: a
+	// second list, blind to app/ and android/, and one that took a library's or
+	// a JVM service's Gradle file for an app.
+	app := len(applePlatforms(dir)) > 0 || AndroidCheckout(dir) != "" || hasWeb(dir)
 
 	switch {
 	case backend && app:

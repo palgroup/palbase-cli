@@ -65,7 +65,22 @@ func TestADirectorySaysWhatItIs(t *testing.T) {
 		{"somebody else's project.yml is not an app", func(t *testing.T, d string) {
 			writeBody(t, d, "project.yml", "service: my-api\nprovider:\n  name: aws\n")
 		}, PlaneNone},
-		{"an Android app", func(t *testing.T, d string) { write(t, d, "build.gradle.kts") }, PlaneApp},
+		// AN ANDROID APP IS WHAT `palbase link` DETECTS ONE FROM (androidBuildFiles):
+		// a Gradle file that declares an applicationId — in app/, where Android
+		// Studio puts it, or under android/ for React Native and Flutter. This
+		// read the root's build.gradle(.kts) by name, a second list that saw
+		// neither place.
+		{"an Android app", func(t *testing.T, d string) {
+			writeBody(t, d, "app/build.gradle.kts", `android { defaultConfig { applicationId = "com.example.app" } }`)
+		}, PlaneApp},
+		{"a cross-platform app's Android build", func(t *testing.T, d string) {
+			writeBody(t, d, "android/app/build.gradle", `android { defaultConfig { applicationId "com.example.app" } }`)
+		}, PlaneApp},
+		// A Gradle file declaring no application is not one: the root project
+		// file of a multi-module build, a library, a JVM service.
+		{"a Gradle build with no application is not an app", func(t *testing.T, d string) {
+			write(t, d, "build.gradle.kts")
+		}, PlaneNone},
 		{"a web app", func(t *testing.T, d string) {
 			write(t, d, "package.json")
 			write(t, d, "index.html")
