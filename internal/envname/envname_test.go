@@ -94,3 +94,21 @@ func TestSameDirectoryIsWhatAMacTakesForOneName(t *testing.T) {
 		require.Equal(t, c.same, SameDirectory(c.a, c.b), "%q and %q", c.a, c.b)
 	}
 }
+
+// A NAME PRINTS AS IT IS WHEN IT IS ONE PLAIN WORD — every slug is — and
+// quoted and escaped otherwise, so no byte a member typed into a name reaches
+// a teammate's terminal raw (FR-006).
+func TestLabelQuotesEveryNameThatIsNotOnePlainWord(t *testing.T) {
+	for name, want := range map[string]string{
+		"main":                   "main",
+		"Production":             "Production",
+		"feature-profile-update": "feature-profile-update",
+		"staging_2":              "staging_2",
+		"Feature X":              `"Feature X"`,
+		"evil\x1b]0;owned\a":     `"evil\x1b]0;owned\a"`,
+		"tab\there":              `"tab\there"`,
+		"":                       `""`,
+	} {
+		require.Equal(t, want, Label(name), "%q", name)
+	}
+}

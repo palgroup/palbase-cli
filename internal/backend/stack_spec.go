@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 // ErrNotSignedIn says the contract could not be fetched because nobody is signed
@@ -170,13 +172,14 @@ func reportStaleContracts(refreshed string, envs appEnvironments, w io.Writer) {
 		if info, err := os.Stat(specPath(name)); err == nil {
 			age = "from " + info.ModTime().Local().Format("2006-01-02 15:04")
 		}
-		stale = append(stale, fmt.Sprintf("%s (%s)", name, age))
+		// A directory an older CLI made from whatever the listing said.
+		stale = append(stale, fmt.Sprintf("%s (%s)", envname.Label(name), age))
 	}
 	if len(stale) == 0 {
 		return
 	}
 	fmt.Fprintf(w, "\nonly %s was refreshed. The others still describe what they last served:\n  %s\n",
-		refreshed, strings.Join(stale, "\n  "))
+		envname.Label(refreshed), strings.Join(stale, "\n  "))
 	fmt.Fprintln(w, "  `palbase link` fetches every environment's contract; `palbase spec --env <name>` refreshes one, and `palbase env use <name>` remembers the choice.")
 }
 

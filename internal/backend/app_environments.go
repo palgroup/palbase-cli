@@ -35,6 +35,7 @@ import (
 	"sync"
 
 	"github.com/palgroup/palbase-cli/internal/authcontract"
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 // appEnvironment is one environment as an app needs it.
@@ -513,12 +514,12 @@ func reportContractDrift(specs map[string][]byte, w io.Writer) {
 		}
 		sort.Strings(only)
 		sort.Strings(missing)
-		fmt.Fprintf(w, "\n%s and %s serve different contracts:\n", env, base)
+		fmt.Fprintf(w, "\n%s and %s serve different contracts:\n", envname.Label(env), envname.Label(base))
 		for _, path := range only {
-			fmt.Fprintf(w, "  only in %s:  %s\n", env, path)
+			fmt.Fprintf(w, "  only in %s:  %s\n", envname.Label(env), path)
 		}
 		for _, path := range missing {
-			fmt.Fprintf(w, "  not in %s:   %s\n", env, path)
+			fmt.Fprintf(w, "  not in %s:   %s\n", envname.Label(env), path)
 		}
 	}
 }
@@ -684,7 +685,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		var jobs []job
 		for _, e := range project {
 			if unavailableEnvironment(e.Status) {
-				fmt.Fprintf(w, "%s is %s — not asked; its files are left as they are\n", e.Name, e.Status)
+				fmt.Fprintf(w, "%s is %s — not asked; its files are left as they are\n", envname.Label(e.Name), e.Status)
 				continue
 			}
 			addr, err := environmentAddress(e.Ref)
@@ -692,7 +693,7 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 				if e.Name == defaultEnv {
 					return appEnvironments{}, nil, err
 				}
-				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are\n", e.Name, err)
+				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are\n", envname.Label(e.Name), err)
 				continue
 			}
 			jobs = append(jobs, job{env: e, addr: addr})
@@ -707,10 +708,10 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 		if !defaultAsked {
 			for _, e := range project {
 				if e.Name == defaultEnv {
-					return appEnvironments{}, nil, fmt.Errorf("%s is %s, so there is nothing to read from it", e.Name, e.Status)
+					return appEnvironments{}, nil, fmt.Errorf("%s is %s, so there is nothing to read from it", envname.Label(e.Name), e.Status)
 				}
 			}
-			return appEnvironments{}, nil, fmt.Errorf("%s is not an environment of this project", defaultEnv)
+			return appEnvironments{}, nil, fmt.Errorf("%s is not an environment of this project", envname.Label(defaultEnv))
 		}
 		// The workers only fill their own slot; the map and the output are built
 		// once they are done, in the project's own order.
@@ -731,10 +732,10 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 			d, name := results[i], j.env.Name
 			if d.err != nil {
 				if name == defaultEnv {
-					return appEnvironments{}, nil, fmt.Errorf("%s: %w", name, d.err)
+					return appEnvironments{}, nil, fmt.Errorf("%s: %w", envname.Label(name), d.err)
 				}
 				fmt.Fprintf(w, "%s could not be read (%v) — its files are left as they are; "+
-					"run `palbase link` again once it answers\n", name, d.err)
+					"run `palbase link` again once it answers\n", envname.Label(name), d.err)
 				continue
 			}
 			envs.Environments[name] = d.entry
@@ -742,7 +743,8 @@ func gatherEnvironments(ctx context.Context, primary Target, defaultEnv, default
 				// THE PROJECT'S OWN SENTENCE IS KEPT. "Nothing deployed" and "deployed,
 				// but the runtime could not build a document" arrive as the same error,
 				// and telling the second one to push again is how a diagnosis took hours.
-				fmt.Fprintf(w, "%s has no contract to give (%v) — `palbase push --env %s`\n", name, d.noContract, name)
+				fmt.Fprintf(w, "%s has no contract to give (%v) — `palbase push --env %s`\n",
+					envname.Label(name), d.noContract, envname.Label(name))
 			} else {
 				specs[name] = d.spec
 			}

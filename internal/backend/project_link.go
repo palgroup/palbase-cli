@@ -38,6 +38,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/palgroup/palbase-cli/internal/envname"
 	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
@@ -503,7 +504,7 @@ func linkEnvironmentRef(product Product, envs []Environment, named string) (stri
 			if strings.EqualFold(e.Name, named) || e.Ref == named {
 				if unavailableEnvironment(e.Status) {
 					return "", fmt.Errorf("%s of %s is %s, so nothing can be read from it — name another with --from-env.\n%s",
-						e.Name, product.Name, e.Status, listingWithStatus(envs))
+						envname.Label(e.Name), product.Name, e.Status, listingWithStatus(envs))
 				}
 				return e.Ref, nil
 			}
@@ -553,7 +554,7 @@ func listingWithStatus(envs []Environment) string {
 	// Lined up like listing(): this is the menu a refusal hands a person.
 	widestName, widestRef := 0, 0
 	for _, e := range envs {
-		if n := len([]rune(e.Name)); n > widestName {
+		if n := len([]rune(envname.Label(e.Name))); n > widestName {
 			widestName = n
 		}
 		if n := len([]rune(e.Ref)); n > widestRef {
@@ -562,7 +563,7 @@ func listingWithStatus(envs []Environment) string {
 	}
 	rows := make([]string, 0, len(envs))
 	for _, e := range envs {
-		rows = append(rows, strings.TrimRight(fmt.Sprintf("  %-*s   %-*s   %s", widestName, e.Name, widestRef, e.Ref, e.Status), " "))
+		rows = append(rows, strings.TrimRight(fmt.Sprintf("  %-*s   %-*s   %s", widestName, envname.Label(e.Name), widestRef, e.Ref, e.Status), " "))
 	}
 	sort.Strings(rows)
 	return strings.Join(rows, "\n")
@@ -909,7 +910,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	if !writesPerEnvironmentArtifacts(platforms) {
 		for _, e := range o.environments {
 			if unavailableEnvironment(e.Status) {
-				fmt.Fprintf(w, "%s is %s — not asked\n", e.Name, e.Status)
+				fmt.Fprintf(w, "%s is %s — not asked\n", envname.Label(e.Name), e.Status)
 			}
 		}
 		project = nil
@@ -1042,7 +1043,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	var pendingLines []pendingLine
 	unwritable := func(name string, err error) error {
 		if name == envs.Default {
-			return fmt.Errorf("%s could not be written: %w", name, err)
+			return fmt.Errorf("%s could not be written: %w", envname.Label(name), err)
 		}
 		for _, rec := range configWrites[name] {
 			_ = rec.before.restore(rec.path)
@@ -1110,7 +1111,8 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		fmt.Fprintf(w, "wrote %s\n", line.path)
 	}
 	for _, name := range unwritten.names() {
-		fmt.Fprintf(w, "%s could not be written (%v) — skipped; run `palbase link` again once it can be\n", name, unwritten[name])
+		fmt.Fprintf(w, "%s could not be written (%v) — skipped; run `palbase link` again once it can be\n",
+			envname.Label(name), unwritten[name])
 		delete(envs.Environments, name)
 		delete(specs, name)
 	}
@@ -1145,7 +1147,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		// written, the line is said, and the client waits for a push (FR-012).
 		if !isRegularFile(specPath(envs.Default)) {
 			fmt.Fprintf(w, "the web client is not generated yet: %s has no contract — `palbase push --env %s`, then `palbase link`\n",
-				envs.Default, envs.Default)
+				envname.Label(envs.Default), envname.Label(envs.Default))
 		} else if err := wireWebProject(ctx, o.entry, o.out, envs.Default, w); err != nil {
 			return err
 		}
@@ -1655,5 +1657,5 @@ func reportLinked(w io.Writer, product Product, base, hosting, linkedEnv string)
 		return
 	}
 	fmt.Fprintf(w, "\nlinked to %s (%s)\n", product.Name, product.ID)
-	fmt.Fprintf(w, "  contract read from %s; each verb resolves its own environment\n", linkedEnv)
+	fmt.Fprintf(w, "  contract read from %s; each verb resolves its own environment\n", envname.Label(linkedEnv))
 }

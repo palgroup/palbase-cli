@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/palgroup/palbase-cli/internal/authcontract"
+	"github.com/palgroup/palbase-cli/internal/envname"
 	"github.com/palgroup/palbase-cli/internal/sealedclient"
 )
 
@@ -298,7 +299,8 @@ func platformEnvironments(ctx context.Context, target *Target, platform string, 
 				result.Environments[name] = env
 				continue
 			}
-			return result, dropped, fmt.Errorf("%s: cannot refresh complete platform config while the environment is unavailable", name)
+			return result, dropped, fmt.Errorf("%s: cannot refresh complete platform config while the environment is unavailable",
+				envname.Label(name))
 		}
 		// A NON-DEFAULT ENVIRONMENT THAT CANNOT BE READ IS DROPPED, NOT FATAL.
 		// One link describes every environment now; a social-auth read that
@@ -404,7 +406,7 @@ func (e selectionDoesNotFit) Error() string { return e.detail }
 func droppedEnvironmentLine(name string, reason error) string {
 	var misfit selectionDoesNotFit
 	if errors.As(reason, &misfit) {
-		return fmt.Sprintf("%s is left as it is: %v\n", name, reason)
+		return fmt.Sprintf("%s is left as it is: %v\n", envname.Label(name), reason)
 	}
-	return fmt.Sprintf("%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n", name, reason)
+	return fmt.Sprintf("%s could not be read (%v) — its files are left as they are; run `palbase link` again once it answers\n", envname.Label(name), reason)
 }

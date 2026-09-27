@@ -28,6 +28,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 // Environment is one environment as the control plane reports it.
@@ -79,7 +81,7 @@ func (r Resolved) Describe() string {
 		return r.URL + " (local)"
 	}
 	if r.Env != "" {
-		return projectLabel(r.Target) + "/" + r.Env
+		return projectLabel(r.Target) + "/" + envname.Label(r.Env)
 	}
 	return r.URL
 }
@@ -371,15 +373,18 @@ func listing(envs []Environment) string {
 	// what a person sees at the moment a verb refuses, and it is where they
 	// pick the name they will type next. Ragged columns make two short rows
 	// look like a formatting accident rather than a menu.
+	//
+	// Each name is printed as envname.Label has it: this is the control plane's
+	// text, and the menu is read before any gate has looked at it.
 	widest := 0
 	for _, e := range envs {
-		if n := len([]rune(e.Name)); n > widest {
+		if n := len([]rune(envname.Label(e.Name))); n > widest {
 			widest = n
 		}
 	}
 	rows := make([]string, 0, len(envs))
 	for _, e := range envs {
-		rows = append(rows, fmt.Sprintf("  %-*s   %s", widest, e.Name, e.Ref))
+		rows = append(rows, fmt.Sprintf("  %-*s   %s", widest, envname.Label(e.Name), e.Ref))
 	}
 	sort.Strings(rows)
 	return strings.Join(rows, "\n")

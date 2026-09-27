@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -156,3 +157,19 @@ func CheckSlug(name string) error {
 	}
 	return nil
 }
+
+// Label is how a person reads an environment name the control plane sent.
+//
+// ONE PLAIN WORD PRINTS AS IT IS — every slug is one — and anything else
+// prints quoted and escaped (%q), the way git quotes an unusual path. Printed
+// raw, a name carrying escape bytes rewrote a teammate's terminal line, set
+// its title or hid the text after it (FR-006); a name with a space read as two
+// words in a sentence and as two arguments in a suggested command.
+func Label(name string) string {
+	if plainWord.MatchString(name) {
+		return name
+	}
+	return strconv.Quote(name)
+}
+
+var plainWord = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)

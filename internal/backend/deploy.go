@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/palgroup/palbase-cli/internal/envname"
 )
 
 func SourcePath(digest string) string {
@@ -238,7 +240,7 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 			// one environment's deployed code — and a verb that resolves
 			// without saying so is how "this went somewhere I did not mean"
 			// becomes visible only afterwards.
-			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s/%s\n", product.Name, envName)
+			fmt.Fprintf(cmd.ErrOrStderr(), "▸ %s/%s\n", product.Name, envname.Label(envName))
 			// MADE HERE, REMOVED IF NOTHING ARRIVES: a clone that failed
 			// must not leave a directory named after the project, because
 			// the next reader cannot tell an empty clone from a clone that
@@ -277,7 +279,7 @@ func newCloneCmd(r Resolvers) *cobra.Command {
 				}); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", product.Name, envName)
+				fmt.Fprintf(cmd.OutOrStdout(), "▸ %s/%s\n", product.Name, envname.Label(envName))
 				return nil
 			})
 		},
@@ -306,7 +308,7 @@ func cloneEnvironmentRef(product Product, envs []Environment, typed, fromEnv str
 		}
 		if unavailableEnvironment(e.Status) {
 			return "", fmt.Errorf("%s/%s is %s, so there is no source to download — clone a running environment by its ref.\n%s",
-				product.Name, e.Name, e.Status, listingWithStatus(envs))
+				product.Name, envname.Label(e.Name), e.Status, listingWithStatus(envs))
 		}
 		return e.Ref, nil
 	}
@@ -315,12 +317,12 @@ func cloneEnvironmentRef(product Product, envs []Environment, typed, fromEnv str
 
 // withStatus names an environment, and its status when nothing can be read
 // from it: the fact a person needs to decide which half of a contradiction to
-// drop.
+// drop. The name as envname.Label has it — it is the control plane's text.
 func withStatus(e Environment) string {
 	if unavailableEnvironment(e.Status) {
-		return e.Name + " (" + e.Status + ")"
+		return envname.Label(e.Name) + " (" + e.Status + ")"
 	}
-	return e.Name
+	return envname.Label(e.Name)
 }
 
 // fromEnvNamed is what --from-env names, spelled as the environment it is — a
