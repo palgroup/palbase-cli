@@ -99,3 +99,45 @@ func TestDoctorNamesNoCopyWhereABuildReadsNone(t *testing.T) {
 			"  ✓ main       android-config.json with an api_key, openapi.json with x-palbase-roles\n", name)
 	}
 }
+
+// android/'S OWN palbase/ IS NOT A SECOND COPY OF ANYTHING (dalga 2 final
+// re-review). android/.git makes android/ a checkout of its own — to the
+// Gradle plugin (CheckoutMarker.isCheckout) exactly as to `palbase link`
+// (LinkedCheckoutAbove, FR-016) — and a build there reads ONLY android/palbase/
+// environments, never the root's beside it. Root and android/ ARE each other's
+// second copy, but neither reads the other's, so a build never refuses and
+// there is nothing here to delete: `secondCopyIn` said so anyway (measured by
+// a reviewer in a scratch copy), sending android/palbase/environments to be
+// deleted although it is the only copy android/'s own build reads.
+func TestDoctorNamesNoCopyWhenAndroidIsItsOwnCheckout(t *testing.T) {
+	dir := t.TempDir()
+	rnCheckoutIn(t, dir)
+	linkedToAProject(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://new.example", "pb_main_cK"), withRoles)
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "android", ".git"), 0o755))
+	androidEnvironmentIn(t, filepath.Join(dir, "android"), "main", androidConfig("https://own.example", "pb_own_cK"), withRoles)
+
+	out := runDoctorIn(t, dir)
+	require.NotContains(t, out, "second copy")
+	require.NotContains(t, out, "✗ copy")
+}
+
+// AN UNLINKED ROOT HAS NO palbase/ TO BE A SECOND COPY OF (dalga 2 final
+// re-review). An earlier CLI linked only in android/ — its project.json and
+// environments/ still there — and the root was never linked since: no
+// palbase/project.json, no palbase/environments, nothing beside android/'s
+// copy for a build to prefer or refuse. `LinkedCheckoutAbove(android/)` finds
+// no linked checkout above android/ (the root carries no project.json), so
+// there is no build whose behavior a "second copy" line could be describing.
+func TestDoctorNamesNoCopyInAnUnlinkedRootWithOnlyAndroidsCopy(t *testing.T) {
+	dir := t.TempDir()
+	rnCheckoutIn(t, dir)
+	writeFileIn(t, dir, "android/palbase/project.json", `{"project":"prd_rn","name":"rnapp"}`+"\n")
+	writeFileIn(t, dir, "android/palbase/environments/main/android-config.json", androidConfig("https://STALE.example", "pb_stale_cK"))
+	writeFileIn(t, dir, "android/palbase/environments/main/openapi.json", withRoles)
+
+	out := runDoctorIn(t, dir)
+	require.NotContains(t, out, "second copy")
+	require.Contains(t, out, "android (android/app/build.gradle)\n"+
+		"  ✗ envs       nothing under palbase/environments — `palbase link` here writes one directory per environment\n")
+}

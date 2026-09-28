@@ -113,8 +113,23 @@ func gradleRootOf(buildFile string) string {
 // palbase/environments alone is found beside the checkout's own, and the build
 // refuses the two. One tree reached by two paths is one root to the plugin
 // (distinctBy canonicalFile), and nothing else in a palbase/ is read.
+//
+// GATED ON THE SAME WALK `link` USES (dalga 2 final re-review). Everything
+// below assumes the Gradle root's copy sits BESIDE the checkout's own, where a
+// build can find both or prefer one — true only while gradleRoot is not a
+// checkout of its own (android/.git, FR-016) AND the checkout above it is
+// actually linked (LinkedCheckoutAbove, the same walk `link` refuses inside
+// of). Without that: android/.git makes android/ its own checkout, whose
+// build never reaches the root's palbase/ at all — there is no "second copy",
+// there are two checkouts, each reading its own. And an unlinked root has no
+// palbase/ for anything to be a copy OF. Measured by a reviewer in a scratch
+// copy: ungated, this named android/palbase/ "a second copy" — sometimes
+// telling a person to delete the only copy android/'s own build reads.
 func secondCopyIn(dir, gradleRoot string) string {
 	if gradleRoot == "." {
+		return ""
+	}
+	if LinkedCheckoutAbove(filepath.Join(dir, filepath.FromSlash(gradleRoot))) == "" {
 		return ""
 	}
 	copied := path.Join(gradleRoot, RootDir())
