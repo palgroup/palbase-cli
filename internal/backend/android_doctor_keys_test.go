@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -73,4 +75,22 @@ func TestLoadPropertiesReadsAFileAsJavaDoes(t *testing.T) {
 func TestPluginTrimIsKotlinsTrim(t *testing.T) {
 	require.Equal(t, "main", pluginTrim(" \t\f\v\x1c\x1f\u00a0\u2007\u3000main\u2028\u2029 "))
 	require.Equal(t, "\u0085main\u0085", pluginTrim("\u0085main\u0085"))
+}
+
+// A NAME IS NEVER A PATH, even one somebody put in the list: loopbackEnvironment
+// reads a config only through a name that is one directory (envname.CheckDir)
+// and that the directory listing returned exactly — `../outside` is neither,
+// and a spelling that differs in case is not the second.
+func TestLoopbackEnvironmentReadsNoFileThroughAPath(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{"palbase/outside", "palbase/environments/onbox"} {
+		file := filepath.Join(dir, filepath.FromSlash(rel), "android-config.json")
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+		require.NoError(t, os.WriteFile(file, []byte(`{"base_url":"http://127.0.0.1:1"}`), 0o644))
+	}
+
+	require.Empty(t, loopbackEnvironment(dir, "../outside", []string{"../outside"}))
+	require.Empty(t, loopbackEnvironment(dir, "Onbox", []string{"onbox"}))
+	require.Equal(t, "onbox's base_url, http://127.0.0.1:1, is this machine", loopbackEnvironment(dir, "onbox", []string{"onbox"}))
+	require.Equal(t, "LOCAL is the stack on this machine", loopbackEnvironment(dir, "LOCAL", nil))
 }

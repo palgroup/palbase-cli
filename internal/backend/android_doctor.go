@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -70,7 +71,7 @@ func AndroidDoctor(dir string, project bool) []DoctorLine {
 	buildFile := AndroidCheckout(dir)
 	gradleRoot := gradleRootOf(buildFile)
 	lines := environmentDirLines(dir, names, project)
-	lines = append(lines, environmentKeyLines(dir, gradleRoot, names)...)
+	lines = append(lines, environmentKeyLines(dir, gradleRoot, names, project)...)
 	return append(lines, moduleKeyLines(dir, path.Dir(buildFile), gradleRoot)...)
 }
 
@@ -243,8 +244,16 @@ func readFailure(err error) string {
 	if errors.As(err, &pathErr) {
 		err = pathErr.Err
 	}
+	return printable(err.Error())
+}
+
+// printable is s with every rune that does not print written out as its Go
+// escape (U+202E as `\u202e`), and every other rune as it is: text read from
+// a file — a system error, a base_url — never reaches the terminal raw
+// (FR-006).
+func printable(s string) string {
 	var b strings.Builder
-	for _, r := range err.Error() {
+	for _, r := range s {
 		if unicode.IsPrint(r) {
 			b.WriteRune(r)
 			continue
@@ -257,26 +266,79 @@ func readFailure(err error) string {
 
 // environmentKeyLines is one line per palbase.env key in the Gradle root's
 // gradle.properties, then its local.properties — the two files a person writes
-// a choice in — with the environment each names and whether a build can use it.
-func environmentKeyLines(dir, gradleRoot string, names []string) []DoctorLine {
+// a choice in — with the environment each names and whether a build can use it;
+// and a last line when nothing in gradle.properties gives a release build one.
+//
+// RELEASE IS READ FROM gradle.properties ALONE. local.properties reaches
+// debuggable builds only (D-009), and a release build with no key is refused
+// rather than guessed (FR-201).
+func environmentKeyLines(dir, gradleRoot string, names []string, project bool) []DoctorLine {
+	shared := path.Join(gradleRoot, "gradle.properties")
+	personal := path.Join(gradleRoot, "local.properties")
 	var lines []DoctorLine
-	for _, file := range []string{"gradle.properties", "local.properties"} {
-		shown := path.Join(gradleRoot, file)
-		keys, err := palbaseEnvKeysIn(filepath.Join(dir, filepath.FromSlash(shown)))
-		if err != nil {
-			lines = append(lines, unreadableKeysLine(shown, err))
-			continue
-		}
+	committed, unreadable := palbaseEnvKeysIn(filepath.Join(dir, filepath.FromSlash(shared)))
+	if unreadable != nil {
+		lines = append(lines, unreadableKeysLine(shared, unreadable))
+	}
+	releaseMapped, global := false, false
+	for _, k := range committed {
+		releaseMapped = releaseMapped || mapsRelease(k.key)
+		global = global || k.key == envKeyPrefix
+	}
+
+	cure := releaseCure{candidate: releaseCandidate(dir, names), project: project}
+	for _, k := range committed {
+		// The global key of plugin 2.3 is where a release build no other key
+		// maps lands (FR-201 step 7).
+		release := releaseKey(k.key) || (k.key == envKeyPrefix && !releaseMapped)
+		lines = append(lines, environmentKeyLine(dir, k, shared, false, release, names, cure))
+	}
+	if keys, err := palbaseEnvKeysIn(filepath.Join(dir, filepath.FromSlash(personal))); err != nil {
+		lines = append(lines, unreadableKeysLine(personal, err))
+	} else {
 		for _, k := range keys {
-			lines = append(lines, environmentKeyLine(k, shown, file == "local.properties", names))
+			lines = append(lines, environmentKeyLine(dir, k, personal, true, false, names, cure))
 		}
+	}
+	// A gradle.properties GRADLE CANNOT LOAD stops every build before a variant
+	// has an environment, and what it would give release is unknown: nothing
+	// is claimed about release then.
+	if unreadable == nil && !releaseMapped && !global {
+		detail := "not mapped in " + shared + " — a release build refuses to guess its environment; " +
+			cure.of("release", envKeyPrefix+".release")
+		if cure.candidate != "" {
+			detail += " (or palbase { environment = \"<name>\" } in the build script)"
+		}
+		lines = append(lines, DoctorLine{Label: "release", Detail: detail})
 	}
 	return lines
 }
 
+// releaseCure is how a release build gets an environment it may build: the
+// candidate here, or — with none — the link that brings one.
+type releaseCure struct {
+	candidate string // releaseCandidate's answer
+	project   bool   // the checkout is linked to a project
+}
+
+// of is the cure for build, whose environment the key names — both as a line
+// prints them. The candidate is spelled the way gradle.properties is read
+// (envname.PropertiesValue), as `palbase link` spells it.
+func (c releaseCure) of(build, key string) string {
+	switch {
+	case c.candidate != "":
+		return fmt.Sprintf("map %s to a cloud environment: %s=%s", build, key, envname.PropertiesValue(c.candidate))
+	case c.project:
+		return fmt.Sprintf("`palbase link` here, then map %s to one of the project's environments", build)
+	default:
+		return fmt.Sprintf("link a project and map %s to one of its environments", build)
+	}
+}
+
 // environmentKeyLine says what one key picks, in the plugin's own words for
-// where a choice came from (`palbase.env.debug in local.properties`).
-func environmentKeyLine(k propertyKey, file string, personal bool, names []string) DoctorLine {
+// where a choice came from (`palbase.env.debug in local.properties`). personal
+// is local.properties; release is a key a release build reads.
+func environmentKeyLine(dir string, k propertyKey, file string, personal, release bool, names []string, cure releaseCure) DoctorLine {
 	label, head := keyLabel(k.key), keyHead(k, file)
 	switch {
 	case personal && k.key == envKeyPrefix:
@@ -301,6 +363,27 @@ func environmentKeyLine(k propertyKey, file string, personal bool, names []strin
 		return DoctorLine{Label: label, Detail: fmt.Sprintf("%s — a build refuses it: the name %s, and an environment "+
 			"is one directory under palbase/environments", head, problem)}
 	}
+	if release {
+		// The environment the key means: its directory, or the one that
+		// differs only in case — which the plugin refuses too (FR-204), and
+		// which a release build could not use either once the case is right.
+		meant := k.value
+		if !slices.Contains(names, meant) {
+			if i := slices.IndexFunc(names, func(name string) bool { return strings.EqualFold(name, meant) }); i >= 0 {
+				meant = names[i]
+			}
+		}
+		if why := loopbackEnvironment(dir, meant, names); why != "" {
+			// A release build of this machine's stack is refused by the plugin
+			// (FR-206) — and reaches nobody else's device if it were not.
+			build, key := label, shownKey(k.key)
+			if k.key == envKeyPrefix {
+				build, key = "release", envKeyPrefix+".release"
+				why = "a release build falls back to it, and " + why
+			}
+			return DoctorLine{Label: label, Detail: fmt.Sprintf("%s — %s, which a release build refuses; %s", head, why, cure.of(build, key))}
+		}
+	}
 	if slices.Contains(names, k.value) {
 		return DoctorLine{OK: true, Label: label, Detail: head}
 	}
@@ -310,11 +393,11 @@ func environmentKeyLine(k propertyKey, file string, personal bool, names []strin
 				"directory by the exact name: %s=%s", head, shownEnvDir(name), shownKey(k.key), envname.PropertiesValue(name))}
 		}
 	}
-	cure := "`palbase link` here writes one directory per environment of the project"
+	missing := "`palbase link` here writes one directory per environment of the project"
 	if k.value == localEnvName {
-		cure = "`palbase start` in the backend, then `palbase link` here"
+		missing = "`palbase start` in the backend, then `palbase link` here"
 	}
-	return DoctorLine{Label: label, Detail: fmt.Sprintf("%s — no %s here; %s", head, shownEnvDir(k.value), cure)}
+	return DoctorLine{Label: label, Detail: fmt.Sprintf("%s — no %s here; %s", head, shownEnvDir(k.value), missing)}
 }
 
 // moduleKeyLines is one line per palbase.env key in the app module's own
@@ -382,6 +465,74 @@ const envKeyPrefix = "palbase.env"
 func releaseKey(key string) bool {
 	suffix, ok := strings.CutPrefix(key, envKeyPrefix+".")
 	return ok && (suffix == "release" || strings.HasSuffix(suffix, "Release"))
+}
+
+// mapsRelease reports whether key gives a release build its environment: a
+// release key, but not one for a build type that MEASURES release —
+// `benchmarkRelease`, `nonMinifiedRelease`, flavored or not — which follows
+// release's environment and never sets it (FR-201 step 6).
+func mapsRelease(key string) bool {
+	suffix := strings.TrimPrefix(key, envKeyPrefix+".")
+	for _, measuring := range []string{"benchmarkRelease", "nonMinifiedRelease"} {
+		if suffix == measuring || strings.HasSuffix(suffix, strings.ToUpper(measuring[:1])+measuring[1:]) {
+			return false
+		}
+	}
+	return releaseKey(key)
+}
+
+// loopbackEnvironment says why a build that is not debuggable refuses name as
+// the stack on this machine (FR-206) — its name, or the base_url its Android
+// config carries: a loopback host, or plain HTTP to any host, as the plugin's
+// reachesThisMachine decides — or "" when it does not.
+//
+// A KEY'S VALUE IS SOMEBODY'S TEXT, and path.Join resolves `..` (EnvDir): a
+// config is read only through a name that is one directory (envname.CheckDir)
+// and one of names, the directories exactly as they are on disk — never
+// through a spelling that only a disk ignoring case would open, so the answer
+// is the same on every disk.
+func loopbackEnvironment(dir, name string, names []string) string {
+	if strings.EqualFold(name, localEnvName) {
+		return envname.Label(name) + " is the stack on this machine"
+	}
+	if envname.CheckDir(name) != nil || !slices.Contains(names, name) {
+		return ""
+	}
+	var config appEnvironment
+	if found, err := readJSONFile(filepath.Join(dir, filepath.FromSlash(ConfigPath(name, "android"))), &config); !found || err != nil {
+		return ""
+	}
+	// The plugin trims every value it reads before it parses one.
+	baseURL := pluginTrim(config.BaseURL)
+	switch {
+	case isLoopbackAddress(baseURL):
+		return fmt.Sprintf("%s's base_url, %s, is this machine", envname.Label(name), printable(baseURL))
+	case plainHTTP(baseURL):
+		return fmt.Sprintf("%s's base_url, %s, is plain HTTP", envname.Label(name), printable(baseURL))
+	}
+	return ""
+}
+
+// plainHTTP reports whether baseURL is spoken over plain HTTP, which the plugin
+// refuses a build that is not debuggable whatever the host.
+func plainHTTP(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && u.Scheme == "http"
+}
+
+// releaseCandidate is the environment here a release build may be mapped to:
+// the checkout's default when a release build accepts it, else the first by
+// name that one accepts; "" when none does. A directory that is not one
+// directory on every disk (envname.CheckDir) or not an environment at all
+// (holdsNoPalbaseFile) is never proposed.
+func releaseCandidate(dir string, names []string) string {
+	for _, name := range append([]string{defaultEnvironment(names)}, names...) {
+		if name != "" && envname.CheckDir(name) == nil && !holdsNoPalbaseFile(dir, name) &&
+			loopbackEnvironment(dir, name, names) == "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // refusedName says why the Gradle plugin refuses name as an environment before

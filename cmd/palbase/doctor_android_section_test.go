@@ -444,3 +444,185 @@ func TestDoctorPrintsNoControlCharacterFromAPropertiesFile(t *testing.T) {
 			"the name contains a control character, and an environment is one directory under palbase/environments\n")
 	require.NotContains(t, out, "\x1b")
 }
+
+// A RELEASE BUILD WITH NO ENVIRONMENT is refused by the plugin; doctor says so
+// before Gradle does, with the environment to map it to — never `local`.
+func TestDoctorSaysReleaseIsNotMapped(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "local", androidConfig("http://127.0.0.1:54321", "pb_local_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.debug=local\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✓ debug      → local (palbase.env.debug in gradle.properties)\n"+
+			"  ✗ release    not mapped in gradle.properties — a release build refuses to guess its environment; "+
+			"map release to a cloud environment: palbase.env.release=main (or palbase { environment = \"<name>\" } in the build script)\n")
+}
+
+// WITH NOTHING HERE A RELEASE BUILD MAY BUILD, the cure is the step that
+// brings one: a link — of a project, when the checkout names none yet.
+func TestDoctorSaysALocalOnlyCheckoutHasNoEnvironmentForRelease(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "local", androidConfig("http://127.0.0.1:54321", "pb_local_cK"), withRoles)
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ release    not mapped in gradle.properties — a release build refuses to guess its environment; "+
+			"link a project and map release to one of its environments\n")
+}
+
+func TestDoctorSendsALinkedCheckoutWithNoEnvironmentToLink(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	linkedToAProject(t, dir)
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ release    not mapped in gradle.properties — a release build refuses to guess its environment; "+
+			"`palbase link` here, then map release to one of the project's environments\n")
+}
+
+// A RELEASE BUILD OF THIS MACHINE'S STACK is refused by the plugin (FR-206):
+// `local` by name, and any environment whose address is loopback — what an
+// older `link` wrote under main/ for a stack started here (B8).
+func TestDoctorNamesALoopbackEnvironmentMappedToRelease(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "local", androidConfig("http://127.0.0.1:54321", "pb_local_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "onbox", androidConfig("http://127.0.0.1:18865", "pb_onbox_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.release=local\npalbase.env.freeRelease=onbox\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✗ release    → local (palbase.env.release in gradle.properties) — local is the stack on this machine, "+
+			"which a release build refuses; map release to a cloud environment: palbase.env.release=main\n"+
+			"  ✗ freeRelease → onbox (palbase.env.freeRelease in gradle.properties) — onbox's base_url, http://127.0.0.1:18865, "+
+			"is this machine, which a release build refuses; map freeRelease to a cloud environment: palbase.env.freeRelease=main\n")
+	require.NotContains(t, out, "not mapped")
+}
+
+// A KEY'S VALUE IS A NAME, NEVER A PATH: doctor reads no file through one
+// that is not a single directory name, and says it names no environment.
+func TestDoctorReadsNoFileThroughAKeyThatIsAPath(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "palbase/outside/android-config.json", androidConfig("http://127.0.0.1:1", "pb_outside_cK"))
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.release=../outside\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✗ release    → \"../outside\" (palbase.env.release in gradle.properties) — a build refuses it: "+
+			"the name contains a path separator, and an environment is one directory under palbase/environments\n")
+	require.NotContains(t, out, "127.0.0.1:1", "palbase/outside/android-config.json was read through the key")
+}
+
+// THE GLOBAL KEY OF PLUGIN 2.3 reaches a release build no other key maps: it
+// is a mapping, and a loopback one is refused like any other.
+func TestDoctorNamesTheGlobalKeyWhenReleaseFallsToALoopbackEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "local", androidConfig("http://127.0.0.1:54321", "pb_local_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env=local\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✗ any        → local (palbase.env in gradle.properties) — a release build falls back to it, and local is the stack "+
+			"on this machine, which a release build refuses; map release to a cloud environment: palbase.env.release=main\n")
+	require.NotContains(t, out, "not mapped")
+}
+
+// PLAIN HTTP IS REFUSED TOO (FR-206): a build that is not debuggable refuses a
+// base_url over http whatever its host, so neither the line for the key nor
+// the environment it proposes instead may be one.
+func TestDoctorSaysAPlainHTTPEnvironmentIsRefusedForRelease(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "lan", androidConfig("http://192.168.1.20:54321", "pb_lan_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "staging", androidConfig("https://staging.example", "pb_staging_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.release=lan\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ release    → lan (palbase.env.release in gradle.properties) — lan's base_url, http://192.168.1.20:54321, "+
+			"is plain HTTP, which a release build refuses; map release to a cloud environment: palbase.env.release=staging\n")
+}
+
+// THE ENVIRONMENT PROPOSED FOR RELEASE IS ONE A RELEASE BUILD ACCEPTS: not an
+// older link's loopback main/ (B8), and not a directory that is not an
+// environment at all.
+func TestDoctorProposesAnEnvironmentAReleaseBuildAccepts(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "local", androidConfig("http://127.0.0.1:54321", "pb_local_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "main", androidConfig("http://127.0.0.1:54321", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "palbase/environments/mine/NOTES.md", "mine\n")
+	androidEnvironmentIn(t, dir, "staging", androidConfig("https://staging.example", "pb_staging_cK"), withRoles)
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ release    not mapped in gradle.properties — a release build refuses to guess its environment; "+
+			"map release to a cloud environment: palbase.env.release=staging (or palbase { environment = \"<name>\" } in the build script)\n")
+}
+
+// A BUILD THAT MEASURES RELEASE DOES NOT MAP IT (FR-201 step 6):
+// benchmarkRelease follows release's environment, never the other way round.
+func TestDoctorSaysABenchmarkKeyDoesNotMapRelease(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.benchmarkRelease=main\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✓ benchmarkRelease → main (palbase.env.benchmarkRelease in gradle.properties)\n"+
+			"  ✗ release    not mapped in gradle.properties — a release build refuses to guess its environment; "+
+			"map release to a cloud environment: palbase.env.release=main (or palbase { environment = \"<name>\" } in the build script)\n")
+}
+
+// A base_url IS A FILE'S TEXT, and it reaches the line that names it: every
+// rune that does not print is written out as an escape (FR-006).
+func TestDoctorPrintsNoControlCharacterFromABaseURL(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "onbox", androidConfig("http://127.0.0.1:18865/\u202e\u0085", "pb_onbox_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.release=onbox\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out, "— onbox's base_url, http://127.0.0.1:18865/\\u202e\\u0085, is this machine, which a release build refuses; ")
+	require.NotContains(t, out, "\u202e")
+	require.NotContains(t, out, "\u0085")
+}
+
+// A gradle.properties GRADLE CANNOT LOAD stops every build before any variant
+// has an environment: what a release build would read there is unknown, so
+// doctor does not claim it reads nothing.
+func TestDoctorSaysNothingOfReleaseWhenGradlePropertiesCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "sdk.dir=C:\\users\\me\\android\npalbase.env.release=main\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✗ keys       gradle.properties cannot be read (malformed \\uxxxx encoding), and a Gradle build stops on it too — fix the file\n")
+	require.NotContains(t, out, "not mapped")
+}
+
+// THE SAME ANSWER ON EVERY DISK: a value that differs only in case from a
+// loopback environment is that environment to a Mac, and no directory at all
+// to Linux CI. Either way a release build cannot use it, and the cure is a
+// cloud environment — never the loopback spelling a case fix would give.
+func TestDoctorJudgesAReleaseKeyByTheDirectoryItMeans(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "onbox", androidConfig("http://127.0.0.1:18865", "pb_onbox_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.release=Onbox\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✗ release    → Onbox (palbase.env.release in gradle.properties) — onbox's base_url, http://127.0.0.1:18865, "+
+			"is this machine, which a release build refuses; map release to a cloud environment: palbase.env.release=main\n")
+	require.NotContains(t, out, "palbase.env.release=onbox")
+}
