@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -625,4 +627,45 @@ func TestDoctorJudgesAReleaseKeyByTheDirectoryItMeans(t *testing.T) {
 		"  ✗ release    → Onbox (palbase.env.release in gradle.properties) — onbox's base_url, http://127.0.0.1:18865, "+
 			"is this machine, which a release build refuses; map release to a cloud environment: palbase.env.release=main\n")
 	require.NotContains(t, out, "palbase.env.release=onbox")
+}
+
+// twoEnvironmentsCloud lists one project, todoapp, with two environments —
+// the listing the resolver refuses to pick from when nothing selected one.
+func twoEnvironmentsCloud() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/projects" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"id": "prd_a", "name": "todoapp",
+			"environments": []map[string]any{
+				{"ref": "mainref000", "name": "main", "status": "Running"},
+				{"ref": "stagref000", "name": "staging", "status": "Running"},
+			},
+		}})
+	})
+}
+
+// THE ENV LINE IS WHERE A VERB WOULD ACT, and in an Android checkout it reads
+// as the environment the app builds — whose fix, `palbase env use`, changes
+// nothing an APK compiles. There it says what it is.
+func TestDoctorSaysTheEnvLineIsForVerbsInAnAndroidCheckout(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	linkedToAProject(t, dir)
+
+	require.Contains(t, runDoctorAgainst(t, dir, twoEnvironmentsCloud(), "person-token"),
+		"  ✗ env        todoapp has 2 environments and none is selected — verbs only; the build type picks the app's environment\n")
+}
+
+// NEGATIVE CONTROL: outside an Android checkout the line is the resolver's own,
+// as before.
+func TestDoctorLeavesTheEnvLineAloneOutsideAnAndroidCheckout(t *testing.T) {
+	dir := t.TempDir()
+	linkedToAProject(t, dir)
+
+	require.Contains(t, runDoctorAgainst(t, dir, twoEnvironmentsCloud(), "person-token"),
+		"  ✗ env        todoapp has 2 environments and none is selected:\n")
 }

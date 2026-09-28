@@ -44,13 +44,20 @@ func gitRepoIn(t *testing.T, dir string) func(args ...string) {
 // that answers nothing, and returns what it printed.
 func runDoctorIn(t *testing.T, dir string) string {
 	t.Helper()
-	cloud := httptest.NewServer(http.NotFoundHandler())
-	t.Cleanup(cloud.Close)
+	return runDoctorAgainst(t, dir, http.NotFoundHandler(), "")
+}
+
+// runDoctorAgainst runs the production `palbase doctor` in dir against a cloud
+// that answers as cloud does, holding token as PALBASE_ACCESS_TOKEN.
+func runDoctorAgainst(t *testing.T, dir string, cloud http.Handler, token string) string {
+	t.Helper()
+	srv := httptest.NewServer(cloud)
+	t.Cleanup(srv.Close)
 	t.Chdir(dir)
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PALBASE_PLATFORM_URL", cloud.URL)
-	t.Setenv("PALBASE_AUTH_URL", cloud.URL)
-	t.Setenv("PALBASE_ACCESS_TOKEN", "")
+	t.Setenv("PALBASE_PLATFORM_URL", srv.URL)
+	t.Setenv("PALBASE_AUTH_URL", srv.URL)
+	t.Setenv("PALBASE_ACCESS_TOKEN", token)
 
 	root := newRootCmd()
 	root.SetArgs([]string{"doctor"})

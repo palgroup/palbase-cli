@@ -142,13 +142,14 @@ func toolchainProbes(ctx context.Context, look lookupFunc, run cmdRunner) []prob
 // doctorCmd is the environment triage verb: one command that answers "why is
 // the CLI not working for me" — endpoints, login state, headless PAT,
 // project link, and the two JS engines the CLI drives: Node (`build`)
-// and Bun (`push`'s bundler). Informative
+// and Bun (`push`'s bundler) — and, in an Android checkout, what its Gradle
+// build reads. Informative
 // only (always exit 0): doctor diagnoses, the failing command still owns its
 // error.
 func doctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Show cloud addresses and diagnose login, link, Docker, Node and Bun",
+		Short: "Show cloud addresses and diagnose login, link, Docker, Node, Bun and an Android app's environments",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
@@ -183,15 +184,23 @@ func doctorCmd() *cobra.Command {
 			// stack, or this machine's remembered choice. When the second one
 			// refuses, its refusal IS the diagnosis (two environments and none
 			// selected), so it is printed rather than swallowed.
+			wd, wdErr := os.Getwd()
+			android := ""
+			if wdErr == nil {
+				android = backend.AndroidCheckout(wd)
+			}
 			for _, l := range linkProbes(backend.ReadLinkedProject, backend.ReadTarget,
 				func() (backend.Resolved, error) { return backend.ResolveFor(cmd) }) {
+				if l.label == "env" && android != "" {
+					l.detail = withAppEnvNote(l.detail)
+				}
 				if l.ok {
 					ok(l.label, l.detail)
 				} else {
 					bad(l.label, l.detail)
 				}
 			}
-			if wd, err := os.Getwd(); err == nil {
+			if wdErr == nil {
 				for _, l := range localStackProbes(wd, backend.CommittedLocalEnvironment) {
 					bad(l.label, l.detail)
 				}
@@ -218,21 +227,19 @@ func doctorCmd() *cobra.Command {
 
 			// LAST, UNDER ITS OWN HEADING: what a Gradle build of this checkout
 			// reads, which none of the lines above looks at (FR-019).
-			if wd, err := os.Getwd(); err == nil {
-				if file := backend.AndroidCheckout(wd); file != "" {
-					// A PROJECT, NOT ANY LINK: a record bound to an address reads
-					// back without an error too, and a stack linked by address has
-					// no environment to name in `push --env` — the same test
-					// `palbase link` makes (FR-014).
-					linked, notLinked := backend.ReadLinkedProject()
-					project := notLinked == nil && linked.Project != ""
-					fmt.Fprintf(out, "android (%s)\n", file)
-					for _, l := range backend.AndroidDoctor(wd, project) {
-						if l.OK {
-							ok(l.Label, l.Detail)
-						} else {
-							bad(l.Label, l.Detail)
-						}
+			if android != "" {
+				// A PROJECT, NOT ANY LINK: a record bound to an address reads
+				// back without an error too, and a stack linked by address has
+				// no environment to name in `push --env` — the same test
+				// `palbase link` makes (FR-014).
+				linked, notLinked := backend.ReadLinkedProject()
+				project := notLinked == nil && linked.Project != ""
+				fmt.Fprintf(out, "android (%s)\n", android)
+				for _, l := range backend.AndroidDoctor(wd, project) {
+					if l.OK {
+						ok(l.Label, l.Detail)
+					} else {
+						bad(l.Label, l.Detail)
 					}
 				}
 			}
@@ -262,6 +269,17 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// withAppEnvNote glosses the env line in an Android checkout (FR-019).
+//
+// The line is where a VERB would act — push, spec, logs — and there it read as
+// the environment the app builds: "none is selected" sent people to `palbase
+// env use`, which changes nothing an APK compiles. The resolver's refusal ends
+// on a colon introducing the choices doctor does not print; the note takes its
+// place.
+func withAppEnvNote(detail string) string {
+	return strings.TrimSuffix(detail, ":") + " — verbs only; the build type picks the app's environment"
 }
 
 // localStackProbes names a `palbase/environments/local/` git tracks in the
