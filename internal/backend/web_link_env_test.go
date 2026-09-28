@@ -180,6 +180,13 @@ func webLinkOpts(url string) linkOpts {
 // `.gitignore` — none of it printed. Linked twice, and the second time against
 // a stack whose key changed (the relink the issue was doing), the only changes
 // git sees are the environment's own files.
+//
+// ONE FILE OUTSIDE palbase/ IS THE FIRST LINK'S TO WRITE, and it is not the
+// scaffold: `palbase/environments/local/` holds this machine's stack, the root
+// ignore file covers `node_modules/` and not that, so the app's own ignore file
+// is created with that one rule and the link says so (FR-020, D-014). The
+// `node_modules/` + `*.log` scaffold this issue was about still never lands;
+// a relink finds the rule committed and adds nothing.
 func TestARelinkLeavesAnAlreadyWiredNextAppAlone(t *testing.T) {
 	inGitRepoApp(t, "node_modules/\n", map[string]string{
 		// Linked before: the hooks an earlier link added are committed.
@@ -199,10 +206,17 @@ func TestARelinkLeavesAnAlreadyWiredNextAppAlone(t *testing.T) {
 
 	var out strings.Builder
 	require.NoError(t, runLink(context.Background(), webLinkOpts(first.URL), &out), out.String())
-	require.Empty(t, changedOutside(t, "palbase/"), "the first link changed the app's own files:\n%s", out.String())
+	require.Equal(t, []string{"?? apps/web/.gitignore"}, changedOutside(t, "palbase/"),
+		"the first link changed the app's own files beyond the one rule FR-020 adds:\n%s", out.String())
+	ignore, err := os.ReadFile(".gitignore")
+	require.NoError(t, err)
+	require.Equal(t, localIgnoreLine+"\n", string(ignore),
+		"the app's ignore file carries more than this machine's stack — the root already covers node_modules/")
+	require.Contains(t, out.String(), localIgnoreAdded)
 	require.Contains(t, out.String(),
 		"NOTE: palbase/client.ts is already wired in src/lib/providers.tsx — Palbase left layout and providers untouched.")
-	require.NotContains(t, out.String(), "✓ wrote .gitignore", "an ignore file was written into a repository that has one")
+	require.NotContains(t, out.String(), "✓ wrote .gitignore",
+		"the node_modules/ scaffold was written into a repository whose root already covers it")
 	gitIn(t, ".", "add", "-A")
 	gitIn(t, ".", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "link")
 
