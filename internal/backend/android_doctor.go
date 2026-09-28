@@ -56,21 +56,28 @@ func AndroidCheckout(dir string) string {
 // project says whether dir is linked to a project, which decides what brings a
 // missing contract in.
 func AndroidDoctor(dir string, project bool) []DoctorLine {
+	buildFile := AndroidCheckout(dir)
+	gradleRoot := gradleRootOf(buildFile)
+	// FIRST, WHETHER THE BUILD READS THIS palbase/ AT ALL: every line below is
+	// about the checkout's own copy, and a copy in the Gradle root changes which
+	// one a build compiles.
+	var lines []DoctorLine
+	if copied := secondCopyIn(dir, gradleRoot); copied != "" {
+		lines = append(lines, DoctorLine{Label: "copy", Detail: copied})
+	}
 	names, err := environmentDirsIn(dir)
 	if err != nil {
 		// A DIRECTORY THAT CANNOT BE READ IS NOT AN EMPTY ONE. Saying "nothing
 		// under it" would send a person to `palbase link`, which cannot read it
 		// either — and every key below would be judged against a list of
 		// directories nobody could read, so none is.
-		return []DoctorLine{{
+		return append(lines, DoctorLine{
 			Label: "envs",
 			Detail: fmt.Sprintf("%s cannot be read (%s) — make it a directory you can read, then `palbase link` here",
 				path.Dir(EnvDir("any")), readFailure(err)),
-		}}
+		})
 	}
-	buildFile := AndroidCheckout(dir)
-	gradleRoot := gradleRootOf(buildFile)
-	lines := environmentDirLines(dir, names, project)
+	lines = append(lines, environmentDirLines(dir, names, project)...)
 	lines = append(lines, environmentKeyLines(dir, gradleRoot, names, project)...)
 	return append(lines, moduleKeyLines(dir, path.Dir(buildFile), gradleRoot)...)
 }
@@ -84,6 +91,58 @@ func gradleRootOf(buildFile string) string {
 		return "android"
 	}
 	return "."
+}
+
+// secondCopyIn says what the palbase/ in gradleRoot — a cross-platform
+// checkout's android/ (FR-015), relative to dir — does to a build, or "" when
+// there is none, when gradleRoot is dir itself, or when nothing in it changes
+// what a build compiles.
+//
+// AN OLDER CLI LINKED WHEREVER IT RAN, and in a React Native or Flutter
+// checkout android/ was the only place it found Android; `palbase link` now
+// refuses there (FR-016), but the copy an earlier link left may still be
+// there, and a link at the root, where that refusal sends people, went through
+// without a word.
+//
+// WHAT PLUGIN 2.5.0 DOES WITH IT (FR-205): it searches the module's
+// palbase/environments, the Gradle root's and — only while the Gradle root is
+// not a checkout of its own (a .git, or palbase/project.json) — the one above
+// it, where the checkout's own sits. So android/palbase/project.json makes
+// android/ the checkout and its copy is read INSTEAD, without a refusal: the
+// build compiles the stale address, green (verification D3a). A copy holding
+// palbase/environments alone is found beside the checkout's own, and the build
+// refuses the two. One tree reached by two paths is one root to the plugin
+// (distinctBy canonicalFile), and nothing else in a palbase/ is read.
+func secondCopyIn(dir, gradleRoot string) string {
+	if gradleRoot == "." {
+		return ""
+	}
+	copied := path.Join(gradleRoot, RootDir())
+	copyInfo, err := os.Stat(filepath.Join(dir, filepath.FromSlash(copied)))
+	if err != nil || !copyInfo.IsDir() {
+		return ""
+	}
+	if own, err := os.Stat(filepath.Join(dir, RootDir())); err == nil && os.SameFile(copyInfo, own) {
+		return ""
+	}
+	envs := path.Dir(EnvDir("any"))
+	theirs, theirsErr := os.Stat(filepath.Join(dir, filepath.FromSlash(path.Join(gradleRoot, envs))))
+	ours, oursErr := os.Stat(filepath.Join(dir, filepath.FromSlash(envs)))
+	theirsFound := theirsErr == nil && theirs.IsDir()
+	oursFound := oursErr == nil && ours.IsDir()
+	if theirsFound && oursFound && os.SameFile(theirs, ours) {
+		return ""
+	}
+	marker := path.Join(gradleRoot, projectPath())
+	switch {
+	case isRegularFile(filepath.Join(dir, filepath.FromSlash(marker))):
+		return fmt.Sprintf("%s/ is a second copy: %s makes %s/ the checkout, so a build reads it instead of %s/ — "+
+			"delete it and commit that deletion", copied, marker, gradleRoot, RootDir())
+	case theirsFound && oursFound:
+		return fmt.Sprintf("%s/ is a second copy: a build finds %s beside %s and refuses — delete it and commit that deletion",
+			copied, path.Join(gradleRoot, envs), envs)
+	}
+	return ""
 }
 
 // environmentDirLines is one line per directory under palbase/environments —

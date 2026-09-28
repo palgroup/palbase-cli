@@ -387,3 +387,39 @@ func TestTheRefusalComesBeforeTheTargetIsResolved(t *testing.T) {
 	}
 	assert.Zero(t, listed, "the cloud was asked before the refusal")
 }
+
+// A LINK AT THE REACT NATIVE ROOT SAYS WHEN android/ STILL HOLDS AN EARLIER
+// LINK'S COPY. The refusal inside android/ names that copy, and sends the person
+// to the root; the link there went through without a word, and the copy's
+// palbase/project.json went on making android/ the checkout the plugin reads
+// (FR-205) — the build compiled the stale address, green (D3a). The link says
+// so, and leaves the copy where it is: deleting is a commit somebody reviews.
+func TestALinkAtAReactNativeRootNamesTheCopyAnEarlierLinkLeftInAndroid(t *testing.T) {
+	inScratchCheckout(t)
+	require.NoError(t, os.Mkdir(".git", 0o755))
+	writeFile(t, "package.json", `{"name":"rnapp"}`)
+	seedGradleFile(t, filepath.Join("android", "settings.gradle"), "include ':app'\n")
+	seedGradleFile(t, filepath.Join("android", "build.gradle"), "buildscript {}\n")
+	seedGradleFile(t, filepath.Join("android", "app", "build.gradle"), "android {\n  defaultConfig {\n    applicationId \"com.rn.app\"\n  }\n}\n")
+	stale := filepath.Join("android", "palbase", "environments", "main", "android-config.json")
+	seedGradleFile(t, filepath.Join("android", "palbase", "project.json"), `{"project":"prd_rn","name":"rnapp"}`)
+	seedGradleFile(t, stale, `{"base_url":"https://STALE.example","api_key":"pb_stale"}`)
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+	o := linkOpts{
+		url:          main.URL,
+		linkedEnv:    "main",
+		product:      Product{ID: "prd_rn", Name: "rnapp"},
+		environments: []Environment{{Name: "main", Ref: "mainref000", Status: "Running"}},
+	}
+
+	var out strings.Builder
+	require.NoError(t, runLink(context.Background(), o, &out), out.String())
+
+	assert.Contains(t, out.String(), "\nandroid/palbase/ is a second copy: android/palbase/project.json makes android/ the checkout, "+
+		"so a build reads it instead of palbase/ — delete it and commit that deletion\n")
+	assert.FileExists(t, ConfigPath("main", "android"), "the link did not write the root's copy")
+	got, err := os.ReadFile(stale)
+	require.NoError(t, err)
+	assert.Equal(t, `{"base_url":"https://STALE.example","api_key":"pb_stale"}`, string(got), "the link touched the copy in android/")
+}

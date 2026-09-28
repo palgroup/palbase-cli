@@ -404,6 +404,16 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if _, err := io.WriteString(w, strings.ReplaceAll(output.String(), stage, root)); err != nil {
 		return err
 	}
+	// A COPY AN EARLIER LINK LEFT IN android/ IS SAID, NOT DELETED. The refusal
+	// inside android/ sends people here, and a link here writes only the
+	// checkout's own palbase/ — while that copy's project.json makes android/ the
+	// checkout the Gradle plugin reads (secondCopyIn). Asked of the published
+	// checkout, so the two copies compared are the ones a build finds.
+	if copied := secondCopyIn(root, gradleRootOf(AndroidCheckout(root))); copied != "" {
+		if _, err := fmt.Fprintf(w, "\n%s\n", copied); err != nil {
+			return err
+		}
+	}
 	return releaseForProject(o, root, w)
 }
 
