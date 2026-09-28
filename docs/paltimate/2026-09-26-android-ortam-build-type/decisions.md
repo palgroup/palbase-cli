@@ -85,6 +85,7 @@
 ### D-015 · İlk ortamın slug'ı her projede `main`
 **Karar:** FR-102/105; panelden açılmış projelerde de (`Production` → slug `main`, görünen ad `Production` kalır).
 **Sonuç:** Böyle bir projede bir sonraki link `main/` yazar ve `Production/`'ı temizler; `palbase.env=Production` kullanan build **yüksek sesle** düşer ("carries main") — sessiz değil. Göç notunda yazılır.
+**Göç notu — eski CLI'lar (2026-09-28, T015 canlıda):** Bağlar rotası (`/api/v2/apps/{id}/bindings` `environment_name`) ve ortamlar rotası (`/api/v2/projects/{id}/environments` `name`/`slug`) artık saklanan slug'ı döner; önceden ortamın görünen adını (`previous_name`, örn. `centauri`, `preptigo`) dönüyorlardı. v0.54.0 ve öncesi iOS link'i ortam adını bağlar rotasından aldığı için bir sonraki `palbase link` iOS'ta `<Görünen ad>.xcconfig` / build configuration yerine `main` yazar; v0.56.0'a kadarki CLI'lar seçim ve `clone` dizini için ortamlar rotasını okur. Çare: yeniden link'lemeden önce CLI'ı güncelle (v0.79.0+). Üretimdeki 45 ortamın hepsinin slug'ı `main` (T012 raporu); liste rotası zaten `main` diyordu, yalnız bu iki rotanın cevabı değişti.
 
 ### D-016 · CLI listesindeki `name` slug'ı taşır
 **Gerekçe:** Eski CLI sürümleri dizin adını `name`'den alıyor; sunucu `name`'e slug koyarsa eski CLI'lar da güvenli ada geçer. Görünen ad `display_name`'de.
