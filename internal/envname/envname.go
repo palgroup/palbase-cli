@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"golang.org/x/text/cases"
@@ -216,6 +217,44 @@ func ShellWord(name string) string {
 		}
 	}
 	b.WriteByte('\'')
+	return b.String()
+}
+
+// PropertiesValue is how an environment name is WRITTEN AS THE VALUE OF A
+// .properties LINE — the `palbase.env.debug=<name>` line `palbase link` hands
+// an Android developer to paste into gradle.properties.
+//
+// NEITHER Label NOR ShellWord SPELLS IT. Their quotes would become part of the
+// value (`"Feature X"` names a directory with quotes in its name), and Gradle
+// decodes gradle.properties as ISO-8859-1 through java.util.Properties — the
+// Palbase plugin reads the root file the same way — so `Zürich` pasted in
+// UTF-8 reads back as `ZÃ¼rich`, a directory nobody has. The value is
+// written in that format's own escapes instead: every rune outside printable
+// ASCII as \uXXXX, one per UTF-16 unit (Java's own unit, so a rune above
+// U+FFFF is its surrogate pair), a backslash doubled, and a leading space
+// escaped, because the reader skips whitespace in front of a value. A plain
+// word — every slug — prints as it is.
+//
+// WHAT IS PRINTED IS PRINTABLE ASCII, whatever the name, so the line is as
+// safe for the terminal it is shown in as Label (FR-006), and nothing between
+// the terminal, an editor and ISO-8859-1 can change it on the way into the
+// file.
+func PropertiesValue(name string) string {
+	var b strings.Builder
+	for i, r := range name {
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == ' ' && i == 0:
+			b.WriteString(`\ `)
+		case r < 0x20 || r > 0x7e:
+			for _, unit := range utf16.Encode([]rune{r}) {
+				fmt.Fprintf(&b, `\u%04x`, unit)
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
 	return b.String()
 }
 

@@ -148,3 +148,45 @@ func TestShellWordEscapesEveryNonPrintingRuneEvenInsideTheQuotes(t *testing.T) {
 		"does not start and end with a quote: %q", got)
 	require.Contains(t, got, `\x1b`, "the escape byte is not shown as text: %q", got)
 }
+
+// A NAME INSIDE A .properties LINE IS SPELLED IN THAT FILE'S OWN ESCAPES
+// (FR-013). Gradle — and the Palbase plugin, which reads the root
+// gradle.properties itself — decode the file as ISO-8859-1 through
+// java.util.Properties: a name pasted in UTF-8 reads back as other characters,
+// Label's or ShellWord's quotes become part of the value, and whitespace in
+// front of a value is skipped. Every rune outside printable ASCII is a \uXXXX
+// escape per UTF-16 unit, a backslash is doubled, a leading space is escaped —
+// and a plain word, every slug, is untouched.
+func TestPropertiesValueSpellsANameTheWayJavaPropertiesReadsIt(t *testing.T) {
+	for name, want := range map[string]string{
+		"main":                   "main",
+		"feature-profile-update": "feature-profile-update",
+		"Feature X":              "Feature X",
+		"x$(id)":                 "x$(id)",
+		`"quoted"`:               `"quoted"`,
+		"a=b:c#d!e":              "a=b:c#d!e",
+		"Z\u00fcrich":            `Z\u00fcrich`,
+		"caf\u00e9":              `caf\u00e9`,
+		"\u6771\u4eac":           `\u6771\u4eac`,
+		"rocket\U0001f680":       `rocket\ud83d\ude80`,
+		" leading":               `\ leading`,
+		"in between":             "in between",
+		`back\slash`:             `back\\slash`,
+		"evil\x1b]0;owned\a":     `evil\u001b]0;owned\u0007`,
+		"del\x7f":                `del\u007f`,
+	} {
+		require.Equal(t, want, PropertiesValue(name), "%q", name)
+	}
+}
+
+// WHAT IS PRINTED IS PLAIN PRINTABLE ASCII, whatever the name — so the line is
+// as safe for the terminal it is shown in as Label (FR-006), and no encoding
+// between the terminal, the editor and ISO-8859-1 can change it on the way
+// into the file.
+func TestPropertiesValueIsPrintableASCIIWhateverTheName(t *testing.T) {
+	for _, name := range []string{"Z\u00fcrich EU", "\u202eevil", "zero\u200bwidth", "\xff\xfe", "\u6771\u4eac", "tab\there", "line\nbreak"} {
+		for _, r := range PropertiesValue(name) {
+			require.True(t, r >= 0x20 && r <= 0x7e, "%q spells %q, which carries %U", name, PropertiesValue(name), r)
+		}
+	}
+}

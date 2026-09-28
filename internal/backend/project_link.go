@@ -1096,6 +1096,7 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 	}
 	apple := false
 	web := false
+	android := false
 	for _, c := range configs {
 		for name := range unwritten {
 			delete(c.envs.Environments, name)
@@ -1123,6 +1124,9 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 			dest := ConfigPath(name, c.platform)
 			configWrites[name] = append(configWrites[name], recordedWrite{path: dest, before: before[name]})
 			pendingLines = append(pendingLines, pendingLine{env: name, path: dest})
+			if c.platform == "android" {
+				android = true
+			}
 		}
 		if isApplePlatform(c.platform) {
 			apple = true
@@ -1249,6 +1253,12 @@ func runLinkPrepared(ctx context.Context, o linkOpts, w io.Writer) error {
 		// The customer owns their configuration system. What they need from us
 		// is printed once, below, and it is theirs to place.
 		printEnvironmentSelectionSnippet(w, envs.Default)
+	}
+	// AND ANDROID'S, which got nothing (FR-013): the config and the contract sat
+	// on disk with no word about the plugin that reads them, the dependency it
+	// generates against, or which environment a build compiles.
+	if android {
+		printAndroidSetup(w, envs.Default)
 	}
 
 	// THE SAME STEP APPLE GETS, FOR WEB. An Apple checkout leaves here with
