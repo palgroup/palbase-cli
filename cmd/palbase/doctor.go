@@ -185,14 +185,21 @@ func doctorCmd() *cobra.Command {
 			// refuses, its refusal IS the diagnosis (two environments and none
 			// selected), so it is printed rather than swallowed.
 			wd, wdErr := os.Getwd()
-			android := ""
+			android, linkedAbove := "", ""
 			if wdErr == nil {
 				android = backend.AndroidCheckout(wd)
+				linkedAbove = backend.LinkedCheckoutAbove(wd)
 			}
 			for _, l := range linkProbes(backend.ReadLinkedProject, backend.ReadTarget,
 				func() (backend.Resolved, error) { return backend.ResolveFor(cmd) }) {
 				if l.label == "env" && android != "" {
 					l.detail = withAppEnvNote(l.detail)
+				}
+				// NOT `palbase link <project>` HERE: link refuses a Gradle
+				// directory inside a linked checkout and names the root
+				// (FR-016), so the cure is the one that root has.
+				if l.label == "link" && !l.ok && linkedAbove != "" {
+					l.detail = "this directory is not linked, and is " + insideLinkedCheckout(linkedAbove)
 				}
 				if l.ok {
 					ok(l.label, l.detail)
@@ -227,7 +234,17 @@ func doctorCmd() *cobra.Command {
 
 			// LAST, UNDER ITS OWN HEADING: what a Gradle build of this checkout
 			// reads, which none of the lines above looks at (FR-019).
-			if android != "" {
+			switch {
+			case android != "" && linkedAbove != "":
+				// A GRADLE DIRECTORY INSIDE A LINKED CHECKOUT — React Native's
+				// android/, an app module — builds from that checkout's
+				// palbase/ and its root gradle.properties, none of which is
+				// here: the section read as if this were the root, sent people
+				// to a link that refuses, and took a module's own
+				// gradle.properties for the root file (FR-203).
+				fmt.Fprintf(out, "android (%s)\n", android)
+				bad("here", insideLinkedCheckout(linkedAbove))
+			case android != "":
 				// A PROJECT, NOT ANY LINK: a record bound to an address reads
 				// back without an error too, and a stack linked by address has
 				// no environment to name in `push --env` — the same test
@@ -269,6 +286,13 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// insideLinkedCheckout is what doctor says in a Gradle directory inside the
+// checkout linked at root (backend.LinkedCheckoutAbove): where a build of it
+// reads its environments, and where doctor can say what it reads.
+func insideLinkedCheckout(root string) string {
+	return fmt.Sprintf("a Gradle directory inside the checkout linked at %s — run `palbase doctor` there", root)
 }
 
 // withAppEnvNote glosses the env line in an Android checkout (FR-019).

@@ -156,8 +156,10 @@ func holdsOneOf(dir string, names []string) bool {
 	return false
 }
 
-// linkedCheckoutAbove is, for a Gradle directory, the nearest directory ABOVE
-// it that holds palbase/project.json, or "".
+// LinkedCheckoutAbove is, for a Gradle directory, the nearest directory ABOVE
+// it that holds palbase/project.json, or "". `palbase link` refuses such a
+// directory and names that checkout (refuseInsideALinkedCheckout); `palbase
+// doctor` sends people there too, rather than to a link it refuses.
 //
 // ONLY A GRADLE DIRECTORY IS ASKED (D-025) — one holding build.gradle(.kts) or
 // settings.gradle(.kts). The Gradle plugin is what reads palbase/ from above
@@ -186,7 +188,7 @@ func holdsOneOf(dir string, names []string) bool {
 // one further up — a monorepo whose root is linked to the backend, its app in
 // apps/android — is out of that build's reach, and the app is linked where its
 // Gradle root is.
-func linkedCheckoutAbove(dir string) string {
+func LinkedCheckoutAbove(dir string) string {
 	at, err := filepath.Abs(dir)
 	if err != nil || !holdsOneOf(at, gradleDirectoryFiles) {
 		return ""
@@ -230,7 +232,7 @@ func linkedCheckoutAbove(dir string) string {
 // Sent to link at the root with that copy left in place, the build would go on
 // compiling it, in silence, or refuse without saying why the link was fine.
 func refuseInsideALinkedCheckout(dir string) error {
-	linked := linkedCheckoutAbove(dir)
+	linked := LinkedCheckoutAbove(dir)
 	if linked == "" {
 		return nil
 	}
