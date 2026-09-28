@@ -163,6 +163,18 @@ boot generated.`,
 			if len(args) == 1 && o.url == "" {
 				o.url = args[0]
 			}
+			// FR-016 BEFORE THE TARGET IS RESOLVED. Resolving it reads the
+			// record in this directory and asks the cloud about it; a link
+			// refused here needs neither, and without a session the refusal
+			// hid behind `palbase login`. runLink asks again, for the auth
+			// refresh that reaches it without this command.
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := refuseInsideALinkedCheckout(wd); err != nil {
+				return err
+			}
 			if err := resolveLinkTarget(cmd.Context(), r, &o); err != nil {
 				return err
 			}

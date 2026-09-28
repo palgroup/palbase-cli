@@ -139,6 +139,111 @@ func newLinkStage() (string, error) {
 	return os.MkdirTemp("", "palbase-link-*")
 }
 
+// gradleRootFiles mark the root of a Gradle build; gradleDirectoryFiles mark
+// any directory Gradle builds, a root or one of its modules.
+var (
+	gradleRootFiles      = []string{"settings.gradle.kts", "settings.gradle"}
+	gradleDirectoryFiles = []string{"build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle"}
+)
+
+// holdsOneOf reports whether dir holds a regular file by one of names.
+func holdsOneOf(dir string, names []string) bool {
+	for _, name := range names {
+		if isRegularFile(filepath.Join(dir, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkedCheckoutAbove is, for a Gradle directory, the nearest directory ABOVE
+// it that holds palbase/project.json, or "".
+//
+// ONLY A GRADLE DIRECTORY IS ASKED (D-025) — one holding build.gradle(.kts) or
+// settings.gradle(.kts). The Gradle plugin is what reads palbase/ from above
+// the directory it builds (the module, the Gradle root and one level up,
+// FR-205), so only there does a second copy change what a build reads. A
+// directory with no Gradle build — a monorepo's web or iOS app, a docs/ folder
+// — is linked where it is, as it was before this rule (20e5d7e).
+//
+// THE WALK IS WHERE THE DIRECTORY IS ON DISK. A shell that reached it through a
+// symlink names it by the link, and the link's parent is not the directory the
+// plugin reads: Gradle resolves a build's directories.
+//
+// A MODULE IS WALKED UP TO ITS GRADLE ROOT, whatever repository it sits in: the
+// plugin reads a module's palbase/ together with its Gradle root's, and a `.git`
+// between them — an app module kept as a submodule — bounds neither.
+//
+// THE WALK ENDS AT A GRADLE ROOT THAT IS A REPOSITORY OF ITS OWN — it carries
+// `.git`, the directory or the file a worktree or submodule points with. The
+// plugin looks above a root project only while it carries no `.git` (FR-205),
+// so such a root is a checkout of its own, even inside another project's
+// directory.
+//
+// AND AT A GRADLE ROOT WHOSE PARENT IS NOT LINKED. A linked directory right
+// above a Gradle root — React Native's and Flutter's android/ (FR-015) — is the
+// checkout that build reads, and a second copy below it would take its place;
+// one further up — a monorepo whose root is linked to the backend, its app in
+// apps/android — is out of that build's reach, and the app is linked where its
+// Gradle root is.
+func linkedCheckoutAbove(dir string) string {
+	at, err := filepath.Abs(dir)
+	if err != nil || !holdsOneOf(at, gradleDirectoryFiles) {
+		return ""
+	}
+	if onDisk, err := filepath.EvalSymlinks(at); err == nil {
+		at = onDisk
+	}
+	for {
+		gradleRoot := holdsOneOf(at, gradleRootFiles)
+		if gradleRoot {
+			if _, err := os.Lstat(filepath.Join(at, ".git")); err == nil {
+				return ""
+			}
+		}
+		parent := filepath.Dir(at)
+		if parent == at {
+			return ""
+		}
+		if isRegularFile(filepath.Join(parent, filepath.FromSlash(projectPath()))) {
+			return parent
+		}
+		if gradleRoot {
+			return ""
+		}
+		at = parent
+	}
+}
+
+// refuseInsideALinkedCheckout is FR-016's refusal of a link in dir, or nil
+// when dir is not a Gradle directory inside a linked checkout.
+//
+// WHAT A COPY HERE DOES TO A BUILD (plugin 2.5.0, FR-205): a Gradle root
+// holding palbase/project.json is a checkout of its own to the plugin, which
+// then never looks above it, so its copy is read INSTEAD of the checkout's
+// own, without a word; anywhere else the plugin finds both copies in reach and
+// refuses the build. Either way this directory's copy is the wrong one.
+//
+// A COPY ALREADY HERE IS NAMED. An older CLI linked wherever it ran — in a
+// React Native checkout android/ was the only place it found Android (FR-015)
+// — so the second copy this rule keeps from being born may be here already.
+// Sent to link at the root with that copy left in place, the build would go on
+// compiling it, in silence, or refuse without saying why the link was fine.
+func refuseInsideALinkedCheckout(dir string) error {
+	linked := linkedCheckoutAbove(dir)
+	if linked == "" {
+		return nil
+	}
+	why := fmt.Sprintf("A %s/ written here would be a second copy: a build in this directory would read it instead of "+
+		"the checkout's own, or find both and refuse", RootDir())
+	if info, err := os.Stat(filepath.Join(dir, RootDir())); err == nil && info.IsDir() {
+		why = fmt.Sprintf("The %s/ here, from an earlier link, is a second copy: a build in this directory reads it instead of "+
+			"the checkout's own, or finds both and refuses — delete it and commit that deletion", RootDir())
+	}
+	return fmt.Errorf("%s is inside the checkout linked at %s (%s) — run `palbase link` there; "+
+		"--platform names this app's platform if it is not found from there.\n  %s", dir, linked, projectPath(), why)
+}
+
 func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	root, err := os.Getwd()
 	if err != nil {
@@ -153,6 +258,16 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	// hidden root git tracks, and CarriesLegacyLayout refuses exactly that one,
 	// by name, right below.
 	reapRetiredArtifacts(root)
+	// A GRADLE DIRECTORY INSIDE A LINKED CHECKOUT IS NOT ONE (FR-016). An Android
+	// module has a build.gradle.kts, so detection finds an app in it, and a link
+	// there wrote a second palbase/ that the Gradle plugin read before the
+	// checkout's own — measured: a debug APK carried the module copy's stale
+	// address, build green (verification D3a). Asked again here, after the
+	// sweep and before every network call, for the auth refresh that reaches
+	// runLink without `palbase link`'s own gate.
+	if err := refuseInsideALinkedCheckout(root); err != nil {
+		return err
+	}
 	// THE RETIRED LAYOUT IS REFUSED NEXT, BEFORE ANY SIDE EFFECT OF ITS OWN.
 	//
 	// The sweep above is not one: it removes only what an older CLI produced
