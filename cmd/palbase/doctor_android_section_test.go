@@ -272,3 +272,175 @@ func caseInsensitive(t *testing.T, dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, "CASEPROBE"))
 	return err == nil
 }
+
+// THE KEYS THAT PICK AN ENVIRONMENT are listed where the Gradle plugin reads
+// them — the root gradle.properties, then local.properties — each with the
+// environment it names, in the plugin's own words for where a choice came from.
+func TestDoctorListsThePalbaseEnvKeys(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "featureX", androidConfig("https://featurex.example", "pb_featurex_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "org.gradle.jvmargs=-Xmx2g\npalbase.env.debug=main\npalbase.env.release=main\n")
+	writeFileIn(t, dir, "local.properties", "sdk.dir=/opt/android-sdk\npalbase.env.debug = featureX\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✓ main       android-config.json with an api_key, openapi.json with x-palbase-roles\n"+
+			"  ✓ debug      → main (palbase.env.debug in gradle.properties)\n"+
+			"  ✓ release    → main (palbase.env.release in gradle.properties)\n"+
+			"  ✓ debug      → featureX (palbase.env.debug in local.properties)\n")
+}
+
+// A KEY THAT NAMES NO DIRECTORY fails the build that reads it. One whose name
+// differs only in case finds its directory on this Mac and not on CI: the
+// plugin matches the exact name.
+func TestDoctorNamesAKeyWhoseEnvironmentIsNotHere(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "featureX", androidConfig("https://featurex.example", "pb_featurex_cK"), withRoles)
+	writeFileIn(t, dir, "local.properties", "palbase.env.debug=Featurex\npalbase.env.staging=featureZ\npalbase.env.qa=local\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ debug      → Featurex (palbase.env.debug in local.properties) — palbase/environments/featureX differs only in case, "+
+			"and a build finds its directory by the exact name: palbase.env.debug=featureX\n"+
+			"  ✗ staging    → featureZ (palbase.env.staging in local.properties) — no palbase/environments/featureZ here; "+
+			"`palbase link` here writes one directory per environment of the project\n"+
+			"  ✗ qa         → local (palbase.env.qa in local.properties) — no palbase/environments/local here; "+
+			"`palbase start` in the backend, then `palbase link` here\n")
+}
+
+// WHAT local.properties CANNOT CARRY is said, not listed as if it counted: it
+// reaches debuggable builds only (a release build is not one), and it holds
+// per-build-type keys, not the global one.
+func TestDoctorSaysWhichKeysLocalPropertiesDoesNotReach(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "local.properties", "palbase.env.release=main\npalbase.env=main\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ release    → main (palbase.env.release in local.properties) — ignored: local.properties reaches only debuggable builds, "+
+			"and a release build is not one; put it in gradle.properties\n"+
+			"  ✗ any        → main (palbase.env in local.properties) — ignored: local.properties carries palbase.env.<build type> keys, "+
+			"not the global palbase.env\n")
+}
+
+// A CROSS-PLATFORM CHECKOUT'S GRADLE BUILD IS android/, and so are its
+// properties files.
+func TestDoctorReadsTheKeysOfACrossPlatformCheckout(t *testing.T) {
+	dir := t.TempDir()
+	writeFileIn(t, dir, "android/app/build.gradle", "android {\n    defaultConfig {\n        applicationId \"com.example.todo\"\n    }\n}\n")
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "android/gradle.properties", "palbase.env.release=main\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✓ release    → main (palbase.env.release in android/gradle.properties)\n")
+}
+
+// A KEY IS READ AS THE PLUGIN READS IT. Gradle and the plugin load these files
+// through java.util.Properties — ISO-8859-1, \uXXXX escapes, a line continued
+// by a trailing backslash — and the plugin trims the value it gets: `main  `
+// selects main. `palbase link` hands over a name outside plain ASCII in those
+// escapes, so the line it prints reads back as the directory it wrote.
+func TestDoctorReadsTheKeysAsTheGradlePluginDoes(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	androidEnvironmentIn(t, dir, "Zürich", androidConfig("https://zurich.example", "pb_zurich_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties",
+		"palbase.env.debug=main  \n# palbase.env.qa=nothing\\\npalbase.env.release=ma\\\n    in\npalbase.env.staging=Z\\u00fcrich\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✓ debug      → main (palbase.env.debug in gradle.properties)\n"+
+			"  ✓ release    → main (palbase.env.release in gradle.properties)\n"+
+			"  ✓ staging    → \"Zürich\" (palbase.env.staging in gradle.properties)\n")
+	require.NotContains(t, out, "palbase.env.qa", "a comment is not continued by a trailing backslash")
+}
+
+// A NAME PASTED IN UTF-8 IS NOT THE NAME A BUILD READS: the file is decoded as
+// ISO-8859-1, so `Zürich` arrives as `ZÃ¼rich`, a directory nobody has. The
+// line says so, with the spelling that reads back.
+func TestDoctorSaysANameWrittenInUTF8ReadsAsAnotherOne(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "Zürich", androidConfig("https://zurich.example", "pb_zurich_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.debug=Zürich\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ debug      → \"ZÃ¼rich\" (palbase.env.debug in gradle.properties) — gradle.properties is read as ISO-8859-1, "+
+			"so \"Zürich\" written in UTF-8 reads as this; write it as palbase.env.debug=Z\\u00fcrich\n")
+}
+
+// A VALUE THAT IS NOT ONE DIRECTORY NAME is refused by the plugin before it
+// looks for a directory — an empty one included, which does not mean unset —
+// and no `palbase link` ever writes such a directory.
+func TestDoctorSaysWhichValuesTheGradlePluginRefuses(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.debug=\npalbase.env.qa=../outside\npalbase.env.staging=.main\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ debug      → \"\" (palbase.env.debug in gradle.properties) — a build refuses it: the name is empty, "+
+			"and an environment is one directory under palbase/environments\n"+
+			"  ✗ qa         → \"../outside\" (palbase.env.qa in gradle.properties) — a build refuses it: the name contains a path separator, "+
+			"and an environment is one directory under palbase/environments\n"+
+			"  ✗ staging    → \".main\" (palbase.env.staging in gradle.properties) — a build refuses it: the name starts with a dot, "+
+			"and an environment is one directory under palbase/environments\n")
+}
+
+// A MODULE'S OWN gradle.properties NEVER CHOOSES (FR-203): the plugin reads the
+// root file every module shares, and refuses every build of a module whose own
+// file holds a palbase.env line rather than ignore it in silence.
+func TestDoctorSaysAModulesOwnGradlePropertiesIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "app/gradle.properties", "android.useAndroidX=true\npalbase.env=main\npalbase.env.release=main\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✗ any        → main (palbase.env in app/gradle.properties) — every build of app/ is refused while it holds this line: "+
+			"a module's own gradle.properties never chooses an environment; move it to gradle.properties\n"+
+			"  ✗ release    → main (palbase.env.release in app/gradle.properties) — every build of app/ is refused while it holds this line: "+
+			"a module's own gradle.properties never chooses an environment; move it to gradle.properties\n")
+
+	rn := t.TempDir()
+	writeFileIn(t, rn, "android/app/build.gradle", "android {\n    defaultConfig {\n        applicationId \"com.example.todo\"\n    }\n}\n")
+	androidEnvironmentIn(t, rn, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, rn, "android/app/gradle.properties", "palbase.env.debug=main\n")
+
+	require.Contains(t, runDoctorIn(t, rn),
+		"  ✗ debug      → main (palbase.env.debug in android/app/gradle.properties) — every build of android/app/ is refused "+
+			"while it holds this line: a module's own gradle.properties never chooses an environment; move it to android/gradle.properties\n")
+}
+
+// A FILE JAVA CANNOT LOAD stops a Gradle build before any environment is
+// chosen: a hand-written Windows path in local.properties reads `\u` followed
+// by "sers" as a broken escape.
+func TestDoctorSaysWhenAPropertiesFileCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.debug=main\n")
+	writeFileIn(t, dir, "local.properties", "sdk.dir=C:\\users\\me\\android\npalbase.env.debug=main\n")
+
+	require.Contains(t, runDoctorIn(t, dir),
+		"  ✓ debug      → main (palbase.env.debug in gradle.properties)\n"+
+			"  ✗ keys       local.properties cannot be read (malformed \\uxxxx encoding), and a Gradle build stops on it too — fix the file\n")
+}
+
+// NOTHING FROM A PROPERTIES FILE REACHES THE TERMINAL RAW: a key is somebody's
+// text as much as a value is, and \uXXXX puts any character in either.
+func TestDoctorPrintsNoControlCharacterFromAPropertiesFile(t *testing.T) {
+	dir := t.TempDir()
+	androidCheckoutIn(t, dir)
+	androidEnvironmentIn(t, dir, "main", androidConfig("https://main.example", "pb_main_cK"), withRoles)
+	writeFileIn(t, dir, "gradle.properties", "palbase.env.de\\u001bbug=ma\\u001b[2Jin\n")
+
+	out := runDoctorIn(t, dir)
+	require.Contains(t, out,
+		"  ✗ \"de\\x1bbug\" → \"ma\\x1b[2Jin\" (palbase.env.\"de\\x1bbug\" in gradle.properties) — a build refuses it: "+
+			"the name contains a control character, and an environment is one directory under palbase/environments\n")
+	require.NotContains(t, out, "\x1b")
+}
