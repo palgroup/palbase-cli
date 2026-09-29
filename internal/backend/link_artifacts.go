@@ -306,6 +306,13 @@ func runLink(ctx context.Context, o linkOpts, w io.Writer) error {
 	if len(platforms) == 0 {
 		platforms = detectPlatforms(root)
 	}
+	// A WEB LINK'S OWN DIRECTORIES ARE SPELLED EXACTLY TOO, for the same reason
+	// as `palbase` — and only a web link writes them.
+	if slices.Contains(platforms, webPlatform) {
+		if err := refuseAnotherSpellingOfAWebDirectory(root); err != nil {
+			return err
+		}
+	}
 	installWebSDK := slices.Contains(platforms, webPlatform) && !isRegularFile(filepath.Join(root, palbeGenBin))
 	stage, err := newLinkStage()
 	if err != nil {
@@ -471,6 +478,54 @@ func refuseAnotherSpellingOfTheRoot(root string) error {
 	}
 	return fmt.Errorf("this checkout spells the palbase/ directory `%s`; rename it to `%s` and run `palbase link` again",
 		envname.Label(other), RootDir())
+}
+
+// webWrittenDirs are the top-level directories a web link writes into — the
+// web half of runLink's `mutable`.
+var webWrittenDirs = []string{"src", "app", "pages", "public"}
+
+// refuseAnotherSpellingOfAWebDirectory refuses a web checkout whose root holds
+// one of webWrittenDirs spelled another way — `App/`, say — the way
+// refuseAnotherSpellingOfTheRoot refuses `Palbase/`.
+//
+// THE SAME HOLE, ONE LEVEL OVER. `mutable` names these directories exactly, so
+// `App/` was symlinked into the stage instead of copied; on a Mac's disk the
+// stage's `app/` then IS that symlink, the wiring edited `App/layout.tsx` in the
+// real checkout, and a link that failed afterwards left the edit behind while it
+// said "previous client artifacts were preserved". Decided by the name, not the
+// disk, because the stage's disk decides as much as the checkout's.
+//
+// WEB ONLY: an Xcode project's `App/` or a native `Src/` is written by no link,
+// and the stage leaves it alone as it should.
+func refuseAnotherSpellingOfAWebDirectory(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	exact := map[string]bool{}
+	for _, e := range entries {
+		exact[e.Name()] = true
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		for _, dir := range webWrittenDirs {
+			if name == dir || !envname.SameDirectory(name, dir) {
+				continue
+			}
+			if exact[dir] {
+				// Only a case-sensitive disk holds both; renaming onto the real one
+				// would collide.
+				return fmt.Errorf("this checkout holds both `%s` and `%s`, which are one directory on a Mac; "+
+					"move `%s` aside and run `palbase link` again", envname.Label(name), dir, envname.Label(name))
+			}
+			return fmt.Errorf("this web app spells its %s/ directory `%s`; rename it to `%s` and run `palbase link` again",
+				dir, envname.Label(name), dir)
+		}
+	}
+	return nil
 }
 
 // publishProjectContract copies the linked project's identity out of a stage a

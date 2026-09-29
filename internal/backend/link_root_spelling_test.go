@@ -111,3 +111,70 @@ func TestALinkRefusesAPalbaseDirectoryBesideTheRealOne(t *testing.T) {
 	}
 	assert.Equal(t, []string{"featurex"}, entriesIn(t, filepath.Join(RootDir(), envSubdir)))
 }
+
+// A WEB APP'S OWN DIRECTORIES ARE SPELLED ONE WAY TOO. The stage copies the
+// directories a web link writes — `src`, `app`, `pages`, `public` — by those
+// exact names and symlinks every other one; `App/` is `app/` on a Mac's disk,
+// so the wiring edited `App/layout.tsx` straight in the real checkout, and a
+// link that failed afterwards left it edited while it said "previous client
+// artifacts were preserved" (wave-1 final review, parked residual (a)).
+//
+// REFUSED BEFORE ANYTHING IS STAGED, like `Palbase/`, and for the same reason:
+// the disk that decides is the stage's as much as the checkout's, so the rule
+// is the name.
+func TestAWebLinkRefusesAWebDirectorySpelledAnotherWay(t *testing.T) {
+	inScratchCheckout(t)
+	seedWebCheckout(t)
+	layout := filepath.Join("App", "layout.tsx")
+	require.NoError(t, os.MkdirAll("App", 0o755))
+	require.NoError(t, os.WriteFile(layout, []byte("// the app's own layout\n"), 0o644))
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+
+	var out strings.Builder
+	err := runLink(context.Background(), webLinkOpts(main.URL), &out)
+
+	require.EqualError(t, err, "this web app spells its app/ directory `App`; "+
+		"rename it to `app` and run `palbase link` again", out.String())
+	raw, readErr := os.ReadFile(layout)
+	require.NoError(t, readErr)
+	assert.Equal(t, "// the app's own layout\n", string(raw))
+	assert.NoDirExists(t, RootDir())
+}
+
+// ONLY A WEB LINK WRITES THERE. An Xcode project's `App/` or an Android
+// checkout's `Src/` is an ordinary directory of that platform: nothing is
+// written into it, the stage symlinks it, and the link goes ahead.
+func TestANativeLinkLeavesADirectorySpelledLikeAWebOneAlone(t *testing.T) {
+	inScratchCheckout(t)
+	seedAndroidApp(t)
+	require.NoError(t, os.MkdirAll("Src", 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join("Src", "Main.kt"), []byte("// native\n"), 0o644))
+
+	out, err := linkOneEnvironment(t)
+
+	require.NoError(t, err, out)
+	raw, readErr := os.ReadFile(filepath.Join("Src", "Main.kt"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "// native\n", string(raw))
+}
+
+// ON A CASE-SENSITIVE DISK BOTH SPELLINGS CAN EXIST, and renaming onto the real
+// one would collide: the other is to be moved aside.
+func TestAWebLinkRefusesAWebDirectoryBesideTheRealOne(t *testing.T) {
+	inScratchCheckout(t)
+	if caseInsensitiveDisk(t, ".") {
+		t.Skip("this disk takes Public and public for one name — there is no second directory")
+	}
+	seedWebCheckout(t)
+	require.NoError(t, os.MkdirAll("public", 0o755))
+	require.NoError(t, os.MkdirAll("Public", 0o755))
+	main := stackServing(t, linkKeyMain, nil)
+	routeEnvironments(t, map[string]string{"mainref000": main.URL})
+
+	var out strings.Builder
+	err := runLink(context.Background(), webLinkOpts(main.URL), &out)
+
+	require.EqualError(t, err, "this checkout holds both `Public` and `public`, which are one directory on a Mac; "+
+		"move `Public` aside and run `palbase link` again", out.String())
+}
