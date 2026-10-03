@@ -61,6 +61,14 @@ func TestInstalledBackendVersion(t *testing.T) {
 // that exercise the skew branch also seed a controllers/ dir).
 func seedInstalledBackend(t *testing.T, dir, version string) {
 	t.Helper()
+	// AND THE package.json THAT INSTALLED IT, unless the test wrote its own: an
+	// SDK in node_modules with no package.json beside it is no backend anybody
+	// has, and `palbase build` refuses a folder without one before it asks npm
+	// anything (palbase-cli#8).
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); os.IsNotExist(err) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"),
+			[]byte(`{"name":"fixture","dependencies":{"@palbase/backend":"`+version+`"}}`), 0o644))
+	}
 	pkgDir := filepath.Join(dir, "node_modules", "@palbase", "backend")
 	require.NoError(t, os.MkdirAll(pkgDir, 0o755))
 	// A RESOLVABLE package, not just a version string. The version is what these

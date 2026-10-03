@@ -159,8 +159,12 @@ func TestPushAndPlanSweepBeforeTheirOwnRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			mustWrite(t, dir, ".palbase/keep.txt", "committed by somebody\n")
-			gitCheckout(t, dir, ".palbase/keep.txt")
+			// A CLI-WRITTEN hidden root somebody committed — the case FR-010
+			// protects. A `.palbase` holding only files no CLI writes is not the
+			// CLI's hidden root at all and is neither swept nor named
+			// (palbase-cli#8, TestReapLeavesAHiddenRootNoCLIWroteIntoAlone).
+			mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+			gitCheckout(t, dir, ".palbase/project.json")
 			litter := filepath.Join(dir, ".palbase-build-controllers", "a.ts")
 			mustWrite(t, dir, ".palbase-build-controllers/a.ts", "// left behind by a SIGKILL\n")
 
@@ -176,7 +180,7 @@ func TestPushAndPlanSweepBeforeTheirOwnRefusals(t *testing.T) {
 			if _, statErr := os.Stat(litter); !os.IsNotExist(statErr) {
 				t.Errorf("a killed run's litter survived a refused `palbase %s` (FR-009)", verb.name)
 			}
-			if _, statErr := os.Stat(filepath.Join(dir, ".palbase", "keep.txt")); statErr != nil {
+			if _, statErr := os.Stat(filepath.Join(dir, ".palbase", "project.json")); statErr != nil {
 				t.Errorf("`palbase %s` deleted a .palbase git tracks: %v", verb.name, statErr)
 			}
 			if !strings.Contains(out.String(), "kept .palbase") {

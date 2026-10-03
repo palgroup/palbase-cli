@@ -185,6 +185,17 @@ func runBuildWith(ctx context.Context, cwd string, out io.Writer, opts buildOpti
 		return nil
 	}
 
+	// AND A BACKEND'S FOLDER HAS ITS package.json — npm IS ASKED NOTHING WITHOUT
+	// ONE (palbase-cli#8). The source check above walks the whole tree, so one
+	// folder too high it found the backend's TypeScript and ran `npm install`
+	// where npm had nothing to read: exit 254, a package-lock.json left behind,
+	// and a refusal about the SDK when what was wrong was the folder. Asked
+	// AFTER the no-source exit, so an empty folder still says "nothing to
+	// validate" rather than being refused (backend_folder.go).
+	if why := notABackendFolder(cwd); why != "" {
+		return errors.New(why)
+	}
+
 	// Controllers import @palbase/backend; the bundler keeps it external and the
 	// extractor require()s it from node_modules. Install once when absent so a
 	// fresh clone can be validated in one step.
@@ -844,10 +855,14 @@ func flagKeys(ctx context.Context, target Target, cred Credentials) ([]string, e
 }
 
 // hasProjectSource reports whether the tree holds any TypeScript the build could
-// be about. It stops at the first hit and skips the directories that are never
-// somebody's source.
-func hasProjectSource(dir string) bool {
-	found := false
+// be about.
+func hasProjectSource(dir string) bool { return firstProjectSource(dir) != "" }
+
+// firstProjectSource is the path of the first TypeScript source under dir, or
+// "" when there is none. It stops at the first hit and skips the directories
+// that are never somebody's source.
+func firstProjectSource(dir string) string {
+	found := ""
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -861,7 +876,7 @@ func hasProjectSource(dir string) bool {
 			return nil
 		}
 		if strings.HasSuffix(name, ".ts") && !strings.HasSuffix(name, ".d.ts") {
-			found = true
+			found = path
 			return filepath.SkipAll
 		}
 		return nil

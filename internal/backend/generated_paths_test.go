@@ -283,17 +283,24 @@ func TestBuildRefusesWhenTheDeployTreeCannotBeStaged(t *testing.T) {
 // tek bir controller yok. Uyarının kendisi bunu söylüyordu ("cannot validate
 // locally") — sorun tam da bu: 0 ile çıkan bir komuttan akılda kalan cümle,
 // geçtiğidir. `palbase push` bu komutu pre-push hook olarak kuruyor.
+//
+// KURULUM GERÇEKTEN DÜŞMELİ. Bu fikstürün package.json'ı yoktu ve kırmızıyı
+// npm'in ENOENT'i (254) veriyordu — palbase-cli#8'in ta kendisi: backend
+// klasörü olmayan bir yerde npm'e soru sormak. O klasör artık npm'den ÖNCE
+// reddediliyor; burada package.json var ama npm onu okuyamıyor (sondaki
+// virgül), yani ağsız ve gerçek bir kurulum hatası.
 func TestBuildRefusesWhenTheSDKCannotBeInstalled(t *testing.T) {
 	dir := t.TempDir()
 	writeFixture(t, dir, goodControllerTS)
+	mustWrite(t, dir, "package.json", `{"name":"x","dependencies":{"@palbase/backend":"^42.0.0"},}`)
 
 	var out bytes.Buffer
 	err := runBuild(context.Background(), dir, &out)
 	if err == nil {
 		t.Fatalf("SDK'sız bir ağaç için build 'OK' dedi\n%s", out.String())
 	}
-	if !strings.Contains(err.Error(), backendPkg) {
-		t.Errorf("red, neyin eksik olduğunu adlandırmıyor: %v", err)
+	if !strings.Contains(err.Error(), backendPkg) || !strings.Contains(err.Error(), "`npm install` failed") {
+		t.Errorf("red, kurulamayan SDK'yı adlandırmıyor: %v", err)
 	}
 	// NEGATİF KONTROL: kaynak OLMAYAN bir dizin hâlâ dürüstçe geçmeli — "hiçbir
 	// şey yok" ile "doğrulanamadı" ayrı cevaplar, ve bu kapı ikincisi için.
@@ -598,6 +605,78 @@ func TestReapLeavesWhatNoCLIWroteUnderAnUntrackedHiddenRoot(t *testing.T) {
 		}
 		if _, err := os.Lstat(filepath.Join(dir, ".palbase")); !os.IsNotExist(err) {
 			t.Errorf("a hidden root holding only products was not removed (lstat: %v)", err)
+		}
+	})
+}
+
+// A `.palbase` NO CLI WROTE INTO IS NOT THE CLI'S HIDDEN ROOT (palbase-cli#8).
+//
+// Measured with 0.79.1: a workspace whose `.palbase/` held one file another tool
+// put there got "kept .palbase/palbase.env — … the CLI's own files in the hidden
+// root were removed" on every build, though there had never been any to remove;
+// had git tracked it, every verb would have told the person to remove it in a
+// commit. The directory is the retired hidden root only when it holds something
+// a palbase CLI writes. Otherwise it is somebody else's: not swept, not named.
+func TestReapLeavesAHiddenRootNoCLIWroteIntoAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	foreign := map[string]string{
+		".palbase/palbase.env":          "TOKEN=x\n",
+		".palbase/recovery/restore.sql": "select 1;\n",
+	}
+	for _, tracked := range []bool{false, true} {
+		name := "untracked"
+		if tracked {
+			name = "tracked by git"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			for p, body := range foreign {
+				mustWrite(t, dir, p, body)
+			}
+			if tracked {
+				gitCheckout(t, dir, ".palbase/palbase.env")
+			}
+
+			if kept := reapRetiredArtifacts(dir); len(kept) != 0 {
+				t.Errorf("a .palbase no CLI wrote into was reported: %q", kept)
+			}
+			for p, body := range foreign {
+				got, err := os.ReadFile(filepath.Join(dir, p))
+				if err != nil || string(got) != body {
+					t.Errorf("a file no CLI wrote was touched: %s (err: %v, body: %q)", p, err, got)
+				}
+			}
+		})
+	}
+
+	// An empty one carries no sign of a CLI either.
+	t.Run("empty", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, ".palbase"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if kept := reapRetiredArtifacts(dir); len(kept) != 0 {
+			t.Errorf("an empty .palbase was reported: %q", kept)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".palbase")); err != nil {
+			t.Errorf("an empty .palbase no CLI wrote into was removed: %v", err)
+		}
+	})
+
+	// The sentence is said in the run that removed something, and only there:
+	// once the CLI's files are gone what is left is not the CLI's to name again.
+	t.Run("named once, when the CLI's files go", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, dir, ".palbase/project.json", `{"url":"x"}`)
+		mustWrite(t, dir, ".palbase/palbase.env", "TOKEN=x\n")
+
+		first := reapRetiredArtifacts(dir)
+		want := []string{".palbase/palbase.env — " + keptForeignWhy}
+		if !slices.Equal(first, want) {
+			t.Errorf("the run that removed the CLI's file did not name what it left:\n got %q\nwant %q", first, want)
+		}
+		if second := reapRetiredArtifacts(dir); len(second) != 0 {
+			t.Errorf("a later run named a .palbase that holds nothing of the CLI's: %q", second)
 		}
 	})
 }

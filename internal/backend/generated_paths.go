@@ -180,6 +180,15 @@ func gitignoreScaffold() string {
 // behind a progress line; an untracked one keeps what no CLI wrote. The caller
 // names both.
 func reapRetiredArtifacts(dir string) []string {
+	// WHOSE `.palbase` IS IT, measured before anything is deleted: the entries
+	// ahead of the hidden root's own one remove products under it, and the
+	// question is whether a CLI ever wrote there at all.
+	cliWrote := map[string]bool{}
+	for _, e := range retiredProjectPaths {
+		if e.keepIfTracked {
+			cliWrote[e.path] = holdsAHiddenRootProduct(filepath.Join(dir, e.path))
+		}
+	}
 	var kept []string
 	for _, e := range retiredProjectPaths {
 		if e.supersededBy != "" {
@@ -188,7 +197,13 @@ func reapRetiredArtifacts(dir string) []string {
 			}
 		}
 		if e.keepIfTracked {
-			if _, err := os.Lstat(filepath.Join(dir, e.path)); err != nil {
+			// A `.palbase` holding nothing a palbase CLI writes is not the
+			// retired hidden root: some other tool's directory, or one this
+			// sweep already emptied of the CLI's files. Not swept and not named
+			// (palbase-cli#8) — naming it said "the CLI's own files were
+			// removed" on every run, of a directory no CLI had written into, and
+			// a tracked one was sent to be removed in a commit.
+			if !cliWrote[e.path] {
 				continue
 			}
 			if gitTracks(dir, e.path) {
@@ -213,20 +228,52 @@ func reapRetiredArtifacts(dir string) []string {
 	return kept
 }
 
+// holdsAHiddenRootProduct reports whether root is a real directory holding at
+// least one entry of hiddenRootProducts — read the way reapHiddenRoot deletes
+// them, so what counts as the CLI's here is exactly what the sweep would take.
+// A symbolic link or a file at root was never made by a CLI.
+func holdsAHiddenRootProduct(root string) bool {
+	if info, err := os.Lstat(root); err != nil || !info.IsDir() {
+		return false
+	}
+	regular := func(p string) bool {
+		fi, err := os.Lstat(p)
+		return err == nil && fi.Mode().IsRegular()
+	}
+	for _, d := range hiddenRootProducts.dirs {
+		if _, err := os.Lstat(filepath.Join(root, d)); err == nil {
+			return true
+		}
+	}
+	for _, f := range hiddenRootProducts.files {
+		if regular(filepath.Join(root, f)) {
+			return true
+		}
+	}
+	for _, d := range hiddenRootProducts.jsonDirs {
+		entries, _ := os.ReadDir(filepath.Join(root, d))
+		for _, ent := range entries {
+			if ent.Type().IsRegular() && strings.HasSuffix(ent.Name(), ".json") {
+				return true
+			}
+		}
+	}
+	for _, d := range hiddenRootProducts.configDirs {
+		if regular(filepath.Join(root, d, "palbase-config.json")) {
+			return true
+		}
+	}
+	return false
+}
+
 // reapHiddenRoot removes hiddenRootProducts from an untracked hidden root, then
 // the root itself if that emptied it, and returns a kept sentence for every entry
 // left behind — sorted, so the same checkout says the same thing every run.
 //
-// A root that is not a real directory (a symbolic link, a file) was not made by
-// a CLI either: it is named and left alone, and nothing is read through it.
+// The caller has measured that root is a real directory holding a product
+// (holdsAHiddenRootProduct): a symbolic link, a file or a directory with
+// nothing of a CLI's in it never reaches here, and nothing is read through one.
 func reapHiddenRoot(root, rel string) []string {
-	info, err := os.Lstat(root)
-	if err != nil {
-		return nil
-	}
-	if !info.IsDir() {
-		return []string{rel + " — " + keptForeignWhy}
-	}
 	for _, d := range hiddenRootProducts.dirs {
 		_ = os.RemoveAll(filepath.Join(root, d))
 	}
