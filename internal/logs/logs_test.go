@@ -33,16 +33,29 @@ import (
 // server was asked plus what the terminal saw.
 func runLogs(t *testing.T, entries []map[string]any, args ...string) (url.Values, string) {
 	t.Helper()
+	return runLogsWithSources(t, entries, nil, args...)
+}
+
+// runLogsWithSources is runLogs against a store that also lists which sources
+// wrote in the window.
+func runLogsWithSources(t *testing.T, entries, sources []map[string]any, args ...string) (url.Values, string) {
+	t.Helper()
 	t.Chdir(t.TempDir())
 	var got url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/panel/environments/app1prod/logs" {
-			http.NotFound(w, r)
-			return
-		}
-		got = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/panel/environments/app1prod/logs":
+			got = r.URL.Query()
+			_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/panel/environments/app1prod/logs/sources":
+			if sources == nil {
+				sources = []map[string]any{}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"sources": sources})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	t.Cleanup(srv.Close)
 
@@ -282,4 +295,34 @@ func TestFollowStillExitsOnARealFailure(t *testing.T) {
 	require.Error(t, err, "a real failure was retried instead of reported")
 	require.Contains(t, err.Error(), "not_found")
 	require.Equal(t, 2, stub.calls)
+}
+
+// A SOURCE THAT DOES NOT EXIST IS NAMED, AND THE ONES THAT DO ARE LISTED.
+//
+// palgroup/palbase#29: the help's example was `--source backend`, which no
+// environment has, and the empty answer said the backend might not be
+// deployed. It now says which sources wrote in that window instead.
+func TestAnEmptyAnswerForAnUnknownSourceListsTheRealOnes(t *testing.T) {
+	sources := []map[string]any{{"name": "application", "count": 95}, {"name": "pgbouncer", "count": 12}}
+	got, out := runLogsWithSources(t, nil, sources, "--source", "backend", "--since", "24h")
+	require.Equal(t, "backend", got.Get("source"))
+	require.Contains(t, out, `(no source named "backend" wrote in this window — the ones that did: application (95), pgbouncer (12))`)
+
+	// A source that DID write, emptied by the other filters, says so instead.
+	_, out = runLogsWithSources(t, nil, sources, "--source", "application", "-q", "nothing-matches")
+	require.Contains(t, out, `source "application" wrote 95 line(s) in this window, and the other filters kept none of them`)
+
+	// No filter on the source: the answer it always gave.
+	_, out = runLogsWithSources(t, nil, sources)
+	require.Contains(t, out, "(no log lines — is the backend deployed and receiving traffic?)")
+}
+
+// The help names sources that exist, in both places a project's logs live.
+func TestTheHelpNamesTheSourcesThatExist(t *testing.T) {
+	cmd := Cmd(Resolvers{})
+	help := cmd.Long + "\n" + cmd.Flags().Lookup("source").Usage
+	for _, name := range []string{"application", "postgres", "pgbouncer", "runtime", "palsvc", "envoy"} {
+		require.Contains(t, help, name)
+	}
+	require.NotContains(t, help, "e.g. backend", "the example names a source no environment has")
 }

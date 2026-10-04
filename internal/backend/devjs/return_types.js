@@ -349,18 +349,24 @@ function buildInjection(parsed) {
  * is in scope (controllers already import it from @palbase/backend; if not, we
  * add the import). Pure string transform — the caller writes the result to the
  * file esbuild will bundle.
+ *
+ * EVERYTHING GOES AFTER THE AUTHOR'S LAST LINE, the import included. The
+ * bundle's source map is built from this staged copy and then labelled as the
+ * author's file, so a line added on top moved every frame of a deployed stack
+ * trace one line down (palgroup/palbase#27). An `import` is hoisted wherever it
+ * stands in a module, so the end of the file is as good as the top.
  */
 function injectReturnBindings(sourceText, fileLabel, inferReturn) {
   const parsed = readReturnTypes(sourceText, fileLabel, inferReturn);
   const snippet = buildInjection(parsed);
   if (!snippet) return sourceText;
-  let out = sourceText;
+  let out = sourceText + '\n';
   // Ensure `z` is importable for z.array(...) wrapping.
   if (!/\bimport\b[^\n]*\bz\b[^\n]*@palbase\/backend/.test(sourceText) &&
       !/\bimport\b[^\n]*\{[^}]*\bz\b[^}]*\}/.test(sourceText)) {
-    out = `import { z } from "@palbase/backend";\n` + out;
+    out += `import { z } from "@palbase/backend";\n`;
   }
-  return out + '\n' + snippet + '\n';
+  return out + snippet + '\n';
 }
 
 module.exports = {

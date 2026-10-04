@@ -153,7 +153,7 @@ func showCloud(cmd *cobra.Command, r Resolvers, ref string, o showCloudOpts) err
 	printLines(out, lines, jsonOut)
 	if !follow {
 		if len(lines) == 0 {
-			fmt.Fprintln(out, "(no log lines — is the backend deployed and receiving traffic?)")
+			fmt.Fprintln(out, emptyAnswer(cmd.Context(), r.REST(), ref, windowSec, source))
 		}
 		return nil
 	}
@@ -205,6 +205,44 @@ func showCloud(cmd *cobra.Command, r Resolvers, ref string, o showCloudOpts) err
 	}
 }
 
+// emptyAnswer is what a one-shot read that found nothing says.
+//
+// WITH --source IT NAMES THE SOURCES THAT DID WRITE (palgroup/palbase#29). The
+// help's example used to be `--source backend`, a source no environment has —
+// the deployed code's lines are `application` — and the answer was the same
+// "no log lines — is the backend deployed?" a silent environment gets. So a
+// person filtering on a name that does not exist was told their backend was
+// quiet. The store can say which sources wrote in the window; this asks it.
+func emptyAnswer(ctx context.Context, rest REST, ref string, windowSec int, source string) string {
+	const quiet = "(no log lines — is the backend deployed and receiving traffic?)"
+	if source == "" {
+		return quiet
+	}
+	q := url.Values{}
+	q.Set("window_seconds", strconv.Itoa(windowSec))
+	var resp struct {
+		Sources []struct {
+			Name  string `json:"name"`
+			Count int    `json:"count"`
+		} `json:"sources"`
+	}
+	if err := rest.Do(ctx, http.MethodGet, logsPath(ref)+"/sources?"+q.Encode(), nil, &resp); err != nil {
+		return fmt.Sprintf("(no log lines from source %q — and the sources that did write could not be listed: %v)", source, err)
+	}
+	if len(resp.Sources) == 0 {
+		return quiet
+	}
+	names := make([]string, 0, len(resp.Sources))
+	for _, s := range resp.Sources {
+		if s.Name == source {
+			return fmt.Sprintf("(no log lines — source %q wrote %d line(s) in this window, and the other filters kept none of them)",
+				source, s.Count)
+		}
+		names = append(names, fmt.Sprintf("%s (%d)", s.Name, s.Count))
+	}
+	return fmt.Sprintf("(no source named %q wrote in this window — the ones that did: %s)", source, strings.Join(names, ", "))
+}
+
 // followInterval is how often --follow re-polls. A var so tests can shrink it.
 var followInterval = 2 * time.Second
 
@@ -228,7 +266,13 @@ new lines every 2s — Ctrl-C to stop.
   palbase logs                          last 100 lines
   palbase logs --level error,warn       errors and warnings only
   palbase logs --since 15m -q timeout   free-text filter over the last 15m
-  palbase logs --follow                 tail live`,
+  palbase logs -q req_9862ae87          the error a request id was answered with
+  palbase logs --follow                 tail live
+
+Sources (--source):
+  cloud          application (your backend and the platform beside it),
+                 postgres, pgbouncer
+  local stack    runtime, palsvc, envoy, postgres`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := backend.ResolveFor(cmd)
@@ -268,7 +312,7 @@ new lines every 2s — Ctrl-C to stop.
 			}, cmd.OutOrStdout())
 		},
 	}
-	cmd.Flags().StringVar(&source, "source", "", "Only this source (e.g. backend)")
+	cmd.Flags().StringVar(&source, "source", "", "Only this source: application, postgres or pgbouncer in the cloud; runtime, palsvc, envoy or postgres on a local stack")
 	cmd.Flags().StringVar(&levels, "level", "", "Comma-separated levels: debug,info,warn,error")
 	cmd.Flags().StringVar(&since, "since", "", "Look-back window, e.g. 15m, 2h")
 	cmd.Flags().StringVarP(&query, "query", "q", "", "Free-text line filter")

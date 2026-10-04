@@ -244,11 +244,8 @@ func buildStackArtifact(ctx context.Context, dir, bundleRoot string, w io.Writer
 		return nil, nil, err
 	}
 
-	// Bun labels bundled sources relative to its working directory. Building
-	// from the stage keeps random temp directory names out of those labels and
-	// gives identical sources an identical artifact on the same toolchain.
-	if err := run(ctx, staged, "bun", "build", entry, "--target=bun", "--format=esm", "--outfile="+out); err != nil {
-		return nil, nil, fmt.Errorf("the bundle did not build: %w", err)
+	if err := bundleWithSourceMap(ctx, staged, entry, out, bundleRoot, dir); err != nil {
+		return nil, nil, err
 	}
 
 	// A bundle carrying no controller is the silent-404 class: it would deploy,
@@ -1619,6 +1616,120 @@ for (const file of walk(srcDir)) {
 for (const w of throws.warnings()) console.log('warning: ' + w);
 console.log('typed ' + injected + ' controller file(s) from their return types');
 `
+
+// bundleWithSourceMap builds the controllers' bundle at `out`, with its source
+// map beside it pointing at the project's files as the artifact carries them.
+//
+// Bun labels bundled sources relative to its working directory. Building from
+// the stage keeps random temp directory names out of those labels and gives
+// identical sources an identical artifact on the same toolchain.
+//
+// THE SOURCE MAP TRAVELS BESIDE THE BUNDLE (palgroup/palbase#27). An error a
+// deployed handler throws used to point at `controllers.js:22952` — a line of a
+// file nobody wrote — in the push's refusal and in `palbase logs`. With the map
+// next to it, the stack's Bun builds `error.stack` against the project's own
+// files (measured on bun 1.3.9 and on the image's 1.4.2).
+//
+// `--outdir` + `--entry-naming`, NOT `--outfile`: measured on both versions,
+// `--outfile` together with `--sourcemap` writes the bundle and its map next to
+// the ENTRY, in the staged tree, and nothing at all where it was asked.
+func bundleWithSourceMap(ctx context.Context, staged, entry, out, bundleRoot, projectDir string) error {
+	if err := run(ctx, staged, "bun", "build", entry, "--target=bun", "--format=esm",
+		"--outdir="+filepath.Dir(out), "--entry-naming="+filepath.Base(out), "--sourcemap=linked"); err != nil {
+		return fmt.Errorf("the bundle did not build: %w", err)
+	}
+	if err := rewriteSourceMap(out+".map", bundleRoot, staged, projectDir); err != nil {
+		return fmt.Errorf("the bundle's source map could not be written: %w", err)
+	}
+	return nil
+}
+
+// rewriteSourceMap points a bundle's source map at the project's files as they
+// lie in the ARTIFACT, and drops the copies of their text.
+//
+// Bun writes each source relative to the bundle, and the bundle was built from
+// a staged copy in a temp directory — so the map names
+// `../../../../../var/folders/…/palbase-staged-controllers-123/modules/…`. That
+// is a different path on every build (the artifact's digest would change with
+// nothing changed) and a path that does not exist where the stack runs. The
+// artifact carries the project's tree at its root, so each source becomes that
+// root's path to it: `../../../modules/areas/areas.controller.ts` from
+// `.palbase/esm/controllers/`, which the stack resolves under the unpacked
+// artifact.
+//
+// The copies of the files' text go (each entry becomes null): the files travel
+// in the artifact anyway, and a stack trace needs only the mappings.
+func rewriteSourceMap(mapPath, bundleRoot, staged, projectDir string) error {
+	raw, err := os.ReadFile(mapPath)
+	if err != nil {
+		return err
+	}
+	var sm map[string]any
+	if err := json.Unmarshal(raw, &sm); err != nil {
+		return fmt.Errorf("%s is not JSON: %w", filepath.Base(mapPath), err)
+	}
+	// Real paths on every side. A temp directory on macOS is `/var/…` to the
+	// caller and `/private/var/…` once resolved, and Bun MIXES them — measured:
+	// it writes the path from the outdir as it was given to the source's
+	// resolved path. So a source is resolved from the map's directory as given
+	// AND as resolved, and whichever names a file is compared resolved.
+	real := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	mapDir := filepath.Dir(mapPath)
+	toRoot, err := filepath.Rel(mapDir, bundleRoot)
+	if err != nil {
+		return err
+	}
+	roots := []string{real(staged), real(projectDir)}
+	under := func(abs string) (string, bool) {
+		for _, root := range roots {
+			rel, err := filepath.Rel(root, abs)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return rel, true
+			}
+		}
+		return "", false
+	}
+	sources, _ := sm["sources"].([]any)
+	for i, s := range sources {
+		src, ok := s.(string)
+		if !ok {
+			continue
+		}
+		var outside string
+		for _, base := range []string{mapDir, real(mapDir)} {
+			abs := real(filepath.Join(base, filepath.FromSlash(src)))
+			if rel, ok := under(abs); ok {
+				sources[i] = filepath.ToSlash(filepath.Join(toRoot, rel))
+				outside = ""
+				break
+			}
+			if _, err := os.Stat(abs); err == nil && outside == "" {
+				outside = abs
+			}
+		}
+		// A source outside both trees — a dependency hoisted above the project in
+		// a monorepo — is written relative to the project too, so the map names
+		// no temp directory and no home directory of the machine that built it.
+		if outside != "" {
+			if rel, err := filepath.Rel(real(projectDir), outside); err == nil {
+				sources[i] = filepath.ToSlash(filepath.Join(toRoot, rel))
+			}
+		}
+	}
+	// NULL, NOT ABSENT: Bun refuses a map without the field ("InvalidSourceMap",
+	// measured on 1.3.9 and 1.4.2) and then prints the bundle's lines again.
+	sm["sourcesContent"] = make([]any, len(sources))
+	out, err := json.Marshal(sm)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(mapPath, out, 0o644)
+}
 
 // bunVersion is the toolchain that produced the bundle, or "?" when bun answers
 // something unexpected — a build is not worth failing over a version string.

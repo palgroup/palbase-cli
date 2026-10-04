@@ -724,6 +724,12 @@ function registerControllers() {
         if (typeof sdk.assertNoOrphanEntryPoints === 'function') {
           sdk.assertNoOrphanEntryPoints(registeredControllers(), container.owned);
         }
+        // `@User()` on a route anonymous callers reach (palgroup/palbase#30):
+        // the deploy refuses it in `createApp`, so the build refuses it here
+        // with the same code. An SDK older than the check does not export it.
+        if (typeof sdk.assertNoUserOnOpenRoutes === 'function') {
+          sdk.assertNoUserOnOpenRoutes(registeredControllers());
+        }
       }
     } catch (err) {
       // Same rule: the container's refusal IS the finding. It used to be pushed
