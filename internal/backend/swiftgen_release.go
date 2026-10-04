@@ -4,15 +4,23 @@ package backend
 // pins, downloaded once per version.
 //
 // Every palbackend-ios release carries the generator prebuilt for macOS
-// (universal) and Linux (x86_64, arm64; fully static), plus a checksum file,
-// all built from the release's own sources (palbackend-ios-src:
-// scripts/build-swiftgen.sh). Running that binary needs neither Xcode nor a
-// Swift toolchain, which is what lets `palbase link --platform ios` run in a
-// Linux shell (palbase-cli#9).
+// (universal) and Linux (x86_64, arm64; fully static), plus a checksum file
+// and its Ed25519 signature, all built from the release's own sources
+// (palbackend-ios-src: scripts/build-swiftgen.sh). Running that binary needs
+// neither Xcode nor a Swift toolchain, which is what lets `palbase link
+// --platform ios` run in a Linux shell (palbase-cli#9).
+//
+// THE SIGNATURE IS THE TRUST, NOT THE CHECKSUM. A checksum served beside the
+// binary proves the download is intact, and nothing more: whoever can replace
+// one release asset can replace both. The binary runs on every machine that
+// links an iOS app, so the checksum file must be signed by a key this CLI
+// carries — its private half exists only as the SDK repo's release secret.
 
 import (
 	"bufio"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -30,8 +38,18 @@ import (
 var swiftgenReleaseBase = sdkRepository + "/releases/download"
 
 // swiftgenChecksumsAsset lists every generator asset of a release, one
-// `<sha256>  <asset>` line each (`shasum -a 256` output).
+// `<sha256>  <asset>` line each (`shasum -a 256` output); its signature is the
+// same name + ".sig", base64 of a 64-byte Ed25519 signature.
 const swiftgenChecksumsAsset = "palbase-swiftgen.sha256"
+
+// swiftgenSigningKeys are the Ed25519 public keys a checksum file may be signed
+// by (palbackend-ios-src: scripts/swiftgen-signing.pub). A LIST so the key can
+// be rotated: a new key is added here before releases start using it, and the
+// old one stays while versions signed by it are still pinned. A var only so
+// tests can sign their own releases.
+var swiftgenSigningKeys = []string{
+	"zGpUmIZ5bFdFkMcwisEk7pms1ovB1U/sPSfmTAvqvlY=",
+}
 
 // swiftgenHost is the machine the generator will run on. A var only so tests
 // can ask for another one.
@@ -84,6 +102,17 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download the Swift generator for palbackend-ios %s: %w", v, err)
 	}
+	sig, err := fetchReleaseAsset(v, swiftgenChecksumsAsset+".sig", 1<<10)
+	if errors.Is(err, errSwiftgenNotPublished) {
+		return "", fmt.Errorf("palbackend-ios %s publishes no signature for its Swift generator, so it is not run — "+
+			"update the package to a newer release, then link again", v)
+	}
+	if err != nil {
+		return "", fmt.Errorf("download the Swift generator's signature for palbackend-ios %s: %w", v, err)
+	}
+	if err := verifySwiftgenSignature(sums, sig); err != nil {
+		return "", fmt.Errorf("palbackend-ios %s: %w — nothing was installed", v, err)
+	}
 	want, err := checksumOf(sums, asset)
 	if err != nil {
 		return "", fmt.Errorf("palbackend-ios %s: %w", v, err)
@@ -98,7 +127,7 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	got, err := downloadReleaseAsset(v, asset, tmp)
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
@@ -117,6 +146,22 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 		return "", err
 	}
 	return tool, nil
+}
+
+// verifySwiftgenSignature accepts a checksum file only when one of the keys
+// this CLI carries signed it.
+func verifySwiftgenSignature(sums, sig []byte) error {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
+	if err != nil || len(raw) != ed25519.SignatureSize {
+		return fmt.Errorf("%s.sig is not an Ed25519 signature", swiftgenChecksumsAsset)
+	}
+	for _, encoded := range swiftgenSigningKeys {
+		pub, err := base64.StdEncoding.DecodeString(encoded)
+		if err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(ed25519.PublicKey(pub), sums, raw) {
+			return nil
+		}
+	}
+	return fmt.Errorf("the Swift generator's checksum file is not signed by a key this CLI trusts")
 }
 
 // checksumOf picks one asset's digest out of a checksum file.

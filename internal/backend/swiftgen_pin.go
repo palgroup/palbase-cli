@@ -379,7 +379,7 @@ func manifestRequirement(manifest string) (*sdkRequirement, error) {
 		if end < 0 {
 			end = len(rest)
 		}
-		return nil, fmt.Errorf("Package.swift depends on palbackend-ios with a rule this CLI cannot read: %q", strings.TrimSpace(rest[:end]))
+		return nil, fmt.Errorf("this project's Package.swift depends on palbackend-ios with a rule this CLI cannot read: %q", strings.TrimSpace(rest[:end]))
 	}
 	return nil, nil
 }

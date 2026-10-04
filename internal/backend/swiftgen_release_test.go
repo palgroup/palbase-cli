@@ -2,7 +2,10 @@ package backend
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -22,6 +25,9 @@ type fakeRelease struct {
 	// tamper, when set, is served in place of the asset — its checksum line
 	// still describes the real one.
 	tamper string
+	// sums and sig are what the release serves for the checksum file and its
+	// signature; a test edits them to forge or drop one. sig "" is a 404.
+	sums, sig string
 }
 
 func (r *fakeRelease) downloads() int { return int(r.assetHits.Load()) }
@@ -42,11 +48,25 @@ func serveRelease(t *testing.T, v sdkVersion, body string) *fakeRelease {
 		"palbase-swiftgen-linux-aarch64":    "c",
 	}[asset], 64), hex.EncodeToString(sum[:]), 1)
 
-	rel := &fakeRelease{}
+	// Signed by a key the test makes the CLI trust — the release secret's
+	// stand-in.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	prevKeys := swiftgenSigningKeys
+	swiftgenSigningKeys = []string{base64.StdEncoding.EncodeToString(pub)}
+	t.Cleanup(func() { swiftgenSigningKeys = prevKeys })
+
+	rel := &fakeRelease{sums: sums, sig: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(sums))) + "\n"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v" + v.String() + "/" + swiftgenChecksumsAsset:
-			_, _ = w.Write([]byte(sums))
+			_, _ = w.Write([]byte(rel.sums))
+		case "/v" + v.String() + "/" + swiftgenChecksumsAsset + ".sig":
+			if rel.sig == "" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(rel.sig))
 		case "/v" + v.String() + "/" + asset:
 			rel.assetHits.Add(1)
 			if rel.tamper != "" {
@@ -117,6 +137,44 @@ func TestATamperedGeneratorIsNeverInstalled(t *testing.T) {
 	_, err = downloadSwiftgen(v, &bytes.Buffer{})
 	require.NoError(t, err)
 	require.Equal(t, 2, rel.downloads())
+}
+
+// TestOnlyASignedChecksumFileIsTrusted is the authenticity half: a checksum
+// file proves a download is intact, not that it is ours, because whoever can
+// replace the binary on a release can replace the checksum beside it. Each of
+// these is that attacker — or a release that never got signed — and each must
+// leave nothing installed and download nothing executable.
+func TestOnlyASignedChecksumFileIsTrusted(t *testing.T) {
+	v := sdkVersion{0, 66, 0}
+	evil := "#!/bin/sh\necho pwned\n"
+	evilSum := sha256.Sum256([]byte(evil))
+
+	cases := map[string]func(rel *fakeRelease){
+		"no signature": func(rel *fakeRelease) { rel.sig = "" },
+		"checksum file swapped after signing": func(rel *fakeRelease) {
+			asset, _ := swiftgenAsset()
+			rel.sums = hex.EncodeToString(evilSum[:]) + "  " + asset + "\n"
+			rel.tamper = evil
+		},
+		"signed by a key the CLI does not carry": func(rel *fakeRelease) {
+			_, other, _ := ed25519.GenerateKey(rand.Reader)
+			rel.sig = base64.StdEncoding.EncodeToString(ed25519.Sign(other, []byte(rel.sums)))
+		},
+		"not a signature": func(rel *fakeRelease) { rel.sig = "bm90IGEgc2lnbmF0dXJl\n" },
+	}
+	for name, forge := range cases {
+		t.Run(name, func(t *testing.T) {
+			rel := serveRelease(t, v, "the real generator")
+			forge(rel)
+			cache := useToolHome(t)
+
+			_, err := downloadSwiftgen(v, &bytes.Buffer{})
+			require.Error(t, err)
+			entries, _ := filepath.Glob(filepath.Join(cache, "swiftgen-v0.66.0", "*"))
+			require.Empty(t, entries, "nothing is installed")
+			require.Zero(t, rel.downloads(), "the executable is not even fetched")
+		})
+	}
 }
 
 func TestAReleaseWithoutTheGeneratorIsNamed(t *testing.T) {
