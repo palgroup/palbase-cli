@@ -2,11 +2,13 @@ package backend
 
 // native_codegen.go — regenerate the COMMITTED Swift client after a spec fetch.
 //
-// The generator is NOT in this CLI. It ships with the SDK
-// (palbackend-ios, `Sources/palbase-swiftgen`), so the code it emits always
-// matches the SDK version this app pins: the CLI only locates the checkout
-// SwiftPM already resolved, compiles it for the host once (cached by source
-// hash), and runs it. One generator, one golden suite, no second copy to drift.
+// The generator is NOT in this CLI. It ships with the SDK (palbackend-ios,
+// `Sources/palbase-swiftgen`), so the code it emits always matches the SDK
+// version this app pins: one generator, one golden suite, no second copy to
+// drift. Each SDK release carries it prebuilt (swiftgen_release.go) for the
+// version the project pins (swiftgen_pin.go); an app that links the SDK by
+// local path gets it compiled from that source instead, because a local package
+// has no release.
 //
 // The output is COMMITTED under Palbase/Generated/ rather than produced at
 // build time. Build-time output lands in DerivedData, where it is invisible to
@@ -23,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -46,7 +49,26 @@ var swiftgenToolHome = func() (string, error) {
 
 // ensureSwiftgenTool is a seam: tests substitute a stub generator so they can
 // assert the arguments the CLI passes without a Swift toolchain.
-var ensureSwiftgenTool = compileSwiftgen
+var ensureSwiftgenTool = provideSwiftgen
+
+// provideSwiftgen returns a generator that runs on this machine for the SDK
+// this project builds: compiled from the SDK's source when the project links it
+// by local path, otherwise the one released with the version it pins.
+//
+// THERE IS NO THIRD PLACE. The checkout Xcode resolved under DerivedData used to
+// be the source for a published SDK; it exists only on a Mac that has already
+// built the app, so a Linux shell or a fresh clone could never generate
+// (palbase-cli#9), and it could outlive the version the project pinned.
+func provideSwiftgen(projectRoot string, w io.Writer) (string, error) {
+	if src := localSwiftgenSource(projectRoot); src != "" {
+		return compileSwiftgen(src, w)
+	}
+	v, err := resolveSDKVersion(projectRoot, w)
+	if err != nil {
+		return "", err
+	}
+	return downloadSwiftgen(v, w)
+}
 
 // discardStaleGenerated handles "spec refreshed, generator unavailable". Leaving
 // yesterday's generated code beside today's spec is the one outcome worse than
@@ -66,13 +88,9 @@ func discardStaleGenerated(cause error, w io.Writer, paths ...string) error {
 		strings.Join(removed, ", "), cause)
 }
 
-// compileSwiftgen returns a host binary of the SDK's generator, compiling it on
-// first use for this SDK version.
-func compileSwiftgen(projectRoot string, w io.Writer) (string, error) {
-	src, err := findSwiftgenSources(projectRoot)
-	if err != nil {
-		return "", err
-	}
+// compileSwiftgen returns a host binary of the generator in src — a local SDK
+// package's — compiling it on first use for those sources.
+func compileSwiftgen(src string, w io.Writer) (string, error) {
 	sum, err := hashFiles(swiftgenSourcePaths(src))
 	if err != nil {
 		return "", err
@@ -88,15 +106,17 @@ func compileSwiftgen(projectRoot string, w io.Writer) (string, error) {
 	if isRegularFile(tool) {
 		return tool, nil
 	}
+	compiler, err := swiftCompiler()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	fmt.Fprintln(w, "→ compiling the SDK's Swift generator (one-time per SDK version) ...")
-	// -u SDKROOT: under Xcode an inherited SDKROOT points at the device or
-	// simulator SDK, and the resulting binary cannot run on the build host.
-	argv := append([]string{"-u", "SDKROOT", "/usr/bin/xcrun", "swiftc"}, swiftgenSourcePaths(src)...)
+	fmt.Fprintln(w, "→ compiling the local SDK's Swift generator (one-time per source change) ...")
+	argv := append(append([]string{}, compiler[1:]...), swiftgenSourcePaths(src)...)
 	argv = append(argv, "-o", tool)
-	cmd := exec.Command("/usr/bin/env", argv...)
+	cmd := exec.Command(compiler[0], argv...)
 	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
 		removeTemp(dir)
@@ -105,34 +125,20 @@ func compileSwiftgen(projectRoot string, w io.Writer) (string, error) {
 	return tool, nil
 }
 
-// findSwiftgenSources locates the generator in the palbackend-ios checkout
-// SwiftPM already resolved for THIS project — that is what ties the emitted
-// code to the SDK version the app pins.
-func findSwiftgenSources(projectRoot string) (string, error) {
-	rel := filepath.Join("checkouts", "palbackend-ios", "Sources", "palbase-swiftgen")
-
-	// A LOCAL package comes FIRST, because it is what the project says today.
-	// A checkout of the published SDK can outlive the switch to a local one —
-	// DerivedData keeps it — and generating from that stale copy is the exact
-	// drift this lookup exists to prevent: the emitted client would match a
-	// version the app no longer links.
-	candidates := append(localSwiftgenSources(projectRoot),
-		filepath.Join(projectRoot, ".build", rel))
-
-	if home, err := os.UserHomeDir(); err == nil {
-		derived := filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData")
-		for _, name := range derivedDataNames(projectRoot) {
-			matches, _ := filepath.Glob(filepath.Join(derived, name+"-*", "SourcePackages", rel))
-			candidates = append(candidates, newestFirst(matches)...)
-		}
+// swiftCompiler is the host's Swift compiler command. A local package has no
+// release to download a generator from, so its source has to be compiled here.
+func swiftCompiler() ([]string, error) {
+	if runtime.GOOS == "darwin" {
+		// -u SDKROOT: under Xcode an inherited SDKROOT points at the device or
+		// simulator SDK, and the resulting binary cannot run on the build host.
+		return []string{"/usr/bin/env", "-u", "SDKROOT", "/usr/bin/xcrun", "swiftc"}, nil
 	}
-	for _, dir := range candidates {
-		if hasSwiftgenSources(dir) {
-			return dir, nil
-		}
+	swiftc, err := exec.LookPath("swiftc")
+	if err != nil {
+		return nil, fmt.Errorf("this project links palbackend-ios by local path, so its Swift generator is compiled "+
+			"from that source, and that needs a Swift toolchain (swiftc) on PATH: %w", err)
 	}
-	return "", fmt.Errorf("the palbackend-ios checkout is not resolved for this project yet — " +
-		"build once in Xcode, or run `xcodebuild -resolvePackageDependencies`")
+	return []string{swiftc}, nil
 }
 
 // localSwiftgenSources returns the generator directory of every SDK package
@@ -146,8 +152,28 @@ func findSwiftgenSources(projectRoot string) (string, error) {
 // published one.
 func localSwiftgenSources(projectRoot string) []string {
 	var out []string
+	for _, ref := range localPackageRefs(projectRoot) {
+		out = append(out, resolveSwiftgenDir(projectRoot, ref))
+	}
+	return out
+}
 
-	// An Xcode project records it as an XCLocalSwiftPackageReference.
+// localSwiftgenSource is the generator of the SDK package this project links by
+// path, or "" when it links none (or the path holds no generator on this
+// machine).
+func localSwiftgenSource(projectRoot string) string {
+	for _, src := range localSwiftgenSources(projectRoot) {
+		if hasSwiftgenSources(src) {
+			return src
+		}
+	}
+	return ""
+}
+
+// localPackageRefs lists every package path the project links BY PATH: an Xcode
+// project's XCLocalSwiftPackageReference, a Swift package's .package(path:).
+func localPackageRefs(projectRoot string) []string {
+	var out []string
 	projects, _ := filepath.Glob(filepath.Join(projectRoot, "*.xcodeproj", "project.pbxproj"))
 	for _, pbxproj := range projects {
 		blob, err := os.ReadFile(pbxproj)
@@ -155,14 +181,12 @@ func localSwiftgenSources(projectRoot string) []string {
 			continue
 		}
 		for _, m := range localPackagePath.FindAllStringSubmatch(string(blob), -1) {
-			out = append(out, resolveSwiftgenDir(projectRoot, m[1]))
+			out = append(out, m[1])
 		}
 	}
-
-	// A Swift package records it as .package(path:).
 	if blob, err := os.ReadFile(filepath.Join(projectRoot, "Package.swift")); err == nil {
 		for _, m := range packageByPath.FindAllStringSubmatch(string(blob), -1) {
-			out = append(out, resolveSwiftgenDir(projectRoot, m[1]))
+			out = append(out, m[1])
 		}
 	}
 	return out
@@ -187,19 +211,6 @@ func resolveSwiftgenDir(projectRoot, packagePath string) string {
 		packagePath = filepath.Join(projectRoot, packagePath)
 	}
 	return filepath.Join(packagePath, "Sources", "palbase-swiftgen")
-}
-
-// derivedDataNames lists the names Xcode may have used for this project's
-// DerivedData directory: its workspace, its project, then the directory itself.
-func derivedDataNames(projectRoot string) []string {
-	var names []string
-	for _, ext := range []string{"*.xcworkspace", "*.xcodeproj"} {
-		matches, _ := filepath.Glob(filepath.Join(projectRoot, ext))
-		for _, m := range matches {
-			names = append(names, strings.TrimSuffix(filepath.Base(m), filepath.Ext(m)))
-		}
-	}
-	return append(names, filepath.Base(projectRoot))
 }
 
 // swiftgenSourcePaths is every Swift file in the generator directory, sorted so
@@ -231,20 +242,6 @@ func hashFiles(paths []string) (string, error) {
 		h.Write(data)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
-}
-
-// newestFirst orders checkout candidates by mtime so the most recently resolved
-// DerivedData directory wins when a project has several.
-func newestFirst(paths []string) []string {
-	sort.SliceStable(paths, func(i, j int) bool {
-		a, errA := os.Stat(paths[i])
-		b, errB := os.Stat(paths[j])
-		if errA != nil || errB != nil {
-			return errA == nil
-		}
-		return a.ModTime().After(b.ModTime())
-	})
-	return paths
 }
 
 func isRegularFile(path string) bool {

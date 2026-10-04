@@ -66,8 +66,8 @@ func oneEnvironment() appEnvironments {
 	}
 }
 
-// errNoCheckout stands for the real "SDK package not resolved yet" failure.
-var errNoCheckout = errors.New("the palbackend-ios checkout is not resolved for this project yet")
+// errNoSDK stands for the real "project does not depend on the SDK" failure.
+var errNoSDK = errors.New("this project does not depend on palbackend-ios")
 
 // useStub points the generator seam at a stub for one test — AND makes the
 // working directory look like a checkout an Apple client can be generated in.
@@ -154,7 +154,7 @@ func TestGenerateForEnvironments_StaleOutputIsDeletedAndReported(t *testing.T) {
 	require.NoError(t, os.MkdirAll(genDir, 0o755))
 	stale := filepath.Join(genDir, "PalbaseGenerated.swift")
 	require.NoError(t, os.WriteFile(stale, []byte("// generated from yesterday's spec"), 0o644))
-	useStub(t, "", errNoCheckout)
+	useStub(t, "", errNoSDK)
 
 	err := generateForEnvironments(context.Background(), oneEnvironment(), &bytes.Buffer{})
 
@@ -167,20 +167,22 @@ func TestGenerateForEnvironments_StaleOutputIsDeletedAndReported(t *testing.T) {
 
 func TestGenerateForEnvironments_FirstLinkRequiresSDK(t *testing.T) {
 	linkedProject(t, "ios")
-	useStub(t, "", errNoCheckout)
+	useStub(t, "", errNoSDK)
 
 	var out bytes.Buffer
 	require.ErrorContains(t, generateForEnvironments(context.Background(), oneEnvironment(), &out), "cannot generate the Swift client")
 }
 
-func TestFindSwiftgenSources(t *testing.T) {
+func TestLocalSwiftgenSource(t *testing.T) {
 	root := t.TempDir()
-	src := filepath.Join(root, ".build", "checkouts", "palbackend-ios", "Sources", "palbase-swiftgen")
+	src := filepath.Join(root, "sdk", "Sources", "palbase-swiftgen")
 	require.NoError(t, os.MkdirAll(src, 0o755))
+	project := filepath.Join(root, "App.xcodeproj")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, "project.pbxproj"),
+		[]byte("isa = XCLocalSwiftPackageReference;\n\t\t\trelativePath = sdk;\n"), 0o644))
 
-	_, err := findSwiftgenSources(root)
-	require.Error(t, err, "an empty checkout dir is not a generator")
-	require.Contains(t, err.Error(), "resolvePackageDependencies")
+	require.Empty(t, localSwiftgenSource(root), "an empty generator dir is not a generator")
 
 	// A directory is the generator when it has the entry point; every other
 	// *.swift beside it comes along, so an SDK that adds a file (0.28.0 added
@@ -188,10 +190,33 @@ func TestFindSwiftgenSources(t *testing.T) {
 	for _, name := range []string{"main.swift", "Parse.swift", "Emit.swift", "Plist.swift", "Purchases.swift"} {
 		require.NoError(t, os.WriteFile(filepath.Join(src, name), []byte("// swift"), 0o644))
 	}
-	found, err := findSwiftgenSources(root)
-	require.NoError(t, err)
+	found := localSwiftgenSource(root)
 	require.Equal(t, src, found)
 	require.Len(t, swiftgenSourcePaths(found), 5, "every generator source is compiled, not a fixed four")
+}
+
+// TestAResolvedCheckoutIsNotAGeneratorSource locks the removal palbase-cli#9
+// needed: a checkout SwiftPM or Xcode resolved — `.build/checkouts`, DerivedData
+// — is never compiled. It exists only on a machine that has built the app, and
+// it can outlive the version the project pins; the version comes from the
+// project's own files and its generator from that release.
+func TestAResolvedCheckoutIsNotAGeneratorSource(t *testing.T) {
+	root := t.TempDir()
+	checkout := filepath.Join(root, ".build", "checkouts", "palbackend-ios", "Sources", "palbase-swiftgen")
+	require.NoError(t, os.MkdirAll(checkout, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, "main.swift"), []byte("// stale"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Package.resolved"), []byte(resolvedJSON("0.66.0")), 0o644))
+	release := serveRelease(t, sdkVersion{0, 66, 0}, "generator-0.66.0")
+	useToolHome(t)
+
+	var out bytes.Buffer
+	tool, err := provideSwiftgen(root, &out)
+	require.NoError(t, err)
+	require.NotContains(t, out.String(), "compiling")
+	got, err := os.ReadFile(tool)
+	require.NoError(t, err)
+	require.Equal(t, "generator-0.66.0", string(got), "the generator came from the pinned release")
+	require.Equal(t, 1, release.downloads())
 }
 
 func TestHashFilesTracksContent(t *testing.T) {
@@ -218,11 +243,10 @@ func TestCompileSwiftgen_RealToolchain(t *testing.T) {
 	if testing.Short() {
 		t.Skip("compiles Swift; -short skips it")
 	}
-	if _, err := exec.LookPath("xcrun"); err != nil {
-		t.Skip("no xcrun on this host")
+	if _, err := swiftCompiler(); err != nil {
+		t.Skip("no Swift toolchain on this host")
 	}
-	root := t.TempDir()
-	src := filepath.Join(root, ".build", "checkouts", "palbackend-ios", "Sources", "palbase-swiftgen")
+	src := filepath.Join(t.TempDir(), "Sources", "palbase-swiftgen")
 	require.NoError(t, os.MkdirAll(src, 0o755))
 	// A miniature stand-in for the SDK generator: same file names, same flag,
 	// real Swift.
@@ -235,15 +259,12 @@ func TestCompileSwiftgen_RealToolchain(t *testing.T) {
 	for name, body := range bodies {
 		require.NoError(t, os.WriteFile(filepath.Join(src, name), []byte(body), 0o644))
 	}
-	cache := t.TempDir()
-	prev := swiftgenToolHome
-	swiftgenToolHome = func() (string, error) { return cache, nil }
-	t.Cleanup(func() { swiftgenToolHome = prev })
+	useToolHome(t)
 
 	var out bytes.Buffer
-	tool, err := compileSwiftgen(root, &out)
+	tool, err := compileSwiftgen(src, &out)
 	require.NoError(t, err)
-	require.Contains(t, out.String(), "compiling the SDK's Swift generator")
+	require.Contains(t, out.String(), "compiling the local SDK's Swift generator")
 
 	got, err := exec.Command(tool, "--openapi", "spec.json").CombinedOutput()
 	require.NoError(t, err)
@@ -251,17 +272,17 @@ func TestCompileSwiftgen_RealToolchain(t *testing.T) {
 
 	// Second call must hit the cache: same path, no recompile message.
 	out.Reset()
-	again, err := compileSwiftgen(root, &out)
+	again, err := compileSwiftgen(src, &out)
 	require.NoError(t, err)
 	require.Equal(t, tool, again)
 	require.Empty(t, out.String())
 }
 
-func TestALocalSDKPackageIsFoundBeforeAStaleCheckout(t *testing.T) {
+func TestALocalSDKPackageIsFoundBeforeTheRemotePin(t *testing.T) {
 	// The failure this locks out: a project switches from the published SDK to
-	// the SDK source, and keeps generating from the checkout DerivedData still
-	// holds. The emitted client then matches a version the app no longer links —
-	// silently, because both directories contain a working generator.
+	// the SDK source, and keeps generating with the published one. The emitted
+	// client then matches a version the app no longer links — silently, because
+	// both generators work.
 	root := t.TempDir()
 	sdk := filepath.Join(root, "sdk-source")
 	generator := filepath.Join(sdk, "Sources", "palbase-swiftgen")
@@ -272,11 +293,15 @@ func TestALocalSDKPackageIsFoundBeforeAStaleCheckout(t *testing.T) {
 	require.NoError(t, os.MkdirAll(project, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, "project.pbxproj"),
 		[]byte(`isa = XCLocalSwiftPackageReference;
-			relativePath = "sdk-source";`), 0o644))
+			relativePath = "sdk-source";
+		isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/palgroup/palbackend-ios";
+			requirement = {
+				kind = exactVersion;
+				version = 0.66.0;
+			};`), 0o644))
 
-	found, err := findSwiftgenSources(root)
-	require.NoError(t, err)
-	require.Equal(t, generator, found)
+	require.Equal(t, generator, localSwiftgenSource(root))
 }
 
 func TestAPackageSwiftLocalDependencyIsFoundToo(t *testing.T) {
@@ -290,9 +315,7 @@ func TestAPackageSwiftLocalDependencyIsFoundToo(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "Package.swift"),
 		[]byte(`.package(path: "../sdk-src"),`), 0o644))
 
-	found, err := findSwiftgenSources(root)
-	require.NoError(t, err)
-	require.Equal(t, filepath.Clean(generator), filepath.Clean(found))
+	require.Equal(t, filepath.Clean(generator), filepath.Clean(localSwiftgenSource(root)))
 }
 
 func TestAnUnquotedPackagePathIsFoundToo(t *testing.T) {
@@ -311,7 +334,5 @@ func TestAnUnquotedPackagePathIsFoundToo(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(project, "project.pbxproj"),
 		[]byte("isa = XCLocalSwiftPackageReference;\n\t\t\trelativePath = sdk;\n"), 0o644))
 
-	found, err := findSwiftgenSources(root)
-	require.NoError(t, err)
-	require.Equal(t, generator, found)
+	require.Equal(t, generator, localSwiftgenSource(root))
 }

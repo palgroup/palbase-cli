@@ -1166,8 +1166,8 @@ func generateForEnvironments(ctx context.Context, envs appEnvironments, w io.Wri
 //
 // toolRoot is the project the SDK's generator is found from, "" meaning the
 // working directory. `link` passes the checkout: a local package's relative
-// path, `.build` and the DerivedData folder named after the project all
-// resolve from there, not from the stage.
+// path, Package.resolved and the project's SDK requirement all resolve from
+// there, not from the stage.
 func generateForEnvironmentsAt(ctx context.Context, envs appEnvironments, w io.Writer, toolRoot string) error {
 	root, err := os.Getwd()
 	if err != nil {

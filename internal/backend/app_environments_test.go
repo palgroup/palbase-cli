@@ -103,7 +103,7 @@ func TestApplePlatformNeedsAnXcodeProjectNotJustAConfig(t *testing.T) {
 	}
 
 	// Aynı checkout'a bir Xcode projesi koy: ARTIK Apple checkout'udur ve
-	// çözülmemiş bir proje GERÇEK bir hatadır ("build once in Xcode").
+	// SDK'ya bağlanmamış bir proje GERÇEK bir hatadır ("add the package").
 	if err := os.MkdirAll("white-label.xcodeproj", 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -59,8 +59,8 @@ func anyEnvironmentHas(platform string) bool {
 // where it can never run.
 //
 // The distinction this restores: no Xcode project means the client is generated
-// SOMEWHERE ELSE and nothing is wrong here; an Xcode project that is not yet
-// resolved is a real error and still says "build once in Xcode".
+// SOMEWHERE ELSE and nothing is wrong here; an Xcode project that does not
+// depend on the SDK is a real error and says "add the package".
 func hasAppleProject(root string) bool {
 	for _, ext := range []string{"*.xcodeproj", "*.xcworkspace"} {
 		if m, _ := filepath.Glob(filepath.Join(root, ext)); len(m) > 0 {
@@ -95,8 +95,9 @@ directory. Run it after every deploy so the committed API contract stays current
   palbase/environments/<env>/openapi.json   the contract
 
   ios/macos→ regenerates PalbaseGenerated.swift and Palbase-Info.plist beside them,
-             using the generator from the palbackend-ios checkout SwiftPM resolved
-             for this project. Commit the result.
+             using the generator released with the palbackend-ios version this
+             project pins (Package.resolved, else its package requirement) —
+             no Xcode needed. Commit the result.
   web      → ` + "`palbe-gen`" + ` regenerates palbe.gen.ts from the same directory, via the
              predev/prebuild hook or by hand.
   android  → the Gradle plugin regenerates on the next build.

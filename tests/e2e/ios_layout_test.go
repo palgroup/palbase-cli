@@ -109,14 +109,13 @@ func TestIOSLayoutSelectsOneEnvironment(t *testing.T) {
 		[]byte("import Foundation\n@main struct App { static func main() {} }\n"), 0o644))
 	generateApp(t, dir, specWithoutPalbase(projectYAML))
 
-	// THE SDK IS RESOLVED FIRST. `link` compiles the generator out of the
-	// palbackend-ios checkout SwiftPM resolved, and refuses when there is none
-	// — the same refusal a person gets before their first build.
-	run(t, dir, nil, "xcodebuild", "-project", "E2EApp.xcodeproj", "-resolvePackageDependencies")
-
-	// THE REAL LINK, through the binary, into a checkout that really has an
-	// Xcode project — the precondition `link` refuses without.
+	// THE LINK COMES BEFORE ANY RESOLVE — a fresh clone's order, and the only
+	// order a Linux shell has (palbase-cli#9). The generator is the one
+	// released with the version the project's requirement resolves to, so
+	// nothing Xcode resolved may be needed: no Package.resolved, no checkout.
+	requireUnresolved(t, dir)
 	run(t, dir, nil, bin, "link", ref, "--platform", "ios")
+	run(t, dir, nil, "xcodebuild", "-project", "E2EApp.xcodeproj", "-resolvePackageDependencies")
 
 	// …and now the environments exist, so the target can take them.
 	generateApp(t, dir, projectYAML)
@@ -188,8 +187,9 @@ func TestIOSLayoutExclusionIsLoadBearing(t *testing.T) {
 			"        INCLUDED_SOURCE_FILE_NAMES: \"*/palbase/environments/$(PALBASE_ENV)/*\"\n", "")
 	require.NotEqual(t, projectYAML, withoutExclusion, "the fixture's selection lines were not removed")
 	generateApp(t, dir, specWithoutPalbase(withoutExclusion))
-	run(t, dir, nil, "xcodebuild", "-project", "E2EApp.xcodeproj", "-resolvePackageDependencies")
+	requireUnresolved(t, dir)
 	run(t, dir, nil, bin, "link", ref, "--platform", "ios")
+	run(t, dir, nil, "xcodebuild", "-project", "E2EApp.xcodeproj", "-resolvePackageDependencies")
 	generateApp(t, dir, withoutExclusion)
 
 	envs := environmentsIn(t, dir)
@@ -205,6 +205,18 @@ func TestIOSLayoutExclusionIsLoadBearing(t *testing.T) {
 	require.True(t,
 		strings.Contains(string(out), "Multiple commands produce") || strings.Contains(string(out), "used twice"),
 		"the build failed for some other reason:\n%s", out)
+}
+
+// requireUnresolved asserts the checkout is what a fresh clone is: an Xcode
+// project whose packages nothing has resolved — no Package.resolved and no
+// `.build` beside it. (DerivedData is never read by `link`; the CLI has no
+// code that looks there.)
+func requireUnresolved(t *testing.T, dir string) {
+	t.Helper()
+	resolved, _ := filepath.Glob(filepath.Join(dir, "*.xcodeproj", "project.xcworkspace", "xcshareddata", "swiftpm", "Package.resolved"))
+	require.Empty(t, resolved, "the fixture is not a fresh clone")
+	_, err := os.Stat(filepath.Join(dir, ".build"))
+	require.True(t, os.IsNotExist(err), "the fixture is not a fresh clone")
 }
 
 func requireTool(t *testing.T, name string) {
