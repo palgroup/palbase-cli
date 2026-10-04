@@ -118,12 +118,17 @@ func isSDKRepository(location string) bool {
 // requirement allows. The second case is a fresh resolve; it prints a warning,
 // because a machine that resolves later may land on a newer release.
 func resolveSDKVersion(projectRoot string, w io.Writer) (sdkVersion, error) {
-	req, err := sdkRequirementIn(projectRoot)
+	pin, pinFile, err := sdkPinIn(projectRoot)
 	if err != nil {
 		return sdkVersion{}, err
 	}
-	pin, pinFile, err := sdkPinIn(projectRoot)
+	req, err := sdkRequirementIn(projectRoot)
 	if err != nil {
+		// A rule this CLI cannot read does not unsettle a version SwiftPM has
+		// already settled: the pin is the outcome of resolving that very rule.
+		if pin != nil && pin.commit == "" {
+			return checkPrebuilt(pin.version, pinFile)
+		}
 		return sdkVersion{}, err
 	}
 	if req == nil && pin == nil {
@@ -158,9 +163,12 @@ func resolveSDKVersion(projectRoot string, w io.Writer) (sdkVersion, error) {
 	if best == nil {
 		return sdkVersion{}, fmt.Errorf("no published palbackend-ios release satisfies this project's requirement (%s)", req.rule)
 	}
-	if pin != nil {
+	switch {
+	case pin != nil && pin.commit != "":
+		fmt.Fprintf(w, "! %s pins palbackend-ios to %s, while the project's requirement (%s) asks for a release;\n", pinFile, pin.commit, req.rule)
+	case pin != nil:
 		fmt.Fprintf(w, "! %s pins palbackend-ios %s, which the project's requirement (%s) no longer allows;\n", pinFile, pin.version, req.rule)
-	} else {
+	default:
 		fmt.Fprintf(w, "! no Package.resolved pins palbackend-ios in this checkout;\n")
 	}
 	fmt.Fprintf(w, "  generating with %s, the newest release %s allows — the one a fresh resolve picks.\n"+
@@ -177,9 +185,27 @@ func checkPrebuilt(v sdkVersion, from string) (sdkVersion, error) {
 	return v, nil
 }
 
+// errNoSDKDependency says what was READ, not what the project is. This lookup
+// sees the Xcode projects at the checkout root and the ones its workspaces
+// name, and a Package.swift at the root; an SDK that arrives another way — only
+// through a local package's own manifest, say — is real and simply out of its
+// sight, so the message names the files rather than declaring the app unlinked.
 func errNoSDKDependency(projectRoot string) error {
-	msg := "this project does not depend on palbackend-ios, so there is no SDK to generate the Swift client for — " +
-		"add the package " + sdkRepository + " (product Palbe) to the app, then link again"
+	var read []string
+	for _, pbxproj := range projectFiles(projectRoot) {
+		if rel, err := filepath.Rel(projectRoot, pbxproj); err == nil {
+			read = append(read, rel)
+		}
+	}
+	if isRegularFile(filepath.Join(projectRoot, "Package.swift")) {
+		read = append(read, "Package.swift")
+	}
+	where := "no Xcode project or Package.swift was found at the checkout root"
+	if len(read) > 0 {
+		where = "none of " + strings.Join(read, ", ") + " depends on it, and no Package.resolved pins it"
+	}
+	msg := "cannot tell which palbackend-ios this app builds: " + where + " — add the package " + sdkRepository +
+		" (product Palbe) to the app, or commit the Package.resolved that pins it, then link again"
 	if refs := localPackageRefs(projectRoot); len(refs) > 0 {
 		msg += fmt.Sprintf(" (its local packages %s hold no Sources/palbase-swiftgen on this machine)", strings.Join(refs, ", "))
 	}
@@ -251,8 +277,7 @@ func sdkPinIn(projectRoot string) (*sdkPin, string, error) {
 // sdkRequirementIn reads the project's dependency rule: an Xcode project's
 // XCRemoteSwiftPackageReference, or a Swift package's `.package(url:)`.
 func sdkRequirementIn(projectRoot string) (*sdkRequirement, error) {
-	projects, _ := filepath.Glob(filepath.Join(projectRoot, "*.xcodeproj", "project.pbxproj"))
-	for _, pbxproj := range projects {
+	for _, pbxproj := range projectFiles(projectRoot) {
 		blob, err := os.ReadFile(pbxproj)
 		if err != nil {
 			return nil, err
@@ -268,6 +293,43 @@ func sdkRequirementIn(projectRoot string) (*sdkRequirement, error) {
 	}
 	return nil, nil
 }
+
+// projectFiles lists the project.pbxproj files that describe this app: every
+// Xcode project at the checkout root, and every project a root WORKSPACE names.
+// The second half is the common layout where the workspace sits at the root and
+// the project in a subdirectory (App/App.xcodeproj) — a checkout hasAppleProject
+// already accepts, and one whose only requirement lives below the root.
+func projectFiles(projectRoot string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(project string) {
+		pbxproj := filepath.Join(project, "project.pbxproj")
+		if !seen[pbxproj] && isRegularFile(pbxproj) {
+			seen[pbxproj] = true
+			out = append(out, pbxproj)
+		}
+	}
+	projects, _ := filepath.Glob(filepath.Join(projectRoot, "*.xcodeproj"))
+	for _, project := range projects {
+		add(project)
+	}
+	workspaces, _ := filepath.Glob(filepath.Join(projectRoot, "*.xcworkspace", "contents.xcworkspacedata"))
+	for _, data := range workspaces {
+		blob, err := os.ReadFile(data)
+		if err != nil {
+			continue
+		}
+		for _, m := range workspaceProjectRef.FindAllStringSubmatch(string(blob), -1) {
+			add(filepath.Join(projectRoot, filepath.FromSlash(m[1])))
+		}
+	}
+	return out
+}
+
+// workspaceProjectRef matches a workspace's `<FileRef location = "group:…xcodeproj">`.
+// `group:` paths are relative to the workspace's own directory, which is the
+// checkout root for a workspace found there.
+var workspaceProjectRef = regexp.MustCompile(`location\s*=\s*"group:([^"]+\.xcodeproj)"`)
 
 // remotePackageReference matches one XCRemoteSwiftPackageReference object.
 // Xcode writes `isa` first and every other key in alphabetical order, so the
@@ -330,6 +392,11 @@ func pbxprojRequirement(block string) (*sdkRequirement, error) {
 // rule is read from what follows it, up to the call's closing parenthesis.
 var manifestURLDependency = regexp.MustCompile(`\.package\(\s*(?:name:\s*"[^"]*"\s*,\s*)?url:\s*"([^"]+)"`)
 
+var (
+	quotedString = regexp.MustCompile(`"(?:[^"\\\n]|\\.)*"`)
+	placeholder  = regexp.MustCompile("\"\x00\\d+\"")
+)
+
 var manifestRules = []struct {
 	pattern *regexp.Regexp
 	build   func(m []string) (sdkRequirement, bool)
@@ -362,7 +429,25 @@ var manifestRules = []struct {
 	}},
 }
 
+// swiftComment matches a `//` line comment or a `/* */` block. A dependency
+// someone commented out is not a dependency; read as one, it would name a
+// version the app does not build.
+var swiftComment = regexp.MustCompile(`(?s)/\*.*?\*/|//[^\n]*`)
+
 func manifestRequirement(manifest string) (*sdkRequirement, error) {
+	// URLs contain `//`, so they are lifted out before comments are cut and
+	// put back after.
+	var urls []string
+	manifest = quotedString.ReplaceAllStringFunc(manifest, func(s string) string {
+		urls = append(urls, s)
+		return fmt.Sprintf("\"\x00%d\"", len(urls)-1)
+	})
+	manifest = swiftComment.ReplaceAllString(manifest, "")
+	manifest = placeholder.ReplaceAllStringFunc(manifest, func(s string) string {
+		var i int
+		_, _ = fmt.Sscanf(s, "\"\x00%d\"", &i)
+		return urls[i]
+	})
 	for _, loc := range manifestURLDependency.FindAllStringSubmatchIndex(manifest, -1) {
 		if !isSDKRepository(manifest[loc[2]:loc[3]]) {
 			continue

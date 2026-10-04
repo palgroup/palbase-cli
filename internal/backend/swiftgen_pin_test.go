@@ -232,9 +232,87 @@ func TestVersionsThatCannotBeGeneratedForAreRefusedByName(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, "App.xcodeproj", "project.pbxproj"),
 			[]byte("isa = XCLocalSwiftPackageReference;\n\t\t\trelativePath = ../palbackend-ios-src;\n"), 0o644))
 		_, err := resolveSDKVersion(root, &bytes.Buffer{})
-		require.ErrorContains(t, err, "does not depend on palbackend-ios")
+		require.ErrorContains(t, err, "cannot tell which palbackend-ios this app builds")
+		require.ErrorContains(t, err, filepath.Join("App.xcodeproj", "project.pbxproj"), "the file that was read is named")
 		require.ErrorContains(t, err, "../palbackend-ios-src", "a local reference that is missing here is named")
 	})
+}
+
+// TestAProjectBelowARootWorkspaceIsRead: the workspace sits at the checkout
+// root and the project in a subdirectory. hasAppleProject accepts that checkout,
+// so the requirement has to be found there too — or the app is told to add a
+// package it already has.
+func TestAProjectBelowARootWorkspaceIsRead(t *testing.T) {
+	root := t.TempDir()
+	xcodeProject(t, filepath.Join(root, "App"), "kind = exactVersion;\n\t\t\t\tversion = 0.63.1;")
+	ws := filepath.Join(root, "App.xcworkspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "contents.xcworkspacedata"), []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<Workspace version = "1.0">
+   <FileRef location = "group:App/App.xcodeproj"></FileRef>
+   <FileRef location = "group:Pods/Pods.xcodeproj"></FileRef>
+</Workspace>
+`), 0o644))
+
+	v, err := resolveSDKVersion(root, &bytes.Buffer{})
+	require.NoError(t, err)
+	require.Equal(t, "0.63.1", v.String())
+}
+
+func TestACommentedOutDependencyIsNotADependency(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Package.swift"), []byte(`// swift-tools-version:5.9
+import PackageDescription
+let package = Package(name: "App", dependencies: [
+    // .package(url: "https://github.com/palgroup/palbackend-ios", exact: "0.60.0"),
+    /* .package(url: "https://github.com/palgroup/palbackend-ios", exact: "0.61.0"), */
+    .package(url: "https://github.com/palgroup/palbackend-ios", exact: "0.64.0"), // the real one
+])
+`), 0o644))
+	v, err := resolveSDKVersion(root, &bytes.Buffer{})
+	require.NoError(t, err)
+	require.Equal(t, "0.64.0", v.String())
+}
+
+func TestAnUnreadableRequirementDoesNotUnsettleAPin(t *testing.T) {
+	manifest := `// swift-tools-version:5.9
+import PackageDescription
+let sdk: Version = "0.63.0"
+let package = Package(name: "App", dependencies: [
+    .package(url: "https://github.com/palgroup/palbackend-ios", from: sdk),
+])
+`
+	t.Run("pinned", func(t *testing.T) {
+		root := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(root, "Package.swift"), []byte(manifest), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(root, "Package.resolved"), []byte(resolvedJSON("0.63.1")), 0o644))
+		v, err := resolveSDKVersion(root, &bytes.Buffer{})
+		require.NoError(t, err)
+		require.Equal(t, "0.63.1", v.String())
+	})
+	t.Run("not pinned", func(t *testing.T) {
+		root := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(root, "Package.swift"), []byte(manifest), 0o644))
+		_, err := resolveSDKVersion(root, &bytes.Buffer{})
+		require.ErrorContains(t, err, "a rule this CLI cannot read")
+	})
+}
+
+func TestACommitPinUnderAVersionRequirementIsNamedAsACommit(t *testing.T) {
+	root := t.TempDir()
+	xcodeProject(t, root, "kind = upToNextMajorVersion;\n\t\t\t\tminimumVersion = 0.60.0;")
+	dir := filepath.Join(root, "App.xcodeproj", "project.xcworkspace", "xcshareddata", "swiftpm")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Package.resolved"), []byte(`{"pins":[{"identity":"palbackend-ios",
+		"location":"https://github.com/palgroup/palbackend-ios","state":{"branch":"main","revision":"abc123"}}],"version":3}`), 0o644))
+	serveTags(t, "v0.60.0", "v0.66.0")
+
+	var out bytes.Buffer
+	v, err := resolveSDKVersion(root, &out)
+	require.NoError(t, err)
+	require.Equal(t, "0.66.0", v.String())
+	require.Contains(t, out.String(), "pins palbackend-ios to branch main")
+	require.NotContains(t, out.String(), "0.0.0")
 }
 
 func TestIsSDKRepository(t *testing.T) {

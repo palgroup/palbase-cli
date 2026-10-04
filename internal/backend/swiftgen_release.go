@@ -15,9 +15,12 @@ package backend
 // one release asset can replace both. The binary runs on every machine that
 // links an iOS app, so the checksum file must be signed by a key this CLI
 // carries — its private half exists only as the SDK repo's release secret.
+// The signed bytes start with the release's version, so one release's signed
+// files do not verify when served as another's.
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -48,7 +51,7 @@ const swiftgenChecksumsAsset = "palbase-swiftgen.sha256"
 // old one stays while versions signed by it are still pinned. A var only so
 // tests can sign their own releases.
 var swiftgenSigningKeys = []string{
-	"zGpUmIZ5bFdFkMcwisEk7pms1ovB1U/sPSfmTAvqvlY=",
+	"C0JBUFnQ+czMUvuymapVz/36S7BNmn85wV02dHdltcg=",
 }
 
 // swiftgenHost is the machine the generator will run on. A var only so tests
@@ -96,8 +99,8 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	fmt.Fprintf(w, "→ downloading the Swift generator released with palbackend-ios %s (one-time per SDK version) ...\n", v)
 	sums, err := fetchReleaseAsset(v, swiftgenChecksumsAsset, 1<<20)
 	if errors.Is(err, errSwiftgenNotPublished) {
-		return "", fmt.Errorf("palbackend-ios %s has no prebuilt Swift generator on its release — "+
-			"update the package to a newer release, then link again", v)
+		return "", fmt.Errorf("there is no prebuilt Swift generator for palbackend-ios %s: either no such release "+
+			"exists (check the version this project asks for) or it predates them — pin a published release, then link again", v)
 	}
 	if err != nil {
 		return "", fmt.Errorf("download the Swift generator for palbackend-ios %s: %w", v, err)
@@ -110,7 +113,7 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download the Swift generator's signature for palbackend-ios %s: %w", v, err)
 	}
-	if err := verifySwiftgenSignature(sums, sig); err != nil {
+	if err := verifySwiftgenSignature(v, sums, sig); err != nil {
 		return "", fmt.Errorf("palbackend-ios %s: %w — nothing was installed", v, err)
 	}
 	want, err := checksumOf(sums, asset)
@@ -121,14 +124,20 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	removeAbandonedDownloads(dir)
 	// Written beside its final name and renamed only once verified, so an
 	// interrupted or tampered download never becomes the cached generator.
-	tmp, err := os.CreateTemp(dir, asset+".*.partial")
+	tmp, err := os.CreateTemp(dir, asset+".*"+partialSuffix)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	got, err := downloadReleaseAsset(v, asset, tmp)
+	// Synced before the rename: the cache is trusted by NAME from then on, so
+	// the name must never point at bytes a power cut could still lose.
+	if syncErr := tmp.Sync(); err == nil {
+		err = syncErr
+	}
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
@@ -148,20 +157,45 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	return tool, nil
 }
 
+// partialSuffix marks a download that has not been verified yet.
+const partialSuffix = ".partial"
+
+// removeAbandonedDownloads deletes partial files a killed run left behind —
+// each is a full ~60 MB on Linux. Only old ones: a younger file may belong to
+// another CLI process downloading the same generator right now.
+func removeAbandonedDownloads(dir string) {
+	stale, _ := filepath.Glob(filepath.Join(dir, "*"+partialSuffix))
+	for _, path := range stale {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) > time.Hour {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+// swiftgenSignedPayload is what a release signs: the version it is, then its
+// checksum file (palbackend-ios-src: scripts/swiftgen-signing.swift). Without
+// the version, the signed files of one release would verify on any other, and
+// whoever can write to the public repo could serve an older generator under a
+// newer version.
+func swiftgenSignedPayload(v sdkVersion, sums []byte) []byte {
+	return append([]byte("palbase-swiftgen v"+v.String()+"\n"), sums...)
+}
+
 // verifySwiftgenSignature accepts a checksum file only when one of the keys
-// this CLI carries signed it.
-func verifySwiftgenSignature(sums, sig []byte) error {
+// this CLI carries signed it as release v's.
+func verifySwiftgenSignature(v sdkVersion, sums, sig []byte) error {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
 	if err != nil || len(raw) != ed25519.SignatureSize {
 		return fmt.Errorf("%s.sig is not an Ed25519 signature", swiftgenChecksumsAsset)
 	}
+	payload := swiftgenSignedPayload(v, sums)
 	for _, encoded := range swiftgenSigningKeys {
 		pub, err := base64.StdEncoding.DecodeString(encoded)
-		if err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(ed25519.PublicKey(pub), sums, raw) {
+		if err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(ed25519.PublicKey(pub), payload, raw) {
 			return nil
 		}
 	}
-	return fmt.Errorf("the Swift generator's checksum file is not signed by a key this CLI trusts")
+	return fmt.Errorf("the Swift generator's checksum file is not signed for this release by a key this CLI trusts")
 }
 
 // checksumOf picks one asset's digest out of a checksum file.
@@ -180,27 +214,67 @@ func checksumOf(sums []byte, asset string) (string, error) {
 	return "", fmt.Errorf("%s lists no %s", swiftgenChecksumsAsset, asset)
 }
 
-var swiftgenHTTP = &http.Client{Timeout: 5 * time.Minute}
+// swiftgenIdleTimeout bounds SILENCE, not the download. A Linux generator is
+// ~60 MB, so any deadline on the whole request fails every time on a link slow
+// enough — and a failed download here ends in the committed client being
+// deleted. What must not happen is waiting forever on a connection that went
+// quiet. A var only so tests can shorten it.
+var swiftgenIdleTimeout = 60 * time.Second
 
 func releaseAssetURL(v sdkVersion, asset string) string {
 	return swiftgenReleaseBase + "/v" + v.String() + "/" + asset
 }
 
+// idleBody cancels its request when no byte arrives for swiftgenIdleTimeout.
+type idleBody struct {
+	io.ReadCloser
+	timer  *time.Timer
+	cancel context.CancelFunc
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.timer.Reset(swiftgenIdleTimeout)
+	}
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.timer.Stop()
+	b.cancel()
+	return b.ReadCloser.Close()
+}
+
 func openReleaseAsset(v sdkVersion, asset string) (io.ReadCloser, error) {
 	url := releaseAssetURL(v, asset)
-	resp, err := swiftgenHTTP.Get(url)
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(swiftgenIdleTimeout, cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		timer.Stop()
+		cancel()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("GET %s: no response for %s", url, swiftgenIdleTimeout)
+		}
+		return nil, err
+	}
+	timer.Reset(swiftgenIdleTimeout)
+	body := &idleBody{ReadCloser: resp.Body, timer: timer, cancel: cancel}
 	if resp.StatusCode == http.StatusNotFound {
-		resp.Body.Close()
+		_ = body.Close()
 		return nil, errSwiftgenNotPublished
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = body.Close()
 		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	return resp.Body, nil
+	return body, nil
 }
 
 func fetchReleaseAsset(v sdkVersion, asset string, limit int64) ([]byte, error) {
@@ -208,7 +282,7 @@ func fetchReleaseAsset(v sdkVersion, asset string, limit int64) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	return io.ReadAll(io.LimitReader(body, limit))
 }
 
@@ -218,7 +292,7 @@ func downloadReleaseAsset(v sdkVersion, asset string, dst io.Writer) (string, er
 	if err != nil {
 		return "", err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(dst, h), body); err != nil {
 		return "", err

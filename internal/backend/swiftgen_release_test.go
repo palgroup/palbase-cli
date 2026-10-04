@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -28,6 +29,15 @@ type fakeRelease struct {
 	// sums and sig are what the release serves for the checksum file and its
 	// signature; a test edits them to forge or drop one. sig "" is a 404.
 	sums, sig string
+	// key is the release secret's stand-in, for a test that signs something else.
+	key ed25519.PrivateKey
+	// serve, when set, writes the asset's body itself (a slow or stalled one).
+	serve func(w http.ResponseWriter, body string)
+}
+
+// signAs signs sums the way a release of version v does.
+func (r *fakeRelease) signAs(v sdkVersion, sums string) string {
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(r.key, swiftgenSignedPayload(v, []byte(sums)))) + "\n"
 }
 
 func (r *fakeRelease) downloads() int { return int(r.assetHits.Load()) }
@@ -56,7 +66,8 @@ func serveRelease(t *testing.T, v sdkVersion, body string) *fakeRelease {
 	swiftgenSigningKeys = []string{base64.StdEncoding.EncodeToString(pub)}
 	t.Cleanup(func() { swiftgenSigningKeys = prevKeys })
 
-	rel := &fakeRelease{sums: sums, sig: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(sums))) + "\n"}
+	rel := &fakeRelease{sums: sums, key: priv}
+	rel.sig = rel.signAs(v, sums)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v" + v.String() + "/" + swiftgenChecksumsAsset:
@@ -71,6 +82,10 @@ func serveRelease(t *testing.T, v sdkVersion, body string) *fakeRelease {
 			rel.assetHits.Add(1)
 			if rel.tamper != "" {
 				_, _ = w.Write([]byte(rel.tamper))
+				return
+			}
+			if rel.serve != nil {
+				rel.serve(w, body)
 				return
 			}
 			_, _ = w.Write([]byte(body))
@@ -158,7 +173,18 @@ func TestOnlyASignedChecksumFileIsTrusted(t *testing.T) {
 		},
 		"signed by a key the CLI does not carry": func(rel *fakeRelease) {
 			_, other, _ := ed25519.GenerateKey(rand.Reader)
-			rel.sig = base64.StdEncoding.EncodeToString(ed25519.Sign(other, []byte(rel.sums)))
+			rel.key = other
+			rel.sig = rel.signAs(v, rel.sums)
+		},
+		// The replay: every byte is genuinely ours and genuinely signed — for
+		// ANOTHER release. Served under this one, it would run an older
+		// generator for a newer SDK.
+		"genuinely signed, for another release": func(rel *fakeRelease) {
+			rel.sig = rel.signAs(sdkVersion{0, 59, 0}, rel.sums)
+		},
+		// What the first design signed: the checksum file alone.
+		"signed without the version": func(rel *fakeRelease) {
+			rel.sig = base64.StdEncoding.EncodeToString(ed25519.Sign(rel.key, []byte(rel.sums)))
 		},
 		"not a signature": func(rel *fakeRelease) { rel.sig = "bm90IGEgc2lnbmF0dXJl\n" },
 	}
@@ -181,7 +207,71 @@ func TestAReleaseWithoutTheGeneratorIsNamed(t *testing.T) {
 	serveRelease(t, sdkVersion{0, 66, 0}, "x")
 	useToolHome(t)
 	_, err := downloadSwiftgen(sdkVersion{0, 60, 0}, &bytes.Buffer{})
-	require.ErrorContains(t, err, "palbackend-ios 0.60.0 has no prebuilt Swift generator on its release")
+	require.ErrorContains(t, err, "there is no prebuilt Swift generator for palbackend-ios 0.60.0")
+	require.ErrorContains(t, err, "no such release exists", "a mistyped version gets the same 404 and must not be told to upgrade")
+}
+
+// TestADownloadIsBoundedBySilenceNotBySize: the Linux generator is ~60 MB, so a
+// deadline on the whole request fails on every slow link — and a failed
+// download ends with the committed client deleted. A slow download that keeps
+// moving finishes; a connection that goes quiet is given up on.
+func TestADownloadIsBoundedBySilenceNotBySize(t *testing.T) {
+	prev := swiftgenIdleTimeout
+	swiftgenIdleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { swiftgenIdleTimeout = prev })
+	v := sdkVersion{0, 66, 0}
+
+	t.Run("slow but moving outlives the idle limit", func(t *testing.T) {
+		rel := serveRelease(t, v, strings.Repeat("generator ", 8))
+		rel.serve = func(w http.ResponseWriter, body string) {
+			for i := 0; i < len(body); i += 10 {
+				_, _ = w.Write([]byte(body[i : i+10]))
+				w.(http.Flusher).Flush()
+				time.Sleep(120 * time.Millisecond) // 8 × 120 ms: three idle limits in total
+			}
+		}
+		useToolHome(t)
+		_, err := downloadSwiftgen(v, &bytes.Buffer{})
+		require.NoError(t, err)
+	})
+
+	t.Run("a stalled connection is abandoned", func(t *testing.T) {
+		rel := serveRelease(t, v, "generator")
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		rel.serve = func(w http.ResponseWriter, body string) {
+			_, _ = w.Write([]byte(body[:3]))
+			w.(http.Flusher).Flush()
+			<-release
+		}
+		cache := useToolHome(t)
+		started := time.Now()
+		_, err := downloadSwiftgen(v, &bytes.Buffer{})
+		require.Error(t, err)
+		require.Less(t, time.Since(started), 5*time.Second)
+		entries, _ := filepath.Glob(filepath.Join(cache, "swiftgen-v0.66.0", "*"))
+		require.Empty(t, entries, "the half-written file is not left behind")
+	})
+}
+
+func TestAbandonedDownloadsAreRemoved(t *testing.T) {
+	v := sdkVersion{0, 66, 0}
+	serveRelease(t, v, "generator")
+	cache := useToolHome(t)
+	dir := filepath.Join(cache, "swiftgen-v0.66.0")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	old := filepath.Join(dir, "palbase-swiftgen-linux-x86_64.123.partial")
+	young := filepath.Join(dir, "palbase-swiftgen-linux-x86_64.456.partial")
+	for _, f := range []string{old, young} {
+		require.NoError(t, os.WriteFile(f, []byte("half"), 0o644))
+	}
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(old, twoHoursAgo, twoHoursAgo))
+
+	_, err := downloadSwiftgen(v, &bytes.Buffer{})
+	require.NoError(t, err)
+	require.NoFileExists(t, old, "a killed run's leftover is cleaned up")
+	require.FileExists(t, young, "another process may be writing this one right now")
 }
 
 func TestTheAssetMatchesTheHost(t *testing.T) {
