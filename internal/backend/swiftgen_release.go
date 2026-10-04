@@ -88,12 +88,20 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// The version is in the directory name, and a release asset never changes,
-	// so "is this the right generator?" and "is it here?" are one question.
 	dir := filepath.Join(cacheRoot, "swiftgen-v"+v.String())
 	tool := filepath.Join(dir, asset)
+	// THE CACHE IS RE-VERIFIED, NOT TRUSTED BY NAME. The signed checksum file
+	// is kept beside the binary, and every run checks the signature and the
+	// binary's hash again (~0.2 s for the 60 MB Linux one): a file that a
+	// crash truncated, that something else wrote there, or that no signature
+	// ever covered is discarded and downloaded again rather than run.
 	if isRegularFile(tool) {
-		return tool, nil
+		if err := verifyCachedSwiftgen(v, dir, asset); err == nil {
+			return tool, nil
+		}
+		for _, f := range []string{tool, filepath.Join(dir, swiftgenChecksumsAsset), filepath.Join(dir, swiftgenChecksumsAsset+".sig")} {
+			_ = os.Remove(f)
+		}
 	}
 
 	fmt.Fprintf(w, "→ downloading the Swift generator released with palbackend-ios %s (one-time per SDK version) ...\n", v)
@@ -133,8 +141,8 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	got, err := downloadReleaseAsset(v, asset, tmp)
-	// Synced before the rename: the cache is trusted by NAME from then on, so
-	// the name must never point at bytes a power cut could still lose.
+	// Synced before the rename, so the final name never points at bytes a power
+	// cut could still lose.
 	if syncErr := tmp.Sync(); err == nil {
 		err = syncErr
 	}
@@ -151,10 +159,74 @@ func downloadSwiftgen(v sdkVersion, w io.Writer) (string, error) {
 	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
 		return "", err
 	}
+	// The signed checksum file lands BEFORE the binary's name does, so the
+	// binary is never under its final name without what verifies it.
+	if err := writeFileAtomically(filepath.Join(dir, swiftgenChecksumsAsset), sums); err != nil {
+		return "", err
+	}
+	if err := writeFileAtomically(filepath.Join(dir, swiftgenChecksumsAsset+".sig"), sig); err != nil {
+		return "", err
+	}
 	if err := os.Rename(tmp.Name(), tool); err != nil {
 		return "", err
 	}
 	return tool, nil
+}
+
+// verifyCachedSwiftgen checks a cached generator the way a download is checked:
+// the stored checksum file signed for version v by a trusted key, and the
+// binary matching it.
+func verifyCachedSwiftgen(v sdkVersion, dir, asset string) error {
+	sums, err := os.ReadFile(filepath.Join(dir, swiftgenChecksumsAsset))
+	if err != nil {
+		return err
+	}
+	sig, err := os.ReadFile(filepath.Join(dir, swiftgenChecksumsAsset+".sig"))
+	if err != nil {
+		return err
+	}
+	if err := verifySwiftgenSignature(v, sums, sig); err != nil {
+		return err
+	}
+	want, err := checksumOf(sums, asset)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(filepath.Join(dir, asset))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != want {
+		return fmt.Errorf("cached %s does not match its checksum", asset)
+	}
+	return nil
+}
+
+// writeFileAtomically writes data under path via a synced temporary file, so
+// path never holds a partial write.
+func writeFileAtomically(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*"+partialSuffix)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // partialSuffix marks a download that has not been verified yet.

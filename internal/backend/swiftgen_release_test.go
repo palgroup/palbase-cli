@@ -136,6 +136,53 @@ func TestDownloadSwiftgenVerifiesAndCachesPerVersion(t *testing.T) {
 	require.Empty(t, leftovers)
 }
 
+// TestACachedGeneratorIsReverifiedNotTrustedByName: the cache is where a
+// verified download lives, so whatever sits there is checked again before it
+// runs — a file a crash truncated, one something else put there, or one no
+// signature ever covered is replaced by a fresh, verified download.
+func TestACachedGeneratorIsReverifiedNotTrustedByName(t *testing.T) {
+	v := sdkVersion{0, 66, 0}
+	cases := map[string]func(t *testing.T, dir, tool string){
+		"truncated binary": func(t *testing.T, dir, tool string) {
+			require.NoError(t, os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755))
+		},
+		"binary without its signed checksum file": func(t *testing.T, dir, tool string) {
+			require.NoError(t, os.Remove(filepath.Join(dir, swiftgenChecksumsAsset+".sig")))
+		},
+		"checksum file rewritten to match a swapped binary": func(t *testing.T, dir, tool string) {
+			evil := []byte("#!/bin/sh\necho pwned\n")
+			sum := sha256.Sum256(evil)
+			asset, _ := swiftgenAsset()
+			require.NoError(t, os.WriteFile(tool, evil, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, swiftgenChecksumsAsset),
+				[]byte(hex.EncodeToString(sum[:])+"  "+asset+"\n"), 0o644))
+		},
+	}
+	for name, spoil := range cases {
+		t.Run(name, func(t *testing.T) {
+			rel := serveRelease(t, v, "the real generator")
+			useToolHome(t)
+			tool, err := downloadSwiftgen(v, &bytes.Buffer{})
+			require.NoError(t, err)
+
+			// Intact, the cache answers without the network.
+			_, err = downloadSwiftgen(v, &bytes.Buffer{})
+			require.NoError(t, err)
+			require.Equal(t, 1, rel.downloads())
+
+			spoil(t, filepath.Dir(tool), tool)
+			var out bytes.Buffer
+			again, err := downloadSwiftgen(v, &out)
+			require.NoError(t, err)
+			require.Contains(t, out.String(), "downloading", "a spoiled cache is downloaded again, not run")
+			got, err := os.ReadFile(again)
+			require.NoError(t, err)
+			require.Equal(t, "the real generator", string(got))
+			require.Equal(t, 2, rel.downloads())
+		})
+	}
+}
+
 func TestATamperedGeneratorIsNeverInstalled(t *testing.T) {
 	v := sdkVersion{0, 66, 0}
 	rel := serveRelease(t, v, "the real generator")
