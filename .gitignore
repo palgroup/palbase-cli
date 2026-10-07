@@ -1,3 +1,8 @@
 .palbase/config.json
 .claude/
 todoappm8p6z/
+
+# Internal work documents and agent rules live in the private palgroup/palbase-cli-internal; local copies stay out of this public repo.
+/docs/paltimate/
+/CLAUDE.md
+/AGENTS.md
